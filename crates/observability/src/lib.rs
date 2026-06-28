@@ -1,5 +1,7 @@
 //! Role-selectable service skeleton for Crabka observability.
 
+pub mod metrics;
+
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
@@ -12,6 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use crate::metrics::ServiceMetrics;
 use async_trait::async_trait;
 use axum::Router;
 use axum::body::Bytes;
@@ -91,7 +94,9 @@ use thiserror::Error;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tokio::net::TcpListener;
+use tokio::task::JoinHandle;
 use tokio::time::{Duration, sleep};
+use tokio_util::sync::CancellationToken;
 use url::Url;
 
 const LOKI_REJECT_OLD_SAMPLES_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
@@ -240,6 +245,11 @@ pub struct ServiceDependencies {
     /// Querier-only: params for the hot-tail WAL consumer that is connected
     /// asynchronously after HTTP serving begins (FIX B2).
     deferred_wal_consumer_connect: Option<DeferredWalConsumerConnect>,
+    /// Shared RED-metrics bundle threaded into the per-role state. `None` in
+    /// tests that don't care about metrics (each state then gets a fresh
+    /// bundle); the binary constructs one bundle and threads it through here so
+    /// the `:9404` exporter and the handlers share the same registry.
+    metrics: Option<ServiceMetrics>,
 }
 
 #[derive(Clone)]
@@ -305,6 +315,15 @@ pub enum ActiveLogDeleteFilterError {
 }
 
 impl ServiceDependencies {
+    /// Thread a shared RED-metrics bundle into the service so the per-role
+    /// state (distributor / querier) increments the same registry the `:9404`
+    /// exporter serves.
+    #[must_use]
+    pub fn with_metrics(mut self, metrics: ServiceMetrics) -> Self {
+        self.metrics = Some(metrics);
+        self
+    }
+
     #[must_use]
     pub fn with_wal_sink(mut self, sink: impl LogWalSink) -> Self {
         self.wal_sink = Some(Arc::new(sink));
@@ -1836,6 +1855,23 @@ pub trait LogQueryAuthorizer: Send + Sync + 'static {
 
 pub trait LogHotTail: Send + Sync + 'static {
     fn records(&self) -> Vec<WalLogRecord>;
+
+    /// Return the hot-tail records whose `timestamp_ns` falls within the inclusive
+    /// window `[start_ns, end_ns]`.
+    ///
+    /// Callers re-apply their exact per-record time bound downstream, so this may
+    /// return a *superset* of the in-window records (e.g. records sharing a coarse
+    /// time bucket with the window edges); it MUST NOT drop any record whose
+    /// timestamp lies in `[start_ns, end_ns]`. The default implementation simply
+    /// filters [`LogHotTail::records`], preserving its order; implementations that
+    /// maintain a time index (see [`BufferedLogHotTail`]) override this to avoid a
+    /// full-buffer scan.
+    fn records_in_range(&self, start_ns: i64, end_ns: i64) -> Vec<WalLogRecord> {
+        self.records()
+            .into_iter()
+            .filter(|record| record.timestamp_ns >= start_ns && record.timestamp_ns <= end_ns)
+            .collect()
+    }
 }
 
 #[async_trait]
@@ -2191,31 +2227,113 @@ fn ingest_quota_bytes(records: &[WalLogRecord]) -> usize {
         .sum()
 }
 
+/// Width of a hot-tail time bucket, in nanoseconds (one minute).
+///
+/// Coarse enough that a wide retention window holds few buckets, fine enough that
+/// a typical query window (minutes to hours) only touches the buckets it overlaps.
+const HOT_TAIL_BUCKET_NS: i64 = 60_000_000_000;
+
+/// Map a record timestamp to its bucket key. Uses [`i64::div_euclid`] so negative
+/// timestamps (pre-epoch) still bucket monotonically and the bucket containing a
+/// given timestamp is unambiguous.
+fn hot_tail_bucket_key(timestamp_ns: i64) -> i64 {
+    timestamp_ns.div_euclid(HOT_TAIL_BUCKET_NS)
+}
+
+/// Buffer holding polled hot-tail records.
+///
+/// Records arrive from Kafka polling in NO timestamp order, so the buffer keeps two
+/// views of the same data:
+///
+/// * `records` — the append-ordered log. [`records`](Self::records) clones this whole
+///   list; it backs the WebSocket tail path, which indexes into the buffer by arrival
+///   order and must see every record.
+/// * `buckets` — a per-minute time index mapping each [`hot_tail_bucket_key`] to the
+///   positions in `records` whose timestamps land in that bucket. Out-of-order arrivals
+///   simply land in the correct bucket; no global sort is ever needed.
+///
+/// [`records_in_range`](Self::records_in_range) walks only the buckets overlapping the
+/// query window, so a 30-minute query over a buffer holding hours of logs touches only
+/// the window's records instead of scanning the entire buffer.
+#[derive(Debug, Default)]
+struct HotTailBuffer {
+    records: Vec<WalLogRecord>,
+    buckets: BTreeMap<i64, Vec<usize>>,
+}
+
+impl HotTailBuffer {
+    fn push(&mut self, record: WalLogRecord) {
+        let index = self.records.len();
+        let bucket = hot_tail_bucket_key(record.timestamp_ns);
+        self.records.push(record);
+        self.buckets.entry(bucket).or_default().push(index);
+    }
+
+    fn records_in_range(&self, start_ns: i64, end_ns: i64) -> Vec<WalLogRecord> {
+        if start_ns > end_ns {
+            return Vec::new();
+        }
+        let start_bucket = hot_tail_bucket_key(start_ns);
+        let end_bucket = hot_tail_bucket_key(end_ns);
+        let mut matches: Vec<usize> = Vec::new();
+        for (_bucket, indices) in self.buckets.range(start_bucket..=end_bucket) {
+            for &index in indices {
+                let record = &self.records[index];
+                if record.timestamp_ns >= start_ns && record.timestamp_ns <= end_ns {
+                    matches.push(index);
+                }
+            }
+        }
+        // Restore append order so the windowed slice matches a full-buffer scan
+        // exactly (downstream collects into a BTreeMap and re-sorts, so order is not
+        // load-bearing, but matching the full-scan order keeps the two paths trivially
+        // equivalent for testing and reasoning).
+        matches.sort_unstable();
+        matches
+            .into_iter()
+            .map(|index| self.records[index].clone())
+            .collect()
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct BufferedLogHotTail {
-    records: Arc<Mutex<Vec<WalLogRecord>>>,
+    buffer: Arc<Mutex<HotTailBuffer>>,
 }
 
 impl BufferedLogHotTail {
     #[must_use]
     pub fn records(&self) -> Vec<WalLogRecord> {
-        self.records
+        self.buffer
             .lock()
             .expect("hot tail buffer lock poisoned")
+            .records
             .clone()
     }
 
-    pub fn append_records(&self, records: Vec<WalLogRecord>) {
-        self.records
+    #[must_use]
+    pub fn records_in_range(&self, start_ns: i64, end_ns: i64) -> Vec<WalLogRecord> {
+        self.buffer
             .lock()
             .expect("hot tail buffer lock poisoned")
-            .extend(records);
+            .records_in_range(start_ns, end_ns)
+    }
+
+    pub fn append_records(&self, records: Vec<WalLogRecord>) {
+        let mut buffer = self.buffer.lock().expect("hot tail buffer lock poisoned");
+        for record in records {
+            buffer.push(record);
+        }
     }
 }
 
 impl LogHotTail for BufferedLogHotTail {
     fn records(&self) -> Vec<WalLogRecord> {
         BufferedLogHotTail::records(self)
+    }
+
+    fn records_in_range(&self, start_ns: i64, end_ns: i64) -> Vec<WalLogRecord> {
+        BufferedLogHotTail::records_in_range(self, start_ns, end_ns)
     }
 }
 
@@ -2282,6 +2400,10 @@ impl KafkaLogWalConsumer {
             .build()
             .await?;
         Ok(Self { consumer })
+    }
+
+    pub(crate) async fn close(self) {
+        let _ = self.consumer.close().await;
     }
 }
 
@@ -2411,41 +2533,54 @@ fn spawn_log_hot_tail_poller(
 /// Spawn a background task that retries `KafkaLogWalConsumer::connect` until it succeeds,
 /// then runs the hot-tail poll loop.  On a cold boot the Kafka broker may not be ready yet;
 /// retrying here lets the querier serve its HTTP port immediately (FIX B2).
+///
+/// Cancelling `token` causes the poll loop to exit and calls `consumer.close()` to send
+/// LeaveGroup, removing the consumer from the broker's group immediately on graceful shutdown.
 fn spawn_wal_hot_tail_connect_and_poll(
     bootstrap: String,
     group_id: String,
     topic: String,
     hot_tail: BufferedLogHotTail,
-) {
+    token: CancellationToken,
+) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let consumer = loop {
-            match KafkaLogWalConsumer::connect(&bootstrap, group_id.clone(), topic.clone()).await {
-                Ok(c) => break c,
-                Err(error) => {
-                    eprintln!(
-                        "[crabka-observability] querier WAL consumer connect failed; retrying: {error}"
-                    );
-                    sleep(Duration::from_millis(500)).await;
+        let mut consumer = loop {
+            tokio::select! {
+                () = token.cancelled() => return,
+                result = KafkaLogWalConsumer::connect(&bootstrap, group_id.clone(), topic.clone()) => {
+                    match result {
+                        Ok(c) => break c,
+                        Err(error) => {
+                            eprintln!(
+                                "[crabka-observability] querier WAL consumer connect failed; retrying: {error}"
+                            );
+                            tokio::select! {
+                                () = token.cancelled() => return,
+                                () = sleep(Duration::from_millis(500)) => {}
+                            }
+                        }
+                    }
                 }
             }
         };
-        let consumer = Arc::new(tokio::sync::Mutex::new(
-            Box::new(consumer) as Box<dyn LogWalConsumer>
-        ));
         loop {
-            let result = {
-                let mut c = consumer.lock().await;
-                poll_log_hot_tail_once(c.as_mut(), &hot_tail, Duration::from_millis(50)).await
+            let result = tokio::select! {
+                () = token.cancelled() => break,
+                result = poll_log_hot_tail_once(&mut consumer, &hot_tail, Duration::from_millis(50)) => result,
             };
             let should_back_off = match result {
                 Ok(decoded) => decoded == 0,
                 Err(_) => true,
             };
             if should_back_off {
-                sleep(Duration::from_millis(50)).await;
+                tokio::select! {
+                    () = token.cancelled() => break,
+                    () = sleep(Duration::from_millis(50)) => {}
+                }
             }
         }
-    });
+        consumer.close().await;
+    })
 }
 
 /// Spawn a background task that retries `BrokerBackedQueryAuthorizer::connect` until it succeeds,
@@ -2716,6 +2851,7 @@ pub struct DistributorState {
     wal_append_timeout: Option<Duration>,
     reject_old_samples_max_age: Option<Duration>,
     creation_grace_period: Option<Duration>,
+    metrics: ServiceMetrics,
 }
 
 pub fn distributor_router(sink: impl LogWalSink) -> Router {
@@ -2726,6 +2862,7 @@ pub fn distributor_router(sink: impl LogWalSink) -> Router {
         None,
         None,
         None,
+        ServiceMetrics::new(),
     )
 }
 
@@ -2736,11 +2873,13 @@ fn distributor_router_with_sink(
     wal_append_timeout: Option<Duration>,
     reject_old_samples_max_age: Option<Duration>,
     creation_grace_period: Option<Duration>,
+    metrics: ServiceMetrics,
 ) -> Router {
     let grpc_logs_service = OtlpGrpcLogsService {
         sink: Arc::clone(&sink),
         ingest_limiter: Arc::clone(&ingest_limiter),
         wal_append_timeout,
+        metrics: metrics.clone(),
     };
 
     Router::new()
@@ -2784,6 +2923,7 @@ fn distributor_router_with_sink(
             wal_append_timeout,
             reject_old_samples_max_age,
             creation_grace_period,
+            metrics,
         })
 }
 
@@ -2792,6 +2932,7 @@ pub struct OtlpGrpcLogsService {
     sink: Arc<dyn LogWalSink>,
     ingest_limiter: Arc<dyn LogIngestLimiter>,
     wal_append_timeout: Option<Duration>,
+    metrics: ServiceMetrics,
 }
 
 pub fn otlp_grpc_logs_service(sink: impl LogWalSink) -> OtlpGrpcLogsService {
@@ -2806,6 +2947,7 @@ pub fn otlp_grpc_logs_service_with_limiter(
         sink: Arc::new(sink),
         ingest_limiter: Arc::new(ingest_limiter),
         wal_append_timeout: None,
+        metrics: ServiceMetrics::new(),
     }
 }
 
@@ -2828,6 +2970,7 @@ impl LogsService for OtlpGrpcLogsService {
             wal_append_timeout: self.wal_append_timeout,
             reject_old_samples_max_age: None,
             creation_grace_period: None,
+            metrics: self.metrics.clone(),
         };
         append_distributor_wal_records(&state, records)
             .await
@@ -2984,21 +3127,28 @@ async fn push_logs(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    let start = Instant::now();
+    let bytes = body.len() as u64;
     if let Err(error) = validate_ingest_body_limit(&state, body.len()) {
-        return error.into_response();
+        return record_ingest_response(&state, error.into_response(), bytes, 0, start);
     }
-    match normalize_loki_http_push(
+    let resp = match normalize_loki_http_push(
         &headers,
         &body,
         state.reject_old_samples_max_age,
         state.creation_grace_period,
     ) {
-        Ok(records) => match append_distributor_wal_records(&state, records).await {
-            Ok(()) => StatusCode::NO_CONTENT.into_response(),
-            Err(error) => error.into_response(),
-        },
+        Ok(records) => {
+            let items = records.len() as u64;
+            let resp = match append_distributor_wal_records(&state, records).await {
+                Ok(()) => StatusCode::NO_CONTENT.into_response(),
+                Err(error) => error.into_response(),
+            };
+            return record_ingest_response(&state, resp, bytes, items, start);
+        }
         Err(error) => error.into_response(),
-    }
+    };
+    record_ingest_response(&state, resp, bytes, 0, start)
 }
 
 async fn push_otlp_logs(
@@ -3006,21 +3156,62 @@ async fn push_otlp_logs(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    let start = Instant::now();
+    let bytes = body.len() as u64;
     if let Err(error) = validate_ingest_body_limit(&state, body.len()) {
-        return error.into_response();
+        return record_ingest_response(&state, error.into_response(), bytes, 0, start);
     }
-    match normalize_otlp_http_logs(
+    let resp = match normalize_otlp_http_logs(
         &headers,
         &body,
         state.reject_old_samples_max_age,
         state.creation_grace_period,
     ) {
-        Ok(records) => match append_distributor_wal_records(&state, records).await {
-            Ok(()) => StatusCode::NO_CONTENT.into_response(),
-            Err(error) => error.into_response(),
-        },
-        Err(error) => otlp_http_error_response(error),
-    }
+        Ok(records) => {
+            let items = records.len() as u64;
+            let resp = match append_distributor_wal_records(&state, records).await {
+                Ok(()) => StatusCode::NO_CONTENT.into_response(),
+                Err(error) => {
+                    // Surface why an accepted OTLP log batch failed to persist
+                    // (WAL append errors are otherwise opaque to the client).
+                    tracing::debug!(error = %error, "OTLP logs: WAL append failed");
+                    error.into_response()
+                }
+            };
+            return record_ingest_response(&state, resp, bytes, items, start);
+        }
+        Err(error) => {
+            // Surface why an OTLP log push was rejected at decode/normalize
+            // (content-type, encoding, and size pinpoint client misconfig).
+            tracing::debug!(
+                error = %error,
+                content_type = ?headers.get(CONTENT_TYPE).and_then(|v| v.to_str().ok()),
+                content_encoding = ?headers.get(CONTENT_ENCODING).and_then(|v| v.to_str().ok()),
+                bytes,
+                "OTLP logs: decode/normalize rejected the request"
+            );
+            otlp_http_error_response(error)
+        }
+    };
+    record_ingest_response(&state, resp, bytes, 0, start)
+}
+
+/// Record one push-handler ingest outcome from the response status and return
+/// the response unchanged. `ok` is true for any 2xx; the WAL/produce failure
+/// counter is bumped separately at the [`append_distributor_wal_records`] error
+/// site, so a 4xx validation/quota reject here does not inflate it.
+fn record_ingest_response(
+    state: &DistributorState,
+    resp: Response,
+    bytes: u64,
+    items: u64,
+    start: Instant,
+) -> Response {
+    let ok = resp.status().is_success();
+    state
+        .metrics
+        .record_ingest(ok, bytes, items, start.elapsed().as_secs_f64());
+    resp
 }
 
 fn otlp_http_error_response(error: DistributorError) -> Response {
@@ -3085,15 +3276,27 @@ async fn append_distributor_wal_records(
     state: &DistributorState,
     records: Vec<WalLogRecord>,
 ) -> Result<(), DistributorError> {
+    // A quota/rate-limit reject is a 4xx client error, NOT a WAL-append
+    // failure, so it must not bump the WAL failure counter.
     check_ingest_quota(state.ingest_limiter.as_ref(), &records).await?;
-    if let Some(timeout) = state.wal_append_timeout {
-        tokio::time::timeout(timeout, append_wal_records(state.sink.as_ref(), records))
-            .await
-            .map_err(|_| DistributorError::WalAppendTimeout)??;
+    let result = if let Some(timeout) = state.wal_append_timeout {
+        match tokio::time::timeout(timeout, append_wal_records(state.sink.as_ref(), records)).await
+        {
+            Ok(inner) => inner.map_err(DistributorError::from),
+            Err(_) => Err(DistributorError::WalAppendTimeout),
+        }
     } else {
-        append_wal_records(state.sink.as_ref(), records).await?;
+        append_wal_records(state.sink.as_ref(), records)
+            .await
+            .map_err(DistributorError::from)
+    };
+    // Bump the WAL/produce append-failure counter only at the actual append
+    // error site (timeout or sink error), never on a 4xx validation/quota
+    // reject handled above or upstream.
+    if result.is_err() {
+        state.metrics.record_wal_append_failure();
     }
-    Ok(())
+    result
 }
 
 async fn check_ingest_quota(
@@ -3425,6 +3628,13 @@ fn normalize_otlp_http_logs(
     reject_old_samples_max_age: Option<Duration>,
     creation_grace_period: Option<Duration>,
 ) -> Result<Vec<WalLogRecord>, DistributorError> {
+    // OTLP/HTTP clients (e.g. the OpenTelemetry SDK's otlphttp exporter, which
+    // defaults to gzip) honour Content-Encoding just like the Loki push path, so
+    // decompress before decode. Without this, a gzip body reaches the protobuf
+    // decoder as raw deflate stream bytes and fails to parse.
+    let body = decode_loki_http_body(headers, body)?;
+    let body = body.as_slice();
+
     if is_protobuf_content_type(headers) {
         let payload =
             ProtoExportLogsServiceRequest::decode(body).map_err(DistributorError::OtlpDecode)?;
@@ -4517,6 +4727,9 @@ pub struct QuerierState {
     max_query_series: Option<usize>,
     max_query_bytes: Option<u64>,
     max_query_length: Option<usize>,
+    /// Shared RED-metrics bundle. `None` for test routers that don't wire
+    /// metrics; the binary threads a shared bundle in via [`QuerierState::with_metrics`].
+    metrics: Option<ServiceMetrics>,
 }
 
 type LokiRuleGroupsByName = BTreeMap<String, serde_yaml::Value>;
@@ -4600,6 +4813,24 @@ impl QuerierState {
             max_query_series: None,
             max_query_bytes: None,
             max_query_length: None,
+            metrics: None,
+        }
+    }
+
+    /// Thread a shared RED-metrics bundle so each querier handler records its
+    /// per-route request count and latency on the same registry the `:9404`
+    /// exporter serves. A no-op when left unset (test routers).
+    #[must_use]
+    pub fn with_metrics(mut self, metrics: ServiceMetrics) -> Self {
+        self.metrics = Some(metrics);
+        self
+    }
+
+    /// Record one querier request outcome (per-route count + latency) on the
+    /// shared bundle. No-op when metrics are not wired (test routers).
+    fn record_query(&self, route: &str, ok: bool, start: Instant) {
+        if let Some(metrics) = &self.metrics {
+            metrics.record_query(route, ok, start.elapsed().as_secs_f64());
         }
     }
 
@@ -4995,6 +5226,18 @@ pub async fn build_service_router(
     dependencies: ServiceDependencies,
     object_store: Option<&dyn ObjectStore>,
 ) -> Result<Router, ServiceConfigError> {
+    build_service_router_with_shutdown(config, dependencies, object_store, CancellationToken::new())
+        .await
+        .map(|(router, _)| router)
+}
+
+async fn build_service_router_with_shutdown(
+    config: &ServiceConfig,
+    dependencies: ServiceDependencies,
+    object_store: Option<&dyn ObjectStore>,
+    token: CancellationToken,
+) -> Result<(Router, Option<JoinHandle<()>>), ServiceConfigError> {
+    let metrics = dependencies.metrics.clone().unwrap_or_default();
     match config.target {
         Role::Distributor => {
             let sink = dependencies
@@ -5003,16 +5246,21 @@ pub async fn build_service_router(
             let ingest_limiter = dependencies
                 .ingest_limiter
                 .unwrap_or_else(|| Arc::new(AllowAllIngestLimiter));
-            Ok(distributor_router_with_sink(
-                sink,
-                ingest_limiter,
-                config.max_ingest_body_bytes,
-                config.wal_append_timeout_ms.map(Duration::from_millis),
-                Some(LOKI_REJECT_OLD_SAMPLES_MAX_AGE),
-                Some(LOKI_CREATION_GRACE_PERIOD),
+            Ok((
+                distributor_router_with_sink(
+                    sink,
+                    ingest_limiter,
+                    config.max_ingest_body_bytes,
+                    config.wal_append_timeout_ms.map(Duration::from_millis),
+                    Some(LOKI_REJECT_OLD_SAMPLES_MAX_AGE),
+                    Some(LOKI_CREATION_GRACE_PERIOD),
+                    metrics,
+                ),
+                None,
             ))
         }
         Role::Querier => {
+            let mut wal_handle: Option<JoinHandle<()>> = None;
             let configured_store = if object_store.is_none() {
                 build_configured_object_store(config)?
             } else {
@@ -5074,12 +5322,13 @@ pub async fn build_service_router(
                 let hot_tail = BufferedLogHotTail::default();
 
                 // Spawn the consumer connect + poll loop in a background task.
-                spawn_wal_hot_tail_connect_and_poll(
+                wal_handle = Some(spawn_wal_hot_tail_connect_and_poll(
                     deferred.bootstrap.clone(),
                     deferred.group_id,
                     deferred.topic.clone(),
                     hot_tail.clone(),
-                );
+                    token,
+                ));
 
                 // Install a swappable authorizer that starts as AllowAll and gets promoted
                 // to BrokerBackedQueryAuthorizer once connected in the background.
@@ -5111,12 +5360,13 @@ pub async fn build_service_router(
                     state = state.with_hot_tail(hot_tail, i64::MIN);
                 }
             }
-            Ok(loki_router(state))
+            state = state.with_metrics(metrics);
+            Ok((loki_router(state), wal_handle))
         }
         Role::Compactor => {
             let delete_requests =
                 compactor_delete_requests_for_config(config, dependencies.delete_requests)?;
-            Ok(compactor_router_with_delete_requests(delete_requests))
+            Ok((compactor_router_with_delete_requests(delete_requests), None))
         }
     }
 }
@@ -5141,8 +5391,36 @@ pub async fn serve_service_listener(
             .await;
     }
 
-    let app = build_service_router(&config, dependencies, object_store).await?;
-    axum::serve(listener, app).await?;
+    let token = CancellationToken::new();
+    let token_sig = token.clone();
+    tokio::spawn(async move {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{SignalKind, signal};
+            let mut sigterm =
+                signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+            tokio::select! {
+                _ = sigterm.recv() => {}
+                _ = tokio::signal::ctrl_c() => {}
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = tokio::signal::ctrl_c().await;
+        }
+        token_sig.cancel();
+    });
+    let token_srv = token.clone();
+    let (app, wal_handle) =
+        build_service_router_with_shutdown(&config, dependencies, object_store, token.clone())
+            .await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move { token_srv.cancelled().await })
+        .await?;
+    token.cancel();
+    if let Some(h) = wal_handle {
+        let _ = h.await;
+    }
     Ok(())
 }
 
@@ -7284,7 +7562,16 @@ async fn query(
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
 ) -> Response {
-    handle_query(state, headers, raw_query.as_deref(), QueryKind::Instant).await
+    let start = Instant::now();
+    let resp = handle_query(
+        state.clone(),
+        headers,
+        raw_query.as_deref(),
+        QueryKind::Instant,
+    )
+    .await;
+    state.record_query("query", resp.status().is_success(), start);
+    resp
 }
 
 async fn query_post(
@@ -7293,11 +7580,18 @@ async fn query_post(
     RawQuery(raw_query): RawQuery,
     body: Bytes,
 ) -> Response {
+    let start = Instant::now();
     let raw_query = match post_query_params_body_first(raw_query.as_deref(), &body) {
         Ok(raw_query) => raw_query,
-        Err(error) => return error.into_response(),
+        Err(error) => {
+            let resp = error.into_response();
+            state.record_query("query", resp.status().is_success(), start);
+            return resp;
+        }
     };
-    handle_query(state, headers, Some(&raw_query), QueryKind::Instant).await
+    let resp = handle_query(state.clone(), headers, Some(&raw_query), QueryKind::Instant).await;
+    state.record_query("query", resp.status().is_success(), start);
+    resp
 }
 
 async fn api_prom_query(
@@ -7347,7 +7641,16 @@ async fn query_range(
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
 ) -> Response {
-    handle_query(state, headers, raw_query.as_deref(), QueryKind::Range).await
+    let start = Instant::now();
+    let resp = handle_query(
+        state.clone(),
+        headers,
+        raw_query.as_deref(),
+        QueryKind::Range,
+    )
+    .await;
+    state.record_query("query_range", resp.status().is_success(), start);
+    resp
 }
 
 async fn query_range_post(
@@ -7356,11 +7659,18 @@ async fn query_range_post(
     RawQuery(raw_query): RawQuery,
     body: Bytes,
 ) -> Response {
+    let start = Instant::now();
     let raw_query = match post_query_params_body_first(raw_query.as_deref(), &body) {
         Ok(raw_query) => raw_query,
-        Err(error) => return error.into_response(),
+        Err(error) => {
+            let resp = error.into_response();
+            state.record_query("query_range", resp.status().is_success(), start);
+            return resp;
+        }
     };
-    handle_query(state, headers, Some(&raw_query), QueryKind::Range).await
+    let resp = handle_query(state.clone(), headers, Some(&raw_query), QueryKind::Range).await;
+    state.record_query("query_range", resp.status().is_success(), start);
+    resp
 }
 
 async fn format_query(RawQuery(raw_query): RawQuery) -> Response {
@@ -7496,14 +7806,16 @@ async fn label_names(
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
 ) -> Response {
-    let params = match parse_series_params(raw_query.as_deref()) {
-        Ok(params) => params,
-        Err(error) => return error.into_response(),
-    };
-    match execute_label_names_query(&state, &headers, &params).await {
-        Ok(response) => response,
+    let start = Instant::now();
+    let resp = match parse_series_params(raw_query.as_deref()) {
+        Ok(params) => match execute_label_names_query(&state, &headers, &params).await {
+            Ok(response) => response,
+            Err(error) => error.into_response(),
+        },
         Err(error) => error.into_response(),
-    }
+    };
+    state.record_query("labels", resp.status().is_success(), start);
+    resp
 }
 
 async fn label_names_post(
@@ -7532,14 +7844,16 @@ async fn label_values(
     Path(name): Path<String>,
     RawQuery(raw_query): RawQuery,
 ) -> Response {
-    let params = match parse_series_params(raw_query.as_deref()) {
-        Ok(params) => params,
-        Err(error) => return error.into_response(),
-    };
-    match execute_label_values_query(&state, &headers, &name, &params).await {
-        Ok(response) => response,
+    let start = Instant::now();
+    let resp = match parse_series_params(raw_query.as_deref()) {
+        Ok(params) => match execute_label_values_query(&state, &headers, &name, &params).await {
+            Ok(response) => response,
+            Err(error) => error.into_response(),
+        },
         Err(error) => error.into_response(),
-    }
+    };
+    state.record_query("label_values", resp.status().is_success(), start);
+    resp
 }
 
 async fn label_values_post(
@@ -7568,14 +7882,16 @@ async fn series(
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
 ) -> Response {
-    let params = match parse_series_params(raw_query.as_deref()) {
-        Ok(params) => params,
-        Err(error) => return error.into_response(),
-    };
-    match execute_series_query(&state, &headers, &params).await {
-        Ok(response) => response,
+    let start = Instant::now();
+    let resp = match parse_series_params(raw_query.as_deref()) {
+        Ok(params) => match execute_series_query(&state, &headers, &params).await {
+            Ok(response) => response,
+            Err(error) => error.into_response(),
+        },
         Err(error) => error.into_response(),
-    }
+    };
+    state.record_query("series", resp.status().is_success(), start);
+    resp
 }
 
 async fn series_post(
@@ -7710,10 +8026,13 @@ async fn index_stats(
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
 ) -> Response {
-    match execute_index_stats_query(&state, &headers, raw_query.as_deref()).await {
+    let start = Instant::now();
+    let resp = match execute_index_stats_query(&state, &headers, raw_query.as_deref()).await {
         Ok(value) => json_response(StatusCode::OK, &value),
         Err(error) => error.into_response(),
-    }
+    };
+    state.record_query("index_stats", resp.status().is_success(), start);
+    resp
 }
 
 async fn index_stats_post(
@@ -7737,12 +8056,20 @@ async fn index_volume(
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
 ) -> Response {
-    match execute_index_volume_query(&state, &headers, raw_query.as_deref(), VolumeKind::Instant)
-        .await
+    let start = Instant::now();
+    let resp = match execute_index_volume_query(
+        &state,
+        &headers,
+        raw_query.as_deref(),
+        VolumeKind::Instant,
+    )
+    .await
     {
         Ok(value) => json_response(StatusCode::OK, &value),
         Err(error) => error.into_response(),
-    }
+    };
+    state.record_query("index_volume", resp.status().is_success(), start);
+    resp
 }
 
 async fn index_volume_post(
@@ -9610,7 +9937,7 @@ async fn execute_http_metric_query(
         )
         .await?;
         if state.hot_tail.is_some() {
-            let (records, frontier) = hot_tail_snapshot(&state);
+            let (records, frontier) = hot_tail_snapshot(&state, plan.time_range);
             return Ok(add_loki_query_stats_for_metric_plan_with_hot_tail(
                 response,
                 &plan,
@@ -9629,7 +9956,7 @@ async fn execute_http_metric_query(
     let response =
         execute_http_metric_instant_query(&state, &plan, &query, &delete_filters).await?;
     if state.hot_tail.is_some() {
-        let (records, frontier) = hot_tail_snapshot(&state);
+        let (records, frontier) = hot_tail_snapshot(&state, plan.time_range);
         let eval_range = TimeRange::new(time_range.end_ns, time_range.end_ns)
             .expect("single timestamp metric eval range is valid");
         return Ok(add_loki_query_stats_for_metric_plan_with_hot_tail(
@@ -10312,7 +10639,7 @@ async fn execute_http_metric_scalar_comparison_query(
         .await?;
         apply_metric_scalar_comparison_to_loki_result(&mut response, &comparison, query_text)?;
         if state.hot_tail.is_some() {
-            let (records, frontier) = hot_tail_snapshot(&state);
+            let (records, frontier) = hot_tail_snapshot(&state, plan.time_range);
             return Ok(add_loki_query_stats_for_metric_plan_with_hot_tail(
                 response,
                 &plan,
@@ -10333,7 +10660,7 @@ async fn execute_http_metric_scalar_comparison_query(
         execute_http_metric_instant_query(&state, &plan, &query, &delete_filters).await?;
     apply_metric_scalar_comparison_to_loki_result(&mut response, &comparison, query_text)?;
     if state.hot_tail.is_some() {
-        let (records, frontier) = hot_tail_snapshot(&state);
+        let (records, frontier) = hot_tail_snapshot(&state, plan.time_range);
         let eval_range = TimeRange::new(time_range.end_ns, time_range.end_ns)
             .expect("single timestamp metric eval range is valid");
         return Ok(add_loki_query_stats_for_metric_plan_with_hot_tail(
@@ -10387,7 +10714,7 @@ async fn execute_http_metric_scalar_arithmetic_query(
         .await?;
         apply_metric_scalar_arithmetic_to_loki_result(&mut response, &arithmetic, query_text)?;
         if state.hot_tail.is_some() {
-            let (records, frontier) = hot_tail_snapshot(&state);
+            let (records, frontier) = hot_tail_snapshot(&state, plan.time_range);
             return Ok(add_loki_query_stats_for_metric_plan_with_hot_tail(
                 response,
                 &plan,
@@ -10408,7 +10735,7 @@ async fn execute_http_metric_scalar_arithmetic_query(
         execute_http_metric_instant_query(&state, &plan, &query, &delete_filters).await?;
     apply_metric_scalar_arithmetic_to_loki_result(&mut response, &arithmetic, query_text)?;
     if state.hot_tail.is_some() {
-        let (records, frontier) = hot_tail_snapshot(&state);
+        let (records, frontier) = hot_tail_snapshot(&state, plan.time_range);
         let eval_range = TimeRange::new(time_range.end_ns, time_range.end_ns)
             .expect("single timestamp metric eval range is valid");
         return Ok(add_loki_query_stats_for_metric_plan_with_hot_tail(
@@ -11377,7 +11704,7 @@ async fn execute_http_metric_range_query(
         return Err(HttpQueryError::InvalidStep);
     }
     if let Some(cold_store) = &state.cold_store {
-        let (records, frontier) = hot_tail_snapshot(state);
+        let (records, frontier) = hot_tail_snapshot(state, plan.time_range);
         return execute_metric_query_range_from_object_store_with_hot_tail_frontier_and_deletes(
             Arc::clone(&cold_store.store),
             &cold_store.prefix,
@@ -11394,7 +11721,9 @@ async fn execute_http_metric_range_query(
         .map_err(HttpQueryError::from);
     }
     if let Some(hot_tail) = &state.hot_tail {
-        let records = hot_tail.source.records();
+        let records = hot_tail
+            .source
+            .records_in_range(plan.time_range.start_ns, plan.time_range.end_ns);
         let frontier = hot_tail.frontier.snapshot();
         return execute_metric_query_range_with_hot_tail_frontier_and_deletes(
             &state.root,
@@ -11430,7 +11759,7 @@ async fn execute_http_metric_instant_query(
     delete_filters: &[ActiveLogDeleteFilter],
 ) -> Result<Value, HttpQueryError> {
     let response = if let Some(cold_store) = &state.cold_store {
-        let (records, frontier) = hot_tail_snapshot(state);
+        let (records, frontier) = hot_tail_snapshot(state, plan.time_range);
         execute_metric_query_from_object_store_with_hot_tail_frontier_and_deletes(
             Arc::clone(&cold_store.store),
             &cold_store.prefix,
@@ -11444,7 +11773,9 @@ async fn execute_http_metric_instant_query(
         .await
         .map_err(HttpQueryError::from)?
     } else if let Some(hot_tail) = &state.hot_tail {
-        let records = hot_tail.source.records();
+        let records = hot_tail
+            .source
+            .records_in_range(plan.time_range.start_ns, plan.time_range.end_ns);
         let frontier = hot_tail.frontier.snapshot();
         execute_metric_query_with_hot_tail_frontier_and_deletes(
             &state.root,
@@ -11496,7 +11827,7 @@ async fn execute_http_stream_query(
     validate_query_bytes_limit(&state, &plan)?;
     let delete_filters = active_log_delete_filters(&state, tenant, time_range)?;
     if let Some(cold_store) = &state.cold_store {
-        let (records, frontier) = hot_tail_snapshot(&state);
+        let (records, frontier) = hot_tail_snapshot(&state, plan.time_range);
         let response = execute_stream_query_from_object_store_with_hot_tail_frontier(
             Arc::clone(&cold_store.store),
             &cold_store.prefix,
@@ -11515,7 +11846,9 @@ async fn execute_http_stream_query(
         ));
     }
     if let Some(hot_tail) = &state.hot_tail {
-        let records = hot_tail.source.records();
+        let records = hot_tail
+            .source
+            .records_in_range(plan.time_range.start_ns, plan.time_range.end_ns);
         let frontier = hot_tail.frontier.snapshot();
         let response = execute_stream_query_with_hot_tail_frontier_and_deletes(
             &state.root,
@@ -14059,10 +14392,28 @@ fn validate_query_bytes_limit(
     Ok(())
 }
 
-fn hot_tail_snapshot(state: &QuerierState) -> (Vec<WalLogRecord>, CompactionFrontier) {
+/// Snapshot the hot-tail records overlapping `time_range`, plus the compaction frontier.
+///
+/// `time_range` must be the planned scan range (`plan.time_range`): every hot-tail
+/// query path re-applies the exact per-record time bound downstream, and that bound is
+/// always contained within the plan's scan range (the stream query range, or
+/// [`metric_scan_range`] for metric queries). Pruning to the plan range therefore drops
+/// only records the downstream filter would reject anyway, so results are identical to a
+/// full-buffer scan while a narrow window avoids touching the whole retained buffer.
+fn hot_tail_snapshot(
+    state: &QuerierState,
+    time_range: TimeRange,
+) -> (Vec<WalLogRecord>, CompactionFrontier) {
     state.hot_tail.as_ref().map_or(
         (Vec::new(), CompactionFrontier::new(i64::MAX)),
-        |hot_tail| (hot_tail.source.records(), hot_tail.frontier.snapshot()),
+        |hot_tail| {
+            (
+                hot_tail
+                    .source
+                    .records_in_range(time_range.start_ns, time_range.end_ns),
+                hot_tail.frontier.snapshot(),
+            )
+        },
     )
 }
 
@@ -14332,7 +14683,15 @@ async fn metadata_label_sets(
     }
 
     if let Some(hot_tail) = &state.hot_tail {
-        let records = hot_tail.source.records();
+        // Prune to the metadata window when one is supplied; the per-record bound below
+        // (`< start_ns || > end_ns`) is re-applied, so the windowed records are exactly
+        // the records a full scan would have kept. With no time range, scan everything.
+        let records = match time_range {
+            Some(range) => hot_tail
+                .source
+                .records_in_range(range.start_ns, range.end_ns),
+            None => hot_tail.source.records(),
+        };
         let frontier = hot_tail.frontier.snapshot();
         for record in records {
             if record.tenant != tenant || frontier.is_compacted(&record) {
@@ -14756,7 +15115,14 @@ fn parse_detected_labels_params(
             let value = decode_form_component(value)?;
 
             match key.as_str() {
-                "query" if query.is_none() => query = Some(value),
+                // Grafana's Logs Drilldown sends `detected_labels?query=` (empty)
+                // on load to discover all labels. Treat an empty/blank query as
+                // "match all streams" (None) — the same as Loki — instead of
+                // parsing "" as a stream selector, which fails with
+                // `parse error: syntax error: unexpected $end, expecting '{'`.
+                // `execute_detected_labels_query` already maps `None` to no
+                // matchers (all series).
+                "query" if query.is_none() && !value.trim().is_empty() => query = Some(value),
                 "start" if start.is_none() => {
                     start = Some(parse_loki_timestamp_query_param("start", &value)?);
                 }
@@ -18782,6 +19148,220 @@ impl IntoResponse for HttpQueryError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The OTLP/HTTP logs handler must decompress `Content-Encoding: gzip`
+    /// before protobuf-decoding. The OpenTelemetry SDK's `otlphttp` exporter
+    /// (what the demo's Alloy uses) gzips by default, so a regression here means
+    /// every emitted log line silently fails to decode and no logs are ingested.
+    #[test]
+    fn normalize_otlp_http_logs_decodes_gzip_identically_to_identity() {
+        use opentelemetry_proto::tonic::logs::v1::{ResourceLogs, ScopeLogs};
+        use opentelemetry_proto::tonic::resource::v1::Resource;
+        use std::io::Write as _;
+
+        let request = ProtoExportLogsServiceRequest {
+            resource_logs: vec![ResourceLogs {
+                resource: Some(Resource {
+                    attributes: vec![ProtoKeyValue {
+                        key: "service.name".to_string(),
+                        value: Some(ProtoAnyValue {
+                            value: Some(proto_any_value::Value::StringValue(
+                                "checkout".to_string(),
+                            )),
+                        }),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }),
+                scope_logs: vec![ScopeLogs {
+                    log_records: vec![ProtoLogRecord {
+                        time_unix_nano: 1_700_000_000_000_000_000,
+                        body: Some(ProtoAnyValue {
+                            value: Some(proto_any_value::Value::StringValue(
+                                "hello world".to_string(),
+                            )),
+                        }),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        };
+        let raw = request.encode_to_vec();
+
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Scope-OrgID", "demo".parse().unwrap());
+        headers.insert(CONTENT_TYPE, "application/x-protobuf".parse().unwrap());
+
+        // Identity (no Content-Encoding) decodes to a single record.
+        let identity = normalize_otlp_http_logs(&headers, &raw, None, None)
+            .expect("uncompressed OTLP proto logs should decode");
+        assert_eq!(identity.len(), 1);
+        assert_eq!(identity[0].line, "hello world");
+
+        // The gzip-compressed body must decode to exactly the same records.
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&raw).unwrap();
+        let gzipped = encoder.finish().unwrap();
+
+        let mut gz_headers = headers.clone();
+        gz_headers.insert(CONTENT_ENCODING, "gzip".parse().unwrap());
+        let from_gzip = normalize_otlp_http_logs(&gz_headers, &gzipped, None, None)
+            .expect("gzip-compressed OTLP proto logs should decode");
+        assert_eq!(from_gzip, identity);
+    }
+
+    fn hot_tail_test_record(timestamp_ns: i64, app: &str) -> WalLogRecord {
+        WalLogRecord {
+            tenant: "tenant".to_string(),
+            labels: BTreeMap::from([("app".to_string(), app.to_string())]),
+            timestamp_ns,
+            line: format!("line@{timestamp_ns}"),
+            structured_metadata: BTreeMap::new(),
+            position: None,
+        }
+    }
+
+    /// Brute-force oracle: the records a full linear scan keeps for an inclusive window.
+    fn brute_force_in_range(
+        records: &[WalLogRecord],
+        start_ns: i64,
+        end_ns: i64,
+    ) -> Vec<WalLogRecord> {
+        records
+            .iter()
+            .filter(|record| record.timestamp_ns >= start_ns && record.timestamp_ns <= end_ns)
+            .cloned()
+            .collect()
+    }
+
+    /// The time-bucketed `records_in_range` MUST return exactly the same records (and
+    /// therefore the same label/field sets) as a full-buffer scan, for any inclusive
+    /// `[start, end]`, even though records are appended in NO timestamp order. This is the
+    /// soundness guarantee that lets the query paths prune to the window instead of
+    /// scanning the whole retained buffer.
+    #[tokio::test]
+    async fn hot_tail_records_in_range_matches_full_scan_under_out_of_order_inserts() {
+        let hot_tail = BufferedLogHotTail::default();
+
+        // Timestamps deliberately out of order and spread across many one-minute buckets,
+        // with duplicates at the same instant and records straddling bucket boundaries.
+        const BUCKET: i64 = HOT_TAIL_BUCKET_NS;
+        let timestamps = [
+            5 * BUCKET + 10,
+            BUCKET - 1, // last ns of bucket 0
+            3 * BUCKET,
+            BUCKET,          // first ns of bucket 1
+            5 * BUCKET + 10, // duplicate timestamp
+            0,
+            7 * BUCKET + 42,
+            2 * BUCKET + 999,
+            3 * BUCKET, // duplicate timestamp in a different append position
+            4 * BUCKET - 1,
+            -BUCKET + 5, // a pre-epoch (negative) timestamp
+            6 * BUCKET,
+        ];
+        let apps = ["api", "web", "db"];
+        let records: Vec<WalLogRecord> = timestamps
+            .iter()
+            .enumerate()
+            .map(|(i, &ts)| hot_tail_test_record(ts, apps[i % apps.len()]))
+            .collect();
+
+        // Append one at a time to exercise incremental bucket insertion of out-of-order data.
+        for record in &records {
+            hot_tail.append_records(vec![record.clone()]);
+        }
+
+        // `records()` must still return the full append-ordered buffer (the tail path
+        // depends on this).
+        assert_eq!(hot_tail.records(), records);
+
+        // Probe a wide set of windows: exact bucket edges, sub-bucket slivers, windows
+        // spanning many buckets, empty windows, and windows entirely outside the data.
+        let min_ts = *timestamps.iter().min().unwrap();
+        let max_ts = *timestamps.iter().max().unwrap();
+        let mut probes: Vec<(i64, i64)> = Vec::new();
+        // Walk window starts at a coarse quarter-bucket stride from below the earliest
+        // record to above the latest, pairing each with several spans.
+        let stride = BUCKET / 4;
+        let mut start = min_ts - 2 * BUCKET;
+        while start <= max_ts + 2 * BUCKET {
+            for span in [0_i64, 1, BUCKET - 1, BUCKET, BUCKET + 1, 3 * BUCKET] {
+                probes.push((start, start + span));
+            }
+            start += stride;
+        }
+        // Add exact per-record point windows and tight windows around each timestamp.
+        for &ts in &timestamps {
+            probes.push((ts, ts));
+            probes.push((ts - 1, ts));
+            probes.push((ts, ts + 1));
+            probes.push((ts + 1, ts + 1));
+        }
+
+        for (start, end) in probes {
+            if start > end {
+                // Mirror the guard: an inverted window yields nothing.
+                assert!(hot_tail.records_in_range(start, end).is_empty());
+                continue;
+            }
+            let expected = brute_force_in_range(&records, start, end);
+            let actual = hot_tail.records_in_range(start, end);
+            assert_eq!(
+                actual, expected,
+                "records_in_range({start}, {end}) diverged from full-scan oracle"
+            );
+
+            // The label sets a query would derive must be identical too (records are the
+            // sole input to label/field extraction).
+            let expected_labels: BTreeSet<Labels> =
+                expected.iter().map(|r| r.labels.clone()).collect();
+            let actual_labels: BTreeSet<Labels> = actual.iter().map(|r| r.labels.clone()).collect();
+            assert_eq!(
+                actual_labels, expected_labels,
+                "label sets diverged at [{start}, {end}]"
+            );
+        }
+
+        // The trait-object path the querier actually uses must agree with the inherent method.
+        let dyn_tail: Arc<dyn LogHotTail> = Arc::new(hot_tail.clone());
+        let window = (2 * BUCKET, 6 * BUCKET);
+        assert_eq!(
+            dyn_tail.records_in_range(window.0, window.1),
+            hot_tail.records_in_range(window.0, window.1),
+        );
+
+        // The default trait impl (used by other LogHotTail implementors, e.g. the
+        // in-memory sink) falls back to filtering the full buffer and must also agree.
+        let in_memory = InMemoryWalSink::default();
+        for record in &records {
+            LogWalSink::append(&in_memory, record.clone())
+                .await
+                .unwrap();
+        }
+        let in_memory_dyn: Arc<dyn LogHotTail> = Arc::new(in_memory);
+        assert_eq!(
+            in_memory_dyn.records_in_range(window.0, window.1),
+            brute_force_in_range(&records, window.0, window.1),
+        );
+    }
+
+    #[test]
+    fn detected_labels_empty_query_is_match_all() {
+        // Grafana's Logs Drilldown loads `detected_labels?query=` with an empty
+        // query to discover every label. An empty/blank query must parse to
+        // `None` (match all streams), not be handed to the LogQL parser — which
+        // rejects "" with `syntax error: unexpected $end, expecting '{'`.
+        for raw in ["query=", "query=%20", "query=%20%20"] {
+            let params = parse_detected_labels_params(Some(raw)).unwrap();
+            assert!(params.query.is_none(), "{raw}: {:?}", params.query);
+        }
+        // A real stream selector is still preserved.
+        let params = parse_detected_labels_params(Some("query=%7Bapp%3D%22api%22%7D")).unwrap();
+        assert_eq!(params.query.as_deref(), Some(r#"{app="api"}"#));
+    }
 
     #[test]
     fn instant_synthetic_vector_uses_raw_loki_timestamp() {

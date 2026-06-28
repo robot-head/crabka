@@ -392,9 +392,10 @@ fn collect_retries(
             expired.push(pb);
             continue;
         }
-        // Honour a connection-failure backoff: the batch waits in its slot until
-        // its `backoff_until` passes. Routing redirects leave `backoff_until`
-        // `None`, so they resend immediately at the re-resolved leader.
+        // Honour a retry backoff: the batch waits in its slot until its
+        // `backoff_until` passes. Set after a transport failure and after a
+        // routing rejection (NOT_LEADER / UNKNOWN_TOPIC) so a partition that is
+        // still settling at cold boot isn't hammered in a tight resend loop.
         if pb.backoff_until.is_some_and(|t| now < t) {
             parked.push((key, pb));
             continue;
@@ -692,6 +693,25 @@ fn backoff_deadline(now: Instant, retry_backoff: Duration) -> Instant {
 /// alongside the verdict (the caller still owns its records). On a connection
 /// error the broker is evicted so a reconnect targets its current address.
 async fn send_one_batch(cfg: &SenderConfig, mut pb: PreparedBatch) -> BatchSendResult {
+    // A batch prepared before its topic existed (cold-boot race: the WAL topic's
+    // leadership is still settling) carries a ZERO `topic_id`. Produce v≥13 keys
+    // topics by id and drops the name on the wire, so a ZERO id makes the broker
+    // return an un-correlatable UNKNOWN_TOPIC response that the sender retries
+    // forever. Re-resolve the id from the metadata cache (which `partitions_for`
+    // backfills once the topic exists) before each (verbatim) resend, so the
+    // SAME batch converges in place — same `base_sequence`, so the idempotent
+    // sequence stays gap-free and no records are dropped.
+    if pb.topic_id == Uuid::ZERO
+        && let Some(resolved) = cfg
+            .metadata_cache
+            .lock()
+            .await
+            .get(&pb.topic)
+            .map(|m| m.topic_id)
+    {
+        pb.topic_id = resolved;
+    }
+
     let leader = resolve_leader(cfg, &pb.topic, pb.partition);
     let req = build_single_batch_request(cfg, &pb);
 
@@ -748,7 +768,7 @@ async fn send_one_batch(cfg: &SenderConfig, mut pb: PreparedBatch) -> BatchSendR
 /// mapping lives in [`classify_verdict`].
 fn interpret_response(
     cfg: &SenderConfig,
-    pb: PreparedBatch,
+    mut pb: PreparedBatch,
     resp: &ProduceResponse,
 ) -> BatchSendResult {
     let part_resp = resp
@@ -763,8 +783,18 @@ fn interpret_response(
 
     let Some(part_resp) = part_resp else {
         // No matching partition in the response: treat as a retriable failure so
-        // the batch resends verbatim rather than being dropped. (The broker
-        // echoes the partition we sent, so this is rare.)
+        // the batch resends verbatim rather than being dropped. This happens at
+        // cold boot when a Produce for a not-yet-existing topic comes back as
+        // UNKNOWN_TOPIC with an empty (name="", topic_id=ZERO) identity that
+        // can't be correlated to our batch; the resend re-resolves `topic_id`
+        // (see `send_one_batch`) once the topic exists.
+        tracing::debug!(
+            topic = %pb.topic,
+            partition = pb.partition,
+            base_sequence = pb.base_sequence,
+            "produce response carried no matching partition; resending"
+        );
+        pb.backoff_until = Some(backoff_deadline(Instant::now(), cfg.retry_backoff));
         return BatchSendResult {
             pb,
             verdict: BatchVerdict::Retry,
@@ -772,12 +802,34 @@ fn interpret_response(
         };
     };
 
+    // Surface the actual broker error code (and any inline leader hint) for a
+    // rejected produce, so a retry loop can be diagnosed from the code rather
+    // than inferred from the resend pattern. Error-gated to stay off the
+    // happy-path hot loop; enable with RUST_LOG=crabka_client_producer=debug.
+    if part_resp.error_code != 0 {
+        tracing::debug!(
+            topic = %pb.topic,
+            partition = pb.partition,
+            base_sequence = pb.base_sequence,
+            error_code = part_resp.error_code,
+            base_offset = part_resp.base_offset,
+            leader_hint = part_resp.current_leader.leader_id,
+            "produce partition rejected"
+        );
+    }
     match classify_verdict(part_resp.error_code, part_resp.base_offset) {
-        Classification::Verdict(verdict) => BatchSendResult {
-            pb,
-            verdict,
-            refresh_needed: false,
-        },
+        Classification::Verdict(verdict) => {
+            // Back off before a verbatim resend (e.g. a defensive OUT_OF_ORDER)
+            // so a partition that keeps rejecting isn't hammered in a tight loop.
+            if matches!(verdict, BatchVerdict::Retry) {
+                pb.backoff_until = Some(backoff_deadline(Instant::now(), cfg.retry_backoff));
+            }
+            BatchSendResult {
+                pb,
+                verdict,
+                refresh_needed: false,
+            }
+        }
         Classification::Routing => {
             // Adopt any inline leader hint immediately; otherwise (or if the
             // hinted leader's address is unknown) force a metadata refresh. The
@@ -790,6 +842,13 @@ fn interpret_response(
             } else {
                 true
             };
+            // Back off before re-routing. A NOT_LEADER/UNKNOWN_TOPIC at cold boot
+            // (the partition's leader/writer-actor still settling) otherwise spins
+            // a tight refresh+resend loop that hammers the broker and can itself
+            // starve the reconcile that would make the partition writable —
+            // leaving the producer stuck (observed: traces/logs WAL never advances
+            // on some cold boots). Backing off lets the partition become ready.
+            pb.backoff_until = Some(backoff_deadline(Instant::now(), cfg.retry_backoff));
             BatchSendResult {
                 pb,
                 verdict: BatchVerdict::Retry,
@@ -833,6 +892,9 @@ fn build_single_batch_request(cfg: &SenderConfig, pb: &PreparedBatch) -> Produce
 /// re-elected onto a broker the pool hadn't dialed becomes routable.
 async fn update_leaders_from_metadata(cfg: &SenderConfig) {
     if let Ok(md) = cfg.transport.refresh_metadata().await {
+        // Hold the cache lock across the loop so a tracked topic's correction is
+        // applied atomically alongside the leader-map update.
+        let mut cache = cfg.metadata_cache.lock().await;
         for t in &md.topics {
             let Some(name) = &t.name else { continue };
             if t.error_code != 0 {
@@ -841,6 +903,18 @@ async fn update_leaders_from_metadata(cfg: &SenderConfig) {
             for p in &t.partitions {
                 cfg.partition_leaders
                     .insert((name.clone(), p.partition_index), p.leader_id);
+            }
+            // Correct a previously-cached unresolved entry now that the topic
+            // exists. `partitions_for` caches `{count: 1, topic_id: ZERO}` when a
+            // produce races ahead of the topic's creation at cold boot; left
+            // frozen, that ZERO `topic_id` makes a v≥13 Produce (name dropped on
+            // the wire) come back as an un-correlatable UNKNOWN_TOPIC response the
+            // sender retries forever. Refreshing the id here lets a parked batch
+            // backfill it on resend (see `send_one_batch`). Only update topics we
+            // already track, so a full-cluster refresh doesn't bloat the cache.
+            if let Some(entry) = cache.get_mut(name) {
+                entry.num_partitions = i32::try_from(t.partitions.len()).unwrap_or(1).max(1);
+                entry.topic_id = t.topic_id;
             }
         }
     }

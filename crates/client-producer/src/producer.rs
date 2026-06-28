@@ -640,6 +640,13 @@ impl Producer {
                     }
                     _ => (1, crabka_protocol::primitives::uuid::Uuid::ZERO),
                 };
+                // NOTE: an unresolved lookup is cached as `{count: 1, topic_id:
+                // ZERO}` to avoid a metadata-refresh storm (this runs per record
+                // on the produce path). That entry is later corrected in place by
+                // `update_leaders_from_metadata` once the topic exists — which is
+                // essential: a frozen ZERO `topic_id` makes Produce v≥13 (name
+                // dropped on the wire) return an un-correlatable UNKNOWN_TOPIC
+                // response that the sender would retry forever.
                 let mut m = self.metadata_cache.lock().await;
                 m.insert(
                     topic.to_string(),

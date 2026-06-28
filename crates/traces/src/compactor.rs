@@ -157,7 +157,10 @@ fn recompute_nested_sets(batch: &RecordBatch) -> Result<RecordBatch, TracesError
 
     let mut left = vec![0_i32; batch.num_rows()];
     let mut right = vec![0_i32; batch.num_rows()];
-    let mut parent_id = vec![0_i32; batch.num_rows()];
+    // Default to the root sentinel (-1, Tempo's no-parent value): a row not
+    // reached by the per-trace DFS has no parent. 0 is an invalid parent (left
+    // values start at 1).
+    let mut parent_id = vec![-1_i32; batch.num_rows()];
 
     for rows in by_trace.values() {
         let mut pos = HashMap::new();
@@ -191,7 +194,8 @@ fn recompute_nested_sets(batch: &RecordBatch) -> Result<RecordBatch, TracesError
         for row in roots.iter().rev() {
             stack.push(Frame::Enter {
                 row: *row,
-                parent_left: 0,
+                // Root span: nestedSetParent = -1 (Tempo no-parent sentinel).
+                parent_left: -1,
             });
         }
         while let Some(frame) = stack.pop() {

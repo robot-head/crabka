@@ -1,7 +1,7 @@
 //! Object-store backed cold-block `ProfileStore`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use arrow::array::{ArrayRef, AsArray, UInt64Array};
 use arrow::datatypes::{Int64Type, UInt64Type};
@@ -24,7 +24,12 @@ use crabka_pprof::LazySymbolizer;
 #[derive(Clone)]
 pub struct ColdProfileStore {
     store: Arc<dyn ObjectStore>,
-    index: Arc<ProfileIndex>,
+    // The block index is loaded from object storage and must be REFRESHED as the
+    // block-builder writes new blocks — otherwise blocks created after the querier
+    // started are invisible (a query only sees the startup snapshot). Held behind a
+    // lock so a background task can swap in a freshly-loaded index; readers clone the
+    // inner `Arc` out and never hold the guard across an await.
+    index: Arc<RwLock<Arc<ProfileIndex>>>,
     resolver: Arc<ChainedResolver>,
 }
 
@@ -33,7 +38,7 @@ impl ColdProfileStore {
     pub fn new(store: Arc<dyn ObjectStore>, index: Arc<ProfileIndex>) -> Self {
         Self {
             store,
-            index,
+            index: Arc::new(RwLock::new(index)),
             resolver: local_native_resolver(),
         }
     }
@@ -52,9 +57,22 @@ impl ColdProfileStore {
         resolvers.push(Arc::new(AddressFallbackResolver));
         Ok(Self {
             store,
-            index,
+            index: Arc::new(RwLock::new(index)),
             resolver: Arc::new(ChainedResolver::new(resolvers)),
         })
+    }
+
+    /// Current block index snapshot. Clones the inner `Arc` (cheap) so the lock is
+    /// released immediately and never held across an `.await`.
+    #[must_use]
+    fn current_index(&self) -> Arc<ProfileIndex> {
+        Arc::clone(&self.index.read().expect("profile index lock poisoned"))
+    }
+
+    /// Swap in a freshly-loaded block index so blocks written since the querier
+    /// started become queryable. Called by the querier's periodic refresh task.
+    pub fn replace_index(&self, index: Arc<ProfileIndex>) {
+        *self.index.write().expect("profile index lock poisoned") = index;
     }
 
     async fn block_keys(
@@ -66,14 +84,14 @@ impl ColdProfileStore {
         end_ms: i64,
     ) -> Result<(Vec<String>, std::collections::BTreeSet<SeriesFingerprint>), ProfileError> {
         let fps = self
-            .index
+            .current_index()
             .select_fingerprints(tenant, profile_type, matchers)
             .map_err(|err| ProfileError::Store(err.to_string()))?;
         if fps.is_empty() {
             return Ok((Vec::new(), fps));
         }
         let blocks = self
-            .index
+            .current_index()
             .candidate_blocks_for_series(tenant, &fps, start_ms, end_ms);
         Ok((blocks, fps))
     }
@@ -108,7 +126,7 @@ impl ProfileStore for ColdProfileStore {
             // fresh base straight onto them folds bits together and can collide
             // across blocks (e.g. `1<<32 | (2<<32)` and `2<<32 | (1<<32)` both ==
             // `3<<32`). Dense re-basing keeps each block's external keys unique.
-            let stored_partitions = self.index.stacktrace_partitions(block_key);
+            let stored_partitions = self.current_index().stacktrace_partitions(block_key);
             let partition_map = block_partition_map(block_idx, &stored_partitions)?;
             let symdb = self.load_symdb(block_key).await?;
             let source = Arc::new(LazySymbolizer::new(symdb, Arc::clone(&self.resolver)));
@@ -156,7 +174,9 @@ impl ProfileStore for ColdProfileStore {
         let active = self
             .active_fingerprints_for_rows(tenant, matchers, start_ms, end_ms)
             .await?;
-        Ok(self.index.label_names_for_fingerprints(tenant, &active))
+        Ok(self
+            .current_index()
+            .label_names_for_fingerprints(tenant, &active))
     }
 
     async fn label_values(
@@ -171,7 +191,7 @@ impl ProfileStore for ColdProfileStore {
             .active_fingerprints_for_rows(tenant, matchers, start_ms, end_ms)
             .await?;
         Ok(self
-            .index
+            .current_index()
             .label_values_for_fingerprints(tenant, name, &active))
     }
 
@@ -184,7 +204,9 @@ impl ProfileStore for ColdProfileStore {
         let active = self
             .active_fingerprints_for_rows(tenant, &[], start_ms, end_ms)
             .await?;
-        Ok(self.index.profile_types_for_fingerprints(tenant, &active))
+        Ok(self
+            .current_index()
+            .profile_types_for_fingerprints(tenant, &active))
     }
 
     async fn series(
@@ -199,7 +221,7 @@ impl ProfileStore for ColdProfileStore {
             .active_fingerprints_for_rows(tenant, matchers, start_ms, end_ms)
             .await?;
         Ok(self
-            .index
+            .current_index()
             .series_for_fingerprints(tenant, &active, label_names))
     }
 
@@ -209,9 +231,18 @@ impl ProfileStore for ColdProfileStore {
         start_ms: i64,
         end_ms: i64,
     ) -> Result<ProfileStats, ProfileError> {
+        // Derive the tenant's profile-time bounds from the per-block `min_ts`/
+        // `max_ts` the index already tracks instead of loading and scanning every
+        // candidate block's sample rows. `GetProfileStats` is unbounded
+        // (`[0, i64::MAX]`), so a row scan reads the entire dataset on every
+        // Grafana Profiles-Drilldown load; the index aggregate is in-memory and
+        // O(blocks). Block bounds intersected with `[start_ms, end_ms]` are clamped
+        // to the requested window so a narrower query never reports times outside
+        // it, and `data_ingested` is true iff the tenant has any overlapping block.
         let bounds = self
-            .sample_time_bounds_for_rows(tenant, start_ms, end_ms)
-            .await?;
+            .current_index()
+            .block_time_bounds(tenant, start_ms, end_ms)
+            .map(|(block_min, block_max)| (block_min.max(start_ms), block_max.min(end_ms)));
         Ok(ProfileStats {
             data_ingested: bounds.is_some(),
             oldest_profile_time: bounds.map(|(oldest, _)| oldest),
@@ -221,45 +252,6 @@ impl ProfileStore for ColdProfileStore {
 }
 
 impl ColdProfileStore {
-    async fn sample_time_bounds_for_rows(
-        &self,
-        tenant: &str,
-        start_ms: i64,
-        end_ms: i64,
-    ) -> Result<Option<(i64, i64)>, ProfileError> {
-        let fps = self
-            .index
-            .matching_fingerprints(tenant, &[])
-            .map_err(|err| ProfileError::Store(err.to_string()))?;
-        if fps.is_empty() {
-            return Ok(None);
-        }
-        let blocks = self
-            .index
-            .candidate_blocks_for_series(tenant, &fps, start_ms, end_ms);
-        let mut bounds: Option<(i64, i64)> = None;
-        for block_key in blocks {
-            for batch in self
-                .load_block_batches_for_fingerprints(&block_key, &fps)
-                .await?
-            {
-                let fingerprints = batch.column(0).as_primitive::<UInt64Type>();
-                let timestamps = batch.column(1).as_primitive::<Int64Type>();
-                for row in 0..batch.num_rows() {
-                    let fp = fingerprints.value(row);
-                    let ts = timestamps.value(row);
-                    if fps.contains(&fp) && ts >= start_ms && ts <= end_ms {
-                        bounds = Some(match bounds {
-                            Some((oldest, newest)) => (oldest.min(ts), newest.max(ts)),
-                            None => (ts, ts),
-                        });
-                    }
-                }
-            }
-        }
-        Ok(bounds)
-    }
-
     async fn active_fingerprints_for_rows(
         &self,
         tenant: &str,
@@ -268,14 +260,14 @@ impl ColdProfileStore {
         end_ms: i64,
     ) -> Result<BTreeSet<SeriesFingerprint>, ProfileError> {
         let fps = self
-            .index
+            .current_index()
             .matching_fingerprints(tenant, matchers)
             .map_err(|err| ProfileError::Store(err.to_string()))?;
         if fps.is_empty() {
             return Ok(BTreeSet::new());
         }
         let blocks = self
-            .index
+            .current_index()
             .candidate_blocks_for_series(tenant, &fps, start_ms, end_ms);
         let mut active = BTreeSet::new();
         for block_key in blocks {
@@ -614,6 +606,62 @@ mod tests {
         assert!(stats.data_ingested);
         assert!(stats.oldest_profile_time == Some(1000), "{stats:?}");
         assert!(stats.newest_profile_time == Some(1000), "{stats:?}");
+    }
+
+    #[tokio::test]
+    async fn cold_store_stats_aggregate_block_bounds_without_scanning_batches() {
+        // Two blocks with disjoint, known time spans. The global stats must be the
+        // min of the mins and the max of the maxes derived from the index's
+        // per-block metadata. To prove the bounds come from block metadata and not
+        // from scanning sample rows, the parquet block objects are DELETED from the
+        // store before calling `stats`: a row scan would fail to load them, but the
+        // index aggregate succeeds because it never touches the blocks.
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let early = record_at("t", "api", vec![0], 5, 1_000_000_000); // 1000 ms
+        let late = record_at("t", "worker", vec![0], 7, 5_000_000_000); // 5000 ms
+        let meta_early = build_block(&store, "t", 0, std::slice::from_ref(&early), (0, 0))
+            .await
+            .unwrap()
+            .remove(0);
+        let meta_late = build_block(&store, "t", 0, std::slice::from_ref(&late), (1, 1))
+            .await
+            .unwrap()
+            .remove(0);
+        assert!(meta_early.min_ts == 1000 && meta_early.max_ts == 1000);
+        assert!(meta_late.min_ts == 5000 && meta_late.max_ts == 5000);
+        let mut index = ProfileIndex::new();
+        for rec in [&early, &late] {
+            let labels = Labels::from_pairs(rec.labels.iter().cloned());
+            index.add_series("t", labels.fingerprint(), &labels);
+        }
+        index.add_block(&meta_early);
+        index.add_block(&meta_late);
+        // Drop the block payloads so any attempt to load+scan a batch would error.
+        store
+            .delete(&Path::from(meta_early.object_key.clone()))
+            .await
+            .unwrap();
+        store
+            .delete(&Path::from(meta_late.object_key.clone()))
+            .await
+            .unwrap();
+        let cold = ColdProfileStore::new(store, Arc::new(index));
+
+        let stats = cold.stats("t", 0, i64::MAX).await.unwrap();
+
+        assert!(stats.data_ingested);
+        assert!(stats.oldest_profile_time == Some(1000), "{stats:?}");
+        assert!(stats.newest_profile_time == Some(5000), "{stats:?}");
+
+        // A tenant with no blocks reports no data without touching the store.
+        let empty = stats_for_unknown_tenant(&cold).await;
+        assert!(!empty.data_ingested, "{empty:?}");
+        assert!(empty.oldest_profile_time.is_none(), "{empty:?}");
+        assert!(empty.newest_profile_time.is_none(), "{empty:?}");
+    }
+
+    async fn stats_for_unknown_tenant(cold: &ColdProfileStore) -> ProfileStats {
+        cold.stats("absent-tenant", 0, i64::MAX).await.unwrap()
     }
 
     #[tokio::test]

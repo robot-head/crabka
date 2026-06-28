@@ -33,8 +33,8 @@ pub use merge::{
     merge_tag_values,
 };
 pub use metrics_merge::{
-    Exemplar, MetricPoint, MetricSeries, MetricsResponseJson, limit_exemplars, merge_metric_series,
-    merge_metrics,
+    Exemplar, KeyValue, MetricSample, MetricSeries, MetricsResponseJson, limit_exemplars,
+    merge_metric_series, merge_metrics,
 };
 pub use queue::run_jobs;
 pub use server::router_with_backend;

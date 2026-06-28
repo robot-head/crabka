@@ -26,6 +26,7 @@ use opentelemetry_proto::tonic::metrics::v1::MetricsData;
 use tokio::net::TcpListener;
 use tonic::{Request as TonicRequest, Response as TonicResponse, Status};
 
+use crate::metrics::ServiceMetrics;
 use crate::otlp::{
     DeltaAccumulator, OtlpError, TranslationStrategy, decode_otlp_stateful,
     decode_otlp_stateful_bytes,
@@ -356,6 +357,7 @@ pub struct DistributorState {
     latest_timestamps: Mutex<BTreeMap<(String, SeriesFingerprint), i64>>,
     limits: TenantLimits,
     max_decompressed: usize,
+    metrics: Option<ServiceMetrics>,
 }
 
 impl DistributorState {
@@ -372,12 +374,19 @@ impl DistributorState {
             latest_timestamps: Mutex::new(BTreeMap::new()),
             limits: TenantLimits::default(),
             max_decompressed: 32 * 1024 * 1024,
+            metrics: None,
         }
     }
 
     #[must_use]
     pub fn with_limits(mut self, limits: TenantLimits) -> Self {
         self.limits = limits;
+        self
+    }
+
+    #[must_use]
+    pub fn with_metrics(mut self, metrics: ServiceMetrics) -> Self {
+        self.metrics = Some(metrics);
         self
     }
 
@@ -459,8 +468,19 @@ impl MetricsService for OtlpMetricsService {
         &self,
         request: TonicRequest<ExportMetricsServiceRequest>,
     ) -> Result<TonicResponse<ExportMetricsServiceResponse>, Status> {
-        match otlp_grpc_export_inner(&self.state, request).await {
-            Ok(response) => Ok(TonicResponse::new(response)),
+        let started = std::time::Instant::now();
+        let result = otlp_grpc_export_inner(&self.state, request).await;
+        if let Some(metrics) = &self.state.metrics {
+            let secs = started.elapsed().as_secs_f64();
+            match &result {
+                Ok(items) => metrics.record_ingest(true, 0, *items, secs),
+                Err(_) => metrics.record_ingest(false, 0, 0, secs),
+            }
+        }
+        match result {
+            Ok(_) => Ok(TonicResponse::new(ExportMetricsServiceResponse {
+                partial_success: None,
+            })),
             Err(error) => Err(status_from_push_error(&error)),
         }
     }
@@ -490,8 +510,12 @@ async fn push(
     headers: HeaderMap,
     body: BodyBytes,
 ) -> Response {
-    match push_inner(&state, &headers, &body).await {
-        Ok(success) => success.into_response(),
+    let started = std::time::Instant::now();
+    let bytes = body.len() as u64;
+    let result = push_inner(&state, &headers, &body).await;
+    record_ingest_outcome(&state, &result, bytes, started.elapsed().as_secs_f64());
+    match result {
+        Ok((success, _items)) => success.into_response(),
         Err(error) => error.into_response(),
     }
 }
@@ -500,7 +524,7 @@ async fn push_inner(
     state: &DistributorState,
     headers: &HeaderMap,
     body: &[u8],
-) -> Result<PushSuccess, PushError> {
+) -> Result<(PushSuccess, u64), PushError> {
     let tenant = tenant_from_headers(headers)?;
     let content_type = headers
         .get(axum::http::header::CONTENT_TYPE)
@@ -515,14 +539,18 @@ async fn push_inner(
             (series, Some(counts))
         }
     };
+    let items = series.len() as u64;
 
     if !append_decoded_series(state, tenant, &mut series).await? {
-        return Ok(PushSuccess::Accepted {
-            counts: counts.map(|_| WrittenCounts::default()),
-        });
+        return Ok((
+            PushSuccess::Accepted {
+                counts: counts.map(|_| WrittenCounts::default()),
+            },
+            items,
+        ));
     }
 
-    Ok(PushSuccess::NoContent { counts })
+    Ok((PushSuccess::NoContent { counts }, items))
 }
 
 fn require_snappy_encoding(headers: &HeaderMap) -> Result<(), WireError> {
@@ -547,8 +575,12 @@ async fn otlp_push(
     headers: HeaderMap,
     body: BodyBytes,
 ) -> Response {
-    match otlp_push_inner(&state, &headers, &body).await {
-        Ok(success) => success.into_response(),
+    let started = std::time::Instant::now();
+    let bytes = body.len() as u64;
+    let result = otlp_push_inner(&state, &headers, &body).await;
+    record_ingest_outcome(&state, &result, bytes, started.elapsed().as_secs_f64());
+    match result {
+        Ok((success, _items)) => success.into_response(),
         Err(error) => error.into_response(),
     }
 }
@@ -557,7 +589,7 @@ async fn otlp_push_inner(
     state: &DistributorState,
     headers: &HeaderMap,
     body: &[u8],
-) -> Result<PushSuccess, PushError> {
+) -> Result<(PushSuccess, u64), PushError> {
     let tenant = tenant_from_headers(headers)?;
     require_otlp_protobuf_content_type(headers)?;
     let mut series = {
@@ -567,16 +599,37 @@ async fn otlp_push_inner(
             .expect("otlp delta accumulator poisoned");
         decode_otlp_stateful_bytes(body, TranslationStrategy::default(), &mut accumulator)?
     };
+    let items = series.len() as u64;
     if !append_decoded_series(state, tenant, &mut series).await? {
-        return Ok(PushSuccess::Accepted { counts: None });
+        return Ok((PushSuccess::Accepted { counts: None }, items));
     }
-    Ok(PushSuccess::Ok)
+    Ok((PushSuccess::Ok, items))
 }
 
+/// Record an ingest request outcome on the distributor metrics bundle, if one
+/// is configured. `bytes` is the (compressed) request-body length; `items` is
+/// the decoded series count on success and `0` on error.
+fn record_ingest_outcome(
+    state: &DistributorState,
+    result: &Result<(PushSuccess, u64), PushError>,
+    bytes: u64,
+    secs: f64,
+) {
+    let Some(metrics) = &state.metrics else {
+        return;
+    };
+    match result {
+        Ok((_, items)) => metrics.record_ingest(true, bytes, *items, secs),
+        Err(_) => metrics.record_ingest(false, bytes, 0, secs),
+    }
+}
+
+/// Decode and append an OTLP gRPC export. Returns the decoded series count
+/// (the ingest `items` measure) on success.
 async fn otlp_grpc_export_inner(
     state: &DistributorState,
     request: TonicRequest<ExportMetricsServiceRequest>,
-) -> Result<ExportMetricsServiceResponse, PushError> {
+) -> Result<u64, PushError> {
     let tenant = tenant_from_metadata(request.metadata())?.to_string();
     let data = MetricsData {
         resource_metrics: request.into_inner().resource_metrics,
@@ -588,10 +641,9 @@ async fn otlp_grpc_export_inner(
             .expect("otlp delta accumulator poisoned");
         decode_otlp_stateful(&data, TranslationStrategy::default(), &mut accumulator)?
     };
+    let items = series.len() as u64;
     let _accepted = append_decoded_series(state, &tenant, &mut series).await?;
-    Ok(ExportMetricsServiceResponse {
-        partial_success: None,
-    })
+    Ok(items)
 }
 
 fn require_otlp_protobuf_content_type(headers: &HeaderMap) -> Result<(), WireError> {
@@ -635,7 +687,15 @@ async fn append_decoded_series(
     enforce_out_of_order_window(state, &limits, tenant, series)?;
     for record in wal_records_from_series(tenant, series) {
         let key = partition_key(tenant, record.series_fingerprint());
-        state.sink.append(key, record).await?;
+        if let Err(error) = state.sink.append(key, record).await {
+            // The actual WAL/produce error site — count it distinctly from
+            // 4xx client/validation rejects so operators can alert on durable
+            // append failures via rate(wal_append_failures_total).
+            if let Some(metrics) = &state.metrics {
+                metrics.wal_append_failures.inc();
+            }
+            return Err(error.into());
+        }
     }
     Ok(true)
 }

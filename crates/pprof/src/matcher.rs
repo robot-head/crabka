@@ -75,11 +75,15 @@ fn split_top_level_commas(input: &str) -> Result<Vec<&str>, ProfileError> {
             '\\' if in_quote => escaped = true,
             '"' => in_quote = !in_quote,
             ',' if !in_quote => {
+                // Tolerate empty parts from stray/leading/trailing/double commas
+                // (e.g. `{,service_name="x"}`). Grafana's pyroscope app builds its
+                // selector by concatenating an often-empty base filter with the
+                // service name, yielding a leading comma; Prometheus/Pyroscope
+                // accept these, so skip the empty part rather than erroring.
                 let part = input[start..idx].trim();
-                if part.is_empty() {
-                    return Err(ProfileError::Plan("empty label matcher".to_string()));
+                if !part.is_empty() {
+                    parts.push(part);
                 }
-                parts.push(part);
                 start = idx + ch.len_utf8();
             }
             _ => {}
@@ -91,10 +95,9 @@ fn split_top_level_commas(input: &str) -> Result<Vec<&str>, ProfileError> {
         ));
     }
     let tail = input[start..].trim();
-    if tail.is_empty() {
-        return Err(ProfileError::Plan("empty label matcher".to_string()));
+    if !tail.is_empty() {
+        parts.push(tail);
     }
-    parts.push(tail);
     Ok(parts)
 }
 
@@ -149,6 +152,32 @@ mod tests {
     fn empty_selector_is_empty() {
         assert!(parse_label_selector("{}").unwrap().is_empty());
         assert!(parse_label_selector("").unwrap().is_empty());
+    }
+
+    // Grafana's pyroscope drilldown app concatenates an often-empty base filter
+    // with the service name, producing leading/trailing/double commas. Real
+    // Pyroscope tolerates these; we skip the empty parts rather than rejecting
+    // the whole query with "empty label matcher" (which blanked every tile).
+    #[test]
+    fn tolerates_stray_commas() {
+        for sel in [
+            r#"{,service_name="broker"}"#,
+            r#"{service_name="broker",}"#,
+            r#"{ , service_name="broker" , }"#,
+        ] {
+            let ms = parse_label_selector(sel).unwrap();
+            assert!(ms.len() == 1, "{sel}");
+            assert!(ms[0].name == "service_name" && ms[0].value == "broker");
+        }
+        // Real matchers on either side of a double comma are both kept.
+        assert!(
+            parse_label_selector(r#"{service_name="a",,instance="i"}"#)
+                .unwrap()
+                .len()
+                == 2
+        );
+        // A selector that is only commas/whitespace means match-all.
+        assert!(parse_label_selector("{,}").unwrap().is_empty());
     }
 
     #[test]

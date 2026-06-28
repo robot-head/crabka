@@ -628,16 +628,30 @@ async fn config_built_querier_enforces_tenant_read_acl_before_query() {
     .await
     .unwrap();
 
-    let response = app
-        .oneshot(
-            Request::builder()
-                .uri("/loki/api/v1/query?query=%7Bapp%3D%22api%22%7D")
-                .header("X-Scope-OrgID", "tenant-a")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    // The querier serves queries through a `SwappableQueryAuthorizer` that begins
+    // permissive (allow-all) and swaps in the real broker-backed authorizer once
+    // it connects in the background ("FIX B2"). A query issued before that swap
+    // completes is allowed, so poll until enforcement is active rather than
+    // racing the swap (the race is marginal and only surfaces under CI's slower
+    // coverage build).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let response = loop {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/loki/api/v1/query?query=%7Bapp%3D%22api%22%7D")
+                    .header("X-Scope-OrgID", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        if response.status() == StatusCode::FORBIDDEN || std::time::Instant::now() >= deadline {
+            break response;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
 
     assert!(response.status() == StatusCode::FORBIDDEN);
     let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();

@@ -18,6 +18,7 @@ use crabka_metrics::distributor::{
     DistributorState, HA_TRACKER_TOPIC, KafkaHaElectionSink, KafkaSink,
     run_ha_election_consumer_loop, serve,
 };
+use crabka_metrics::metrics::ServiceMetrics;
 use crabka_metrics::{MetricsCompactorConfig, run_compactor_consumer_loop};
 use crabka_telemetry::OtlpConfig;
 use object_store::ObjectStore;
@@ -40,6 +41,12 @@ struct Cli {
     compactor_client_id: String,
     #[arg(long, default_value_t = 1000)]
     compactor_poll_timeout_ms: u64,
+    /// Flush the accumulated compaction buffer once this many WAL records are buffered.
+    #[arg(long, default_value_t = crabka_metrics::DEFAULT_FLUSH_MAX_ROWS)]
+    compactor_flush_max_rows: usize,
+    /// Flush the accumulated compaction buffer once its oldest record reaches this age.
+    #[arg(long, default_value_t = crabka_metrics::DEFAULT_FLUSH_MAX_AGE.as_millis() as u64)]
+    compactor_flush_max_age_ms: u64,
     #[arg(long, default_value = HA_TRACKER_TOPIC)]
     ha_tracker_topic: String,
     #[arg(long, default_value = "crabka-metrics-ha-tracker")]
@@ -89,7 +96,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "info",
         "crabka-metrics",
     )?;
-    crabka_telemetry::profiling::serve_admin_from_env("0.0.0.0:9404").await?;
+    let metrics = ServiceMetrics::new();
+    crabka_telemetry::profiling::serve_admin_from_env_with(
+        "0.0.0.0:9404",
+        crabka_metrics::metrics::metrics_router(metrics.registry.clone()),
+    )
+    .await?;
 
     let cli = Cli::parse();
     if !runnable_targets().contains(&cli.target) {
@@ -97,7 +109,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(2);
     }
     match cli.target {
-        Target::Distributor => run_distributor(cli).await?,
+        Target::Distributor => run_distributor(cli, metrics).await?,
         Target::Compactor => run_compactor(cli).await?,
         Target::Querier => run_querier(cli).await?,
         Target::QueryFrontend => run_query_frontend(cli).await?,
@@ -234,7 +246,10 @@ fn role_build_info(role: &'static str) -> impl IntoResponse {
     )
 }
 
-async fn run_distributor(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_distributor(
+    cli: Cli,
+    metrics: ServiceMetrics,
+) -> Result<(), Box<dyn std::error::Error>> {
     let producer = Arc::new(
         Producer::builder()
             .bootstrap(&cli.bootstrap)
@@ -254,7 +269,8 @@ async fn run_distributor(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             .with_ha_election_sink(Arc::new(KafkaHaElectionSink::new(
                 Arc::clone(&producer),
                 cli.ha_tracker_topic.clone(),
-            ))),
+            )))
+            .with_metrics(metrics),
     );
     let ha_state = Arc::clone(&state);
     let ha_topic = cli.ha_tracker_topic.clone();
@@ -287,6 +303,8 @@ async fn run_compactor(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     config.group_id = cli.compactor_group_id;
     config.client_id = cli.compactor_client_id;
     config.poll_timeout = Duration::from_millis(cli.compactor_poll_timeout_ms);
+    config.flush_max_rows = cli.compactor_flush_max_rows;
+    config.flush_max_age = Duration::from_millis(cli.compactor_flush_max_age_ms);
     let runtime = config.build_runtime(store)?;
     let mut consumer = config.build_consumer().await?;
     let stopping = Arc::new(AtomicBool::new(false));

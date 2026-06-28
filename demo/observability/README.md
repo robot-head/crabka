@@ -67,6 +67,32 @@ Actions workflow (Actions → *publish-demo-image* → *Run workflow* → image 
 - **Explore → Crabka Profiles** (Pyroscope): service `broker` / `observability-demo-app` — CPU + heap flamegraphs.
 - The **“Crabka observes Crabka”** dashboard (folder *Crabka*) shows one panel per signal.
 
+## Dashboards & alerts
+
+Every Crabka service exports Prometheus metrics on its admin port `:9404`
+(`/metrics`): the broker via its metrics server, and the four observability
+services (metrics/logs/traces/profiles) via the shared profiling-admin server,
+across all roles. Alloy scrapes them with a `job` label per compose service, so
+the dashboards/alerts select per service and role.
+
+Provisioned dashboards (folder *Crabka*):
+
+- **Crabka — Overview** — fleet liveness, ingest/query rate and error ratio per
+  subsystem, broker throughput.
+- **Crabka — Broker** — Kafka throughput, produce/fetch, partitions, ISR &
+  controller health, and FedRAMP-MLA audit pipeline.
+- **Crabka — Metrics / Logs / Traces / Profiles** — per-subsystem RED: ingest
+  rate/bytes/errors/latency (distributor) and query rate/errors/p99 latency by
+  route (querier), plus WAL append failures and per-role liveness.
+
+Provisioned Grafana-managed alerts (folder *Crabka Alerts*,
+`grafana/provisioning/alerting/`): broker (no active controller, offline
+partitions, under-min-ISR, under-replicated, audit write failures) and
+observability (service down; per-subsystem ingest error ratio > 5%; per-subsystem
+query p99 > 5s). To see one fire, stop a service
+(`docker compose stop traces-querier`) — **Observability service down** moves to
+Firing within ~1 minute; `docker compose start traces-querier` resolves it.
+
 ## Smoke check (all four signals)
 
 ```bash
@@ -88,5 +114,5 @@ curl -s -H 'X-Scope-OrgID: demo' -X POST -H 'content-type: application/json' \
 - `docker-compose.yml` — the stack
 - `Dockerfile` — single image with every Crabka binary + the demo app
 - `alloy/config.alloy` — Alloy collects all four signals from both sources
-- `grafana/provisioning/` — datasources + starter dashboard
+- `grafana/provisioning/` — datasources, dashboards (overview + broker + one per subsystem), and alert rules
 - `minio/bootstrap.sh` — creates one bucket per signal (`crabka-metrics`, `crabka-traces`, `crabka-logs`, `crabka-profiles`)

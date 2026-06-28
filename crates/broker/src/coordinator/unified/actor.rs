@@ -469,7 +469,11 @@ async fn actor_loop(
                                 }
                                 classic_ops::JoinAction::CompleteNow => {
                                     parked.joiners.insert(req.member_id, reply);
-                                    complete_classic_rebalance(state, &mut parked.joiners);
+                                    complete_classic_rebalance(
+                                        state,
+                                        &mut parked.joiners,
+                                        &mut parked.followers,
+                                    );
                                 }
                             }
                         } else if group.as_consumer().is_some() {
@@ -554,7 +558,11 @@ async fn actor_loop(
                             // A leave can make every survivor "joined this round"
                             // true; complete the rebalance early if so (mirrors the
                             // old `join_complete.notify_waiters()`).
-                            maybe_complete_classic(state, &mut parked.joiners);
+                            maybe_complete_classic(
+                                state,
+                                &mut parked.joiners,
+                                &mut parked.followers,
+                            );
                         } else {
                             let _ = reply.send(Vec::new());
                         }
@@ -644,14 +652,22 @@ async fn actor_loop(
                             group = %gid, dropped = ?dropped,
                             "expired members; waking joiners",
                         );
-                        maybe_complete_classic(state, &mut parked.joiners);
+                        maybe_complete_classic(
+                            state,
+                            &mut parked.joiners,
+                            &mut parked.followers,
+                        );
                     }
                 }
             }
             () = opt_sleep(deadline) => {
                 // Classic rebalance deadline fired: complete with whoever is here.
                 if let Some(state) = group.as_classic_mut() {
-                    complete_classic_rebalance(state, &mut parked.joiners);
+                    complete_classic_rebalance(
+                        state,
+                        &mut parked.joiners,
+                        &mut parked.followers,
+                    );
                 }
             }
         }
@@ -673,10 +689,22 @@ async fn opt_sleep(deadline: Option<Instant>) {
 
 /// Run the rebalance vote and resolve every parked joiner. Mirrors the old
 /// `join_group.rs` block 5 + `notify_waiters()`.
+///
+/// Also drains any stale parked followers with `REBALANCE_IN_PROGRESS`: they
+/// belong to a previous `CompletingRebalance` whose leader was dead and never
+/// sent `SyncGroup`. Notifying them lets the client rejoin immediately rather
+/// than waiting for the 30-second request timeout.
 fn complete_classic_rebalance(
     state: &mut ClassicState,
     joiners: &mut HashMap<String, oneshot::Sender<JoinResult>>,
+    followers: &mut HashMap<String, oneshot::Sender<SyncResult>>,
 ) {
+    for (_, sender) in followers.drain() {
+        let _ = sender.send(SyncResult {
+            error_code: codes::REBALANCE_IN_PROGRESS,
+            ..SyncResult::default()
+        });
+    }
     let inconsistent = classic_ops::try_complete(state).is_err();
     for (member_id, sender) in joiners.drain() {
         let result = if inconsistent {
@@ -698,12 +726,13 @@ fn complete_classic_rebalance(
 fn maybe_complete_classic(
     state: &mut ClassicState,
     joiners: &mut HashMap<String, oneshot::Sender<JoinResult>>,
+    followers: &mut HashMap<String, oneshot::Sender<SyncResult>>,
 ) {
     let should = state.generation_id > 0
         && matches!(state.state, ClassicGroupState::PreparingRebalance)
         && state.all_members_joined_this_round();
     if should {
-        complete_classic_rebalance(state, joiners);
+        complete_classic_rebalance(state, joiners, followers);
     }
 }
 

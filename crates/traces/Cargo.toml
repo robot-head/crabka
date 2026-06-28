@@ -43,6 +43,7 @@ futures = { workspace = true }
 hex = { workspace = true }
 object_store = { workspace = true }
 opentelemetry-proto = { workspace = true }
+prometheus-client = { workspace = true }
 prost = { workspace = true }
 prost-types = { workspace = true }
 reqwest = { workspace = true }

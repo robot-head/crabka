@@ -3,8 +3,18 @@ otelcol.receiver.otlp "in" {
   grpc { endpoint = "0.0.0.0:4317" }
   http { endpoint = "0.0.0.0:4318" }
   output {
-    traces = [otelcol.exporter.otlphttp.traces.input]
+    traces = [otelcol.processor.batch.traces.input]
     logs   = [otelcol.exporter.otlphttp.logs.input]
+  }
+}
+
+// Coalesce spans into fewer, larger exports so the distributor's per-request
+// produce path is invoked less often and each request carries a full batch
+// (drained into the WAL in ~one round-trip). Defense-in-depth alongside the
+// distributor's concurrent produce_spans.
+otelcol.processor.batch "traces" {
+  output {
+    traces = [otelcol.exporter.otlphttp.traces.input]
   }
 }
 
@@ -25,17 +35,29 @@ otelcol.exporter.otlphttp "logs" {
   }
 }
 
-// ---------------- Metrics: scrape every Crabka :9404 + demo app ----------------
+// ---------------- Metrics: scrape every Crabka service's :9404 /metrics ----------------
+// Every Crabka service exposes a Prometheus exporter on its admin port 9404
+// (the broker via its metrics server; the four observability services via the
+// shared profiling-admin server, across all roles). The `job` label carries the
+// compose service name so dashboards/alerts can select per service+role. The
+// demo apps are intentionally NOT scraped here — they expose pprof on 9404 but
+// no /metrics, so a metrics scrape would 404 (up=0). They remain in the
+// pyroscope scrape below for CPU profiles.
 prometheus.scrape "crabka" {
   targets = [
-    { __address__ = "broker:9404",               job = "broker" },
-    { __address__ = "metrics-distributor:9404",  job = "metrics-distributor" },
-    { __address__ = "metrics-querier:9404",       job = "metrics-querier" },
-    { __address__ = "traces-distributor:9404",   job = "traces-distributor" },
-    { __address__ = "logs-distributor:9404",     job = "logs-distributor" },
-    { __address__ = "profiles-distributor:9404", job = "profiles-distributor" },
-    { __address__ = "demo-produce:9404",         job = "demo-produce" },
-    { __address__ = "demo-stream:9404",          job = "demo-stream" },
+    { __address__ = "broker:9404",                 job = "broker" },
+    { __address__ = "metrics-distributor:9404",    job = "metrics-distributor" },
+    { __address__ = "metrics-querier:9404",         job = "metrics-querier" },
+    { __address__ = "metrics-compactor:9404",      job = "metrics-compactor" },
+    { __address__ = "traces-distributor:9404",     job = "traces-distributor" },
+    { __address__ = "traces-querier:9404",          job = "traces-querier" },
+    { __address__ = "traces-block-builder:9404",   job = "traces-block-builder" },
+    { __address__ = "logs-distributor:9404",       job = "logs-distributor" },
+    { __address__ = "logs-querier:9404",            job = "logs-querier" },
+    { __address__ = "logs-compactor:9404",         job = "logs-compactor" },
+    { __address__ = "profiles-distributor:9404",   job = "profiles-distributor" },
+    { __address__ = "profiles-querier:9404",        job = "profiles-querier" },
+    { __address__ = "profiles-block-builder:9404", job = "profiles-block-builder" },
   ]
   scrape_interval = "15s"
   forward_to = [prometheus.remote_write.crabka.receiver]
@@ -53,9 +75,23 @@ discovery.docker "containers" {
   host = "unix:///var/run/docker.sock"
 }
 
+// Map the Docker compose service name to the Loki service_name label so logs
+// appear under a meaningful stream selector instead of "unknown_service".
+discovery.relabel "containers" {
+  targets = discovery.docker.containers.targets
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "service_name"
+  }
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "job"
+  }
+}
+
 loki.source.docker "containers" {
   host       = "unix:///var/run/docker.sock"
-  targets    = discovery.docker.containers.targets
+  targets    = discovery.relabel.containers.output
   forward_to = [loki.write.crabka.receiver]
 }
 
@@ -66,8 +102,17 @@ loki.write "crabka" {
   }
 }
 
-// ---------------- Profiles: scrape every Crabka :9404 pprof → Pyroscope ----------------
-pyroscope.scrape "crabka" {
+// ---------------- Profiles: scrape Crabka :9404 pprof → Pyroscope ----------------
+// Two scrape blocks: the Crabka service binaries are built `--features
+// heap-profiling` so they expose CPU *and* jemalloc heap at /debug/pprof/heap;
+// the demo apps (observability-demo-app) are NOT, so scraping memory from them
+// 404s on every cycle. Split the memory profile out of the demo-app block.
+//
+// `scrape_interval = "60s"`: the CPU profile endpoint runs a 30s profile per
+// scrape behind a single global pprof guard. Scraping faster than that window
+// overlaps the guard — yielding `500 profiler: start running cpu profiler error`
+// and sustained SIGPROF overhead. 60s gives a 2x margin so profiles never overlap.
+pyroscope.scrape "crabka_services" {
   targets = [
     { __address__ = "broker:9404",               service_name = "broker" },
     { __address__ = "metrics-distributor:9404",  service_name = "metrics-distributor" },
@@ -75,20 +120,64 @@ pyroscope.scrape "crabka" {
     { __address__ = "logs-distributor:9404",     service_name = "logs-distributor" },
     { __address__ = "profiles-distributor:9404", service_name = "profiles-distributor" },
     { __address__ = "schema-registry:9404",      service_name = "schema-registry" },
-    { __address__ = "demo-produce:9404",         service_name = "demo-produce" },
-    { __address__ = "demo-stream:9404",          service_name = "demo-stream" },
   ]
+  scrape_interval = "60s"
   profiling_config {
-    // Crabka serves CPU at /debug/pprof/profile and jemalloc heap at
-    // /debug/pprof/heap (the image is built --features heap-profiling). Point the
-    // memory profile at the heap endpoint (its default path is
-    // /debug/pprof/memory). goroutine/block/mutex are Go-only — crabka does not
-    // expose them, so leave them off to avoid 404 scrape noise.
     profile.process_cpu { enabled = true }
     profile.memory {
       enabled = true
       path    = "/debug/pprof/heap"
     }
+    profile.goroutine { enabled = false }
+    profile.block     { enabled = false }
+    profile.mutex     { enabled = false }
+  }
+  forward_to = [pyroscope.write.crabka.receiver]
+}
+
+// Demo apps: CPU only — they are built without --features heap-profiling, so
+// /debug/pprof/heap is not registered and scraping it would 404 every cycle.
+pyroscope.scrape "demo_apps" {
+  targets = [
+    { __address__ = "demo-produce:9404", service_name = "demo-produce" },
+    { __address__ = "demo-stream:9404",  service_name = "demo-stream" },
+  ]
+  scrape_interval = "60s"
+  profiling_config {
+    profile.process_cpu { enabled = true }
+    profile.memory    { enabled = false }
+    profile.goroutine { enabled = false }
+    profile.block     { enabled = false }
+    profile.mutex     { enabled = false }
+  }
+  forward_to = [pyroscope.write.crabka.receiver]
+}
+
+// CPU-only profiling for the compaction / block-builder / querier roles that the
+// `crabka_services` block above (broker + distributors + schema-registry) does
+// not cover — without this they are a profiling blind spot. CPU pprof is
+// signal-based and allocator-independent, so it works regardless of the
+// allocator. `profile.memory` is left off here to keep the per-scrape cost down
+// on the heavy DataFusion query/compaction roles; these binaries are still built
+// with `--features heap-profiling`, so `/debug/pprof/heap` exists and can be
+// enabled later if heap profiles are wanted. `scrape_interval = "60s"` for the
+// same reason as the blocks above (the CPU endpoint runs a 30s profile per
+// scrape behind one global pprof guard).
+pyroscope.scrape "crabka_workers" {
+  targets = [
+    { __address__ = "metrics-compactor:9404",      service_name = "metrics-compactor" },
+    { __address__ = "metrics-querier:9404",         service_name = "metrics-querier" },
+    { __address__ = "traces-block-builder:9404",    service_name = "traces-block-builder" },
+    { __address__ = "traces-querier:9404",          service_name = "traces-querier" },
+    { __address__ = "logs-compactor:9404",          service_name = "logs-compactor" },
+    { __address__ = "logs-querier:9404",            service_name = "logs-querier" },
+    { __address__ = "profiles-block-builder:9404",  service_name = "profiles-block-builder" },
+    { __address__ = "profiles-querier:9404",        service_name = "profiles-querier" },
+  ]
+  scrape_interval = "60s"
+  profiling_config {
+    profile.process_cpu { enabled = true }
+    profile.memory    { enabled = false }
     profile.goroutine { enabled = false }
     profile.block     { enabled = false }
     profile.mutex     { enabled = false }

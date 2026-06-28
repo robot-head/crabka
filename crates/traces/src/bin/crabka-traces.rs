@@ -20,6 +20,7 @@ use crabka_traces::{
     distributor::{self, DistributorState, KafkaSink},
     frontend::{self, FrontendConfig, TraceIndexCatalog},
     livestore,
+    metrics::ServiceMetrics,
     metricsgen::{
         KafkaSpanSource, MetricsGenConfig, MetricsGenService, PrometheusRemoteWriteSink,
         SystemClock,
@@ -68,6 +69,10 @@ struct Cli {
     retention_ns: i64,
     #[arg(long, default_value_t = 5)]
     block_builder_window_secs: u64,
+    #[arg(long, default_value_t = crabka_traces::blockbuilder::DEFAULT_FLUSH_MAX_RECORDS)]
+    block_builder_flush_max_records: usize,
+    #[arg(long, default_value_t = crabka_traces::blockbuilder::DEFAULT_FLUSH_MAX_AGE.as_millis() as u64)]
+    block_builder_flush_max_age_ms: u64,
     #[arg(long, action = ArgAction::SetTrue)]
     querier_live_store: bool,
     #[arg(long)]
@@ -180,7 +185,12 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         "info",
         "crabka-traces",
     )?;
-    crabka_telemetry::profiling::serve_admin_from_env("0.0.0.0:9404").await?;
+    let metrics = ServiceMetrics::new();
+    crabka_telemetry::profiling::serve_admin_from_env_with(
+        "0.0.0.0:9404",
+        crabka_traces::metrics::metrics_router(metrics.registry.clone()),
+    )
+    .await?;
 
     let shutdown = CancellationToken::new();
     let shutdown_task = shutdown.clone();
@@ -191,10 +201,10 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     });
 
     match cli.target {
-        Target::Distributor => run_distributor(cli, shutdown).await?,
+        Target::Distributor => run_distributor(cli, metrics, shutdown).await?,
         Target::BlockBuilder => run_block_builder(cli, shutdown).await?,
         Target::LiveStore => run_live_store(cli, shutdown).await?,
-        Target::Querier => run_querier(cli, shutdown).await?,
+        Target::Querier => run_querier(cli, metrics, shutdown).await?,
         Target::QueryFrontend => run_query_frontend(cli, shutdown).await?,
         Target::Compactor => run_compactor(cli).await?,
         Target::MetricsGenerator => run_metrics_generator(cli, shutdown).await?,
@@ -204,10 +214,12 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
 async fn run_distributor(
     cli: Cli,
+    metrics: ServiceMetrics,
     shutdown: CancellationToken,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let producer = Producer::builder().bootstrap(cli.bootstrap).build().await?;
-    let mut state = DistributorState::new(Arc::new(KafkaSink::new(Arc::new(producer))));
+    let mut state =
+        DistributorState::with_metrics(Arc::new(KafkaSink::new(Arc::new(producer))), metrics);
     state.limits.max_spans_per_request = cli.max_spans_per_request;
     state.limits.max_spans_per_trace = cli.max_spans_per_trace;
     state.limits.max_ingest_spans_per_second = cli.max_ingest_spans_per_second;
@@ -286,6 +298,8 @@ async fn run_block_builder(
             index_key: trace_index_key,
             window: Duration::from_secs(cli.block_builder_window_secs),
             promoted_attrs,
+            flush_max_records: cli.block_builder_flush_max_records,
+            flush_max_age: Duration::from_millis(cli.block_builder_flush_max_age_ms),
         },
         shutdown,
     )
@@ -321,6 +335,7 @@ async fn run_live_store(
 
 async fn run_querier(
     cli: Cli,
+    metrics: ServiceMetrics,
     shutdown: CancellationToken,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let addr: SocketAddr = cli.listen.parse()?;
@@ -328,7 +343,7 @@ async fn run_querier(
         .querier_live_store
         .then(|| Arc::new(RwLock::new(LiveStore::new(cli.retention_ns))));
     let (router, store, trace_index_key, trace_index) =
-        build_querier_router_with_live(&cli, live_store.clone()).await?;
+        build_querier_router_with_live(&cli, metrics, live_store.clone()).await?;
     if let Some(live_store) = live_store {
         let consumer =
             wal_consumer(cli.bootstrap.clone(), "crabka-traces-querier-live-store").await?;
@@ -374,12 +389,13 @@ async fn run_querier(
 async fn build_querier_router(
     cli: &Cli,
 ) -> Result<axum::Router, Box<dyn std::error::Error + Send + Sync>> {
-    let (router, ..) = build_querier_router_with_live(cli, None).await?;
+    let (router, ..) = build_querier_router_with_live(cli, ServiceMetrics::new(), None).await?;
     Ok(router)
 }
 
 async fn build_querier_router_with_live(
     cli: &Cli,
+    metrics: ServiceMetrics,
     live_store: Option<Arc<RwLock<LiveStore>>>,
 ) -> Result<
     (axum::Router, Arc<dyn ObjectStore>, String, SharedTraceIndex),
@@ -410,12 +426,13 @@ async fn build_querier_router_with_live(
     };
     let store = Arc::new(CrabkaSpanStore::new(blocks, Arc::clone(&trace_index), live));
     let engine = Arc::new(TraceqlEngine::new(store, engine_opts_from_cli(cli)));
-    let router = trace_querier::http::router_with_config(
+    let router = trace_querier::http::router_with_config_and_metrics(
         engine,
         HttpConfig {
             max_trace_spans: cli.max_trace_spans,
             ..HttpConfig::default()
         },
+        metrics,
     );
     Ok((router, configured.store, trace_index_key, trace_index))
 }
@@ -919,6 +936,39 @@ mod tests {
 
         assert!(matches!(cli.target, Target::BlockBuilder));
         assert!(cli.block_builder_window_secs == 30);
+    }
+
+    #[test]
+    fn block_builder_flush_knobs_default() {
+        let cli = Cli::try_parse_from(["crabka-traces", "--target", "block-builder"]).unwrap();
+
+        assert!(
+            cli.block_builder_flush_max_records
+                == crabka_traces::blockbuilder::DEFAULT_FLUSH_MAX_RECORDS
+        );
+        assert!(
+            cli.block_builder_flush_max_age_ms
+                == u64::try_from(crabka_traces::blockbuilder::DEFAULT_FLUSH_MAX_AGE.as_millis())
+                    .unwrap()
+        );
+    }
+
+    #[test]
+    fn parses_block_builder_flush_knobs() {
+        let cli = Cli::try_parse_from([
+            "crabka-traces",
+            "--target",
+            "block-builder",
+            "--block-builder-flush-max-records",
+            "1000",
+            "--block-builder-flush-max-age-ms",
+            "30000",
+        ])
+        .unwrap();
+
+        assert!(matches!(cli.target, Target::BlockBuilder));
+        assert!(cli.block_builder_flush_max_records == 1000);
+        assert!(cli.block_builder_flush_max_age_ms == 30_000);
     }
 
     #[test]

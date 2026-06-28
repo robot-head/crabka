@@ -164,6 +164,7 @@ impl CrabkaSpanStore {
         let mut expansion_matchers = matchers.to_vec();
         expansion_matchers.extend(options.projection_matchers.clone());
         let batches = add_nested_intrinsic_columns(batches, &expansion_matchers)?;
+        let batches = add_span_attr_columns(batches, &options.projection_matchers)?;
 
         let schema = batches
             .first()
@@ -1264,7 +1265,10 @@ fn recompute_trace_nested_sets(spans: &mut [SpanRef]) {
     for &root in roots.iter().rev() {
         stack.push(Frame::Enter {
             idx: root,
-            parent_left: 0,
+            // Root spans encode nestedSetParent = -1 (Tempo's no-parent sentinel;
+            // left values start at 1 so -1 never collides). Must match the stored
+            // assignment in span/nested_set.rs and the Drilldown's `< 0` signal.
+            parent_left: -1,
         });
     }
     while let Some(frame) = stack.pop() {
@@ -1291,11 +1295,25 @@ fn recompute_trace_nested_sets(spans: &mut [SpanRef]) {
 }
 
 fn recompute_scan_nested_sets(batches: Vec<RecordBatch>) -> Result<Vec<RecordBatch>, TraceqlError> {
+    // `concat_batches` materialises every matched span into one RecordBatch.
+    // Arrow's variable-length columns use i32 offsets, so a combined batch over
+    // ~2 GiB overflows with an opaque `Offset overflow error`. Cap the merge at a
+    // safe 1.5 GiB and surface an actionable error so a pathological query (an
+    // unbounded time range over a huge tenant) degrades cleanly instead of
+    // emitting `concat scan batches: Offset overflow error`.
+    const MAX_SCAN_CONCAT_BYTES: usize = 1_500_000_000;
     if batches.is_empty() {
         return Ok(batches);
     }
     let schema = batches[0].schema();
     let batches = align_scan_batches_to_schema(batches, &schema)?;
+    let total_bytes: usize = batches.iter().map(RecordBatch::get_array_memory_size).sum();
+    if total_bytes > MAX_SCAN_CONCAT_BYTES {
+        return Err(TraceqlError::Store(format!(
+            "scan result too large to merge ({total_bytes} bytes > {MAX_SCAN_CONCAT_BYTES} cap); \
+             narrow the query time range or selector"
+        )));
+    }
     let batch = concat_batches(&schema, &batches)
         .map_err(|err| TraceqlError::Store(format!("concat scan batches: {err}")))?;
     recompute_batch_nested_sets(&batch).map(|batch| vec![batch])
@@ -1309,6 +1327,82 @@ fn add_nested_intrinsic_columns(
         .into_iter()
         .map(|batch| add_nested_intrinsic_columns_to_batch(&batch, matchers))
         .collect()
+}
+
+/// Materialize regular span/resource attribute columns (`attr.<key>`) referenced
+/// by metric `by()`/`select()` projections. The selector path filters attributes
+/// directly on the parquet arrays, so these columns are otherwise never built and
+/// `rate() by(span.http.method)` cannot `GROUP BY attr.http.method`. Values are
+/// stringified into a Utf8 column (metric labels are strings); a span missing the
+/// attribute becomes NULL — the nil group, matching Tempo. Event/Link matchers
+/// are handled by `add_nested_intrinsic_columns`; `service.name` is skipped (it is
+/// the promoted `COL_ROOT_SERVICE_NAME` column, not an attribute).
+fn add_span_attr_columns(
+    batches: Vec<RecordBatch>,
+    projection_matchers: &[SpanMatcher],
+) -> Result<Vec<RecordBatch>, TraceqlError> {
+    // (column_name, attr-array lookup key, include_resource) per regular-attr field.
+    let mut wanted: Vec<(String, String, bool)> = Vec::new();
+    for matcher in projection_matchers {
+        let (lookup_key, include_resource) = match matcher.scope {
+            MatchScope::Span | MatchScope::Both => (matcher.key.clone(), false),
+            MatchScope::Resource => (format!("{RESOURCE_ATTR_PREFIX}{}", matcher.key), true),
+            _ => continue,
+        };
+        if matcher.key == "service.name" {
+            continue; // grouped via the promoted COL_ROOT_SERVICE_NAME column
+        }
+        let column_name = format!("{ATTR_PREFIX}{}", matcher.key);
+        if !wanted.iter().any(|(name, _, _)| name == &column_name) {
+            wanted.push((column_name, lookup_key, include_resource));
+        }
+    }
+    if wanted.is_empty() {
+        return Ok(batches);
+    }
+    batches
+        .into_iter()
+        .map(|batch| add_span_attr_columns_to_batch(&batch, &wanted))
+        .collect()
+}
+
+fn add_span_attr_columns_to_batch(
+    batch: &RecordBatch,
+    wanted: &[(String, String, bool)],
+) -> Result<RecordBatch, TraceqlError> {
+    let schema = batch.schema();
+    let mut fields: Vec<Field> = schema
+        .fields()
+        .iter()
+        .map(|field| field.as_ref().clone())
+        .collect();
+    let mut columns = batch.columns().to_vec();
+    for (column_name, lookup_key, include_resource) in wanted {
+        if schema.column_with_name(column_name).is_some() {
+            continue; // already a (promoted) column
+        }
+        let mut values: Vec<Option<String>> = Vec::with_capacity(batch.num_rows());
+        for row in 0..batch.num_rows() {
+            let value = attr_values_with_resource(batch, row, *include_resource)?
+                .into_iter()
+                .find(|(key, _)| key == lookup_key)
+                .map(|(_, value)| attr_value_label(&value));
+            values.push(value);
+        }
+        fields.push(Field::new(column_name.clone(), DataType::Utf8, true));
+        columns.push(Arc::new(StringArray::from(values)) as ArrayRef);
+    }
+    RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)
+        .map_err(|err| TraceqlError::Store(format!("materialize attribute columns: {err}")))
+}
+
+fn attr_value_label(value: &AttrValue) -> String {
+    match value {
+        AttrValue::Str(value) => value.clone(),
+        AttrValue::Int(value) => value.to_string(),
+        AttrValue::Float(value) => value.to_string(),
+        AttrValue::Bool(value) => value.to_string(),
+    }
 }
 
 fn add_nested_intrinsic_columns_to_batch(
@@ -1664,7 +1758,10 @@ fn recompute_batch_nested_sets(batch: &RecordBatch) -> Result<RecordBatch, Trace
 
     let mut left = vec![0_i32; batch.num_rows()];
     let mut right = vec![0_i32; batch.num_rows()];
-    let mut parent_id = vec![0_i32; batch.num_rows()];
+    // Default to the root sentinel (-1): a row not reached by the per-trace DFS
+    // (e.g. a null trace_id) has no parent. 0 would be an invalid parent (left
+    // values start at 1) and would read as "has a parent at left 0".
+    let mut parent_id = vec![-1_i32; batch.num_rows()];
     let mut child_count = vec![0_i32; batch.num_rows()];
 
     for rows in by_trace.values() {
@@ -1706,7 +1803,8 @@ fn recompute_batch_nested_sets(batch: &RecordBatch) -> Result<RecordBatch, Trace
         for &row in roots.iter().rev() {
             stack.push(Frame::Enter {
                 row,
-                parent_left: 0,
+                // Root span: nestedSetParent = -1 (Tempo no-parent sentinel).
+                parent_left: -1,
             });
         }
         while let Some(frame) = stack.pop() {
@@ -2766,6 +2864,101 @@ mod tests {
         assert!(int32_value(&out, COL_CHILD_COUNT, 1).unwrap() == 0);
         assert!(int32_value(&out, COL_CHILD_COUNT, 2).unwrap() == 1);
         assert!(int32_value(&out, COL_CHILD_COUNT, 3).unwrap() == 0);
+        // Roots encode nestedSetParent = -1 (Tempo no-parent sentinel) so the
+        // Drilldown's `nestedSetParent < 0` primary signal selects them; each
+        // child points at its root's `left` (1 after the per-trace reset).
+        assert!(int32_value(&out, COL_PARENT_ID, 0).unwrap() == -1);
+        assert!(int32_value(&out, COL_PARENT_ID, 1).unwrap() == 1);
+        assert!(int32_value(&out, COL_PARENT_ID, 2).unwrap() == -1);
+        assert!(int32_value(&out, COL_PARENT_ID, 3).unwrap() == 1);
+    }
+
+    #[test]
+    fn metrics_by_attr_materializes_span_and_resource_columns() {
+        // A `by(span.<attr>)` / `by(resource.<attr>)` projection must materialize
+        // an `attr.<key>` column from the parquet attr arrays so grouping can read
+        // it; spans lacking the attribute become the nil group (NULL). The
+        // in-memory store can't catch this (it materializes every attr), so this
+        // exercises the production parquet batch path directly.
+        use crate::span::{AttrValue as SAttr, KeyValue, Span, SpanKind, StatusCode};
+        let mk = |id: u8, parent: Option<u8>, span_attrs: Vec<KeyValue>, version: Option<&str>| {
+            let mut resource_attrs = vec![KeyValue {
+                key: "service.name".into(),
+                value: SAttr::Str("api".into()),
+            }];
+            if let Some(v) = version {
+                resource_attrs.push(KeyValue {
+                    key: "service.version".into(),
+                    value: SAttr::Str(v.into()),
+                });
+            }
+            Span {
+                trace_id: [7; 16],
+                span_id: [id; 8],
+                parent_span_id: parent.map(|p| [p; 8]),
+                name: "GET /".into(),
+                kind: SpanKind::Server,
+                start_ns: 1_000 + i64::from(id),
+                duration_ns: 100,
+                status: StatusCode::Ok,
+                status_message: String::new(),
+                resource_attrs,
+                span_attrs,
+                events: vec![],
+                links: vec![],
+                instrumentation_scope: String::new(),
+                instrumentation_version: String::new(),
+            }
+        };
+        let root = mk(
+            1,
+            None,
+            vec![KeyValue {
+                key: "http.method".into(),
+                value: SAttr::Str("GET".into()),
+            }],
+            Some("1.2.3"),
+        );
+        let child = mk(2, Some(1), vec![], None);
+        let batch = span_batch(&[root, child]).unwrap();
+
+        let matcher = |scope, key: &str| SpanMatcher {
+            scope,
+            key: key.into(),
+            op: MatchCmp::Neq,
+            value: MatchValue::Nil,
+            negated: false,
+        };
+        let out = add_span_attr_columns(
+            vec![batch],
+            &[
+                matcher(MatchScope::Span, "http.method"),
+                matcher(MatchScope::Resource, "service.version"),
+            ],
+        )
+        .unwrap();
+        let out = &out[0];
+
+        let sorted = |name: &str| -> Vec<Option<String>> {
+            let col = out
+                .column_by_name(name)
+                .unwrap_or_else(|| panic!("{name} materialized"));
+            let mut vals: Vec<Option<String>> = (0..out.num_rows())
+                .map(|row| {
+                    if col.is_null(row) {
+                        None
+                    } else {
+                        Some(string_array_value(col.as_ref(), row).unwrap())
+                    }
+                })
+                .collect();
+            vals.sort();
+            vals
+        };
+        // The span with the attribute carries its value; the other is the nil
+        // group (NULL → empty label downstream).
+        assert!(sorted("attr.http.method") == vec![None, Some("GET".to_string())]);
+        assert!(sorted("attr.service.version") == vec![None, Some("1.2.3".to_string())]);
     }
 
     #[tokio::test]
@@ -4075,8 +4268,11 @@ mod tests {
             .series;
 
         series.sort_by(|a, b| a.labels.cmp(&b.labels));
+        // `by(event.exception.type)` groups by an event ATTRIBUTE, so the series
+        // label key carries its `event.` scope (matching real Tempo, per the
+        // live-Tempo differential) — unlike the bare `event:name` intrinsic above.
         assert!(series.iter().any(|series| series.labels
-            == vec![("exception.type".into(), "timeout".into())]
+            == vec![("event.exception.type".into(), "timeout".into())]
             && series.points == vec![(0, 3.0), (10_000, 0.0)]));
 
         let mut series = engine

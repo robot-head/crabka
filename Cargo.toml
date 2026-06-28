@@ -116,10 +116,14 @@ uuid = { version = "1", features = ["v4", "serde"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # Slice 42: OTLP distributed tracing. opentelemetry-otlp 0.32 lines up with
 # the tonic 0.14 / prost 0.14 / reqwest 0.13 stack already in the dep graph.
-opentelemetry = { version = "0.32", default-features = false, features = ["trace"] }
-opentelemetry_sdk = { version = "0.32", default-features = false, features = ["trace"] }
-opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "grpc-tonic", "http-proto", "reqwest-blocking-client"] }
+opentelemetry = { version = "0.32", default-features = false, features = ["trace", "logs"] }
+opentelemetry_sdk = { version = "0.32", default-features = false, features = ["trace", "logs"] }
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "logs", "grpc-tonic", "http-proto", "reqwest-blocking-client"] }
 tracing-opentelemetry = { version = "0.33", default-features = false }
+# Bridges `tracing` events → OTLP log records so services emit logs over OTLP
+# (alloy:4317 → logs-distributor) rather than relying on container-stdout tailing
+# (which doesn't stream on Docker Desktop). Version tracks the opentelemetry 0.32 stack.
+opentelemetry-appender-tracing = { version = "0.32", default-features = false }
 tonic = "0.14"
 tonic-prost = "0.14"
 # Slice KIP-714: prost-generated OTLP MetricsData / MetricsService types

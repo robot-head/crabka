@@ -16,8 +16,8 @@ use crabka_blockstore::{LABEL_PROFILE_TYPE, LabelMatcher, MatchOp};
 use crabka_pprof::{
     COL_FINGERPRINT, COL_TIMESTAMP, EngineOpts, FlameEngine, FlameGraph, InMemoryProfileStore,
     LabeledHeatmap, PCOL_SPAN_ID, PCOL_STACKTRACE_ID, PCOL_STACKTRACE_PARTITION, PCOL_TOTAL_VALUE,
-    PCOL_VALUE, ProfileError, ProfileStore, ProfileType, Series, SeriesAgg, bin_heatmap,
-    parse_label_selector, step_bucket_ms, step_ms_from_secs,
+    PCOL_VALUE, ProfileError, ProfileStats, ProfileStore, ProfileType, Series, SeriesAgg,
+    bin_heatmap, parse_label_selector, step_bucket_ms, step_ms_from_secs,
 };
 use prost::Message;
 use serde::{Deserialize, Deserializer};
@@ -25,6 +25,7 @@ use serde_json::json;
 use tokio::net::TcpListener;
 
 use crate::limits::{Limits, OverridesProvider};
+use crate::metrics::ServiceMetrics;
 use crate::query_frontend::{FrontendConfig, split_inclusive_range};
 use crate::wire::pb;
 
@@ -51,6 +52,7 @@ pub struct QuerierState<S: ProfileStore = DefaultStore> {
     engine: FlameEngine<S>,
     execution: QueryExecution,
     overrides: OverridesProvider,
+    metrics: ServiceMetrics,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -108,7 +110,20 @@ impl<S: ProfileStore> QuerierState<S> {
             engine,
             execution,
             overrides,
+            // A self-contained default registry; the binary `main` attaches the
+            // process-shared bundle (the one wired to `/metrics`) via
+            // [`Self::with_metrics`] so query handlers feed the exported series.
+            metrics: ServiceMetrics::new(),
         }
+    }
+
+    /// Attach the process-shared metrics bundle (the one whose registry backs
+    /// the `/metrics` exporter) so query handlers record into the exported
+    /// series. Called once by the binary `main` after constructing the state.
+    #[must_use]
+    pub fn with_metrics(mut self, metrics: ServiceMetrics) -> Self {
+        self.metrics = metrics;
+        self
     }
 
     fn validate_query_range(
@@ -121,6 +136,15 @@ impl<S: ProfileStore> QuerierState<S> {
             .for_tenant(tenant)
             .validate_query_range_ms(start_ms, end_ms)
             .map_err(|err| ProfileError::Plan(err.message()))
+    }
+
+    /// Global profile stats for a tenant across all ingested data. Pyroscope's
+    /// `GetProfileStats` is unbounded — the request carries no time range — so
+    /// this queries the full time span rather than a caller-supplied window. A
+    /// `[0, 0]`-scoped query always reports "no data" and traps Grafana's
+    /// Profiles Drilldown on its onboarding screen even when the tenant has data.
+    async fn global_profile_stats(&self, tenant: &str) -> Result<ProfileStats, ProfileError> {
+        self.store.stats(tenant, 0, i64::MAX).await
     }
 
     fn effective_max_nodes(&self, tenant: &str, requested: i64) -> i64 {
@@ -1059,6 +1083,35 @@ fn heatmap_slot_timestamp(
     Some(start_ms + (bucket + 1) * step_ms)
 }
 
+/// Time `fut` (a Connect handler body) and record the outcome on `route`.
+/// `Ok` => `status="ok"`, any `ConnectError` => `status="error"`. The latency is
+/// observed regardless of outcome.
+async fn timed_query<T>(
+    metrics: &ServiceMetrics,
+    route: &str,
+    fut: impl Future<Output = Result<T, ConnectError>>,
+) -> Result<T, ConnectError> {
+    let start = std::time::Instant::now();
+    let result = fut.await;
+    metrics.record_query(route, result.is_ok(), start.elapsed().as_secs_f64());
+    result
+}
+
+/// Time `fut` (a raw axum handler body returning a `Response`) and record the
+/// outcome on `route`. A 2xx/3xx status counts as `ok`; 4xx/5xx counts as
+/// `error`.
+async fn timed_query_response(
+    metrics: &ServiceMetrics,
+    route: &str,
+    fut: impl Future<Output = Response>,
+) -> Response {
+    let start = std::time::Instant::now();
+    let response = fut.await;
+    let ok = response.status().is_success() || response.status().is_redirection();
+    metrics.record_query(route, ok, start.elapsed().as_secs_f64());
+    response
+}
+
 pub fn router<S>(state: Arc<QuerierState<S>>) -> Router
 where
     S: ProfileStore + 'static,
@@ -1082,10 +1135,21 @@ where
         // proto clients like Grafana's built-in Pyroscope datasource (a connect-go client).
         .build_connect();
 
+    // Pyroscope `settings.v1.SettingsService`. The Grafana Profiles Drilldown
+    // app calls `Get` during init; a 404 aborts its init chain so it never
+    // issues the per-panel `SelectSeries` queries and the landing grid renders
+    // empty. Crabka doesn't persist UI settings, so `Get` returns an empty set
+    // (the app falls back to its defaults) and `Set` echoes the value back.
+    let settings = pb::settings::v1::settings_service_connect::SettingsServiceBuilder::<()>::new()
+        .get(get_settings_handler)
+        .set(set_settings_handler)
+        .build_connect();
+
     Router::new()
         .route("/pyroscope/render", get(render_handler::<S>))
         .route("/pyroscope/render-diff", get(render_diff_handler::<S>))
         .merge(querier)
+        .merge(settings)
         .layer(Extension(state))
 }
 
@@ -1110,7 +1174,50 @@ where
     Ok(bound)
 }
 
+/// Pyroscope `settings.v1.SettingsService/Get`. Crabka does not persist UI
+/// settings, so it reports an empty set; the Grafana Profiles Drilldown app then
+/// uses its built-in defaults (same as a fresh Pyroscope tenant). Without this
+/// endpoint the app's init 404s and the landing renders empty.
+async fn get_settings_handler(
+    _req: ConnectRequest<pb::settings::v1::GetSettingsRequest>,
+) -> Result<ConnectResponse<pb::settings::v1::GetSettingsResponse>, ConnectError> {
+    Ok(ConnectResponse::new(
+        pb::settings::v1::GetSettingsResponse {
+            settings: Vec::new(),
+        },
+    ))
+}
+
+/// Pyroscope `settings.v1.SettingsService/Set`. Settings are not persisted; echo
+/// the value back so the app's optimistic UI update succeeds for the session.
+async fn set_settings_handler(
+    req: ConnectRequest<pb::settings::v1::SetSettingsRequest>,
+) -> Result<ConnectResponse<pb::settings::v1::SetSettingsResponse>, ConnectError> {
+    Ok(ConnectResponse::new(
+        pb::settings::v1::SetSettingsResponse {
+            setting: req.0.setting,
+        },
+    ))
+}
+
 async fn profile_types_handler<S>(
+    state: Extension<Arc<QuerierState<S>>>,
+    headers: HeaderMap,
+    req: ConnectRequest<pb::querier::v1::ProfileTypesRequest>,
+) -> Result<ConnectResponse<pb::querier::v1::ProfileTypesResponse>, ConnectError>
+where
+    S: ProfileStore,
+{
+    let metrics = state.0.metrics.clone();
+    timed_query(
+        &metrics,
+        "profile_types",
+        profile_types_inner(state, headers, req),
+    )
+    .await
+}
+
+async fn profile_types_inner<S>(
     Extension(state): Extension<Arc<QuerierState<S>>>,
     headers: HeaderMap,
     req: ConnectRequest<pb::querier::v1::ProfileTypesRequest>,
@@ -1157,6 +1264,23 @@ where
 }
 
 async fn label_names_handler<S>(
+    state: Extension<Arc<QuerierState<S>>>,
+    headers: HeaderMap,
+    req: ConnectRequest<pb::querier::v1::LabelNamesRequest>,
+) -> Result<ConnectResponse<pb::querier::v1::LabelNamesResponse>, ConnectError>
+where
+    S: ProfileStore,
+{
+    let metrics = state.0.metrics.clone();
+    timed_query(
+        &metrics,
+        "label_names",
+        label_names_inner(state, headers, req),
+    )
+    .await
+}
+
+async fn label_names_inner<S>(
     Extension(state): Extension<Arc<QuerierState<S>>>,
     headers: HeaderMap,
     req: ConnectRequest<pb::querier::v1::LabelNamesRequest>,
@@ -1166,12 +1290,21 @@ where
 {
     let tenant = tenant_from_headers(&headers).map_err(connect_error)?;
     let matchers = parse_matchers(&req.0.matchers).map_err(connect_error)?;
-    state
-        .validate_query_range(&tenant, req.0.start, req.0.end)
-        .map_err(connect_error)?;
+    // Omitted range (start == end == 0) means "unbounded" (see `series_inner`).
+    let range_omitted = req.0.start == 0 && req.0.end == 0;
+    let (start, end) = if range_omitted {
+        (0, i64::MAX)
+    } else {
+        (req.0.start, req.0.end)
+    };
+    if !range_omitted {
+        state
+            .validate_query_range(&tenant, start, end)
+            .map_err(connect_error)?;
+    }
     let mut names = state
         .store
-        .label_names(&tenant, &matchers, req.0.start, req.0.end)
+        .label_names(&tenant, &matchers, start, end)
         .await
         .map_err(connect_error)?;
     names.retain(|name| !is_internal_label(name));
@@ -1181,6 +1314,23 @@ where
 }
 
 async fn label_values_handler<S>(
+    state: Extension<Arc<QuerierState<S>>>,
+    headers: HeaderMap,
+    req: ConnectRequest<pb::querier::v1::LabelValuesRequest>,
+) -> Result<ConnectResponse<pb::querier::v1::LabelValuesResponse>, ConnectError>
+where
+    S: ProfileStore,
+{
+    let metrics = state.0.metrics.clone();
+    timed_query(
+        &metrics,
+        "label_values",
+        label_values_inner(state, headers, req),
+    )
+    .await
+}
+
+async fn label_values_inner<S>(
     Extension(state): Extension<Arc<QuerierState<S>>>,
     headers: HeaderMap,
     req: ConnectRequest<pb::querier::v1::LabelValuesRequest>,
@@ -1190,9 +1340,18 @@ where
 {
     let tenant = tenant_from_headers(&headers).map_err(connect_error)?;
     let matchers = parse_matchers(&req.0.matchers).map_err(connect_error)?;
-    state
-        .validate_query_range(&tenant, req.0.start, req.0.end)
-        .map_err(connect_error)?;
+    // Omitted range (start == end == 0) means "unbounded" (see `series_inner`).
+    let range_omitted = req.0.start == 0 && req.0.end == 0;
+    let (start, end) = if range_omitted {
+        (0, i64::MAX)
+    } else {
+        (req.0.start, req.0.end)
+    };
+    if !range_omitted {
+        state
+            .validate_query_range(&tenant, start, end)
+            .map_err(connect_error)?;
+    }
     if is_internal_label(&req.0.name) {
         return Ok(ConnectResponse::new(pb::querier::v1::LabelValuesResponse {
             names: Vec::new(),
@@ -1200,7 +1359,7 @@ where
     }
     let names = state
         .store
-        .label_values(&tenant, &req.0.name, &matchers, req.0.start, req.0.end)
+        .label_values(&tenant, &req.0.name, &matchers, start, end)
         .await
         .map_err(connect_error)?;
     Ok(ConnectResponse::new(pb::querier::v1::LabelValuesResponse {
@@ -1209,6 +1368,18 @@ where
 }
 
 async fn series_handler<S>(
+    state: Extension<Arc<QuerierState<S>>>,
+    headers: HeaderMap,
+    req: ConnectRequest<pb::querier::v1::SeriesRequest>,
+) -> Result<ConnectResponse<pb::querier::v1::SeriesResponse>, ConnectError>
+where
+    S: ProfileStore,
+{
+    let metrics = state.0.metrics.clone();
+    timed_query(&metrics, "series", series_inner(state, headers, req)).await
+}
+
+async fn series_inner<S>(
     Extension(state): Extension<Arc<QuerierState<S>>>,
     headers: HeaderMap,
     req: ConnectRequest<pb::querier::v1::SeriesRequest>,
@@ -1218,18 +1389,25 @@ where
 {
     let tenant = tenant_from_headers(&headers).map_err(connect_error)?;
     let matchers = parse_matchers(&req.0.matchers).map_err(connect_error)?;
-    state
-        .validate_query_range(&tenant, req.0.start, req.0.end)
-        .map_err(connect_error)?;
+    // An omitted range (start == end == 0) means "unbounded" — the Grafana
+    // Profiles Drilldown enumerates series without a range. Match Pyroscope:
+    // expand to the full range and skip the range-limit check (mirrors
+    // `profile_types_inner`). Honoring [0, 0] literally filters out every row
+    // and leaves the drilldown with no series to chart.
+    let range_omitted = req.0.start == 0 && req.0.end == 0;
+    let (start, end) = if range_omitted {
+        (0, i64::MAX)
+    } else {
+        (req.0.start, req.0.end)
+    };
+    if !range_omitted {
+        state
+            .validate_query_range(&tenant, start, end)
+            .map_err(connect_error)?;
+    }
     let labels_set = state
         .store
-        .series(
-            &tenant,
-            &matchers,
-            &req.0.label_names,
-            req.0.start,
-            req.0.end,
-        )
+        .series(&tenant, &matchers, &req.0.label_names, start, end)
         .await
         .map_err(connect_error)?
         .into_iter()
@@ -1243,6 +1421,23 @@ where
 }
 
 async fn select_merge_stacktraces_handler<S>(
+    state: Extension<Arc<QuerierState<S>>>,
+    headers: HeaderMap,
+    req: ConnectRequest<pb::querier::v1::SelectMergeStacktracesRequest>,
+) -> Result<ConnectResponse<pb::querier::v1::SelectMergeStacktracesResponse>, ConnectError>
+where
+    S: ProfileStore,
+{
+    let metrics = state.0.metrics.clone();
+    timed_query(
+        &metrics,
+        "select_merge_stacktraces",
+        select_merge_stacktraces_inner(state, headers, req),
+    )
+    .await
+}
+
+async fn select_merge_stacktraces_inner<S>(
     Extension(state): Extension<Arc<QuerierState<S>>>,
     headers: HeaderMap,
     req: ConnectRequest<pb::querier::v1::SelectMergeStacktracesRequest>,
@@ -1319,6 +1514,23 @@ where
 }
 
 async fn select_series_handler<S>(
+    state: Extension<Arc<QuerierState<S>>>,
+    headers: HeaderMap,
+    req: ConnectRequest<pb::querier::v1::SelectSeriesRequest>,
+) -> Result<ConnectResponse<pb::querier::v1::SelectSeriesResponse>, ConnectError>
+where
+    S: ProfileStore,
+{
+    let metrics = state.0.metrics.clone();
+    timed_query(
+        &metrics,
+        "select_series",
+        select_series_inner(state, headers, req),
+    )
+    .await
+}
+
+async fn select_series_inner<S>(
     Extension(state): Extension<Arc<QuerierState<S>>>,
     headers: HeaderMap,
     req: ConnectRequest<pb::querier::v1::SelectSeriesRequest>,
@@ -1408,6 +1620,23 @@ where
 }
 
 async fn select_merge_span_profile_handler<S>(
+    state: Extension<Arc<QuerierState<S>>>,
+    headers: HeaderMap,
+    req: ConnectRequest<pb::querier::v1::SelectMergeSpanProfileRequest>,
+) -> Result<ConnectResponse<pb::querier::v1::SelectMergeSpanProfileResponse>, ConnectError>
+where
+    S: ProfileStore,
+{
+    let metrics = state.0.metrics.clone();
+    timed_query(
+        &metrics,
+        "select_merge_span_profile",
+        select_merge_span_profile_inner(state, headers, req),
+    )
+    .await
+}
+
+async fn select_merge_span_profile_inner<S>(
     Extension(state): Extension<Arc<QuerierState<S>>>,
     headers: HeaderMap,
     req: ConnectRequest<pb::querier::v1::SelectMergeSpanProfileRequest>,
@@ -1457,6 +1686,23 @@ where
 }
 
 async fn select_merge_profile_handler<S>(
+    state: Extension<Arc<QuerierState<S>>>,
+    headers: HeaderMap,
+    req: ConnectRequest<pb::querier::v1::SelectMergeProfileRequest>,
+) -> Result<ConnectResponse<pb::google::v1::Profile>, ConnectError>
+where
+    S: ProfileStore,
+{
+    let metrics = state.0.metrics.clone();
+    timed_query(
+        &metrics,
+        "select_merge_profile",
+        select_merge_profile_inner(state, headers, req),
+    )
+    .await
+}
+
+async fn select_merge_profile_inner<S>(
     Extension(state): Extension<Arc<QuerierState<S>>>,
     headers: HeaderMap,
     req: ConnectRequest<pb::querier::v1::SelectMergeProfileRequest>,
@@ -1492,6 +1738,23 @@ where
 }
 
 async fn select_heatmap_handler<S>(
+    state: Extension<Arc<QuerierState<S>>>,
+    headers: HeaderMap,
+    req: ConnectRequest<pb::querier::v1::SelectHeatmapRequest>,
+) -> Result<ConnectResponse<pb::querier::v1::SelectHeatmapResponse>, ConnectError>
+where
+    S: ProfileStore,
+{
+    let metrics = state.0.metrics.clone();
+    timed_query(
+        &metrics,
+        "select_heatmap",
+        select_heatmap_inner(state, headers, req),
+    )
+    .await
+}
+
+async fn select_heatmap_inner<S>(
     Extension(state): Extension<Arc<QuerierState<S>>>,
     headers: HeaderMap,
     req: ConnectRequest<pb::querier::v1::SelectHeatmapRequest>,
@@ -1584,6 +1847,18 @@ where
 }
 
 async fn diff_handler<S>(
+    state: Extension<Arc<QuerierState<S>>>,
+    headers: HeaderMap,
+    req: ConnectRequest<pb::querier::v1::DiffRequest>,
+) -> Result<ConnectResponse<pb::querier::v1::DiffResponse>, ConnectError>
+where
+    S: ProfileStore,
+{
+    let metrics = state.0.metrics.clone();
+    timed_query(&metrics, "diff", diff_inner(state, headers, req)).await
+}
+
+async fn diff_inner<S>(
     Extension(state): Extension<Arc<QuerierState<S>>>,
     headers: HeaderMap,
     req: ConnectRequest<pb::querier::v1::DiffRequest>,
@@ -1645,20 +1920,40 @@ where
 }
 
 async fn get_profile_stats_handler<S>(
-    Extension(state): Extension<Arc<QuerierState<S>>>,
+    state: Extension<Arc<QuerierState<S>>>,
     headers: HeaderMap,
     req: ConnectRequest<pb::querier::v1::GetProfileStatsRequest>,
 ) -> Result<ConnectResponse<pb::querier::v1::GetProfileStatsResponse>, ConnectError>
 where
     S: ProfileStore,
 {
+    let metrics = state.0.metrics.clone();
+    timed_query(
+        &metrics,
+        "profile_stats",
+        get_profile_stats_inner(state, headers, req),
+    )
+    .await
+}
+
+async fn get_profile_stats_inner<S>(
+    Extension(state): Extension<Arc<QuerierState<S>>>,
+    headers: HeaderMap,
+    _req: ConnectRequest<pb::querier::v1::GetProfileStatsRequest>,
+) -> Result<ConnectResponse<pb::querier::v1::GetProfileStatsResponse>, ConnectError>
+where
+    S: ProfileStore,
+{
     let tenant = tenant_from_headers(&headers).map_err(connect_error)?;
-    state
-        .validate_query_range(&tenant, req.0.start, req.0.end)
-        .map_err(connect_error)?;
+    // GetProfileStats is a global "has this tenant ever ingested, and over what
+    // span" query. Pyroscope's request carries no time range, and Grafana's
+    // Profiles Drilldown sends an empty message (so start/end arrive as 0).
+    // Report stats across all data rather than time-scoping to [0, 0] — the
+    // latter always looks empty and wedges the Drilldown onto its onboarding
+    // screen even when the tenant has data. No range validation: a global
+    // metadata query is unbounded by design (Pyroscope doesn't limit it).
     let stats = state
-        .store
-        .stats(&tenant, req.0.start, req.0.end)
+        .global_profile_stats(&tenant)
         .await
         .map_err(connect_error)?;
     Ok(ConnectResponse::new(
@@ -1671,6 +1966,23 @@ where
 }
 
 async fn analyze_query_handler<S>(
+    state: Extension<Arc<QuerierState<S>>>,
+    headers: HeaderMap,
+    req: ConnectRequest<pb::querier::v1::AnalyzeQueryRequest>,
+) -> Result<ConnectResponse<pb::querier::v1::AnalyzeQueryResponse>, ConnectError>
+where
+    S: ProfileStore,
+{
+    let metrics = state.0.metrics.clone();
+    timed_query(
+        &metrics,
+        "analyze_query",
+        analyze_query_inner(state, headers, req),
+    )
+    .await
+}
+
+async fn analyze_query_inner<S>(
     Extension(state): Extension<Arc<QuerierState<S>>>,
     headers: HeaderMap,
     req: ConnectRequest<pb::querier::v1::AnalyzeQueryRequest>,
@@ -1762,6 +2074,18 @@ where
 }
 
 async fn render_handler<S>(
+    state: Extension<Arc<QuerierState<S>>>,
+    headers: HeaderMap,
+    query: Query<RenderQuery>,
+) -> Response
+where
+    S: ProfileStore,
+{
+    let metrics = state.0.metrics.clone();
+    timed_query_response(&metrics, "render", render_inner(state, headers, query)).await
+}
+
+async fn render_inner<S>(
     Extension(state): Extension<Arc<QuerierState<S>>>,
     headers: HeaderMap,
     Query(query): Query<RenderQuery>,
@@ -1816,6 +2140,23 @@ where
 }
 
 async fn render_diff_handler<S>(
+    state: Extension<Arc<QuerierState<S>>>,
+    headers: HeaderMap,
+    query: RawQuery,
+) -> Response
+where
+    S: ProfileStore,
+{
+    let metrics = state.0.metrics.clone();
+    timed_query_response(
+        &metrics,
+        "render_diff",
+        render_diff_inner(state, headers, query),
+    )
+    .await
+}
+
+async fn render_diff_inner<S>(
     Extension(state): Extension<Arc<QuerierState<S>>>,
     headers: HeaderMap,
     RawQuery(query): RawQuery,
@@ -2489,6 +2830,44 @@ mod tests {
         store
     }
 
+    /// A store whose single series carries multiple labels pushed in an order
+    /// that is NOT sorted by name (`service_name` before `__profile_type__`),
+    /// exercising the `Series` response's sort-by-name path.
+    fn store_with_unsorted_labels() -> InMemoryProfileStore {
+        let mut store = InMemoryProfileStore::new();
+        let name_ref = store.symbols_mut().intern_string("main.work");
+        let function_id = store.symbols_mut().intern_function(FunctionRec {
+            name: name_ref,
+            system_name: name_ref,
+            filename: 0,
+            start_line: 0,
+        });
+        let location_id = store.symbols_mut().intern_location(LocationRec {
+            address: 0,
+            mapping_id: 0,
+            lines: vec![LineRec {
+                function_id,
+                line: 1,
+            }],
+        });
+        let stacktrace = store.symbols_mut().intern_stacktrace(0, &[location_id]);
+        store.push_sample(
+            "tenant-a",
+            PT,
+            vec![
+                ("service_name".to_string(), "api".to_string()),
+                ("__name__".to_string(), "process_cpu".to_string()),
+                ("env".to_string(), "pprofdiff".to_string()),
+                ("__profile_type__".to_string(), PT.to_string()),
+            ],
+            0,
+            stacktrace,
+            7,
+            10,
+        );
+        store
+    }
+
     fn store_with_two_profile_types() -> InMemoryProfileStore {
         let mut store = InMemoryProfileStore::new();
         let name_ref = store.symbols_mut().intern_string("main.work");
@@ -2768,6 +3147,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_profile_stats_is_global_not_time_scoped() {
+        // A sample ingested at a non-zero timestamp must be reported by
+        // GetProfileStats even though Grafana's Profiles Drilldown sends an empty
+        // request (start = end = 0). Time-scoping to [0, 0] hides it and wedges
+        // the Drilldown onto its onboarding screen.
+        let mut store = InMemoryProfileStore::new();
+        let name_ref = store.symbols_mut().intern_string("main.work");
+        let function_id = store.symbols_mut().intern_function(FunctionRec {
+            name: name_ref,
+            system_name: name_ref,
+            filename: 0,
+            start_line: 0,
+        });
+        let location_id = store.symbols_mut().intern_location(LocationRec {
+            address: 0,
+            mapping_id: 0,
+            lines: vec![LineRec {
+                function_id,
+                line: 1,
+            }],
+        });
+        let stacktrace = store.symbols_mut().intern_stacktrace(0, &[location_id]);
+        store.push_sample(
+            "tenant-a",
+            PT,
+            vec![("service_name".to_string(), "api".to_string())],
+            0,
+            stacktrace,
+            7,
+            5_000, // non-zero ingest timestamp
+        );
+        let store = Arc::new(store);
+
+        // Control: the old [0, 0]-scoped behavior misses the sample entirely.
+        let scoped = store.stats("tenant-a", 0, 0).await.unwrap();
+        assert!(!scoped.data_ingested);
+
+        // The handler path queries globally and reports the sample.
+        let state = QuerierState::new(Arc::clone(&store));
+        let stats = state.global_profile_stats("tenant-a").await.unwrap();
+        assert!(stats.data_ingested);
+        assert!(stats.oldest_profile_time == Some(5_000));
+        assert!(stats.newest_profile_time == Some(5_000));
+    }
+
+    #[tokio::test]
     async fn select_series_rejects_ranges_above_configured_limit() {
         let state = QuerierState::new_with_limits(
             Arc::new(store_with_frame("main.work")),
@@ -2899,6 +3324,65 @@ overrides:
 
         assert!(body.starts_with("digraph flamegraph"));
         assert!(body.contains("main.work"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn settings_service_get_returns_empty_and_set_echoes() {
+        // Regression: the Grafana Profiles Drilldown app calls
+        // `settings.v1.SettingsService/Get` during init. A 404 aborts init — the
+        // app never issues the per-panel SelectSeries queries and the landing
+        // grid renders empty. The querier must answer 200 with an (empty)
+        // settings set; `Set` must echo the value back.
+        let state = Arc::new(QuerierState::new(Arc::new(store_with_frame("main.work"))));
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let bound = serve("127.0.0.1:0".parse().unwrap(), state, async move {
+            let _ = shutdown_rx.await;
+        })
+        .await
+        .unwrap();
+        let client = reqwest::Client::new();
+
+        let resp = client
+            .post(format!("http://{bound}/settings.v1.SettingsService/Get"))
+            .header("content-type", "application/json")
+            .header("connect-protocol-version", "1")
+            .header("x-scope-orgid", "tenant-a")
+            .body("{}")
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            resp.status() == reqwest::StatusCode::OK,
+            "Get must succeed (Grafana init calls this), got {}",
+            resp.status()
+        );
+        let json: serde_json::Value = resp.json().await.unwrap();
+        // Connect JSON omits empty repeated fields, so `settings` is absent or [].
+        let empty = json
+            .get("settings")
+            .and_then(|v| v.as_array())
+            .is_none_or(std::vec::Vec::is_empty);
+        assert!(empty, "expected empty settings, got {json}");
+
+        let resp = client
+            .post(format!("http://{bound}/settings.v1.SettingsService/Set"))
+            .header("content-type", "application/json")
+            .header("connect-protocol-version", "1")
+            .header("x-scope-orgid", "tenant-a")
+            .body(r#"{"setting":{"name":"flamegraph.collapsed","value":"true"}}"#)
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            resp.status() == reqwest::StatusCode::OK,
+            "Set must succeed, got {}",
+            resp.status()
+        );
+        let json: serde_json::Value = resp.json().await.unwrap();
+        assert!(
+            json.pointer("/setting/name").and_then(|v| v.as_str()) == Some("flamegraph.collapsed"),
+            "Set must echo the setting, got {json}"
+        );
     }
 
     #[tokio::test]
@@ -3608,6 +4092,81 @@ overrides:
         assert!(
             points[0].get("value").and_then(serde_json::Value::as_f64) == Some(7.0),
             "{response}"
+        );
+    }
+
+    /// The `Series` RPC must emit each label set SORTED by name, matching real
+    /// Pyroscope's `/series` wire order (e.g. `__profile_type__` before
+    /// `service_name`). The Grafana Profiles Drilldown compares this order, so an
+    /// insertion-order response is a wire-compat regression. Drives the live
+    /// handler over HTTP for both the projected and full-label-set forms.
+    #[tokio::test]
+    async fn series_emits_label_sets_sorted_by_name() {
+        let state = Arc::new(QuerierState::new(Arc::new(store_with_unsorted_labels())));
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let bound = serve("127.0.0.1:0".parse().unwrap(), state, async move {
+            let _ = shutdown_rx.await;
+        })
+        .await
+        .unwrap();
+
+        let series_labels = |body: serde_json::Value| {
+            let url = format!("http://{bound}/querier.v1.QuerierService/Series");
+            async move {
+                let response: serde_json::Value = reqwest::Client::new()
+                    .post(url)
+                    .header("x-scope-orgid", "tenant-a")
+                    .json(&body)
+                    .send()
+                    .await
+                    .unwrap()
+                    .error_for_status()
+                    .unwrap()
+                    .json()
+                    .await
+                    .unwrap();
+                response
+                    .pointer("/labelsSet/0/labels")
+                    .and_then(serde_json::Value::as_array)
+                    .unwrap_or_else(|| panic!("missing labelsSet: {response}"))
+                    .iter()
+                    .map(|pair| {
+                        pair.get("name")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap()
+                            .to_string()
+                    })
+                    .collect::<Vec<_>>()
+            }
+        };
+
+        // Projected onto the drilldown's exact label list, sent in NON-sorted
+        // request order — the response must still be sorted by name.
+        let projected = series_labels(json!({
+            "matchers": [],
+            "labelNames": ["service_name", "__profile_type__"],
+        }))
+        .await;
+        assert!(
+            projected == vec!["__profile_type__".to_string(), "service_name".to_string()],
+            "{projected:?}"
+        );
+
+        // Full label set (`labelNames=[]`) — also sorted by name, not the order
+        // the labels were ingested.
+        let full = series_labels(json!({
+            "matchers": [],
+            "labelNames": [],
+        }))
+        .await;
+        assert!(
+            full == vec![
+                "__name__".to_string(),
+                "__profile_type__".to_string(),
+                "env".to_string(),
+                "service_name".to_string(),
+            ],
+            "{full:?}"
         );
     }
 

@@ -26,6 +26,7 @@ use serde_json::{Map, Value, json};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use url::form_urlencoded;
 
+use crate::metrics::ServiceMetrics;
 use crate::{
     EngineOpts, MetricStore, PromqlEngine, PromqlError, QueryResult, RangeSeries, SampleValue,
     engine::{MAX_RESOLUTION_POINTS, label_matcher_sets},
@@ -49,6 +50,7 @@ pub struct PrometheusApiState<S: MetricStore> {
     ruler_evaluation_time_ms: RwLock<i64>,
     query_frontend: Option<QueryFrontendState>,
     query_limits: Option<OverridesProvider>,
+    metrics: Option<ServiceMetrics>,
     start_time: SystemTime,
 }
 
@@ -103,6 +105,7 @@ impl<S: MetricStore> PrometheusApiState<S> {
             ruler_evaluation_time_ms: RwLock::new(0),
             query_frontend: None,
             query_limits: None,
+            metrics: None,
             start_time: SystemTime::now(),
         }
     }
@@ -111,6 +114,20 @@ impl<S: MetricStore> PrometheusApiState<S> {
     pub fn with_query_limits(mut self, limits: OverridesProvider) -> Self {
         self.query_limits = Some(limits);
         self
+    }
+
+    #[must_use]
+    pub fn with_metrics(mut self, metrics: ServiceMetrics) -> Self {
+        self.metrics = Some(metrics);
+        self
+    }
+
+    /// Record one query request outcome on `route`, if a metrics bundle is
+    /// configured. No-op otherwise.
+    fn record_query(&self, route: &str, ok: bool, secs: f64) {
+        if let Some(metrics) = &self.metrics {
+            metrics.record_query(route, ok, secs);
+        }
     }
 
     #[must_use]
@@ -462,7 +479,18 @@ async fn query_inner<S: MetricStore>(
     headers: HeaderMap,
     params: InstantQueryParams,
 ) -> Response {
-    let tenant = match tenant_from_headers(&headers) {
+    let started = std::time::Instant::now();
+    let response = query_dispatch(&state, &headers, params).await;
+    record_query_response(&state, "query", &response, started);
+    response
+}
+
+async fn query_dispatch<S: MetricStore>(
+    state: &Arc<PrometheusApiState<S>>,
+    headers: &HeaderMap,
+    params: InstantQueryParams,
+) -> Response {
+    let tenant = match tenant_from_headers(headers) {
         Ok(tenant) => tenant,
         Err(error) => return error.into_response(),
     };
@@ -479,6 +507,18 @@ async fn query_inner<S: MetricStore>(
         }
         Err(error) => ApiError::from(error).into_response(),
     }
+}
+
+/// Record a query handler outcome from its final response status. A response
+/// with a client/server error status (`>= 400`) counts as `status="error"`.
+fn record_query_response<S: MetricStore>(
+    state: &Arc<PrometheusApiState<S>>,
+    route: &str,
+    response: &Response,
+    started: std::time::Instant,
+) {
+    let ok = !response.status().is_client_error() && !response.status().is_server_error();
+    state.record_query(route, ok, started.elapsed().as_secs_f64());
 }
 
 async fn query_range<S: MetricStore>(
@@ -511,7 +551,18 @@ async fn query_range_inner<S: MetricStore>(
     headers: HeaderMap,
     params: RangeQueryParams,
 ) -> Response {
-    let tenant = match tenant_from_headers(&headers) {
+    let started = std::time::Instant::now();
+    let response = query_range_dispatch(&state, &headers, params).await;
+    record_query_response(&state, "query_range", &response, started);
+    response
+}
+
+async fn query_range_dispatch<S: MetricStore>(
+    state: &Arc<PrometheusApiState<S>>,
+    headers: &HeaderMap,
+    params: RangeQueryParams,
+) -> Response {
+    let tenant = match tenant_from_headers(headers) {
         Ok(tenant) => tenant,
         Err(error) => return error.into_response(),
     };
@@ -1392,7 +1443,18 @@ async fn series_inner<S: MetricStore>(
     headers: HeaderMap,
     params: DiscoveryParams,
 ) -> Response {
-    let tenant = match tenant_from_headers(&headers) {
+    let started = std::time::Instant::now();
+    let response = series_dispatch(&state, &headers, params).await;
+    record_query_response(&state, "series", &response, started);
+    response
+}
+
+async fn series_dispatch<S: MetricStore>(
+    state: &Arc<PrometheusApiState<S>>,
+    headers: &HeaderMap,
+    params: DiscoveryParams,
+) -> Response {
+    let tenant = match tenant_from_headers(headers) {
         Ok(tenant) => tenant,
         Err(error) => return error.into_response(),
     };
@@ -1424,7 +1486,7 @@ async fn series_inner<S: MetricStore>(
         .into_values()
         .map(|labels| labels_json(&labels))
         .collect::<Vec<_>>();
-    if let Err(error) = enforce_selected_series_limit(&state, &tenant, series.len()) {
+    if let Err(error) = enforce_selected_series_limit(state, &tenant, series.len()) {
         return error.into_response();
     }
     apply_limit(&mut series, params.limit);
@@ -1460,7 +1522,18 @@ async fn labels_inner<S: MetricStore>(
     headers: HeaderMap,
     params: DiscoveryParams,
 ) -> Response {
-    let tenant = match tenant_from_headers(&headers) {
+    let started = std::time::Instant::now();
+    let response = labels_dispatch(&state, &headers, params).await;
+    record_query_response(&state, "labels", &response, started);
+    response
+}
+
+async fn labels_dispatch<S: MetricStore>(
+    state: &Arc<PrometheusApiState<S>>,
+    headers: &HeaderMap,
+    params: DiscoveryParams,
+) -> Response {
+    let tenant = match tenant_from_headers(headers) {
         Ok(tenant) => tenant,
         Err(error) => return error.into_response(),
     };
@@ -1525,7 +1598,19 @@ async fn label_values_inner<S: MetricStore>(
     name: String,
     params: DiscoveryParams,
 ) -> Response {
-    let tenant = match tenant_from_headers(&headers) {
+    let started = std::time::Instant::now();
+    let response = label_values_dispatch(&state, &headers, name, params).await;
+    record_query_response(&state, "label_values", &response, started);
+    response
+}
+
+async fn label_values_dispatch<S: MetricStore>(
+    state: &Arc<PrometheusApiState<S>>,
+    headers: &HeaderMap,
+    name: String,
+    params: DiscoveryParams,
+) -> Response {
+    let tenant = match tenant_from_headers(headers) {
         Ok(tenant) => tenant,
         Err(error) => return error.into_response(),
     };

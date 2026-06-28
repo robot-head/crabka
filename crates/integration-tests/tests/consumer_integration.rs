@@ -419,6 +419,117 @@ async fn eager_rebalance_reacquires_and_primes() {
     broker.shutdown().await;
 }
 
+/// Regression: a commit issued AFTER a rebalance bumped the group generation
+/// must stamp the CURRENT generation, not the start-up snapshot. The commit
+/// path used to read a `generation_id` captured at build time and never kept in
+/// sync as the coordinator rejoined, so the first commit after any rebalance hit
+/// `ILLEGAL_GENERATION (22)` and a long-running block-builder/compactor commit
+/// loop crashed (observed as the demo metrics-compactor crash-loop). Now the
+/// generation is shared (`Arc<AtomicI32>`) and published by the coordinator on
+/// every rejoin, and a rebalance code on commit defers rather than failing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn commit_succeeds_after_rebalance_bumps_generation() {
+    let dir = TempDir::new().unwrap();
+    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+        .await
+        .unwrap();
+    let bootstrap = broker.listen_addr().to_string();
+
+    let producer = Client::builder()
+        .bootstrap(&bootstrap)
+        .client_id("p")
+        .build()
+        .await
+        .unwrap();
+    create_topic_with_partitions(&producer, "genbump", 2).await;
+
+    let build = |client_id: &'static str| {
+        let bootstrap = bootstrap.clone();
+        async move {
+            Consumer::builder()
+                .bootstrap(&bootstrap)
+                .client_id(client_id)
+                .group_id("genbump-grp")
+                .session_timeout(Duration::from_secs(30))
+                .rebalance_timeout(Duration::from_secs(2))
+                .heartbeat_interval(Duration::from_millis(500))
+                .auto_offset_reset(AutoOffsetReset::Earliest)
+                .subscribe(["genbump".to_string()])
+                .build()
+                .await
+                .expect("build consumer")
+        }
+    };
+
+    // Build both members in the first rebalance round → they split 1/1.
+    let (mut m1, m2) = tokio::join!(build("m1"), build("m2"));
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let settle = Instant::now() + Duration::from_secs(30);
+        loop {
+            if m1.assignment().await.len() == 1 && m2.assignment().await.len() == 1 {
+                break;
+            }
+            assert!(Instant::now() < settle, "group did not split 1+1");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("1/1 split within 30s");
+    let gen_after_split = m1.generation_id();
+
+    // m2 leaves → m1 re-acquires both partitions via an eager rejoin, which
+    // advances the group generation. m1's commit must follow that bump.
+    m2.close().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let regain = Instant::now() + Duration::from_secs(30);
+        loop {
+            let _ = m1.poll(Duration::from_millis(200)).await;
+            if m1.assignment().await.len() == 2 {
+                break;
+            }
+            assert!(
+                Instant::now() < regain,
+                "m1 did not re-acquire both partitions"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("m1 reacquired both partitions within 30s");
+
+    // The rejoin bumped the generation, and the accessor reads it live (shared
+    // atomic) — proving the generation the commit path stamps is current.
+    let gen_after_rejoin = m1.generation_id();
+    assert!(
+        gen_after_rejoin > gen_after_split,
+        "rejoin should advance the generation: split={gen_after_split} rejoin={gen_after_rejoin}",
+    );
+
+    // Consume a record on each partition so there are offsets to commit, then
+    // commit. Pre-fix this stamped the stale start-up generation and the broker
+    // returned ILLEGAL_GENERATION (22) → commit_sync errored → panic here.
+    produce_to_partition(&broker, &producer, "genbump", 0, &["g0"]).await;
+    produce_to_partition(&broker, &producer, "genbump", 1, &["g1"]).await;
+    let mut seen: HashSet<String> = HashSet::new();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while seen.len() < 2 && Instant::now() < deadline {
+        for r in m1.poll(Duration::from_millis(200)).await.unwrap() {
+            let v = String::from_utf8_lossy(r.value.as_deref().unwrap_or(&[])).into_owned();
+            if v.starts_with('g') {
+                seen.insert(v);
+            }
+        }
+    }
+    assert!(seen.len() == 2, "m1 delivered both records: {seen:?}");
+
+    m1.commit_sync()
+        .await
+        .expect("commit after a generation-bumping rebalance must succeed (current generation)");
+
+    m1.close().await.unwrap();
+    broker.shutdown().await;
+}
+
 // ── KIP-320 truncation detection (Task 10) ───────────────────────────────────
 
 use crabka_client_consumer::ConsumerError;
@@ -898,4 +1009,111 @@ async fn committed_leader_epoch_survives_restart() {
 
         broker.shutdown().await;
     }
+}
+
+/// Regression for the WAL-consumer cold-start hang: a single-member group that
+/// JOINS before its subscribed topic exists gets a 0-partition assignment, and
+/// a Stable one-member group is never sent a broker-driven rebalance — so
+/// recovery depends *solely* on the coordinator noticing, via its metadata
+/// refresh, that the topic appeared, and rejoining. Without that loop the empty
+/// assignment strands forever (the `logs-compactor` / `profiles-block-builder`
+/// hang). No second member ever joins, so this isolates the metadata-driven
+/// rejoin from the heartbeat-driven `REBALANCE_IN_PROGRESS` path. It also guards
+/// the TOCTOU fix: the coordinator seeds its rejoin baseline from the snapshot
+/// the *initial* (empty) assignment was computed against, so a topic created any
+/// time after the join — including during start-up — is still seen as growth.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cold_start_rejoins_when_subscribed_topic_appears() {
+    let dir = TempDir::new().unwrap();
+    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+        .await
+        .unwrap();
+    let bootstrap = broker.listen_addr().to_string();
+
+    let producer = Client::builder()
+        .bootstrap(&bootstrap)
+        .client_id("p")
+        .build()
+        .await
+        .unwrap();
+
+    // Subscribe to a topic that does NOT exist yet. The join still succeeds and
+    // the assignment is empty — exactly the cold start the WAL consumers hit.
+    let mut consumer = Consumer::builder()
+        .bootstrap(&bootstrap)
+        .client_id("c")
+        .group_id("cold-start-grp")
+        .session_timeout(Duration::from_secs(30))
+        .heartbeat_interval(Duration::from_millis(500))
+        .auto_offset_reset(AutoOffsetReset::Earliest)
+        .subscribe(["wal-late".to_string()])
+        .build()
+        .await
+        .expect("consumer builds even though its subscribed topic does not exist yet");
+
+    // Let the initial join settle, then assert it really is the empty-assignment
+    // cold start (a single Stable member with nothing to consume).
+    let _ = consumer.poll(Duration::from_millis(200)).await;
+    assert!(
+        consumer.assignment().await.is_empty(),
+        "expected an empty assignment before the topic exists, got len {}",
+        consumer.assignment().await.len()
+    );
+
+    // The distributor creates the WAL topic AFTER the consumer has joined.
+    create_topic_with_partitions(&producer, "wal-late", 2).await;
+
+    // Recovery is driven only by the coordinator's metadata refresh
+    // (SUBSCRIPTION_METADATA_REFRESH = 5s) — there is no membership change — so
+    // allow a few multiples of that interval on slow CI.
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let _ = consumer.poll(Duration::from_millis(200)).await;
+            if consumer.assignment().await.len() == 2 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "consumer never rejoined after its topic appeared (last assignment len {})",
+                consumer.assignment().await.len()
+            );
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    })
+    .await
+    .expect("metadata-driven rejoin within 30s");
+
+    // The recovered assignment must be functional: produce to both partitions
+    // and confirm every record is delivered (proves the re-acquired partitions
+    // primed their fetch offsets).
+    produce_to_partition(&broker, &producer, "wal-late", 0, &["p0a", "p0b"]).await;
+    produce_to_partition(&broker, &producer, "wal-late", 1, &["p1a", "p1b"]).await;
+
+    let mut seen: HashSet<String> = HashSet::new();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while seen.len() < 4 {
+            for r in consumer.poll(Duration::from_millis(200)).await.unwrap() {
+                seen.insert(
+                    String::from_utf8_lossy(r.value.as_deref().unwrap_or(&[])).into_owned(),
+                );
+            }
+            assert!(
+                Instant::now() < deadline,
+                "did not deliver all records from the recovered assignment, seen {seen:?}"
+            );
+        }
+    })
+    .await
+    .expect("records delivered from the recovered assignment within 30s");
+
+    let expected: HashSet<String> = ["p0a", "p0b", "p1a", "p1b"]
+        .into_iter()
+        .map(String::from)
+        .collect();
+    assert!(seen == expected, "expected {expected:?}, got {seen:?}");
+
+    consumer.close().await.unwrap();
+    broker.shutdown().await;
 }

@@ -35,15 +35,18 @@ flate2 = { workspace = true }
 object_store.workspace = true
 opentelemetry-proto = { workspace = true, features = ["gen-tonic", "logs"] }
 parquet.workspace = true
+prometheus-client.workspace = true
 prost.workspace = true
 regex.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 serde_yaml.workspace = true
+tracing = { workspace = true }
 snap.workspace = true
 thiserror = { workspace = true }
 time = { version = "0.3", default-features = false, features = ["parsing"] }
-tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "time"] }
+tokio-util = { workspace = true }
 tonic.workspace = true
 url = "2"
 

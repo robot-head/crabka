@@ -31,7 +31,7 @@ use crate::error::ConsumerError;
 use crate::group_metadata::ConsumerGroupMetadata;
 
 /// Subscribe-style consumer handle. Construct via [`Consumer::builder`].
-#[allow(dead_code)] // `session_timeout` / `heartbeat_interval` / `generation_id`
+#[allow(dead_code)] // `session_timeout` / `heartbeat_interval`
 // are captured for diagnostics; the live values are owned
 // by the coordinator task post-start.
 pub struct Consumer {
@@ -43,8 +43,12 @@ pub struct Consumer {
     /// `OffsetCommit` to the coordinator over this data-path client.
     pub(crate) coordinator_id: Arc<AtomicI32>,
     pub(crate) member_id: String,
-    /// Captured at start; not kept in sync as the coordinator rejoins.
-    pub(crate) generation_id: i32,
+    /// The group generation the commit path stamps onto `OffsetCommit`. Shared
+    /// (`Arc<AtomicI32>`) with the coordinator task, which is the sole writer and
+    /// publishes the new value on every (re)join — so a commit issued after a
+    /// rebalance uses the *current* generation instead of a stale start-up
+    /// snapshot (which the broker rejects with `ILLEGAL_GENERATION`).
+    pub(crate) current_generation: Arc<AtomicI32>,
     pub(crate) subscribed_topics: Vec<String>,
     /// Current assigned partitions: `(topic, partition_index)`.
     pub(crate) assigned: Arc<Mutex<Vec<(String, i32)>>>,
@@ -577,6 +581,9 @@ impl Consumer {
         let positions = Arc::new(Mutex::new(positions));
         let pending_seeks = Arc::new(Mutex::new(HashMap::new()));
         let topic_ids = Arc::new(Mutex::new(topic_ids));
+        // Shared with the coordinator task so the commit path always stamps the
+        // current generation; the coordinator publishes to it on every (re)join.
+        let current_generation = Arc::new(AtomicI32::new(r2.generation_id));
 
         let shutdown = CancellationToken::new();
         let state = CoordinatorState {
@@ -585,6 +592,7 @@ impl Consumer {
             coordinator_id: Arc::clone(&coordinator_id),
             member_id: member_id.clone(),
             generation_id: r2.generation_id,
+            current_generation: Arc::clone(&current_generation),
             assignor,
             subscribed_topics: subscribe.clone(),
             assigned: Arc::clone(&assigned),
@@ -596,6 +604,12 @@ impl Consumer {
             heartbeat_interval,
             auto_offset_reset,
             client_rack: client_rack.clone(),
+            // The metadata snapshot this initial assignment was computed against,
+            // threaded to the coordinator so its rejoin baseline starts from
+            // exactly what we saw here — not a fresh fetch that could already
+            // include a topic created during start-up (which would strand a
+            // cold-start empty assignment permanently).
+            initial_subscribed_counts: topic_partitions,
         };
         // IMPORTANT: `tokio::spawn` is the very last operation — no `.await`
         // follows it.  Dropping a timed-out `start_once` future before this
@@ -607,7 +621,7 @@ impl Consumer {
             group_id,
             coordinator_id,
             member_id,
-            generation_id: r2.generation_id,
+            current_generation,
             subscribed_topics: subscribe,
             assigned,
             next_offsets,
@@ -663,24 +677,23 @@ impl Consumer {
         &self.member_id
     }
 
-    /// The generation id captured at the most recent successful join.
+    /// The current group generation, kept live by the coordinator task across
+    /// rejoins (shared `Arc<AtomicI32>`).
     #[must_use]
     pub fn generation_id(&self) -> i32 {
-        self.generation_id
+        self.current_generation.load(Ordering::Relaxed)
     }
 
     /// KIP-447 group metadata to hand to a transactional producer's
-    /// `send_offsets_to_transaction`. The generation id is the value captured
-    /// at the most recent successful join (the field is not kept in sync as
-    /// the coordinator rejoins — see [`Self::generation_id`]); for a stable
-    /// single-member group this equals the coordinator's live generation.
-    /// `group_instance_id` is always `None` — the consumer has no
-    /// static-membership support yet.
+    /// `send_offsets_to_transaction`. The generation id is the coordinator's
+    /// live generation (kept current across rejoins via the shared
+    /// `Arc<AtomicI32>`). `group_instance_id` is always `None` — the consumer
+    /// has no static-membership support yet.
     #[must_use]
     pub fn group_metadata(&self) -> ConsumerGroupMetadata {
         ConsumerGroupMetadata {
             group_id: self.group_id.clone(),
-            generation_id: self.generation_id,
+            generation_id: self.current_generation.load(Ordering::Relaxed),
             member_id: self.member_id.clone(),
             group_instance_id: None,
         }
@@ -898,7 +911,7 @@ mod security_arg_tests {
             group_id: "group-a".into(),
             coordinator_id: Arc::new(AtomicI32::new(3)),
             member_id: "member-a".into(),
-            generation_id: 7,
+            current_generation: Arc::new(AtomicI32::new(7)),
             subscribed_topics: vec!["orders".into(), "payments".into()],
             assigned: Arc::new(Mutex::new(vec![("orders".into(), 0)])),
             next_offsets: Arc::new(Mutex::new(HashMap::new())),
@@ -930,6 +943,25 @@ mod security_arg_tests {
         assert!(metadata.member_id == "member-a");
         assert!(metadata.generation_id == 7);
         assert!(metadata.group_instance_id.is_none());
+    }
+
+    /// Regression: the generation the commit path stamps must track the
+    /// coordinator's (re)joins, not a start-up snapshot. The coordinator is the
+    /// sole writer and publishes via the shared `current_generation` atomic; the
+    /// accessor + group-metadata + commit path all read it live, so a commit
+    /// issued after a rebalance carries the CURRENT generation instead of the
+    /// stale one the broker rejects with `ILLEGAL_GENERATION (22)`.
+    #[tokio::test]
+    async fn generation_tracks_coordinator_rejoins_via_shared_atomic() {
+        let consumer = test_consumer().await;
+        assert!(consumer.generation_id() == 7);
+        assert!(consumer.group_metadata().generation_id == 7);
+
+        // Simulate the coordinator publishing a new generation on rejoin.
+        consumer.current_generation.store(11, Ordering::Relaxed);
+
+        assert!(consumer.generation_id() == 11);
+        assert!(consumer.group_metadata().generation_id == 11);
     }
 
     #[tokio::test]

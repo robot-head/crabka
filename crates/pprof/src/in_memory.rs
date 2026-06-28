@@ -261,15 +261,32 @@ impl ProfileStore for InMemoryProfileStore {
             if !row_matches(row, &compiled) {
                 continue;
             }
-            let projected: Vec<_> = label_names
-                .iter()
-                .filter_map(|want| {
-                    row.labels
-                        .iter()
-                        .find(|(name, _)| name == want)
-                        .map(|(name, value)| (name.clone(), value.clone()))
-                })
-                .collect();
+            // An empty `label_names` means "return the full label set" (the
+            // Pyroscope `/series` convention). Projecting onto an empty name
+            // list yields an empty vec, which surfaces as a spurious `[{}]`
+            // entry — mirror the cold-path fix in `crabka_blockstore`'s index.
+            let mut projected: Vec<_> = if label_names.is_empty() {
+                row.labels
+                    .iter()
+                    .map(|(name, value)| (name.clone(), value.clone()))
+                    .collect()
+            } else {
+                label_names
+                    .iter()
+                    .filter_map(|want| {
+                        row.labels
+                            .iter()
+                            .find(|(name, _)| name == want)
+                            .map(|(name, value)| (name.clone(), value.clone()))
+                    })
+                    .collect()
+            };
+            // Pyroscope's `/series` emits each set's labels SORTED by name, in
+            // both the projected and full-label-set forms (e.g. `__profile_type__`
+            // before `service_name`). `row.labels` is in ingest insertion order and
+            // the projection follows the request's `label_names` order, so sort
+            // here to match the wire order the Grafana drilldown compares against.
+            projected.sort();
             if !projected.is_empty() || label_names.is_empty() {
                 out.insert(projected);
             }
@@ -514,10 +531,66 @@ mod tests {
             .unwrap();
         assert!(series == vec![vec![("service_name".to_string(), "checkout".to_string())]]);
 
+        // Empty `label_names` means "return the full label set" (the Pyroscope
+        // `/series` convention), mirroring `crabka_blockstore`'s index. It must
+        // NOT collapse to a single empty label set (`[{}]`), which breaks
+        // Grafana's Pyroscope label autocomplete. All samples here carry the same
+        // single label, so the full sets dedup to one series.
         let unprojected = store
             .series("t", &[] as &[LabelMatcher], &[], 0, 5000)
             .await
             .unwrap();
-        assert!(unprojected == vec![Vec::<(String, String)>::new()]);
+        assert!(unprojected == vec![vec![("service_name".to_string(), "checkout".to_string())]]);
+    }
+
+    #[tokio::test]
+    async fn series_emits_each_label_set_sorted_by_name() {
+        // Push a sample whose labels are in ingest insertion order that is NOT
+        // sorted by name (`service_name` before `__profile_type__`). Pyroscope's
+        // `/series` emits each set's labels SORTED by name, so both the projected
+        // and full-label-set forms must come back with `__profile_type__` first
+        // (`_` < `s`). This is the exact ordering the Grafana Profiles Drilldown
+        // compares against in the pyroscope_differential test.
+        let mut store = InMemoryProfileStore::new();
+        let pt = "process_cpu:cpu:nanoseconds:cpu:nanoseconds";
+        let labels = vec![
+            ("service_name".to_string(), "api".to_string()),
+            ("__name__".to_string(), "process_cpu".to_string()),
+            ("__profile_type__".to_string(), pt.to_string()),
+        ];
+        store.push_sample("t", pt, labels, 0, 0, 1, 1000);
+
+        // Projected onto the drilldown's exact label list (request order is
+        // `service_name, __profile_type__`) — the response must still be sorted.
+        let projected = store
+            .series(
+                "t",
+                &[] as &[LabelMatcher],
+                &["service_name".to_string(), "__profile_type__".to_string()],
+                0,
+                5000,
+            )
+            .await
+            .unwrap();
+        assert!(
+            projected
+                == vec![vec![
+                    ("__profile_type__".to_string(), pt.to_string()),
+                    ("service_name".to_string(), "api".to_string()),
+                ]]
+        );
+
+        // Full label set (`label_names=[]`) — also sorted by name.
+        let full = store
+            .series("t", &[] as &[LabelMatcher], &[], 0, 5000)
+            .await
+            .unwrap();
+        assert!(
+            full == vec![vec![
+                ("__name__".to_string(), "process_cpu".to_string()),
+                ("__profile_type__".to_string(), pt.to_string()),
+                ("service_name".to_string(), "api".to_string()),
+            ]]
+        );
     }
 }

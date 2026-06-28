@@ -90,19 +90,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "info",
         "crabka-metrics-service",
     )?;
-    crabka_telemetry::profiling::serve_admin_from_env("0.0.0.0:9404").await?;
+    let metrics = crabka_promql::metrics::ServiceMetrics::new();
+    crabka_telemetry::profiling::serve_admin_from_env_with(
+        "0.0.0.0:9404",
+        crabka_promql::metrics::metrics_router(metrics.registry.clone()),
+    )
+    .await?;
 
     let cli = Cli::parse();
     match cli.target {
-        Target::Querier => run_querier(cli).await?,
-        Target::QueryFrontend => run_query_frontend(cli).await?,
-        Target::Ruler => run_ruler(cli).await?,
+        Target::Querier => run_querier(cli, metrics).await?,
+        Target::QueryFrontend => run_query_frontend(cli, metrics).await?,
+        Target::Ruler => run_ruler(cli, metrics).await?,
     }
 
     Ok(())
 }
 
-async fn run_query_frontend(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_query_frontend(
+    cli: Cli,
+    metrics: crabka_promql::metrics::ServiceMetrics,
+) -> Result<(), Box<dyn std::error::Error>> {
     let object_store_url = url::Url::parse(&cli.object_store_url)?;
     let (store, _prefix) = object_store::parse_url_opts(&object_store_url, std::env::vars())?;
     let store: Arc<dyn ObjectStore> = Arc::from(store);
@@ -113,6 +121,7 @@ async fn run_query_frontend(cli: Cli) -> Result<(), Box<dyn std::error::Error>> 
         WalHead::new(),
     );
     let mut state = PrometheusApiState::new(Arc::new(metric_store), EngineOpts::default())
+        .with_metrics(metrics)
         .with_query_frontend_cache(
             QueryFrontendOptions {
                 split_interval_ms: cli.query_frontend_split_ms,
@@ -138,7 +147,10 @@ async fn run_query_frontend(cli: Cli) -> Result<(), Box<dyn std::error::Error>> 
     Ok(())
 }
 
-async fn run_ruler(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_ruler(
+    cli: Cli,
+    metrics: crabka_promql::metrics::ServiceMetrics,
+) -> Result<(), Box<dyn std::error::Error>> {
     let object_store_url = url::Url::parse(&cli.object_store_url)?;
     let (store, _prefix) = object_store::parse_url_opts(&object_store_url, std::env::vars())?;
     let store: Arc<dyn ObjectStore> = Arc::from(store);
@@ -148,7 +160,8 @@ async fn run_ruler(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         &cli.manifest_prefix,
         WalHead::new(),
     );
-    let mut state = PrometheusApiState::new(Arc::new(metric_store), EngineOpts::default());
+    let mut state = PrometheusApiState::new(Arc::new(metric_store), EngineOpts::default())
+        .with_metrics(metrics);
     if let Some(overrides) = load_runtime_overrides(cli.runtime_overrides.as_deref())? {
         state = state.with_query_limits(overrides);
     }
@@ -236,7 +249,10 @@ async fn run_ruler(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn run_querier(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_querier(
+    cli: Cli,
+    metrics: crabka_promql::metrics::ServiceMetrics,
+) -> Result<(), Box<dyn std::error::Error>> {
     let object_store_url = url::Url::parse(&cli.object_store_url)?;
     let (store, _prefix) = object_store::parse_url_opts(&object_store_url, std::env::vars())?;
     let store: Arc<dyn ObjectStore> = Arc::from(store);
@@ -282,7 +298,8 @@ async fn run_querier(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         &cli.manifest_prefix,
         head,
     );
-    let mut state = PrometheusApiState::new(Arc::new(metric_store), EngineOpts::default());
+    let mut state = PrometheusApiState::new(Arc::new(metric_store), EngineOpts::default())
+        .with_metrics(metrics);
     if let Some(overrides) = load_runtime_overrides(cli.runtime_overrides.as_deref())? {
         state = state.with_query_limits(overrides);
     }

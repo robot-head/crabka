@@ -36,6 +36,7 @@ crabka-broker = { version = "0.3.8", path = "../broker", features = ["test-helpe
 crabka-client-producer = { version = "0.3.8", path = "../client-producer" }
 crabka-security = { version = "0.3.8", path = "../security" }
 mutants = { workspace = true }
+stateright = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
 proptest = { workspace = true }

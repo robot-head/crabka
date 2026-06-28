@@ -26,6 +26,7 @@ use serde_json::{Map, Value, json};
 
 use crate::error::tempo_limit_error_response;
 use crate::limits::{LimitError, Limits, OverridesProvider, QueryEnforcer};
+use crate::metrics::ServiceMetrics;
 
 const TENANT_HEADER: &str = "x-scope-orgid";
 const INTRINSIC_TAGS: &[&str] = &[
@@ -53,6 +54,7 @@ const INSTRUMENTATION_TAGS: &[&str] = &["instrumentation:name", "instrumentation
 struct AppState<S: SpanStore> {
     engine: Arc<TraceqlEngine<S>>,
     cfg: HttpConfig,
+    metrics: Option<ServiceMetrics>,
 }
 
 impl<S: SpanStore> Clone for AppState<S> {
@@ -60,6 +62,17 @@ impl<S: SpanStore> Clone for AppState<S> {
         Self {
             engine: Arc::clone(&self.engine),
             cfg: self.cfg.clone(),
+            metrics: self.metrics.clone(),
+        }
+    }
+}
+
+impl<S: SpanStore> AppState<S> {
+    /// Record one querier request on `route` with the given outcome and
+    /// elapsed time. No-op when metrics are not wired (test routers).
+    fn record_query(&self, route: &str, ok: bool, start: std::time::Instant) {
+        if let Some(metrics) = &self.metrics {
+            metrics.record_query(route, ok, start.elapsed().as_secs_f64());
         }
     }
 }
@@ -100,6 +113,34 @@ pub fn router_with_config<S>(engine: Arc<TraceqlEngine<S>>, cfg: HttpConfig) -> 
 where
     S: SpanStore + 'static,
 {
+    router_with_state(AppState {
+        engine,
+        cfg,
+        metrics: None,
+    })
+}
+
+/// Like [`router_with_config`] but threads a [`ServiceMetrics`] bundle so each
+/// query handler records `query_requests` / `query_duration_seconds`.
+pub fn router_with_config_and_metrics<S>(
+    engine: Arc<TraceqlEngine<S>>,
+    cfg: HttpConfig,
+    metrics: ServiceMetrics,
+) -> Router
+where
+    S: SpanStore + 'static,
+{
+    router_with_state(AppState {
+        engine,
+        cfg,
+        metrics: Some(metrics),
+    })
+}
+
+fn router_with_state<S>(state: AppState<S>) -> Router
+where
+    S: SpanStore + 'static,
+{
     Router::new()
         .route("/api/echo", get(echo))
         .route("/ready", get(ready))
@@ -117,7 +158,7 @@ where
         .route("/api/metrics/query", get(query_instant::<S>))
         .route("/api/v2/traces/{trace_id}", get(trace_by_id::<S>))
         .route("/api/traces/{trace_id}", get(trace_by_id_v1::<S>))
-        .with_state(AppState { engine, cfg })
+        .with_state(state)
 }
 
 async fn echo() -> &'static str {
@@ -149,6 +190,16 @@ async fn buildinfo() -> Response {
 }
 
 async fn search<S>(State(state): State<AppState<S>>, headers: HeaderMap, uri: Uri) -> Response
+where
+    S: SpanStore + 'static,
+{
+    let start = std::time::Instant::now();
+    let resp = search_inner(&state, headers, uri).await;
+    state.record_query("search", resp.status().is_success(), start);
+    resp
+}
+
+async fn search_inner<S>(state: &AppState<S>, headers: HeaderMap, uri: Uri) -> Response
 where
     S: SpanStore + 'static,
 {
@@ -248,6 +299,16 @@ async fn search_tags<S>(State(state): State<AppState<S>>, headers: HeaderMap, ur
 where
     S: SpanStore + 'static,
 {
+    let start = std::time::Instant::now();
+    let resp = search_tags_inner(&state, headers, uri).await;
+    state.record_query("tags", resp.status().is_success(), start);
+    resp
+}
+
+async fn search_tags_inner<S>(state: &AppState<S>, headers: HeaderMap, uri: Uri) -> Response
+where
+    S: SpanStore + 'static,
+{
     let tenant = tenant(&headers);
     let (start_ns, end_ns) = match optional_time_bounds(&uri) {
         Ok(bounds) => bounds,
@@ -294,6 +355,16 @@ async fn search_tags_v2<S>(
     headers: HeaderMap,
     uri: Uri,
 ) -> Response
+where
+    S: SpanStore + 'static,
+{
+    let start = std::time::Instant::now();
+    let resp = search_tags_v2_inner(&state, headers, uri).await;
+    state.record_query("tags", resp.status().is_success(), start);
+    resp
+}
+
+async fn search_tags_v2_inner<S>(state: &AppState<S>, headers: HeaderMap, uri: Uri) -> Response
 where
     S: SpanStore + 'static,
 {
@@ -349,6 +420,21 @@ async fn search_tag_values<S>(
 where
     S: SpanStore + 'static,
 {
+    let start = std::time::Instant::now();
+    let resp = search_tag_values_inner(&state, headers, tag, uri).await;
+    state.record_query("tag_values", resp.status().is_success(), start);
+    resp
+}
+
+async fn search_tag_values_inner<S>(
+    state: &AppState<S>,
+    headers: HeaderMap,
+    tag: String,
+    uri: Uri,
+) -> Response
+where
+    S: SpanStore + 'static,
+{
     let tenant = tenant(&headers);
     let (start_ns, end_ns) = match optional_time_bounds(&uri) {
         Ok(bounds) => bounds,
@@ -396,6 +482,21 @@ async fn search_tag_values_v2<S>(
 where
     S: SpanStore + 'static,
 {
+    let start = std::time::Instant::now();
+    let resp = search_tag_values_v2_inner(&state, headers, tag, uri).await;
+    state.record_query("tag_values", resp.status().is_success(), start);
+    resp
+}
+
+async fn search_tag_values_v2_inner<S>(
+    state: &AppState<S>,
+    headers: HeaderMap,
+    tag: String,
+    uri: Uri,
+) -> Response
+where
+    S: SpanStore + 'static,
+{
     let tenant = tenant(&headers);
     let (start_ns, end_ns) = match optional_time_bounds(&uri) {
         Ok(bounds) => bounds,
@@ -438,8 +539,18 @@ async fn query_range<S>(State(state): State<AppState<S>>, headers: HeaderMap, ur
 where
     S: SpanStore + 'static,
 {
+    let start = std::time::Instant::now();
+    let resp = query_range_inner(&state, headers, uri).await;
+    state.record_query("query_range", resp.status().is_success(), start);
+    resp
+}
+
+async fn query_range_inner<S>(state: &AppState<S>, headers: HeaderMap, uri: Uri) -> Response
+where
+    S: SpanStore + 'static,
+{
     let tenant = tenant(&headers);
-    let Some(query) = query_param(&uri, "q") else {
+    let Some(query) = metrics_query_param(&uri) else {
         return (StatusCode::BAD_REQUEST, "missing query parameter q").into_response();
     };
     let start_ns = match required_seconds_param(&uri, "start") {
@@ -457,7 +568,7 @@ where
     if let Err(err) = QueryEnforcer::check_search_duration(limits, start_ns, end_ns) {
         return limit_error_response(&err);
     }
-    let step_ns = match step_param(&uri) {
+    let step_ns = match step_param(&uri, start_ns, end_ns) {
         Ok(value) => value,
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
     };
@@ -489,8 +600,18 @@ async fn query_instant<S>(
 where
     S: SpanStore + 'static,
 {
+    let start = std::time::Instant::now();
+    let resp = query_instant_inner(&state, headers, uri).await;
+    state.record_query("query", resp.status().is_success(), start);
+    resp
+}
+
+async fn query_instant_inner<S>(state: &AppState<S>, headers: HeaderMap, uri: Uri) -> Response
+where
+    S: SpanStore + 'static,
+{
     let tenant = tenant(&headers);
-    let Some(query) = query_param(&uri, "q") else {
+    let Some(query) = metrics_query_param(&uri) else {
         return (StatusCode::BAD_REQUEST, "missing query parameter q").into_response();
     };
     let (start_ns, end_ns, step_ns, point_ns) = match instant_metric_bounds(&uri) {
@@ -521,6 +642,21 @@ async fn trace_by_id<S>(
     State(state): State<AppState<S>>,
     headers: HeaderMap,
     Path(trace_id): Path<String>,
+    uri: Uri,
+) -> Response
+where
+    S: SpanStore + 'static,
+{
+    let start = std::time::Instant::now();
+    let resp = trace_by_id_inner(&state, headers, trace_id, uri).await;
+    state.record_query("trace_by_id", resp.status().is_success(), start);
+    resp
+}
+
+async fn trace_by_id_inner<S>(
+    state: &AppState<S>,
+    headers: HeaderMap,
+    trace_id: String,
     uri: Uri,
 ) -> Response
 where
@@ -567,6 +703,21 @@ async fn trace_by_id_v1<S>(
     State(state): State<AppState<S>>,
     headers: HeaderMap,
     Path(trace_id): Path<String>,
+    uri: Uri,
+) -> Response
+where
+    S: SpanStore + 'static,
+{
+    let start = std::time::Instant::now();
+    let resp = trace_by_id_v1_inner(&state, headers, trace_id, uri).await;
+    state.record_query("trace_by_id", resp.status().is_success(), start);
+    resp
+}
+
+async fn trace_by_id_v1_inner<S>(
+    state: &AppState<S>,
+    headers: HeaderMap,
+    trace_id: String,
     uri: Uri,
 ) -> Response
 where
@@ -645,6 +796,14 @@ fn wants_json(headers: &HeaderMap) -> bool {
 fn query_param(uri: &Uri, key: &str) -> Option<String> {
     url::form_urlencoded::parse(uri.query().unwrap_or_default().as_bytes())
         .find_map(|(k, v)| (k == key).then(|| v.into_owned()))
+}
+
+/// The `TraceQL` metrics query string. Tempo accepts both `q` and `query` on
+/// the metrics endpoints: the Explore `TraceQL` editor and the HTTP API send
+/// `q`, while the Grafana Tempo datasource powering the Traces Drilldown app
+/// sends `query`. Accept either, preferring `q`.
+fn metrics_query_param(uri: &Uri) -> Option<String> {
+    query_param(uri, "q").or_else(|| query_param(uri, "query"))
 }
 
 fn search_query(uri: &Uri) -> Result<Option<String>, &'static str> {
@@ -850,9 +1009,12 @@ fn parse_step_to_ns(value: &str) -> Option<i64> {
     parse_seconds_to_ns(value).or_else(|| i64::try_from(parse_go_duration_ns(value).ok()?).ok())
 }
 
-fn step_param(uri: &Uri) -> Result<i64, &'static str> {
+fn step_param(uri: &Uri, start_ns: i64, end_ns: i64) -> Result<i64, &'static str> {
     let Some(step) = query_param(uri, "step") else {
-        return Err("missing query parameter step");
+        // Tempo computes a default step when the client omits it; Grafana's
+        // Traces Drilldown breakdown queries send no `step`. Match that instead
+        // of rejecting the query.
+        return Ok(default_query_range_step_ns(start_ns, end_ns));
     };
     let Some(step_ns) = parse_step_to_ns(&step) else {
         return Err("invalid step");
@@ -861,6 +1023,17 @@ fn step_param(uri: &Uri) -> Result<i64, &'static str> {
         return Err("step must be positive");
     }
     Ok(step_ns)
+}
+
+/// Default query-range step when none is supplied: aim for ~100 buckets over the
+/// range, rounded up to a whole second, with a 1s floor (mirrors Tempo's
+/// `DefaultQueryRangeStep` closely enough for a usable series).
+fn default_query_range_step_ns(start_ns: i64, end_ns: i64) -> i64 {
+    const SECOND_NS: i64 = 1_000_000_000;
+    let delta = end_ns.saturating_sub(start_ns).max(0);
+    let raw = delta / 100;
+    let rounded = raw.saturating_add(SECOND_NS - 1) / SECOND_NS * SECOND_NS;
+    rounded.max(SECOND_NS)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1478,24 +1651,57 @@ fn typed_value_parts(value: &AttrValue) -> (String, String) {
     }
 }
 
+/// One TraceQL-metrics label as Tempo's protojson `commonv1.KeyValue`
+/// (`{"key": k, "value": {"stringValue": v}}`). Grafana's Tempo backend parses
+/// the `labels` field as a JSON array, so a map object fails to unmarshal
+/// (`cannot unmarshal object into Go value of type []json.RawMessage`).
+fn metric_label_json(key: &str, value: &str) -> Value {
+    json!({ "key": key, "value": { "stringValue": value } })
+}
+
+/// Prometheus-style label string for `TimeSeries.promLabels` (Grafana's legend),
+/// e.g. `{resource_service_name="api"}`. Empty label set renders as `{}`.
+fn metric_prom_labels(labels: &[(String, String)]) -> String {
+    let inner = labels
+        .iter()
+        .map(|(key, value)| {
+            format!(
+                "{}=\"{}\"",
+                key.replace('.', "_"),
+                value.replace('"', "\\\"")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{{{inner}}}")
+}
+
 fn trace_metrics_json(resp: &TraceMetricsResponse) -> Value {
+    // Tempo `tempopb.QueryRangeResponse` protojson shape, which Grafana's Tempo
+    // backend unmarshals: `series[].labels` is an ARRAY of KeyValue, samples use
+    // `timestampMs` (milliseconds; int64 rendered as a string to match protojson)
+    // and `value`. Crabka's internal point timestamps are nanoseconds.
     json!({
         "series": resp.series.iter().map(|series| {
             json!({
                 "labels": series.labels.iter()
-                    .map(|(key, value)| (key.clone(), json!(value)))
-                    .collect::<Map<_, _>>(),
-                "points": series.points.iter()
-                    .map(|(ts, value)| json!([ts.to_string(), *value]))
+                    .map(|(key, value)| metric_label_json(key, value))
+                    .collect::<Vec<_>>(),
+                "promLabels": metric_prom_labels(&series.labels),
+                "samples": series.points.iter()
+                    .map(|(ts_ns, value)| json!({
+                        "timestampMs": (ts_ns / 1_000_000).to_string(),
+                        "value": *value,
+                    }))
                     .collect::<Vec<_>>(),
                 "exemplars": series.exemplars.iter()
                     .map(|exemplar| {
                         json!({
                             "labels": exemplar.labels.iter()
-                                .map(|(key, value)| (key.clone(), json!(value)))
-                                .collect::<Map<_, _>>(),
+                                .map(|(key, value)| metric_label_json(key, value))
+                                .collect::<Vec<_>>(),
                             "value": exemplar.value,
-                            "timestamp": exemplar.timestamp_ns.to_string(),
+                            "timestampMs": (exemplar.timestamp_ns / 1_000_000).to_string(),
                         })
                     })
                     .collect::<Vec<_>>(),
@@ -1744,7 +1950,7 @@ fn otlp_span(trace_id: [u8; 16], span: &SpanRef) -> OtlpSpan {
             .map(|event| otlp_event(span, event))
             .collect(),
         links: span.links.iter().map(otlp_link).collect(),
-        status: otlp_status(span.status_code, &span.status_message),
+        status: Some(otlp_status(span.status_code, &span.status_message)),
         ..OtlpSpan::default()
     }
 }
@@ -1769,11 +1975,16 @@ fn otlp_link(link: &crabka_traceql::LinkRef) -> OtlpLink {
     }
 }
 
-fn otlp_status(code: i32, message: &str) -> Option<OtlpStatus> {
-    (code != 0 || !message.is_empty()).then(|| OtlpStatus {
+fn otlp_status(code: i32, message: &str) -> OtlpStatus {
+    // Tempo constructs a Status for every span, and Grafana's Tempo backend
+    // dereferences `span.Status` when transforming the protobuf trace
+    // (trace_transform.go) — an absent/nil status is a nil pointer dereference
+    // that 500s the trace view. STATUS_CODE_UNSET (0) is a valid, present status,
+    // so this is emitted unconditionally (wrapped in `Some` at the call site).
+    OtlpStatus {
         code,
         message: message.to_string(),
-    })
+    }
 }
 
 fn otlp_attrs(attrs: &[(String, AttrValue)]) -> Vec<OtlpKeyValue> {
@@ -1869,9 +2080,10 @@ fn trace_span_json(trace_id: [u8; 16], span: &SpanRef) -> Value {
         "endTimeUnixNano".into(),
         json!((span.start_time_unix_nano + span.duration_nanos).to_string()),
     );
-    if let Some(status) = span_status_json(span.status_code, &span.status_message) {
-        obj.insert("status".into(), status);
-    }
+    obj.insert(
+        "status".into(),
+        span_status_json(span.status_code, &span.status_message),
+    );
     obj.insert("attributes".into(), attrs_json(&span.attributes));
     if !span.events.is_empty() {
         obj.insert("events".into(), events_json(span));
@@ -1926,23 +2138,24 @@ fn span_kind_json(kind: i32) -> Option<&'static str> {
     }
 }
 
-fn span_status_json(code: i32, message: &str) -> Option<Value> {
-    let code_name = match code {
-        1 => Some("STATUS_CODE_OK"),
-        2 => Some("STATUS_CODE_ERROR"),
-        _ => None,
-    };
-    if code_name.is_none() && message.is_empty() {
-        return None;
-    }
+fn span_status_json(code: i32, message: &str) -> Value {
+    // Always emit a status object so the field is never missing (Tempo always
+    // sets a Status; Grafana dereferences it). STATUS_CODE_UNSET (0) is the
+    // protojson default and is omitted (rendered as `{}`); OK/ERROR are explicit.
     let mut status = Map::new();
-    if let Some(code_name) = code_name {
-        status.insert("code".into(), json!(code_name));
+    match code {
+        1 => {
+            status.insert("code".into(), json!("STATUS_CODE_OK"));
+        }
+        2 => {
+            status.insert("code".into(), json!("STATUS_CODE_ERROR"));
+        }
+        _ => {}
     }
     if !message.is_empty() {
         status.insert("message".into(), json!(message));
     }
-    Some(Value::Object(status))
+    Value::Object(status)
 }
 
 fn attrs_json(attrs: &[(String, AttrValue)]) -> Value {
@@ -2274,15 +2487,19 @@ mod tests {
         assert!(
             body == json!({
                 "series": [{
-                    "labels": {},
-                    "points": [["0", 2.0], ["1000000000", 0.0]],
+                    "labels": [],
+                    "promLabels": "{}",
+                    "samples": [
+                        {"timestampMs": "0", "value": 2.0},
+                        {"timestampMs": "1000", "value": 0.0}
+                    ],
                     "exemplars": [{
-                        "labels": {
-                            "span_id": "0101010101010101",
-                            "trace_id": "09090909090909090909090909090909"
-                        },
-                        "timestamp": "1001",
-                        "value": 1.0
+                        "labels": [
+                            {"key": "trace_id", "value": {"stringValue": "09090909090909090909090909090909"}},
+                            {"key": "span_id", "value": {"stringValue": "0101010101010101"}}
+                        ],
+                        "value": 1.0,
+                        "timestampMs": "0"
                     }]
                 }]
             })
@@ -2296,15 +2513,19 @@ mod tests {
         assert!(
             body == json!({
                 "series": [{
-                    "labels": {},
-                    "points": [["0", 2.0], ["1000000000", 0.0]],
+                    "labels": [],
+                    "promLabels": "{}",
+                    "samples": [
+                        {"timestampMs": "0", "value": 2.0},
+                        {"timestampMs": "1000", "value": 0.0}
+                    ],
                     "exemplars": [{
-                        "labels": {
-                            "span_id": "0101010101010101",
-                            "trace_id": "09090909090909090909090909090909"
-                        },
-                        "timestamp": "1001",
-                        "value": 1.0
+                        "labels": [
+                            {"key": "trace_id", "value": {"stringValue": "09090909090909090909090909090909"}},
+                            {"key": "span_id", "value": {"stringValue": "0101010101010101"}}
+                        ],
+                        "value": 1.0,
+                        "timestampMs": "0"
                     }]
                 }]
             })
@@ -2334,8 +2555,12 @@ mod tests {
         assert!(
             body == json!({
                 "series": [{
-                    "labels": {},
-                    "points": [["0", 1.0], ["1000000000", 0.0]],
+                    "labels": [],
+                    "promLabels": "{}",
+                    "samples": [
+                        {"timestampMs": "0", "value": 1.0},
+                        {"timestampMs": "1000", "value": 0.0}
+                    ],
                     "exemplars": []
                 }]
             })
@@ -2434,8 +2659,12 @@ mod tests {
 
         assert!(status == StatusCode::OK);
         assert!(
-            body["series"][0]["points"]
-                == json!([["0", 2.0], ["500000000", 0.0], ["1000000000", 0.0]])
+            body["series"][0]["samples"]
+                == json!([
+                    {"timestampMs": "0", "value": 2.0},
+                    {"timestampMs": "500", "value": 0.0},
+                    {"timestampMs": "1000", "value": 0.0}
+                ])
         );
     }
 
@@ -2447,7 +2676,7 @@ mod tests {
         .await;
 
         assert!(status == StatusCode::OK);
-        assert!(body["series"][0]["points"] == json!([["1000000000", 2.0]]));
+        assert!(body["series"][0]["samples"] == json!([{"timestampMs": "1000", "value": 2.0}]));
         assert!(body["series"][0]["exemplars"] == json!([]));
     }
 
@@ -2485,14 +2714,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn metrics_query_range_requires_step() {
-        let (status, body) = get_text(
+    async fn metrics_query_range_defaults_step_when_omitted() {
+        // Grafana's Traces Drilldown breakdown queries omit `step`; Tempo defaults
+        // it rather than rejecting (was a 400 "missing query parameter step").
+        let (status, body) = get_json(
             "/api/metrics/query_range?q=%7B%20.svc%20%21%3D%20nil%20%7D%20%7C%20count_over_time()&start=0&end=1",
         )
         .await;
 
-        assert!(status == StatusCode::BAD_REQUEST);
-        assert!(body == "missing query parameter step");
+        assert!(status == StatusCode::OK);
+        assert!(!body["series"][0]["samples"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn metrics_query_range_accepts_query_param_alias() {
+        // The Grafana Tempo datasource (and thus the Traces Drilldown breakdown)
+        // sends the TraceQL under `query=`, not `q=`; accept it as an alias.
+        let (status, body) = get_json(
+            "/api/metrics/query_range?query=%7B%20.svc%20%21%3D%20nil%20%7D%20%7C%20count_over_time()&start=0&end=1",
+        )
+        .await;
+
+        assert!(status == StatusCode::OK);
+        assert!(!body["series"][0]["samples"].as_array().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -3089,6 +3333,7 @@ overrides:
                                     "name": "span",
                                     "startTimeUnixNano": "1001",
                                     "endTimeUnixNano": "1201",
+                                    "status": {},
                                     "attributes": [{"key": "svc", "value": {"stringValue": "a"}}]
                                 },
                                 {
@@ -3098,6 +3343,7 @@ overrides:
                                     "name": "span",
                                     "startTimeUnixNano": "1002",
                                     "endTimeUnixNano": "1202",
+                                    "status": {},
                                     "attributes": [{"key": "svc", "value": {"stringValue": "b"}}]
                                 }
                             ]
@@ -3107,6 +3353,28 @@ overrides:
                 "status": "COMPLETE",
                 "message": ""
             })
+        );
+    }
+
+    #[test]
+    fn span_status_is_always_present_even_when_unset() {
+        // Grafana's Tempo backend dereferences span.Status when transforming the
+        // protobuf trace; an absent (nil) status panics it and 500s the trace
+        // view. Every span must carry a Status, including STATUS_CODE_UNSET (0).
+        for code in [0, 1, 2] {
+            assert!(
+                otlp_status(code, "").code == code,
+                "code {code} must emit status"
+            );
+        }
+        let unset = otlp_status(0, "");
+        assert!(unset.code == 0 && unset.message.is_empty());
+        // JSON mirrors the protojson shape: UNSET is present-but-empty, OK/ERROR
+        // carry the explicit code.
+        assert!(span_status_json(0, "") == json!({}));
+        assert!(span_status_json(1, "") == json!({"code": "STATUS_CODE_OK"}));
+        assert!(
+            span_status_json(2, "boom") == json!({"code": "STATUS_CODE_ERROR", "message": "boom"})
         );
     }
 
@@ -4866,7 +5134,7 @@ overrides:
                 "tagValues": [
                     {
                         "type": "int",
-                        "value": "0"
+                        "value": "-1"
                     },
                     {
                         "type": "int",

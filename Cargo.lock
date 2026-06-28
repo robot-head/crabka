@@ -2314,6 +2314,7 @@ dependencies = [
  "futures-util",
  "mutants",
  "proptest",
+ "stateright",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -2712,6 +2713,7 @@ dependencies = [
  "dashmap",
  "object_store",
  "opentelemetry-proto",
+ "prometheus-client",
  "proptest",
  "prost 0.14.4",
  "prost-build 0.14.4",
@@ -2788,6 +2790,7 @@ dependencies = [
  "object_store",
  "opentelemetry-proto",
  "parquet",
+ "prometheus-client",
  "prost 0.14.4",
  "regex",
  "serde",
@@ -2800,8 +2803,10 @@ dependencies = [
  "time",
  "tokio",
  "tokio-tungstenite",
+ "tokio-util",
  "tonic",
  "tower",
+ "tracing",
  "url",
 ]
 
@@ -2931,6 +2936,7 @@ dependencies = [
  "object_store",
  "parquet",
  "pbjson",
+ "prometheus-client",
  "proptest",
  "prost 0.14.4",
  "protoc-bin-vendored",
@@ -2965,6 +2971,7 @@ dependencies = [
  "datafusion",
  "futures",
  "object_store",
+ "prometheus-client",
  "promql-parser",
  "proptest",
  "prost 0.14.4",
@@ -3279,6 +3286,7 @@ dependencies = [
  "flate2",
  "jemalloc_pprof",
  "opentelemetry",
+ "opentelemetry-appender-tracing",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "pprof",
@@ -3346,6 +3354,7 @@ dependencies = [
  "object_store",
  "opentelemetry-proto",
  "parquet",
+ "prometheus-client",
  "prost 0.14.4",
  "prost-types 0.14.4",
  "protox",
@@ -7421,6 +7430,18 @@ dependencies = [
  "js-sys",
  "pin-project-lite",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "opentelemetry-appender-tracing"
+version = "0.32.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2c0080f0dc1d7c786f467cd85a4e395fcab11ee852004f39a29a18ab7c25d837"
+dependencies = [
+ "opentelemetry",
+ "tracing",
+ "tracing-core",
+ "tracing-subscriber",
 ]
 
 [[package]]

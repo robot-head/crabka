@@ -200,7 +200,7 @@ where
     C: BlockCatalog + 'static,
 {
     let tenant = tenant(&headers);
-    let Some(query) = query_param(&uri, "q") else {
+    let Some(query) = metrics_query_param(&uri) else {
         return (StatusCode::BAD_REQUEST, "missing query parameter q").into_response();
     };
     let (start_ns, end_ns) = match required_time_bounds(&uri) {
@@ -239,7 +239,7 @@ where
     C: BlockCatalog + 'static,
 {
     let tenant = tenant(&headers);
-    let Some(query) = query_param(&uri, "q") else {
+    let Some(query) = metrics_query_param(&uri) else {
         return (StatusCode::BAD_REQUEST, "missing query parameter q").into_response();
     };
     // Instant query: a window via start/end, else a single `time` point.
@@ -289,6 +289,14 @@ fn tenant(headers: &HeaderMap) -> String {
 fn query_param(uri: &Uri, key: &str) -> Option<String> {
     url::form_urlencoded::parse(uri.query().unwrap_or_default().as_bytes())
         .find_map(|(k, v)| (k == key).then(|| v.into_owned()))
+}
+
+/// The `TraceQL` metrics query string. Tempo accepts both `q` and `query` on
+/// the metrics endpoints: the Explore `TraceQL` editor and the HTTP API send
+/// `q`, while the Grafana Tempo datasource powering the Traces Drilldown app
+/// sends `query`. Accept either, preferring `q`.
+fn metrics_query_param(uri: &Uri) -> Option<String> {
+    query_param(uri, "q").or_else(|| query_param(uri, "query"))
 }
 
 /// `q` (`TraceQL`) or the legacy `tags` logfmt form.

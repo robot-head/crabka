@@ -166,6 +166,10 @@ pub struct CompactionPollResult {
 pub struct CompactionLoopConfig {
     pub wal_topic: String,
     pub poll_timeout: Duration,
+    /// Flush the accumulated buffer once this many WAL records are buffered.
+    pub flush_max_rows: usize,
+    /// Flush the accumulated buffer once its oldest record reaches this age.
+    pub flush_max_age: Duration,
 }
 
 /// Summary returned after a compactor loop exits.
@@ -178,6 +182,12 @@ pub struct CompactionLoopResult {
     pub committed_offsets: Vec<CompactionPartitionOffset>,
 }
 
+/// Default number of buffered WAL records that triggers a compaction flush.
+pub const DEFAULT_FLUSH_MAX_ROWS: usize = 50_000;
+
+/// Default maximum age the oldest buffered WAL record may reach before a flush.
+pub const DEFAULT_FLUSH_MAX_AGE: Duration = Duration::from_mins(1);
+
 /// Configuration for the metrics compactor role.
 #[derive(Clone, Debug)]
 pub struct MetricsCompactorConfig {
@@ -187,6 +197,10 @@ pub struct MetricsCompactorConfig {
     pub wal_topic: String,
     pub poll_timeout: Duration,
     pub auto_offset_reset: AutoOffsetReset,
+    /// Flush the accumulated buffer once this many WAL records are buffered.
+    pub flush_max_rows: usize,
+    /// Flush the accumulated buffer once its oldest record reaches this age.
+    pub flush_max_age: Duration,
 }
 
 /// Runtime handles assembled for the compactor role.
@@ -233,6 +247,9 @@ pub enum MetricsCompactorConfigError {
 
     #[error("metrics compactor poll_timeout must be non-zero")]
     ZeroPollTimeout,
+
+    #[error("metrics compactor flush_max_rows must be non-zero")]
+    ZeroFlushMaxRows,
 }
 
 /// Errors raised while writing compacted metric blocks.
@@ -381,6 +398,8 @@ impl MetricsCompactorConfig {
             wal_topic: crate::WAL_TOPIC.to_string(),
             poll_timeout: Duration::from_secs(1),
             auto_offset_reset: AutoOffsetReset::Earliest,
+            flush_max_rows: DEFAULT_FLUSH_MAX_ROWS,
+            flush_max_age: DEFAULT_FLUSH_MAX_AGE,
         }
     }
 
@@ -391,6 +410,9 @@ impl MetricsCompactorConfig {
         validate_non_empty("wal_topic", &self.wal_topic)?;
         if self.poll_timeout.is_zero() {
             return Err(MetricsCompactorConfigError::ZeroPollTimeout);
+        }
+        if self.flush_max_rows == 0 {
+            return Err(MetricsCompactorConfigError::ZeroFlushMaxRows);
         }
         Ok(())
     }
@@ -406,6 +428,8 @@ impl MetricsCompactorConfig {
             loop_config: CompactionLoopConfig {
                 wal_topic: self.wal_topic.clone(),
                 poll_timeout: self.poll_timeout,
+                flush_max_rows: self.flush_max_rows,
+                flush_max_age: self.flush_max_age,
             },
         })
     }
@@ -589,9 +613,15 @@ impl CompactionIndexManifest {
 
 /// Deterministic object key for one tenant/kind/WAL offset compaction window.
 ///
-/// Retrying the same compacted offset range writes the same object key, which
-/// lets the service write block data and index data idempotently before
-/// committing consumer-group offsets.
+/// The key is a pure function of `(tenant, kind, first_offset, last_offset)`, so
+/// re-compacting the *same* offset range writes the *same* object key (an
+/// idempotent overwrite). The accumulate-then-flush loop does NOT guarantee the
+/// same range is re-formed after a crash-before-commit: the flushed window
+/// depends on poll batching and the age timer, so a re-run may write the same
+/// records under a *different* key. That is at-least-once delivery, not
+/// byte-identical idempotency — but offset-overlapping duplicate blocks carry
+/// identical `(series, ts, value)` rows and are deduplicated at query time by the
+/// timestamp-keyed `PromQL` operator engine, so they do not double-count.
 #[must_use]
 pub fn compaction_object_key(
     tenant: &str,
@@ -878,19 +908,27 @@ where
     let mut partition_results = Vec::new();
     let mut writes = Vec::new();
     let mut committed_offsets = Vec::new();
+    // Write every partition's block + index sidecar durably BEFORE committing any
+    // offsets. The production committer (`CompactionConsumerCommitter`) commits
+    // the whole assignment's offsets regardless of the per-partition offset
+    // passed, so committing per-partition would advance partitions whose blocks
+    // are not yet written; a later partition's write failure would then skip
+    // those un-written records — silent data loss. One commit after all writes
+    // only advances past fully-durable data; any write error returns before the
+    // commit so the next poll re-reads from the last committed offset
+    // (at-least-once).
     for partition_records in by_partition.into_values() {
-        let result = process_compaction_partition_window(
-            block_writer,
-            index_sink,
-            committer,
-            &partition_records,
-        )
-        .await?;
+        let result =
+            write_compaction_partition_window(block_writer, index_sink, &partition_records).await?;
         writes.extend(result.writes.clone());
         if let Some(offset) = &result.committed_offset {
             committed_offsets.push(offset.clone());
         }
         partition_results.push(result);
+    }
+
+    if !committed_offsets.is_empty() {
+        committer.commit_offsets(&committed_offsets).await?;
     }
 
     Ok(CompactionBatchResult {
@@ -928,14 +966,119 @@ where
     })
 }
 
-/// Run the compactor polling loop until `should_stop` returns true.
+/// Monotonic clock used by the compaction loop to age the accumulation buffer.
+///
+/// Abstracted so flush-by-age can be driven deterministically in tests without
+/// real wall-clock waits.
+pub trait CompactionClock {
+    fn now(&self) -> std::time::Instant;
+}
+
+/// Real monotonic clock backed by [`std::time::Instant::now`].
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SystemCompactionClock;
+
+impl CompactionClock for SystemCompactionClock {
+    fn now(&self) -> std::time::Instant {
+        std::time::Instant::now()
+    }
+}
+
+/// Accumulates polled WAL records across polls so the compactor can flush one
+/// larger block per threshold instead of one tiny block per poll.
+///
+/// The buffer retains each record's consumer offset/partition metadata, so the
+/// flush keys blocks by the buffered offset range exactly as a single-poll write
+/// would. The oldest record's arrival time anchors the age-based flush deadline.
+struct CompactionBuffer {
+    records: Vec<CompactionWalRecord>,
+    oldest_arrival: Option<std::time::Instant>,
+}
+
+impl CompactionBuffer {
+    const fn new() -> Self {
+        Self {
+            records: Vec::new(),
+            oldest_arrival: None,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.records.is_empty()
+    }
+
+    /// Append newly polled records, anchoring the age deadline at the first
+    /// record to enter an empty buffer.
+    fn extend(&mut self, records: Vec<CompactionWalRecord>, now: std::time::Instant) {
+        if records.is_empty() {
+            return;
+        }
+        if self.oldest_arrival.is_none() {
+            self.oldest_arrival = Some(now);
+        }
+        self.records.extend(records);
+    }
+
+    /// Whether the buffer should flush now given the configured thresholds.
+    fn should_flush(&self, config: &CompactionLoopConfig, now: std::time::Instant) -> bool {
+        if self.is_empty() {
+            return false;
+        }
+        if self.records.len() >= config.flush_max_rows {
+            return true;
+        }
+        self.oldest_arrival
+            .is_some_and(|anchor| now.duration_since(anchor) >= config.flush_max_age)
+    }
+
+    /// Take all buffered records, resetting the buffer to empty.
+    fn take(&mut self) -> Vec<CompactionWalRecord> {
+        self.oldest_arrival = None;
+        std::mem::take(&mut self.records)
+    }
+}
+
+/// Write one block from the buffered records and commit their offsets, folding
+/// the result into the running loop summary.
+///
+/// CORRECTNESS: `process_compaction_record_batch` writes every partition's block
+/// and index sidecar durably *before* committing any offsets, then commits once
+/// after all writes succeed — so offsets are advanced only after the accumulated
+/// blocks are durable. The buffer is emptied by the caller via `take` *before*
+/// this call, so a write/commit error leaves the buffer empty and the next poll
+/// re-reads from the last committed offset — at-least-once.
+async fn flush_buffer<S, C>(
+    block_writer: &BlockWriter,
+    index_sink: &S,
+    committer: &C,
+    records: &[CompactionWalRecord],
+    summary: &mut CompactionLoopResult,
+) -> Result<Vec<CompactionPartitionOffset>, CompactionPollError>
+where
+    S: CompactionIndexSink + ?Sized,
+    C: CompactionOffsetCommitter + ?Sized,
+{
+    if records.is_empty() {
+        return Ok(Vec::new());
+    }
+    let batch =
+        process_compaction_record_batch(block_writer, index_sink, committer, records).await?;
+    summary.writes += batch.writes.len();
+    summary
+        .committed_offsets
+        .extend(batch.committed_offsets.iter().cloned());
+    Ok(batch.committed_offsets)
+}
+
+/// Run the compactor polling loop until `should_stop` returns true, using the
+/// real monotonic clock for flush-by-age.
 pub async fn run_compactor_loop<P, S, C, Stop>(
     poller: &mut P,
     block_writer: &BlockWriter,
     index_sink: &S,
     committer: &C,
     config: CompactionLoopConfig,
-    mut should_stop: Stop,
+    should_stop: Stop,
 ) -> Result<CompactionLoopResult, CompactionPollError>
 where
     P: CompactionConsumerPoll + ?Sized,
@@ -943,70 +1086,210 @@ where
     C: CompactionOffsetCommitter + ?Sized,
     Stop: FnMut(&CompactionPollResult) -> bool,
 {
+    run_compactor_loop_with_clock(
+        poller,
+        block_writer,
+        index_sink,
+        committer,
+        config,
+        should_stop,
+        &SystemCompactionClock,
+    )
+    .await
+}
+
+/// Accumulate-then-flush compactor loop with an injectable clock.
+///
+/// Each poll appends to an in-memory buffer instead of writing a block. A block
+/// is written (and offsets committed) only when the buffer reaches
+/// `flush_max_rows` or its oldest record reaches `flush_max_age`, or when
+/// `should_stop` fires (shutdown), at which point the remaining buffer is
+/// flushed so no records are dropped. The `CompactionPollResult` handed to
+/// `should_stop` reports this poll's `polled_records`/`compacted_records`; its
+/// `batch` reflects only the writes/commits that occurred this iteration (empty
+/// while buffering, populated on a flush).
+pub async fn run_compactor_loop_with_clock<P, S, C, Stop, Clock>(
+    poller: &mut P,
+    block_writer: &BlockWriter,
+    index_sink: &S,
+    committer: &C,
+    config: CompactionLoopConfig,
+    mut should_stop: Stop,
+    clock: &Clock,
+) -> Result<CompactionLoopResult, CompactionPollError>
+where
+    P: CompactionConsumerPoll + ?Sized,
+    S: CompactionIndexSink + ?Sized,
+    C: CompactionOffsetCommitter + ?Sized,
+    Stop: FnMut(&CompactionPollResult) -> bool,
+    Clock: CompactionClock + ?Sized,
+{
     let mut summary = CompactionLoopResult::default();
+    let mut buffer = CompactionBuffer::new();
     loop {
-        let result = poll_compactor_once(
-            poller,
-            block_writer,
-            index_sink,
-            committer,
-            &config.wal_topic,
-            config.poll_timeout,
-        )
-        .await?;
+        let records = poller.poll(config.poll_timeout).await?;
+        let polled_records = records.len();
+        let wal_records =
+            compaction_wal_records_from_consumer_records(&config.wal_topic, &records)?;
+        let compacted_records = wal_records.len();
+
+        let now = clock.now();
+        buffer.extend(wal_records, now);
+
+        let mut iteration_offsets = Vec::new();
+        if buffer.should_flush(&config, now) {
+            let buffered = buffer.take();
+            iteration_offsets =
+                flush_buffer(block_writer, index_sink, committer, &buffered, &mut summary).await?;
+        }
 
         summary.polls += 1;
-        summary.polled_records += result.polled_records;
-        summary.compacted_records += result.compacted_records;
-        summary.writes += result.batch.writes.len();
-        summary
-            .committed_offsets
-            .extend(result.batch.committed_offsets.iter().cloned());
+        summary.polled_records += polled_records;
+        summary.compacted_records += compacted_records;
+
+        let result = CompactionPollResult {
+            polled_records,
+            compacted_records,
+            batch: CompactionBatchResult {
+                partition_results: Vec::new(),
+                writes: Vec::new(),
+                committed_offsets: iteration_offsets,
+            },
+        };
 
         if should_stop(&result) {
+            // Shutdown: flush whatever is still buffered so no records are lost.
+            let buffered = buffer.take();
+            flush_buffer(block_writer, index_sink, committer, &buffered, &mut summary).await?;
             break;
         }
     }
     Ok(summary)
 }
 
-/// Run the compactor polling loop using a single consumer handle for poll and commit.
+/// Run the compactor polling loop using a single consumer handle for poll and
+/// commit, using the real monotonic clock for flush-by-age.
 pub async fn run_compactor_consumer_loop<C, S, Stop>(
     consumer: &mut C,
     block_writer: &BlockWriter,
     index_sink: &S,
     config: CompactionLoopConfig,
-    mut should_stop: Stop,
+    should_stop: Stop,
 ) -> Result<CompactionLoopResult, CompactionPollError>
 where
     C: CompactionConsumerPoll + CompactionConsumerCommitMut + ?Sized,
     S: CompactionIndexSink + ?Sized,
     Stop: FnMut(&CompactionPollResult) -> bool,
 {
+    run_compactor_consumer_loop_with_clock(
+        consumer,
+        block_writer,
+        index_sink,
+        config,
+        should_stop,
+        &SystemCompactionClock,
+    )
+    .await
+}
+
+/// Accumulate-then-flush single-consumer compactor loop with an injectable clock.
+///
+/// Mirrors [`run_compactor_loop_with_clock`] but polls and commits through one
+/// mutable consumer handle (`process_compaction_record_batch_with_consumer`),
+/// which likewise writes the block durably before committing offsets.
+pub async fn run_compactor_consumer_loop_with_clock<C, S, Stop, Clock>(
+    consumer: &mut C,
+    block_writer: &BlockWriter,
+    index_sink: &S,
+    config: CompactionLoopConfig,
+    mut should_stop: Stop,
+    clock: &Clock,
+) -> Result<CompactionLoopResult, CompactionPollError>
+where
+    C: CompactionConsumerPoll + CompactionConsumerCommitMut + ?Sized,
+    S: CompactionIndexSink + ?Sized,
+    Stop: FnMut(&CompactionPollResult) -> bool,
+    Clock: CompactionClock + ?Sized,
+{
     let mut summary = CompactionLoopResult::default();
+    let mut buffer = CompactionBuffer::new();
     loop {
-        let result = poll_compactor_consumer_once(
-            consumer,
-            block_writer,
-            index_sink,
-            &config.wal_topic,
-            config.poll_timeout,
-        )
-        .await?;
+        let records = consumer.poll(config.poll_timeout).await?;
+        let polled_records = records.len();
+        let wal_records =
+            compaction_wal_records_from_consumer_records(&config.wal_topic, &records)?;
+        let compacted_records = wal_records.len();
+
+        let now = clock.now();
+        buffer.extend(wal_records, now);
+
+        let mut iteration_offsets = Vec::new();
+        if buffer.should_flush(&config, now) {
+            let buffered = buffer.take();
+            iteration_offsets = flush_buffer_with_consumer(
+                block_writer,
+                index_sink,
+                consumer,
+                &buffered,
+                &mut summary,
+            )
+            .await?;
+        }
 
         summary.polls += 1;
-        summary.polled_records += result.polled_records;
-        summary.compacted_records += result.compacted_records;
-        summary.writes += result.batch.writes.len();
-        summary
-            .committed_offsets
-            .extend(result.batch.committed_offsets.iter().cloned());
+        summary.polled_records += polled_records;
+        summary.compacted_records += compacted_records;
+
+        let result = CompactionPollResult {
+            polled_records,
+            compacted_records,
+            batch: CompactionBatchResult {
+                partition_results: Vec::new(),
+                writes: Vec::new(),
+                committed_offsets: iteration_offsets,
+            },
+        };
 
         if should_stop(&result) {
+            // Shutdown: flush whatever is still buffered so no records are lost.
+            let buffered = buffer.take();
+            flush_buffer_with_consumer(block_writer, index_sink, consumer, &buffered, &mut summary)
+                .await?;
             break;
         }
     }
     Ok(summary)
+}
+
+/// Write one block from buffered records and commit through the consumer handle,
+/// folding the result into the running summary and returning the offsets committed
+/// this flush.
+///
+/// CORRECTNESS: `process_compaction_record_batch_with_consumer` writes the block
+/// and index sidecar durably before `commit_sync_mut`, so offsets are committed
+/// only after the accumulated block is durable.
+async fn flush_buffer_with_consumer<C, S>(
+    block_writer: &BlockWriter,
+    index_sink: &S,
+    consumer: &mut C,
+    records: &[CompactionWalRecord],
+    summary: &mut CompactionLoopResult,
+) -> Result<Vec<CompactionPartitionOffset>, CompactionPollError>
+where
+    C: CompactionConsumerCommitMut + ?Sized,
+    S: CompactionIndexSink + ?Sized,
+{
+    if records.is_empty() {
+        return Ok(Vec::new());
+    }
+    let batch =
+        process_compaction_record_batch_with_consumer(block_writer, index_sink, consumer, records)
+            .await?;
+    summary.writes += batch.writes.len();
+    summary
+        .committed_offsets
+        .extend(batch.committed_offsets.iter().cloned());
+    Ok(batch.committed_offsets)
 }
 
 /// Poll, compact, and commit once using a single mutable consumer handle.
@@ -1085,18 +1368,29 @@ where
     let mut partition_results = Vec::new();
     let mut writes = Vec::new();
     let mut committed_offsets = Vec::new();
+    // Write every partition's block durably BEFORE committing any offsets.
+    // `commit_sync` advances the whole assignment's offsets (a whole-snapshot
+    // commit, see `Consumer::commit_sync`), so committing inside the loop would
+    // advance partitions whose blocks have not yet been written; a later
+    // partition's write failure would then skip those un-written records on the
+    // next run — silent data loss. Writing all partitions first means the single
+    // commit below only advances past fully-durable data, and any write error
+    // returns before the commit so the next poll re-reads (at-least-once).
     for partition_records in by_partition.into_values() {
         let result =
             write_compaction_partition_window(block_writer, index_sink, &partition_records).await?;
         writes.extend(result.writes.clone());
         if let Some(offset) = &result.committed_offset {
-            consumer
-                .commit_sync_mut()
-                .await
-                .map_err(|error| CompactionCommitError::Commit(error.to_string()))?;
             committed_offsets.push(offset.clone());
         }
         partition_results.push(result);
+    }
+
+    if !committed_offsets.is_empty() {
+        consumer
+            .commit_sync_mut()
+            .await
+            .map_err(|error| CompactionCommitError::Commit(error.to_string()))?;
     }
 
     Ok(CompactionBatchResult {
@@ -1758,6 +2052,8 @@ mod tests {
             wal_topic: crate::WAL_TOPIC.to_string(),
             poll_timeout: std::time::Duration::from_millis(500),
             auto_offset_reset: crabka_client_consumer::AutoOffsetReset::Earliest,
+            flush_max_rows: super::DEFAULT_FLUSH_MAX_ROWS,
+            flush_max_age: super::DEFAULT_FLUSH_MAX_AGE,
         };
 
         let err = cfg.validate().expect_err("empty bootstrap should fail");
@@ -1774,6 +2070,8 @@ mod tests {
             wal_topic: crate::WAL_TOPIC.to_string(),
             poll_timeout: std::time::Duration::from_millis(250),
             auto_offset_reset: crabka_client_consumer::AutoOffsetReset::Earliest,
+            flush_max_rows: 12_345,
+            flush_max_age: std::time::Duration::from_secs(7),
         };
 
         let runtime = cfg
@@ -1781,6 +2079,8 @@ mod tests {
             .expect("build runtime");
         assert!(runtime.loop_config.wal_topic == crate::WAL_TOPIC);
         assert!(runtime.loop_config.poll_timeout == std::time::Duration::from_millis(250));
+        assert!(runtime.loop_config.flush_max_rows == 12_345);
+        assert!(runtime.loop_config.flush_max_age == std::time::Duration::from_secs(7));
 
         let manifest = super::CompactionIndexManifest::from_plan(
             "tenant-a",
@@ -1975,6 +2275,81 @@ mod tests {
                     offset: 44,
                 }]
         );
+    }
+
+    /// Index sink that succeeds for the first `ok_before_failure` manifest writes
+    /// and then fails, to model one partition's block write succeeding before a
+    /// later partition's write fails mid-batch.
+    struct FailAfterIndexSink {
+        ok_before_failure: usize,
+        calls: Mutex<usize>,
+    }
+
+    impl FailAfterIndexSink {
+        fn new(ok_before_failure: usize) -> Self {
+            Self {
+                ok_before_failure,
+                calls: Mutex::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl super::CompactionIndexSink for FailAfterIndexSink {
+        async fn write_manifest(
+            &self,
+            _manifest: &super::CompactionIndexManifest,
+        ) -> Result<(), super::CompactionIndexError> {
+            let mut calls = self.calls.lock().expect("calls lock");
+            if *calls >= self.ok_before_failure {
+                return Err(super::CompactionIndexError::ObjectStore(
+                    "injected index write failure".to_string(),
+                ));
+            }
+            *calls += 1;
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn process_compaction_record_batch_does_not_commit_when_a_later_partition_write_fails() {
+        // Two partitions processed in order (0, then 1). Partition 0's block +
+        // index write succeeds; partition 1's index write fails. Because the
+        // commit advances the WHOLE assignment's offsets, committing per-partition
+        // would have advanced partition 1's offset past records whose block was
+        // never written — silent data loss. The fix writes all partitions first
+        // and commits once, so a mid-batch failure must leave NOTHING committed
+        // and the next poll re-reads from the last committed offset (at-least-once).
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let block_writer = crabka_blockstore::BlockWriter::new(object_store);
+        // Float-only records => exactly one block (one index manifest) per
+        // partition, so `ok_before_failure = 1` lets partition 0 through and fails
+        // partition 1.
+        let sink = FailAfterIndexSink::new(1);
+        let committer = RecordingOffsetCommitter::default();
+        let records = vec![
+            super::CompactionWalRecord {
+                partition: 0,
+                offset: 42,
+                value: float_record("tenant-a", "up", "api", 100)
+                    .encode()
+                    .expect("encode p0"),
+            },
+            super::CompactionWalRecord {
+                partition: 1,
+                offset: 42,
+                value: float_record("tenant-a", "up", "api", 200)
+                    .encode()
+                    .expect("encode p1"),
+            },
+        ];
+
+        let result =
+            super::process_compaction_record_batch(&block_writer, &sink, &committer, &records)
+                .await;
+
+        assert!(result.is_err());
+        assert!(committer.commits.lock().expect("commit lock").is_empty());
     }
 
     #[tokio::test]
@@ -2200,7 +2575,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_compactor_loop_repeats_until_stop_policy_triggers() {
+    async fn run_compactor_loop_accumulates_across_polls_and_flushes_once_on_stop() {
+        // Two below-threshold polls must accumulate into ONE block (not one per
+        // poll) and commit offsets only at the single shutdown flush.
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let block_writer = crabka_blockstore::BlockWriter::new(object_store);
         let sink = RecordingIndexSink::default();
@@ -2234,6 +2611,10 @@ mod tests {
             super::CompactionLoopConfig {
                 wal_topic: crate::WAL_TOPIC.to_string(),
                 poll_timeout: std::time::Duration::from_millis(1),
+                // High row threshold and long age so neither below-threshold
+                // poll triggers a mid-loop flush; only the shutdown flush writes.
+                flush_max_rows: 50_000,
+                flush_max_age: std::time::Duration::from_hours(1),
             },
             &mut stop_after_empty,
         )
@@ -2243,22 +2624,177 @@ mod tests {
         assert!(result.polls == 3);
         assert!(result.polled_records == 2);
         assert!(result.compacted_records == 2);
-        assert!(result.writes == 2);
+        // ONE block written for the whole buffer, not one per poll.
+        assert!(result.writes == 1);
+        // Single commit at flush: through the last buffered record (offset 11 -> commit 12).
         assert!(
             result.committed_offsets
-                == vec![
-                    super::CompactionPartitionOffset {
-                        partition: 0,
-                        offset: 11,
-                    },
-                    super::CompactionPartitionOffset {
-                        partition: 0,
-                        offset: 12,
-                    },
-                ]
+                == vec![super::CompactionPartitionOffset {
+                    partition: 0,
+                    offset: 12,
+                }]
         );
-        assert!(*commit.calls.lock().expect("commit calls lock") == 2);
-        assert!(sink.manifests.lock().expect("manifest lock").len() == 2);
+        assert!(*commit.calls.lock().expect("commit calls lock") == 1);
+        assert!(sink.manifests.lock().expect("manifest lock").len() == 1);
+        // The single block spans the full buffered offset range [10, 11].
+        let manifests = sink.manifests.lock().expect("manifest lock");
+        assert!(manifests[0].first_offset == 10);
+        assert!(manifests[0].last_offset == 11);
+        assert!(manifests[0].row_count == 2);
+    }
+
+    #[tokio::test]
+    async fn run_compactor_loop_flushes_when_row_threshold_reached() {
+        // Crossing flush_max_rows must flush mid-loop without waiting for stop.
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let block_writer = crabka_blockstore::BlockWriter::new(object_store);
+        let sink = RecordingIndexSink::default();
+        let commit = RecordingCommitSync::default();
+        let committer = super::CompactionConsumerCommitter::new(&commit);
+        let make_record = |offset, timestamp| crabka_client_consumer::ConsumerRecord {
+            topic: crate::WAL_TOPIC.to_string(),
+            partition: 0,
+            offset,
+            leader_epoch: -1,
+            timestamp,
+            key: None,
+            value: Some(bytes::Bytes::from(
+                float_record("tenant-a", "up", "api", timestamp)
+                    .encode()
+                    .expect("encode wal"),
+            )),
+            headers: Vec::new(),
+        };
+        // Two records per poll; flush_max_rows == 2 flushes on the first poll.
+        let mut poller = QueuePoller {
+            batches: vec![vec![make_record(10, 100), make_record(11, 200)]],
+        };
+        // Stop once the buffer has flushed (a committed offset surfaced) or polls drain.
+        let mut stop_after_empty =
+            |result: &super::CompactionPollResult| result.polled_records == 0;
+
+        let result = super::run_compactor_loop(
+            &mut poller,
+            &block_writer,
+            &sink,
+            &committer,
+            super::CompactionLoopConfig {
+                wal_topic: crate::WAL_TOPIC.to_string(),
+                poll_timeout: std::time::Duration::from_millis(1),
+                flush_max_rows: 2,
+                flush_max_age: std::time::Duration::from_hours(1),
+            },
+            &mut stop_after_empty,
+        )
+        .await
+        .expect("run compactor loop");
+
+        // One block flushed by the row threshold on the first poll; the empty
+        // second poll triggers stop with an already-empty buffer (no extra write).
+        assert!(result.writes == 1);
+        assert!(
+            result.committed_offsets
+                == vec![super::CompactionPartitionOffset {
+                    partition: 0,
+                    offset: 12,
+                }]
+        );
+        assert!(*commit.calls.lock().expect("commit calls lock") == 1);
+        assert!(sink.manifests.lock().expect("manifest lock").len() == 1);
+    }
+
+    struct FixedClock {
+        now: std::sync::Mutex<std::time::Instant>,
+    }
+
+    impl FixedClock {
+        fn new(start: std::time::Instant) -> Self {
+            Self {
+                now: std::sync::Mutex::new(start),
+            }
+        }
+
+        fn advance(&self, delta: std::time::Duration) {
+            let mut guard = self.now.lock().expect("clock lock");
+            *guard += delta;
+        }
+    }
+
+    impl super::CompactionClock for FixedClock {
+        fn now(&self) -> std::time::Instant {
+            *self.now.lock().expect("clock lock")
+        }
+    }
+
+    #[tokio::test]
+    async fn run_compactor_loop_age_flush_uses_injected_clock() {
+        // With a finite age, the buffer flushes only after the clock advances past it.
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let block_writer = crabka_blockstore::BlockWriter::new(object_store);
+        let sink = RecordingIndexSink::default();
+        let commit = RecordingCommitSync::default();
+        let committer = super::CompactionConsumerCommitter::new(&commit);
+        let make_record = |offset, timestamp| crabka_client_consumer::ConsumerRecord {
+            topic: crate::WAL_TOPIC.to_string(),
+            partition: 0,
+            offset,
+            leader_epoch: -1,
+            timestamp,
+            key: None,
+            value: Some(bytes::Bytes::from(
+                float_record("tenant-a", "up", "api", timestamp)
+                    .encode()
+                    .expect("encode wal"),
+            )),
+            headers: Vec::new(),
+        };
+        let clock = std::sync::Arc::new(FixedClock::new(std::time::Instant::now()));
+        let advance_clock = std::sync::Arc::clone(&clock);
+        // Poll 1 buffers offset 10; poll 2 buffers offset 11; poll 3 is empty.
+        let mut poller = QueuePoller {
+            batches: vec![vec![make_record(10, 100)], vec![make_record(11, 200)]],
+        };
+        // Advance the clock past flush_max_age once both records are buffered (after 2 polls).
+        let mut polls = 0_usize;
+        let mut stop_after_three = move |result: &super::CompactionPollResult| {
+            polls += 1;
+            if polls == 2 {
+                advance_clock.advance(std::time::Duration::from_mins(2));
+            }
+            result.polled_records == 0
+        };
+
+        let result = super::run_compactor_loop_with_clock(
+            &mut poller,
+            &block_writer,
+            &sink,
+            &committer,
+            super::CompactionLoopConfig {
+                wal_topic: crate::WAL_TOPIC.to_string(),
+                poll_timeout: std::time::Duration::from_millis(1),
+                flush_max_rows: 50_000,
+                flush_max_age: std::time::Duration::from_mins(1),
+            },
+            &mut stop_after_three,
+            clock.as_ref(),
+        )
+        .await
+        .expect("run compactor loop with clock");
+
+        // Both records land in one age-triggered block; commit through offset 11 -> 12.
+        assert!(result.writes == 1);
+        assert!(
+            result.committed_offsets
+                == vec![super::CompactionPartitionOffset {
+                    partition: 0,
+                    offset: 12,
+                }]
+        );
+        assert!(*commit.calls.lock().expect("commit calls lock") == 1);
+        let manifests = sink.manifests.lock().expect("manifest lock");
+        assert!(manifests.len() == 1);
+        assert!(manifests[0].first_offset == 10);
+        assert!(manifests[0].last_offset == 11);
     }
 
     #[tokio::test]
@@ -2292,6 +2828,8 @@ mod tests {
             super::CompactionLoopConfig {
                 wal_topic: crate::WAL_TOPIC.to_string(),
                 poll_timeout: std::time::Duration::from_millis(1),
+                flush_max_rows: 50_000,
+                flush_max_age: std::time::Duration::from_hours(1),
             },
             |result| result.polled_records == 0,
         )
@@ -2300,8 +2838,184 @@ mod tests {
 
         assert!(result.polls == 2);
         assert!(result.polled_records == 1);
+        // Buffered for one poll, then flushed once on the empty-poll shutdown.
         assert!(result.writes == 1);
         assert!(consumer.commit_calls == 1);
+    }
+
+    #[tokio::test]
+    async fn run_compactor_consumer_loop_accumulates_multiple_polls_into_one_block() {
+        // Two below-threshold polls accumulate into ONE block and commit once.
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let block_writer = crabka_blockstore::BlockWriter::new(object_store);
+        let sink = RecordingIndexSink::default();
+        let make_record = |offset, timestamp| crabka_client_consumer::ConsumerRecord {
+            topic: crate::WAL_TOPIC.to_string(),
+            partition: 0,
+            offset,
+            leader_epoch: -1,
+            timestamp,
+            key: None,
+            value: Some(bytes::Bytes::from(
+                float_record("tenant-a", "up", "api", timestamp)
+                    .encode()
+                    .expect("encode wal"),
+            )),
+            headers: Vec::new(),
+        };
+        let mut consumer = PollAndCommit {
+            batches: vec![vec![make_record(10, 100)], vec![make_record(11, 200)]],
+            commit_calls: 0,
+        };
+
+        let result = super::run_compactor_consumer_loop(
+            &mut consumer,
+            &block_writer,
+            &sink,
+            super::CompactionLoopConfig {
+                wal_topic: crate::WAL_TOPIC.to_string(),
+                poll_timeout: std::time::Duration::from_millis(1),
+                flush_max_rows: 50_000,
+                flush_max_age: std::time::Duration::from_hours(1),
+            },
+            |result| result.polled_records == 0,
+        )
+        .await
+        .expect("run compactor consumer loop");
+
+        assert!(result.polls == 3);
+        assert!(result.polled_records == 2);
+        // Single block + single commit for the whole two-poll buffer.
+        assert!(result.writes == 1);
+        assert!(consumer.commit_calls == 1);
+        let manifests = sink.manifests.lock().expect("manifest lock");
+        assert!(manifests.len() == 1);
+        assert!(manifests[0].first_offset == 10);
+        assert!(manifests[0].last_offset == 11);
+        assert!(manifests[0].row_count == 2);
+    }
+
+    /// Index sink that appends an ordered event marker shared with a committer,
+    /// so a test can assert block/index writes precede the offset commit.
+    struct OrderingIndexSink {
+        store: Arc<dyn ObjectStore>,
+        events: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl super::CompactionIndexSink for OrderingIndexSink {
+        async fn write_manifest(
+            &self,
+            manifest: &super::CompactionIndexManifest,
+        ) -> Result<(), super::CompactionIndexError> {
+            // The block object is written before this sink runs, so assert it is
+            // already durable when the index manifest lands.
+            let head = self
+                .store
+                .head(&object_store::path::Path::from(manifest.block_key.clone()))
+                .await;
+            assert!(
+                head.is_ok(),
+                "block object must exist before index manifest"
+            );
+            self.events
+                .lock()
+                .expect("events lock")
+                .push(format!("index:{}", manifest.block_key));
+            Ok(())
+        }
+    }
+
+    /// Committer that asserts the buffered block object is durable, then records
+    /// the commit event after the block/index writes.
+    struct OrderingCommitter {
+        store: Arc<dyn ObjectStore>,
+        events: Arc<Mutex<Vec<String>>>,
+        block_key: String,
+    }
+
+    #[async_trait]
+    impl super::CompactionOffsetCommitter for OrderingCommitter {
+        async fn commit_offsets(
+            &self,
+            offsets: &[super::CompactionPartitionOffset],
+        ) -> Result<(), super::CompactionCommitError> {
+            // Commits must only happen after the block is durably written.
+            let head = self
+                .store
+                .head(&object_store::path::Path::from(self.block_key.clone()))
+                .await;
+            assert!(head.is_ok(), "block must be durable before offset commit");
+            for offset in offsets {
+                self.events
+                    .lock()
+                    .expect("events lock")
+                    .push(format!("commit:{}", offset.offset));
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn run_compactor_loop_commits_offsets_only_after_durable_block_write() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let block_writer = crabka_blockstore::BlockWriter::new(object_store.clone());
+        let events = Arc::new(Mutex::new(Vec::<String>::new()));
+        let block_key = super::compaction_partition_object_key(
+            "tenant-a",
+            super::MetricBlockKind::Float,
+            0,
+            10,
+            11,
+        );
+        let sink = OrderingIndexSink {
+            store: object_store.clone(),
+            events: Arc::clone(&events),
+        };
+        let committer = OrderingCommitter {
+            store: object_store.clone(),
+            events: Arc::clone(&events),
+            block_key: block_key.clone(),
+        };
+        let make_record = |offset, timestamp| crabka_client_consumer::ConsumerRecord {
+            topic: crate::WAL_TOPIC.to_string(),
+            partition: 0,
+            offset,
+            leader_epoch: -1,
+            timestamp,
+            key: None,
+            value: Some(bytes::Bytes::from(
+                float_record("tenant-a", "up", "api", timestamp)
+                    .encode()
+                    .expect("encode wal"),
+            )),
+            headers: Vec::new(),
+        };
+        let mut poller = QueuePoller {
+            batches: vec![vec![make_record(10, 100)], vec![make_record(11, 200)]],
+        };
+
+        let result = super::run_compactor_loop(
+            &mut poller,
+            &block_writer,
+            &sink,
+            &committer,
+            super::CompactionLoopConfig {
+                wal_topic: crate::WAL_TOPIC.to_string(),
+                poll_timeout: std::time::Duration::from_millis(1),
+                flush_max_rows: 50_000,
+                flush_max_age: std::time::Duration::from_hours(1),
+            },
+            |result| result.polled_records == 0,
+        )
+        .await
+        .expect("run compactor loop");
+
+        assert!(result.writes == 1);
+        // Index manifest write (which only runs after the durable block put) must
+        // precede the offset commit in the recorded event order.
+        let recorded = events.lock().expect("events lock").clone();
+        assert!(recorded == vec![format!("index:{block_key}"), "commit:12".to_string()]);
     }
 
     struct PollAndCommit {

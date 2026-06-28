@@ -42,8 +42,10 @@ use std::time::Duration;
 
 use opentelemetry::KeyValue;
 use opentelemetry::trace::TracerProvider as _;
-use opentelemetry_otlp::{Protocol, SpanExporter, WithExportConfig};
+use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
+use opentelemetry_otlp::{LogExporter, Protocol, SpanExporter, WithExportConfig};
 use opentelemetry_sdk::Resource;
+use opentelemetry_sdk::logs::SdkLoggerProvider;
 use opentelemetry_sdk::propagation::TraceContextPropagator;
 use opentelemetry_sdk::trace::{Sampler, SdkTracerProvider};
 use tracing_subscriber::layer::SubscriberExt as _;
@@ -196,6 +198,27 @@ impl OtlpConfig {
         Ok(exporter)
     }
 
+    /// OTLP **log** exporter, mirroring [`Self::build_exporter`] (spans). Lets
+    /// services ship their `tracing` logs over OTLP to the logs pipeline instead
+    /// of relying on container-stdout tailing.
+    fn build_log_exporter(&self) -> Result<LogExporter, TelemetryError> {
+        let builder = LogExporter::builder();
+        let exporter = match self.protocol {
+            OtlpProtocol::Grpc => builder
+                .with_tonic()
+                .with_endpoint(self.endpoint.clone())
+                .with_timeout(self.timeout)
+                .build()?,
+            OtlpProtocol::HttpProtobuf => builder
+                .with_http()
+                .with_protocol(Protocol::HttpBinary)
+                .with_endpoint(self.endpoint.clone())
+                .with_timeout(self.timeout)
+                .build()?,
+        };
+        Ok(exporter)
+    }
+
     fn resource(&self) -> Resource {
         Resource::builder()
             .with_service_name(self.service_name.clone())
@@ -226,15 +249,22 @@ fn otel_filter(default: &str, get: impl Fn(&str) -> Option<String>) -> EnvFilter
 #[must_use = "hold the guard for the process lifetime and call shutdown() before exit"]
 pub struct TelemetryGuard {
     provider: Option<SdkTracerProvider>,
+    logger_provider: Option<SdkLoggerProvider>,
 }
 
 impl TelemetryGuard {
-    /// Flush and shut down the OTLP exporter. No-op when OTLP is disabled.
+    /// Flush and shut down the OTLP exporters (traces + logs). No-op when OTLP
+    /// is disabled.
     pub fn shutdown(self) {
         if let Some(provider) = self.provider
             && let Err(e) = provider.shutdown()
         {
             tracing::warn!(error = %e, "OTLP tracer provider shutdown error");
+        }
+        if let Some(logger_provider) = self.logger_provider
+            && let Err(e) = logger_provider.shutdown()
+        {
+            tracing::warn!(error = %e, "OTLP logger provider shutdown error");
         }
     }
 }
@@ -263,7 +293,10 @@ pub fn init(
 
     let Some(cfg) = otlp else {
         tracing_subscriber::registry().with(fmt_layer).init();
-        return Ok(TelemetryGuard { provider: None });
+        return Ok(TelemetryGuard {
+            provider: None,
+            logger_provider: None,
+        });
     };
 
     let exporter = cfg.build_exporter()?;
@@ -282,20 +315,37 @@ pub fn init(
         .with_location(false)
         .with_filter(otel_filter(otel_default_filter, |k| std::env::var(k).ok()));
 
+    // OTLP LOGS: a `tracing` → OTLP-log-record bridge so services ship their
+    // logs over OTLP (alloy:4317 → logs-distributor) — Docker-stdout tailing
+    // doesn't stream on Docker Desktop. Quiet the OTLP/transport stack on THIS
+    // layer so the exporter's own events can't feed back into more log records.
+    let log_exporter = cfg.build_log_exporter()?;
+    let logger_provider = SdkLoggerProvider::builder()
+        .with_batch_exporter(log_exporter)
+        .with_resource(cfg.resource())
+        .build();
+    let logs_default = format!(
+        "{otel_default_filter},opentelemetry=warn,opentelemetry_sdk=warn,opentelemetry_otlp=warn,hyper_util=warn,tonic=warn,h2=warn,tower=warn"
+    );
+    let otel_logs_layer = OpenTelemetryTracingBridge::new(&logger_provider)
+        .with_filter(otel_filter(&logs_default, |k| std::env::var(k).ok()));
+
     tracing_subscriber::registry()
         .with(fmt_layer)
         .with(otel_layer)
+        .with(otel_logs_layer)
         .init();
 
     tracing::info!(
         endpoint = %cfg.endpoint,
         protocol = ?cfg.protocol,
         sample_ratio = cfg.sample_ratio,
-        "OTLP distributed tracing enabled"
+        "OTLP distributed tracing + logs enabled"
     );
 
     Ok(TelemetryGuard {
         provider: Some(provider),
+        logger_provider: Some(logger_provider),
     })
 }
 

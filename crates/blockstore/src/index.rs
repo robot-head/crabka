@@ -329,15 +329,31 @@ impl Index {
             let Some(labels) = tenant_index.series.get(fp) else {
                 continue;
             };
-            let projected = label_names
-                .iter()
-                .filter_map(|name| {
-                    labels
-                        .get(name)
-                        .map(|value| (name.clone(), value.to_string()))
-                })
-                .collect::<Vec<_>>();
-            if !projected.is_empty() || label_names.is_empty() {
+            // An empty `label_names` means "return the full label set" (the
+            // Prometheus/Loki/Pyroscope `/series` convention). Projecting onto an
+            // empty name list previously yielded one empty label set (`[{}]`),
+            // which broke Grafana's Pyroscope label autocomplete.
+            let mut projected = if label_names.is_empty() {
+                labels
+                    .iter()
+                    .map(|(name, value)| (name.clone(), value.clone()))
+                    .collect::<Vec<_>>()
+            } else {
+                label_names
+                    .iter()
+                    .filter_map(|name| {
+                        labels
+                            .get(name)
+                            .map(|value| (name.clone(), value.to_string()))
+                    })
+                    .collect::<Vec<_>>()
+            };
+            // Pyroscope's `/series` emits each set's labels SORTED by name. The
+            // full-label-set form already iterates the `BTreeMap` in key order, but
+            // the projected form follows the request's `label_names` order, so sort
+            // unconditionally to keep the wire order identical to Pyroscope's.
+            projected.sort();
+            if !projected.is_empty() {
                 out.insert(projected);
             }
         }
@@ -1151,6 +1167,53 @@ mod tests {
         let none =
             idx.series_for_fingerprints("nope", &BTreeSet::from([web_prod]), &["app".to_string()]);
         assert!(none.is_empty());
+    }
+
+    #[test]
+    fn series_for_fingerprints_projection_is_sorted_by_name() {
+        // Pyroscope's `/series` emits each set's labels SORTED by name regardless
+        // of the request's `labelNames` order. Request the projection in REVERSE
+        // sorted order (`env` before `app`) and assert the response is still
+        // `[app, env]` — the wire order the Grafana drilldown compares against.
+        let idx = seed();
+        let web_prod = labels(&[("app", "web"), ("env", "prod")]).fingerprint();
+        let got = idx.series_for_fingerprints(
+            "t",
+            &BTreeSet::from([web_prod]),
+            &["env".to_string(), "app".to_string()],
+        );
+        assert!(
+            got == vec![vec![
+                ("app".to_string(), "web".to_string()),
+                ("env".to_string(), "prod".to_string()),
+            ]]
+        );
+    }
+
+    #[test]
+    fn series_for_fingerprints_empty_names_returns_full_label_sets() {
+        // Empty `label_names` means "return all labels" (the
+        // Prometheus/Loki/Pyroscope `/series` convention). Previously this
+        // returned a single empty label set (`[{}]`), breaking Grafana's
+        // Pyroscope label autocomplete.
+        let idx = seed();
+        let api_prod = labels(&[("app", "api"), ("env", "prod")]).fingerprint();
+        let api_dev = labels(&[("app", "api"), ("env", "dev")]).fingerprint();
+        let got = idx.series_for_fingerprints("t", &BTreeSet::from([api_prod, api_dev]), &[]);
+        assert!(got.len() == 2);
+        for series in &got {
+            assert!(!series.is_empty());
+            assert!(series.iter().any(|(k, _)| k == "app"));
+            assert!(series.iter().any(|(k, _)| k == "env"));
+        }
+        assert!(got.contains(&vec![
+            ("app".to_string(), "api".to_string()),
+            ("env".to_string(), "prod".to_string()),
+        ]));
+        assert!(got.contains(&vec![
+            ("app".to_string(), "api".to_string()),
+            ("env".to_string(), "dev".to_string()),
+        ]));
     }
 
     #[test]

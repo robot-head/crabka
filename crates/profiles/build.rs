@@ -11,6 +11,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "proto/google/v1/profile.proto",
         "proto/push/v1/push.proto",
         "proto/querier/v1/querier.proto",
+        "proto/settings/v1/settings.proto",
         "proto/opentelemetry/proto/collector/profiles/v1development/profiles_service.proto",
     ];
     let includes = ["proto"];
@@ -25,6 +26,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "proto/google/v1/profile.proto",
         "proto/push/v1/push.proto",
         "proto/querier/v1/querier.proto",
+        "proto/settings/v1/settings.proto",
         "proto/opentelemetry/proto/common/v1/common.proto",
         "proto/opentelemetry/proto/resource/v1/resource.proto",
         "proto/opentelemetry/proto/profiles/v1development/profiles.proto",
