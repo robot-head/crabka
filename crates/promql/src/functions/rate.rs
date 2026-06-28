@@ -333,6 +333,77 @@ mod tests {
         (left - right).abs() < 1e-9
     }
 
+    fn timestamp_range(windows: &[&[i64]]) -> ArrayRef {
+        let mut values = Vec::new();
+        let mut ranges = Vec::new();
+        let mut offset = 0_u32;
+        for window in windows {
+            let len = u32::try_from(window.len()).unwrap();
+            values.extend_from_slice(window);
+            ranges.push((offset, len));
+            offset += len;
+        }
+        let range = RangeArray::from_ranges(Arc::new(Int64Array::from(values)) as ArrayRef, ranges)
+            .unwrap();
+        Arc::new(range.into_dict_array().unwrap())
+    }
+
+    fn value_range(windows: &[&[f64]]) -> ArrayRef {
+        let mut values = Vec::new();
+        let mut ranges = Vec::new();
+        let mut offset = 0_u32;
+        for window in windows {
+            let len = u32::try_from(window.len()).unwrap();
+            values.extend_from_slice(window);
+            ranges.push((offset, len));
+            offset += len;
+        }
+        let range =
+            RangeArray::from_ranges(Arc::new(Float64Array::from(values)) as ArrayRef, ranges)
+                .unwrap();
+        Arc::new(range.into_dict_array().unwrap())
+    }
+
+    fn invoke_args(
+        eval_col: ArrayRef,
+        ts_dict: ArrayRef,
+        val_dict: ArrayRef,
+        range_ms: ColumnarValue,
+        rows: usize,
+    ) -> ScalarFunctionArgs {
+        let return_field = Arc::new(Field::new("out", DataType::Float64, true));
+        let arg_fields = vec![
+            Arc::new(Field::new(
+                "eval_timestamp",
+                eval_col.data_type().clone(),
+                false,
+            )),
+            Arc::new(Field::new(
+                "timestamp_range",
+                ts_dict.data_type().clone(),
+                false,
+            )),
+            Arc::new(Field::new(
+                "value_range",
+                val_dict.data_type().clone(),
+                false,
+            )),
+            Arc::new(Field::new("range_ms", DataType::Int64, false)),
+        ];
+        ScalarFunctionArgs {
+            args: vec![
+                ColumnarValue::Array(eval_col),
+                ColumnarValue::Array(ts_dict),
+                ColumnarValue::Array(val_dict),
+                range_ms,
+            ],
+            arg_fields,
+            number_rows: rows,
+            return_field,
+            config_options: Arc::new(datafusion::config::ConfigOptions::default()),
+        }
+    }
+
     /// Build the four invoke args (`eval_ts`, `timestamp_range`, `value_range`,
     /// `range_ms`) for a multi-step window set and run a `RateUdf` directly,
     /// returning each step's value or `None` for a no-value (NULL) cell.
@@ -367,33 +438,13 @@ mod tests {
         let eval_col: ArrayRef = Arc::new(Int64Array::from(eval.clone()));
 
         let rows = steps.len();
-        let return_field = Arc::new(Field::new("out", DataType::Float64, true));
-        let arg_fields = vec![
-            Arc::new(Field::new("eval_timestamp", DataType::Int64, false)),
-            Arc::new(Field::new(
-                "timestamp_range",
-                ts_dict.data_type().clone(),
-                false,
-            )),
-            Arc::new(Field::new(
-                "value_range",
-                val_dict.data_type().clone(),
-                false,
-            )),
-            Arc::new(Field::new("range_ms", DataType::Int64, false)),
-        ];
-        let args = ScalarFunctionArgs {
-            args: vec![
-                ColumnarValue::Array(eval_col),
-                ColumnarValue::Array(ts_dict),
-                ColumnarValue::Array(val_dict),
-                ColumnarValue::Scalar(ScalarValue::Int64(Some(range_ms))),
-            ],
-            arg_fields,
-            number_rows: rows,
-            return_field,
-            config_options: Arc::new(datafusion::config::ConfigOptions::default()),
-        };
+        let args = invoke_args(
+            eval_col,
+            ts_dict,
+            val_dict,
+            ColumnarValue::Scalar(ScalarValue::Int64(Some(range_ms))),
+            rows,
+        );
 
         let out = udf.invoke_with_args(args).unwrap();
         let array = out.into_array(rows).unwrap();
@@ -417,6 +468,75 @@ mod tests {
             .into_iter()
             .map(|value| value.expect("expected a non-null value cell"))
             .collect()
+    }
+
+    #[test]
+    fn rate_udf_rejects_each_row_count_mismatch_independently() {
+        let udf = RateUdf::new(RateFamily::Rate);
+        let eval: ArrayRef = Arc::new(Int64Array::from(vec![60_000_i64]));
+        let timestamps = timestamp_range(&[&[0, 60_000]]);
+        let values = value_range(&[&[1.0, 2.0]]);
+        let range_ms = ColumnarValue::Scalar(ScalarValue::Int64(Some(60_000)));
+
+        assert!(
+            udf.invoke_with_args(invoke_args(
+                Arc::clone(&eval),
+                timestamp_range(&[&[0, 60_000], &[0, 60_000]]),
+                Arc::clone(&values),
+                range_ms.clone(),
+                1,
+            ))
+            .is_err()
+        );
+        assert!(
+            udf.invoke_with_args(invoke_args(
+                Arc::clone(&eval),
+                Arc::clone(&timestamps),
+                value_range(&[&[1.0, 2.0], &[1.0, 2.0]]),
+                range_ms.clone(),
+                1,
+            ))
+            .is_err()
+        );
+        assert!(
+            udf.invoke_with_args(invoke_args(
+                Arc::new(Int64Array::from(vec![60_000_i64, 120_000])),
+                timestamps,
+                values,
+                range_ms,
+                1,
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn rate_udf_rejects_empty_or_null_range_ms_array() {
+        let udf = RateUdf::new(RateFamily::Rate);
+        let eval: ArrayRef = Arc::new(Int64Array::from(vec![60_000_i64]));
+        let timestamps = timestamp_range(&[&[0, 60_000]]);
+        let values = value_range(&[&[1.0, 2.0]]);
+
+        assert!(
+            udf.invoke_with_args(invoke_args(
+                Arc::clone(&eval),
+                Arc::clone(&timestamps),
+                Arc::clone(&values),
+                ColumnarValue::Array(Arc::new(Int64Array::from(Vec::<i64>::new()))),
+                1,
+            ))
+            .is_err()
+        );
+        assert!(
+            udf.invoke_with_args(invoke_args(
+                eval,
+                timestamps,
+                values,
+                ColumnarValue::Array(Arc::new(Int64Array::from(vec![None::<i64>]))),
+                1,
+            ))
+            .is_err()
+        );
     }
 
     /// `prom_rate` over the engine's counter window reproduces 5/300 — the same

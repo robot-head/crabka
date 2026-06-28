@@ -226,11 +226,121 @@ mod tests {
     use arrow::compute::concat_batches;
     use arrow::datatypes::{DataType, Field, Schema};
     use assert2::assert;
+    use datafusion::catalog::MemTable;
     use datafusion::datasource::memory::MemorySourceConfig;
+    use datafusion::logical_expr::{Extension, UserDefinedLogicalNodeCore, col};
     use datafusion::physical_plan::collect;
+    use datafusion::physical_plan::display::DisplayableExecutionPlan;
     use datafusion::prelude::SessionContext;
 
     use super::*;
+
+    async fn logical_input() -> LogicalPlan {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("timestamp", DataType::Int64, false),
+            Field::new("value", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Int64Array::from(vec![100_i64])),
+                Arc::new(Float64Array::from(vec![1.0])),
+            ],
+        )
+        .unwrap();
+        let ctx = SessionContext::new();
+        let table = MemTable::try_new(schema, vec![vec![batch]]).unwrap();
+        ctx.register_table("leaf", Arc::new(table)).unwrap();
+        ctx.table("leaf")
+            .await
+            .unwrap()
+            .into_optimized_plan()
+            .unwrap()
+    }
+
+    fn physical_input() -> Arc<dyn ExecutionPlan> {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("timestamp", DataType::Int64, false),
+            Field::new("value", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Int64Array::from(vec![100_i64])),
+                Arc::new(Float64Array::from(vec![1.0])),
+            ],
+        )
+        .unwrap();
+        MemorySourceConfig::try_new_exec(&[vec![batch]], schema, None).unwrap()
+    }
+
+    #[tokio::test]
+    async fn logical_node_reports_identity_explain_and_rejects_bad_rewrites() {
+        let input = logical_input().await;
+        let node = SeriesNormalize {
+            offset_ms: 123,
+            time_index: "timestamp".to_string(),
+            need_filter_out_nan: true,
+            input: input.clone(),
+        };
+
+        assert!(UserDefinedLogicalNodeCore::name(&node) == "SeriesNormalize");
+        let plan = LogicalPlan::Extension(Extension {
+            node: Arc::new(node),
+        });
+        let explain = format!("{plan}");
+        assert!(
+            explain
+                .starts_with("PromSeriesNormalize: time=timestamp, offset_ms=123, filter_nan=true")
+        );
+        assert!(explain.contains("TableScan: leaf projection=[timestamp, value]"));
+
+        let node = SeriesNormalize {
+            offset_ms: 123,
+            time_index: "timestamp".to_string(),
+            need_filter_out_nan: true,
+            input: input.clone(),
+        };
+        assert!(
+            node.with_exprs_and_inputs(vec![col("timestamp")], vec![input.clone()])
+                .is_err()
+        );
+        assert!(node.with_exprs_and_inputs(vec![], vec![]).is_err());
+        let rewritten = node
+            .with_exprs_and_inputs(vec![], vec![input])
+            .expect("valid rewrite");
+        assert!(rewritten.offset_ms == 123);
+        assert!(rewritten.time_index == "timestamp");
+        assert!(rewritten.need_filter_out_nan);
+    }
+
+    #[test]
+    fn physical_node_reports_identity_display_ordering_and_rejects_bad_children() {
+        let input = physical_input();
+        let exec = Arc::new(SeriesNormalizeExec::new(
+            123,
+            "timestamp".to_string(),
+            true,
+            Arc::clone(&input),
+        ));
+
+        assert!(exec.name() == "SeriesNormalizeExec");
+        assert!(
+            format!(
+                "{}",
+                DisplayableExecutionPlan::new(exec.as_ref()).indent(false)
+            ) == "PromSeriesNormalizeExec: time=timestamp, offset_ms=123, filter_nan=true\n  DataSourceExec: partitions=1, partition_sizes=[1]\n"
+        );
+        assert!(exec.maintains_input_order() == vec![false]);
+        assert!(Arc::clone(&exec).with_new_children(vec![]).is_err());
+        assert!(
+            Arc::clone(&exec)
+                .with_new_children(vec![input])
+                .expect("valid child rewrite")
+                .name()
+                == "SeriesNormalizeExec"
+        );
+    }
 
     #[tokio::test]
     async fn sorts_by_time_and_drops_nan() {
