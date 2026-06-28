@@ -1820,9 +1820,9 @@ dependencies = [
 
 [[package]]
 name = "columnar"
-version = "0.13.0"
+version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "31b280b1509d6a79dccc29a809a4eda5916af652d479afb0e27f7718af6639f1"
+checksum = "94063ab5cdb61ed8e5a8294c3c7cc8466c1a9eafc7b9ca02b2a521ea06e52d92"
 dependencies = [
  "bytemuck",
  "columnar_derive",
