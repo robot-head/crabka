@@ -126,19 +126,19 @@ impl<'a> JsonPathParser<'a> {
         while self.pos < self.input.len() {
             match self.peek() {
                 Some('.') => {
-                    self.advance_one_char();
+                    self.pos = self.pos.saturating_add('.'.len_utf8());
                     let field = self.parse_field_name().ok_or_else(|| {
                         template_parse_error("expected json field name after '.'")
                     })?;
                     parts.push(JsonPathPart::Field(field));
                 }
                 Some('[') => {
-                    self.advance_one_char();
+                    self.pos = self.pos.saturating_add('['.len_utf8());
                     parts.push(self.parse_bracket_part()?);
                     if self.peek() != Some(']') {
                         return Err(template_parse_error("expected closing json path bracket"));
                     }
-                    self.advance_one_char();
+                    self.pos = self.pos.saturating_add(']'.len_utf8());
                 }
                 _ => return Err(template_parse_error("expected json path component")),
             }
@@ -154,7 +154,7 @@ impl<'a> JsonPathParser<'a> {
         let start = self.pos;
         while let Some(ch) = self.peek() {
             if is_json_path_field_name_char(ch) {
-                self.advance_one_char();
+                self.pos = self.pos.saturating_add(ch.len_utf8());
             } else {
                 break;
             }
@@ -169,7 +169,7 @@ impl<'a> JsonPathParser<'a> {
 
         let start = self.pos;
         while self.peek().is_some_and(|ch| ch.is_ascii_digit()) {
-            self.pos += 1;
+            self.pos = self.pos.saturating_add('0'.len_utf8());
         }
         if self.pos == start {
             return Err(template_parse_error("expected json path array index"));
@@ -181,17 +181,17 @@ impl<'a> JsonPathParser<'a> {
     }
 
     fn parse_bracket_string(&mut self) -> Result<String, ParseError> {
-        self.pos += 1;
+        self.pos = self.pos.saturating_add('"'.len_utf8());
         let mut out = String::new();
         while let Some(ch) = self.peek() {
-            self.pos += ch.len_utf8();
+            self.pos = self.pos.saturating_add(ch.len_utf8());
             match ch {
                 '"' => return Ok(out),
                 '\\' => {
                     let Some(escaped) = self.peek() else {
                         return Err(template_parse_error("expected escaped json path character"));
                     };
-                    self.pos += escaped.len_utf8();
+                    self.pos = self.pos.saturating_add(escaped.len_utf8());
                     out.push(decode_quoted_escape(escaped));
                 }
                 _ => out.push(ch),
@@ -203,15 +203,6 @@ impl<'a> JsonPathParser<'a> {
     fn peek(&self) -> Option<char> {
         self.input[self.pos..].chars().next()
     }
-
-    fn advance_one_char(&mut self) {
-        let next = self
-            .input
-            .get(self.pos..)
-            .and_then(|remaining| remaining.char_indices().nth(1))
-            .map_or(self.input.len(), |(offset, _)| self.pos + offset);
-        self.pos = next;
-    }
 }
 
 fn is_json_path_field_name_char(ch: char) -> bool {
@@ -220,7 +211,7 @@ fn is_json_path_field_name_char(ch: char) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{JsonExtraction, JsonPath, JsonPathPart};
+    use super::{JsonExtraction, JsonPath, JsonPathPart, LogfmtExtraction, LogfmtParserConfig};
 
     #[test]
     fn json_extraction_expression_returns_source_text() {
@@ -243,6 +234,39 @@ mod tests {
     }
 
     #[test]
+    fn json_path_parse_rejects_empty_dot_field_segments() {
+        assert!(JsonPath::parse(".request").is_err());
+        assert!(JsonPath::parse("request.").is_err());
+        assert!(JsonPath::parse("request..headers").is_err());
+    }
+
+    #[test]
+    fn json_path_parse_advances_over_array_indexes() {
+        assert_eq!(
+            JsonPath::parse("servers[10]").unwrap(),
+            JsonPath {
+                parts: vec![
+                    JsonPathPart::Field("servers".to_string()),
+                    JsonPathPart::Index(10),
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn json_path_bracket_strings_decode_escaped_characters() {
+        assert_eq!(
+            JsonPath::parse(r#"headers["quoted\"name"]"#).unwrap(),
+            JsonPath {
+                parts: vec![
+                    JsonPathPart::Field("headers".to_string()),
+                    JsonPathPart::Field("quoted\"name".to_string()),
+                ],
+            }
+        );
+    }
+
+    #[test]
     fn json_path_field_names_accept_identifier_punctuation() {
         assert_eq!(
             JsonPath::parse("trace:id.request-id._meta").unwrap(),
@@ -254,6 +278,21 @@ mod tests {
                 ],
             }
         );
+    }
+
+    #[test]
+    fn logfmt_flags_preserve_non_strict_keep_empty_config() {
+        let config = LogfmtParserConfig::flags(false, true).unwrap();
+
+        assert!(!config.strict());
+        assert!(config.keep_empty());
+    }
+
+    #[test]
+    fn logfmt_extractions_reject_empty_destination_or_source() {
+        assert!(LogfmtExtraction::same("").is_err());
+        assert!(LogfmtExtraction::rename("", "source").is_err());
+        assert!(LogfmtExtraction::rename("destination", "").is_err());
     }
 }
 
