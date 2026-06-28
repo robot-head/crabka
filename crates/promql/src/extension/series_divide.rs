@@ -92,10 +92,10 @@ impl SeriesDivideExec {
 
         Ok(boundaries
             .windows(2)
-            .filter_map(|window| {
+            .map(|window| {
                 let start = window[0];
                 let len = window[1] - start;
-                (len > 0).then(|| batch.slice(start, len))
+                batch.slice(start, len)
             })
             .collect())
     }
@@ -201,8 +201,11 @@ mod tests {
     use arrow::array::{Array, Int64Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
     use assert2::assert;
+    use datafusion::catalog::MemTable;
     use datafusion::datasource::memory::MemorySourceConfig;
+    use datafusion::logical_expr::{Extension, UserDefinedLogicalNodeCore, col};
     use datafusion::physical_plan::collect;
+    use datafusion::physical_plan::display::DisplayableExecutionPlan;
     use datafusion::prelude::SessionContext;
 
     use super::*;
@@ -215,6 +218,82 @@ mod tests {
             Field::new("timestamp", DataType::Int64, false),
         ]));
         RecordBatch::try_new(schema, vec![Arc::new(job), Arc::new(ts)]).unwrap()
+    }
+
+    async fn logical_input() -> LogicalPlan {
+        let batch = input_batch();
+        let schema = batch.schema();
+        let ctx = SessionContext::new();
+        let table = MemTable::try_new(schema, vec![vec![batch]]).unwrap();
+        ctx.register_table("leaf", Arc::new(table)).unwrap();
+        ctx.table("leaf")
+            .await
+            .unwrap()
+            .into_optimized_plan()
+            .unwrap()
+    }
+
+    fn physical_input() -> Arc<dyn ExecutionPlan> {
+        let batch = input_batch();
+        let schema = batch.schema();
+        MemorySourceConfig::try_new_exec(&[vec![batch]], schema, None).unwrap()
+    }
+
+    #[tokio::test]
+    async fn logical_node_reports_identity_explain_and_rejects_bad_rewrites() {
+        let input = logical_input().await;
+        let node = SeriesDivide {
+            tag_columns: vec!["job".to_string()],
+            input: input.clone(),
+        };
+
+        assert!(UserDefinedLogicalNodeCore::name(&node) == "SeriesDivide");
+        let plan = LogicalPlan::Extension(Extension {
+            node: Arc::new(node),
+        });
+        let explain = format!("{plan}");
+        assert!(explain.starts_with("PromSeriesDivide: tags=[\"job\"]"));
+        assert!(explain.contains("TableScan: leaf projection=[job, timestamp]"));
+
+        let node = SeriesDivide {
+            tag_columns: vec!["job".to_string()],
+            input: input.clone(),
+        };
+        assert!(
+            node.with_exprs_and_inputs(vec![col("job")], vec![input.clone()])
+                .is_err()
+        );
+        assert!(node.with_exprs_and_inputs(vec![], vec![]).is_err());
+        let rewritten = node
+            .with_exprs_and_inputs(vec![], vec![input])
+            .expect("valid rewrite");
+        assert!(rewritten.tag_columns == vec!["job"]);
+    }
+
+    #[test]
+    fn physical_node_reports_identity_display_ordering_and_rejects_bad_children() {
+        let input = physical_input();
+        let exec = Arc::new(SeriesDivideExec::new(
+            vec!["job".to_string()],
+            Arc::clone(&input),
+        ));
+
+        assert!(exec.name() == "SeriesDivideExec");
+        let display = format!(
+            "{}",
+            DisplayableExecutionPlan::new(exec.as_ref()).indent(false)
+        );
+        assert!(display.starts_with("PromSeriesDivideExec: tags=[\"job\"]"));
+        assert!(display.contains("DataSourceExec: partitions=1"));
+        assert!(exec.maintains_input_order() == vec![true]);
+        assert!(Arc::clone(&exec).with_new_children(vec![]).is_err());
+        assert!(
+            Arc::clone(&exec)
+                .with_new_children(vec![input])
+                .expect("valid child rewrite")
+                .name()
+                == "SeriesDivideExec"
+        );
     }
 
     #[tokio::test]

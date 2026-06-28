@@ -195,6 +195,7 @@ pub fn register_aggregate_udafs(ctx: &SessionContext) {
 mod tests {
     use arrow::array::{BooleanArray, Float64Array};
     use assert2::assert;
+    use datafusion::execution::FunctionRegistry;
 
     use super::*;
 
@@ -280,6 +281,13 @@ mod tests {
     }
 
     #[test]
+    fn accumulator_size_reports_struct_size() {
+        let acc = PromExtremumAccumulator::new(Extremum::Min);
+        assert!(acc.size() == std::mem::size_of_val(&acc));
+        assert!(acc.size() > 1);
+    }
+
+    #[test]
     fn merge_of_partial_states_matches_single_pass() {
         // Two partitions: one all-NaN, one with finite values. The merged result
         // is the min over the finite values (the all-NaN partition contributes a
@@ -321,6 +329,16 @@ mod tests {
     }
 
     #[test]
+    fn merge_ignores_unseen_partition_even_with_running_value() {
+        let running = Arc::new(Float64Array::from(vec![7.0])) as ArrayRef;
+        let seen = Arc::new(BooleanArray::from(vec![false])) as ArrayRef;
+
+        let mut merged = PromExtremumAccumulator::new(Extremum::Min);
+        merged.merge_batch(&[running, seen]).unwrap();
+        assert!(merged.evaluate().unwrap() == ScalarValue::Float64(None));
+    }
+
+    #[test]
     fn merge_of_all_nan_partitions_stays_nan() {
         let mut a = PromExtremumAccumulator::new(Extremum::Max);
         a.update_batch(&[Arc::new(Float64Array::from(vec![f64::NAN])) as ArrayRef])
@@ -337,5 +355,14 @@ mod tests {
         let mut merged = PromExtremumAccumulator::new(Extremum::Max);
         merged.merge_batch(&[running, seen]).unwrap();
         assert!(float(merged.evaluate().unwrap()).is_nan());
+    }
+
+    #[test]
+    fn register_installs_min_and_max_udafs() {
+        let ctx = SessionContext::new();
+        register_aggregate_udafs(&ctx);
+
+        assert!(ctx.udaf(PROM_MIN_UDAF_NAME).is_ok());
+        assert!(ctx.udaf(PROM_MAX_UDAF_NAME).is_ok());
     }
 }

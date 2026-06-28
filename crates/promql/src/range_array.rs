@@ -313,6 +313,21 @@ mod tests {
     }
 
     #[test]
+    fn basic_accessors_report_empty_state_and_exact_ranges() {
+        let values = Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])) as ArrayRef;
+        let empty = RangeArray::from_ranges(values.clone(), []).unwrap();
+        assert!(empty.len() == 0);
+        assert!(empty.is_empty());
+        assert!(empty.ranges().is_empty());
+
+        let range_array =
+            RangeArray::from_ranges(values, [(1_u32, 0_u32), (0, 2), (2, 1)]).unwrap();
+        assert!(range_array.len() == 3);
+        assert!(!range_array.is_empty());
+        assert!(range_array.ranges() == [(1, 0), (0, 2), (2, 1)]);
+    }
+
+    #[test]
     fn dict_array_round_trips_through_recordbatch_column() {
         let values = Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])) as ArrayRef;
         let range_array = RangeArray::from_ranges(values, [(0_u32, 2_u32), (1, 3)]).unwrap();

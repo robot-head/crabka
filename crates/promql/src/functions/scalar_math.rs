@@ -410,6 +410,26 @@ mod tests {
         (0..floats.len()).map(|i| floats.value(i)).collect()
     }
 
+    fn invoke_with_columns(
+        op: ScalarMathOp,
+        call_args: Vec<ColumnarValue>,
+        rows: usize,
+    ) -> DfResult<ColumnarValue> {
+        let udf = ScalarMathUdf::new(op);
+        let arg_fields = call_args
+            .iter()
+            .enumerate()
+            .map(|(index, _)| Arc::new(Field::new(format!("arg_{index}"), DataType::Float64, true)))
+            .collect();
+        udf.invoke_with_args(ScalarFunctionArgs {
+            args: call_args,
+            arg_fields,
+            number_rows: rows,
+            return_field: Arc::new(Field::new("out", DataType::Float64, true)),
+            config_options: Arc::new(datafusion::config::ConfigOptions::default()),
+        })
+    }
+
     fn bits_eq(left: f64, right: f64) -> bool {
         left.to_bits() == right.to_bits() || (left.is_nan() && right.is_nan())
     }
@@ -468,8 +488,44 @@ mod tests {
             run(ScalarMathOp::Clamp, &[0.0, 100.0], &[-5.0])[0],
             0.0
         ));
+        assert!(bits_eq(
+            run(ScalarMathOp::ClampMin, &[0.0], &[-0.0])[0],
+            -0.0
+        ));
+        assert!(bits_eq(
+            run(ScalarMathOp::ClampMax, &[-0.0], &[0.0])[0],
+            0.0
+        ));
         // A NaN bound yields NaN.
         assert!(run(ScalarMathOp::ClampMin, &[f64::NAN], &[3.0])[0].is_nan());
+    }
+
+    #[test]
+    fn scalar_bound_array_must_have_non_null_first_value() {
+        let values: ArrayRef = Arc::new(Float64Array::from(vec![1.0]));
+
+        assert!(
+            invoke_with_columns(
+                ScalarMathOp::ClampMin,
+                vec![
+                    ColumnarValue::Array(Arc::new(Float64Array::from(Vec::<f64>::new()))),
+                    ColumnarValue::Array(Arc::clone(&values)),
+                ],
+                1,
+            )
+            .is_err()
+        );
+        assert!(
+            invoke_with_columns(
+                ScalarMathOp::ClampMin,
+                vec![
+                    ColumnarValue::Array(Arc::new(Float64Array::from(vec![None::<f64>]))),
+                    ColumnarValue::Array(values),
+                ],
+                1,
+            )
+            .is_err()
+        );
     }
 
     #[test]

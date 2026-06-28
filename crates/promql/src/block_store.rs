@@ -781,6 +781,107 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn index_metadata_methods_report_float_and_histogram_series() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let base = url::Url::parse("memory:///").unwrap();
+        let mut floats = BlockStore::new(object_store.clone(), base.clone());
+        let mut histograms = BlockStore::new(object_store, base);
+
+        let up = labels(&[("__name__", "up"), ("instance", "a"), ("job", "api")]);
+        let latency = labels(&[
+            ("__name__", "http_request_duration_seconds"),
+            ("instance", "b"),
+            ("job", "api"),
+            ("le", "0.5"),
+        ]);
+        floats
+            .index_mut()
+            .add_series("tenant-a", up.fingerprint(), &up);
+        histograms
+            .index_mut()
+            .add_series("tenant-a", latency.fingerprint(), &latency);
+        let store = MetricBlockStore::with_histograms(floats, histograms);
+
+        let names = store.label_names("tenant-a", &[], 0, 10_000).await.unwrap();
+        assert!(names == vec!["__name__", "instance", "job", "le"]);
+
+        let job_values = store
+            .label_values("tenant-a", "job", &[], 0, 10_000)
+            .await
+            .unwrap();
+        assert!(job_values == vec!["api"]);
+        let instance_values = store
+            .label_values("tenant-a", "instance", &[], 0, 10_000)
+            .await
+            .unwrap();
+        assert!(instance_values == vec!["a", "b"]);
+
+        let mut active_series = store.cardinality_active_series("tenant-a").await.unwrap();
+        active_series.sort_by_key(|labels| labels.get("instance").unwrap_or("").to_string());
+        assert!(active_series == vec![up, latency]);
+
+        let label_names = store.cardinality_label_names("tenant-a").await.unwrap();
+        let name_counts = label_names
+            .iter()
+            .map(|stat| (stat.name.as_str(), stat.series_count))
+            .collect::<Vec<_>>();
+        assert!(name_counts == vec![("__name__", 2), ("instance", 2), ("job", 2), ("le", 1)]);
+
+        let label_values = store.cardinality_label_values("tenant-a").await.unwrap();
+        let value_counts = label_values
+            .iter()
+            .map(|stat| {
+                (
+                    stat.label_name.as_str(),
+                    stat.label_value.as_str(),
+                    stat.series_count,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            value_counts
+                == vec![
+                    ("job", "api", 2),
+                    ("__name__", "http_request_duration_seconds", 1),
+                    ("__name__", "up", 1),
+                    ("instance", "a", 1),
+                    ("instance", "b", 1),
+                    ("le", "0.5", 1),
+                ]
+        );
+
+        let stats = store.tsdb_stats("tenant-a").await.unwrap();
+        assert!(stats.head_stats.num_series == 2);
+        assert!(stats.head_stats.num_samples == 0);
+        assert!(stats.head_stats.num_chunks == 2);
+        assert!(stats.head_stats.min_time == 0);
+        assert!(stats.head_stats.max_time == 0);
+        assert!(
+            named_pairs(&stats.series_count_by_metric_name)
+                == vec![("http_request_duration_seconds", 1), ("up", 1)]
+        );
+        assert!(
+            named_pairs(&stats.label_value_count_by_label_name)
+                == vec![("__name__", 2), ("instance", 2), ("job", 1), ("le", 1)]
+        );
+        assert!(
+            named_pairs(&stats.memory_in_bytes_by_label_name)
+                == vec![("__name__", 47), ("instance", 18), ("job", 12), ("le", 5)]
+        );
+        assert!(
+            named_pairs(&stats.series_count_by_label_value_pair)
+                == vec![
+                    ("job=api", 2),
+                    ("__name__=http_request_duration_seconds", 1),
+                    ("__name__=up", 1),
+                    ("instance=a", 1),
+                    ("instance=b", 1),
+                    ("le=0.5", 1),
+                ]
+        );
+    }
+
+    #[tokio::test]
     async fn exemplars_reads_compacted_exemplar_sidecar_blocks() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let base = url::Url::parse("memory:///").unwrap();
@@ -838,6 +939,77 @@ mod tests {
         assert!(exemplars[0].labels.get("kind") == Some("slow"));
         assert!(exemplars[0].ts_ms == 10_500);
         assert!((exemplars[0].value - 7.0).abs() < f64::EPSILON);
+    }
+
+    #[tokio::test]
+    async fn exemplars_include_closed_range_boundaries_and_filter_outside_rows() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let base = url::Url::parse("memory:///").unwrap();
+        let writer_store = BlockStore::new(object_store.clone(), base.clone());
+
+        let series_labels = labels(&[("__name__", "http_requests_total"), ("job", "api")]);
+        let fp = series_labels.fingerprint();
+        let batch = exemplar_batch_from_rows(&[
+            (fp, 9_999, 1.0, "too-low", "s1", "kind", "outside"),
+            (fp, 10_000, 2.0, "start", "s2", "kind", "inside"),
+            (fp, 11_000, 3.0, "end", "s3", "kind", "inside"),
+            (fp, 11_001, 4.0, "too-high", "s4", "kind", "outside"),
+        ]);
+        let block_meta = writer_store
+            .writer()
+            .write_block(
+                "tenant-a",
+                "metrics/exemplars/0005.parquet",
+                exemplar_schema(),
+                &[batch],
+            )
+            .await
+            .unwrap();
+        let manifest = CompactionIndexManifest::from_block_meta(
+            MetricBlockKind::Exemplars,
+            &CompactionObjectPlan {
+                block_key: block_meta.object_key.clone(),
+                index_key: "metrics/exemplars/0005.index".to_string(),
+                first_offset: 0,
+                last_offset: 3,
+                row_count: block_meta.row_count,
+            },
+            &block_meta,
+            vec![CompactionSeriesLabels {
+                fingerprint: fp,
+                labels: series_labels.clone(),
+            }],
+        );
+
+        let fresh_store = BlockStore::new(object_store, base);
+        let store = MetricBlockStore::from_compaction_manifests(fresh_store, None, &[manifest]);
+        let exemplars = store
+            .exemplars(
+                "tenant-a",
+                &[crabka_blockstore::LabelMatcher {
+                    name: "job".to_string(),
+                    op: crabka_blockstore::MatchOp::Eq,
+                    value: "api".to_string(),
+                }],
+                10_000,
+                11_000,
+            )
+            .await
+            .unwrap();
+
+        assert!(exemplars.len() == 2);
+        assert!(exemplars[0].series_labels == series_labels);
+        assert!(exemplars[0].labels.get("trace_id") == Some("start"));
+        assert!(exemplars[0].labels.get("span_id") == Some("s2"));
+        assert!(exemplars[0].labels.get("kind") == Some("inside"));
+        assert!(exemplars[0].ts_ms == 10_000);
+        assert!(exemplars[0].value.to_bits() == 2.0_f64.to_bits());
+        assert!(exemplars[1].series_labels == series_labels);
+        assert!(exemplars[1].labels.get("trace_id") == Some("end"));
+        assert!(exemplars[1].labels.get("span_id") == Some("s3"));
+        assert!(exemplars[1].labels.get("kind") == Some("inside"));
+        assert!(exemplars[1].ts_ms == 11_000);
+        assert!(exemplars[1].value.to_bits() == 3.0_f64.to_bits());
     }
 
     #[tokio::test]
@@ -904,6 +1076,18 @@ mod tests {
         label_name: &str,
         label_value: &str,
     ) -> RecordBatch {
+        exemplar_batch_from_rows(&[(
+            fingerprint,
+            timestamp_ms,
+            value,
+            trace_id,
+            span_id,
+            label_name,
+            label_value,
+        )])
+    }
+
+    fn exemplar_batch_from_rows(rows: &[(u64, i64, f64, &str, &str, &str, &str)]) -> RecordBatch {
         let mut fingerprints = UInt64Builder::new();
         let mut timestamps = Int64Builder::new();
         let mut values = Float64Builder::new();
@@ -920,14 +1104,16 @@ mod tests {
         )
         .with_values_field(Field::new("value", DataType::Utf8, false));
 
-        fingerprints.append_value(fingerprint);
-        timestamps.append_value(timestamp_ms);
-        values.append_value(value);
-        trace_ids.append_value(trace_id);
-        span_ids.append_value(span_id);
-        labels.keys().append_value(label_name);
-        labels.values().append_value(label_value);
-        labels.append(true).unwrap();
+        for (fingerprint, timestamp_ms, value, trace_id, span_id, label_name, label_value) in rows {
+            fingerprints.append_value(*fingerprint);
+            timestamps.append_value(*timestamp_ms);
+            values.append_value(*value);
+            trace_ids.append_value(*trace_id);
+            span_ids.append_value(*span_id);
+            labels.keys().append_value(*label_name);
+            labels.values().append_value(*label_value);
+            labels.append(true).unwrap();
+        }
 
         let columns: Vec<ArrayRef> = vec![
             Arc::new(fingerprints.finish()),
@@ -970,5 +1156,12 @@ mod tests {
             Arc::new(units.finish()),
         ];
         RecordBatch::try_new(metadata_schema(), columns).unwrap()
+    }
+
+    fn named_pairs(stats: &[crate::NamedTsdbStat]) -> Vec<(&str, usize)> {
+        stats
+            .iter()
+            .map(|stat| (stat.name.as_str(), stat.value))
+            .collect()
     }
 }

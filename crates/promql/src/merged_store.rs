@@ -430,7 +430,8 @@ mod tests {
     use crabka_blockstore::Labels;
 
     use crate::{
-        EngineOpts, InMemoryMetricStore, MergedMetricStore, PromqlEngine, QueryResult, SampleValue,
+        EngineOpts, InMemoryMetricStore, MergedMetricStore, MetricStore, PromqlEngine, QueryResult,
+        SampleValue,
     };
 
     fn labels(pairs: &[(&str, &str)]) -> Labels {
@@ -463,6 +464,289 @@ mod tests {
         assert!(samples[0].labels == labels);
         assert!(samples[0].ts_ms == 20_000);
         assert!(samples[0].value == SampleValue::Float(2.0));
+    }
+
+    #[tokio::test]
+    async fn label_names_merges_cold_and_hot_series_metadata() {
+        let mut cold = InMemoryMetricStore::new();
+        let mut hot = InMemoryMetricStore::new();
+        cold.push_float(
+            "tenant-a",
+            labels(&[("__name__", "up"), ("instance", "a"), ("job", "api")]),
+            10_000,
+            1.0,
+        );
+        hot.push_float(
+            "tenant-a",
+            labels(&[("__name__", "up"), ("cluster", "prod"), ("job", "api")]),
+            20_000,
+            2.0,
+        );
+
+        let store = MergedMetricStore::new(cold, hot);
+        let names = store.label_names("tenant-a", &[], 0, 30_000).await.unwrap();
+
+        assert!(names == vec!["__name__", "cluster", "instance", "job"]);
+    }
+
+    #[tokio::test]
+    async fn label_values_merges_cold_and_hot_series_metadata() {
+        let mut cold = InMemoryMetricStore::new();
+        let mut hot = InMemoryMetricStore::new();
+        cold.push_float(
+            "tenant-a",
+            labels(&[("__name__", "up"), ("job", "api")]),
+            10_000,
+            1.0,
+        );
+        hot.push_float(
+            "tenant-a",
+            labels(&[("__name__", "up"), ("job", "worker")]),
+            20_000,
+            2.0,
+        );
+        hot.push_float(
+            "tenant-a",
+            labels(&[("__name__", "up"), ("job", "api")]),
+            30_000,
+            3.0,
+        );
+
+        let store = MergedMetricStore::new(cold, hot);
+        let values = store
+            .label_values("tenant-a", "job", &[], 0, 30_000)
+            .await
+            .unwrap();
+
+        assert!(values == vec!["api", "worker"]);
+    }
+
+    #[tokio::test]
+    async fn exemplars_merges_cold_and_hot_records() {
+        let mut cold = InMemoryMetricStore::new();
+        let mut hot = InMemoryMetricStore::new();
+        let series = labels(&[("__name__", "request_latency"), ("job", "api")]);
+        cold.push_exemplar(
+            "tenant-a",
+            series.clone(),
+            labels(&[("trace_id", "cold")]),
+            10_000,
+            1.0,
+        );
+        hot.push_exemplar(
+            "tenant-a",
+            series.clone(),
+            labels(&[("trace_id", "hot")]),
+            20_000,
+            2.0,
+        );
+
+        let store = MergedMetricStore::new(cold, hot);
+        let exemplars = store.exemplars("tenant-a", &[], 0, 30_000).await.unwrap();
+
+        assert!(exemplars.len() == 2);
+        assert!(exemplars[0].series_labels == series);
+        assert!(exemplars[0].labels == labels(&[("trace_id", "cold")]));
+        assert!(exemplars[0].ts_ms == 10_000);
+        assert!(exemplars[0].value.to_bits() == 1.0_f64.to_bits());
+        assert!(exemplars[1].series_labels == series);
+        assert!(exemplars[1].labels == labels(&[("trace_id", "hot")]));
+        assert!(exemplars[1].ts_ms == 20_000);
+        assert!(exemplars[1].value.to_bits() == 2.0_f64.to_bits());
+    }
+
+    #[tokio::test]
+    async fn metadata_merges_cold_and_hot_records() {
+        let mut cold = InMemoryMetricStore::new();
+        let mut hot = InMemoryMetricStore::new();
+        cold.push_metadata(
+            "tenant-a",
+            "requests_total",
+            "counter",
+            "requests",
+            "requests",
+        );
+        cold.push_metadata("tenant-a", "up", "gauge", "availability", "");
+        hot.push_metadata(
+            "tenant-a",
+            "requests_total",
+            "counter",
+            "requests",
+            "requests",
+        );
+        hot.push_metadata(
+            "tenant-a",
+            "latency_seconds",
+            "histogram",
+            "latency",
+            "seconds",
+        );
+
+        let store = MergedMetricStore::new(cold, hot);
+        let metadata = store.metadata("tenant-a", None).await.unwrap();
+        let fields = metadata
+            .iter()
+            .map(|record| {
+                (
+                    record.metric_family_name.as_str(),
+                    record.metric_type.as_str(),
+                    record.help.as_str(),
+                    record.unit.as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert!(
+            fields
+                == vec![
+                    ("latency_seconds", "histogram", "latency", "seconds"),
+                    ("requests_total", "counter", "requests", "requests"),
+                    ("up", "gauge", "availability", ""),
+                ]
+        );
+    }
+
+    #[tokio::test]
+    async fn cardinality_methods_merge_cold_and_hot_series() {
+        let mut cold = InMemoryMetricStore::new();
+        let mut hot = InMemoryMetricStore::new();
+        let api = labels(&[("__name__", "up"), ("instance", "a"), ("job", "api")]);
+        let worker = labels(&[("__name__", "up"), ("instance", "b"), ("job", "worker")]);
+        cold.push_float("tenant-a", api.clone(), 10_000, 1.0);
+        hot.push_float("tenant-a", worker.clone(), 20_000, 2.0);
+
+        let store = MergedMetricStore::new(cold, hot);
+        let mut active_series = store.cardinality_active_series("tenant-a").await.unwrap();
+        active_series.sort_by_key(|labels| labels.get("instance").unwrap_or("").to_string());
+        assert!(active_series == vec![api, worker]);
+
+        let label_names = store.cardinality_label_names("tenant-a").await.unwrap();
+        let name_counts = label_names
+            .iter()
+            .map(|stat| (stat.name.as_str(), stat.series_count))
+            .collect::<Vec<_>>();
+        assert!(name_counts == vec![("__name__", 2), ("instance", 2), ("job", 2)]);
+
+        let label_values = store.cardinality_label_values("tenant-a").await.unwrap();
+        let value_counts = label_values
+            .iter()
+            .map(|stat| {
+                (
+                    stat.label_name.as_str(),
+                    stat.label_value.as_str(),
+                    stat.series_count,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            value_counts
+                == vec![
+                    ("__name__", "up", 2),
+                    ("instance", "a", 1),
+                    ("instance", "b", 1),
+                    ("job", "api", 1),
+                    ("job", "worker", 1),
+                ]
+        );
+    }
+
+    #[tokio::test]
+    async fn tsdb_stats_merge_cold_and_hot_counts() {
+        let mut cold = InMemoryMetricStore::new();
+        let mut hot = InMemoryMetricStore::new();
+        cold.push_float(
+            "tenant-a",
+            labels(&[("__name__", "up"), ("job", "api")]),
+            10_000,
+            1.0,
+        );
+        cold.push_float(
+            "tenant-a",
+            labels(&[("__name__", "up"), ("job", "api")]),
+            20_000,
+            2.0,
+        );
+        hot.push_float(
+            "tenant-a",
+            labels(&[("__name__", "errors_total"), ("job", "worker")]),
+            30_000,
+            3.0,
+        );
+
+        let store = MergedMetricStore::new(cold, hot);
+        let stats = store.tsdb_stats("tenant-a").await.unwrap();
+
+        assert!(stats.head_stats.num_series == 2);
+        assert!(stats.head_stats.num_samples == 3);
+        assert!(stats.head_stats.num_chunks == 2);
+        assert!(stats.head_stats.min_time == 10_000);
+        assert!(stats.head_stats.max_time == 30_000);
+        assert!(
+            named_pairs(&stats.series_count_by_metric_name) == vec![("errors_total", 1), ("up", 1)]
+        );
+        assert!(
+            named_pairs(&stats.label_value_count_by_label_name)
+                == vec![("__name__", 2), ("job", 2)]
+        );
+        assert!(
+            named_pairs(&stats.series_count_by_label_value_pair)
+                == vec![
+                    ("__name__=errors_total", 1),
+                    ("__name__=up", 1),
+                    ("job=api", 1),
+                    ("job=worker", 1),
+                ]
+        );
+    }
+
+    #[tokio::test]
+    async fn tsdb_stats_ignore_empty_side_min_time() {
+        let mut hot_only = InMemoryMetricStore::new();
+        hot_only.push_float(
+            "tenant-a",
+            labels(&[("__name__", "up"), ("job", "api")]),
+            40_000,
+            1.0,
+        );
+        let store = MergedMetricStore::new(InMemoryMetricStore::new(), hot_only);
+        let stats = store.tsdb_stats("tenant-a").await.unwrap();
+        assert!(stats.head_stats.min_time == 40_000);
+
+        let mut cold_only = InMemoryMetricStore::new();
+        cold_only.push_float(
+            "tenant-a",
+            labels(&[("__name__", "up"), ("job", "api")]),
+            50_000,
+            1.0,
+        );
+        let store = MergedMetricStore::new(cold_only, InMemoryMetricStore::new());
+        let stats = store.tsdb_stats("tenant-a").await.unwrap();
+        assert!(stats.head_stats.min_time == 50_000);
+    }
+
+    #[tokio::test]
+    async fn tsdb_blocks_merges_cold_and_hot_blocks() {
+        let mut cold = InMemoryMetricStore::new();
+        let mut hot = InMemoryMetricStore::new();
+        cold.push_tsdb_block("tenant-a", "cold-b", 30_000, 40_000, 3, 1);
+        hot.push_tsdb_block("tenant-a", "hot-a", 10_000, 20_000, 2, 1);
+        cold.push_tsdb_block("tenant-a", "cold-a", 10_000, 15_000, 1, 1);
+
+        let store = MergedMetricStore::new(cold, hot);
+        let blocks = store.tsdb_blocks("tenant-a").await.unwrap();
+        let ids = blocks
+            .iter()
+            .map(|block| block.id.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(ids == vec!["cold-a", "hot-a", "cold-b"]);
+    }
+
+    fn named_pairs(stats: &[crate::NamedTsdbStat]) -> Vec<(&str, usize)> {
+        stats
+            .iter()
+            .map(|stat| (stat.name.as_str(), stat.value))
+            .collect()
     }
 
     #[test]

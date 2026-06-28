@@ -148,7 +148,9 @@ impl InstantManipulateExec {
         let mut grid_ts = self.start_ms;
         while grid_ts <= self.end_ms {
             while sample_cursor < timestamps.len() && timestamps.value(sample_cursor) <= grid_ts {
-                sample_cursor += 1;
+                sample_cursor = sample_cursor.checked_add(1).ok_or_else(|| {
+                    DataFusionError::Execution("sample cursor overflow".to_string())
+                })?;
             }
             if let Some(row) = sample_cursor.checked_sub(1) {
                 let sample_ts = timestamps.value(row);
@@ -262,11 +264,131 @@ mod tests {
     use arrow::compute::concat_batches;
     use arrow::datatypes::{DataType, Field, Schema};
     use assert2::assert;
+    use datafusion::catalog::MemTable;
     use datafusion::datasource::memory::MemorySourceConfig;
+    use datafusion::logical_expr::{Extension, UserDefinedLogicalNodeCore, col};
     use datafusion::physical_plan::collect;
+    use datafusion::physical_plan::display::DisplayableExecutionPlan;
     use datafusion::prelude::SessionContext;
 
     use super::*;
+
+    fn batch_from_rows(rows: &[(i64, f64)]) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("timestamp", DataType::Int64, false),
+            Field::new("value", DataType::Float64, false),
+        ]));
+        let timestamps = rows.iter().map(|(ts, _)| *ts).collect::<Vec<_>>();
+        let values = rows.iter().map(|(_, value)| *value).collect::<Vec<_>>();
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(timestamps)),
+                Arc::new(Float64Array::from(values)),
+            ],
+        )
+        .unwrap()
+    }
+
+    async fn logical_input() -> LogicalPlan {
+        let batch = batch_from_rows(&[(0, 1.0)]);
+        let schema = batch.schema();
+        let ctx = SessionContext::new();
+        let table = MemTable::try_new(schema, vec![vec![batch]]).unwrap();
+        ctx.register_table("leaf", Arc::new(table)).unwrap();
+        ctx.table("leaf")
+            .await
+            .unwrap()
+            .into_optimized_plan()
+            .unwrap()
+    }
+
+    fn physical_input() -> Arc<dyn ExecutionPlan> {
+        let batch = batch_from_rows(&[(0, 1.0)]);
+        let schema = batch.schema();
+        MemorySourceConfig::try_new_exec(&[vec![batch]], schema, None).unwrap()
+    }
+
+    #[tokio::test]
+    async fn logical_node_reports_identity_explain_and_rejects_bad_rewrites() {
+        let input = logical_input().await;
+        let node = InstantManipulate {
+            start_ms: 0,
+            end_ms: 60_000,
+            step_ms: 15_000,
+            lookback_delta_ms: 300_000,
+            time_index: "timestamp".to_string(),
+            field_column: "value".to_string(),
+            input: input.clone(),
+        };
+
+        assert!(UserDefinedLogicalNodeCore::name(&node) == "InstantManipulate");
+        let plan = LogicalPlan::Extension(Extension {
+            node: Arc::new(node),
+        });
+        let explain = format!("{plan}");
+        assert!(explain.starts_with(
+            "PromInstantManipulate: start_ms=0, end_ms=60000, step_ms=15000, lookback_delta_ms=300000"
+        ));
+        assert!(explain.contains("TableScan: leaf projection=[timestamp, value]"));
+
+        let node = InstantManipulate {
+            start_ms: 0,
+            end_ms: 60_000,
+            step_ms: 15_000,
+            lookback_delta_ms: 300_000,
+            time_index: "timestamp".to_string(),
+            field_column: "value".to_string(),
+            input: input.clone(),
+        };
+        assert!(
+            node.with_exprs_and_inputs(vec![col("timestamp")], vec![input.clone()])
+                .is_err()
+        );
+        assert!(node.with_exprs_and_inputs(vec![], vec![]).is_err());
+        let rewritten = node
+            .with_exprs_and_inputs(vec![], vec![input])
+            .expect("valid rewrite");
+        assert!(rewritten.start_ms == 0);
+        assert!(rewritten.end_ms == 60_000);
+        assert!(rewritten.step_ms == 15_000);
+        assert!(rewritten.lookback_delta_ms == 300_000);
+        assert!(rewritten.time_index == "timestamp");
+        assert!(rewritten.field_column == "value");
+    }
+
+    #[test]
+    fn physical_node_reports_identity_display_ordering_and_rejects_bad_children() {
+        let input = physical_input();
+        let exec = Arc::new(InstantManipulateExec::new(
+            0,
+            60_000,
+            15_000,
+            300_000,
+            "timestamp".to_string(),
+            "value".to_string(),
+            Arc::clone(&input),
+        ));
+
+        assert!(exec.name() == "InstantManipulateExec");
+        let display = format!(
+            "{}",
+            DisplayableExecutionPlan::new(exec.as_ref()).indent(false)
+        );
+        assert!(display.starts_with(
+            "PromInstantManipulateExec: start_ms=0, end_ms=60000, step_ms=15000, lookback_delta_ms=300000"
+        ));
+        assert!(display.contains("DataSourceExec: partitions=1"));
+        assert!(exec.maintains_input_order() == vec![false]);
+        assert!(Arc::clone(&exec).with_new_children(vec![]).is_err());
+        assert!(
+            Arc::clone(&exec)
+                .with_new_children(vec![input])
+                .expect("valid child rewrite")
+                .name()
+                == "InstantManipulateExec"
+        );
+    }
 
     #[tokio::test]
     async fn selects_latest_sample_within_lookback_for_each_grid_step() {
@@ -317,6 +439,28 @@ mod tests {
                 .collect::<Vec<_>>()
                 == vec![1.0, 2.0, 2.0]
         );
+    }
+
+    #[tokio::test]
+    async fn excludes_sample_at_exact_lookback_delta() {
+        let batch = batch_from_rows(&[(0, 1.0)]);
+        let schema = batch.schema();
+        let mem = MemorySourceConfig::try_new_exec(&[vec![batch]], schema, None).unwrap();
+
+        let exec = InstantManipulateExec::new(
+            300_000,
+            300_000,
+            60_000,
+            300_000,
+            "timestamp".into(),
+            "value".into(),
+            mem,
+        );
+        let ctx = SessionContext::new();
+        let out = collect(Arc::new(exec), ctx.task_ctx()).await.unwrap();
+
+        let rows = out.iter().map(RecordBatch::num_rows).sum::<usize>();
+        assert!(rows == 0);
     }
 
     #[tokio::test]

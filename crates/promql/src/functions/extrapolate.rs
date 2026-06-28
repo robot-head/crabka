@@ -95,11 +95,12 @@ pub fn extrapolated_rate(
         duration_to_end = average_duration_between_samples / 2.0;
     }
 
-    if is_counter && result > 0.0 && values[0] >= 0.0 {
+    if is_counter
+        && matches!(result.partial_cmp(&0.0), Some(std::cmp::Ordering::Greater))
+        && values[0] >= 0.0
+    {
         let duration_to_zero = sampled_interval * (values[0] / result);
-        if duration_to_zero < duration_to_start {
-            duration_to_start = duration_to_zero;
-        }
+        duration_to_start = duration_to_start.min(duration_to_zero);
     }
 
     let extrapolate_to_interval = sampled_interval + duration_to_start + duration_to_end;
@@ -200,6 +201,28 @@ mod tests {
         assert!(approx_eq(got, -2.0));
     }
 
+    /// Durations just beyond 110% of the average sample interval are capped to
+    /// half an interval, matching Prometheus' extrapolation threshold.
+    #[test]
+    fn extrapolation_threshold_uses_ten_percent_slack() {
+        let timestamps = [11_050_i64, 21_050];
+        let values = [2.0, 12.0];
+        let got =
+            extrapolated_rate(&timestamps, &values, 0, 21_050, 21_050, RangeKind::Delta).unwrap();
+        assert!(approx_eq(got, 15.0));
+    }
+
+    /// Counter extrapolation clamps the start duration to the extrapolated zero
+    /// point when the counter would otherwise project below zero.
+    #[test]
+    fn counter_zero_anchor_limits_start_extrapolation() {
+        let timestamps = [5_000_i64, 15_000];
+        let values = [1.0, 4.0];
+        let got = extrapolated_rate(&timestamps, &values, 0, 15_000, 15_000, RangeKind::Increase)
+            .unwrap();
+        assert!(approx_eq(got, 4.0));
+    }
+
     /// A single sample cannot form a rate: Prometheus yields no value.
     #[test]
     fn single_sample_yields_none() {
@@ -209,6 +232,16 @@ mod tests {
             extrapolated_rate(&timestamps, &values, 0, 60_000, 60_000, RangeKind::Rate).is_none()
         );
         assert!(instant_delta(&timestamps, &values, InstantKind::Irate).is_none());
+    }
+
+    /// Timestamp/value range arrays must be paired 1:1 before any arithmetic.
+    #[test]
+    fn mismatched_range_lengths_yield_none() {
+        let timestamps = [0_i64, 60_000];
+        let values = [1.0];
+        assert!(
+            extrapolated_rate(&timestamps, &values, 0, 60_000, 60_000, RangeKind::Rate).is_none()
+        );
     }
 
     /// A zero-width sampled interval (two coincident timestamps) yields no value.
@@ -254,5 +287,14 @@ mod tests {
         // idelta preserves the negative delta (gauge): 2 - 5 = -3.
         let idelta = instant_delta(&timestamps, &values, InstantKind::Idelta).unwrap();
         assert!(approx_eq(idelta, -3.0));
+    }
+
+    /// Equal adjacent counter samples are a zero rate, not a reset.
+    #[test]
+    fn irate_equal_samples_yield_zero_without_reset_clamp() {
+        let timestamps = [0_i64, 1_000];
+        let values = [5.0, 5.0];
+        let got = instant_delta(&timestamps, &values, InstantKind::Irate).unwrap();
+        assert!(approx_eq(got, 0.0));
     }
 }
