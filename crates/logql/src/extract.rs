@@ -1,0 +1,438 @@
+use std::collections::BTreeSet;
+
+use crate::ParseError;
+use crate::template::template_parse_error;
+use crate::util::decode_quoted_escape;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct JsonParserConfig {
+    extractions: Vec<JsonExtraction>,
+}
+
+impl JsonParserConfig {
+    pub fn new(extractions: Vec<JsonExtraction>) -> Result<Self, ParseError> {
+        if extractions.is_empty() {
+            return Err(template_parse_error("expected json extraction"));
+        }
+        let mut destinations = BTreeSet::new();
+        for extraction in &extractions {
+            if !destinations.insert(extraction.destination.clone()) {
+                return Err(template_parse_error(
+                    "json extraction destination appears more than once",
+                ));
+            }
+        }
+        Ok(Self { extractions })
+    }
+
+    #[must_use]
+    pub fn extractions(&self) -> &[JsonExtraction] {
+        &self.extractions
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct JsonExtraction {
+    destination: String,
+    expression: String,
+    path: JsonPath,
+}
+
+impl JsonExtraction {
+    pub fn new(
+        destination: impl Into<String>,
+        expression: impl Into<String>,
+    ) -> Result<Self, ParseError> {
+        let destination = destination.into();
+        let expression = expression.into();
+        if destination.is_empty() {
+            return Err(template_parse_error("expected json label name"));
+        }
+        let path = JsonPath::parse(&expression)?;
+        Ok(Self {
+            destination,
+            expression,
+            path,
+        })
+    }
+
+    #[must_use]
+    pub fn destination(&self) -> &str {
+        &self.destination
+    }
+
+    #[must_use]
+    pub fn expression(&self) -> &str {
+        &self.expression
+    }
+
+    pub(crate) fn evaluate<'a>(
+        &self,
+        value: &'a serde_json::Value,
+    ) -> Option<&'a serde_json::Value> {
+        self.path.evaluate(value)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct JsonPath {
+    parts: Vec<JsonPathPart>,
+}
+
+impl JsonPath {
+    fn parse(expression: &str) -> Result<Self, ParseError> {
+        let mut parser = JsonPathParser::new(expression);
+        parser.parse()
+    }
+
+    fn evaluate<'a>(&self, value: &'a serde_json::Value) -> Option<&'a serde_json::Value> {
+        let mut current = value;
+        for part in &self.parts {
+            match part {
+                JsonPathPart::Field(name) => {
+                    current = current.as_object()?.get(name)?;
+                }
+                JsonPathPart::Index(index) => {
+                    current = current.as_array()?.get(*index)?;
+                }
+            }
+        }
+        Some(current)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum JsonPathPart {
+    Field(String),
+    Index(usize),
+}
+
+struct JsonPathParser<'a> {
+    input: &'a str,
+    pos: usize,
+}
+
+impl<'a> JsonPathParser<'a> {
+    fn new(input: &'a str) -> Self {
+        Self { input, pos: 0 }
+    }
+
+    fn parse(&mut self) -> Result<JsonPath, ParseError> {
+        let mut parts = Vec::new();
+        if let Some(field) = self.parse_field_name() {
+            parts.push(JsonPathPart::Field(field));
+        }
+
+        while self.pos < self.input.len() {
+            match self.peek() {
+                Some('.') => {
+                    self.pos += 1;
+                    let field = self.parse_field_name().ok_or_else(|| {
+                        template_parse_error("expected json field name after '.'")
+                    })?;
+                    parts.push(JsonPathPart::Field(field));
+                }
+                Some('[') => {
+                    self.pos += 1;
+                    parts.push(self.parse_bracket_part()?);
+                    if self.peek() != Some(']') {
+                        return Err(template_parse_error("expected closing json path bracket"));
+                    }
+                    self.pos += 1;
+                }
+                _ => return Err(template_parse_error("expected json path component")),
+            }
+        }
+
+        if parts.is_empty() {
+            return Err(template_parse_error("expected json path expression"));
+        }
+        Ok(JsonPath { parts })
+    }
+
+    fn parse_field_name(&mut self) -> Option<String> {
+        let start = self.pos;
+        while let Some(ch) = self.peek() {
+            if ch == '_' || ch == ':' || ch == '-' || ch.is_ascii_alphanumeric() {
+                self.pos += ch.len_utf8();
+            } else {
+                break;
+            }
+        }
+        (self.pos > start).then(|| self.input[start..self.pos].to_string())
+    }
+
+    fn parse_bracket_part(&mut self) -> Result<JsonPathPart, ParseError> {
+        if self.peek() == Some('"') {
+            return self.parse_bracket_string().map(JsonPathPart::Field);
+        }
+
+        let start = self.pos;
+        while self.peek().is_some_and(|ch| ch.is_ascii_digit()) {
+            self.pos += 1;
+        }
+        if self.pos == start {
+            return Err(template_parse_error("expected json path array index"));
+        }
+        let index = self.input[start..self.pos]
+            .parse::<usize>()
+            .map_err(|_| template_parse_error("expected json path array index"))?;
+        Ok(JsonPathPart::Index(index))
+    }
+
+    fn parse_bracket_string(&mut self) -> Result<String, ParseError> {
+        self.pos += 1;
+        let mut out = String::new();
+        while let Some(ch) = self.peek() {
+            self.pos += ch.len_utf8();
+            match ch {
+                '"' => return Ok(out),
+                '\\' => {
+                    let Some(escaped) = self.peek() else {
+                        return Err(template_parse_error("expected escaped json path character"));
+                    };
+                    self.pos += escaped.len_utf8();
+                    out.push(decode_quoted_escape(escaped));
+                }
+                _ => out.push(ch),
+            }
+        }
+        Err(template_parse_error("expected closing json path string"))
+    }
+
+    fn peek(&self) -> Option<char> {
+        self.input[self.pos..].chars().next()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LogfmtParserConfig {
+    extractions: Vec<LogfmtExtraction>,
+    strict: bool,
+    keep_empty: bool,
+}
+
+impl LogfmtParserConfig {
+    pub fn new(extractions: Vec<LogfmtExtraction>) -> Result<Self, ParseError> {
+        Self::with_options(extractions, false, false)
+    }
+
+    pub fn flags(strict: bool, keep_empty: bool) -> Result<Self, ParseError> {
+        Self::with_options(Vec::new(), strict, keep_empty)
+    }
+
+    pub fn with_options(
+        extractions: Vec<LogfmtExtraction>,
+        strict: bool,
+        keep_empty: bool,
+    ) -> Result<Self, ParseError> {
+        if extractions.is_empty() {
+            if strict || keep_empty {
+                return Ok(Self {
+                    extractions,
+                    strict,
+                    keep_empty,
+                });
+            }
+            return Err(template_parse_error("expected logfmt extraction"));
+        }
+        let mut destinations = BTreeSet::new();
+        for extraction in &extractions {
+            if !destinations.insert(extraction.destination.clone()) {
+                return Err(template_parse_error(
+                    "logfmt extraction destination appears more than once",
+                ));
+            }
+        }
+        Ok(Self {
+            extractions,
+            strict,
+            keep_empty,
+        })
+    }
+
+    #[must_use]
+    pub fn extractions(&self) -> &[LogfmtExtraction] {
+        &self.extractions
+    }
+
+    #[must_use]
+    pub fn strict(&self) -> bool {
+        self.strict
+    }
+
+    #[must_use]
+    pub fn keep_empty(&self) -> bool {
+        self.keep_empty
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LogfmtExtraction {
+    destination: String,
+    source: String,
+}
+
+impl LogfmtExtraction {
+    pub fn same(name: impl Into<String>) -> Result<Self, ParseError> {
+        let name = name.into();
+        Self::rename(name.clone(), name)
+    }
+
+    pub fn rename(
+        destination: impl Into<String>,
+        source: impl Into<String>,
+    ) -> Result<Self, ParseError> {
+        let extraction = Self {
+            destination: destination.into(),
+            source: source.into(),
+        };
+        extraction.validate()?;
+        Ok(extraction)
+    }
+
+    #[must_use]
+    pub fn destination(&self) -> &str {
+        &self.destination
+    }
+
+    #[must_use]
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    fn validate(&self) -> Result<(), ParseError> {
+        if self.destination.is_empty() || self.source.is_empty() {
+            return Err(template_parse_error("expected logfmt label name"));
+        }
+        Ok(())
+    }
+}
+
+pub(crate) struct LogfmtParser<'a> {
+    input: &'a str,
+    pos: usize,
+}
+
+impl<'a> LogfmtParser<'a> {
+    pub(crate) fn new(input: &'a str) -> Self {
+        Self { input, pos: 0 }
+    }
+
+    pub(crate) fn next_pair(&mut self) -> Option<(String, String)> {
+        self.next_pair_with_standalone(false)
+    }
+
+    fn next_pair_with_standalone(&mut self, keep_standalone: bool) -> Option<(String, String)> {
+        self.next_pair_with_options(keep_standalone, false)
+            .unwrap_or(None)
+    }
+
+    pub(crate) fn next_pair_with_options(
+        &mut self,
+        keep_standalone: bool,
+        strict: bool,
+    ) -> Result<Option<(String, String)>, String> {
+        loop {
+            self.skip_ws();
+            if self.pos == self.input.len() {
+                return Ok(None);
+            }
+
+            let token_start = self.pos;
+            let key = self.parse_key();
+            if key.is_empty() || self.peek() != Some('=') {
+                if keep_standalone && !key.is_empty() {
+                    return Ok(Some((key, String::new())));
+                }
+                if strict && key.is_empty() {
+                    return Err(format!("invalid logfmt token at byte {token_start}"));
+                }
+                self.skip_token();
+                continue;
+            }
+            self.pos += 1;
+            match self.parse_value(strict) {
+                Ok(value) => return Ok(Some((key, value))),
+                Err(details) if strict => return Err(details),
+                Err(_) => continue,
+            }
+        }
+    }
+
+    fn parse_key(&mut self) -> String {
+        let start = self.pos;
+        while let Some(ch) = self.peek() {
+            if ch.is_whitespace() || ch == '=' {
+                break;
+            }
+            self.pos += ch.len_utf8();
+        }
+        self.input[start..self.pos].to_string()
+    }
+
+    fn parse_value(&mut self, strict: bool) -> Result<String, String> {
+        if self.peek() == Some('"') {
+            self.pos += 1;
+            return self.parse_quoted_value().ok_or_else(|| {
+                format!(
+                    "logfmt syntax error at pos {} : unterminated quoted value",
+                    self.pos + 1
+                )
+            });
+        }
+
+        let start = self.pos;
+        while let Some(ch) = self.peek() {
+            if ch.is_whitespace() {
+                break;
+            }
+            self.pos += ch.len_utf8();
+        }
+        let value = &self.input[start..self.pos];
+        if strict && value.contains('=') {
+            return Err(format!("invalid logfmt value at byte {start}"));
+        }
+        Ok(value.to_string())
+    }
+
+    fn parse_quoted_value(&mut self) -> Option<String> {
+        let mut out = String::new();
+        while let Some(ch) = self.peek() {
+            self.pos += ch.len_utf8();
+            match ch {
+                '"' => return Some(out),
+                '\\' => {
+                    if let Some(escaped) = self.peek() {
+                        self.pos += escaped.len_utf8();
+                        out.push(decode_quoted_escape(escaped));
+                    }
+                }
+                _ => out.push(ch),
+            }
+        }
+        None
+    }
+
+    fn skip_token(&mut self) {
+        while let Some(ch) = self.peek() {
+            if ch.is_whitespace() {
+                break;
+            }
+            self.pos += ch.len_utf8();
+        }
+    }
+
+    fn skip_ws(&mut self) {
+        while let Some(ch) = self.peek() {
+            if !ch.is_whitespace() {
+                break;
+            }
+            self.pos += ch.len_utf8();
+        }
+    }
+
+    fn peek(&self) -> Option<char> {
+        self.input[self.pos..].chars().next()
+    }
+}
