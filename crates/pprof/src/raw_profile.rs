@@ -187,6 +187,24 @@ mod tests {
         let sample_type = inner.sample_type[0];
 
         assert!(total == 10);
+        assert!(inner.sample.len() == 2);
+        assert!(inner.sample.iter().all(|sample| sample.value != vec![0]));
+        assert!(inner.function.iter().all(|function| function.id > 0));
+        assert!(inner.location.iter().all(|location| location.id > 0));
+        assert!(
+            inner
+                .sample
+                .iter()
+                .flat_map(|sample| sample.location_id.iter())
+                .all(|location_id| *location_id > 0)
+        );
+        assert!(
+            sample_paths(inner)
+                == vec![
+                    vec!["leaf_a".to_string(), "root_fn".to_string()],
+                    vec!["leaf_b".to_string(), "root_fn".to_string()],
+                ]
+        );
         assert!(inner.string_table[usize::try_from(sample_type.r#type).unwrap()] == "cpu");
         assert!(inner.string_table[usize::try_from(sample_type.unit).unwrap()] == "nanoseconds");
     }
@@ -211,5 +229,34 @@ mod tests {
         assert!(inner.sample.len() <= 4);
         assert!(total == 10);
         assert!(inner.string_table.iter().any(|value| value == "other"));
+    }
+
+    fn sample_paths(profile: &crate::proto::Profile) -> Vec<Vec<String>> {
+        let mut paths = profile
+            .sample
+            .iter()
+            .map(|sample| {
+                sample
+                    .location_id
+                    .iter()
+                    .map(|location_id| {
+                        let location = profile
+                            .location
+                            .iter()
+                            .find(|location| location.id == *location_id)
+                            .expect("location id exists");
+                        let function_id = location.line[0].function_id;
+                        let function = profile
+                            .function
+                            .iter()
+                            .find(|function| function.id == function_id)
+                            .expect("function id exists");
+                        profile.string_table[usize::try_from(function.name).unwrap()].clone()
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        paths.sort();
+        paths
     }
 }

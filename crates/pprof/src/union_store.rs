@@ -252,6 +252,8 @@ mod tests {
     use std::sync::Arc;
 
     use assert2::assert;
+    use datafusion::arrow::array::AsArray;
+    use datafusion::arrow::datatypes::UInt64Type;
 
     use crate::{
         EngineOpts, FlameEngine, FunctionRec, InMemoryProfileStore, LocationRec, ProfileStore,
@@ -260,6 +262,15 @@ mod tests {
     const PT: &str = "process_cpu:cpu:nanoseconds:cpu:nanoseconds";
 
     fn store_with_frame(frame: &str, value: i64, timestamp_ms: i64) -> InMemoryProfileStore {
+        store_with_frame_partition(frame, value, timestamp_ms, 0)
+    }
+
+    fn store_with_frame_partition(
+        frame: &str,
+        value: i64,
+        timestamp_ms: i64,
+        partition: u64,
+    ) -> InMemoryProfileStore {
         let mut store = InMemoryProfileStore::new();
         let name = store.symbols_mut().intern_string(frame);
         let function_id = store.symbols_mut().intern_function(FunctionRec {
@@ -281,7 +292,7 @@ mod tests {
             "tenant-a",
             PT,
             vec![("service_name".to_string(), "api".to_string())],
-            0,
+            partition,
             stacktrace,
             value,
             timestamp_ms,
@@ -326,6 +337,7 @@ mod tests {
             .label_values("tenant-a", "service_name", &[], 0, 100)
             .await
             .unwrap();
+        let names = union.label_names("tenant-a", &[], 0, 100).await.unwrap();
         let series = union
             .series("tenant-a", &[], &["service_name".to_string()], 0, 100)
             .await
@@ -339,10 +351,46 @@ mod tests {
                     PT.to_string(),
                 ]
         );
+        assert!(names == vec!["service_name".to_string()]);
         assert!(values == vec!["api".to_string(), "worker".to_string()]);
         assert!(series.len() == 2);
         assert!(stats.data_ingested);
         assert!(stats.oldest_profile_time == Some(10));
         assert!(stats.newest_profile_time == Some(40));
+    }
+
+    #[tokio::test]
+    async fn hot_cold_union_stats_reports_data_when_only_one_side_has_samples() {
+        let hot = store_with_frame("hot", 7, 20);
+        let cold = InMemoryProfileStore::new();
+        let union = super::UnionProfileStore::new(Arc::new(hot), Arc::new(cold));
+
+        let stats = union.stats("tenant-a", 0, 100).await.unwrap();
+
+        assert!(stats.data_ingested);
+        assert!(stats.oldest_profile_time == Some(20));
+        assert!(stats.newest_profile_time == Some(20));
+    }
+
+    #[tokio::test]
+    async fn hot_partition_remap_preserves_existing_low_and_high_bits() {
+        let partition = 0x0100_0000_0000_0001;
+        let hot = store_with_frame_partition("hot", 7, 20, partition);
+        let cold = InMemoryProfileStore::new();
+        let union = super::UnionProfileStore::new(Arc::new(hot), Arc::new(cold));
+        let scan = union.select("tenant-a", PT, &[], 0, 100).await.unwrap();
+        let df = scan
+            .ctx
+            .sql(&format!(
+                "SELECT {} FROM {}",
+                crate::PCOL_STACKTRACE_PARTITION,
+                scan.samples_table
+            ))
+            .await
+            .unwrap();
+        let out = df.collect().await.unwrap();
+        let partitions = out[0].column(0).as_primitive::<UInt64Type>();
+
+        assert!(partitions.value(0) == partition);
     }
 }

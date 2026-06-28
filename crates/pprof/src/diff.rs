@@ -311,4 +311,73 @@ mod tests {
         assert!(root[1] == 3 && root[4] == 9);
         assert!(diff.names[usize::try_from(root[6]).unwrap()] == "total");
     }
+
+    #[test]
+    fn diff_truncation_keeps_hot_path_and_aggregates_hidden_subtrees() {
+        let mut left = Tree::new();
+        left.add_stack(&[frame("leaf_a"), frame("a_hidden")], 2);
+        left.add_stack(&[frame("hot_leaf"), frame("m_parent")], 10);
+        left.add_stack(&[frame("leaf_z"), frame("z_hidden")], 3);
+        let mut right = Tree::new();
+        right.add_stack(&[frame("hot_leaf"), frame("m_parent")], 8);
+        right.add_stack(&[frame("leaf_z"), frame("z_hidden")], 4);
+
+        let diff = diff_trees(left, right, 3);
+
+        assert!(diff.left_ticks == 15);
+        assert!(diff.right_ticks == 12);
+        let parent = name_index(&diff, "m_parent");
+        let leaf = name_index(&diff, "hot_leaf");
+        let other = name_index(&diff, "other");
+        assert!(diff.levels[1].values == vec![2, 10, 0, 0, 8, 0, parent, -2, 5, 5, 0, 4, 4, other]);
+        assert!(diff.levels[2].values == vec![2, 10, 10, 0, 8, 8, leaf]);
+    }
+
+    #[test]
+    fn diff_truncation_ranks_by_sum_and_emits_right_only_other() {
+        let mut left = Tree::new();
+        left.add_stack(&[frame("left_only")], 9);
+        left.add_stack(&[frame("balanced")], 3);
+        let mut right = Tree::new();
+        right.add_stack(&[frame("balanced")], 3);
+
+        let diff = diff_trees(left, right, 2);
+
+        let left_only = name_index(&diff, "left_only");
+        let other = name_index(&diff, "other");
+        assert!(
+            diff.levels[1].values == vec![3, 9, 9, 3, 0, 0, left_only, -3, 3, 3, -3, 3, 3, other]
+        );
+
+        let mut left = Tree::new();
+        left.add_stack(&[frame("kept")], 10);
+        let mut right = Tree::new();
+        right.add_stack(&[frame("right_only")], 4);
+
+        let diff = diff_trees(left, right, 2);
+
+        let kept = name_index(&diff, "kept");
+        let other = name_index(&diff, "other");
+        assert!(diff.levels[1].values == vec![0, 10, 10, 0, 0, 0, kept, 0, 0, 0, 0, 4, 4, other]);
+    }
+
+    #[test]
+    fn diff_level_offsets_accumulate_right_totals_between_kept_siblings() {
+        let mut left = Tree::new();
+        left.add_stack(&[frame("a")], 2);
+        left.add_stack(&[frame("b")], 3);
+        let mut right = Tree::new();
+        right.add_stack(&[frame("a")], 2);
+        right.add_stack(&[frame("b")], 3);
+
+        let diff = diff_trees(left, right, 0);
+
+        let a = name_index(&diff, "a");
+        let b = name_index(&diff, "b");
+        assert!(diff.levels[1].values == vec![0, 2, 2, 0, 2, 2, a, 0, 3, 3, 0, 3, 3, b]);
+    }
+
+    fn name_index(diff: &FlameGraphDiff, name: &str) -> i64 {
+        i64::try_from(diff.names.iter().position(|value| value == name).unwrap()).unwrap()
+    }
 }

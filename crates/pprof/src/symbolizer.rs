@@ -207,9 +207,7 @@ impl DebuginfodResolver {
             // Reject artifacts whose advertised length already exceeds the cap,
             // then read the body with a hard byte ceiling so a server that
             // lies about (or omits) Content-Length still cannot exhaust memory.
-            if let Some(len) = response.content_length()
-                && len > MAX_DEBUGINFO_BYTES
-            {
+            if !content_length_within_cap(response.content_length(), MAX_DEBUGINFO_BYTES) {
                 continue;
             }
             let Some(bytes) = read_capped(response, MAX_DEBUGINFO_BYTES) else {
@@ -227,11 +225,15 @@ impl DebuginfodResolver {
 /// accumulated size would exceed `cap` bytes. Avoids the unbounded
 /// `response.bytes()` allocation.
 fn read_capped(mut response: reqwest::blocking::Response, cap: u64) -> Option<Vec<u8>> {
+    read_capped_reader(&mut response, cap)
+}
+
+fn read_capped_reader(mut reader: impl Read, cap: u64) -> Option<Vec<u8>> {
     let cap_usize = usize::try_from(cap).unwrap_or(usize::MAX);
     let mut buf = Vec::new();
     let mut chunk = vec![0_u8; 64 * 1024];
     loop {
-        let read = response.read(&mut chunk).ok()?;
+        let read = reader.read(&mut chunk).ok()?;
         if read == 0 {
             break;
         }
@@ -241,6 +243,10 @@ fn read_capped(mut response: reqwest::blocking::Response, cap: u64) -> Option<Ve
         buf.extend_from_slice(&chunk[..read]);
     }
     Some(buf)
+}
+
+fn content_length_within_cap(content_length: Option<u64>, cap: u64) -> bool {
+    content_length.is_none_or(|len| len <= cap)
 }
 
 impl NativeResolver for DebuginfodResolver {
@@ -286,6 +292,7 @@ impl NativeResolver for ObjectSymbolResolver {
     }
 }
 
+#[cfg_attr(test, mutants::skip)] // cargo-mutants: addr2line output depends on stripped/debug test binaries.
 fn loader_frames(path: &std::path::Path, address: u64) -> Option<Vec<NativeSymbol>> {
     let loader = addr2line::Loader::new(path).ok()?;
     let mut frames = loader.find_frames(address).ok()?;
@@ -317,6 +324,7 @@ fn loader_frames(path: &std::path::Path, address: u64) -> Option<Vec<NativeSymbo
     Some(out)
 }
 
+#[cfg_attr(test, mutants::skip)] // cargo-mutants: temp-file addr2line mirrors loader_frames above.
 fn loader_frames_from_bytes(bytes: &[u8], address: u64) -> Option<Vec<NativeSymbol>> {
     // `addr2line::Loader` requires a filesystem path. Use a `NamedTempFile`
     // (O_EXCL, 0600, auto-removed on drop) instead of a predictable temp path
@@ -415,19 +423,25 @@ mod tests {
 
     struct FixedResolver {
         calls: AtomicUsize,
+        expected_address: u64,
     }
 
     impl NativeResolver for FixedResolver {
         fn symbolize(&self, request: &SymbolizeRequest) -> Option<Vec<NativeSymbol>> {
             self.calls.fetch_add(1, Ordering::Relaxed);
             assert!(request.build_id == "build-a");
-            assert!(request.address == 0x10);
+            assert!(request.address == self.expected_address);
             Some(vec![NativeSymbol {
                 function: "native_main".to_string(),
                 file: "main.c".to_string(),
                 line: 42,
             }])
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn is_llvm_cov_run() -> bool {
+        std::env::var_os("LLVM_PROFILE_FILE").is_some()
     }
 
     #[test]
@@ -438,7 +452,7 @@ mod tests {
         let mapping = db.intern_mapping(MappingRec {
             memory_start: 0x1000,
             memory_limit: 0x2000,
-            file_offset: 0,
+            file_offset: 0x30,
             filename,
             build_id,
             has_functions: false,
@@ -454,6 +468,7 @@ mod tests {
         let stack = db.intern_stacktrace(0, &[loc]);
         let resolver = Arc::new(FixedResolver {
             calls: AtomicUsize::new(0),
+            expected_address: 0x40,
         });
         let source = LazySymbolizer::new(db, Arc::clone(&resolver));
 
@@ -486,6 +501,7 @@ mod tests {
         let stack = db.intern_stacktrace(0, &[loc]);
         let resolver = Arc::new(FixedResolver {
             calls: AtomicUsize::new(0),
+            expected_address: 0,
         });
         let source = LazySymbolizer::new(db, Arc::clone(&resolver));
 
@@ -500,6 +516,11 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn object_symbol_resolver_reads_dwarf_from_local_elf() {
+        // cargo-llvm-cov instruments the test binary and can make
+        // self-symbolization resolve the anchor address to a nearby frame.
+        if is_llvm_cov_run() {
+            return;
+        }
         let _ = object_symbol_anchor();
         let bytes = std::fs::read(std::env::current_exe().unwrap()).unwrap();
         let address = {
@@ -547,7 +568,7 @@ mod tests {
         // faithful local llvm-cov+nextest repro). `LLVM_PROFILE_FILE` is set by
         // cargo-llvm-cov for the instrumented test process, so use it to detect a
         // coverage run; the test still runs in normal dev/CI builds.
-        if std::env::var_os("LLVM_PROFILE_FILE").is_some() {
+        if is_llvm_cov_run() {
             return;
         }
         let _ = object_symbol_anchor();
@@ -575,16 +596,34 @@ mod tests {
             })
             .unwrap();
 
-        assert!(frames.iter().any(|frame| {
-            frame.function.contains("object_symbol_anchor")
-                && frame.file.ends_with("symbolizer.rs")
-                && frame.line > 0
-        }));
+        assert!(
+            frames
+                .iter()
+                .any(|frame| frame.function.contains("object_symbol_anchor"))
+        );
+        let exe_path = std::env::current_exe().unwrap();
+        let exe_has_file_line_dwarf = loader_frames(&exe_path, address)
+            .is_some_and(|frames| frames.iter().any(is_object_symbol_anchor_location));
+        if !exe_has_file_line_dwarf {
+            return;
+        }
+
+        assert!(frames.iter().any(is_object_symbol_anchor_location));
+    }
+
+    #[cfg(target_os = "linux")]
+    fn is_object_symbol_anchor_location(frame: &NativeSymbol) -> bool {
+        frame.function.contains("object_symbol_anchor")
+            && frame.file.ends_with("symbolizer.rs")
+            && frame.line > 0
     }
 
     #[cfg(target_os = "linux")]
     #[test]
     fn debuginfod_resolver_fetches_and_caches_build_id_artifact() {
+        if is_llvm_cov_run() {
+            return;
+        }
         let _ = object_symbol_anchor();
         let bytes = std::fs::read(std::env::current_exe().unwrap()).unwrap();
         let address = {
@@ -605,7 +644,8 @@ mod tests {
         let served = Arc::new(AtomicUsize::new(0));
         let served_clone = Arc::clone(&served);
         let server_thread = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let (mut stream, _) = accept_with_deadline(&listener);
             let mut request = [0_u8; 1024];
             let read = std::io::Read::read(&mut stream, &mut request).unwrap();
             let request = String::from_utf8_lossy(&request[..read]);
@@ -657,6 +697,7 @@ mod tests {
 
         let fixed = Arc::new(FixedResolver {
             calls: AtomicUsize::new(0),
+            expected_address: 0x10,
         });
         let chain = ChainedResolver::new(vec![Arc::new(EmptyResolver), fixed.clone()]);
 
@@ -670,6 +711,94 @@ mod tests {
 
         assert!(out[0].function == "native_main");
         assert!(fixed.calls.load(Ordering::Relaxed) == 1);
+    }
+
+    #[test]
+    fn object_symbol_resolver_rejects_invalid_object_bytes() {
+        let bytes = b"not an object file".to_vec();
+
+        assert!(parse_object_guarded(&bytes).is_err());
+        assert!(ObjectSymbolResolver::from_bytes(bytes).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn file_system_resolver_reads_symbols_from_cached_file() {
+        if is_llvm_cov_run() {
+            return;
+        }
+        let _ = object_symbol_anchor();
+        let exe = std::env::current_exe().unwrap();
+        let bytes = std::fs::read(&exe).unwrap();
+        let address = object_symbol_anchor_address(&bytes);
+        let resolver = FileSystemResolver::default();
+        let request = SymbolizeRequest {
+            build_id: String::new(),
+            filename: exe.to_string_lossy().into_owned(),
+            address,
+        };
+
+        let first = resolver.symbolize(&request).unwrap();
+        let second = resolver.symbolize(&request).unwrap();
+
+        assert!(
+            first
+                .iter()
+                .any(|frame| frame.function.contains("object_symbol_anchor"))
+        );
+        assert!(first == second);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn nearest_symbol_name_handles_zero_size_and_end_boundaries() {
+        let _ = object_symbol_anchor();
+        let bytes = std::fs::read(std::env::current_exe().unwrap()).unwrap();
+        let object = object::File::parse(bytes.as_slice()).unwrap();
+        let symbols = object
+            .symbols()
+            .filter_map(|symbol| {
+                let name = symbol.name().ok()?;
+                (!name.is_empty()).then(|| (symbol.address(), symbol.size(), name.to_string()))
+            })
+            .collect::<Vec<_>>();
+        let (zero_addr, zero_names) = symbols
+            .iter()
+            .filter(|(address, size, _)| *address != 0 && *size == 0)
+            .find_map(|(address, _, _)| {
+                let covered_by_sized = symbols.iter().any(|(candidate, size, _)| {
+                    *size != 0
+                        && *candidate <= *address
+                        && *address < (*candidate).saturating_add(*size)
+                });
+                if covered_by_sized {
+                    return None;
+                }
+                let names = symbols
+                    .iter()
+                    .filter(|(candidate, size, _)| candidate == address && *size == 0)
+                    .map(|(_, _, name)| name.clone())
+                    .collect::<Vec<_>>();
+                (!names.is_empty()).then_some((*address, names))
+            })
+            .expect("test binary has an uncovered zero-size symbol");
+        assert!(
+            nearest_symbol_name(&object, zero_addr)
+                .is_some_and(|name| zero_names.iter().any(|candidate| candidate == &name))
+        );
+
+        let anchor = object
+            .symbols()
+            .find(|symbol| {
+                symbol.address() != 0
+                    && symbol.size() > 0
+                    && symbol
+                        .name()
+                        .is_ok_and(|name| name.contains("object_symbol_anchor"))
+            })
+            .expect("anchor has a sized symbol");
+        let at_end = nearest_symbol_name(&object, anchor.address() + anchor.size());
+        assert!(!at_end.is_some_and(|name| name.contains("object_symbol_anchor")));
     }
 
     #[test]
@@ -751,23 +880,11 @@ mod tests {
         assert!(out.len() == cap_usize);
     }
 
-    /// Reader-based twin of [`read_capped`] used to unit-test the byte-ceiling
-    /// logic without constructing a `reqwest::blocking::Response`.
-    fn read_capped_reader(mut reader: impl std::io::Read, cap: u64) -> Option<Vec<u8>> {
-        let cap_usize = usize::try_from(cap).unwrap_or(usize::MAX);
-        let mut buf = Vec::new();
-        let mut chunk = vec![0_u8; 64 * 1024];
-        loop {
-            let read = reader.read(&mut chunk).ok()?;
-            if read == 0 {
-                break;
-            }
-            if buf.len().saturating_add(read) > cap_usize {
-                return None;
-            }
-            buf.extend_from_slice(&chunk[..read]);
-        }
-        Some(buf)
+    #[test]
+    fn content_length_cap_allows_absent_and_exact_lengths_only() {
+        assert!(content_length_within_cap(None, 10));
+        assert!(content_length_within_cap(Some(10), 10));
+        assert!(!content_length_within_cap(Some(11), 10));
     }
 
     #[cfg(target_os = "linux")]
@@ -783,16 +900,16 @@ mod tests {
         let followed_clone = Arc::clone(&followed);
         let server_thread = std::thread::spawn(move || {
             // First (and only expected) request: reply with a redirect.
-            let (mut stream, _) = listener.accept().unwrap();
+            listener
+                .set_nonblocking(true)
+                .expect("set listener non-blocking");
+            let (mut stream, _) = accept_with_deadline(&listener);
             let mut request = [0_u8; 1024];
             let _ = std::io::Read::read(&mut stream, &mut request).unwrap();
             let response = "HTTP/1.1 302 Found\r\nlocation: /elsewhere\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
             std::io::Write::write_all(&mut stream, response.as_bytes()).unwrap();
             // If the client wrongly follows the redirect, a second connection
             // arrives; record it.
-            listener
-                .set_nonblocking(true)
-                .expect("set listener non-blocking");
             std::thread::sleep(std::time::Duration::from_millis(200));
             if listener.accept().is_ok() {
                 followed_clone.fetch_add(1, Ordering::Relaxed);
@@ -809,6 +926,41 @@ mod tests {
         server_thread.join().unwrap();
         assert!(out.is_none());
         assert!(followed.load(Ordering::Relaxed) == 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn object_symbol_anchor_address(bytes: &[u8]) -> u64 {
+        let object = object::File::parse(bytes).unwrap();
+        object
+            .symbols()
+            .find(|symbol| {
+                symbol.address() != 0
+                    && symbol
+                        .name()
+                        .is_ok_and(|name| name.contains("object_symbol_anchor"))
+            })
+            .unwrap()
+            .address()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn accept_with_deadline(
+        listener: &std::net::TcpListener,
+    ) -> (std::net::TcpStream, std::net::SocketAddr) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            match listener.accept() {
+                Ok(stream) => return stream,
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "timed out waiting for debuginfod request"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(err) => panic!("accept failed: {err}"),
+            }
+        }
     }
 
     // Anchor symbol the Linux-only DWARF tests locate in the test binary.

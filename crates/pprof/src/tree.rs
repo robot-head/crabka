@@ -420,12 +420,16 @@ fn write_pyroscope_tree_node(out: &mut Vec<u8>, name: &str, self_: i64) {
 }
 
 fn write_uvarint(out: &mut Vec<u8>, mut value: u64) {
-    while value >= 0x80 {
+    for _ in 0..10 {
+        if value < 0x80 {
+            out.push(u8::try_from(value).expect("terminal uvarint byte fits in u8"));
+            return;
+        }
         let low_bits = u8::try_from(value & 0x7f).expect("masked uvarint byte fits in u8");
-        out.push(low_bits | 0x80);
+        out.push(low_bits + 0x80);
         value >>= 7;
     }
-    out.push(u8::try_from(value).expect("terminal uvarint byte fits in u8"));
+    unreachable!("u64 uvarint uses at most 10 bytes");
 }
 
 #[cfg(test)]
@@ -514,6 +518,18 @@ mod tests {
     }
 
     #[test]
+    fn to_flamegraph_places_children_after_parent_self() {
+        let mut tree = Tree::new();
+        tree.add_stack(&stack(&["main"]), 5);
+        tree.add_stack(&stack(&["work", "main"]), 7);
+
+        let fg = tree.to_flamegraph(2048);
+        let work = &fg.levels[2].values[0..4];
+
+        assert!(work == [5, 7, 7, names_index(&fg, "work")]);
+    }
+
+    #[test]
     fn to_flamegraph_sorts_siblings_like_pyroscope_function_tree() {
         let mut tree = Tree::new();
         tree.add_stack(&stack(&["z_leaf", "main"]), 6);
@@ -549,6 +565,43 @@ mod tests {
     }
 
     #[test]
+    fn to_flamegraph_synthetic_other_keeps_hidden_self_sum() {
+        let mut tree = Tree::new();
+        tree.add_stack(&stack(&["hot", "main"]), 10);
+        tree.add_stack(&stack(&["cold", "main"]), 5);
+        tree.add_stack(&stack(&["warm", "main"]), 4);
+
+        let fg = tree.to_flamegraph(3);
+        let other = names_index(&fg, "other");
+        let other_bar = fg.levels[2]
+            .values
+            .chunks_exact(4)
+            .find(|chunk| chunk[3] == other)
+            .unwrap();
+
+        assert!(other_bar[1] == 9);
+        assert!(other_bar[2] == 9);
+    }
+
+    #[test]
+    fn sample_paths_exclude_internal_zero_self_and_restore_sibling_paths() {
+        let mut tree = Tree::new();
+        tree.add_stack(&stack(&["a", "main"]), 7);
+        tree.add_stack(&stack(&["b", "main"]), 3);
+
+        let mut samples = tree.sample_paths(2048);
+        samples.sort();
+
+        assert!(
+            samples
+                == vec![
+                    (vec!["main".to_string(), "a".to_string()], 7),
+                    (vec!["main".to_string(), "b".to_string()], 3),
+                ]
+        );
+    }
+
+    #[test]
     fn to_pyroscope_tree_bytes_uses_virtual_root_and_function_nodes() {
         let mut tree = Tree::new();
         tree.add_stack(&stack(&["work", "main"]), 7);
@@ -556,6 +609,18 @@ mod tests {
         let bytes = tree.to_pyroscope_tree_bytes(2048);
 
         assert!(bytes == b"\x00\x00\x01\x04main\x00\x01\x04work\x07\x00");
+    }
+
+    #[test]
+    fn write_uvarint_encodes_single_and_multi_byte_values() {
+        let mut out = Vec::new();
+
+        write_uvarint(&mut out, 0);
+        write_uvarint(&mut out, 127);
+        write_uvarint(&mut out, 128);
+        write_uvarint(&mut out, 300);
+
+        assert!(out == vec![0x00, 0x7f, 0x80, 0x01, 0xac, 0x02]);
     }
 
     fn names_index(fg: &FlameGraph, name: &str) -> i64 {

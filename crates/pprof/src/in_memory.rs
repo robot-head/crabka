@@ -434,9 +434,9 @@ fn label_value<'a>(row: &'a SampleRow, name: &str) -> Option<&'a str> {
 #[cfg(test)]
 mod tests {
     use assert2::assert;
-    use crabka_blockstore::LabelMatcher;
+    use crabka_blockstore::{LabelMatcher, MatchOp};
     use datafusion::arrow::array::AsArray;
-    use datafusion::arrow::datatypes::Int64Type;
+    use datafusion::arrow::datatypes::{Int64Type, UInt64Type};
 
     use super::*;
     use crate::{FunctionRec, LineRec, LocationRec};
@@ -541,6 +541,121 @@ mod tests {
             .await
             .unwrap();
         assert!(unprojected == vec![vec![("service_name".to_string(), "checkout".to_string())]]);
+    }
+
+    #[tokio::test]
+    async fn range_filter_requires_rows_inside_both_bounds() {
+        let mut store = InMemoryProfileStore::new();
+        let pt = "process_cpu:cpu:nanoseconds:cpu:nanoseconds";
+        store.push_sample(
+            "t",
+            pt,
+            vec![("service_name".to_string(), "early".to_string())],
+            0,
+            0,
+            1,
+            1000,
+        );
+        store.push_sample(
+            "t",
+            pt,
+            vec![("service_name".to_string(), "inside".to_string())],
+            0,
+            0,
+            1,
+            2000,
+        );
+
+        let values = store
+            .label_values("t", "service_name", &[], 1500, 2500)
+            .await
+            .unwrap();
+        let stats = store.stats("t", 1500, 2500).await.unwrap();
+
+        assert!(values == vec!["inside".to_string()]);
+        assert!(stats.oldest_profile_time == Some(2000));
+        assert!(stats.newest_profile_time == Some(2000));
+    }
+
+    #[tokio::test]
+    async fn select_encodes_distinct_fingerprints_for_distinct_label_sets() {
+        let mut store = InMemoryProfileStore::new();
+        let pt = "process_cpu:cpu:nanoseconds:cpu:nanoseconds";
+        store.push_sample(
+            "t",
+            pt,
+            vec![("service_name".to_string(), "api".to_string())],
+            0,
+            0,
+            1,
+            1000,
+        );
+        store.push_sample(
+            "t",
+            pt,
+            vec![("service_name".to_string(), "worker".to_string())],
+            0,
+            0,
+            1,
+            1000,
+        );
+        let scan = store.select("t", pt, &[], 0, 5000).await.unwrap();
+        let df = scan
+            .ctx
+            .sql(&format!(
+                "SELECT {} FROM {} ORDER BY {}",
+                crate::samples::COL_FINGERPRINT,
+                scan.samples_table,
+                crate::samples::COL_FINGERPRINT,
+            ))
+            .await
+            .unwrap();
+        let out = df.collect().await.unwrap();
+        let fingerprints = out[0].column(0).as_primitive::<UInt64Type>();
+
+        assert!(fingerprints.len() == 2);
+        assert!(fingerprints.value(0) != fingerprints.value(1));
+    }
+
+    #[tokio::test]
+    async fn label_matchers_filter_negative_literal_and_regex_cases() {
+        let mut store = InMemoryProfileStore::new();
+        let pt = "process_cpu:cpu:nanoseconds:cpu:nanoseconds";
+        for service in ["checkout", "api"] {
+            store.push_sample(
+                "t",
+                pt,
+                vec![("service_name".to_string(), service.to_string())],
+                0,
+                0,
+                1,
+                1000,
+            );
+        }
+
+        let neq = store
+            .label_values(
+                "t",
+                "service_name",
+                &[LabelMatcher::new("service_name", MatchOp::Neq, "checkout")],
+                0,
+                5000,
+            )
+            .await
+            .unwrap();
+        let nre = store
+            .label_values(
+                "t",
+                "service_name",
+                &[LabelMatcher::new("service_name", MatchOp::Nre, "check.*")],
+                0,
+                5000,
+            )
+            .await
+            .unwrap();
+
+        assert!(neq == vec!["api".to_string()]);
+        assert!(nre == vec!["api".to_string()]);
     }
 
     #[tokio::test]

@@ -302,7 +302,10 @@ impl SymbolDb {
         };
         let mut frames = Vec::new();
         let mut current = i32::try_from(stacktrace_id).unwrap_or(-1);
-        while current >= 0 {
+        for _ in 0..part.nodes.len() {
+            if current < 0 {
+                break;
+            }
             let Some(node) = part
                 .nodes
                 .get(usize::try_from(current).expect("non-negative"))
@@ -345,7 +348,10 @@ impl SymbolDb {
         };
         let mut locations = Vec::new();
         let mut current = i32::try_from(stacktrace_id).unwrap_or(-1);
-        while current >= 0 {
+        for _ in 0..part.nodes.len() {
+            if current < 0 {
+                break;
+            }
             let Some(node) = part
                 .nodes
                 .get(usize::try_from(current).expect("non-negative"))
@@ -435,39 +441,33 @@ fn drop_go_type_parameters(input: &str) -> Cow<'_, str> {
     }
 
     let mut result = String::with_capacity(input.len());
-    let mut i = 0;
-    while i < input.len() {
-        let Some(start) = input[i..].find(GO_SHAPE_PREFIX) else {
-            result.push_str(&input[i..]);
-            break;
-        };
-        result.push_str(&input[i..i + start]);
+    let mut cursor = 0;
+    while let Some(relative_start) = input[cursor..].find(GO_SHAPE_PREFIX) {
+        let start = cursor + relative_start;
+        result.push_str(&input[cursor..start]);
 
         let mut depth = 0_i32;
-        let mut j = i + start;
-        let mut found = false;
-        while j < input.len() {
-            match input.as_bytes()[j] {
+        let mut end = None;
+        for (offset, byte) in input[start..].bytes().enumerate() {
+            match byte {
                 b'[' => depth += 1,
                 b']' => {
                     depth -= 1;
                     if depth == 0 {
-                        i = j + 1;
-                        found = true;
+                        end = Some(start + offset + 1);
                         break;
                     }
                 }
                 _ => {}
             }
-            j += 1;
         }
-
-        if !found {
-            result.push_str(&input[i..]);
-            break;
-        }
+        let Some(next) = end else {
+            result.push_str(&input[start..]);
+            return Cow::Owned(result);
+        };
+        cursor = next;
     }
-
+    result.push_str(&input[cursor..]);
     Cow::Owned(result)
 }
 
@@ -510,11 +510,43 @@ mod tests {
     }
 
     #[test]
+    fn new_reserves_empty_string_slot() {
+        let mut db = SymbolDb::new();
+        let name = db.intern_string("name");
+
+        assert!(db.string(0) == "");
+        assert!(name == 1);
+        assert!(db.string(name) == "name");
+    }
+
+    #[test]
     fn identical_stacks_dedup_to_same_leaf() {
         let (mut db, [a, b, c]) = db_with_abc();
         let id1 = db.intern_stacktrace(0, &[a, b, c]);
         let id2 = db.intern_stacktrace(0, &[a, b, c]);
         assert!(id1 == id2);
+    }
+
+    #[test]
+    fn intern_stacktrace_roots_first_node_at_sentinel_parent() {
+        let (mut db, [a, b, _c]) = db_with_abc();
+        let id = db.intern_stacktrace(0, &[a, b]);
+        let part = db.partitions.get(&0).unwrap();
+
+        assert!(id == 1);
+        assert!(part.nodes[0].parent == -1);
+        assert!(part.nodes[1].parent == 0);
+    }
+
+    #[test]
+    fn resolve_stops_at_corrupt_parent_cycle() {
+        let (mut db, [a, b, _c]) = db_with_abc();
+        let id = db.intern_stacktrace(0, &[a, b]);
+        db.partitions.get_mut(&0).unwrap().nodes[0].parent = 1;
+
+        let frames = db.resolve(0, id);
+        let names: Vec<&str> = frames.iter().map(|frame| frame.function.as_str()).collect();
+        assert!(names == vec!["a", "b"]);
     }
 
     #[test]
@@ -550,6 +582,43 @@ mod tests {
         let frames = db.resolve(0, id);
         let names: Vec<&str> = frames.iter().map(|frame| frame.function.as_str()).collect();
         assert!(names == vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn invalid_large_stacktrace_ids_resolve_to_empty() {
+        let (mut db, [a, b, c]) = db_with_abc();
+        let _ = db.intern_stacktrace(0, &[a, b, c]);
+        let invalid = u32::try_from(i64::from(i32::MAX) + 1).unwrap();
+
+        assert!(db.resolve(0, invalid).is_empty());
+
+        let mut raw_db = SymbolDb::new();
+        let filename = raw_db.intern_string("/bin/app");
+        let build_id = raw_db.intern_string("build");
+        let mapping = raw_db.intern_mapping(MappingRec {
+            memory_start: 0,
+            memory_limit: 0x1000,
+            file_offset: 0,
+            filename,
+            build_id,
+            has_functions: false,
+            has_filenames: false,
+            has_line_numbers: false,
+            has_inline_frames: false,
+        });
+        let loc_a = raw_db.intern_location(LocationRec {
+            address: 0x10,
+            mapping_id: mapping,
+            lines: Vec::new(),
+        });
+        let loc_b = raw_db.intern_location(LocationRec {
+            address: 0x20,
+            mapping_id: mapping,
+            lines: Vec::new(),
+        });
+        let _ = raw_db.intern_stacktrace(0, &[loc_a, loc_b]);
+
+        assert!(raw_db.raw_locations(0, invalid).is_empty());
     }
 
     #[test]
@@ -618,12 +687,30 @@ mod tests {
     }
 
     #[test]
+    fn drop_go_type_parameters_handles_multiple_nested_and_unclosed_shapes() {
+        assert!(
+            drop_go_type_parameters("pkg.(*Cache[go.shape.string]).Get[go.shape.int]").as_ref()
+                == "pkg.(*Cache).Get"
+        );
+        assert!(
+            drop_go_type_parameters("pkg.F[go.shape.struct{Field [go.shape.int]}].G").as_ref()
+                == "pkg.F.G"
+        );
+        let unclosed = "pkg.F[go.shape.string";
+        assert!(drop_go_type_parameters(unclosed).as_ref() == unclosed);
+        let ordinary_generic = "pkg.F[int]";
+        assert!(drop_go_type_parameters(ordinary_generic).as_ref() == ordinary_generic);
+    }
+
+    #[test]
     fn encode_decode_round_trips() {
         let (mut db, [a, b, c]) = db_with_abc();
         let id = db.intern_stacktrace(0, &[a, b, c]);
         let bytes = db.encode();
-        let back = SymbolDb::decode(&bytes).unwrap();
+        let mut back = SymbolDb::decode(&bytes).unwrap();
         assert!(back.resolve(0, id) == db.resolve(0, id));
+        assert!(back.intern_string("a") == db.intern_string("a"));
+        assert!(back.intern_stacktrace(0, &[a, b, c]) == id);
     }
 
     #[test]
@@ -639,9 +726,36 @@ mod tests {
         let (mut source, [a, b, _]) = db_with_abc();
         let id = source.intern_stacktrace(0, &[a, b]);
         let mut dest = SymbolDb::new();
+        let pre_name = dest.intern_string("preexisting");
+        let pre_fn = dest.intern_function(FunctionRec {
+            name: pre_name,
+            system_name: pre_name,
+            filename: 0,
+            start_line: 1,
+        });
+        let _ = dest.intern_location(LocationRec {
+            address: 0xff,
+            mapping_id: 0,
+            lines: vec![LineRec {
+                function_id: pre_fn,
+                line: 1,
+            }],
+        });
 
         dest.copy_partition_from(&source, 0, 17).unwrap();
 
         assert!(dest.resolve(17, id) == source.resolve(0, id));
+    }
+
+    #[test]
+    fn copy_partition_rebuilds_children_and_rejects_nonempty_destination() {
+        let (mut source, [a, b, _]) = db_with_abc();
+        let id = source.intern_stacktrace(0, &[a, b]);
+        let mut dest = SymbolDb::new();
+
+        dest.copy_partition_from(&source, 0, 17).unwrap();
+
+        assert!(dest.intern_stacktrace(17, &[a, b]) == id);
+        assert!(dest.copy_partition_from(&source, 0, 17).is_err());
     }
 }
