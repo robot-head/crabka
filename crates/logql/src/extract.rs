@@ -126,19 +126,19 @@ impl<'a> JsonPathParser<'a> {
         while self.pos < self.input.len() {
             match self.peek() {
                 Some('.') => {
-                    self.pos += 1;
+                    self.advance_one_char();
                     let field = self.parse_field_name().ok_or_else(|| {
                         template_parse_error("expected json field name after '.'")
                     })?;
                     parts.push(JsonPathPart::Field(field));
                 }
                 Some('[') => {
-                    self.pos += 1;
+                    self.advance_one_char();
                     parts.push(self.parse_bracket_part()?);
                     if self.peek() != Some(']') {
                         return Err(template_parse_error("expected closing json path bracket"));
                     }
-                    self.pos += 1;
+                    self.advance_one_char();
                 }
                 _ => return Err(template_parse_error("expected json path component")),
             }
@@ -153,8 +153,8 @@ impl<'a> JsonPathParser<'a> {
     fn parse_field_name(&mut self) -> Option<String> {
         let start = self.pos;
         while let Some(ch) = self.peek() {
-            if ch == '_' || ch == ':' || ch == '-' || ch.is_ascii_alphanumeric() {
-                self.pos += ch.len_utf8();
+            if is_json_path_field_name_char(ch) {
+                self.advance_one_char();
             } else {
                 break;
             }
@@ -202,6 +202,58 @@ impl<'a> JsonPathParser<'a> {
 
     fn peek(&self) -> Option<char> {
         self.input[self.pos..].chars().next()
+    }
+
+    fn advance_one_char(&mut self) {
+        let next = self
+            .input
+            .get(self.pos..)
+            .and_then(|remaining| remaining.char_indices().nth(1))
+            .map_or(self.input.len(), |(offset, _)| self.pos + offset);
+        self.pos = next;
+    }
+}
+
+fn is_json_path_field_name_char(ch: char) -> bool {
+    matches!(ch, '_' | ':' | '-') || ch.is_ascii_alphanumeric()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{JsonExtraction, JsonPath, JsonPathPart};
+
+    #[test]
+    fn json_extraction_expression_returns_source_text() {
+        let extraction = JsonExtraction::new("value", "trace:id.request-id").unwrap();
+
+        assert_eq!(extraction.expression(), "trace:id.request-id");
+    }
+
+    #[test]
+    fn json_path_parse_advances_over_dot_separators() {
+        assert_eq!(
+            JsonPath::parse("request.headers").unwrap(),
+            JsonPath {
+                parts: vec![
+                    JsonPathPart::Field("request".to_string()),
+                    JsonPathPart::Field("headers".to_string()),
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn json_path_field_names_accept_identifier_punctuation() {
+        assert_eq!(
+            JsonPath::parse("trace:id.request-id._meta").unwrap(),
+            JsonPath {
+                parts: vec![
+                    JsonPathPart::Field("trace:id".to_string()),
+                    JsonPathPart::Field("request-id".to_string()),
+                    JsonPathPart::Field("_meta".to_string()),
+                ],
+            }
+        );
     }
 }
 
