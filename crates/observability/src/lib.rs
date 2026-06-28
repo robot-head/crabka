@@ -19571,7 +19571,10 @@ mod tests {
 
     #[test]
     fn service_duration_constants_are_exact() {
-        assert_eq!(LOKI_REJECT_OLD_SAMPLES_MAX_AGE, Duration::from_secs(604_800));
+        assert_eq!(
+            LOKI_REJECT_OLD_SAMPLES_MAX_AGE,
+            Duration::from_secs(604_800)
+        );
         assert_eq!(LOKI_CREATION_GRACE_PERIOD, Duration::from_secs(600));
     }
 
@@ -19678,8 +19681,14 @@ mod tests {
             PermissionType::Deny,
         );
 
-        assert!(matches_acl_topic_pattern(&allow_write, "__crabka_observability_logs_wal"));
-        assert!(matches_acl_topic_pattern(&allow_read, "__crabka_observability_logs_wal"));
+        assert!(matches_acl_topic_pattern(
+            &allow_write,
+            "__crabka_observability_logs_wal"
+        ));
+        assert!(matches_acl_topic_pattern(
+            &allow_read,
+            "__crabka_observability_logs_wal"
+        ));
         assert!(!matches_acl_topic_pattern(&allow_read, "other-topic"));
         assert!(acl_matches_tenant_wal_write(
             &allow_write,
@@ -19713,30 +19722,38 @@ mod tests {
             "User:tenant-a",
             "__crabka_observability_logs_wal",
         ));
-        assert!(check_tenant_wal_write_acl(
-            "tenant-a",
-            "__crabka_observability_logs_wal",
-            &[allow_write.clone()]
-        )
-        .is_ok());
-        assert!(check_tenant_wal_read_acl(
-            "tenant-a",
-            "__crabka_observability_logs_wal",
-            &[allow_read.clone()]
-        )
-        .is_ok());
-        assert!(check_tenant_wal_write_acl(
-            "tenant-a",
-            "__crabka_observability_logs_wal",
-            &[deny_write]
-        )
-        .is_err());
-        assert!(check_tenant_wal_read_acl(
-            "tenant-a",
-            "__crabka_observability_logs_wal",
-            &[allow_write]
-        )
-        .is_err());
+        assert!(
+            check_tenant_wal_write_acl(
+                "tenant-a",
+                "__crabka_observability_logs_wal",
+                &[allow_write.clone()]
+            )
+            .is_ok()
+        );
+        assert!(
+            check_tenant_wal_read_acl(
+                "tenant-a",
+                "__crabka_observability_logs_wal",
+                &[allow_read.clone()]
+            )
+            .is_ok()
+        );
+        assert!(
+            check_tenant_wal_write_acl(
+                "tenant-a",
+                "__crabka_observability_logs_wal",
+                &[deny_write]
+            )
+            .is_err()
+        );
+        assert!(
+            check_tenant_wal_read_acl(
+                "tenant-a",
+                "__crabka_observability_logs_wal",
+                &[allow_write]
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -19842,7 +19859,10 @@ mod tests {
         headers.insert(CONTENT_ENCODING, "gzip".parse().unwrap());
         let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         std::io::Write::write_all(&mut encoder, b"raw").unwrap();
-        assert_eq!(decode_loki_http_body(&headers, &encoder.finish().unwrap()).unwrap(), b"raw");
+        assert_eq!(
+            decode_loki_http_body(&headers, &encoder.finish().unwrap()).unwrap(),
+            b"raw"
+        );
         headers.insert(CONTENT_ENCODING, "br".parse().unwrap());
         assert!(decode_loki_http_body(&headers, b"raw").is_err());
 
@@ -19858,7 +19878,9 @@ mod tests {
                 .unwrap()
         );
         assert!(!is_loki_json_content_type(&loki_content_type("application/x-protobuf")).unwrap());
-        assert!(is_loki_json_content_type(&loki_content_type("application/json; charset")).is_err());
+        assert!(
+            is_loki_json_content_type(&loki_content_type("application/json; charset")).is_err()
+        );
         assert!(
             is_loki_json_content_type(&loki_content_type("application/json; charset=")).is_err()
         );
@@ -19867,10 +19889,13 @@ mod tests {
     #[test]
     fn loki_error_contexts_respect_utf8_boundaries_and_offsets() {
         let body = "{\"streams\":\"not-array\"}";
-        assert!(loki_json_push_streams_parse_error(body.as_bytes(), &json!("not-array"))
-            .contains("|{\"streams\":\"not-array\"}|"));
+        assert!(
+            loki_json_push_streams_parse_error(body.as_bytes(), &json!("not-array"))
+                .contains("|{\"streams\":\"not-array\"}|")
+        );
 
-        let structured = br#"{"streams":[{"stream":{"app":"api"},"values":[["1","line",{"ok":true}]]}]}"#;
+        let structured =
+            br#"{"streams":[{"stream":{"app":"api"},"values":[["1","line",{"ok":true}]]}]}"#;
         let error = loki_structured_metadata_value_parse_error(structured, "ok", &json!(true));
         assert!(error.contains("ok\":true"));
 
@@ -19885,18 +19910,28 @@ mod tests {
             ("app".to_string(), "api".to_string()),
             ("env".to_string(), "prod".to_string()),
         ]);
-        assert_eq!(loki_label_set(&rendered_labels), r#"{app="api",env="prod"}"#);
+        assert_eq!(
+            loki_label_set(&rendered_labels),
+            r#"{app="api",env="prod"}"#
+        );
         assert!(loki_push_label_parse_error(&rendered_labels, "bad-name").contains("1:5"));
-        assert!(loki_proto_label_parse_error(r#"{9bad="x"}"#)
-            .unwrap()
-            .contains("1:2"));
-        assert!(loki_proto_label_parse_error(r#"{app="api",9bad="x"}"#)
-            .unwrap()
-            .contains("1:12"));
+        assert!(
+            loki_proto_label_parse_error(r#"{9bad="x"}"#)
+                .unwrap()
+                .contains("1:2")
+        );
+        assert!(
+            loki_proto_label_parse_error(r#"{app="api",9bad="x"}"#)
+                .unwrap()
+                .contains("1:12")
+        );
 
         let mut detected = BTreeMap::from([("app".to_string(), "api".to_string())]);
         discover_detected_level_label(&mut detected, "api ERROR happened");
-        assert_eq!(detected.get("detected_level").map(String::as_str), Some("error"));
+        assert_eq!(
+            detected.get("detected_level").map(String::as_str),
+            Some("error")
+        );
         let mut explicit = BTreeMap::from([("level".to_string(), "custom".to_string())]);
         discover_detected_level_label(&mut explicit, "api error happened");
         assert!(!explicit.contains_key("detected_level"));
@@ -19975,7 +20010,9 @@ mod tests {
             parse_cancel_delete_request_params(Some("request_id=delete-1&force=true")).unwrap(),
             "delete-1"
         );
-        assert!(parse_cancel_delete_request_params(Some("request_id=delete-1&force=maybe")).is_err());
+        assert!(
+            parse_cancel_delete_request_params(Some("request_id=delete-1&force=maybe")).is_err()
+        );
         assert_eq!(
             parse_loki_delete_timestamp_query_param("start", "1.5").unwrap(),
             1
@@ -20035,6 +20072,10 @@ mod tests {
         let recording = PrometheusRulesFilters::parse(Some("type=record")).unwrap();
         assert_eq!(recording.rule_kind.as_deref(), Some("recording"));
         assert!(PrometheusRulesFilters::parse(Some("group_next_token=next")).is_err());
-        assert!(!PrometheusRulesFilters::parse(Some("")).unwrap().has_rule_filter());
+        assert!(
+            !PrometheusRulesFilters::parse(Some(""))
+                .unwrap()
+                .has_rule_filter()
+        );
     }
 }
