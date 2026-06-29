@@ -925,7 +925,13 @@ async fn refresh_compaction_frontier_and_prune(
     frontier: &SharedCompactionFrontier,
     hot_tail: &BufferedLogHotTail,
 ) -> Result<usize, CompactionFrontierStoreError> {
-    let updated = read_compaction_frontier_from_object_store(store, prefix).await?;
+    let updated = match read_compaction_frontier_from_object_store(store, prefix).await {
+        Ok(updated) => updated,
+        Err(CompactionFrontierStoreError::ObjectStore(object_store::Error::NotFound {
+            ..
+        })) => return Ok(0),
+        Err(error) => return Err(error),
+    };
     frontier.replace(updated.clone());
     Ok(hot_tail.prune_compacted(&updated))
 }
@@ -20419,6 +20425,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn compaction_frontier_refresh_treats_absent_manifest_as_empty() {
+        let store = object_store::memory::InMemory::new();
+        let prefix = ObjectPath::default();
+        let frontier = SharedCompactionFrontier::new(CompactionFrontier::new(123));
+        let hot_tail = BufferedLogHotTail::default();
+        let fresh = hot_tail_test_record(3_000, "new");
+        hot_tail.append_records(vec![fresh.clone()]);
+
+        let pruned = refresh_compaction_frontier_and_prune(&store, &prefix, &frontier, &hot_tail)
+            .await
+            .unwrap();
+
+        assert_eq!(pruned, 0);
+        assert_eq!(frontier.snapshot(), CompactionFrontier::new(123));
+        assert_eq!(hot_tail.records(), vec![fresh]);
+    }
+
+    #[tokio::test]
     async fn appending_log_index_shard_does_not_rewrite_historical_shards_or_full_manifest() {
         let store = RecordingObjectStore::new();
         let prefix = ObjectPath::from("observability");
@@ -20453,17 +20477,18 @@ mod tests {
         .await
         .unwrap();
 
-        block_index.insert(BlockDescriptor::new(
+        let new_descriptor = BlockDescriptor::new(
             BlockKey::new(tenant, 0, 30, 39, new_range),
             BTreeSet::from([admin]),
-        ));
+        );
+        block_index.insert(new_descriptor.clone());
         store.clear_put_paths();
 
         write_tenant_compaction_indexes_to_object_store(
             &store,
             &prefix,
             tenant,
-            new_range,
+            &new_descriptor,
             &labels_index,
             &block_index,
             LogCompactionIndexOutput::ShardManifests,
