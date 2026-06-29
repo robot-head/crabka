@@ -759,6 +759,8 @@ mod bootstrap_mode_tests {
     use assert2::assert;
     use tempfile::TempDir;
 
+    const TEST_OP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
     #[test]
     fn controller_endpoint_addr_keeps_dns_hostname_not_parsed_socketaddr() {
         // Regression: a voter endpoint host is a per-pod DNS FQDN, NOT a
@@ -832,13 +834,20 @@ mod bootstrap_mode_tests {
 
     async fn wait_for_leader(ctrl: &ControllerHandle) {
         let mut leader_rx = ctrl.watch_leader();
-        tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            leader_rx.wait_for(Option::is_some),
-        )
-        .await
-        .expect("no leader elected within 30s")
-        .expect("leader watch channel closed");
+        tokio::time::timeout(TEST_OP_TIMEOUT, leader_rx.wait_for(Option::is_some))
+            .await
+            .expect("no leader elected within 2s")
+            .expect("leader watch channel closed");
+    }
+
+    async fn submit_change_with_timeout(
+        ctrl: &ControllerHandle,
+        records: Vec<crabka_metadata::MetadataRecord>,
+        context: &str,
+    ) -> Result<(), RaftError> {
+        tokio::time::timeout(TEST_OP_TIMEOUT, ctrl.submit_change(records))
+            .await
+            .unwrap_or_else(|_| panic!("{context} submit_change timed out"))
     }
 
     async fn bind_eventually(addr: SocketAddr) -> tokio::net::TcpListener {
@@ -988,17 +997,25 @@ mod bootstrap_mode_tests {
         assert!(<ControllerHandle as crate::reconfig::ReconfigOps>::leader(&ctrl) == Some(1));
         assert!(<ControllerHandle as crate::reconfig::ReconfigOps>::is_leader(&ctrl));
 
-        <ControllerHandle as crate::reconfig::ReconfigOps>::submit_records(
-            &ctrl,
-            vec![committable_topic_record("ops-a")],
+        tokio::time::timeout(
+            TEST_OP_TIMEOUT,
+            <ControllerHandle as crate::reconfig::ReconfigOps>::submit_records(
+                &ctrl,
+                vec![committable_topic_record("ops-a")],
+            ),
         )
         .await
+        .expect("submit ops-a timed out")
         .expect("submit ops-a");
-        <ControllerHandle as crate::reconfig::ReconfigOps>::submit_records(
-            &ctrl,
-            vec![committable_topic_record("ops-b")],
+        tokio::time::timeout(
+            TEST_OP_TIMEOUT,
+            <ControllerHandle as crate::reconfig::ReconfigOps>::submit_records(
+                &ctrl,
+                vec![committable_topic_record("ops-b")],
+            ),
         )
         .await
+        .expect("submit ops-b timed out")
         .expect("submit ops-b");
 
         assert!(ctrl.current_image().topic("ops-a").is_some());
@@ -1217,18 +1234,19 @@ mod bootstrap_mode_tests {
         };
         let ctrl = Controller::start(cfg).await.expect("first bootstrap ok");
         // Drive a commit so the log is non-empty on the second boot.
-        let mut leader_rx = ctrl.watch_leader();
-        while leader_rx.borrow().is_none() {
-            leader_rx.changed().await.unwrap();
-        }
-        ctrl.submit_change(vec![crabka_metadata::MetadataRecord::V1Topic(
-            crabka_metadata::TopicRecord {
-                name: "seed".into(),
-                topic_id: Uuid::new_v4(),
-                partitions: 1,
-                replication_factor: 1,
-            },
-        )])
+        wait_for_leader(&ctrl).await;
+        submit_change_with_timeout(
+            &ctrl,
+            vec![crabka_metadata::MetadataRecord::V1Topic(
+                crabka_metadata::TopicRecord {
+                    name: "seed".into(),
+                    topic_id: Uuid::new_v4(),
+                    partitions: 1,
+                    replication_factor: 1,
+                },
+            )],
+            "bootstrap seed",
+        )
         .await
         .expect("submit");
         ctrl.shutdown().await;
@@ -1279,20 +1297,23 @@ mod bootstrap_mode_tests {
             ..ControllerConfig::for_tests(1, dir.path().to_path_buf())
         };
         let ctrl = Controller::start(cfg).await.expect("bootstrap");
-        let mut leader_rx = ctrl.watch_leader();
-        while leader_rx.borrow().is_none() {
-            leader_rx.changed().await.unwrap();
-        }
-        ctrl.submit_change(vec![MetadataRecord::V1Topic(TopicRecord {
-            name: "t".into(),
-            topic_id: Uuid::new_v4(),
-            partitions: 1,
-            replication_factor: 1,
-        })])
+        wait_for_leader(&ctrl).await;
+        submit_change_with_timeout(
+            &ctrl,
+            vec![MetadataRecord::V1Topic(TopicRecord {
+                name: "t".into(),
+                topic_id: Uuid::new_v4(),
+                partitions: 1,
+                replication_factor: 1,
+            })],
+            "metadata_records seed",
+        )
         .await
         .expect("submit");
 
-        let slice = ctrl.metadata_records(0, usize::MAX).await;
+        let slice = tokio::time::timeout(TEST_OP_TIMEOUT, ctrl.metadata_records(0, usize::MAX))
+            .await
+            .expect("metadata_records timed out");
         assert!(slice.high_watermark >= 1);
         let image = MetadataImage::new(Uuid::nil());
         let mut buf: &[u8] = &slice.records;
@@ -1328,24 +1349,28 @@ mod bootstrap_mode_tests {
             ..ControllerConfig::for_tests(1, dir.path().to_path_buf())
         };
         let ctrl = Controller::start(cfg).await.expect("bootstrap");
-        let mut leader_rx = ctrl.watch_leader();
-        while leader_rx.borrow().is_none() {
-            leader_rx.changed().await.unwrap();
-        }
-        ctrl.submit_change(vec![MetadataRecord::V1Topic(TopicRecord {
-            name: "fetched".into(),
-            topic_id: Uuid::new_v4(),
-            partitions: 1,
-            replication_factor: 1,
-        })])
+        wait_for_leader(&ctrl).await;
+        submit_change_with_timeout(
+            &ctrl,
+            vec![MetadataRecord::V1Topic(TopicRecord {
+                name: "fetched".into(),
+                topic_id: Uuid::new_v4(),
+                partitions: 1,
+                replication_factor: 1,
+            })],
+            "fetch_metadata seed",
+        )
         .await
         .expect("submit");
 
         let addr = ctrl.controller_bound_addr();
-        let resp = ctrl
-            .fetch_metadata_from(addr, 0, 1_048_576)
-            .await
-            .expect("fetch");
+        let resp = tokio::time::timeout(
+            TEST_OP_TIMEOUT,
+            ctrl.fetch_metadata_from(addr, 0, 1_048_576),
+        )
+        .await
+        .expect("fetch_metadata_from timed out")
+        .expect("fetch");
         assert!(resp.error_code == 0);
         assert!(resp.high_watermark >= 1);
 
@@ -1389,14 +1414,21 @@ mod bootstrap_mode_tests {
 
         let ctrl = Controller::start(cfg).await.expect("bootstrap");
         wait_for_leader(&ctrl).await;
-        ctrl.submit_change(vec![committable_topic_record("client-id-check")])
-            .await
-            .expect("submit");
+        submit_change_with_timeout(
+            &ctrl,
+            vec![committable_topic_record("client-id-check")],
+            "client-id fetch seed",
+        )
+        .await
+        .expect("submit");
 
-        let resp = ctrl
-            .fetch_metadata_from(ctrl.controller_bound_addr(), 0, 1_048_576)
-            .await
-            .expect("fetch");
+        let resp = tokio::time::timeout(
+            TEST_OP_TIMEOUT,
+            ctrl.fetch_metadata_from(ctrl.controller_bound_addr(), 0, 1_048_576),
+        )
+        .await
+        .expect("fetch_metadata_from timed out")
+        .expect("fetch");
 
         assert!(resp.error_code == 0);
         assert!(

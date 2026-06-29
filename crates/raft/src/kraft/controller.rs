@@ -2722,6 +2722,22 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn engine_following_leader_reflects_current_role() {
+        let (mut follower, _dir) = build_engine_only(1, &[1, 2, 3]);
+        assert!(follower.following_leader().is_none());
+
+        follower.on_event(Event::ReceiveBeginQuorumEpoch {
+            leader_id: 2,
+            leader_epoch: 1,
+        });
+        assert!(follower.following_leader() == Some(2));
+
+        let (mut leader, _leader_dir) = build_engine_only(1, &[1]);
+        elect_single_voter_engine(&mut leader);
+        assert!(leader.following_leader().is_none());
+    }
+
     #[test]
     fn direct_single_voter_submit_applies_image_and_resolves_waiter() {
         let (mut engine, _dir) = build_engine_only(1, &[1]);
@@ -3161,6 +3177,16 @@ mod tests {
         );
     }
 
+    async fn submit_change_with_timeout(
+        ctrl: &KraftController,
+        records: Vec<crabka_metadata::MetadataRecord>,
+        context: &str,
+    ) -> Result<(), RaftError> {
+        tokio::time::timeout(StdDuration::from_secs(2), ctrl.submit_change(records))
+            .await
+            .unwrap_or_else(|_| panic!("{context} submit_change timed out"))
+    }
+
     #[tokio::test]
     async fn single_voter_engine_starts_with_no_initial_leader() {
         let (ctrl, _dir) = build(1, &[1]);
@@ -3319,8 +3345,11 @@ mod tests {
         ctrl.inject_event(Event::ElectionTimeout).await.unwrap();
         await_leader(&ctrl, Some(1)).await;
 
-        ctrl.submit_change(topic_record("t")).await.unwrap();
-        let dup = ctrl.submit_change(topic_record("t")).await;
+        submit_change_with_timeout(&ctrl, topic_record("t"), "first duplicate-test submit")
+            .await
+            .unwrap();
+        let dup =
+            submit_change_with_timeout(&ctrl, topic_record("t"), "duplicate-test submit").await;
         assert!(matches!(dup, Err(RaftError::Metadata(_))), "got {dup:?}");
         ctrl.shutdown().await;
     }
@@ -3488,7 +3517,9 @@ mod tests {
             );
             ctrl.inject_event(Event::ElectionTimeout).await.unwrap();
             await_leader(&ctrl, Some(1)).await;
-            ctrl.submit_change(topic_record("recovered")).await.unwrap();
+            submit_change_with_timeout(&ctrl, topic_record("recovered"), "recovery seed")
+                .await
+                .unwrap();
             assert!(ctrl.current_image().topic("recovered").is_some());
             ctrl.trigger_snapshot().await.unwrap();
             ctrl.shutdown().await;
@@ -3573,7 +3604,9 @@ mod tests {
         // commit advances the HWM well past the 3-record interval, so a
         // snapshot+prune fires.
         for name in ["a", "b", "c", "d"] {
-            ctrl.submit_change(topic_record(name)).await.unwrap();
+            submit_change_with_timeout(&ctrl, topic_record(name), "snapshot threshold submit")
+                .await
+                .unwrap();
         }
 
         // A checkpoint was written.
@@ -3649,14 +3682,16 @@ mod tests {
         };
 
         let base1 = ctrl.quorum_state().await.unwrap().log_end_offset;
-        ctrl.submit_change(reg(7))
+        submit_change_with_timeout(&ctrl, reg(7), "first broker registration")
             .await
             .expect("first registration");
         let e1 = ctrl.current_image().broker_epoch(7);
         assert!(e1 == Some(base1), "epoch {e1:?} != commit offset {base1}");
 
         let base2 = ctrl.quorum_state().await.unwrap().log_end_offset;
-        ctrl.submit_change(reg(7)).await.expect("re-registration");
+        submit_change_with_timeout(&ctrl, reg(7), "broker re-registration")
+            .await
+            .expect("re-registration");
         let e2 = ctrl.current_image().broker_epoch(7);
         assert!(e2 == Some(base2), "re-reg epoch {e2:?} != offset {base2}");
         assert!(base2 > base1 && e2 > e1, "epoch must strictly increase");
