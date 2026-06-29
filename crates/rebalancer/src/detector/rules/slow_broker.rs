@@ -165,6 +165,28 @@ mod tests {
     }
 
     #[test]
+    fn per_broker_cores_converts_cpu_micros_to_cores() {
+        let parts = vec![part("t", 0, vec![1])];
+        let s = state(&[1], parts);
+        let usages = store_with_cpu(vec![(1, "t", 0, 0.0, 2_000_000.0)]);
+        let capacities = BrokerCapacities::default();
+        let cfg = cfg(2.0, 0.0);
+        let hist = SnapshotHistory::new(10);
+        let ctx = RuleCtx {
+            snapshot: &s,
+            history: &hist,
+            usages: &usages,
+            capacities: &capacities,
+            now_ms: 1000,
+            cfg: &cfg,
+        };
+
+        let cores = SlowBroker::per_broker_cores(&ctx);
+
+        assert!((cores[&1] - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
     fn idle_cluster_no_fire() {
         // All three brokers reporting ~0 cores → max threshold = min_cores (0.5).
         // No broker over that → no fire.
@@ -218,6 +240,85 @@ mod tests {
         assert!(hits.len() == 1);
         assert!(hits[0].key == AnomalyKey::Broker(1));
         assert!(matches!(hits[0].severity, AnomalySeverity::Warning));
+    }
+
+    #[test]
+    fn even_broker_count_uses_average_of_middle_two_for_median() {
+        let parts: Vec<_> = (0..4).map(|i| part("t", i, vec![1, 2, 3, 4])).collect();
+        let s = state(&[1, 2, 3, 4], parts);
+        let usages = store_with_cpu(vec![
+            (1, "t", 0, 0.0, 1_000_000.0),
+            (2, "t", 1, 0.0, 3_000_000.0),
+            (3, "t", 2, 0.0, 5_000_000.0),
+            (4, "t", 3, 0.0, 7_000_000.0),
+        ]);
+        let capacities = BrokerCapacities::default();
+        let cfg = cfg(1.5, 0.0);
+        let hist = SnapshotHistory::new(10);
+        let ctx = RuleCtx {
+            snapshot: &s,
+            history: &hist,
+            usages: &usages,
+            capacities: &capacities,
+            now_ms: 1000,
+            cfg: &cfg,
+        };
+
+        let hits = SlowBroker.evaluate(&ctx);
+
+        assert!(hits.len() == 1);
+        assert!(hits[0].key == AnomalyKey::Broker(4));
+        assert!(hits[0].details.contains("median 4.00"));
+        assert!(hits[0].details.contains("threshold 6.00"));
+    }
+
+    #[test]
+    fn multiplier_threshold_uses_product_not_sum() {
+        let parts: Vec<_> = (0..4).map(|i| part("t", i, vec![1, 2, 3, 4])).collect();
+        let s = state(&[1, 2, 3, 4], parts);
+        let usages = store_with_cpu(vec![
+            (1, "t", 0, 0.0, 1_000_000.0),
+            (2, "t", 1, 0.0, 3_000_000.0),
+            (3, "t", 2, 0.0, 5_000_000.0),
+            (4, "t", 3, 0.0, 7_500_000.0),
+        ]);
+        let capacities = BrokerCapacities::default();
+        let cfg = cfg(2.0, 0.0);
+        let hist = SnapshotHistory::new(10);
+        let ctx = RuleCtx {
+            snapshot: &s,
+            history: &hist,
+            usages: &usages,
+            capacities: &capacities,
+            now_ms: 1000,
+            cfg: &cfg,
+        };
+
+        assert!(SlowBroker.evaluate(&ctx).is_empty());
+    }
+
+    #[test]
+    fn broker_exactly_at_threshold_does_not_fire() {
+        let parts: Vec<_> = (0..3).map(|i| part("t", i, vec![1, 2, 3])).collect();
+        let s = state(&[1, 2, 3], parts);
+        let usages = store_with_cpu(vec![
+            (1, "t", 0, 0.0, 2_000_000.0),
+            (2, "t", 1, 0.0, 1_000_000.0),
+            (3, "t", 2, 0.0, 1_000_000.0),
+        ]);
+        let capacities = BrokerCapacities::default();
+        let cfg = cfg(2.0, 0.0);
+        let hist = SnapshotHistory::new(10);
+        let ctx = RuleCtx {
+            snapshot: &s,
+            history: &hist,
+            usages: &usages,
+            capacities: &capacities,
+            now_ms: 1000,
+            cfg: &cfg,
+        };
+
+        assert!(SlowBroker.evaluate(&ctx).is_empty());
     }
 
     #[test]

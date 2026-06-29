@@ -220,6 +220,29 @@ mod tests {
     }
 
     #[test]
+    fn exact_critical_threshold_is_warning() {
+        let parts: Vec<_> = (0..5).map(|i| part("t", i, vec![1, 2])).collect();
+        let s = state(parts);
+        let usages = store_with_disk((0..5).map(|i| (1, "t", i, 190.0)).collect());
+        let capacities = caps_with(1, 1_000);
+        let cfg = cfg(0.85, 0.95);
+        let hist = SnapshotHistory::new(10);
+        let ctx = RuleCtx {
+            snapshot: &s,
+            history: &hist,
+            usages: &usages,
+            capacities: &capacities,
+            now_ms: 0,
+            cfg: &cfg,
+        };
+
+        let hits = DiskPressure.evaluate(&ctx);
+
+        assert!(hits.len() == 1);
+        assert!(matches!(hits[0].severity, AnomalySeverity::Warning));
+    }
+
+    #[test]
     fn no_capacity_info_skips_broker() {
         // Lots of disk usage but no capacity configured → skip.
         let parts: Vec<_> = (0..5).map(|i| part("t", i, vec![1, 2])).collect();

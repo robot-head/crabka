@@ -10,6 +10,7 @@ use tracing::debug;
 
 use crabka_client_core::Client;
 use crabka_protocol::owned::metadata_request::{MetadataRequest, MetadataRequestTopic};
+use crabka_protocol::owned::metadata_response::MetadataResponse;
 use crabka_protocol::owned::produce_request::{
     PartitionProduceData, ProduceRequest, TopicProduceData,
 };
@@ -90,21 +91,26 @@ pub(crate) async fn produce_state(
 /// the controller's metadata image but hasn't propagated to the broker
 /// we're talking to — treat as transient and retry).
 async fn resolve_topic_id(client: &Client, topic: &str) -> Result<Option<Uuid>, StateTopicError> {
-    let resp = client
-        .send(MetadataRequest {
-            topics: Some(vec![MetadataRequestTopic {
-                name: Some(topic.into()),
-                ..Default::default()
-            }]),
+    let resp = client.send(metadata_request(topic)).await?;
+    Ok(topic_id_from_metadata(&resp, topic))
+}
+
+fn metadata_request(topic: &str) -> MetadataRequest {
+    MetadataRequest {
+        topics: Some(vec![MetadataRequestTopic {
+            name: Some(topic.into()),
             ..Default::default()
-        })
-        .await?;
-    Ok(resp
-        .topics
+        }]),
+        ..Default::default()
+    }
+}
+
+fn topic_id_from_metadata(resp: &MetadataResponse, topic: &str) -> Option<Uuid> {
+    resp.topics
         .iter()
         .find(|t| t.name.as_deref() == Some(topic))
         .map(|t| t.topic_id)
-        .filter(|id| *id != Uuid::default()))
+        .filter(|id| *id != Uuid::default())
 }
 
 async fn send_once(
@@ -138,7 +144,6 @@ fn produce_request(
         ..Default::default()
     };
     ProduceRequest {
-        transactional_id: None,
         acks: -1, // all
         timeout_ms: 10_000,
         topic_data: vec![TopicProduceData {
@@ -181,6 +186,7 @@ fn classify_send_result(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crabka_protocol::owned::metadata_response::{MetadataResponse, MetadataResponseTopic};
     use crabka_protocol::owned::produce_response::{
         PartitionProduceResponse, ProduceResponse, TopicProduceResponse,
     };
@@ -197,6 +203,21 @@ mod tests {
             }],
             ..Default::default()
         }
+    }
+
+    fn unreachable_client_id(suffix: &str) -> String {
+        format!("state-topic-producer-test-{suffix}")
+    }
+
+    async fn unreachable_client(suffix: &str) -> Client {
+        Client::builder()
+            .bootstrap("127.0.0.1:1")
+            .client_id(&unreachable_client_id(suffix))
+            .connect_timeout(Duration::from_millis(50))
+            .request_timeout(Duration::from_millis(50))
+            .build()
+            .await
+            .expect("client build does not connect")
     }
 
     #[test]
@@ -239,6 +260,53 @@ mod tests {
     }
 
     #[test]
+    fn metadata_request_scopes_to_state_topic_name() {
+        let req = metadata_request("state-topic");
+
+        let topics = req.topics.expect("topics");
+        assert!(topics.len() == 1);
+        assert!(topics[0].name.as_deref() == Some("state-topic"));
+    }
+
+    #[test]
+    fn topic_id_from_metadata_requires_matching_nonzero_topic_id() {
+        let wanted = Uuid([7; 16]);
+        let resp = MetadataResponse {
+            topics: vec![
+                MetadataResponseTopic {
+                    name: Some("other-topic".into()),
+                    topic_id: Uuid([9; 16]),
+                    ..Default::default()
+                },
+                MetadataResponseTopic {
+                    name: Some("state-topic".into()),
+                    topic_id: wanted,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        assert!(topic_id_from_metadata(&resp, "state-topic") == Some(wanted));
+        assert!(topic_id_from_metadata(&resp, "other-topic") == Some(Uuid([9; 16])));
+        assert!(topic_id_from_metadata(&resp, "missing").is_none());
+    }
+
+    #[test]
+    fn topic_id_from_metadata_treats_zero_uuid_as_missing() {
+        let resp = MetadataResponse {
+            topics: vec![MetadataResponseTopic {
+                name: Some("state-topic".into()),
+                topic_id: Uuid::default(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        assert!(topic_id_from_metadata(&resp, "state-topic").is_none());
+    }
+
+    #[test]
     fn produce_response_errors_are_classified_for_retry() {
         assert!(classify_send_result(Ok(())).unwrap().is_none());
         assert!(
@@ -261,20 +329,38 @@ mod tests {
 
     #[tokio::test]
     async fn produce_state_propagates_initial_metadata_send_errors() {
-        let client = Client::builder()
-            .bootstrap("127.0.0.1:1")
-            .client_id("state-topic-producer-test")
-            .connect_timeout(Duration::from_millis(50))
-            .request_timeout(Duration::from_millis(50))
-            .build()
-            .await
-            .expect("client build does not connect");
+        let client = unreachable_client("produce-state").await;
 
         assert!(
             produce_state(
                 &client,
                 "__crabka_state",
                 "in_flight",
+                Some(Bytes::from_static(b"{}"))
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_topic_id_propagates_metadata_send_errors() {
+        let client = unreachable_client("resolve-topic-id").await;
+
+        assert!(resolve_topic_id(&client, "__crabka_state").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn send_once_propagates_produce_send_errors() {
+        let client = unreachable_client("send-once").await;
+        let key = Bytes::from_static(b"in_flight");
+
+        assert!(
+            send_once(
+                &client,
+                "__crabka_state",
+                Uuid([7; 16]),
+                &key,
                 Some(Bytes::from_static(b"{}"))
             )
             .await
