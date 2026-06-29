@@ -450,7 +450,7 @@ mod tests {
         }
     }
 
-    fn decode_response(version: i16, bytes: Bytes) -> AlterPartitionReassignmentsResponse {
+    fn decode_response(version: i16, bytes: &Bytes) -> AlterPartitionReassignmentsResponse {
         let mut cur: &[u8] = bytes.as_ref();
         let resp = AlterPartitionReassignmentsResponse::decode(&mut cur, version)
             .expect("decode AlterPartitionReassignmentsResponse");
@@ -587,7 +587,7 @@ mod tests {
         let bytes =
             encode_whole_request_error(&req, CLUSTER_AUTHORIZATION_FAILED, "denied", version)
                 .expect("encode whole request error");
-        let resp = decode_response(version, bytes);
+        let resp = decode_response(version, &bytes);
 
         assert!(resp.throttle_time_ms == 0);
         assert!(!resp.allow_replication_factor_change);
@@ -644,7 +644,7 @@ mod tests {
         )
         .await
         .expect("handle");
-        let resp = decode_response(version, bytes);
+        let resp = decode_response(version, &bytes);
 
         assert!(resp.throttle_time_ms == 0);
         assert!(!resp.allow_replication_factor_change);
@@ -685,7 +685,7 @@ mod tests {
         )
         .await
         .expect("handle");
-        let resp = decode_response(version, bytes);
+        let resp = decode_response(version, &bytes);
 
         assert!(!resp.allow_replication_factor_change);
         assert!(resp.responses.len() == 1);
@@ -726,7 +726,7 @@ mod tests {
         )
         .await
         .expect("handle");
-        let resp = decode_response(version, bytes);
+        let resp = decode_response(version, &bytes);
 
         assert!(resp.responses.len() == 1);
         assert!(resp.responses[0].name == "orders");

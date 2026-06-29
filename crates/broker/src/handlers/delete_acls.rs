@@ -269,7 +269,7 @@ mod tests {
         }
     }
 
-    fn decode_response(bytes: Bytes) -> DeleteAclsResponse {
+    fn decode_response(bytes: &Bytes) -> DeleteAclsResponse {
         let mut cur: &[u8] = bytes.as_ref();
         let resp = DeleteAclsResponse::decode(&mut cur, VERSION).expect("decode response");
         assert!(cur.is_empty(), "response decoder consumed all bytes");
@@ -439,7 +439,7 @@ mod tests {
             VERSION,
         )
         .expect("encode");
-        let resp = decode_response(bytes);
+        let resp = decode_response(&bytes);
 
         assert!(resp.throttle_time_ms == 0);
         assert!(resp.filter_results.len() == 1);
@@ -466,7 +466,7 @@ mod tests {
         ]);
 
         let resp = handle(&broker, req, &ctx, VERSION).await.expect("handle");
-        let resp = decode_response(resp);
+        let resp = decode_response(&resp);
 
         assert!(resp.throttle_time_ms == 0);
         assert!(resp.filter_results.len() == 2);
@@ -498,7 +498,7 @@ mod tests {
         let req = request(vec![filter(Some("orders"), Some("User:alice"))]);
 
         let resp = handle(&broker, req, &ctx, VERSION).await.expect("handle");
-        let resp = decode_response(resp);
+        let resp = decode_response(&resp);
 
         assert!(resp.filter_results.len() == 1);
         let result = &resp.filter_results[0];

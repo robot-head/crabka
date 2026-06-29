@@ -12,7 +12,7 @@ use crabka_protocol::owned::alter_partition_request::AlterPartitionRequest;
 use crabka_protocol::owned::alter_partition_response::{
     AlterPartitionResponse, PartitionData as RespPartitionData, TopicData as RespTopicData,
 };
-use crabka_protocol::{Decode, Encode};
+use crabka_protocol::{Decode, Encode, UnknownTaggedFields};
 
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
@@ -68,7 +68,7 @@ pub(crate) async fn handle(
                     throttle_time_ms: 0,
                     error_code: codes::NOT_CONTROLLER,
                     topics: Vec::new(),
-                    unknown_tagged_fields: Default::default(),
+                    unknown_tagged_fields: UnknownTaggedFields::default(),
                 },
             );
         }
@@ -101,7 +101,7 @@ pub(crate) async fn handle(
             resp_topics.push(RespTopicData {
                 topic_id: req_topic.topic_id,
                 partitions: resp_partitions,
-                unknown_tagged_fields: Default::default(),
+                unknown_tagged_fields: UnknownTaggedFields::default(),
             });
         }
 
@@ -117,7 +117,7 @@ pub(crate) async fn handle(
                 throttle_time_ms: 0,
                 error_code: codes::NONE,
                 topics: resp_topics,
-                unknown_tagged_fields: Default::default(),
+                unknown_tagged_fields: UnknownTaggedFields::default(),
             },
         )
     }
@@ -250,7 +250,7 @@ fn handle_partition(
         isr: effective_isr_i32.to_vec(),
         leader_recovery_state: 0,
         partition_epoch: new_partition_epoch,
-        unknown_tagged_fields: Default::default(),
+        unknown_tagged_fields: UnknownTaggedFields::default(),
     }
 }
 
@@ -269,7 +269,7 @@ fn error_part(
         isr: isr.to_vec(),
         leader_recovery_state: 0,
         partition_epoch: 0,
-        unknown_tagged_fields: Default::default(),
+        unknown_tagged_fields: UnknownTaggedFields::default(),
     }
 }
 
@@ -301,7 +301,7 @@ fn denied_response(version: i16) -> Result<Bytes, BrokerError> {
             throttle_time_ms: 0,
             error_code: codes::CLUSTER_AUTHORIZATION_FAILED,
             topics: Vec::new(),
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         },
     )
 }
@@ -369,7 +369,10 @@ mod tests {
     }
 
     /// Image with topic "t" and one partition. Brokers registered per `epochs`.
-    fn image_with_partition(fixture: PartitionFixture<'_>, epochs: &[(u64, i64)]) -> MetadataImage {
+    fn image_with_partition(
+        fixture: &PartitionFixture<'_>,
+        epochs: &[(u64, i64)],
+    ) -> MetadataImage {
         let mut image = MetadataImage::new(uuid::Uuid::nil());
         image.apply(&MetadataRecord::V1Topic(TopicRecord {
             name: "t".into(),
@@ -399,7 +402,7 @@ mod tests {
     /// leader 1 @ `leader_epoch` 5. Brokers registered per `epochs`.
     fn image_with(epochs: &[(u64, i64)]) -> MetadataImage {
         image_with_partition(
-            PartitionFixture {
+            &PartitionFixture {
                 partition: 0,
                 leader: 1,
                 replicas: &[1, 2, 3],
@@ -433,7 +436,7 @@ mod tests {
         buf.freeze()
     }
 
-    fn decode_response(version: i16, bytes: Bytes) -> AlterPartitionResponse {
+    fn decode_response(version: i16, bytes: &Bytes) -> AlterPartitionResponse {
         let mut cur: &[u8] = bytes.as_ref();
         let resp = AlterPartitionResponse::decode(&mut cur, version).expect("decode response");
         assert!(cur.is_empty(), "response decoder consumed all bytes");
@@ -582,7 +585,7 @@ mod tests {
         let resp = super::handle(&broker, version, 123, &req_bytes, &ctx)
             .await
             .expect("handle");
-        let resp = decode_response(version, resp);
+        let resp = decode_response(version, &resp);
 
         assert!(resp.throttle_time_ms == 0);
         assert!(resp.error_code == codes::CLUSTER_AUTHORIZATION_FAILED);
@@ -609,7 +612,7 @@ mod tests {
         let resp = super::handle(&broker, version, 123, &req_bytes, &ctx)
             .await
             .expect("handle");
-        let resp = decode_response(version, resp);
+        let resp = decode_response(version, &resp);
 
         assert!(resp.throttle_time_ms == 0);
         assert!(resp.error_code == codes::NONE);
@@ -648,7 +651,7 @@ mod tests {
         let resp = super::handle(&broker, version, 123, &req_bytes, &ctx)
             .await
             .expect("handle");
-        let resp = decode_response(version, resp);
+        let resp = decode_response(version, &resp);
 
         assert!(resp.throttle_time_ms == 0);
         assert!(resp.error_code == codes::NONE);
@@ -682,7 +685,7 @@ mod tests {
     #[test]
     fn success_response_preserves_non_default_partition_fields() {
         let image = image_with_partition(
-            PartitionFixture {
+            &PartitionFixture {
                 partition: 7,
                 leader: 2,
                 replicas: &[2, 4, 6],
@@ -713,7 +716,7 @@ mod tests {
     #[test]
     fn error_response_preserves_non_default_partition_fields() {
         let image = image_with_partition(
-            PartitionFixture {
+            &PartitionFixture {
                 partition: 7,
                 leader: 2,
                 replicas: &[2, 4, 6],

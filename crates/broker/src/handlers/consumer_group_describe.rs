@@ -141,7 +141,7 @@ mod tests {
         buf.freeze()
     }
 
-    fn decode_response(bytes: Bytes) -> ConsumerGroupDescribeResponse {
+    fn decode_response(bytes: &Bytes) -> ConsumerGroupDescribeResponse {
         let mut cur: &[u8] = bytes.as_ref();
         let resp = ConsumerGroupDescribeResponse::decode(&mut cur, VERSION)
             .expect("decode ConsumerGroupDescribeResponse");
@@ -224,7 +224,7 @@ mod tests {
         let bytes = handle(&broker, VERSION, 3, &req)
             .await
             .expect("ConsumerGroupDescribe handler");
-        let resp = decode_response(bytes);
+        let resp = decode_response(&bytes);
 
         assert!(resp.groups.len() == 1, "{resp:?}");
         assert!(resp.groups[0].group_id == "missing-group", "{resp:?}");

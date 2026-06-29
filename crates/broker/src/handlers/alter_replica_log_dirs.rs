@@ -131,7 +131,7 @@ mod tests {
         buf.freeze()
     }
 
-    fn decode_response(version: i16, bytes: Bytes) -> AlterReplicaLogDirsResponse {
+    fn decode_response(version: i16, bytes: &Bytes) -> AlterReplicaLogDirsResponse {
         let mut cur: &[u8] = bytes.as_ref();
         let resp = AlterReplicaLogDirsResponse::decode(&mut cur, version).expect("decode response");
         assert!(cur.is_empty(), "response decoder consumed all bytes");
@@ -167,7 +167,7 @@ mod tests {
         let bytes = handle(&broker, version, 123, &req_bytes)
             .await
             .expect("handle");
-        let resp = decode_response(version, bytes);
+        let resp = decode_response(version, &bytes);
 
         assert!(resp.throttle_time_ms == 0);
         assert!(resp.results.len() == 1);

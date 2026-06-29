@@ -236,7 +236,7 @@ mod tests {
         }
     }
 
-    fn decode_response(bytes: Bytes) -> DescribeAclsResponse {
+    fn decode_response(bytes: &Bytes) -> DescribeAclsResponse {
         let mut cur: &[u8] = bytes.as_ref();
         let resp = DescribeAclsResponse::decode(&mut cur, VERSION).expect("decode response");
         assert!(cur.is_empty(), "response decoder consumed all bytes");
@@ -378,7 +378,7 @@ mod tests {
         )
         .await
         .expect("handle");
-        let resp = decode_response(resp);
+        let resp = decode_response(&resp);
 
         assert!(resp.throttle_time_ms == 0);
         assert!(resp.error_code == codes::CLUSTER_AUTHORIZATION_FAILED);
@@ -399,7 +399,7 @@ mod tests {
         req.resource_type_filter = 99;
 
         let resp = handle(&broker, req, &ctx, VERSION).await.expect("handle");
-        let resp = decode_response(resp);
+        let resp = decode_response(&resp);
 
         assert!(resp.throttle_time_ms == 0);
         assert!(resp.error_code == codes::INVALID_REQUEST);
@@ -433,7 +433,7 @@ mod tests {
         )
         .await
         .expect("handle");
-        let resp = decode_response(resp);
+        let resp = decode_response(&resp);
 
         assert!(resp.throttle_time_ms == 0);
         assert!(resp.error_code == codes::NONE);

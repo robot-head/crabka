@@ -183,7 +183,7 @@ mod tests {
         buf.freeze()
     }
 
-    fn decode_response(version: i16, bytes: Bytes) -> ApiVersionsResponse {
+    fn decode_response(version: i16, bytes: &Bytes) -> ApiVersionsResponse {
         let mut cur: &[u8] = bytes.as_ref();
         let resp =
             ApiVersionsResponse::decode(&mut cur, version).expect("decode ApiVersionsResponse");
@@ -320,7 +320,7 @@ mod tests {
             let bytes = handle(&broker, API_VERSIONS_V3, 7, &req)
                 .await
                 .expect("ApiVersions handler");
-            let resp = decode_response(API_VERSIONS_V3, bytes);
+            let resp = decode_response(API_VERSIONS_V3, &bytes);
             assert!(resp.error_code == codes::INVALID_REQUEST, "{resp:?}");
             assert!(resp.api_keys.is_empty(), "{resp:?}");
         }
@@ -340,7 +340,7 @@ mod tests {
         let bytes = handle(&broker, 0, 7, &req_bytes)
             .await
             .expect("ApiVersions handler");
-        let resp = decode_response(0, bytes);
+        let resp = decode_response(0, &bytes);
 
         assert!(resp.error_code == codes::NONE, "{resp:?}");
         assert!(!resp.api_keys.is_empty(), "{resp:?}");
@@ -368,7 +368,7 @@ mod tests {
         let bytes = handle(&broker, API_VERSIONS_V3, 7, &req)
             .await
             .expect("ApiVersions handler");
-        let resp = decode_response(API_VERSIONS_V3, bytes);
+        let resp = decode_response(API_VERSIONS_V3, &bytes);
 
         assert!(resp.error_code == codes::NONE, "{resp:?}");
         assert!(resp.api_keys == crate::api_catalog::supported_apis());

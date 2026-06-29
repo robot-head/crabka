@@ -4,13 +4,13 @@ use std::collections::HashSet;
 
 use bytes::Bytes;
 use crabka_metadata::{AclOperation, ClientQuotaRecord, MetadataRecord, QuotaEntity, ResourceType};
-use crabka_protocol::Encode;
 use crabka_protocol::owned::alter_client_quotas_request::{
     AlterClientQuotasRequest, EntityData, EntryData,
 };
 use crabka_protocol::owned::alter_client_quotas_response::{
     AlterClientQuotasResponse, EntityData as RespEntity, EntryData as RespEntry,
 };
+use crabka_protocol::{Encode, UnknownTaggedFields};
 
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
@@ -84,7 +84,7 @@ pub(crate) async fn handle(
     let resp = AlterClientQuotasResponse {
         throttle_time_ms: 0,
         entries: entry_results,
-        unknown_tagged_fields: Default::default(),
+        unknown_tagged_fields: UnknownTaggedFields::default(),
     };
     encode_response(&resp, api_version)
 }
@@ -161,10 +161,10 @@ fn ok_entry(entity: &[EntityData]) -> RespEntry {
             .map(|e| RespEntity {
                 entity_type: e.entity_type.clone(),
                 entity_name: e.entity_name.clone(),
-                unknown_tagged_fields: Default::default(),
+                unknown_tagged_fields: UnknownTaggedFields::default(),
             })
             .collect(),
-        unknown_tagged_fields: Default::default(),
+        unknown_tagged_fields: UnknownTaggedFields::default(),
     }
 }
 
@@ -177,10 +177,10 @@ fn err_entry(entity: &[EntityData], code: i16, msg: String) -> RespEntry {
             .map(|e| RespEntity {
                 entity_type: e.entity_type.clone(),
                 entity_name: e.entity_name.clone(),
-                unknown_tagged_fields: Default::default(),
+                unknown_tagged_fields: UnknownTaggedFields::default(),
             })
             .collect(),
-        unknown_tagged_fields: Default::default(),
+        unknown_tagged_fields: UnknownTaggedFields::default(),
     }
 }
 
@@ -208,7 +208,7 @@ fn encode_whole_request_error(
     let resp = AlterClientQuotasResponse {
         throttle_time_ms: 0,
         entries,
-        unknown_tagged_fields: Default::default(),
+        unknown_tagged_fields: UnknownTaggedFields::default(),
     };
     encode_response(&resp, api_version)
 }
@@ -282,7 +282,7 @@ mod tests {
         }
     }
 
-    fn decode_response(version: i16, bytes: Bytes) -> AlterClientQuotasResponse {
+    fn decode_response(version: i16, bytes: &Bytes) -> AlterClientQuotasResponse {
         let mut cur: &[u8] = bytes.as_ref();
         let resp = AlterClientQuotasResponse::decode(&mut cur, version).expect("decode response");
         assert!(cur.is_empty(), "response decoder consumed all bytes");
@@ -530,7 +530,7 @@ mod tests {
         let bytes =
             encode_whole_request_error(&req, CLUSTER_AUTHORIZATION_FAILED, "denied", version)
                 .expect("encode");
-        let resp = decode_response(version, bytes);
+        let resp = decode_response(version, &bytes);
 
         assert!(resp.throttle_time_ms == 0);
         assert!(resp.entries.len() == 2);
@@ -558,11 +558,11 @@ mod tests {
                 INVALID_REQUEST,
                 "bad request".into(),
             )],
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         };
 
         let bytes = encode_response(&resp, version).expect("encode");
-        let decoded = decode_response(version, bytes);
+        let decoded = decode_response(version, &bytes);
 
         assert!(decoded.throttle_time_ms == 123);
         assert!(decoded.entries.len() == 1);
@@ -593,7 +593,7 @@ mod tests {
         );
 
         let resp = handle(&broker, req, &ctx, version).await.expect("handle");
-        let resp = decode_response(version, resp);
+        let resp = decode_response(version, &resp);
 
         assert!(resp.throttle_time_ms == 0);
         assert!(resp.entries.len() == 1);
@@ -633,7 +633,7 @@ mod tests {
         );
 
         let resp = handle(&broker, req, &ctx, version).await.expect("handle");
-        let resp = decode_response(version, resp);
+        let resp = decode_response(version, &resp);
 
         assert!(resp.throttle_time_ms == 0);
         assert!(resp.entries.len() == 2);
@@ -674,7 +674,7 @@ mod tests {
         );
 
         let resp = handle(&broker, req, &ctx, version).await.expect("handle");
-        let resp = decode_response(version, resp);
+        let resp = decode_response(version, &resp);
 
         assert!(resp.throttle_time_ms == 0);
         assert!(resp.entries.len() == 1);

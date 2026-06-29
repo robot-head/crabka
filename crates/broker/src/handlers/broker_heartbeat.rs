@@ -415,7 +415,7 @@ mod tests {
         Arc::new(l)
     }
 
-    fn decode_response(version: i16, bytes: Bytes) -> BrokerHeartbeatResponse {
+    fn decode_response(version: i16, bytes: &Bytes) -> BrokerHeartbeatResponse {
         let mut cur: &[u8] = bytes.as_ref();
         let resp = BrokerHeartbeatResponse::decode(&mut cur, version)
             .expect("decode BrokerHeartbeatResponse");
@@ -695,7 +695,7 @@ mod tests {
         let bytes = handle(&broker, version, 11, &req, &ctx)
             .await
             .expect("BrokerHeartbeat handler");
-        let resp = decode_response(version, bytes);
+        let resp = decode_response(version, &bytes);
 
         assert!(resp.error_code == codes::NONE, "{resp:?}");
         assert!(resp.is_caught_up, "{resp:?}");

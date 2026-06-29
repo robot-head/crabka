@@ -415,7 +415,7 @@ mod tests {
         buf.freeze()
     }
 
-    fn decode_response(bytes: Bytes) -> CreatePartitionsResponse {
+    fn decode_response(bytes: &Bytes) -> CreatePartitionsResponse {
         let mut cur: &[u8] = bytes.as_ref();
         let resp = CreatePartitionsResponse::decode(&mut cur, VERSION).expect("decode response");
         assert!(cur.is_empty(), "response decoder consumed all bytes");
@@ -521,7 +521,7 @@ mod tests {
         let bytes = handle(broker, VERSION, 123, &req_bytes, &ctx)
             .await
             .expect("handle");
-        decode_response(bytes)
+        decode_response(&bytes)
     }
 
     #[test]
@@ -643,7 +643,7 @@ mod tests {
             VERSION,
         )
         .expect("encode");
-        let resp = decode_response(bytes);
+        let resp = decode_response(&bytes);
 
         assert!(resp.throttle_time_ms == 321);
         assert!(resp.results.len() == 1);

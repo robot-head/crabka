@@ -198,7 +198,7 @@ mod tests {
         buf.freeze()
     }
 
-    fn decode_response(version: i16, bytes: Bytes) -> AddRaftVoterResponse {
+    fn decode_response(version: i16, bytes: &Bytes) -> AddRaftVoterResponse {
         let mut cur: &[u8] = bytes.as_ref();
         let resp = AddRaftVoterResponse::decode(&mut cur, version).expect("decode response");
         assert!(cur.is_empty(), "response decoder consumed all bytes");
@@ -301,7 +301,7 @@ mod tests {
         let resp = super::handle(&broker, version, 123, &req_bytes, &ctx)
             .await
             .expect("handle");
-        let resp = decode_response(version, resp);
+        let resp = decode_response(version, &resp);
 
         assert!(resp.error_code == codes::CLUSTER_AUTHORIZATION_FAILED);
         assert!(resp.error_message.as_deref() == Some("add-raft-voter denied"));
@@ -326,7 +326,7 @@ mod tests {
         let resp = super::handle(&broker, version, 123, &req_bytes, &ctx)
             .await
             .expect("handle");
-        let resp = decode_response(version, resp);
+        let resp = decode_response(version, &resp);
 
         assert!(resp.error_code == codes::INVALID_REQUEST);
         assert!(
@@ -355,7 +355,7 @@ mod tests {
         let resp = super::handle(&broker, version, 123, &req_bytes, &ctx)
             .await
             .expect("handle");
-        let resp = decode_response(version, resp);
+        let resp = decode_response(version, &resp);
 
         assert!(resp.error_code == codes::UNKNOWN_SERVER_ERROR);
         assert!(

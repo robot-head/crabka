@@ -539,7 +539,7 @@ mod handler_tests {
         buf.freeze()
     }
 
-    fn decode_response(bytes: Bytes) -> CreateTopicsResponse {
+    fn decode_response(bytes: &Bytes) -> CreateTopicsResponse {
         let mut cur: &[u8] = bytes.as_ref();
         let resp = CreateTopicsResponse::decode(&mut cur, VERSION).expect("decode response");
         assert!(cur.is_empty(), "response decoder consumed all bytes");
@@ -591,7 +591,7 @@ mod handler_tests {
         let bytes = handle(broker, VERSION, 123, &req_bytes, &ctx)
             .await
             .expect("handle");
-        decode_response(bytes)
+        decode_response(&bytes)
     }
 
     async fn seed_controller_quota(handle: &BrokerHandle, rate: f64) {

@@ -254,7 +254,7 @@ mod tests {
         }
     }
 
-    fn decode_response(bytes: Bytes) -> CreateAclsResponse {
+    fn decode_response(bytes: &Bytes) -> CreateAclsResponse {
         let mut cur: &[u8] = bytes.as_ref();
         let resp = CreateAclsResponse::decode(&mut cur, VERSION).expect("decode response");
         assert!(cur.is_empty(), "response decoder consumed all bytes");
@@ -455,7 +455,7 @@ mod tests {
             VERSION,
         )
         .expect("encode");
-        let decoded = decode_response(bytes);
+        let decoded = decode_response(&bytes);
 
         assert!(decoded.throttle_time_ms == 0);
         assert!(decoded.results.len() == 1);
@@ -476,7 +476,7 @@ mod tests {
         ]);
 
         let resp = handle(&broker, req, &ctx, VERSION).await.expect("handle");
-        let resp = decode_response(resp);
+        let resp = decode_response(&resp);
 
         assert!(resp.throttle_time_ms == 0);
         assert!(resp.results.len() == 2);
@@ -504,7 +504,7 @@ mod tests {
         ]);
 
         let resp = handle(&broker, req, &ctx, VERSION).await.expect("handle");
-        let resp = decode_response(resp);
+        let resp = decode_response(&resp);
 
         assert!(resp.throttle_time_ms == 0);
         assert!(resp.results.len() == 2);

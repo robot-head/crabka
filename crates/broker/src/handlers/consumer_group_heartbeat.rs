@@ -154,7 +154,7 @@ mod tests {
         buf.freeze()
     }
 
-    fn decode_response(bytes: Bytes) -> ConsumerGroupHeartbeatResponse {
+    fn decode_response(bytes: &Bytes) -> ConsumerGroupHeartbeatResponse {
         let mut cur: &[u8] = bytes.as_ref();
         let resp = ConsumerGroupHeartbeatResponse::decode(&mut cur, VERSION)
             .expect("decode ConsumerGroupHeartbeatResponse");
@@ -295,7 +295,7 @@ mod tests {
         let bytes = handle(&broker, VERSION, 5, &req, &ctx)
             .await
             .expect("ConsumerGroupHeartbeat handler");
-        let resp = decode_response(bytes);
+        let resp = decode_response(&bytes);
 
         assert!(
             resp.error_code == codes::GROUP_AUTHORIZATION_FAILED,

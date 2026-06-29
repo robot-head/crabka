@@ -4339,10 +4339,10 @@ mod tests {
     async fn rlmm_bootstrap_backoff_returns_false_when_cancelled() {
         let shutdown = CancellationToken::new();
         shutdown.cancel();
-        let mut backoff = std::time::Duration::from_secs(60);
+        let mut backoff = std::time::Duration::from_mins(1);
 
         assert!(!rlmm_bootstrap_backoff(&mut backoff, &shutdown).await);
-        assert!(backoff == std::time::Duration::from_secs(60));
+        assert!(backoff == std::time::Duration::from_mins(1));
     }
 
     #[tokio::test]

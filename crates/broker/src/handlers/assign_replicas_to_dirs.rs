@@ -230,7 +230,7 @@ mod tests {
         buf.freeze()
     }
 
-    fn decode_response(bytes: Bytes) -> AssignReplicasToDirsResponse {
+    fn decode_response(bytes: &Bytes) -> AssignReplicasToDirsResponse {
         let mut cur: &[u8] = bytes.as_ref();
         let resp = AssignReplicasToDirsResponse::decode(&mut cur, VERSION)
             .expect("decode AssignReplicasToDirsResponse");
@@ -300,7 +300,7 @@ mod tests {
         let resp = build_echo_response(&req);
 
         let bytes = encode_resp(VERSION, &resp).expect("encode response");
-        let decoded = decode_response(bytes);
+        let decoded = decode_response(&bytes);
 
         assert!(decoded.error_code == codes::NONE, "{decoded:?}");
         assert!(decoded.directories.len() == 1, "{decoded:?}");
@@ -322,7 +322,7 @@ mod tests {
         let bytes = handle(&broker, VERSION, 9, &req)
             .await
             .expect("AssignReplicasToDirs handler");
-        let resp = decode_response(bytes);
+        let resp = decode_response(&bytes);
 
         assert!(resp.error_code == codes::NONE, "{resp:?}");
         assert!(resp.directories.len() == 1, "{resp:?}");

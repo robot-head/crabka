@@ -12,7 +12,7 @@ use crabka_protocol::owned::alter_configs_request::AlterConfigsRequest;
 use crabka_protocol::owned::alter_configs_response::{
     AlterConfigsResourceResponse, AlterConfigsResponse,
 };
-use crabka_protocol::{Decode, Encode};
+use crabka_protocol::{Decode, Encode, UnknownTaggedFields};
 use crabka_raft::RaftError;
 
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
@@ -51,7 +51,7 @@ pub(crate) async fn handle(
             resource_name: resource.resource_name.clone(),
             error_code: codes::NONE,
             error_message: None,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         };
 
         // ── ACL preamble ────────────────────────────────────────
@@ -168,7 +168,7 @@ pub(crate) async fn handle(
     let resp = AlterConfigsResponse {
         responses,
         throttle_time_ms: 0,
-        unknown_tagged_fields: Default::default(),
+        unknown_tagged_fields: UnknownTaggedFields::default(),
     };
     let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
     resp.encode(&mut buf, version)?;
@@ -208,7 +208,7 @@ mod tests {
         buf.freeze()
     }
 
-    fn decode_response(version: i16, bytes: Bytes) -> AlterConfigsResponse {
+    fn decode_response(version: i16, bytes: &Bytes) -> AlterConfigsResponse {
         let mut cur: &[u8] = bytes.as_ref();
         let resp = AlterConfigsResponse::decode(&mut cur, version).expect("decode response");
         assert!(cur.is_empty(), "response decoder consumed all bytes");
@@ -275,7 +275,7 @@ mod tests {
         let resp = handle(&broker, version, 123, &req_bytes, &ctx)
             .await
             .expect("handle");
-        let resp = decode_response(version, resp);
+        let resp = decode_response(version, &resp);
         broker_handle.shutdown().await;
         resp
     }
