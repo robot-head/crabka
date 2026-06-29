@@ -273,6 +273,94 @@ fn err_result(name: String, code: i16, msg: &str) -> AlterUserScramCredentialsRe
 mod tests {
     use super::*;
     use assert2::assert;
+    use bytes::Bytes;
+    use crabka_metadata::FeatureLevelRecord;
+    use crabka_security::{AuthMethod, Principal};
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use crate::authorizer::{AuthorizationRequest, AuthorizationResult, Authorizer};
+    use crate::config::BrokerConfig;
+
+    #[derive(Debug)]
+    struct DenyAll;
+
+    impl Authorizer for DenyAll {
+        fn authorize(
+            &self,
+            _source: &dyn crabka_authz::AclSource,
+            _req: &AuthorizationRequest<'_>,
+        ) -> AuthorizationResult {
+            AuthorizationResult::Deny
+        }
+    }
+
+    fn valid_upsertion(name: &str) -> ScramCredentialUpsertion {
+        ScramCredentialUpsertion {
+            name: name.into(),
+            mechanism: 1,
+            iterations: MIN_ITERATIONS,
+            salt: Bytes::from_static(b"salt"),
+            salted_password: Bytes::from(vec![
+                7;
+                crabka_security::scram_hash_len(
+                    SaslMechanism::ScramSha256,
+                )
+            ]),
+            ..Default::default()
+        }
+    }
+
+    fn deletion(name: &str) -> ScramCredentialDeletion {
+        ScramCredentialDeletion {
+            name: name.into(),
+            mechanism: 1,
+            ..Default::default()
+        }
+    }
+
+    fn test_context<'a>(
+        principal: &'a Principal,
+        peer: &'a SocketAddr,
+    ) -> crate::handlers::RequestContext<'a> {
+        crate::handlers::RequestContext {
+            principal,
+            peer,
+            client_id: "admin-client",
+            sendfile_capable: false,
+            connection_listener_name: "PLAINTEXT",
+        }
+    }
+
+    async fn start_broker(
+        authorizer: Arc<dyn Authorizer>,
+    ) -> (crate::broker::BrokerHandle, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
+        cfg.authorizer = authorizer;
+        let handle = Broker::start(cfg).await.expect("start broker");
+        (handle, dir)
+    }
+
+    async fn wait_for_leader(broker: &Broker) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if broker
+                .controller
+                .watch_leader()
+                .borrow()
+                .is_some_and(|n| n == broker.config.node_id)
+            {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() <= deadline,
+                "broker did not become controller leader"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
 
     #[test]
     fn wire_to_mech_maps_both_scram_variants() {
@@ -293,6 +381,7 @@ mod tests {
     #[test]
     fn ok_result_has_zero_error_code() {
         let r = ok_result("alice".into());
+        assert!(r.user == "alice");
         assert!(r.error_code == 0);
         assert!(r.error_message.is_none());
     }
@@ -321,5 +410,255 @@ mod tests {
         assert!(!gate(None));
         assert!(gate(Some(10)));
         assert!(!gate(Some(11)));
+    }
+
+    #[test]
+    fn process_upsertion_validates_boundaries_and_records_success() {
+        let mut seen = HashSet::new();
+        let mut records = Vec::new();
+
+        let mut too_few_iterations = valid_upsertion("too-few");
+        too_few_iterations.iterations = MIN_ITERATIONS - 1;
+        let r = process_upsertion(too_few_iterations, true, &mut seen, &mut records);
+        assert!(r.user == "too-few");
+        assert!(r.error_code == codes::UNACCEPTABLE_CREDENTIAL);
+        assert!(
+            r.error_message
+                .as_deref()
+                .is_some_and(|m| m.contains("iterations"))
+        );
+        assert!(records.is_empty());
+
+        let mut empty_salt = valid_upsertion("empty-salt");
+        empty_salt.salt = Bytes::new();
+        let r = process_upsertion(empty_salt, true, &mut seen, &mut records);
+        assert!(r.user == "empty-salt");
+        assert!(r.error_code == codes::UNACCEPTABLE_CREDENTIAL);
+        assert!(
+            r.error_message
+                .as_deref()
+                .is_some_and(|m| m.contains("salt"))
+        );
+        assert!(records.is_empty());
+
+        let mut wrong_len = valid_upsertion("wrong-len");
+        wrong_len.salted_password = Bytes::from(vec![7; 31]);
+        let r = process_upsertion(wrong_len, true, &mut seen, &mut records);
+        assert!(r.user == "wrong-len");
+        assert!(r.error_code == codes::UNACCEPTABLE_CREDENTIAL);
+        assert!(
+            r.error_message
+                .as_deref()
+                .is_some_and(|m| m.contains("salted_password"))
+        );
+        assert!(records.is_empty());
+
+        let r = process_upsertion(valid_upsertion("alice"), true, &mut seen, &mut records);
+        assert!(r.user == "alice");
+        assert!(r.error_code == 0);
+        assert!(r.error_message.is_none());
+        assert!(records.len() == 1);
+        let MetadataRecord::V1ScramCredential(record) = &records[0] else {
+            panic!("wrong record variant");
+        };
+        assert!(record.user == "alice");
+        assert!(record.mechanism == SaslMechanism::ScramSha256);
+        assert!(record.salt == b"salt");
+        assert!(record.iterations == u32::try_from(MIN_ITERATIONS).expect("min fits"));
+    }
+
+    #[test]
+    fn process_upsertion_rejects_duplicates_and_unauthorized_users() {
+        let mut seen = HashSet::new();
+        let mut records = Vec::new();
+
+        let r = process_upsertion(valid_upsertion("alice"), true, &mut seen, &mut records);
+        assert!(r.error_code == 0);
+        let r = process_upsertion(valid_upsertion("alice"), true, &mut seen, &mut records);
+        assert!(r.user == "alice");
+        assert!(r.error_code == codes::DUPLICATE_RESOURCE);
+        assert!(
+            r.error_message
+                .as_deref()
+                .is_some_and(|m| m.contains("duplicate"))
+        );
+        assert!(records.len() == 1);
+
+        let mut seen = HashSet::new();
+        let mut records = Vec::new();
+        let r = process_upsertion(valid_upsertion("bob"), false, &mut seen, &mut records);
+        assert!(r.user == "bob");
+        assert!(r.error_code == codes::CLUSTER_AUTHORIZATION_FAILED);
+        assert!(
+            r.error_message
+                .as_deref()
+                .is_some_and(|m| m.contains("not super-user"))
+        );
+        assert!(records.is_empty());
+    }
+
+    #[tokio::test]
+    async fn process_deletion_rejects_duplicates_and_missing_credentials() {
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let mut seen = HashSet::new();
+        let mut records = Vec::new();
+
+        let r = process_deletion(&broker, deletion("alice"), true, &mut seen, &mut records);
+        assert!(r.user == "alice");
+        assert!(r.error_code == codes::RESOURCE_NOT_FOUND);
+        assert!(
+            r.error_message
+                .as_deref()
+                .is_some_and(|m| m.contains("credential not found"))
+        );
+        assert!(records.is_empty());
+
+        let r = process_deletion(&broker, deletion("alice"), true, &mut seen, &mut records);
+        assert!(r.user == "alice");
+        assert!(r.error_code == codes::DUPLICATE_RESOURCE);
+        assert!(
+            r.error_message
+                .as_deref()
+                .is_some_and(|m| m.contains("duplicate"))
+        );
+        assert!(records.is_empty());
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn process_deletion_rejects_unauthorized_users() {
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let mut seen = HashSet::new();
+        let mut records = Vec::new();
+
+        let r = process_deletion(&broker, deletion("alice"), false, &mut seen, &mut records);
+        assert!(r.user == "alice");
+        assert!(r.error_code == codes::CLUSTER_AUTHORIZATION_FAILED);
+        assert!(
+            r.error_message
+                .as_deref()
+                .is_some_and(|m| m.contains("not super-user"))
+        );
+        assert!(records.is_empty());
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_authorizes_and_persists_valid_upsertion() {
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        wait_for_leader(&broker).await;
+        let principal = Principal {
+            name: "admin".into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        };
+        let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+        let ctx = test_context(&principal, &peer);
+        let req = AlterUserScramCredentialsRequest {
+            upsertions: vec![valid_upsertion("alice")],
+            ..Default::default()
+        };
+
+        let resp = handle(&broker, req, &ctx).await;
+
+        assert!(resp.throttle_time_ms == 0);
+        assert!(resp.results.len() == 1);
+        assert!(resp.results[0].user == "alice");
+        assert!(resp.results[0].error_code == 0);
+        assert!(resp.results[0].error_message.is_none());
+        let image = broker.controller.current_image();
+        assert!(
+            image
+                .scram_credential("alice", SaslMechanism::ScramSha256)
+                .is_some()
+        );
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_denies_valid_upsertion_without_cluster_alter() {
+        let (broker_handle, _dir) = start_broker(Arc::new(DenyAll)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let principal = Principal {
+            name: "admin".into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        };
+        let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+        let ctx = test_context(&principal, &peer);
+        let req = AlterUserScramCredentialsRequest {
+            upsertions: vec![valid_upsertion("alice")],
+            ..Default::default()
+        };
+
+        let resp = handle(&broker, req, &ctx).await;
+
+        assert!(resp.throttle_time_ms == 0);
+        assert!(resp.results.len() == 1);
+        assert!(resp.results[0].user == "alice");
+        assert!(resp.results[0].error_code == codes::CLUSTER_AUTHORIZATION_FAILED);
+        assert!(
+            resp.results[0]
+                .error_message
+                .as_deref()
+                .is_some_and(|m| m.contains("not super-user"))
+        );
+        let image = broker.controller.current_image();
+        assert!(
+            image
+                .scram_credential("alice", SaslMechanism::ScramSha256)
+                .is_none()
+        );
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_unsupported_metadata_version_reports_every_requested_user() {
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        wait_for_leader(&broker).await;
+        broker
+            .controller
+            .submit_change(vec![MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+                name: crate::features::METADATA_VERSION.to_string(),
+                level: crabka_metadata::metadata_version::SCRAM_MIN_LEVEL - 1,
+            })])
+            .await
+            .expect("seed low metadata.version");
+        let principal = Principal {
+            name: "admin".into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        };
+        let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+        let ctx = test_context(&principal, &peer);
+        let req = AlterUserScramCredentialsRequest {
+            deletions: vec![deletion("alice")],
+            upsertions: vec![valid_upsertion("bob")],
+            ..Default::default()
+        };
+
+        let resp = handle(&broker, req, &ctx).await;
+
+        assert!(resp.throttle_time_ms == 0);
+        assert!(resp.results.len() == 2);
+        assert!(resp.results[0].user == "alice");
+        assert!(resp.results[0].error_code == codes::UNSUPPORTED_VERSION);
+        assert!(
+            resp.results[0]
+                .error_message
+                .as_deref()
+                .is_some_and(|m| m.contains("SCRAM is not enabled"))
+        );
+        assert!(resp.results[1].user == "bob");
+        assert!(resp.results[1].error_code == codes::UNSUPPORTED_VERSION);
+        broker_handle.shutdown().await;
     }
 }

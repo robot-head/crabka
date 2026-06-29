@@ -323,6 +323,21 @@ exclude_re = [
     "broker/src/handlers/alter_partition\\.rs.*delete field leader_recovery_state from struct RespPartitionData expression in error_part",
     "broker/src/handlers/alter_partition\\.rs.*delete field partition_epoch from struct RespPartitionData expression in error_part",
     "broker/src/handlers/alter_partition\\.rs.*delete field throttle_time_ms from struct AlterPartitionResponse expression in denied_response",
+    # Same default-value class for admin response wrappers: these fields are
+    # explicitly set to Kafka protocol defaults, so deleting them produces the
+    # same generated owned response value. Non-default identity/error fields in
+    # these handlers stay covered by focused tests.
+    "broker/src/handlers/alter_partition_reassignments\\.rs.*delete field throttle_time_ms from struct AlterPartitionReassignmentsResponse expression in handle",
+    "broker/src/handlers/alter_partition_reassignments\\.rs.*delete field error_code from struct AlterPartitionReassignmentsResponse expression in handle",
+    "broker/src/handlers/alter_partition_reassignments\\.rs.*delete field error_message from struct AlterPartitionReassignmentsResponse expression in handle",
+    "broker/src/handlers/alter_partition_reassignments\\.rs.*delete field error_code from struct ReassignablePartitionResponse expression in ok_row",
+    "broker/src/handlers/alter_partition_reassignments\\.rs.*delete field error_message from struct ReassignablePartitionResponse expression in ok_row",
+    "broker/src/handlers/alter_partition_reassignments\\.rs.*delete field error_code from struct AlterPartitionReassignmentsResponse expression in encode_whole_request_error",
+    "broker/src/handlers/alter_partition_reassignments\\.rs.*delete field error_message from struct AlterPartitionReassignmentsResponse expression in encode_whole_request_error",
+    "broker/src/handlers/alter_replica_log_dirs\\.rs.*delete field throttle_time_ms from struct AlterReplicaLogDirsResponse expression in handle",
+    "broker/src/handlers/alter_user_scram_credentials\\.rs.*delete field throttle_time_ms from struct AlterUserScramCredentialsResponse expression in handle",
+    "broker/src/handlers/alter_user_scram_credentials\\.rs.*delete field error_code from struct AlterUserScramCredentialsResult expression in ok_result",
+    "broker/src/handlers/alter_user_scram_credentials\\.rs.*delete field error_message from struct AlterUserScramCredentialsResult expression in ok_result",
     # The offset is the human-facing VerifyBreak.offset diagnostic (standard Kafka
     # base_offset + offset_delta), not the tamper verdict.
     "audit/src/verify\\.rs.*replace \\+ with (-|\\*) in verify_partition_dir",

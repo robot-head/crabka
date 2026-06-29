@@ -113,3 +113,68 @@ pub(crate) fn handle(
         Ok(buf.freeze())
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert2::assert;
+    use crabka_protocol::Decode;
+    use crabka_protocol::owned::alter_replica_log_dirs_request::{
+        AlterReplicaLogDir, AlterReplicaLogDirTopic,
+    };
+
+    use crate::config::BrokerConfig;
+
+    fn encode_request(version: i16, req: &AlterReplicaLogDirsRequest) -> Bytes {
+        let mut buf = BytesMut::with_capacity(req.encoded_len(version));
+        req.encode(&mut buf, version).expect("encode request");
+        buf.freeze()
+    }
+
+    fn decode_response(version: i16, bytes: Bytes) -> AlterReplicaLogDirsResponse {
+        let mut cur: &[u8] = bytes.as_ref();
+        let resp = AlterReplicaLogDirsResponse::decode(&mut cur, version).expect("decode response");
+        assert!(cur.is_empty(), "response decoder consumed all bytes");
+        resp
+    }
+
+    async fn start_broker() -> (crate::broker::BrokerHandle, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
+        let handle = Broker::start(cfg).await.expect("start broker");
+        (handle, dir)
+    }
+
+    #[tokio::test]
+    async fn handle_preserves_unknown_target_response_shape() {
+        let version = 2;
+        let (broker_handle, _dir) = start_broker().await;
+        let broker = broker_handle.broker_arc_for_test();
+        let req = AlterReplicaLogDirsRequest {
+            dirs: vec![AlterReplicaLogDir {
+                path: "/tmp/crabka-missing-log-dir".into(),
+                topics: vec![AlterReplicaLogDirTopic {
+                    name: "orders".into(),
+                    partitions: vec![7],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let req_bytes = encode_request(version, &req);
+
+        let bytes = handle(&broker, version, 123, &req_bytes)
+            .await
+            .expect("handle");
+        let resp = decode_response(version, bytes);
+
+        assert!(resp.throttle_time_ms == 0);
+        assert!(resp.results.len() == 1);
+        assert!(resp.results[0].topic_name == "orders");
+        assert!(resp.results[0].partitions.len() == 1);
+        assert!(resp.results[0].partitions[0].partition_index == 7);
+        assert!(resp.results[0].partitions[0].error_code == codes::LOG_DIR_NOT_FOUND);
+        broker_handle.shutdown().await;
+    }
+}
