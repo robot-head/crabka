@@ -134,7 +134,7 @@ services:
       retries: 30
 
   rustfs-permissions:
-    image: busybox:1.37
+    image: busybox:1.38
     <<: *setup-res
     restart: "no"
     command: ["sh", "-c", "mkdir -p /data && chown -R 10001:10001 /data"]
