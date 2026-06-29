@@ -343,6 +343,12 @@ fn rustfs_bootstrap_verifies_obsolete_log_manifest_cleanup() {
         "RustFS bootstrap should target the obsolete full logs manifest left by older demo revisions"
     );
     assert!(
+        bootstrap.contains(
+            "obsolete_logs_shard_catalog_key=\"logs/tenant=demo/index/logs/shards/manifest.json\""
+        ),
+        "RustFS bootstrap should also target the obsolete logs shard catalog left by older demo revisions"
+    );
+    assert!(
         bootstrap.contains("for attempt in 1 2 3 4 5; do"),
         "RustFS bootstrap should retry obsolete manifest cleanup because RustFS can be busy during setup"
     );
@@ -355,8 +361,18 @@ fn rustfs_bootstrap_verifies_obsolete_log_manifest_cleanup() {
         "RustFS bootstrap should verify the obsolete manifest is gone after delete"
     );
     assert!(
-        bootstrap.contains("failed to remove obsolete logs full manifest"),
-        "RustFS bootstrap should fail loudly when an obsolete manifest survives cleanup"
+        bootstrap.contains("failed to remove obsolete $label"),
+        "RustFS bootstrap should fail loudly when obsolete index cleanup fails"
+    );
+    for label in ["\"logs full manifest\"", "\"logs shard catalog\""] {
+        assert!(
+            bootstrap.contains(label),
+            "RustFS bootstrap should name each obsolete logs index cleanup target: missing {label}"
+        );
+    }
+    assert!(
+        bootstrap.contains("exit 1"),
+        "RustFS bootstrap should fail the setup container when obsolete index cleanup fails"
     );
     assert!(
         !bootstrap.contains("manifest.json >/dev/null 2>&1 || true"),

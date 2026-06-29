@@ -40,6 +40,13 @@ scrape to keep profiler overhead bounded.
 Alloy's eBPF profiler is CPU-only for native code; Rust memory profiles in this
 demo therefore come from the services' `/debug/pprof/heap` endpoint.
 
+If a reused RustFS volume grows far beyond the logical bucket sizes shown in the
+RustFS dashboard, reset the fixture with `docker compose down -v` and start it
+again. Older demo revisions rewrote large logs/traces/profiles index objects on
+the same S3 keys; RustFS can leave those old physical parts on disk even after
+the latest S3 object is small or deleted. Current images use append-style log
+shards and immutable trace/profile index snapshots to avoid new overwrite churn.
+
 The traces block-builder has its own replay cap
 (`CRABKA_TRACES_BLOCK_BUILDER_MEM`, default `4g`) and a lower flush size
 (`CRABKA_TRACES_BLOCK_BUILDER_FLUSH_MAX_RECORDS`, default `5000`). Cold starts
