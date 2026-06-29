@@ -293,9 +293,12 @@ async fn run_block_builder(
     .await?;
     let configured = build_object_store(&cli)?;
     let writer = BlockWriter::new(configured.store.clone());
-    let index = Arc::new(Mutex::new(TraceIndex::new()));
     let object_key_prefix = configured.prefix.to_string();
     let trace_index_key = configured.object_key(&cli.trace_index_key);
+    let initial_index = TraceIndex::load_latest_snapshot(&configured.store, &trace_index_key)
+        .await
+        .unwrap_or_else(|_| TraceIndex::new());
+    let index = Arc::new(Mutex::new(initial_index));
     blockbuilder::run(
         consumer,
         writer,
@@ -379,7 +382,7 @@ async fn run_querier(
             tokio::select! {
                 () = refresh_shutdown.cancelled() => break,
                 _ = tick.tick() => {
-                    if let Ok(idx) = TraceIndex::load(&refresh_store, &trace_index_key).await {
+                    if let Ok(idx) = TraceIndex::load_latest_snapshot(&refresh_store, &trace_index_key).await {
                         refresh_index.store(Arc::new(idx));
                     }
                 }
@@ -415,7 +418,7 @@ async fn build_querier_router_with_live(
 > {
     let configured = build_object_store(cli)?;
     let trace_index_key = configured.object_key(&cli.trace_index_key);
-    let initial = TraceIndex::load(&configured.store, &trace_index_key)
+    let initial = TraceIndex::load_latest_snapshot(&configured.store, &trace_index_key)
         .await
         .unwrap_or_else(|_| TraceIndex::new());
     let trace_index: SharedTraceIndex = Arc::new(ArcSwap::from_pointee(initial));
@@ -663,7 +666,7 @@ async fn build_trace_index_catalog(
     }
     let configured = build_object_store(cli)?;
     let trace_index_key = configured.object_key(&cli.trace_index_key);
-    let trace_index = TraceIndex::load(&configured.store, &trace_index_key)
+    let trace_index = TraceIndex::load_latest_snapshot(&configured.store, &trace_index_key)
         .await
         .unwrap_or_else(|_| TraceIndex::new());
     let blocks = BlockStore::new(configured.store, configured.root);
@@ -717,7 +720,7 @@ async fn run_compactor(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send 
     let configured = build_object_store(&cli)?;
     let writer = BlockWriter::new(configured.store.clone());
     let trace_index_key = configured.object_key(&cli.trace_index_key);
-    let mut index = TraceIndex::load(&configured.store, &trace_index_key)
+    let mut index = TraceIndex::load_latest_snapshot(&configured.store, &trace_index_key)
         .await
         .unwrap_or_else(|_| TraceIndex::new());
     compact_index_window(
@@ -729,7 +732,9 @@ async fn run_compactor(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send 
         cli.compaction_end_ns,
     )
     .await?;
-    index.save(&configured.store, &trace_index_key).await?;
+    index
+        .save_latest_snapshot(&configured.store, &trace_index_key)
+        .await?;
     Ok(())
 }
 

@@ -247,7 +247,8 @@ impl ConsumerRecordAccumulator {
 }
 
 pub async fn run_with_config(config: BlockBuilderConfig) -> Result<(), ProfilesError> {
-    let mut index = match ProfileIndex::load(&config.store, &config.index_key).await {
+    let mut index = match ProfileIndex::load_latest_snapshot(&config.store, &config.index_key).await
+    {
         Ok(index) => index,
         Err(_) => ProfileIndex::new(),
     };
@@ -284,7 +285,7 @@ pub async fn run_with_config(config: BlockBuilderConfig) -> Result<(), ProfilesE
         )
         .await?;
         index
-            .save(&config.store, &config.index_key)
+            .save_latest_snapshot(&config.store, &config.index_key)
             .await
             .map_err(|err| ProfilesError::Block(err.to_string()))?;
         consumer

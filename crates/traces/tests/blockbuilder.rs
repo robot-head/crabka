@@ -13,13 +13,13 @@ use crabka_traces::{
     },
 };
 use futures::stream::BoxStream;
-use object_store::ObjectStore;
 use object_store::memory::InMemory;
 use object_store::path::Path;
 use object_store::{
     CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta,
     PutMultipartOptions, PutOptions, PutPayload, PutResult,
 };
+use object_store::{ObjectStore, ObjectStoreExt};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -232,12 +232,23 @@ async fn replaying_saved_partition_window_after_restart_is_idempotent() {
     flush_partition_windows(&writer, &mut index, store.clone(), &config, windows.clone())
         .await
         .unwrap();
-    let mut restarted = TraceIndex::load(&store, "index/traces.json").await.unwrap();
+    let mut restarted = TraceIndex::load_latest_snapshot(&store, "index/traces.json")
+        .await
+        .unwrap();
 
     flush_partition_windows(&writer, &mut restarted, store.clone(), &config, windows)
         .await
         .unwrap();
-    let reloaded = TraceIndex::load(&store, "index/traces.json").await.unwrap();
+    let reloaded = TraceIndex::load_latest_snapshot(&store, "index/traces.json")
+        .await
+        .unwrap();
+
+    assert!(
+        store
+            .head(&object_store::path::Path::from("index/traces.json"))
+            .await
+            .is_err()
+    );
 
     assert!(
         reloaded.candidate_blocks_for_trace("tenant-a", &[1; 16], 0, 1_000)

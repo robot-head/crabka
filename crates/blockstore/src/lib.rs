@@ -13,6 +13,7 @@ mod block_index;
 mod bloom;
 mod error;
 mod index;
+mod index_snapshot;
 mod labels;
 mod log_blockstore;
 mod matcher;
@@ -34,6 +35,7 @@ pub use block_index::{BlockIndex, BlockSchema, RequiredColumn, series_block_sche
 pub use bloom::{ShardedTraceBloom, fnv1_32};
 pub use error::{BlockStoreError, Result};
 pub use index::{Index, MAX_INDEX_SNAPSHOT_BYTES};
+pub use index_snapshot::{DEFAULT_INDEX_SNAPSHOT_RETAIN, index_snapshot_prefix_for_key};
 pub use labels::{Labels, SeriesFingerprint};
 pub use matcher::{
     LabelMatcher, MatchOp, QUERY_SHARD_LABEL, QueryShardSelector, parse_query_shard_selector,

@@ -11,6 +11,7 @@ use crate::block::BlockMeta;
 use crate::block_index::BlockIndex;
 use crate::bloom::ShardedTraceBloom;
 use crate::error::{BlockStoreError, Result};
+use crate::index_snapshot::{latest_index_snapshot_path, put_index_snapshot};
 
 /// The per-block trace footprint registered by a block builder.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -188,13 +189,37 @@ impl TraceIndex {
         Ok(())
     }
 
+    pub async fn save_latest_snapshot(
+        &self,
+        store: &Arc<dyn ObjectStore>,
+        key: &str,
+    ) -> Result<String> {
+        put_index_snapshot(store, key, serde_json::to_vec(self)?).await
+    }
+
     pub async fn load(store: &Arc<dyn ObjectStore>, key: &str) -> Result<Self> {
-        let bytes = store.get(&Path::from(key)).await?.bytes().await?;
+        Self::load_path(store, &Path::from(key)).await
+    }
+
+    pub async fn load_latest_snapshot(store: &Arc<dyn ObjectStore>, key: &str) -> Result<Self> {
+        if let Some(path) = latest_index_snapshot_path(store, key).await? {
+            return Self::load_path(store, &path).await;
+        }
+        Self::load(store, key).await
+    }
+
+    async fn load_path(store: &Arc<dyn ObjectStore>, path: &Path) -> Result<Self> {
+        let bytes = store.get(path).await?.bytes().await?;
         let index: Self = serde_json::from_slice(&bytes)?;
         // `Deserialize` bypasses the bloom constructors' invariant checks, so a
         // structurally-valid-but-corrupt snapshot would panic on the first
         // lookup. Validate here so it surfaces as an error instead.
-        for tenant_index in index.tenants.values() {
+        index.validate()?;
+        Ok(index)
+    }
+
+    fn validate(&self) -> Result<()> {
+        for tenant_index in self.tenants.values() {
             for block in &tenant_index.blocks {
                 block.bloom.validate().map_err(|e| {
                     BlockStoreError::Serde(format!(
@@ -204,7 +229,7 @@ impl TraceIndex {
                 })?;
             }
         }
-        Ok(index)
+        Ok(())
     }
 }
 
@@ -463,6 +488,60 @@ mod tests {
         let loaded = TraceIndex::load(&store, "index/traces.json").await.unwrap();
         let got = loaded.candidate_blocks_for_trace("t", &tid(1), 0, 1_000);
         assert!(got == vec!["b1".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn latest_snapshot_round_trips_without_rewriting_legacy_key() {
+        use object_store::memory::InMemory;
+        use object_store::{ObjectStore, ObjectStoreExt};
+
+        let idx = seed();
+        let store: std::sync::Arc<dyn ObjectStore> = std::sync::Arc::new(InMemory::new());
+
+        let snapshot_key = idx
+            .save_latest_snapshot(&store, "index/traces.json")
+            .await
+            .unwrap();
+        let loaded = TraceIndex::load_latest_snapshot(&store, "index/traces.json")
+            .await
+            .unwrap();
+
+        assert!(snapshot_key.starts_with("index/traces/snapshots/"));
+        assert!(
+            store
+                .head(&object_store::path::Path::from("index/traces.json"))
+                .await
+                .is_err()
+        );
+        assert!(loaded.candidate_blocks_for_trace("t", &tid(1), 0, 1_000) == vec!["b1"]);
+    }
+
+    #[tokio::test]
+    async fn latest_snapshot_retains_bounded_snapshot_set() {
+        use futures::StreamExt as _;
+        use object_store::ObjectStore;
+        use object_store::memory::InMemory;
+
+        let idx = seed();
+        let store: std::sync::Arc<dyn ObjectStore> = std::sync::Arc::new(InMemory::new());
+
+        for _ in 0..(crate::index_snapshot::DEFAULT_INDEX_SNAPSHOT_RETAIN + 3) {
+            idx.save_latest_snapshot(&store, "index/traces.json")
+                .await
+                .unwrap();
+        }
+
+        let prefix = object_store::path::Path::from(crate::index_snapshot_prefix_for_key(
+            "index/traces.json",
+        ));
+        let mut stream = store.list(Some(&prefix));
+        let mut count = 0;
+        while let Some(meta) = stream.next().await {
+            meta.unwrap();
+            count += 1;
+        }
+
+        assert!(count == crate::index_snapshot::DEFAULT_INDEX_SNAPSHOT_RETAIN);
     }
 
     #[tokio::test]
