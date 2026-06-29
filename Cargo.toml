@@ -106,7 +106,7 @@ tracing = "0.1"
 # operator-readable subset.
 regex = "1"
 memmap2 = "0.9"
-testcontainers = { version = "0.27", features = ["host-port-exposure"] }
+testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["kafka"] }
 async-stream = "0.3"
 futures-util = { version = "0.3", features = ["sink"] }
@@ -161,13 +161,16 @@ ktls = "6"
 x509-parser = "0.18"
 rustls-webpki = "0.103"
 arc-swap = "1"
-pbkdf2 = { version = "=0.13.0-rc.10", default-features = false, features = ["kdf", "hmac"] }
+pbkdf2 = { version = "=0.13.0", default-features = false, features = ["kdf", "hmac"] }
 hmac = "0.13"
 sha2 = "0.11"
 ring = "0.17"
 subtle = "2"
 base64 = "0.22"
 rcgen = { version = "0.14", default-features = false, features = ["pem", "ring", "x509-parser"] }
+# SASL/GSSAPI (Kerberos). `network_client` lets the initiator reach the KDC;
+# `ring` keeps crypto provider choice aligned with rustls/rcgen in this workspace.
+sspi = { version = "=0.21.1", default-features = false, features = ["network_client", "ring"] }
 crabka-audit = { path = "crates/audit", version = "0.3.8" }
 crabka-security = { path = "crates/security", version = "0.3.8" }
 kube = { version = "4.0", default-features = false, features = ["client", "runtime", "derive", "rustls-tls"] }
@@ -186,7 +189,6 @@ tonic-prost-build = "0.14"
 # vendored one below.
 protox = "0.9"
 protoc-bin-vendored = "3.2"
-protoc-fetcher = "0.1"
 pbjson = "0.9"
 prometheus-client = "0.25"
 tower = "0.5"
@@ -210,10 +212,3 @@ apache-avro = "0.21"
 prost-reflect = "0.16"
 jsonschema = { version = "0.46", default-features = false }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
-
-# Fork of sspi 0.21.0 carrying our SASL/GSSAPI Kerberos work (keytab client
-# credentials, integrity-only Wrap tokens, multi-SPN acceptor keys). Branched
-# off the sspi-v0.21.0 tag; upstreaming tracked at
-# https://github.com/Devolutions/sspi-rs/pull/681.
-[patch.crates-io]
-sspi = { git = "https://github.com/robot-head/sspi-rs.git", branch = "crabka/sasl-gssapi" }

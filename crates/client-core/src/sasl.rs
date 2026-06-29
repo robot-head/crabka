@@ -34,7 +34,6 @@ const OUTBOUND_CLIENT_ID: &str = "crabka-client";
 /// `max_recv_size` advertised in the client's RFC 4752 security-layer choice.
 /// Auth-only QOP means no data is wrapped post-handshake, so the value only
 /// needs to be a sane non-zero buffer; mirror the server's offer size.
-#[cfg(feature = "sspi-keytab")]
 const GSSAPI_MAX_RECV_SIZE: u32 = 0x1_0000;
 
 /// Outbound SASL credentials. Mirrors the broker's
@@ -267,7 +266,6 @@ where
 ///
 /// The first initiator step performs the synchronous AS/TGS exchange with the
 /// KDC; subsequent steps only process tokens locally.
-#[cfg(feature = "sspi-keytab")]
 async fn run_gssapi_client<S>(
     stream: &mut S,
     keytab_path: &std::path::Path,
@@ -310,25 +308,6 @@ where
             ClientStep::Done => return Ok(()),
         }
     }
-}
-
-#[cfg(not(feature = "sspi-keytab"))]
-#[allow(clippy::unused_async)]
-async fn run_gssapi_client<S>(
-    _stream: &mut S,
-    _keytab_path: &std::path::Path,
-    _client_principal: &str,
-    _service_name: &str,
-    _server_name: &str,
-    _kdc_url: &str,
-    _corr_id: &mut i32,
-) -> Result<(), OutboundSaslError>
-where
-    S: AsyncRead + AsyncWrite + Unpin + Send + ?Sized,
-{
-    Err(OutboundSaslError::Sasl(
-        "GSSAPI client support requires the sspi-keytab feature".to_string(),
-    ))
 }
 
 /// Frame a `SaslAuthenticate v2` request carrying `auth_bytes`, send it,

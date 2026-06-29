@@ -4,28 +4,14 @@ load("@rules_rust//rust:defs.bzl", "rust_library")
 # Manifest is consumed by crate_universe (see //MODULE.bazel).
 exports_files(["Cargo.toml"])
 
-# TLS / SASL / SCRAM / OAuth, plus optional SASL/GSSAPI (Kerberos).
-#
-# The GSSAPI path rides on `sspi`, a git-patched dependency. It is gated by the
-# `//:gssapi` flag so a default client build never pulls the Kerberos / KDC
-# transport closure. With `--//:gssapi=true`, the `sspi-keytab` feature is
-# enabled and the `sspi` crate is linked.
+# TLS / SASL / SCRAM / OAuth, plus SASL/GSSAPI (Kerberos).
 rust_library(
     name = "security",
     srcs = glob(["src/**/*.rs"]),
     aliases = aliases(),
     crate_name = "crabka_security",
-    crate_features = select({
-        "//:gssapi_enabled": ["sspi-keytab"],
-        "//conditions:default": [],
-    }),
     edition = "2024",
     proc_macro_deps = all_crate_deps(proc_macro = True),
     visibility = ["//visibility:public"],
-    deps = all_crate_deps(normal = True) + select({
-        # sspi lives in its own from_specs repo (see //MODULE.bazel) because it's
-        # an optional git dep the default Cargo resolution prunes.
-        "//:gssapi_enabled": ["@crates_gssapi//:sspi"],
-        "//conditions:default": [],
-    }),
+    deps = all_crate_deps(normal = True),
 )

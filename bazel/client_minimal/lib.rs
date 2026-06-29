@@ -8,10 +8,6 @@
 //!   * the columnar streams client (`polars` / `polars-arrow` / `arrow`)
 //!   * the JSON-Schema serde path (`jsonschema` / `schemars`)
 //!
-//! SASL/GSSAPI (the `sspi` Kerberos git dependency) is off unless the build is
-//! run with `--//:gssapi=true`, which flips the `sspi-keytab` feature on the
-//! re-exported `core` client.
-//!
 //! This crate is Bazel-only — it is not a Cargo workspace member.
 
 pub use crabka_client_admin as admin;

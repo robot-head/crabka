@@ -22,7 +22,6 @@ default = []
 # `test_advance_log_start` for the replication integration tests.
 # Pulls in `crabka-log/test-helpers` to reach `Log::test_set_log_start_offset`.
 test-helpers = ["crabka-log/test-helpers"]
-sspi-keytab = ["crabka-security/sspi-keytab", "crabka-client-core/sspi-keytab"]
 # Expose jemalloc heap profiles on `/debug/pprof/heap`. Passes the flag
 # through to crabka-telemetry (which gates the heap route) and activates the
 # jemalloc global allocator in the broker binary. Unix-only at the dep level;

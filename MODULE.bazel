@@ -11,8 +11,7 @@ Re-exported targets (see //:BUILD.bazel):
     @crabka//:schema_serde      @crabka//:protocol
     @crabka//:security          @crabka//:compression
     @crabka//:metadata
-    @crabka//:client_minimal    # lean facade: no polars/arrow/jsonschema,
-                                # GSSAPI (`sspi`) gated behind --//:gssapi
+    @crabka//:client_minimal    # lean facade: no polars/arrow/jsonschema
 """
 
 module(
@@ -21,7 +20,6 @@ module(
 )
 
 bazel_dep(name = "rules_rust", version = "0.71.2")
-bazel_dep(name = "bazel_skylib", version = "1.9.0")
 
 # ---------------------------------------------------------------------------
 # Rust toolchain — pinned to the workspace channel (rust-toolchain.toml).
@@ -44,9 +42,8 @@ register_toolchains("@rust_toolchains//:all")
 # the remaining members are exported en masse from `//crates:BUILD.bazel`
 # (`//crates:<x>/Cargo.toml`).
 #
-# The `sspi` GSSAPI dependency is a git patch (see [patch.crates-io] in the root
-# Cargo.toml); crate_universe vendors it from the pinned git revision in
-# Cargo.lock. It is only *linked* when //:gssapi is set (see //crates/security).
+# The `sspi` GSSAPI dependency is a normal crates.io dependency and is included
+# through the same Cargo.lock splice as the rest of the workspace.
 # ---------------------------------------------------------------------------
 crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
 crate.from_cargo(
@@ -93,30 +90,3 @@ crate.from_cargo(
     ],
 )
 use_repo(crate, "crates")
-
-# ---------------------------------------------------------------------------
-# Opt-in GSSAPI/Kerberos dependency (@crates_gssapi).
-#
-# `sspi` is an *optional* dependency that no crate activates in the default Cargo
-# resolution, so the `from_cargo` splice above prunes it entirely (a single
-# feature set can't both keep the default build lean AND vendor the gated dep).
-# It is therefore vendored in its own repo via `from_specs`, straight from the
-# pinned git revision (kept in sync with [patch.crates-io] / Cargo.lock), and is
-# only referenced by //crates/security when //:gssapi is set.
-# ---------------------------------------------------------------------------
-crate.from_specs(
-    name = "crates_gssapi",
-    cargo_lockfile = "//bazel/gssapi:Cargo.gssapi.lock",
-)
-crate.spec(
-    package = "sspi",
-    git = "https://github.com/robot-head/sspi-rs.git",
-    rev = "80bdedf387da7341b95ff947d3bf68f48a0bc404",
-    default_features = False,
-    features = [
-        "network_client",
-        "ring",
-    ],
-    repositories = ["crates_gssapi"],
-)
-use_repo(crate, "crates_gssapi")
