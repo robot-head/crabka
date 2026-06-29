@@ -7,6 +7,7 @@
 use crabka_schema_registry::compat;
 use crabka_schema_registry::format::SchemaType;
 use crabka_schema_registry::store::StoreState;
+use std::path::Path;
 
 #[derive(serde::Deserialize)]
 #[allow(clippy::struct_field_names)]
@@ -19,24 +20,22 @@ struct Case {
 }
 
 /// Load a golden matrix fixture (`avro_matrix.json` / `protobuf_matrix.json`).
-fn load_matrix(file: &str) -> Vec<Case> {
-    let p = format!(
-        "{}/tests/fixtures/compat/{file}",
-        env!("CARGO_MANIFEST_DIR")
-    );
-    serde_json::from_slice(&std::fs::read(&p).unwrap_or_else(|e| panic!("read {p}: {e}")))
-        .expect("valid matrix")
+fn load_matrix(path: &Path) -> Vec<Case> {
+    serde_json::from_slice(
+        &std::fs::read(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display())),
+    )
+    .expect("valid matrix")
 }
 
 /// Drive `ty` cases from `file` through the engine and assert each verdict
 /// matches cp (modulo any documented `known_divergences`).
 fn assert_matrix_matches_cp(
-    file: &str,
+    path: &Path,
     ty: SchemaType,
     known_divergences: &std::collections::HashMap<(&str, &str), bool>,
 ) {
     let mut mismatches = Vec::new();
-    for c in load_matrix(file) {
+    for c in load_matrix(path) {
         let mut snap = StoreState::default();
         snap.set_subject_compat("s", c.level.clone());
         snap.register("s", ty, &c.writer, &[], None)
@@ -61,36 +60,20 @@ fn assert_matrix_matches_cp(
     );
 }
 
-#[test]
-fn engine_matches_cp_verdicts() {
-    // (case, level) pairs where apache-avro's verdict is KNOWN to diverge from
-    // cp-schema-registry, with the reason. Populate ONLY if a divergence is real.
-    // Format: ("case", "LEVEL") -> our_expected_bool.
+#[allow(clippy::unnecessary_wraps)]
+fn engine_matches_cp_verdicts(path: &Path) -> datatest_stable::Result<()> {
+    let ty = match path.file_name().and_then(|name| name.to_str()) {
+        Some("avro_matrix.json") => SchemaType::Avro,
+        Some("protobuf_matrix.json") => SchemaType::Protobuf,
+        Some("json_matrix.json") => SchemaType::Json,
+        other => panic!("unexpected compatibility matrix {other:?}"),
+    };
     let known_divergences: std::collections::HashMap<(&str, &str), bool> =
         std::collections::HashMap::from([]);
-    assert_matrix_matches_cp("avro_matrix.json", SchemaType::Avro, &known_divergences);
+    assert_matrix_matches_cp(path, ty, &known_divergences);
+    Ok(())
 }
 
-#[test]
-fn engine_matches_cp_protobuf_verdicts() {
-    // (case, level) pairs where our Protobuf engine is KNOWN to diverge from
-    // cp-schema-registry, with the reason documented in
-    // `tests/fixtures/compat/README.md`. Empty == we match cp on all 88 cases.
-    let known_divergences: std::collections::HashMap<(&str, &str), bool> =
-        std::collections::HashMap::from([]);
-    assert_matrix_matches_cp(
-        "protobuf_matrix.json",
-        SchemaType::Protobuf,
-        &known_divergences,
-    );
-}
-
-#[test]
-fn engine_matches_cp_json_verdicts() {
-    // (case, level) pairs where our JSON Schema engine is KNOWN to diverge from
-    // cp-schema-registry, with the reason documented in
-    // `tests/fixtures/compat/README.md`. Empty == we match cp on all 92 cases.
-    let known_divergences: std::collections::HashMap<(&str, &str), bool> =
-        std::collections::HashMap::from([]);
-    assert_matrix_matches_cp("json_matrix.json", SchemaType::Json, &known_divergences);
+datatest_stable::harness! {
+    { test = engine_matches_cp_verdicts, root = "tests/fixtures/compat", pattern = r".*_matrix\.json$" },
 }

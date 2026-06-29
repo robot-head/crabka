@@ -48,6 +48,9 @@ proptest = "1"
 # Expressive test assertions: `assert!(a == b)` / `check!(..)` with
 # captured-expression diagnostics. Used for all test assertions workspace-wide.
 assert2 = "0.4"
+# Stable data-driven test harness. Use for file-backed corpora so nextest can
+# schedule each fixture as its own test process.
+datatest-stable = "0.3.3"
 # Jepsen-style exhaustive concurrency-correctness model checking (KRaft
 # consensus). Dev-dependency only — never linked into a shipped binary.
 # Pinned: pre-1.0, minor bumps can be breaking.

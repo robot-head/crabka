@@ -31,5 +31,10 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 assert2 = { workspace = true }
+datatest-stable = { workspace = true }
 proptest = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[[test]]
+name = "golden_corpus"
+harness = false
