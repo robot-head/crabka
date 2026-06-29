@@ -20,6 +20,9 @@ use uuid::Uuid;
 
 use crate::error::RaftError;
 
+const SNAPSHOT_HEADER_BASE_OFFSET: i64 = 0;
+const SNAPSHOT_DATA_BASE_OFFSET: i64 = 1;
+
 /// Identifies a snapshot by the log position it covers: `end_offset` is
 /// the offset of the last record contained in the snapshot, and `epoch`
 /// is the leader epoch at that offset. The engine names the on-disk artifact
@@ -47,14 +50,13 @@ impl SnapshotWriter {
         // `SnapshotHeaderRecord` (flexible message), encoded via the protocol
         // control-batch builder so the JVM `kafka-dump-log` decoder parses it.
         let header = SnapshotHeaderRecord {
-            version: 0,
             last_contained_log_timestamp,
             ..Default::default()
         };
         let mut header_body = BytesMut::new();
         header.encode(&mut header_body, 0)?;
         out.put_slice(&encode_control_batch(
-            0,
+            SNAPSHOT_HEADER_BASE_OFFSET,
             control_record_key(ControlRecordType::SnapshotHeader),
             header_body.freeze(),
         ));
@@ -85,36 +87,36 @@ impl SnapshotWriter {
             value_blobs.append(&mut blobs);
         }
         let total_blobs = value_blobs.len();
-        if total_blobs > 0 {
-            let last_offset_delta = i32::try_from(total_blobs - 1).unwrap_or(i32::MAX);
+        if !value_blobs.is_empty() {
+            let last_offset_delta = total_blobs
+                .checked_sub(1)
+                .and_then(|delta| i32::try_from(delta).ok())
+                .unwrap_or(i32::MAX);
             let data_records = value_blobs
                 .into_iter()
                 .enumerate()
-                .map(|(i, blob)| Record {
-                    offset_delta: i32::try_from(i).unwrap_or(i32::MAX),
-                    value: Some(blob),
-                    ..Default::default()
+                .map(|(i, blob)| {
+                    let mut record = Record {
+                        value: Some(blob),
+                        ..Default::default()
+                    };
+                    record.offset_delta = i32::try_from(i).unwrap_or(i32::MAX);
+                    record
                 })
                 .collect();
-            let data_batch = RecordBatch {
-                base_offset: 1,
-                last_offset_delta,
+            let mut data_batch = RecordBatch {
                 records: data_records,
                 ..Default::default()
             };
+            data_batch.base_offset = SNAPSHOT_DATA_BASE_OFFSET;
+            data_batch.last_offset_delta = last_offset_delta;
             data_batch.encode(&mut out)?;
         }
 
         // (3) SnapshotFooter control batch (real KIP-630 `SnapshotFooterRecord`).
-        let footer_base_offset = if total_blobs == 0 {
-            1
-        } else {
-            1 + i64::try_from(total_blobs).unwrap_or(i64::MAX)
-        };
-        let footer = SnapshotFooterRecord {
-            version: 0,
-            ..Default::default()
-        };
+        let footer_base_offset = SNAPSHOT_DATA_BASE_OFFSET
+            .saturating_add(i64::try_from(total_blobs).unwrap_or(i64::MAX));
+        let footer = SnapshotFooterRecord::default();
         let mut footer_body = BytesMut::new();
         footer.encode(&mut footer_body, 0)?;
         out.put_slice(&encode_control_batch(
@@ -176,6 +178,7 @@ impl SnapshotReader {
 mod tests {
     use super::*;
     use assert2::assert;
+    use crabka_protocol::Decode;
 
     use crabka_metadata::{
         FeatureLevelRecord, MetadataImage, MetadataRecord, PartitionRecord, TopicRecord,
@@ -215,6 +218,75 @@ mod tests {
         let bytes = SnapshotWriter::serialize(&image, 1_700_000_000_000).unwrap();
         let records = SnapshotReader::read_records(&bytes).unwrap();
         assert!(MetadataImage::from_records(cid, &records) == image);
+    }
+
+    #[test]
+    fn writer_emits_canonical_header_data_offsets_and_footer() {
+        let cid = Uuid::new_v4();
+        let mut image = MetadataImage::new(cid);
+        image.apply(&MetadataRecord::V1Topic(TopicRecord {
+            name: "orders".into(),
+            topic_id: Uuid::new_v4(),
+            partitions: 2,
+            replication_factor: 1,
+        }));
+        for p in 0..2 {
+            image.apply(&MetadataRecord::V1Partition(PartitionRecord {
+                topic: "orders".into(),
+                partition: p,
+                leader: 1,
+                replicas: vec![1],
+                isr: vec![1],
+                leader_epoch: 0,
+                adding_replicas: vec![],
+                removing_replicas: vec![],
+                directories: vec![],
+                partition_epoch: 0,
+            }));
+        }
+
+        let timestamp = 1_700_000_000_123;
+        let bytes = SnapshotWriter::serialize(&image, timestamp).unwrap();
+        let mut cur: &[u8] = &bytes;
+
+        let header = RecordBatch::decode(&mut cur).expect("header batch");
+        assert!(header.base_offset == 0);
+        assert!(header.attributes.is_control_batch());
+        assert!(header.records.len() == 1);
+        let header_value = header.records[0].value.as_ref().expect("header value");
+        let mut header_cur = &header_value[..];
+        let header_record =
+            SnapshotHeaderRecord::decode(&mut header_cur, 0).expect("snapshot header");
+        assert!(header_record.version == 0);
+        assert!(header_record.last_contained_log_timestamp == timestamp);
+        assert!(header_cur.is_empty());
+
+        let data = RecordBatch::decode(&mut cur).expect("data batch");
+        assert!(data.base_offset == 1);
+        assert!(!data.attributes.is_control_batch());
+        assert!(data.records.len() >= 2);
+        assert!(
+            data.last_offset_delta
+                == i32::try_from(data.records.len() - 1).expect("record count fits")
+        );
+        for (i, record) in data.records.iter().enumerate() {
+            assert!(record.offset_delta == i32::try_from(i).expect("index fits"));
+            assert!(record.value.is_some());
+        }
+
+        let footer = RecordBatch::decode(&mut cur).expect("footer batch");
+        assert!(
+            footer.base_offset == 1 + i64::try_from(data.records.len()).expect("record count fits")
+        );
+        assert!(footer.attributes.is_control_batch());
+        assert!(footer.records.len() == 1);
+        let footer_value = footer.records[0].value.as_ref().expect("footer value");
+        let mut footer_cur = &footer_value[..];
+        let footer_record =
+            SnapshotFooterRecord::decode(&mut footer_cur, 0).expect("snapshot footer");
+        assert!(footer_record.version == 0);
+        assert!(footer_cur.is_empty());
+        assert!(cur.is_empty());
     }
 
     /// A snapshot of an image carrying finalized KIP-584 features must
@@ -261,6 +333,38 @@ mod tests {
         let records = SnapshotReader::read_records(&bytes).unwrap();
         assert!(records.is_empty());
         assert!(MetadataImage::from_records(cid, &records) == image);
+    }
+
+    #[test]
+    fn writer_emits_empty_snapshot_header_and_footer_offsets() {
+        let image = MetadataImage::new(Uuid::new_v4());
+
+        let bytes = SnapshotWriter::serialize(&image, 99).unwrap();
+        let mut cur: &[u8] = &bytes;
+
+        let header = RecordBatch::decode(&mut cur).expect("header batch");
+        assert!(header.base_offset == 0);
+        assert!(header.attributes.is_control_batch());
+        assert!(header.records.len() == 1);
+        let header_value = header.records[0].value.as_ref().expect("header value");
+        let mut header_cur = &header_value[..];
+        let header_record =
+            SnapshotHeaderRecord::decode(&mut header_cur, 0).expect("snapshot header");
+        assert!(header_record.version == 0);
+        assert!(header_record.last_contained_log_timestamp == 99);
+        assert!(header_cur.is_empty());
+
+        let footer = RecordBatch::decode(&mut cur).expect("footer batch");
+        assert!(footer.base_offset == 1);
+        assert!(footer.attributes.is_control_batch());
+        assert!(footer.records.len() == 1);
+        let footer_value = footer.records[0].value.as_ref().expect("footer value");
+        let mut footer_cur = &footer_value[..];
+        let footer_record =
+            SnapshotFooterRecord::decode(&mut footer_cur, 0).expect("snapshot footer");
+        assert!(footer_record.version == 0);
+        assert!(footer_cur.is_empty());
+        assert!(cur.is_empty());
     }
 
     /// Docker-gated: a Crabka engine-produced KIP-630 snapshot (built by

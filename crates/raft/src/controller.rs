@@ -586,25 +586,20 @@ impl crate::reconfig::ReconfigOps for ControllerHandle {
 /// highest `(end_offset, epoch)` plus its raw bytes. Matches the bare-checkpoint
 /// format the engine writes (no `.meta` sidecar).
 fn load_latest_checkpoint(dir: &std::path::Path) -> Option<((i64, i32), Vec<u8>)> {
-    let entries = std::fs::read_dir(dir).ok()?;
-    let mut best: Option<((i64, i32), std::path::PathBuf)> = None;
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else { continue };
-        let Some(stem) = name.strip_suffix(".checkpoint") else {
-            continue;
-        };
-        let Some((off, ep)) = stem.split_once('-') else {
-            continue;
-        };
-        let (Ok(off), Ok(ep)) = (off.parse::<i64>(), ep.parse::<i32>()) else {
-            continue;
-        };
-        if best.as_ref().is_none_or(|(cur, _)| (off, ep) > *cur) {
-            best = Some(((off, ep), entry.path()));
-        }
-    }
-    let ((off, ep), path) = best?;
+    let ((off, ep), path) = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let name = name.to_str()?;
+            let stem = name.strip_suffix(".checkpoint")?;
+            let (off, ep) = stem.split_once('-')?;
+            let (Ok(off), Ok(ep)) = (off.parse::<i64>(), ep.parse::<i32>()) else {
+                return None;
+            };
+            Some(((off, ep), entry.path()))
+        })
+        .max_by_key(|(id, _)| *id)?;
     let bytes = std::fs::read(&path).ok()?;
     Some(((off, ep), bytes))
 }
@@ -764,6 +759,8 @@ mod bootstrap_mode_tests {
     use assert2::assert;
     use tempfile::TempDir;
 
+    const TEST_OP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
     #[test]
     fn controller_endpoint_addr_keeps_dns_hostname_not_parsed_socketaddr() {
         // Regression: a voter endpoint host is a per-pod DNS FQDN, NOT a
@@ -826,6 +823,78 @@ mod bootstrap_mode_tests {
         })
     }
 
+    fn committable_topic_record(name: &str) -> crabka_metadata::MetadataRecord {
+        crabka_metadata::MetadataRecord::V1Topic(crabka_metadata::TopicRecord {
+            name: name.into(),
+            topic_id: Uuid::new_v4(),
+            partitions: 1,
+            replication_factor: 1,
+        })
+    }
+
+    async fn wait_for_leader(ctrl: &ControllerHandle) {
+        let mut leader_rx = ctrl.watch_leader();
+        tokio::time::timeout(TEST_OP_TIMEOUT, leader_rx.wait_for(Option::is_some))
+            .await
+            .expect("no leader elected within 2s")
+            .expect("leader watch channel closed");
+    }
+
+    async fn submit_change_with_timeout(
+        ctrl: &ControllerHandle,
+        records: Vec<crabka_metadata::MetadataRecord>,
+        context: &str,
+    ) -> Result<(), RaftError> {
+        tokio::time::timeout(TEST_OP_TIMEOUT, ctrl.submit_change(records))
+            .await
+            .unwrap_or_else(|_| panic!("{context} submit_change timed out"))
+    }
+
+    async fn bind_eventually(addr: SocketAddr) -> tokio::net::TcpListener {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match tokio::net::TcpListener::bind(addr).await {
+                Ok(listener) => return listener,
+                Err(err) if tokio::time::Instant::now() < deadline => {
+                    let _ = err;
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                Err(err) => panic!("listener address {addr} was not released: {err}"),
+            }
+        }
+    }
+
+    #[derive(Clone)]
+    struct RecordingDialer {
+        client_ids: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl OutboundDialer for RecordingDialer {
+        async fn dial(
+            &self,
+            _target: NodeId,
+            addr: &str,
+            options: crabka_client_core::ConnectionOptions,
+        ) -> Result<crabka_client_core::Connection, crabka_client_core::ClientError> {
+            self.client_ids
+                .lock()
+                .unwrap()
+                .push(options.client_id.clone());
+            let sock = tokio::net::lookup_host(addr)
+                .await
+                .map_err(crabka_client_core::ClientError::Io)?
+                .next()
+                .ok_or_else(|| {
+                    crabka_client_core::ClientError::Io(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "test address resolved to no sockets",
+                    ))
+                })?;
+            crabka_client_core::Connection::connect(sock, options).await
+        }
+    }
+
     fn submit_change_response_bytes(error_code: i16, leader_hint: i64) -> bytes::Bytes {
         let mut out = Vec::new();
         crate::wire::CrabkaSubmitChangeResponse {
@@ -834,6 +903,191 @@ mod bootstrap_mode_tests {
         }
         .encode_v0(&mut out);
         bytes::Bytes::from(out)
+    }
+
+    #[test]
+    fn load_latest_checkpoint_picks_highest_offset_then_epoch() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("1-9.checkpoint"), b"old-offset").unwrap();
+        std::fs::write(dir.path().join("2-1.checkpoint"), b"old-epoch").unwrap();
+        std::fs::write(dir.path().join("2-3.checkpoint"), b"best").unwrap();
+        std::fs::write(dir.path().join("9-9.txt"), b"ignored suffix").unwrap();
+        std::fs::write(
+            dir.path().join("not-a-checkpoint.checkpoint"),
+            b"ignored name",
+        )
+        .unwrap();
+
+        let latest = load_latest_checkpoint(dir.path()).expect("checkpoint");
+        assert!(latest == ((2, 3), b"best".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn read_snapshot_range_allows_exact_end_but_rejects_past_end() {
+        let dir = TempDir::new().unwrap();
+        let cfg = ControllerConfig {
+            bootstrap_mode: BootstrapMode::Join,
+            initial_voters: crabka_metadata::VoterSet::from_voters(std::iter::empty()),
+            ..ControllerConfig::for_tests(1, dir.path().to_path_buf())
+        };
+        let ctrl = Controller::start(cfg).await.expect("join start");
+        let checkpoint_dir = crate::kraft::checkpoint_dir(dir.path());
+        std::fs::create_dir_all(&checkpoint_dir).unwrap();
+        std::fs::write(checkpoint_dir.join("10-4.checkpoint"), b"abc").unwrap();
+
+        match ctrl.read_snapshot_range(3, 10) {
+            SnapshotRange::Slice(slice) => {
+                assert!(slice.end_offset == 10);
+                assert!(slice.epoch == 4);
+                assert!(slice.total_size == 3);
+                assert!(slice.bytes.is_empty());
+            }
+            other => panic!(
+                "position exactly at snapshot end should yield an empty slice, got {:?}",
+                std::mem::discriminant(&other)
+            ),
+        }
+
+        assert!(matches!(
+            ctrl.read_snapshot_range(4, 10),
+            SnapshotRange::OutOfRange
+        ));
+        ctrl.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn unsupported_reconfig_ops_return_errors() {
+        let dir = TempDir::new().unwrap();
+        let cfg = ControllerConfig {
+            bootstrap_mode: BootstrapMode::Join,
+            initial_voters: crabka_metadata::VoterSet::from_voters(std::iter::empty()),
+            ..ControllerConfig::for_tests(1, dir.path().to_path_buf())
+        };
+        let ctrl = Controller::start(cfg).await.expect("join start");
+
+        let add_err = <ControllerHandle as crate::reconfig::ReconfigOps>::add_learner(
+            &ctrl,
+            2,
+            Node::default(),
+        )
+        .await
+        .expect_err("static raft rejects add_learner");
+        assert!(matches!(add_err, RaftError::Unsupported(_)));
+
+        let change_err = <ControllerHandle as crate::reconfig::ReconfigOps>::change_membership(
+            &ctrl,
+            std::collections::BTreeSet::from([1, 2]),
+        )
+        .await
+        .expect_err("static raft rejects change_membership");
+        assert!(matches!(change_err, RaftError::Unsupported(_)));
+        ctrl.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn reconfig_ops_reflect_live_single_voter_state_and_submit_records() {
+        let dir = TempDir::new().unwrap();
+        let mut cfg = ControllerConfig::for_tests(1, dir.path().to_path_buf());
+        cfg.election_timeout = std::time::Duration::from_millis(200);
+        let ctrl = Controller::start(cfg).await.expect("bootstrap");
+        wait_for_leader(&ctrl).await;
+
+        let voters = <ControllerHandle as crate::reconfig::ReconfigOps>::current_voters(&ctrl);
+        assert!(voters.contains(1));
+        assert!(<ControllerHandle as crate::reconfig::ReconfigOps>::leader(&ctrl) == Some(1));
+        assert!(<ControllerHandle as crate::reconfig::ReconfigOps>::is_leader(&ctrl));
+
+        tokio::time::timeout(
+            TEST_OP_TIMEOUT,
+            <ControllerHandle as crate::reconfig::ReconfigOps>::submit_records(
+                &ctrl,
+                vec![committable_topic_record("ops-a")],
+            ),
+        )
+        .await
+        .expect("submit ops-a timed out")
+        .expect("submit ops-a");
+        tokio::time::timeout(
+            TEST_OP_TIMEOUT,
+            <ControllerHandle as crate::reconfig::ReconfigOps>::submit_records(
+                &ctrl,
+                vec![committable_topic_record("ops-b")],
+            ),
+        )
+        .await
+        .expect("submit ops-b timed out")
+        .expect("submit ops-b");
+
+        assert!(ctrl.current_image().topic("ops-a").is_some());
+        assert!(ctrl.current_image().topic("ops-b").is_some());
+        let leader_last =
+            <ControllerHandle as crate::reconfig::ReconfigOps>::leader_last_index(&ctrl);
+        assert!(leader_last >= 2);
+        assert!(
+            <ControllerHandle as crate::reconfig::ReconfigOps>::observer_index(&ctrl, 1)
+                == Some(leader_last)
+        );
+        ctrl.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn reconfig_ops_report_join_node_is_not_leader() {
+        let dir = TempDir::new().unwrap();
+        let cfg = ControllerConfig {
+            bootstrap_mode: BootstrapMode::Join,
+            initial_voters: crabka_metadata::VoterSet::from_voters(std::iter::empty()),
+            ..ControllerConfig::for_tests(1, dir.path().to_path_buf())
+        };
+        let ctrl = Controller::start(cfg).await.expect("join start");
+
+        assert!(<ControllerHandle as crate::reconfig::ReconfigOps>::leader(&ctrl).is_none());
+        assert!(!<ControllerHandle as crate::reconfig::ReconfigOps>::is_leader(&ctrl));
+        ctrl.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_releases_bound_listener_addr() {
+        let dir = TempDir::new().unwrap();
+        let cfg = ControllerConfig::for_tests(1, dir.path().to_path_buf());
+        let ctrl = Controller::start(cfg).await.expect("bootstrap");
+        let addr = ctrl.controller_bound_addr();
+
+        ctrl.shutdown().await;
+
+        let rebound = bind_eventually(addr).await;
+        drop(rebound);
+    }
+
+    #[tokio::test]
+    async fn cancel_releases_bound_listener_addr_without_consuming_handle() {
+        let dir = TempDir::new().unwrap();
+        let cfg = ControllerConfig::for_tests(1, dir.path().to_path_buf());
+        let ctrl = Controller::start(cfg).await.expect("bootstrap");
+        let addr = ctrl.controller_bound_addr();
+
+        ctrl.cancel().await;
+
+        let rebound = bind_eventually(addr).await;
+        drop(rebound);
+        ctrl.cancel().await;
+    }
+
+    #[test]
+    fn metadata_log_nonempty_detects_quorum_state_and_log_segments_only() {
+        let empty = TempDir::new().unwrap();
+        assert!(!metadata_log_nonempty(empty.path()));
+
+        let quorum_state = TempDir::new().unwrap();
+        std::fs::write(quorum_state.path().join("quorum-state"), b"state").unwrap();
+        assert!(metadata_log_nonempty(quorum_state.path()));
+
+        let segment = TempDir::new().unwrap();
+        std::fs::write(segment.path().join("00000000000000000000.log"), b"log").unwrap();
+        assert!(metadata_log_nonempty(segment.path()));
+
+        let not_segment = TempDir::new().unwrap();
+        std::fs::write(not_segment.path().join("00000000000000000000.txt"), b"log").unwrap();
+        assert!(!metadata_log_nonempty(not_segment.path()));
     }
 
     #[test]
@@ -980,18 +1234,19 @@ mod bootstrap_mode_tests {
         };
         let ctrl = Controller::start(cfg).await.expect("first bootstrap ok");
         // Drive a commit so the log is non-empty on the second boot.
-        let mut leader_rx = ctrl.watch_leader();
-        while leader_rx.borrow().is_none() {
-            leader_rx.changed().await.unwrap();
-        }
-        ctrl.submit_change(vec![crabka_metadata::MetadataRecord::V1Topic(
-            crabka_metadata::TopicRecord {
-                name: "seed".into(),
-                topic_id: Uuid::new_v4(),
-                partitions: 1,
-                replication_factor: 1,
-            },
-        )])
+        wait_for_leader(&ctrl).await;
+        submit_change_with_timeout(
+            &ctrl,
+            vec![crabka_metadata::MetadataRecord::V1Topic(
+                crabka_metadata::TopicRecord {
+                    name: "seed".into(),
+                    topic_id: Uuid::new_v4(),
+                    partitions: 1,
+                    replication_factor: 1,
+                },
+            )],
+            "bootstrap seed",
+        )
         .await
         .expect("submit");
         ctrl.shutdown().await;
@@ -1042,20 +1297,23 @@ mod bootstrap_mode_tests {
             ..ControllerConfig::for_tests(1, dir.path().to_path_buf())
         };
         let ctrl = Controller::start(cfg).await.expect("bootstrap");
-        let mut leader_rx = ctrl.watch_leader();
-        while leader_rx.borrow().is_none() {
-            leader_rx.changed().await.unwrap();
-        }
-        ctrl.submit_change(vec![MetadataRecord::V1Topic(TopicRecord {
-            name: "t".into(),
-            topic_id: Uuid::new_v4(),
-            partitions: 1,
-            replication_factor: 1,
-        })])
+        wait_for_leader(&ctrl).await;
+        submit_change_with_timeout(
+            &ctrl,
+            vec![MetadataRecord::V1Topic(TopicRecord {
+                name: "t".into(),
+                topic_id: Uuid::new_v4(),
+                partitions: 1,
+                replication_factor: 1,
+            })],
+            "metadata_records seed",
+        )
         .await
         .expect("submit");
 
-        let slice = ctrl.metadata_records(0, usize::MAX).await;
+        let slice = tokio::time::timeout(TEST_OP_TIMEOUT, ctrl.metadata_records(0, usize::MAX))
+            .await
+            .expect("metadata_records timed out");
         assert!(slice.high_watermark >= 1);
         let image = MetadataImage::new(Uuid::nil());
         let mut buf: &[u8] = &slice.records;
@@ -1091,24 +1349,28 @@ mod bootstrap_mode_tests {
             ..ControllerConfig::for_tests(1, dir.path().to_path_buf())
         };
         let ctrl = Controller::start(cfg).await.expect("bootstrap");
-        let mut leader_rx = ctrl.watch_leader();
-        while leader_rx.borrow().is_none() {
-            leader_rx.changed().await.unwrap();
-        }
-        ctrl.submit_change(vec![MetadataRecord::V1Topic(TopicRecord {
-            name: "fetched".into(),
-            topic_id: Uuid::new_v4(),
-            partitions: 1,
-            replication_factor: 1,
-        })])
+        wait_for_leader(&ctrl).await;
+        submit_change_with_timeout(
+            &ctrl,
+            vec![MetadataRecord::V1Topic(TopicRecord {
+                name: "fetched".into(),
+                topic_id: Uuid::new_v4(),
+                partitions: 1,
+                replication_factor: 1,
+            })],
+            "fetch_metadata seed",
+        )
         .await
         .expect("submit");
 
         let addr = ctrl.controller_bound_addr();
-        let resp = ctrl
-            .fetch_metadata_from(addr, 0, 1_048_576)
-            .await
-            .expect("fetch");
+        let resp = tokio::time::timeout(
+            TEST_OP_TIMEOUT,
+            ctrl.fetch_metadata_from(addr, 0, 1_048_576),
+        )
+        .await
+        .expect("fetch_metadata_from timed out")
+        .expect("fetch");
         assert!(resp.error_code == 0);
         assert!(resp.high_watermark >= 1);
 
@@ -1134,6 +1396,44 @@ mod bootstrap_mode_tests {
         assert!(
             found,
             "topic 'fetched' must appear in fetched metadata records"
+        );
+        ctrl.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn fetch_metadata_from_passes_configured_client_id_to_dialer() {
+        let dir = TempDir::new().unwrap();
+        let client_ids = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let dialer = RecordingDialer {
+            client_ids: Arc::clone(&client_ids),
+        };
+        let mut cfg = ControllerConfig::for_tests(1, dir.path().to_path_buf());
+        cfg.election_timeout = std::time::Duration::from_millis(200);
+        cfg.client_id = "metadata-fetch-client".into();
+        cfg.dialer = Some(Arc::new(dialer));
+
+        let ctrl = Controller::start(cfg).await.expect("bootstrap");
+        wait_for_leader(&ctrl).await;
+        submit_change_with_timeout(
+            &ctrl,
+            vec![committable_topic_record("client-id-check")],
+            "client-id fetch seed",
+        )
+        .await
+        .expect("submit");
+
+        let resp = tokio::time::timeout(
+            TEST_OP_TIMEOUT,
+            ctrl.fetch_metadata_from(ctrl.controller_bound_addr(), 0, 1_048_576),
+        )
+        .await
+        .expect("fetch_metadata_from timed out")
+        .expect("fetch");
+
+        assert!(resp.error_code == 0);
+        assert!(
+            client_ids.lock().unwrap().as_slice() == ["metadata-fetch-client"],
+            "fetch_metadata_from must preserve the controller client id"
         );
         ctrl.shutdown().await;
     }
