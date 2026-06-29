@@ -222,6 +222,9 @@ jobs:
           # never in CI. Two separate excludes rather than an `(a|b)` alternation
           # because the lychee-action `eval`s the args, so the parens/pipe of a
           # grouped regex are parsed as a shell subshell/pipe and error out.
+          # `--exclude www.sigstore.dev`: the Sigstore homepage is a valid
+          # external reference for chart provenance, but it intermittently times
+          # out from GitHub-hosted runners and makes PR docs builds flaky.
           # (`#` is literal inside a folded scalar, so the exclusions live in the
           # args below.) KIP-link freshness is tracked by docs-freshness.yml.
           args: >-
@@ -232,6 +235,7 @@ jobs:
             --exclude cwiki\.apache\.org
             --exclude localhost
             --exclude 127\.0\.0\.1
+            --exclude www\.sigstore\.dev
             --include-fragments
             --fallback-extensions html
             --root-dir website/public
