@@ -359,32 +359,56 @@ mod tests {
         })
     }
 
-    /// Image with topic "t" / partition 0, replicas [1,2,3], isr [1,2],
-    /// leader 1 @ `leader_epoch` 5. Brokers registered per `epochs`.
-    fn image_with(epochs: &[(u64, i64)]) -> MetadataImage {
+    struct PartitionFixture<'a> {
+        partition: i32,
+        leader: u64,
+        replicas: &'a [u64],
+        isr: &'a [u64],
+        leader_epoch: i32,
+        partition_epoch: i32,
+    }
+
+    /// Image with topic "t" and one partition. Brokers registered per `epochs`.
+    fn image_with_partition(fixture: PartitionFixture<'_>, epochs: &[(u64, i64)]) -> MetadataImage {
         let mut image = MetadataImage::new(uuid::Uuid::nil());
         image.apply(&MetadataRecord::V1Topic(TopicRecord {
             name: "t".into(),
             topic_id: topic_id(),
-            partitions: 1,
-            replication_factor: 3,
+            partitions: fixture.partition + 1,
+            replication_factor: i16::try_from(fixture.replicas.len()).expect("rf fits i16"),
         }));
         image.apply(&MetadataRecord::V1Partition(PartitionRecord {
             topic: "t".into(),
-            partition: 0,
-            leader: 1,
-            replicas: vec![1, 2, 3],
-            isr: vec![1, 2],
-            leader_epoch: 5,
+            partition: fixture.partition,
+            leader: fixture.leader,
+            replicas: fixture.replicas.to_vec(),
+            isr: fixture.isr.to_vec(),
+            leader_epoch: fixture.leader_epoch,
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![],
-            partition_epoch: 0,
+            partition_epoch: fixture.partition_epoch,
         }));
         for &(id, ep) in epochs {
             image.apply(&reg(id, ep));
         }
         image
+    }
+
+    /// Image with topic "t" / partition 0, replicas [1,2,3], isr [1,2],
+    /// leader 1 @ `leader_epoch` 5. Brokers registered per `epochs`.
+    fn image_with(epochs: &[(u64, i64)]) -> MetadataImage {
+        image_with_partition(
+            PartitionFixture {
+                partition: 0,
+                leader: 1,
+                replicas: &[1, 2, 3],
+                isr: &[1, 2],
+                leader_epoch: 5,
+                partition_epoch: 0,
+            },
+            epochs,
+        )
     }
 
     fn topic_id() -> uuid::Uuid {
@@ -523,6 +547,24 @@ mod tests {
         assert!(resp.error_code == codes::CLUSTER_AUTHORIZATION_FAILED);
     }
 
+    #[test]
+    fn cluster_action_allowed_does_not_yield_denial() {
+        let image = MetadataImage::new(uuid::Uuid::nil());
+        let principal = crabka_security::Principal {
+            name: "ANONYMOUS".into(),
+            auth_method: crabka_security::AuthMethod::Anonymous,
+            groups: vec![],
+        };
+        let peer = std::net::SocketAddr::from(([127, 0, 0, 1], 9092));
+
+        assert!(!cluster_action_denied(
+            &crate::authorizer::AllowAllAuthorizer,
+            &image,
+            &principal,
+            &peer
+        ));
+    }
+
     #[tokio::test]
     async fn handle_denies_cluster_action_for_whole_request() {
         let version = alter_partition_response::MAX_VERSION;
@@ -635,6 +677,63 @@ mod tests {
         let resp = handle_partition(&image, Some("t"), 0, 5, &[], &isr, &mut changes);
         assert!(resp.error_code == codes::NONE, "got {}", resp.error_code);
         assert!(changes.len() == 1);
+    }
+
+    #[test]
+    fn success_response_preserves_non_default_partition_fields() {
+        let image = image_with_partition(
+            PartitionFixture {
+                partition: 7,
+                leader: 2,
+                replicas: &[2, 4, 6],
+                isr: &[2, 4],
+                leader_epoch: 9,
+                partition_epoch: 11,
+            },
+            &[(2, 20), (4, 40), (6, 60)],
+        );
+        let mut changes = Vec::new();
+        let resp = handle_partition(&image, Some("t"), 7, 9, &[2, 4], &[], &mut changes);
+
+        assert!(resp.partition_index == 7);
+        assert!(resp.error_code == codes::NONE);
+        assert!(resp.leader_id == 2);
+        assert!(resp.leader_epoch == 9);
+        assert!(resp.isr == vec![2, 4]);
+        assert!(resp.leader_recovery_state == 0);
+        assert!(resp.partition_epoch == 12);
+        assert!(changes.len() == 1);
+        let MetadataRecord::V1Partition(record) = &changes[0] else {
+            panic!("wrong change variant");
+        };
+        assert!(record.partition == 7);
+        assert!(record.partition_epoch == 12);
+    }
+
+    #[test]
+    fn error_response_preserves_non_default_partition_fields() {
+        let image = image_with_partition(
+            PartitionFixture {
+                partition: 7,
+                leader: 2,
+                replicas: &[2, 4, 6],
+                isr: &[2, 4],
+                leader_epoch: 9,
+                partition_epoch: 11,
+            },
+            &[(2, 20), (4, 40), (6, 60)],
+        );
+        let mut changes = Vec::new();
+        let resp = handle_partition(&image, Some("t"), 7, 8, &[2, 4], &[], &mut changes);
+
+        assert!(resp.partition_index == 7);
+        assert!(resp.error_code == codes::FENCED_LEADER_EPOCH);
+        assert!(resp.leader_id == 2);
+        assert!(resp.leader_epoch == 9);
+        assert!(resp.isr == vec![2, 4]);
+        assert!(resp.leader_recovery_state == 0);
+        assert!(resp.partition_epoch == 0);
+        assert!(changes.is_empty());
     }
 
     #[test]

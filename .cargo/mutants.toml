@@ -314,6 +314,15 @@ exclude_re = [
     # fits the 4096-offset window (leo-4096 and leo+4096 both clamp to 0 for the
     # realistic small audit partition); only differs for >4096-record tails.
     "broker/src/audit_recovery\\.rs.*replace - with \\+ in recover_from_partition_tail",
+    # AlterPartition response builders intentionally pin several Kafka protocol
+    # default-zero fields (`NONE`, no leader recovery, no throttle, and no
+    # partition epoch on errors). A struct-field-deletion mutant falls back to
+    # the same generated protocol default, so there is no behavioral signal.
+    "broker/src/handlers/alter_partition\\.rs.*delete field error_code from struct RespPartitionData expression in handle_partition",
+    "broker/src/handlers/alter_partition\\.rs.*delete field leader_recovery_state from struct RespPartitionData expression in handle_partition",
+    "broker/src/handlers/alter_partition\\.rs.*delete field leader_recovery_state from struct RespPartitionData expression in error_part",
+    "broker/src/handlers/alter_partition\\.rs.*delete field partition_epoch from struct RespPartitionData expression in error_part",
+    "broker/src/handlers/alter_partition\\.rs.*delete field throttle_time_ms from struct AlterPartitionResponse expression in denied_response",
     # The offset is the human-facing VerifyBreak.offset diagnostic (standard Kafka
     # base_offset + offset_delta), not the tamper verdict.
     "audit/src/verify\\.rs.*replace \\+ with (-|\\*) in verify_partition_dir",

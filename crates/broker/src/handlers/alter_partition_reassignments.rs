@@ -349,6 +349,18 @@ mod tests {
         removing: &[NodeId],
         leader: NodeId,
     ) -> MetadataImage {
+        img_with_epoch(replicas, isr, adding, removing, leader, 0)
+    }
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    fn img_with_epoch(
+        replicas: &[NodeId],
+        isr: &[NodeId],
+        adding: &[NodeId],
+        removing: &[NodeId],
+        leader: NodeId,
+        partition_epoch: i32,
+    ) -> MetadataImage {
         let mut img = MetadataImage::new(Uuid::nil());
         // Register brokers 1..=6 so validate_target accepts target lists.
         for n in 1u64..=6 {
@@ -380,7 +392,7 @@ mod tests {
             adding_replicas: adding.to_vec(),
             removing_replicas: removing.to_vec(),
             directories: vec![],
-            partition_epoch: 0,
+            partition_epoch,
         }));
         img
     }
@@ -394,7 +406,7 @@ mod tests {
 
     #[test]
     fn start_writes_union_replicas() {
-        let img = img_with(&[1, 2, 3], &[1, 2, 3], &[], &[], 1);
+        let img = img_with_epoch(&[1, 2, 3], &[1, 2, 3], &[], &[], 1, 11);
         let res = process_one_partition(&img, "foo", 0, Some(&[1, 4]), true)
             .expect("ok")
             .expect("Some");
@@ -403,6 +415,7 @@ mod tests {
         assert!(res.removing_replicas == vec![2, 3]);
         assert!(res.leader == 1);
         assert!(res.leader_epoch == 5); // unchanged on start
+        assert!(res.partition_epoch == 12);
     }
 
     #[test]
@@ -436,11 +449,19 @@ mod tests {
     }
 
     #[test]
+    fn rf_check_counts_current_target_without_removing_replicas() {
+        let img = img_with(&[1, 2, 3, 4], &[1, 3, 4], &[4], &[2], 1);
+        let res = process_one_partition(&img, "foo", 0, Some(&[1, 3, 4]), false).expect("ok");
+
+        assert!(res.is_none());
+    }
+
+    #[test]
     fn cancel_with_leader_in_adding_reverts_leader() {
         // After a successful leader handoff during reassignment, leader=4 (an adding replica).
         // Cancel: leader should revert to whoever in reverted replicas ∩ isr.
         // replicas=[1,2,3,4], adding=[4], removing=[2,3], leader=4, isr=[1,4].
-        let img = img_with(&[1, 2, 3, 4], &[1, 4], &[4], &[2, 3], 4);
+        let img = img_with_epoch(&[1, 2, 3, 4], &[1, 4], &[4], &[2, 3], 4, 11);
         let res = process_one_partition(&img, "foo", 0, None, true)
             .expect("ok")
             .expect("Some");
@@ -449,6 +470,23 @@ mod tests {
         assert!(res.removing_replicas == Vec::<NodeId>::new());
         assert!(res.leader == 1); // reverted replicas ∩ isr = [1]
         assert!(res.leader_epoch == 6); // bumped
+        assert!(res.partition_epoch == 12);
+    }
+
+    #[test]
+    fn cancel_with_only_removing_replicas_is_valid() {
+        let img = img_with_epoch(&[1, 2, 3], &[1, 2, 3], &[], &[3], 1, 11);
+        let res = process_one_partition(&img, "foo", 0, None, true)
+            .expect("ok")
+            .expect("Some");
+
+        assert!(res.replicas == vec![1, 2, 3]);
+        assert!(res.isr == vec![1, 2, 3]);
+        assert!(res.adding_replicas == Vec::<NodeId>::new());
+        assert!(res.removing_replicas == Vec::<NodeId>::new());
+        assert!(res.leader == 1);
+        assert!(res.leader_epoch == 5);
+        assert!(res.partition_epoch == 12);
     }
 
     #[test]
