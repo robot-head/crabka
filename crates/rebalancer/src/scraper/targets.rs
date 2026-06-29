@@ -121,7 +121,12 @@ impl TargetSource {
                 let mut out = Vec::with_capacity(state.brokers.len());
                 for b in &state.brokers {
                     if b.host.is_empty() {
-                        warn_once_empty_host(b.id);
+                        if should_warn_empty_host(b.id) {
+                            warn!(
+                                broker_id = b.id,
+                                "broker advertises empty host in metadata; skipping in scrape discovery"
+                            );
+                        }
                         continue;
                     }
                     out.push(ScrapeTarget {
@@ -136,18 +141,13 @@ impl TargetSource {
 }
 
 /// One-time WARN per `broker_id` when the broker advertises an empty host.
-fn warn_once_empty_host(broker_id: i32) {
+fn should_warn_empty_host(broker_id: i32) -> bool {
     static SEEN: OnceLock<std::sync::Mutex<std::collections::HashSet<i32>>> = OnceLock::new();
     let mut seen = SEEN
         .get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
         .lock()
         .expect("empty-host seen-set");
-    if seen.insert(broker_id) {
-        warn!(
-            broker_id,
-            "broker advertises empty host in metadata; skipping in scrape discovery"
-        );
-    }
+    seen.insert(broker_id)
 }
 
 #[cfg(test)]
@@ -276,6 +276,14 @@ mod target_source_tests {
         out.sort_by_key(|t| t.broker_id);
         assert!(out.len() == 2);
         assert!(out.iter().map(|t| t.broker_id).collect::<Vec<_>>() == vec![1, 3]);
+    }
+
+    #[test]
+    fn empty_host_warning_is_emitted_once_per_broker_id() {
+        let id = 1_000_002;
+        assert!(should_warn_empty_host(id));
+        assert!(!should_warn_empty_host(id));
+        assert!(should_warn_empty_host(id + 1));
     }
 
     #[test]

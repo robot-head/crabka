@@ -173,6 +173,17 @@ mod tests {
         }
     }
 
+    fn part(partition: i32, replicas: Vec<i32>, leader: i32) -> PartitionView {
+        let isr = replicas.clone();
+        PartitionView {
+            topic: "t".into(),
+            partition,
+            replicas,
+            leader,
+            isr,
+        }
+    }
+
     #[test]
     fn balanced_cluster_no_movements() {
         let parts = vec![
@@ -200,6 +211,30 @@ mod tests {
         ];
         let s = state_with(parts, vec![1, 2, 3]);
         assert!(ReplicaDistribution.propose(&s, &ctx()).is_empty());
+    }
+
+    #[test]
+    fn counts_includes_idle_brokers_and_unknown_replicas() {
+        let parts = vec![
+            part(0, vec![1, 2], 1),
+            part(1, vec![1, 3], 1),
+            part(2, vec![99], 99),
+        ];
+        let s = state_with(parts, vec![1, 2, 3, 4]);
+
+        let counts = ReplicaDistribution::counts(&s);
+
+        assert!(counts.get(&1) == Some(&2));
+        assert!(counts.get(&2) == Some(&1));
+        assert!(counts.get(&3) == Some(&1));
+        assert!(counts.get(&4) == Some(&0));
+        assert!(counts.get(&99) == Some(&1));
+    }
+
+    #[test]
+    fn imbalance_pct_uses_difference_times_100_over_total() {
+        let counts = std::collections::HashMap::from([(1, 3), (2, 1)]);
+        assert!(ReplicaDistribution::imbalance_pct(&counts) == 50);
     }
 
     #[test]
@@ -235,6 +270,35 @@ mod tests {
         }];
         let s = state_with(parts, vec![1, 2, 3]);
         assert!(ReplicaDistribution.propose(&s, &ctx()).is_empty());
+    }
+
+    #[test]
+    fn full_length_replica_vector_with_unknown_brokers_is_not_expandable() {
+        let parts = vec![part(0, vec![1, 99], 1), part(1, vec![1], 1)];
+        let s = state_with(parts, vec![1, 2]);
+
+        let mvs = ReplicaDistribution.propose(&s, &ctx_with_cap(1));
+
+        assert!(mvs.len() == 1);
+        assert!(mvs[0].partition == 1);
+        assert!(mvs[0].old_replicas == vec![1]);
+        assert!(mvs[0].new_replicas == vec![2]);
+    }
+
+    #[test]
+    fn rehomes_leader_when_hot_replica_was_leader() {
+        let parts = vec![
+            part(0, vec![1], 1),
+            part(1, vec![1], 1),
+            part(2, vec![2], 2),
+        ];
+        let s = state_with(parts, vec![1, 2, 3]);
+
+        let mvs = ReplicaDistribution.propose(&s, &ctx_with_cap(1));
+
+        assert!(mvs.len() == 1);
+        assert!(mvs[0].old_leader == 1);
+        assert!(mvs[0].new_leader == 3);
     }
 
     #[test]
@@ -284,6 +348,13 @@ mod tests {
                 "movement old_leader must reflect the original cluster state, \
                  not an intermediate working-state snapshot"
             );
+        }
+    }
+
+    fn ctx_with_cap(cap: usize) -> GoalContext {
+        GoalContext {
+            max_movements_per_proposal: cap,
+            ..ctx()
         }
     }
 }

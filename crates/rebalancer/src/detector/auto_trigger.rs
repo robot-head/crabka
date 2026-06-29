@@ -347,4 +347,18 @@ mod tests {
         assert!(h.proposal_store.list(0).len() == 0);
         assert!(h.metrics.auto_trigger_skipped_muted.get() == 1);
     }
+
+    #[tokio::test]
+    async fn mute_window_expires_at_exact_boundary() {
+        let h = build_harness(true);
+        let mut a = anomaly(AnomalyKind::BrokerDeath);
+        a.mute_until_ms = Some(1000);
+
+        let _ = maybe_trigger(&a, &make_ctx(&h, 1000)).await;
+
+        assert!(
+            h.metrics.auto_trigger_skipped_muted.get() == 0,
+            "anomaly should not be muted at the exact mute_until_ms boundary"
+        );
+    }
 }

@@ -282,4 +282,49 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn imbalance_pct_uses_difference_times_100_over_total() {
+        let totals = std::collections::HashMap::from([(1, 300.0), (2, 100.0)]);
+        assert!(LeaderBytesIn::imbalance_pct(&totals) == 50);
+    }
+
+    #[test]
+    fn nonzero_imbalanced_leader_bytes_moves_leadership() {
+        let parts = vec![
+            part("hot", 0, vec![1, 2], 1),
+            part("cold", 0, vec![1, 2], 2),
+        ];
+        let s = state_with(parts, vec![1, 2]);
+        let store = store_with_counter_pair(vec![
+            (1, "hot", 0, 0.0, 300_000.0),
+            (2, "cold", 0, 0.0, 100_000.0),
+        ]);
+        let mut ctx = ctx_with(store);
+        ctx.max_movements_per_proposal = 1;
+
+        let mvs = LeaderBytesIn.propose(&s, &ctx);
+
+        assert!(mvs.len() == 1);
+        assert!(mvs[0].old_replicas == mvs[0].new_replicas);
+        assert!(mvs[0].old_leader == 1);
+        assert!(mvs[0].new_leader == 2);
+    }
+
+    #[test]
+    fn movement_cap_limits_leader_bytes_in_swaps() {
+        let parts: Vec<_> = (0..5).map(|i| part("hot", i, vec![1, 2], 1)).collect();
+        let s = state_with(parts, vec![1, 2]);
+        let samples = (0..5)
+            .map(|i| (1, "hot", i, 0.0, 100_000.0))
+            .chain((0..5).map(|i| (2, "hot", i, 0.0, 1.0)))
+            .collect();
+        let store = store_with_counter_pair(samples);
+        let mut ctx = ctx_with(store);
+        ctx.max_movements_per_proposal = 1;
+
+        let mvs = LeaderBytesIn.propose(&s, &ctx);
+
+        assert!(mvs.len() == 1);
+    }
 }

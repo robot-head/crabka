@@ -202,14 +202,6 @@ impl UsageStore {
         let buf = map.get(&key)?;
         let window_ms = i64::try_from(window.as_duration().as_millis()).unwrap_or(i64::MAX);
         let lower = now_ms - window_ms;
-        // Stale-data guard: if the freshest sample predates the window,
-        // we have no data for the requested interval — return None
-        // rather than averaging old samples that happen to still be in
-        // retention.
-        let latest = buf.samples.back()?;
-        if latest.at_ms < lower {
-            return None;
-        }
         let mut sum = 0.0f64;
         let mut count = 0u64;
         for s in &buf.samples {
@@ -243,25 +235,17 @@ impl UsageStore {
         };
         let map = self.inner.read();
         let buf = map.get(&key)?;
-        if buf.samples.len() < 2 {
-            return None;
-        }
         let window_ms = i64::try_from(window.as_duration().as_millis()).unwrap_or(i64::MAX);
         let lower = now_ms - window_ms;
-        let latest = *buf.samples.back()?;
-        // Stale-data guard: a long-since-dead broker would otherwise
-        // keep producing a stable rate from its last two samples.
-        if latest.at_ms < lower {
-            return None;
-        }
-        // Earliest sample within the window. We also clamp at `now_ms`
-        // on the upper bound so a future-dated sample (clock skew)
-        // doesn't dominate.
-        let earliest = buf
+        // Clamp both ends to the requested window so stale or future-dated
+        // samples retained in the ring do not dominate the rate.
+        let mut in_window = buf
             .samples
             .iter()
-            .find(|s| s.at_ms >= lower && s.at_ms <= now_ms)
-            .copied()?;
+            .filter(|s| s.at_ms >= lower && s.at_ms <= now_ms)
+            .copied();
+        let earliest = in_window.next()?;
+        let latest = in_window.last().unwrap_or(earliest);
         if latest.at_ms == earliest.at_ms {
             return None;
         }
@@ -362,6 +346,91 @@ mod tests {
         // The 5-min window includes both. Rate = (300-200)/60s = ~1.67/sec.
         let rate = s.bytes_in_rate(1, "t", 0, Window::FiveMin, 90_000).unwrap();
         assert!((rate - 100.0 / 60.0).abs() < 1e-3, "got {rate}");
+    }
+
+    #[test]
+    fn retention_cutoff_subtracts_retention_from_insert_time() {
+        let s = UsageStore::new(WindowConfig {
+            scrape_interval: Duration::from_secs(30),
+            retention: Duration::from_mins(1),
+        });
+        s.insert(1, vec![sample(MetricKind::BytesIn, "t", 0, 100.0)], 30_000);
+        s.insert(1, vec![sample(MetricKind::BytesIn, "t", 0, 200.0)], 100_000);
+        s.insert(1, vec![sample(MetricKind::BytesIn, "t", 0, 300.0)], 120_000);
+
+        let rate = s
+            .bytes_in_rate(1, "t", 0, Window::FiveMin, 120_000)
+            .unwrap();
+        assert!((rate - 5.0).abs() < 1e-6, "got {rate}");
+    }
+
+    #[test]
+    fn disk_average_includes_lower_bound_and_excludes_outer_samples() {
+        let s = UsageStore::default();
+        s.insert(1, vec![sample(MetricKind::DiskBytes, "t", 0, 10.0)], -1);
+        s.insert(1, vec![sample(MetricKind::DiskBytes, "t", 0, 100.0)], 0);
+        s.insert(1, vec![sample(MetricKind::DiskBytes, "t", 0, 200.0)], 1_000);
+        s.insert(
+            1,
+            vec![sample(MetricKind::DiskBytes, "t", 0, 1_000.0)],
+            300_001,
+        );
+
+        let avg = s
+            .disk_bytes_avg(1, "t", 0, Window::FiveMin, 300_000)
+            .unwrap();
+        assert!((avg - 150.0).abs() < 1e-6, "got {avg}");
+    }
+
+    #[test]
+    fn counter_rate_uses_window_bounds_and_ignores_future_samples() {
+        let s = UsageStore::default();
+        s.insert(1, vec![sample(MetricKind::BytesIn, "t", 0, 10.0)], -1);
+        s.insert(1, vec![sample(MetricKind::BytesIn, "t", 0, 100.0)], 0);
+        s.insert(1, vec![sample(MetricKind::BytesIn, "t", 0, 300.0)], 1_000);
+        s.insert(
+            1,
+            vec![sample(MetricKind::BytesIn, "t", 0, 30_000.0)],
+            300_001,
+        );
+
+        let rate = s
+            .bytes_in_rate(1, "t", 0, Window::FiveMin, 300_000)
+            .unwrap();
+        assert!((rate - 200.0).abs() < 1e-6, "got {rate}");
+    }
+
+    #[test]
+    fn counter_rate_requires_two_windowed_samples_after_lower_bound() {
+        let s = UsageStore::default();
+        s.insert(1, vec![sample(MetricKind::BytesIn, "t", 0, 100.0)], 10);
+        s.insert(1, vec![sample(MetricKind::BytesIn, "t", 0, 200.0)], 11);
+
+        assert!(
+            s.bytes_in_rate(1, "t", 0, Window::FiveMin, 1_000_000)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn counter_rate_uses_more_than_two_samples_when_available() {
+        let s = UsageStore::default();
+        s.insert(1, vec![sample(MetricKind::BytesIn, "t", 0, 100.0)], 0);
+        s.insert(1, vec![sample(MetricKind::BytesIn, "t", 0, 250.0)], 500);
+        s.insert(1, vec![sample(MetricKind::BytesIn, "t", 0, 300.0)], 1_000);
+
+        let rate = s.bytes_in_rate(1, "t", 0, Window::FiveMin, 1_000).unwrap();
+        assert!((rate - 200.0).abs() < 1e-6, "got {rate}");
+    }
+
+    #[test]
+    fn flat_counter_yields_zero_rate() {
+        let s = UsageStore::default();
+        s.insert(1, vec![sample(MetricKind::BytesIn, "t", 0, 100.0)], 0);
+        s.insert(1, vec![sample(MetricKind::BytesIn, "t", 0, 100.0)], 1_000);
+
+        let rate = s.bytes_in_rate(1, "t", 0, Window::FiveMin, 1_000).unwrap();
+        assert!(rate.abs() < f64::EPSILON);
     }
 
     /// Regression: a broker that stops emitting must not keep producing

@@ -239,6 +239,76 @@ mod tests {
     }
 
     #[test]
+    fn severity_warning_when_exactly_half_of_topic_is_under_replicated() {
+        let cfg = cfg(Duration::from_mins(2));
+        let usages = UsageStore::default();
+        let capacities = BrokerCapacities::default();
+        let parts = vec![
+            part_under("t", 0, vec![1, 2, 3], vec![1, 2]),
+            part_under("t", 1, vec![1, 2, 3], vec![1, 2]),
+            part_full("t", 2, vec![1, 2, 3]),
+            part_full("t", 3, vec![1, 2, 3]),
+        ];
+        let old = state(parts.clone(), 0);
+        let mid = state(parts.clone(), 80_000);
+        let now_snap = state(parts, 200_000);
+        let mut hist = SnapshotHistory::new(10);
+        hist.push(&old);
+        hist.push(&mid);
+        let ctx = ctx(&now_snap, &hist, &cfg, &usages, &capacities, 200_000);
+
+        let hits = UnderReplicatedPartitions.evaluate(&ctx);
+
+        assert!(hits.len() == 2);
+        assert!(
+            hits.iter()
+                .all(|hit| { matches!(hit.severity, AnomalySeverity::Warning) })
+        );
+    }
+
+    #[test]
+    fn hits_are_sorted_by_topic_then_partition() {
+        let cfg = cfg(Duration::from_mins(2));
+        let usages = UsageStore::default();
+        let capacities = BrokerCapacities::default();
+        let parts = vec![
+            part_under("b", 2, vec![1, 2, 3], vec![1, 2]),
+            part_under("a", 3, vec![1, 2, 3], vec![1, 2]),
+            part_under("a", 1, vec![1, 2, 3], vec![1, 2]),
+        ];
+        let old = state(parts.clone(), 0);
+        let mid = state(parts.clone(), 80_000);
+        let now_snap = state(parts, 200_000);
+        let mut hist = SnapshotHistory::new(10);
+        hist.push(&old);
+        hist.push(&mid);
+        let ctx = ctx(&now_snap, &hist, &cfg, &usages, &capacities, 200_000);
+
+        let keys: Vec<_> = UnderReplicatedPartitions
+            .evaluate(&ctx)
+            .into_iter()
+            .map(|hit| hit.key)
+            .collect();
+
+        assert!(
+            keys == vec![
+                AnomalyKey::Partition {
+                    topic: "a".into(),
+                    partition: 1,
+                },
+                AnomalyKey::Partition {
+                    topic: "a".into(),
+                    partition: 3,
+                },
+                AnomalyKey::Partition {
+                    topic: "b".into(),
+                    partition: 2,
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn skip_in_flight_reassignment() {
         // Under-replicated *and* sustained, but partition is being
         // reassigned → suppress.

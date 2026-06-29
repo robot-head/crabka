@@ -126,6 +126,17 @@ mod tests {
         }
     }
 
+    fn part(partition: i32, replicas: Vec<i32>, leader: i32) -> PartitionView {
+        let isr = replicas.clone();
+        PartitionView {
+            topic: "t".into(),
+            partition,
+            replicas,
+            leader,
+            isr,
+        }
+    }
+
     #[test]
     fn balanced_no_movements() {
         let parts = vec![
@@ -188,5 +199,41 @@ mod tests {
         for m in &mvs {
             assert!(m.new_leader != 3, "broker 3 isn't in any replica set");
         }
+    }
+
+    #[test]
+    fn leader_counts_includes_idle_brokers_and_unknown_leaders() {
+        let parts = vec![
+            part(0, vec![1, 2], 1),
+            part(1, vec![1, 2], 1),
+            part(2, vec![2, 3], 3),
+            part(3, vec![1, 2], 99),
+        ];
+        let s = state_with(parts, vec![1, 2, 3]);
+
+        let counts = LeaderDistribution::leader_counts(&s);
+
+        assert!(counts.get(&1) == Some(&2));
+        assert!(counts.get(&2) == Some(&0));
+        assert!(counts.get(&3) == Some(&1));
+        assert!(counts.get(&99) == Some(&1));
+    }
+
+    #[test]
+    fn imbalance_pct_uses_difference_times_100_over_total() {
+        let counts = std::collections::HashMap::from([(1, 3), (2, 1)]);
+        assert!(LeaderDistribution::imbalance_pct(&counts) == 50);
+    }
+
+    #[test]
+    fn movement_cap_limits_leader_distribution_swaps() {
+        let parts: Vec<_> = (0..6).map(|i| part(i, vec![1, 2], 1)).collect();
+        let s = state_with(parts, vec![1, 2]);
+        let mut ctx = ctx();
+        ctx.max_movements_per_proposal = 1;
+
+        let mvs = LeaderDistribution.propose(&s, &ctx);
+
+        assert!(mvs.len() == 1);
     }
 }

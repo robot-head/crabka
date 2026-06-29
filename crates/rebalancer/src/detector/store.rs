@@ -357,6 +357,42 @@ mod tests {
     }
 
     #[test]
+    fn open_propagates_non_not_found_io_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(DEFAULT_FILENAME)).unwrap();
+        let err = AnomalyStore::open(dir.path(), 4).unwrap_err();
+        assert!(matches!(err, StoreError::Io(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn set_triggered_proposal_updates_only_matching_id() {
+        let s = AnomalyStore::new(4);
+        let (id1, _) = s.upsert_open(
+            AnomalyKind::BrokerDeath,
+            AnomalyKey::Broker(1),
+            AnomalySeverity::Critical,
+            "down".into(),
+            1,
+        );
+        let (id2, _) = s.upsert_open(
+            AnomalyKind::DiskPressure,
+            AnomalyKey::Broker(2),
+            AnomalySeverity::Warning,
+            "hot".into(),
+            2,
+        );
+
+        s.set_triggered_proposal(&id1, "proposal-a".into(), 1234);
+
+        let a1 = s.get(&id1).expect("updated anomaly");
+        let a2 = s.get(&id2).expect("other anomaly");
+        assert!(a1.triggered_proposal_id.as_deref() == Some("proposal-a"));
+        assert!(a1.mute_until_ms == Some(1234));
+        assert!(a2.triggered_proposal_id.is_none());
+        assert!(a2.mute_until_ms.is_none());
+    }
+
+    #[test]
     fn find_open_skips_resolved() {
         let s = AnomalyStore::new(4);
         s.upsert_open(
@@ -369,6 +405,42 @@ mod tests {
         s.mark_resolved(AnomalyKind::SlowBroker, &AnomalyKey::Broker(5), 2);
         assert!(
             s.find_open(AnomalyKind::SlowBroker, &AnomalyKey::Broker(5))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn find_open_requires_matching_kind_and_key() {
+        let s = AnomalyStore::new(4);
+        s.upsert_open(
+            AnomalyKind::BrokerDeath,
+            AnomalyKey::Broker(5),
+            AnomalySeverity::Critical,
+            "down".into(),
+            1,
+        );
+        s.upsert_open(
+            AnomalyKind::DiskPressure,
+            AnomalyKey::Broker(5),
+            AnomalySeverity::Warning,
+            "disk".into(),
+            2,
+        );
+
+        let found = s
+            .find_open(AnomalyKind::BrokerDeath, &AnomalyKey::Broker(5))
+            .expect("broker-death anomaly");
+        assert!(found.kind == AnomalyKind::BrokerDeath);
+        assert!(found.details == "down");
+        assert!(
+            s.find_open(
+                AnomalyKind::UnderReplicatedPartitions,
+                &AnomalyKey::Broker(5)
+            )
+            .is_none()
+        );
+        assert!(
+            s.find_open(AnomalyKind::BrokerDeath, &AnomalyKey::Broker(6))
                 .is_none()
         );
     }

@@ -321,4 +321,151 @@ mod tests {
         let ctx = ctx_with(caps_with_disk(1, 1000), store);
         assert!(!DiskCapacity.is_satisfied_with_ctx(&s, &ctx));
     }
+
+    #[test]
+    fn exact_disk_capacity_limit_is_satisfied() {
+        let parts: Vec<_> = (0..2).map(|i| part("t", i, vec![1, 2], 1)).collect();
+        let s = state_with(parts, vec![1, 2, 3]);
+        let samples: Vec<_> = (0..2).map(|i| (1, "t", i, 500.0)).collect();
+        let store = store_with_disk(samples);
+        let ctx = ctx_with(caps_with_disk(1, 1000), store);
+        assert!(DiskCapacity.propose(&s, &ctx).is_empty());
+        assert!(DiskCapacity.is_satisfied_with_ctx(&s, &ctx));
+    }
+
+    #[test]
+    fn disk_capacity_picks_largest_positive_headroom_destination() {
+        let parts = vec![part("hot", 0, vec![1], 1), part("warm", 0, vec![3], 3)];
+        let s = state_with(parts, vec![1, 2, 3]);
+        let store = store_with_disk(vec![(1, "hot", 0, 1500.0), (3, "warm", 0, 900.0)]);
+        let mut by = std::collections::HashMap::new();
+        by.insert(
+            1,
+            BrokerCapacity {
+                disk_bytes: Some(1000),
+                ..Default::default()
+            },
+        );
+        by.insert(
+            2,
+            BrokerCapacity {
+                disk_bytes: Some(100),
+                ..Default::default()
+            },
+        );
+        by.insert(
+            3,
+            BrokerCapacity {
+                disk_bytes: Some(1400),
+                ..Default::default()
+            },
+        );
+        let ctx = ctx_with(BrokerCapacities { by_broker: by }, store);
+
+        let mvs = DiskCapacity.propose(&s, &ctx);
+
+        assert!(mvs.len() == 1);
+        assert!(mvs[0].new_replicas == vec![3]);
+    }
+
+    #[test]
+    fn disk_capacity_prefers_positive_headroom_over_uncapped_low_usage() {
+        let parts = vec![part("hot", 0, vec![1], 1)];
+        let s = state_with(parts, vec![1, 2, 3]);
+        let store = store_with_disk(vec![(1, "hot", 0, 1500.0)]);
+        let mut by = std::collections::HashMap::new();
+        by.insert(
+            1,
+            BrokerCapacity {
+                disk_bytes: Some(1000),
+                ..Default::default()
+            },
+        );
+        by.insert(
+            2,
+            BrokerCapacity {
+                disk_bytes: Some(2000),
+                ..Default::default()
+            },
+        );
+        let ctx = ctx_with(BrokerCapacities { by_broker: by }, store);
+
+        let mvs = DiskCapacity.propose(&s, &ctx);
+
+        assert!(mvs.len() == 1);
+        assert!(mvs[0].new_replicas == vec![2]);
+    }
+
+    #[test]
+    fn disk_capacity_falls_back_to_current_load_without_positive_headroom() {
+        let parts = vec![part("hot", 0, vec![1], 1), part("busy", 0, vec![2], 2)];
+        let s = state_with(parts, vec![1, 2, 3]);
+        let store = store_with_disk(vec![(1, "hot", 0, 1500.0), (2, "busy", 0, 900.0)]);
+        let mut by = std::collections::HashMap::new();
+        by.insert(
+            1,
+            BrokerCapacity {
+                disk_bytes: Some(1000),
+                ..Default::default()
+            },
+        );
+        by.insert(
+            2,
+            BrokerCapacity {
+                disk_bytes: Some(900),
+                ..Default::default()
+            },
+        );
+        by.insert(
+            3,
+            BrokerCapacity {
+                disk_bytes: Some(0),
+                ..Default::default()
+            },
+        );
+        let ctx = ctx_with(BrokerCapacities { by_broker: by }, store);
+
+        let mvs = DiskCapacity.propose(&s, &ctx);
+
+        assert!(mvs.len() == 1);
+        assert!(mvs[0].new_replicas == vec![3]);
+    }
+
+    #[test]
+    fn disk_capacity_skips_destinations_already_in_replica_set() {
+        let parts = vec![part("hot", 0, vec![1, 2], 1)];
+        let s = state_with(parts, vec![1, 2]);
+        let store = store_with_disk(vec![(1, "hot", 0, 1500.0)]);
+        let ctx = ctx_with(caps_with_disk(1, 1000), store);
+
+        assert!(DiskCapacity.propose(&s, &ctx).is_empty());
+    }
+
+    #[test]
+    fn disk_capacity_rehomes_hot_leader_to_replacement() {
+        let parts = vec![part("hot", 0, vec![1], 1)];
+        let s = state_with(parts, vec![1, 2]);
+        let store = store_with_disk(vec![(1, "hot", 0, 1500.0)]);
+        let ctx = ctx_with(caps_with_disk(1, 1000), store);
+
+        let mvs = DiskCapacity.propose(&s, &ctx);
+
+        assert!(mvs.len() == 1);
+        assert!(mvs[0].old_leader == 1);
+        assert!(mvs[0].new_leader == 2);
+    }
+
+    #[test]
+    fn movement_cap_limits_disk_capacity_swaps() {
+        let parts: Vec<_> = (0..3).map(|i| part("hot", i, vec![1], 1)).collect();
+        let s = state_with(parts, vec![1, 2, 3]);
+        let samples: Vec<_> = (0..3).map(|i| (1, "hot", i, 600.0)).collect();
+        let store = store_with_disk(samples);
+        let mut ctx = ctx_with(caps_with_disk(1, 1000), store);
+        ctx.max_movements_per_proposal = 1;
+
+        let mvs = DiskCapacity.propose(&s, &ctx);
+
+        assert!(mvs.len() == 1);
+    }
 }

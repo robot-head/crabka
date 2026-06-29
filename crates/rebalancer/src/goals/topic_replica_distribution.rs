@@ -199,6 +199,12 @@ mod tests {
     }
 
     #[test]
+    fn imbalance_pct_uses_difference_times_100_over_total() {
+        let counts = std::collections::HashMap::from([(1, 3), (2, 1)]);
+        assert!(TopicReplicaDistribution::imbalance_pct(&counts) == 50);
+    }
+
+    #[test]
     fn hot_broker_triggers_swaps() {
         let parts: Vec<_> = (0..9).map(|i| part("t", i, vec![1], 1)).collect();
         let s = state_with(parts, vec![1, 2, 3]);
@@ -210,6 +216,54 @@ mod tests {
         for m in &mvs {
             assert!(m.old_replicas.len() == m.new_replicas.len());
         }
+    }
+
+    #[test]
+    fn full_length_topic_replica_vector_with_unknown_broker_is_not_expandable() {
+        let parts = vec![part("t", 0, vec![1, 99], 1), part("t", 1, vec![1], 1)];
+        let s = state_with(parts, vec![1, 2]);
+
+        let mvs = TopicReplicaDistribution.propose(&s, &ctx_with(10, 1));
+
+        assert!(mvs.len() == 1);
+        assert!(mvs[0].partition == 1);
+        assert!(mvs[0].old_replicas == vec![1]);
+        assert!(mvs[0].new_replicas == vec![2]);
+    }
+
+    #[test]
+    fn replaces_hot_replica_at_its_actual_position() {
+        let parts = vec![
+            part("t", 0, vec![99, 1], 99),
+            part("t", 1, vec![1], 1),
+            part("t", 2, vec![2], 2),
+            part("t", 3, vec![99], 99),
+            part("t", 4, vec![1], 1),
+        ];
+        let s = state_with(parts, vec![1, 2, 99]);
+
+        let mvs = TopicReplicaDistribution.propose(&s, &ctx_with(10, 1));
+
+        assert!(mvs.len() == 1);
+        assert!(mvs[0].old_replicas == vec![99, 1]);
+        assert!(mvs[0].new_replicas == vec![99, 2]);
+        assert!(mvs[0].new_leader == 99);
+    }
+
+    #[test]
+    fn rehomes_leader_when_hot_topic_replica_was_leader() {
+        let parts = vec![
+            part("t", 0, vec![1], 1),
+            part("t", 1, vec![1], 1),
+            part("t", 2, vec![2], 2),
+        ];
+        let s = state_with(parts, vec![1, 2, 3]);
+
+        let mvs = TopicReplicaDistribution.propose(&s, &ctx_with(10, 1));
+
+        assert!(mvs.len() == 1);
+        assert!(mvs[0].old_leader == 1);
+        assert!(mvs[0].new_leader == 3);
     }
 
     #[test]
@@ -240,5 +294,15 @@ mod tests {
             "expected at most 2 movements per cap, got {}",
             mvs.len()
         );
+    }
+
+    #[test]
+    fn movement_cap_stops_at_exact_limit_when_more_work_remains() {
+        let parts: Vec<_> = (0..20).map(|i| part("t", i, vec![1], 1)).collect();
+        let s = state_with(parts, vec![1, 2, 3]);
+
+        let mvs = TopicReplicaDistribution.propose(&s, &ctx_with(10, 1));
+
+        assert!(mvs.len() == 1);
     }
 }

@@ -417,7 +417,8 @@ pub async fn cancel_execution(
     // and update the store. Bound to 5s; if the executor doesn't drain
     // in that time, return the current (Executing) proposal — the
     // operator can re-poll.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline =
+        cancel_poll_deadline(std::time::Instant::now(), std::time::Duration::from_secs(5));
     loop {
         let proposal = state.store.get(&id).ok_or_else(|| {
             ConnectError::new(Code::NotFound, format!("proposal `{id}` vanished"))
@@ -430,13 +431,21 @@ pub async fn cancel_execution(
                 proposal: Some(proposal_to_proto(&proposal)),
             }));
         }
-        if std::time::Instant::now() >= deadline {
+        if cancel_poll_expired(std::time::Instant::now(), deadline) {
             return Ok(ConnectResponse(pb::CancelExecutionResponse {
                 proposal: Some(proposal_to_proto(&proposal)),
             }));
         }
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
+}
+
+fn cancel_poll_deadline(now: std::time::Instant, wait: std::time::Duration) -> std::time::Instant {
+    now + wait
+}
+
+fn cancel_poll_expired(now: std::time::Instant, deadline: std::time::Instant) -> bool {
+    now >= deadline
 }
 
 /// Read the anomaly history. `limit = 0` returns up to the
@@ -648,6 +657,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn execute_proposal_sets_started_at_and_throttle_from_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = build_app_state(dir.path());
+        insert_computed_proposal(&state, "p", vec![mv("t", 0, vec![1], vec![2])]);
+
+        let before = now_ms();
+        let resp = execute_proposal(
+            Extension(state.clone()),
+            req(pb::ExecuteProposalRequest {
+                id: "p".into(),
+                throttle_bytes_per_sec: Some(12345),
+            }),
+        )
+        .await
+        .expect("execute proposal");
+
+        let proposal = resp.0.proposal.expect("proposal in response");
+        assert!(proposal.status == i32::from(pb::ProposalStatus::Executing));
+        assert!(proposal.started_at_ms >= before);
+        assert!(proposal.throttle_bytes_per_sec == 12345);
+
+        if let Some(handle) = state.executor.in_flight.lock().await.take() {
+            handle.cancel.cancel();
+            let _ = tokio::time::timeout(Duration::from_secs(1), handle.task).await;
+        }
+    }
+
+    #[tokio::test]
     async fn cancel_execution_when_idle_returns_not_found() {
         let dir = tempfile::tempdir().unwrap();
         let state = build_app_state(dir.path());
@@ -664,6 +701,14 @@ mod tests {
     }
 
     #[test]
+    fn cancel_poll_deadline_and_expiry_are_strict_until_deadline() {
+        let now = std::time::Instant::now();
+        let deadline = cancel_poll_deadline(now, Duration::from_secs(5));
+        assert!(!cancel_poll_expired(now + Duration::from_secs(4), deadline));
+        assert!(cancel_poll_expired(now + Duration::from_secs(5), deadline));
+    }
+
+    #[test]
     fn anomaly_kind_to_proto_covers_all_variants() {
         use crate::detector::AnomalyKind;
         assert!(anomaly_kind_to_proto(AnomalyKind::BrokerDeath) == pb::AnomalyKind::BrokerDeath);
@@ -673,6 +718,55 @@ mod tests {
         );
         assert!(anomaly_kind_to_proto(AnomalyKind::DiskPressure) == pb::AnomalyKind::DiskPressure);
         assert!(anomaly_kind_to_proto(AnomalyKind::SlowBroker) == pb::AnomalyKind::SlowBroker);
+    }
+
+    #[test]
+    fn anomaly_severity_to_proto_covers_all_variants() {
+        use crate::detector::AnomalySeverity;
+        assert!(
+            anomaly_severity_to_proto(AnomalySeverity::Warning) == pb::AnomalySeverity::Warning
+        );
+        assert!(
+            anomaly_severity_to_proto(AnomalySeverity::Critical) == pb::AnomalySeverity::Critical
+        );
+    }
+
+    #[test]
+    fn anomaly_to_proto_maps_all_fields() {
+        use crate::detector::{Anomaly, AnomalyKey, AnomalyKind, AnomalySeverity};
+        let anomaly = Anomaly {
+            id: "a1".into(),
+            kind: AnomalyKind::SlowBroker,
+            key: AnomalyKey::BrokerPartition {
+                broker: 7,
+                topic: "orders".into(),
+                partition: 3,
+            },
+            severity: AnomalySeverity::Critical,
+            detected_at_ms: 10,
+            last_seen_at_ms: 20,
+            resolved_at_ms: Some(30),
+            triggered_proposal_id: Some("p1".into()),
+            mute_until_ms: Some(40),
+            details: "slow".into(),
+        };
+
+        let proto = anomaly_to_proto(&anomaly);
+
+        assert!(proto.id == "a1");
+        assert!(proto.kind == i32::from(pb::AnomalyKind::SlowBroker));
+        assert!(proto.severity == i32::from(pb::AnomalySeverity::Critical));
+        assert!(proto.detected_at_ms == 10);
+        assert!(proto.last_seen_at_ms == 20);
+        assert!(proto.resolved_at_ms == 30);
+        assert!(proto.triggered_proposal_id.as_deref() == Some("p1"));
+        assert!(proto.mute_until_ms == 40);
+        assert!(proto.details == "slow");
+        assert!(matches!(
+            proto.key.and_then(|k| k.inner),
+            Some(pb::anomaly_key::Inner::BrokerPartition(key))
+                if key.broker == 7 && key.topic == "orders" && key.partition == 3
+        ));
     }
 
     #[test]

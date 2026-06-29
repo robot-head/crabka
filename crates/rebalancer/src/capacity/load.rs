@@ -157,6 +157,21 @@ brokers:
     }
 
     #[test]
+    fn load_accepts_zero_cpu_cores() {
+        let f = write_yaml(
+            r"
+version: 1
+brokers:
+  5:
+    cpu_cores: 0.0
+",
+        );
+        let c = load_from_path(f.path()).expect("zero cpu is finite and non-negative");
+        let b = c.for_broker(5).expect("broker 5");
+        assert!(b.cpu_cores == Some(0.0));
+    }
+
+    #[test]
     fn load_rejects_nan_cpu_cores() {
         let f = write_yaml(
             r"

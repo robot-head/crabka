@@ -194,6 +194,30 @@ enum Outcome {
 mod tests {
     use super::*;
     use assert2::assert;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn one_response_server(status: &str, body: &str) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let status = status.to_string();
+        let body = body.to_string();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut buf = [0_u8; 1024];
+            let _ = stream.read(&mut buf).await;
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+        });
+        addr.to_string()
+    }
 
     #[test]
     fn first_failure_warns() {
@@ -314,5 +338,74 @@ mod tests {
         assert!(scraper.last_ok.len() == 1);
         assert!(scraper.last_ok.contains_key(&1));
         assert!(!scraper.last_ok.contains_key(&2));
+    }
+
+    #[tokio::test]
+    async fn tick_once_inserts_samples_only_on_success_status() {
+        let metric_body = "crabka_broker_partition_disk_bytes{topic=\"t\",partition=\"0\"} 42\n";
+
+        let failed_addr = one_response_server("500 Internal Server Error", metric_body).await;
+        let failed_store = Arc::new(UsageStore::new(WindowConfig {
+            scrape_interval: Duration::from_secs(1),
+            retention: Duration::from_mins(1),
+        }));
+        let mut failed_scraper = Scraper::new(
+            TargetSource::Static(vec![ScrapeTarget {
+                broker_id: 1,
+                addr: failed_addr,
+            }]),
+            Duration::from_millis(50),
+            failed_store.clone(),
+            CancellationToken::new(),
+        );
+        failed_scraper.tick_once().await;
+        assert!(failed_scraper.last_ok.get(&1) == Some(&false));
+        assert!(
+            failed_store
+                .disk_bytes_avg(1, "t", 0, Window::FiveMin, crate::goals::now_ms())
+                .is_none()
+        );
+
+        let ok_addr = one_response_server("200 OK", metric_body).await;
+        let ok_store = Arc::new(UsageStore::new(WindowConfig {
+            scrape_interval: Duration::from_secs(1),
+            retention: Duration::from_mins(1),
+        }));
+        let mut ok_scraper = Scraper::new(
+            TargetSource::Static(vec![ScrapeTarget {
+                broker_id: 1,
+                addr: ok_addr,
+            }]),
+            Duration::from_millis(50),
+            ok_store.clone(),
+            CancellationToken::new(),
+        );
+        ok_scraper.tick_once().await;
+        assert!(ok_scraper.last_ok.get(&1) == Some(&true));
+        assert!(
+            ok_store
+                .disk_bytes_avg(1, "t", 0, Window::FiveMin, crate::goals::now_ms())
+                .is_some_and(|v| (v - 42.0).abs() < 1e-9)
+        );
+    }
+
+    #[tokio::test]
+    async fn run_waits_until_shutdown() {
+        let shutdown = CancellationToken::new();
+        let scraper = Scraper::new(
+            TargetSource::Static(vec![]),
+            Duration::from_mins(1),
+            Arc::new(UsageStore::default()),
+            shutdown.clone(),
+        );
+
+        let handle = tokio::spawn(scraper.run());
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(!handle.is_finished());
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .expect("scraper should stop after cancellation")
+            .expect("scraper task should join");
     }
 }

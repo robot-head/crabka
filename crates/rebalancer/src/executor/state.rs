@@ -165,4 +165,20 @@ mod tests {
             }
         ));
     }
+
+    #[test]
+    fn load_propagates_non_not_found_io_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(FILENAME)).unwrap();
+        let err = InFlightFile::load(dir.path()).unwrap_err();
+        assert!(matches!(err, StateError::Io(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn delete_propagates_non_not_found_io_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(FILENAME)).unwrap();
+        let err = InFlightFile::delete(dir.path()).unwrap_err();
+        assert!(matches!(err, StateError::Io(_)), "got {err:?}");
+    }
 }

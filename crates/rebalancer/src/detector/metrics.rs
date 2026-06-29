@@ -259,4 +259,25 @@ mod tests {
             assert!(buf.contains(needle), "missing {needle}");
         }
     }
+
+    #[test]
+    fn helper_methods_update_the_expected_variant_handles() {
+        let m = DetectorMetrics::default();
+
+        m.record_detected(AnomalyKind::UnderReplicatedPartitions);
+        assert!(m.anomalies_detected_broker_death.get() == 0);
+        assert!(m.anomalies_detected_under_replicated.get() == 1);
+
+        m.record_resolved(AnomalyKind::DiskPressure);
+        assert!(m.anomalies_resolved_disk_pressure.get() == 1);
+        assert!(m.anomalies_resolved_slow_broker.get() == 0);
+
+        m.record_auto_trigger_fired(AnomalyKind::SlowBroker);
+        assert!(m.auto_trigger_fired_slow_broker.get() == 1);
+        assert!(m.auto_trigger_fired_broker_death.get() == 0);
+
+        m.set_open_count(AnomalyKind::BrokerDeath, 7);
+        assert!(m.anomalies_open_broker_death.get() == 7);
+        assert!(m.anomalies_open_under_replicated.get() == 0);
+    }
 }

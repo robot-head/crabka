@@ -298,6 +298,42 @@ mod tests {
     }
 
     #[test]
+    fn collision_uses_unused_rack_not_lower_id_used_rack_broker() {
+        let brokers = vec![
+            broker(0, Some("a")),
+            broker(1, Some("a")),
+            broker(2, Some("a")),
+            broker(3, Some("b")),
+            broker(4, Some("c")),
+        ];
+        let parts = vec![part("t", 0, vec![1, 2, 3], 1)];
+        let s = state_with(parts, brokers);
+
+        let mvs = RackAware.propose(&s, &ctx());
+
+        assert!(mvs.len() == 1);
+        assert!(mvs[0].new_replicas == vec![1, 4, 3]);
+    }
+
+    #[test]
+    fn collision_rehomes_leader_when_donor_was_leader() {
+        let brokers = vec![
+            broker(1, Some("a")),
+            broker(2, Some("a")),
+            broker(3, Some("b")),
+        ];
+        let parts = vec![part("t", 0, vec![1, 2], 2)];
+        let s = state_with(parts, brokers);
+
+        let mvs = RackAware.propose(&s, &ctx());
+
+        assert!(mvs.len() == 1);
+        assert!(mvs[0].old_leader == 2);
+        assert!(mvs[0].new_replicas == vec![1, 3]);
+        assert!(mvs[0].new_leader == 1);
+    }
+
+    #[test]
     fn multi_collision_iterates_within_propose() {
         let brokers = vec![
             broker(1, Some("a")),
@@ -337,5 +373,44 @@ mod tests {
             mvs.is_empty(),
             "RF > rack count must self-limit, got {mvs:?}"
         );
+    }
+
+    #[test]
+    fn is_satisfied_accepts_rack_diverse_assignment() {
+        let brokers = vec![
+            broker(1, Some("a")),
+            broker(2, Some("b")),
+            broker(3, Some("c")),
+        ];
+        let parts = vec![part("t", 0, vec![1, 2, 3], 1)];
+        let s = state_with(parts, brokers);
+
+        assert!(RackAware.is_satisfied(&s));
+    }
+
+    #[test]
+    fn is_satisfied_self_limits_infeasible_rf() {
+        let brokers = vec![
+            broker(1, Some("a")),
+            broker(2, Some("a")),
+            broker(3, Some("b")),
+        ];
+        let parts = vec![part("t", 0, vec![1, 2, 3], 1)];
+        let s = state_with(parts, brokers);
+
+        assert!(RackAware.is_satisfied(&s));
+    }
+
+    #[test]
+    fn is_satisfied_detects_rack_collision() {
+        let brokers = vec![
+            broker(1, Some("a")),
+            broker(2, Some("a")),
+            broker(3, Some("b")),
+        ];
+        let parts = vec![part("t", 0, vec![1, 2], 1)];
+        let s = state_with(parts, brokers);
+
+        assert!(!RackAware.is_satisfied(&s));
     }
 }
