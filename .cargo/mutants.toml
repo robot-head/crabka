@@ -338,6 +338,10 @@ exclude_re = [
     "broker/src/handlers/alter_user_scram_credentials\\.rs.*delete field throttle_time_ms from struct AlterUserScramCredentialsResponse expression in handle",
     "broker/src/handlers/alter_user_scram_credentials\\.rs.*delete field error_code from struct AlterUserScramCredentialsResult expression in ok_result",
     "broker/src/handlers/alter_user_scram_credentials\\.rs.*delete field error_message from struct AlterUserScramCredentialsResult expression in ok_result",
+    "broker/src/handlers/api_versions\\.rs:126:.*delete field api_keys from struct ApiVersionsResponse expression in handle",
+    "broker/src/handlers/api_versions\\.rs:127:.*delete field throttle_time_ms from struct ApiVersionsResponse expression in handle",
+    "broker/src/handlers/api_versions\\.rs:142:.*delete field error_code from struct ApiVersionsResponse expression in handle",
+    "broker/src/handlers/api_versions\\.rs:144:.*delete field throttle_time_ms from struct ApiVersionsResponse expression in handle",
     # The offset is the human-facing VerifyBreak.offset diagnostic (standard Kafka
     # base_offset + offset_delta), not the tamper verdict.
     "audit/src/verify\\.rs.*replace \\+ with (-|\\*) in verify_partition_dir",

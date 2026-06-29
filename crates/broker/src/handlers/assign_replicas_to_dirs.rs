@@ -37,15 +37,9 @@ pub(crate) fn handle(
         let is_leader = controller
             .watch_leader()
             .borrow()
-            .is_some_and(|n| n == node_id);
+            .is_some_and(|n| is_controller_leader(Some(n), node_id));
         if !is_leader {
-            return encode_resp(
-                version,
-                &AssignReplicasToDirsResponse {
-                    error_code: codes::NOT_CONTROLLER,
-                    ..Default::default()
-                },
-            );
+            return encode_resp(version, &not_controller_response());
         }
 
         let Ok(broker_slot_id) = u64::try_from(req.broker_id) else {
@@ -68,6 +62,17 @@ pub(crate) fn handle(
 
         encode_resp(version, &build_echo_response(&req))
     })
+}
+
+fn is_controller_leader(leader: Option<u64>, node_id: u64) -> bool {
+    leader == Some(node_id)
+}
+
+fn not_controller_response() -> AssignReplicasToDirsResponse {
+    AssignReplicasToDirsResponse {
+        error_code: codes::NOT_CONTROLLER,
+        ..Default::default()
+    }
 }
 
 /// Collect all `MetadataRecord` changes from the directories/topics/partitions
@@ -195,6 +200,112 @@ mod tests {
         DirectoryData as ReqDirData, PartitionData as ReqPartData, TopicData as ReqTopicData,
     };
     use crabka_protocol::primitives::uuid::Uuid as ProtocolUuid;
+
+    use crate::broker::Broker;
+    use crate::config::BrokerConfig;
+
+    const VERSION: i16 = 0;
+
+    fn request(dir_uuid: uuid::Uuid, topic_uuid: uuid::Uuid, partition_index: i32) -> Bytes {
+        let req = AssignReplicasToDirsRequest {
+            broker_id: 1,
+            broker_epoch: -1,
+            directories: vec![ReqDirData {
+                id: ProtocolUuid(dir_uuid.into_bytes()),
+                topics: vec![ReqTopicData {
+                    topic_id: ProtocolUuid(topic_uuid.into_bytes()),
+                    partitions: vec![ReqPartData {
+                        partition_index,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut buf = BytesMut::with_capacity(req.encoded_len(VERSION));
+        req.encode(&mut buf, VERSION)
+            .expect("encode AssignReplicasToDirsRequest");
+        buf.freeze()
+    }
+
+    fn decode_response(bytes: Bytes) -> AssignReplicasToDirsResponse {
+        let mut cur: &[u8] = bytes.as_ref();
+        let resp = AssignReplicasToDirsResponse::decode(&mut cur, VERSION)
+            .expect("decode AssignReplicasToDirsResponse");
+        assert!(cur.is_empty(), "response decoder consumed all bytes");
+        resp
+    }
+
+    async fn start_broker() -> (crate::broker::BrokerHandle, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
+        let handle = Broker::start(cfg).await.expect("start broker");
+        (handle, dir)
+    }
+
+    async fn wait_for_leader(broker: &Broker) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if broker
+                .controller
+                .watch_leader()
+                .borrow()
+                .is_some_and(|n| n == broker.config.node_id)
+            {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() <= deadline,
+                "broker did not become controller leader"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }
+
+    #[test]
+    fn leader_predicate_matches_current_node_only() {
+        assert!(is_controller_leader(Some(1), 1));
+        assert!(!is_controller_leader(Some(2), 1));
+        assert!(!is_controller_leader(None, 1));
+    }
+
+    #[test]
+    fn not_controller_response_preserves_error_code() {
+        let resp = not_controller_response();
+        assert!(resp.error_code == codes::NOT_CONTROLLER, "{resp:?}");
+        assert!(resp.directories.is_empty(), "{resp:?}");
+    }
+
+    #[tokio::test]
+    async fn handle_leader_echoes_request_shape() {
+        let (broker_handle, _dir) = start_broker().await;
+        let broker = broker_handle.broker_arc_for_test();
+        wait_for_leader(&broker).await;
+        let dir_uuid = uuid::Uuid::from_u128(0xAA);
+        let topic_uuid = uuid::Uuid::from_u128(0xBB);
+        let req = request(dir_uuid, topic_uuid, 7);
+
+        let bytes = handle(&broker, VERSION, 9, &req)
+            .await
+            .expect("AssignReplicasToDirs handler");
+        let resp = decode_response(bytes);
+
+        assert!(resp.error_code == codes::NONE, "{resp:?}");
+        assert!(resp.directories.len() == 1, "{resp:?}");
+        let dir = &resp.directories[0];
+        assert!(dir.id.0 == dir_uuid.into_bytes(), "{resp:?}");
+        assert!(dir.topics.len() == 1, "{resp:?}");
+        let topic = &dir.topics[0];
+        assert!(topic.topic_id.0 == topic_uuid.into_bytes(), "{resp:?}");
+        assert!(topic.partitions.len() == 1, "{resp:?}");
+        let partition = &topic.partitions[0];
+        assert!(partition.partition_index == 7, "{resp:?}");
+        assert!(partition.error_code == codes::NONE, "{resp:?}");
+
+        broker_handle.shutdown().await;
+    }
 
     #[test]
     fn sets_reporting_brokers_directory_slot() {
