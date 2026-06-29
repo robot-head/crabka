@@ -33,8 +33,8 @@ impl HandlerTable {
         Self::default()
     }
 
-    pub fn register(&mut self, api_key: i16, handler: HandlerFn) {
-        self.table.insert(api_key, handler);
+    pub fn register(&mut self, api_key: i16, handler: HandlerFn) -> bool {
+        self.table.insert(api_key, handler).is_none()
     }
 
     #[must_use]
@@ -338,7 +338,7 @@ mod tests {
         let mut table = HandlerTable::new();
 
         assert!(table.get(1234).is_none());
-        table.register(1234, table_test_handler);
+        assert!(table.register(1234, table_test_handler));
 
         let registered = table.get(1234).expect("registered handler");
         assert!(std::ptr::fn_addr_eq(
@@ -346,6 +346,20 @@ mod tests {
             table_test_handler as HandlerFn
         ));
         assert!(table.get(4321).is_none());
+    }
+
+    #[test]
+    fn handler_table_register_reports_replaced_handler() {
+        let mut table = HandlerTable::new();
+
+        assert!(table.register(1234, table_test_handler));
+        assert!(!table.register(1234, table_test_handler));
+
+        let registered = table.get(1234).expect("registered handler");
+        assert!(std::ptr::fn_addr_eq(
+            registered,
+            table_test_handler as HandlerFn
+        ));
     }
 
     #[test]

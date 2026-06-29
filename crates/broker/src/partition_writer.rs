@@ -50,11 +50,13 @@ fn flag_storage_failure(
     err: &crate::error::BrokerError,
     log_dir: &ArcSwap<PathBuf>,
     log_dir_status: &LogDirRegistry,
-) {
+) -> bool {
     if let crate::error::BrokerError::Log(crabka_log::LogError::Io(io_err)) = err {
         let dir = log_dir.load();
-        log_dir_status.mark_offline(&dir, &format!("partition write/fsync failed: {io_err}"));
+        return log_dir_status
+            .mark_offline(&dir, &format!("partition write/fsync failed: {io_err}"));
     }
+    false
 }
 
 /// Lock the partition log, recovering the guard if the mutex was
@@ -230,7 +232,9 @@ pub async fn run(
                 for (ack, result) in acks.into_iter().zip(results) {
                     match &result {
                         Ok(_) => any_ok = true,
-                        Err(e) => flag_storage_failure(e, &log_dir, &log_dir_status),
+                        Err(e) => {
+                            flag_storage_failure(e, &log_dir, &log_dir_status);
+                        }
                     }
                     // If the receiver dropped, the handler timed out — fine.
                     let _ = ack.send(result);
@@ -556,6 +560,39 @@ mod tests {
             });
         }
         b
+    }
+
+    #[test]
+    fn flag_storage_failure_marks_io_errors_offline() {
+        let dir = tempdir().expect("tempdir");
+        let status = crate::log_dir_status::LogDirRegistry::probe(&[dir.path().to_path_buf()]);
+        let log_dir = ArcSwap::from_pointee(dir.path().to_path_buf());
+        let err = storage_failure_error("append failed", "synthetic EIO");
+
+        assert!(flag_storage_failure(&err, &log_dir, &status));
+
+        assert!(status.is_offline(dir.path()));
+        let offline = status.offline();
+        assert!(offline.len() == 1);
+        assert!(offline[0].0 == dir.path());
+        assert!(offline[0].1.contains("partition write/fsync failed"));
+        assert!(offline[0].1.contains("synthetic EIO"));
+    }
+
+    #[test]
+    fn flag_storage_failure_ignores_non_storage_errors() {
+        let dir = tempdir().expect("tempdir");
+        let status = crate::log_dir_status::LogDirRegistry::probe(&[dir.path().to_path_buf()]);
+        let log_dir = ArcSwap::from_pointee(dir.path().to_path_buf());
+        let err = crate::error::BrokerError::UnsupportedApi {
+            api_key: 123,
+            version: 0,
+        };
+
+        assert!(!flag_storage_failure(&err, &log_dir, &status));
+
+        assert!(!status.is_offline(dir.path()));
+        assert!(status.offline().is_empty());
     }
 
     #[tokio::test]
