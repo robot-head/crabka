@@ -744,17 +744,25 @@ jobs:
       - name: Smoke — /metrics endpoint exposes crabka_broker_ metrics
         run: |
           set -e
-          # Use a one-shot curl pod inside the cluster to scrape the broker's
-          # /metrics endpoint via its pod DNS name.
-          kubectl run curl-metrics -n default --rm -i --restart=Never \
-            --image=curlimages/curl:8.10.1 --quiet -- \
-            -sf "http://demo-brokers-0.demo-broker-headless.default.svc.cluster.local:9404/metrics" \
-            > /tmp/metrics.out
-          grep -q '^# TYPE crabka_broker' /tmp/metrics.out || {
-            echo "::error::crabka_broker_* metrics not exposed; first 20 lines of output:"
-            head -20 /tmp/metrics.out
-            exit 1
-          }
+          url="http://demo-brokers-0.demo-broker-headless.default.svc.cluster.local:9404/metrics"
+          for i in $(seq 1 30); do
+            pod="curl-metrics-$i"
+            if kubectl run "$pod" -n default --rm -i --restart=Never \
+              --image=curlimages/curl:8.10.1 --quiet -- \
+              -sf "$url" > /tmp/metrics.out; then
+              if grep -q '^# TYPE crabka_broker' /tmp/metrics.out; then
+                exit 0
+              fi
+              echo "attempt $i: metrics endpoint responded without crabka_broker_* metrics"
+            else
+              echo "attempt $i: metrics scrape failed"
+            fi
+            sleep 2
+          done
+
+          echo "::error::crabka_broker_* metrics not exposed after 60s; first 20 lines of output:"
+          head -20 /tmp/metrics.out || true
+          exit 1
 
       - name: Garbage-collection on Kafka delete
         run: |

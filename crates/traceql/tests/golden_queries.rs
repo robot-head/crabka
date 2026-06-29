@@ -187,21 +187,3 @@ async fn trace_by_id_returns_known_trace() {
     assert!(got.spans.len() == 4);
     assert!(engine.trace_by_id("t", &[9; 16]).await.unwrap().is_none());
 }
-
-#[test]
-fn golden_query_corpus_passes() {
-    let corpus_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/testdata/traceql");
-    let report = crabka_traceql::testkit::run_corpus_dir(corpus_dir);
-    println!("{}", report.to_text());
-
-    let failing = report
-        .cases
-        .iter()
-        .filter(|case| !case.passed)
-        .collect::<Vec<_>>();
-
-    assert!(
-        failing.is_empty(),
-        "traceql golden corpus failures: {failing:?}"
-    );
-}
