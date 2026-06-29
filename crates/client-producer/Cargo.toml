@@ -38,8 +38,8 @@ tracing = { workspace = true }
 assert2 = { workspace = true }
 # `mock` exposes MockBroker so the ClientTransport adapter can be tested against
 # an in-process broker (no JVM).
-crabka-client-core = { version = "0.3.8", path = "../client-core", features = ["mock"] }
-crabka-security = { version = "0.3.8", path = "../security" }
+crabka-client-core = { version = "0.3", path = "../client-core", features = ["mock"] }
+crabka-security = { version = "0.3", path = "../security" }
 mutants = { workspace = true }
 stateright = { workspace = true }
 tempfile = { workspace = true }

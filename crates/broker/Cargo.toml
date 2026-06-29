@@ -135,13 +135,13 @@ stateright = { workspace = true }
 # complementing the exhaustive stateright model (`producer_state_model.rs`).
 proptest = { workspace = true }
 crabka-broker-test-helpers = { path = "test-helpers" }
-crabka-client-consumer = { version = "0.3.8", path = "../client-consumer" }
-crabka-client-producer = { version = "0.3.8", path = "../client-producer" }
+crabka-client-consumer = { version = "0.3", path = "../client-consumer" }
+crabka-client-producer = { version = "0.3", path = "../client-producer" }
 # Host-side raw `Client::send(DescribeGroupsRequest)` against the
 # real-Kafka Docker capture (`describe_groups_jvm.rs`).
-crabka-client-core = { version = "0.3.8", path = "../client-core" }
-crabka-records-legacy = { version = "0.3.8", path = "../records-legacy" }
-crabka-protocol = { version = "0.3.8", path = "../protocol", default-features = false }
+crabka-client-core = { version = "0.3", path = "../client-core" }
+crabka-records-legacy = { version = "0.3", path = "../records-legacy" }
+crabka-protocol = { version = "0.3", path = "../protocol", default-features = false }
 # Serialize the captured real-Kafka DescribeGroups fixture as JSON.
 serde_json = { workspace = true }
 bytes = { workspace = true }

@@ -4,14 +4,37 @@ on:
     branches: [main]
   workflow_dispatch:
 
-concurrency:
-  group: release-plz-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
-  release-plz:
+  release:
+    name: release-plz release
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    permissions:
+      contents: write
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: release-plz/action@v0.5
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # crates.io publishing — release-plz.toml sets publish = true.
+          # Assumes the repo secret is named CARGO_REGISTRY_TOKEN.
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  release-pr:
+    name: release-plz release-pr
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: release
+    concurrency:
+      group: release-plz-pr-${{ github.ref }}
+      cancel-in-progress: false
     permissions:
       contents: write
       pull-requests: write
@@ -21,13 +44,9 @@ jobs:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
 
-      - uses: MarcoIeni/release-plz-action@v0.5
-        # Default command runs both `release-pr` (opens the version-bump PR)
-        # and `release` (publish + tag/release). The first publish has landed
-        # (all crates are on crates.io at 0.3.x), so the earlier `release`-only
-        # workaround is no longer needed.
+      - uses: release-plz/action@v0.5
+        with:
+          command: release-pr
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # crates.io publishing — release-plz.toml sets publish = true.
-          # Assumes the repo secret is named CARGO_REGISTRY_TOKEN.
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

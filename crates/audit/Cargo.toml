@@ -31,7 +31,7 @@ clap = { workspace = true, features = ["derive"] }
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync"] }
 assert2 = { workspace = true }
-crabka-log = { version = "0.3.8", path = "../log" }
+crabka-log = { version = "0.3", path = "../log" }
 mutants = { workspace = true }
 tempfile = { workspace = true }
 

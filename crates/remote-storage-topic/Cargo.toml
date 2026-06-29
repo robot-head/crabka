@@ -33,6 +33,6 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 assert2 = { workspace = true }
-crabka-security = { version = "0.3.8", path = "../security" }
+crabka-security = { version = "0.3", path = "../security" }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util", "time"] }

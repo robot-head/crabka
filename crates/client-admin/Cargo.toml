@@ -31,9 +31,9 @@ uuid               = { workspace = true }
 
 [dev-dependencies]
 assert2            = { workspace = true }
-crabka-broker      = { version = "0.3.8", path = "../broker" }
-crabka-client-consumer = { version = "0.3.8", path = "../client-consumer" }
-crabka-client-producer = { version = "0.3.8", path = "../client-producer" }
+crabka-broker      = { version = "0.3", path = "../broker" }
+crabka-client-consumer = { version = "0.3", path = "../client-consumer" }
+crabka-client-producer = { version = "0.3", path = "../client-producer" }
 tempfile           = { workspace = true }
 tokio              = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 tracing-subscriber = { workspace = true }
