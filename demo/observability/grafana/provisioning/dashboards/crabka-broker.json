@@ -4,7 +4,7 @@
   "tags": ["crabka", "kafka", "broker"],
   "schemaVersion": 39,
   "version": 1,
-  "refresh": "15s",
+  "refresh": "30s",
   "time": { "from": "now-30m", "to": "now" },
   "templating": {
     "list": [
@@ -27,7 +27,7 @@
       "description": "1 when this broker is the active KRaft controller.",
       "gridPos": { "h": 4, "w": 4, "x": 0, "y": 1 },
       "fieldConfig": { "defaults": { "mappings": [ { "type": "value", "options": { "0": { "text": "No", "color": "red" }, "1": { "text": "Yes", "color": "green" } } } ], "thresholds": { "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] } } },
-      "targets": [ { "refId": "A", "expr": "max(crabka_broker_active_controller)" } ]
+      "targets": [ { "refId": "A", "expr": "max(crabka_broker_active_controller)", "instant": true } ]
     },
     {
       "id": 3, "type": "stat", "title": "Offline partitions",
@@ -35,7 +35,7 @@
       "description": "Partitions with no leader. Should be 0.",
       "gridPos": { "h": 4, "w": 4, "x": 4, "y": 1 },
       "fieldConfig": { "defaults": { "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] } } },
-      "targets": [ { "refId": "A", "expr": "sum(crabka_broker_offline_partitions_count)" } ]
+      "targets": [ { "refId": "A", "expr": "sum(crabka_broker_offline_partitions_count)", "instant": true } ]
     },
     {
       "id": 4, "type": "stat", "title": "Under-replicated partitions",
@@ -43,7 +43,7 @@
       "description": "Partitions whose ISR is smaller than the replica set. Should be 0.",
       "gridPos": { "h": 4, "w": 4, "x": 8, "y": 1 },
       "fieldConfig": { "defaults": { "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] } } },
-      "targets": [ { "refId": "A", "expr": "sum(crabka_broker_under_replicated_partitions)" } ]
+      "targets": [ { "refId": "A", "expr": "sum(crabka_broker_under_replicated_partitions)", "instant": true } ]
     },
     {
       "id": 5, "type": "stat", "title": "Under-min-ISR partitions",
@@ -51,19 +51,19 @@
       "description": "Partitions below min.insync.replicas — producers with acks=all are blocked.",
       "gridPos": { "h": 4, "w": 4, "x": 12, "y": 1 },
       "fieldConfig": { "defaults": { "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] } } },
-      "targets": [ { "refId": "A", "expr": "sum(crabka_broker_under_min_isr_partition_count)" } ]
+      "targets": [ { "refId": "A", "expr": "sum(crabka_broker_under_min_isr_partition_count)", "instant": true } ]
     },
     {
       "id": 6, "type": "stat", "title": "Partitions led",
       "datasource": { "type": "prometheus", "uid": "${ds}" },
       "gridPos": { "h": 4, "w": 4, "x": 16, "y": 1 },
-      "targets": [ { "refId": "A", "expr": "sum(crabka_broker_partitions_led)" } ]
+      "targets": [ { "refId": "A", "expr": "sum(crabka_broker_partitions_led)", "instant": true } ]
     },
     {
       "id": 7, "type": "stat", "title": "Partitions total",
       "datasource": { "type": "prometheus", "uid": "${ds}" },
       "gridPos": { "h": 4, "w": 4, "x": 20, "y": 1 },
-      "targets": [ { "refId": "A", "expr": "sum(crabka_broker_partitions_total)" } ]
+      "targets": [ { "refId": "A", "expr": "sum(crabka_broker_partitions_total)", "instant": true } ]
     },
     {
       "id": 10, "type": "row", "title": "Throughput", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 }

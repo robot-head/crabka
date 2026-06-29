@@ -1,0 +1,100 @@
+{
+  "uid": "crabka-rustfs",
+  "title": "Crabka - RustFS Object Store",
+  "tags": ["crabka", "rustfs", "object-store"],
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-30m", "to": "now" },
+  "templating": {
+    "list": [
+      { "name": "ds", "type": "datasource", "query": "prometheus", "current": { "text": "Crabka Metrics", "value": "crabka-prom" }, "hide": 0 }
+    ]
+  },
+  "panels": [
+    { "id": 1, "type": "row", "title": "RustFS resource health", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 } },
+    {
+      "id": 2, "type": "stat", "title": "RustFS memory working set",
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "fieldConfig": { "defaults": { "unit": "bytes" } },
+      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 1 },
+      "targets": [ { "refId": "A", "expr": "max(container_memory_working_set_bytes{container_label_com_docker_compose_project=\"crabka-observability-demo\", container_label_com_docker_compose_service=\"rustfs\", image!=\"\"})", "instant": true } ]
+    },
+    {
+      "id": 3, "type": "stat", "title": "RustFS memory limit ratio",
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 } },
+      "gridPos": { "h": 5, "w": 6, "x": 6, "y": 1 },
+      "targets": [ { "refId": "A", "expr": "max(container_memory_working_set_bytes{container_label_com_docker_compose_project=\"crabka-observability-demo\", container_label_com_docker_compose_service=\"rustfs\", image!=\"\"}) / clamp_min(max(container_spec_memory_limit_bytes{container_label_com_docker_compose_project=\"crabka-observability-demo\", container_label_com_docker_compose_service=\"rustfs\", image!=\"\"}), 1)", "instant": true } ]
+    },
+    {
+      "id": 4, "type": "stat", "title": "RustFS uptime",
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "gridPos": { "h": 5, "w": 6, "x": 12, "y": 1 },
+      "targets": [ { "refId": "A", "expr": "time() - max(container_start_time_seconds{container_label_com_docker_compose_project=\"crabka-observability-demo\", container_label_com_docker_compose_service=\"rustfs\", image!=\"\"})", "instant": true } ]
+    },
+    {
+      "id": 5, "type": "stat", "title": "RustFS restarts (1h)",
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "gridPos": { "h": 5, "w": 6, "x": 18, "y": 1 },
+      "targets": [ { "refId": "A", "expr": "changes(max(container_start_time_seconds{container_label_com_docker_compose_project=\"crabka-observability-demo\", container_label_com_docker_compose_service=\"rustfs\", image!=\"\"})[1h:15s])", "instant": true } ]
+    },
+    {
+      "id": 6, "type": "timeseries", "title": "RustFS CPU usage",
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "fieldConfig": { "defaults": { "unit": "cores" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "targets": [ { "refId": "A", "expr": "sum(rate(container_cpu_usage_seconds_total{container_label_com_docker_compose_project=\"crabka-observability-demo\", container_label_com_docker_compose_service=\"rustfs\", image!=\"\"}[$__rate_interval]))", "legendFormat": "rustfs" } ]
+    },
+    {
+      "id": 7, "type": "timeseries", "title": "RustFS memory working set",
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "fieldConfig": { "defaults": { "unit": "bytes" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "targets": [ { "refId": "A", "expr": "max(container_memory_working_set_bytes{container_label_com_docker_compose_project=\"crabka-observability-demo\", container_label_com_docker_compose_service=\"rustfs\", image!=\"\"})", "legendFormat": "rustfs" } ]
+    },
+    { "id": 10, "type": "row", "title": "RustFS object-store I/O", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 } },
+    {
+      "id": 11, "type": "timeseries", "title": "RustFS network I/O",
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "fieldConfig": { "defaults": { "unit": "Bps" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 15 },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(container_network_receive_bytes_total{container_label_com_docker_compose_project=\"crabka-observability-demo\", container_label_com_docker_compose_service=\"rustfs\", image!=\"\"}[$__rate_interval]))", "legendFormat": "receive" },
+        { "refId": "B", "expr": "sum(rate(container_network_transmit_bytes_total{container_label_com_docker_compose_project=\"crabka-observability-demo\", container_label_com_docker_compose_service=\"rustfs\", image!=\"\"}[$__rate_interval]))", "legendFormat": "transmit" }
+      ]
+    },
+    {
+      "id": 12, "type": "timeseries", "title": "RustFS filesystem I/O",
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "fieldConfig": { "defaults": { "unit": "Bps" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 15 },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(container_fs_reads_bytes_total{container_label_com_docker_compose_project=\"crabka-observability-demo\", container_label_com_docker_compose_service=\"rustfs\", image!=\"\"}[$__rate_interval]))", "legendFormat": "read" },
+        { "refId": "B", "expr": "sum(rate(container_fs_writes_bytes_total{container_label_com_docker_compose_project=\"crabka-observability-demo\", container_label_com_docker_compose_service=\"rustfs\", image!=\"\"}[$__rate_interval]))", "legendFormat": "write" }
+      ]
+    },
+    {
+      "id": 13, "type": "table", "title": "Object-store client network I/O",
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "fieldConfig": { "defaults": { "unit": "Bps" } },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 23 },
+      "targets": [ { "refId": "A", "expr": "topk(12, sum by (container_label_com_docker_compose_service) (rate(container_network_receive_bytes_total{container_label_com_docker_compose_project=\"crabka-observability-demo\", container_label_com_docker_compose_service=~\"rustfs|.*-querier|.*-compactor|.*-block-builder\", image!=\"\"}[$__rate_interval])) + sum by (container_label_com_docker_compose_service) (rate(container_network_transmit_bytes_total{container_label_com_docker_compose_project=\"crabka-observability-demo\", container_label_com_docker_compose_service=~\"rustfs|.*-querier|.*-compactor|.*-block-builder\", image!=\"\"}[$__rate_interval])))", "legendFormat": "{{container_label_com_docker_compose_service}}", "instant": true } ]
+    },
+    { "id": 20, "type": "row", "title": "RustFS logs and client retries", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 31 } },
+    {
+      "id": 21, "type": "logs", "title": "Recent RustFS warnings and errors",
+      "datasource": { "type": "loki", "uid": "crabka-loki" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+      "targets": [ { "refId": "A", "expr": "{service_name=\"rustfs\"} |~ \"WARN|ERROR|warn|error|failed|panic|timeout\"" } ]
+    },
+    {
+      "id": 22, "type": "logs", "title": "Object-store client retry logs",
+      "datasource": { "type": "loki", "uid": "crabka-loki" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+      "targets": [ { "refId": "A", "expr": "{service_name=~\"logs-querier|metrics-querier|traces-querier|profiles-querier|logs-compactor|metrics-compactor|traces-block-builder|profiles-block-builder\"} |= \"object_store::client::retry\"" } ]
+    }
+  ]
+}

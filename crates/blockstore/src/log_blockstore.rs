@@ -26,6 +26,7 @@ use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use datafusion::parquet::errors::ParquetError;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::SessionContext;
+use futures::StreamExt as _;
 use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, ObjectStoreExt};
 use regex::Regex;
@@ -704,6 +705,15 @@ pub async fn write_tenant_log_index_shards_to_object_store(
         .await?;
     }
 
+    write_tenant_log_index_shard_catalog_to_object_store(store, prefix, tenant, shard_ranges).await
+}
+
+pub async fn write_tenant_log_index_shard_catalog_to_object_store(
+    store: &dyn ObjectStore,
+    prefix: &ObjectPath,
+    tenant: &str,
+    shard_ranges: &[TimeRange],
+) -> Result<(), BlockStoreError> {
     let catalog = LogIndexShardCatalog::new(shard_ranges);
     let payload = serde_json::to_vec_pretty(&catalog)?;
     store
@@ -770,14 +780,84 @@ pub async fn read_tenant_log_index_shard_ranges_from_object_store(
     catalog.into_shards()
 }
 
+pub async fn list_tenant_log_index_shard_ranges_from_object_store(
+    store: &dyn ObjectStore,
+    prefix: &ObjectPath,
+    tenant: &str,
+) -> Result<Vec<TimeRange>, BlockStoreError> {
+    let shard_prefix = log_tenant_index_shards_object_prefix(prefix, tenant);
+    collect_tenant_log_index_shard_ranges(
+        shard_prefix.clone(),
+        store.list(Some(&shard_prefix)),
+        None,
+    )
+    .await
+}
+
+pub async fn list_tenant_log_index_shard_ranges_overlapping_query_from_object_store(
+    store: &dyn ObjectStore,
+    prefix: &ObjectPath,
+    tenant: &str,
+    query_range: TimeRange,
+) -> Result<Vec<TimeRange>, BlockStoreError> {
+    let shard_prefix = log_tenant_index_shards_object_prefix(prefix, tenant);
+    let offset = log_tenant_index_shard_list_offset_object_path(prefix, tenant, query_range);
+    collect_tenant_log_index_shard_ranges(
+        shard_prefix,
+        store.list_with_offset(
+            Some(&log_tenant_index_shards_object_prefix(prefix, tenant)),
+            &offset,
+        ),
+        Some(query_range),
+    )
+    .await
+}
+
+async fn collect_tenant_log_index_shard_ranges(
+    shard_prefix: ObjectPath,
+    mut stream: futures::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>,
+    filter_range: Option<TimeRange>,
+) -> Result<Vec<TimeRange>, BlockStoreError> {
+    let mut ranges = Vec::new();
+    while let Some(meta) = stream.next().await {
+        let meta = meta?;
+        if let Some(range) =
+            parse_log_tenant_index_shard_range_from_object_path(&shard_prefix, &meta.location)
+            && filter_range.is_none_or(|filter_range| range.overlaps(filter_range))
+        {
+            ranges.push(range);
+        }
+    }
+
+    ranges.sort_by_key(|range| (range.start_ns, range.end_ns));
+    ranges.dedup();
+    Ok(ranges)
+}
+
 pub async fn read_tenant_log_index_shards_from_object_store(
     store: &dyn ObjectStore,
     prefix: &ObjectPath,
     tenant: &str,
     query_range: TimeRange,
 ) -> Result<(LabelIndex, BlockIndex), BlockStoreError> {
-    let shard_ranges =
-        read_tenant_log_index_shard_ranges_from_object_store(store, prefix, tenant).await?;
+    let mut shard_ranges = list_tenant_log_index_shard_ranges_overlapping_query_from_object_store(
+        store,
+        prefix,
+        tenant,
+        query_range,
+    )
+    .await?;
+    if shard_ranges.is_empty() {
+        shard_ranges =
+            match read_tenant_log_index_shard_ranges_from_object_store(store, prefix, tenant).await
+            {
+                Ok(shard_ranges) => shard_ranges,
+                Err(BlockStoreError::ObjectStore(object_store::Error::NotFound { .. })) => {
+                    Vec::new()
+                }
+                Err(error) => return Err(error),
+            };
+    }
     let mut merged_labels = LabelIndex::default();
     let mut merged_blocks = BTreeMap::new();
 
@@ -839,13 +919,17 @@ pub fn log_tenant_index_manifest_object_path(prefix: &ObjectPath, tenant: &str) 
 
 #[must_use]
 pub fn log_tenant_index_shard_catalog_object_path(prefix: &ObjectPath, tenant: &str) -> ObjectPath {
+    log_tenant_index_shards_object_prefix(prefix, tenant).join("manifest.json")
+}
+
+#[must_use]
+pub fn log_tenant_index_shards_object_prefix(prefix: &ObjectPath, tenant: &str) -> ObjectPath {
     prefix
         .clone()
         .join(format!("tenant={tenant}"))
         .join("index")
         .join("logs")
         .join("shards")
-        .join("manifest.json")
 }
 
 #[must_use]
@@ -854,17 +938,62 @@ pub fn log_tenant_index_shard_manifest_object_path(
     tenant: &str,
     shard_range: TimeRange,
 ) -> ObjectPath {
-    prefix
-        .clone()
-        .join(format!("tenant={tenant}"))
-        .join("index")
-        .join("logs")
-        .join("shards")
+    log_tenant_index_shards_object_prefix(prefix, tenant)
         .join(format!(
             "time={}-{}",
             shard_range.start_ns, shard_range.end_ns
         ))
         .join("manifest.json")
+}
+
+#[must_use]
+pub fn log_tenant_index_shard_list_offset_object_path(
+    prefix: &ObjectPath,
+    tenant: &str,
+    query_range: TimeRange,
+) -> ObjectPath {
+    log_tenant_index_shards_object_prefix(prefix, tenant).join(format!(
+        "time={}",
+        log_tenant_index_shard_list_offset_start_ns(query_range)
+    ))
+}
+
+#[must_use]
+pub fn log_tenant_index_shard_list_offset_start_ns(query_range: TimeRange) -> i64 {
+    let query_width_ns = query_range
+        .end_ns
+        .saturating_sub(query_range.start_ns)
+        .max(1);
+    query_range.start_ns.saturating_sub(query_width_ns)
+}
+
+fn parse_log_tenant_index_shard_range_from_object_path(
+    shard_prefix: &ObjectPath,
+    location: &ObjectPath,
+) -> Option<TimeRange> {
+    let rest = location
+        .as_ref()
+        .strip_prefix(shard_prefix.as_ref())?
+        .trim_start_matches('/');
+    let mut parts = rest.split('/');
+    let range_part = parts.next()?.strip_prefix("time=")?;
+    if parts.next()? != "manifest.json" || parts.next().is_some() {
+        return None;
+    }
+
+    for (index, _) in range_part.match_indices('-') {
+        if index == 0 {
+            continue;
+        }
+        let (start, end) = range_part.split_at(index);
+        let end = &end[1..];
+        if let (Ok(start_ns), Ok(end_ns)) = (start.parse::<i64>(), end.parse::<i64>())
+            && let Ok(range) = TimeRange::new(start_ns, end_ns)
+        {
+            return Some(range);
+        }
+    }
+    None
 }
 
 #[must_use]

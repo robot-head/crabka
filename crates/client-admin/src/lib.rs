@@ -370,6 +370,7 @@ pub struct KafkaError {
 /// Optionally negotiates TLS/SASL via [`AdminClient::connect_secured`].
 pub struct AdminClient {
     pub(crate) conn: Connection,
+    bootstrap_addrs: Vec<String>,
     /// Client security carried forward to `reconnect` so a
     /// `NOT_CONTROLLER` retry re-dials the new controller the same way.
     security: Option<crabka_client_core::security::ClientSecurity>,
@@ -400,7 +401,13 @@ impl AdminClient {
         let opts = Self::opts(security.clone());
         for host_port in bootstrap_addrs {
             match Self::connect_one(host_port, opts.clone()).await {
-                Ok(conn) => return Ok(Self { conn, security }),
+                Ok(conn) => {
+                    return Ok(Self {
+                        conn,
+                        bootstrap_addrs: bootstrap_addrs.to_vec(),
+                        security,
+                    });
+                }
                 Err(e) => {
                     tracing::debug!(
                         target: "crabka_client_admin",
@@ -445,6 +452,36 @@ impl AdminClient {
         let opts = Self::opts(self.security.clone());
         self.conn = Self::connect_one(host_port, opts).await?;
         Ok(())
+    }
+
+    pub(crate) async fn reconnect_bootstrap(&mut self) -> Result<(), AdminError> {
+        let opts = Self::opts(self.security.clone());
+        for host_port in &self.bootstrap_addrs {
+            match Self::connect_one(host_port, opts.clone()).await {
+                Ok(conn) => {
+                    self.conn = conn;
+                    return Ok(());
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        target: "crabka_client_admin",
+                        addr = %host_port,
+                        error = %error,
+                        "bootstrap reconnect failed",
+                    );
+                }
+            }
+        }
+        Err(AdminError::Connect {
+            tried: self.bootstrap_addrs.len(),
+        })
+    }
+
+    pub(crate) fn is_retriable_transport_error(error: &ClientError) -> bool {
+        matches!(
+            error,
+            ClientError::Timeout(_) | ClientError::Disconnected | ClientError::Io(_)
+        )
     }
 }
 

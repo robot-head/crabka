@@ -38,8 +38,9 @@ use crabka_blockstore::{
     read_tenant_log_index_shards_from_object_store, register_log_blocks,
     register_log_blocks_from_object_store, series_fingerprint, write_log_block,
     write_log_block_to_object_store, write_log_index_manifest,
-    write_tenant_log_index_manifest_to_object_store, write_tenant_log_index_shard_to_object_store,
-    write_tenant_log_index_shards_to_object_store,
+    write_tenant_log_index_manifest_to_object_store,
+    write_tenant_log_index_shard_catalog_to_object_store,
+    write_tenant_log_index_shard_to_object_store,
 };
 use crabka_client_admin::{
     AclEntry, AclEntryFilter, AclOperation, AdminClient, AdminError, PatternType, PermissionType,
@@ -72,6 +73,7 @@ use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::error::DataFusionError;
 use datafusion::prelude::SessionContext;
 use flate2::read::{DeflateDecoder, GzDecoder};
+use futures_util::{StreamExt as _, TryStreamExt as _};
 use object_store::local::LocalFileSystem;
 use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, ObjectStoreExt, parse_url_opts};
@@ -435,6 +437,14 @@ pub fn run(config: ServiceConfig) -> Result<ServiceStatus, Infallible> {
 
 const WAL_CONNECT_STARTUP_DEADLINE: Duration = Duration::from_secs(120);
 const WAL_CONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(15);
+const COMPACTION_FRONTIER_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+const DYNAMIC_INDEX_CACHE_TTL: Duration = Duration::from_secs(5);
+const DYNAMIC_INDEX_SHARD_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+const DYNAMIC_INDEX_SHARD_FETCH_CONCURRENCY: usize = 32;
+const OBJECT_STORE_STREAM_BLOCK_FETCH_CONCURRENCY: usize = 8;
+const LOG_COMPACTION_ACCUMULATION_WINDOW: Duration = Duration::from_secs(2);
+const LOG_COMPACTION_ACCUMULATION_POLL_TIMEOUT: Duration = Duration::from_millis(250);
+const LOG_COMPACTION_MAX_RECORDS_PER_BATCH: usize = 4096;
 
 #[cfg_attr(test, mutants::skip)]
 async fn connect_with_startup_retry<T, E, F, Fut>(
@@ -604,12 +614,14 @@ pub async fn run_compactor_once(
         .ok_or(ServiceConfigError::MissingWalConsumer)?;
     let mut consumer = consumer.lock().await;
 
+    let mut tenant_indexes = TenantCompactionIndexCache::new();
     let descriptors = materialize_deletes_then_compact_next_kafka_wal_batch(
         store,
         &prefix,
         consumer.as_mut(),
         Duration::from_millis(500),
         &delete_requests,
+        &mut tenant_indexes,
     )
     .await?;
     for descriptor in &descriptors {
@@ -659,6 +671,7 @@ pub async fn run_compactor_until_idle(
         .ok_or(ServiceConfigError::MissingWalConsumer)?;
     let mut consumer = consumer.lock().await;
     let mut descriptors = Vec::new();
+    let mut tenant_indexes = TenantCompactionIndexCache::new();
 
     loop {
         let batch_descriptors = materialize_deletes_then_compact_next_kafka_wal_batch(
@@ -667,6 +680,7 @@ pub async fn run_compactor_until_idle(
             consumer.as_mut(),
             Duration::from_millis(500),
             &delete_requests,
+            &mut tenant_indexes,
         )
         .await?;
         if batch_descriptors.is_empty() {
@@ -730,6 +744,8 @@ pub async fn run_compactor_until_shutdown(
     let mut consumer = consumer.lock().await;
     let mut descriptors = Vec::new();
     let mut object_store_retry_backoff = Duration::from_millis(10);
+    let mut tenant_indexes = TenantCompactionIndexCache::new();
+    let mut pending_compaction_records: Option<Vec<KafkaWalRecord>> = None;
     tokio::pin!(shutdown);
 
     loop {
@@ -739,20 +755,60 @@ pub async fn run_compactor_until_shutdown(
             () = sleep(Duration::ZERO) => {}
         }
 
-        let batch_descriptors = match materialize_deletes_then_compact_next_kafka_wal_batch(
+        let batch_result = match materialize_log_deletes_before_compaction(
             store,
             &prefix,
-            consumer.as_mut(),
-            Duration::from_millis(500),
             &delete_requests,
+            &mut tenant_indexes,
         )
         .await
         {
+            Ok(()) => {
+                let records = match pending_compaction_records.take() {
+                    Some(records) => records,
+                    None => {
+                        match poll_accumulated_log_compaction_records(
+                            consumer.as_mut(),
+                            Duration::from_millis(500),
+                        )
+                        .await
+                        {
+                            Ok(records) => records,
+                            Err(error) => return Err(CompactorRunError::from(error).into()),
+                        }
+                    }
+                };
+                if records.is_empty() {
+                    Ok(Vec::new())
+                } else {
+                    let retry_records = records.clone();
+                    match compact_polled_kafka_wal_records_to_object_store_from_existing_manifest(
+                        store,
+                        &prefix,
+                        consumer.as_mut(),
+                        records,
+                        &delete_requests,
+                        &mut tenant_indexes,
+                    )
+                    .await
+                    {
+                        Ok(batch_descriptors) => Ok(batch_descriptors),
+                        Err(error) => {
+                            pending_compaction_records = Some(retry_records);
+                            Err(error)
+                        }
+                    }
+                }
+            }
+            Err(error) => Err(error),
+        };
+        let batch_descriptors = match batch_result {
             Ok(batch_descriptors) => {
                 object_store_retry_backoff = Duration::from_millis(10);
                 batch_descriptors
             }
             Err(error) if compactor_run_error_is_object_store(&error) => {
+                tenant_indexes.clear();
                 tokio::select! {
                     () = &mut shutdown => return Ok(descriptors),
                     () = sleep(object_store_retry_backoff) => {}
@@ -863,6 +919,42 @@ async fn shared_compaction_frontier_from_object_store(
     Ok(frontier)
 }
 
+async fn refresh_compaction_frontier_and_prune(
+    store: &dyn ObjectStore,
+    prefix: &ObjectPath,
+    frontier: &SharedCompactionFrontier,
+    hot_tail: &BufferedLogHotTail,
+) -> Result<usize, CompactionFrontierStoreError> {
+    let updated = read_compaction_frontier_from_object_store(store, prefix).await?;
+    frontier.replace(updated.clone());
+    Ok(hot_tail.prune_compacted(&updated))
+}
+
+#[cfg_attr(test, mutants::skip)]
+fn spawn_compaction_frontier_refresher(
+    store: Arc<dyn ObjectStore>,
+    prefix: ObjectPath,
+    frontier: SharedCompactionFrontier,
+    hot_tail: BufferedLogHotTail,
+    token: CancellationToken,
+) {
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                () = token.cancelled() => return,
+                () = sleep(COMPACTION_FRONTIER_REFRESH_INTERVAL) => {}
+            }
+
+            if let Err(error) =
+                refresh_compaction_frontier_and_prune(store.as_ref(), &prefix, &frontier, &hot_tail)
+                    .await
+            {
+                eprintln!("[crabka-observability] compaction frontier refresh failed: {error}");
+            }
+        }
+    });
+}
+
 async fn advance_and_persist_compaction_frontier(
     store: &dyn ObjectStore,
     prefix: &ObjectPath,
@@ -883,8 +975,9 @@ async fn materialize_deletes_then_compact_next_kafka_wal_batch(
     consumer: &mut (impl LogWalConsumer + ?Sized),
     poll_timeout: Duration,
     delete_requests: &SharedLogDeleteRequests,
+    tenant_indexes: &mut TenantCompactionIndexCache,
 ) -> Result<Vec<BlockDescriptor>, CompactorRunError> {
-    materialize_delete_requests_in_existing_object_store_blocks(store, prefix, delete_requests)
+    materialize_log_deletes_before_compaction(store, prefix, delete_requests, tenant_indexes)
         .await?;
     compact_next_kafka_wal_batch_to_object_store_from_existing_manifest(
         store,
@@ -892,6 +985,7 @@ async fn materialize_deletes_then_compact_next_kafka_wal_batch(
         consumer,
         poll_timeout,
         delete_requests,
+        tenant_indexes,
     )
     .await
 }
@@ -902,8 +996,42 @@ async fn compact_next_kafka_wal_batch_to_object_store_from_existing_manifest(
     consumer: &mut (impl LogWalConsumer + ?Sized),
     poll_timeout: Duration,
     delete_requests: &SharedLogDeleteRequests,
+    tenant_indexes: &mut TenantCompactionIndexCache,
 ) -> Result<Vec<BlockDescriptor>, CompactorRunError> {
     let records = consumer.poll(poll_timeout).await?;
+    compact_polled_kafka_wal_records_to_object_store_from_existing_manifest(
+        store,
+        prefix,
+        consumer,
+        records,
+        delete_requests,
+        tenant_indexes,
+    )
+    .await
+}
+
+async fn materialize_log_deletes_before_compaction(
+    store: &dyn ObjectStore,
+    prefix: &ObjectPath,
+    delete_requests: &SharedLogDeleteRequests,
+    tenant_indexes: &mut TenantCompactionIndexCache,
+) -> Result<(), CompactorRunError> {
+    if !active_log_delete_tenants(delete_requests)?.is_empty() {
+        materialize_delete_requests_in_existing_object_store_blocks(store, prefix, delete_requests)
+            .await?;
+        tenant_indexes.clear();
+    }
+    Ok(())
+}
+
+async fn compact_polled_kafka_wal_records_to_object_store_from_existing_manifest(
+    store: &dyn ObjectStore,
+    prefix: &ObjectPath,
+    consumer: &mut (impl LogWalConsumer + ?Sized),
+    records: Vec<KafkaWalRecord>,
+    delete_requests: &SharedLogDeleteRequests,
+    tenant_indexes: &mut TenantCompactionIndexCache,
+) -> Result<Vec<BlockDescriptor>, CompactorRunError> {
     if records.is_empty() {
         return Ok(Vec::new());
     }
@@ -921,20 +1049,22 @@ async fn compact_next_kafka_wal_batch_to_object_store_from_existing_manifest(
             .ok_or(CompactionError::EmptyWalBatch)?
             .tenant
             .clone();
-        let (mut label_index, mut block_index) =
-            read_tenant_compaction_indexes_from_object_store(store, prefix, &tenant).await?;
+        let (label_index, block_index) = tenant_indexes
+            .entry(tenant.clone())
+            .or_insert_with(|| (LabelIndex::default(), BlockIndex::default()));
         let mut committer = LastCompactedPosition::default();
         let time_range = wal_record_time_range(&chunk)?;
         let delete_filters =
             active_log_delete_filters_from_requests(delete_requests, &tenant, time_range)?;
-        let descriptor = compact_wal_records_to_object_store_with_delete_filters(
+        let descriptor = compact_wal_records_to_object_store_with_delete_filters_and_index_output(
             store,
             prefix,
-            &mut label_index,
-            &mut block_index,
+            label_index,
+            block_index,
             &mut committer,
             chunk,
             &delete_filters,
+            LogCompactionIndexOutput::ShardManifests,
         )
         .await?;
         let position = committer
@@ -956,6 +1086,33 @@ async fn compact_next_kafka_wal_batch_to_object_store_from_existing_manifest(
     }
 
     Ok(descriptors)
+}
+
+async fn poll_accumulated_log_compaction_records(
+    consumer: &mut (impl LogWalConsumer + ?Sized),
+    initial_timeout: Duration,
+) -> Result<Vec<KafkaWalRecord>, WalConsumerError> {
+    let mut records = consumer.poll(initial_timeout).await?;
+    if records.is_empty() || records.len() >= LOG_COMPACTION_MAX_RECORDS_PER_BATCH {
+        return Ok(records);
+    }
+
+    let deadline = Instant::now() + LOG_COMPACTION_ACCUMULATION_WINDOW;
+    while records.len() < LOG_COMPACTION_MAX_RECORDS_PER_BATCH {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+
+        let poll_timeout = std::cmp::min(remaining, LOG_COMPACTION_ACCUMULATION_POLL_TIMEOUT);
+        let next = consumer.poll(poll_timeout).await?;
+        if next.is_empty() {
+            break;
+        }
+        records.extend(next);
+    }
+
+    Ok(records)
 }
 
 async fn materialize_delete_requests_in_existing_object_store_blocks(
@@ -1262,18 +1419,12 @@ fn wal_record_time_range(records: &[WalLogRecord]) -> Result<TimeRange, Compacti
     Ok(TimeRange::new(start_ns, end_ns)?)
 }
 
-async fn read_tenant_compaction_indexes_from_object_store(
-    store: &dyn ObjectStore,
-    prefix: &ObjectPath,
-    tenant: &str,
-) -> Result<(LabelIndex, BlockIndex), CompactorRunError> {
-    match read_tenant_log_index_manifest_from_object_store(store, prefix, tenant).await {
-        Ok(indexes) => Ok(indexes),
-        Err(BlockStoreError::ObjectStore(object_store::Error::NotFound { .. })) => {
-            Ok((LabelIndex::default(), BlockIndex::default()))
-        }
-        Err(error) => Err(error.into()),
-    }
+type TenantCompactionIndexCache = BTreeMap<String, (LabelIndex, BlockIndex)>;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LogCompactionIndexOutput {
+    FullManifestAndShardCatalog,
+    ShardManifests,
 }
 
 pub async fn compact_log_block_to_object_store(
@@ -1284,6 +1435,27 @@ pub async fn compact_log_block_to_object_store(
     block_index: &mut BlockIndex,
     rows: Vec<LogRow>,
 ) -> Result<BlockDescriptor, BlockStoreError> {
+    compact_log_block_to_object_store_with_index_output(
+        store,
+        prefix,
+        key,
+        label_index,
+        block_index,
+        rows,
+        LogCompactionIndexOutput::FullManifestAndShardCatalog,
+    )
+    .await
+}
+
+async fn compact_log_block_to_object_store_with_index_output(
+    store: &dyn ObjectStore,
+    prefix: &ObjectPath,
+    key: &BlockKey,
+    label_index: &LabelIndex,
+    block_index: &mut BlockIndex,
+    rows: Vec<LogRow>,
+    index_output: LogCompactionIndexOutput,
+) -> Result<BlockDescriptor, BlockStoreError> {
     let descriptor = write_log_block_to_object_store(store, prefix, key, rows).await?;
     block_index.insert(descriptor.clone());
     write_tenant_compaction_indexes_to_object_store(
@@ -1293,6 +1465,7 @@ pub async fn compact_log_block_to_object_store(
         key.time_range,
         label_index,
         block_index,
+        index_output,
     )
     .await?;
     Ok(descriptor)
@@ -1305,15 +1478,32 @@ async fn write_tenant_compaction_indexes_to_object_store(
     new_shard_range: TimeRange,
     label_index: &LabelIndex,
     block_index: &BlockIndex,
+    index_output: LogCompactionIndexOutput,
 ) -> Result<(), BlockStoreError> {
-    write_tenant_log_index_manifest_to_object_store(
+    if index_output == LogCompactionIndexOutput::FullManifestAndShardCatalog {
+        write_tenant_log_index_manifest_to_object_store(
+            store,
+            prefix,
+            tenant,
+            label_index,
+            block_index,
+        )
+        .await?;
+    }
+
+    write_tenant_log_index_shard_to_object_store(
         store,
         prefix,
         tenant,
+        new_shard_range,
         label_index,
         block_index,
     )
     .await?;
+
+    if index_output == LogCompactionIndexOutput::ShardManifests {
+        return Ok(());
+    }
 
     let mut shard_ranges =
         match read_tenant_log_index_shard_ranges_from_object_store(store, prefix, tenant).await {
@@ -1325,15 +1515,7 @@ async fn write_tenant_compaction_indexes_to_object_store(
         shard_ranges.push(new_shard_range);
     }
     shard_ranges.sort_by_key(|range| (range.start_ns, range.end_ns));
-    write_tenant_log_index_shards_to_object_store(
-        store,
-        prefix,
-        tenant,
-        &shard_ranges,
-        label_index,
-        block_index,
-    )
-    .await
+    write_tenant_log_index_shard_catalog_to_object_store(store, prefix, tenant, &shard_ranges).await
 }
 
 pub trait CompactionOffsetCommitter {
@@ -1480,7 +1662,7 @@ pub async fn compact_wal_records_to_object_store(
     committer: &mut impl CompactionOffsetCommitter,
     records: Vec<WalLogRecord>,
 ) -> Result<BlockDescriptor, CompactionError> {
-    compact_wal_records_to_object_store_with_delete_filters(
+    compact_wal_records_to_object_store_with_delete_filters_and_index_output(
         store,
         prefix,
         label_index,
@@ -1488,12 +1670,13 @@ pub async fn compact_wal_records_to_object_store(
         committer,
         records,
         &[],
+        LogCompactionIndexOutput::FullManifestAndShardCatalog,
     )
     .await?
     .ok_or(CompactionError::AllRowsDeleted)
 }
 
-async fn compact_wal_records_to_object_store_with_delete_filters(
+async fn compact_wal_records_to_object_store_with_delete_filters_and_index_output(
     store: &dyn ObjectStore,
     prefix: &ObjectPath,
     label_index: &mut LabelIndex,
@@ -1501,6 +1684,7 @@ async fn compact_wal_records_to_object_store_with_delete_filters(
     committer: &mut impl CompactionOffsetCommitter,
     records: Vec<WalLogRecord>,
     delete_filters: &[ActiveLogDeleteFilter],
+    index_output: LogCompactionIndexOutput,
 ) -> Result<Option<BlockDescriptor>, CompactionError> {
     let first = records.first().ok_or(CompactionError::EmptyWalBatch)?;
     let tenant = first.tenant.clone();
@@ -1570,13 +1754,14 @@ async fn compact_wal_records_to_object_store_with_delete_filters(
         TimeRange::new(start_ns, end_ns)?,
     );
     let mut staged_block_index = block_index.clone();
-    let descriptor = compact_log_block_to_object_store(
+    let descriptor = compact_log_block_to_object_store_with_index_output(
         store,
         prefix,
         &key,
         &staged_label_index,
         &mut staged_block_index,
         rows,
+        index_output,
     )
     .await?;
 
@@ -1794,6 +1979,8 @@ struct ConfiguredObjectStore {
     prefix: ObjectPath,
 }
 
+type CompactionFrontierRefreshSource = (Arc<dyn ObjectStore>, ObjectPath);
+
 #[cfg_attr(test, mutants::skip)]
 fn build_configured_object_store(
     config: &ServiceConfig,
@@ -1831,6 +2018,41 @@ fn build_configured_object_store(
             reason: error.to_string(),
         }),
     }
+}
+
+async fn load_querier_shared_compaction_frontier(
+    config: &ServiceConfig,
+    configured_store: Option<&ConfiguredObjectStore>,
+    object_store: Option<&dyn ObjectStore>,
+) -> Result<
+    (
+        Option<SharedCompactionFrontier>,
+        Option<CompactionFrontierRefreshSource>,
+    ),
+    ServiceConfigError,
+> {
+    if let Some(configured_store) = configured_store
+        && let Some(prefix) = querier_object_store_prefix(config, Some(&configured_store.prefix))?
+    {
+        let frontier =
+            shared_compaction_frontier_from_object_store(configured_store.store.as_ref(), &prefix)
+                .await?;
+        return Ok((
+            Some(frontier),
+            Some((configured_store.store.clone(), prefix)),
+        ));
+    }
+
+    if let Some(store) = object_store
+        && let Some(prefix) = querier_object_store_prefix(config, None)?
+    {
+        return Ok((
+            Some(shared_compaction_frontier_from_object_store(store, &prefix).await?),
+            None,
+        ));
+    }
+
+    Ok((None, None))
 }
 
 fn compactor_delete_requests_for_config(
@@ -2276,6 +2498,38 @@ impl HotTailBuffer {
         self.buckets.entry(bucket).or_default().push(index);
     }
 
+    fn prune_compacted(&mut self, frontier: &CompactionFrontier) -> usize {
+        let before = self.records.len();
+        if before == 0 {
+            return 0;
+        }
+
+        let old_records = std::mem::take(&mut self.records);
+        self.records = old_records
+            .into_iter()
+            .filter(|record| !frontier.is_compacted(record))
+            .collect();
+        let pruned = before - self.records.len();
+        if pruned > 0 {
+            self.records.shrink_to_fit();
+            self.rebuild_buckets();
+        }
+        pruned
+    }
+
+    fn rebuild_buckets(&mut self) {
+        self.buckets.clear();
+        for (index, record) in self.records.iter().enumerate() {
+            self.buckets
+                .entry(hot_tail_bucket_key(record.timestamp_ns))
+                .or_default()
+                .push(index);
+        }
+        for indices in self.buckets.values_mut() {
+            indices.shrink_to_fit();
+        }
+    }
+
     fn records_in_range(&self, start_ns: i64, end_ns: i64) -> Vec<WalLogRecord> {
         if start_ns > end_ns {
             return Vec::new();
@@ -2331,6 +2585,13 @@ impl BufferedLogHotTail {
         for record in records {
             buffer.push(record);
         }
+    }
+
+    pub fn prune_compacted(&self, frontier: &CompactionFrontier) -> usize {
+        self.buffer
+            .lock()
+            .expect("hot tail buffer lock poisoned")
+            .prune_compacted(frontier)
     }
 }
 
@@ -2511,6 +2772,15 @@ pub async fn poll_log_hot_tail_once(
     hot_tail: &BufferedLogHotTail,
     timeout: Duration,
 ) -> Result<usize, HotTailPollError> {
+    poll_log_hot_tail_once_with_frontier(consumer, hot_tail, timeout, None).await
+}
+
+async fn poll_log_hot_tail_once_with_frontier(
+    consumer: &mut (impl LogWalConsumer + ?Sized),
+    hot_tail: &BufferedLogHotTail,
+    timeout: Duration,
+    frontier: Option<&SharedCompactionFrontier>,
+) -> Result<usize, HotTailPollError> {
     let batch = consumer.poll(timeout).await?;
     let records = batch
         .into_iter()
@@ -2518,6 +2788,9 @@ pub async fn poll_log_hot_tail_once(
         .collect::<Result<Vec<_>, _>>()?;
     let decoded = records.len();
     hot_tail.append_records(records);
+    if let Some(frontier) = frontier {
+        hot_tail.prune_compacted(&frontier.snapshot());
+    }
     Ok(decoded)
 }
 
@@ -2525,13 +2798,19 @@ pub async fn poll_log_hot_tail_once(
 fn spawn_log_hot_tail_poller(
     consumer: Arc<tokio::sync::Mutex<Box<dyn LogWalConsumer>>>,
     hot_tail: BufferedLogHotTail,
+    frontier: Option<SharedCompactionFrontier>,
 ) {
     tokio::spawn(async move {
         loop {
             let result = {
                 let mut consumer = consumer.lock().await;
-                poll_log_hot_tail_once(consumer.as_mut(), &hot_tail, Duration::from_millis(50))
-                    .await
+                poll_log_hot_tail_once_with_frontier(
+                    consumer.as_mut(),
+                    &hot_tail,
+                    Duration::from_millis(50),
+                    frontier.as_ref(),
+                )
+                .await
             };
             let should_back_off = match result {
                 Ok(decoded) => decoded == 0,
@@ -2556,6 +2835,7 @@ fn spawn_wal_hot_tail_connect_and_poll(
     group_id: String,
     topic: String,
     hot_tail: BufferedLogHotTail,
+    frontier: Option<SharedCompactionFrontier>,
     token: CancellationToken,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -2581,7 +2861,7 @@ fn spawn_wal_hot_tail_connect_and_poll(
         loop {
             let result = tokio::select! {
                 () = token.cancelled() => break,
-                result = poll_log_hot_tail_once(&mut consumer, &hot_tail, Duration::from_millis(50)) => result,
+                result = poll_log_hot_tail_once_with_frontier(&mut consumer, &hot_tail, Duration::from_millis(50), frontier.as_ref()) => result,
             };
             let should_back_off = match result {
                 Ok(decoded) => decoded == 0,
@@ -4734,6 +5014,7 @@ pub struct QuerierState {
     block_index: BlockIndex,
     cold_store: Option<ColdObjectStoreState>,
     dynamic_index: Option<DynamicIndexSource>,
+    dynamic_index_cache: DynamicIndexCache,
     hot_tail: Option<HotTailState>,
     delete_requests: Option<SharedLogDeleteRequests>,
     rules: SharedLokiRules,
@@ -4805,6 +5086,191 @@ enum DynamicIndexSource {
     },
 }
 
+#[derive(Clone, Default)]
+struct DynamicIndexCache {
+    entries: Arc<Mutex<BTreeMap<DynamicIndexCacheKey, CachedDynamicIndex>>>,
+    shard_ranges: Arc<Mutex<BTreeMap<DynamicShardRangesCacheKey, CachedShardRanges>>>,
+    shard_indexes: Arc<Mutex<BTreeMap<DynamicShardIndexCacheKey, CachedDynamicIndex>>>,
+}
+
+impl DynamicIndexCache {
+    fn clear(&self) {
+        self.entries
+            .lock()
+            .expect("dynamic index cache lock poisoned")
+            .clear();
+        self.shard_ranges
+            .lock()
+            .expect("dynamic index shard range cache lock poisoned")
+            .clear();
+        self.shard_indexes
+            .lock()
+            .expect("dynamic index shard cache lock poisoned")
+            .clear();
+    }
+
+    fn get(&self, key: &DynamicIndexCacheKey) -> Option<(LabelIndex, BlockIndex)> {
+        let mut entries = self
+            .entries
+            .lock()
+            .expect("dynamic index cache lock poisoned");
+        let entry = entries.get(key)?;
+        if entry.loaded_at.elapsed() > DYNAMIC_INDEX_CACHE_TTL {
+            entries.remove(key);
+            return None;
+        }
+        Some((entry.label_index.clone(), entry.block_index.clone()))
+    }
+
+    fn insert(&self, key: DynamicIndexCacheKey, label_index: LabelIndex, block_index: BlockIndex) {
+        self.entries
+            .lock()
+            .expect("dynamic index cache lock poisoned")
+            .insert(
+                key,
+                CachedDynamicIndex {
+                    loaded_at: Instant::now(),
+                    label_index,
+                    block_index,
+                },
+            );
+    }
+
+    fn get_shard_ranges(
+        &self,
+        key: &DynamicShardRangesCacheKey,
+        required_from_ns: i64,
+    ) -> Option<Vec<TimeRange>> {
+        let mut ranges = self
+            .shard_ranges
+            .lock()
+            .expect("dynamic index shard range cache lock poisoned");
+        let entry = ranges.get(key)?;
+        if entry.loaded_at.elapsed() > DYNAMIC_INDEX_CACHE_TTL
+            || entry.listed_from_ns > required_from_ns
+        {
+            ranges.remove(key);
+            return None;
+        }
+        Some(entry.ranges.clone())
+    }
+
+    fn insert_shard_ranges(
+        &self,
+        key: DynamicShardRangesCacheKey,
+        listed_from_ns: i64,
+        ranges: Vec<TimeRange>,
+    ) {
+        self.shard_ranges
+            .lock()
+            .expect("dynamic index shard range cache lock poisoned")
+            .insert(
+                key,
+                CachedShardRanges {
+                    loaded_at: Instant::now(),
+                    listed_from_ns,
+                    ranges,
+                },
+            );
+    }
+
+    fn get_shard_index(&self, key: &DynamicShardIndexCacheKey) -> Option<(LabelIndex, BlockIndex)> {
+        let mut entries = self
+            .shard_indexes
+            .lock()
+            .expect("dynamic index shard cache lock poisoned");
+        let entry = entries.get(key)?;
+        if entry.loaded_at.elapsed() > DYNAMIC_INDEX_SHARD_CACHE_TTL {
+            entries.remove(key);
+            return None;
+        }
+        Some((entry.label_index.clone(), entry.block_index.clone()))
+    }
+
+    fn insert_shard_index(
+        &self,
+        key: DynamicShardIndexCacheKey,
+        label_index: LabelIndex,
+        block_index: BlockIndex,
+    ) {
+        self.shard_indexes
+            .lock()
+            .expect("dynamic index shard cache lock poisoned")
+            .insert(
+                key,
+                CachedDynamicIndex {
+                    loaded_at: Instant::now(),
+                    label_index,
+                    block_index,
+                },
+            );
+    }
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum DynamicIndexCacheKey {
+    TenantManifest {
+        tenant: String,
+    },
+    TenantShards {
+        tenant: String,
+        start_ns: i64,
+        end_ns: i64,
+    },
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct DynamicShardRangesCacheKey {
+    tenant: String,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct DynamicShardIndexCacheKey {
+    tenant: String,
+    start_ns: i64,
+    end_ns: i64,
+}
+
+#[derive(Clone)]
+struct CachedDynamicIndex {
+    loaded_at: Instant,
+    label_index: LabelIndex,
+    block_index: BlockIndex,
+}
+
+#[derive(Clone)]
+struct CachedShardRanges {
+    loaded_at: Instant,
+    listed_from_ns: i64,
+    ranges: Vec<TimeRange>,
+}
+
+fn merge_tenant_shard_indexes(
+    tenant: &str,
+    indexes: impl IntoIterator<Item = (LabelIndex, BlockIndex)>,
+) -> (LabelIndex, BlockIndex) {
+    let mut merged_labels = LabelIndex::default();
+    let mut merged_blocks = BTreeMap::new();
+
+    for (label_index, block_index) in indexes {
+        for (_, labels) in label_index.tenant_series(tenant) {
+            merged_labels.insert_series(tenant.to_string(), labels);
+        }
+        for block in block_index.blocks() {
+            merged_blocks
+                .entry(block.key.object_key())
+                .or_insert_with(|| block.clone());
+        }
+    }
+
+    let mut block_index = BlockIndex::default();
+    for block in merged_blocks.into_values() {
+        block_index.insert(block);
+    }
+
+    (merged_labels, block_index)
+}
+
 #[derive(Clone)]
 struct HotTailState {
     source: Arc<dyn LogHotTail>,
@@ -4820,6 +5286,7 @@ impl QuerierState {
             block_index,
             cold_store: None,
             dynamic_index: None,
+            dynamic_index_cache: DynamicIndexCache::default(),
             hot_tail: None,
             delete_requests: None,
             rules: SharedLokiRules::default(),
@@ -4944,6 +5411,7 @@ impl QuerierState {
         store: Arc<dyn ObjectStore>,
         prefix: ObjectPath,
     ) -> Self {
+        self.dynamic_index_cache.clear();
         self.dynamic_index = Some(DynamicIndexSource::TenantObjectStoreManifest { store, prefix });
         self
     }
@@ -4953,6 +5421,7 @@ impl QuerierState {
         store: Arc<dyn ObjectStore>,
         prefix: ObjectPath,
     ) -> Self {
+        self.dynamic_index_cache.clear();
         self.dynamic_index = Some(DynamicIndexSource::TenantObjectStoreShards { store, prefix });
         self
     }
@@ -4968,6 +5437,15 @@ impl QuerierState {
 
         match dynamic_index {
             DynamicIndexSource::TenantObjectStoreManifest { store, prefix } => {
+                let cache_key = DynamicIndexCacheKey::TenantManifest {
+                    tenant: tenant.to_string(),
+                };
+                if let Some((label_index, block_index)) = self.dynamic_index_cache.get(&cache_key) {
+                    let mut state = self.clone();
+                    state.label_index = label_index;
+                    state.block_index = block_index;
+                    return Ok(state);
+                }
                 let (label_index, block_index) =
                     match read_tenant_log_index_manifest_from_object_store(
                         store.as_ref(),
@@ -4984,35 +5462,151 @@ impl QuerierState {
                         }
                         Err(error) => return Err(error),
                     };
+                self.dynamic_index_cache.insert(
+                    cache_key,
+                    label_index.clone(),
+                    block_index.clone(),
+                );
                 let mut state = self.clone();
                 state.label_index = label_index;
                 state.block_index = block_index;
                 Ok(state)
             }
             DynamicIndexSource::TenantObjectStoreShards { store, prefix } => {
-                let (label_index, block_index) =
-                    match read_tenant_log_index_shards_from_object_store(
-                        store.as_ref(),
-                        prefix,
-                        tenant,
-                        query_range,
-                    )
-                    .await
-                    {
-                        Ok(indexes) => indexes,
-                        Err(BlockStoreError::ObjectStore(object_store::Error::NotFound {
-                            ..
-                        })) => {
-                            return Ok(self.clone());
-                        }
-                        Err(error) => return Err(error),
-                    };
+                let cache_key = DynamicIndexCacheKey::TenantShards {
+                    tenant: tenant.to_string(),
+                    start_ns: query_range.start_ns,
+                    end_ns: query_range.end_ns,
+                };
+                if let Some((label_index, block_index)) = self.dynamic_index_cache.get(&cache_key) {
+                    let mut state = self.clone();
+                    state.label_index = label_index;
+                    state.block_index = block_index;
+                    return Ok(state);
+                }
+                let (label_index, block_index) = self
+                    .cached_tenant_shard_indexes(store.as_ref(), prefix, tenant, query_range)
+                    .await?;
+                self.dynamic_index_cache.insert(
+                    cache_key,
+                    label_index.clone(),
+                    block_index.clone(),
+                );
                 let mut state = self.clone();
                 state.label_index = label_index;
                 state.block_index = block_index;
                 Ok(state)
             }
         }
+    }
+
+    async fn cached_tenant_shard_ranges(
+        &self,
+        store: &dyn ObjectStore,
+        prefix: &ObjectPath,
+        tenant: &str,
+        query_range: TimeRange,
+    ) -> Result<Vec<TimeRange>, BlockStoreError> {
+        let required_from_ns =
+            crabka_blockstore::log_tenant_index_shard_list_offset_start_ns(query_range);
+        let cache_key = DynamicShardRangesCacheKey {
+            tenant: tenant.to_string(),
+        };
+        if let Some(ranges) = self
+            .dynamic_index_cache
+            .get_shard_ranges(&cache_key, required_from_ns)
+        {
+            return Ok(ranges);
+        }
+
+        let mut shard_ranges =
+            crabka_blockstore::list_tenant_log_index_shard_ranges_overlapping_query_from_object_store(
+                store,
+                prefix,
+                tenant,
+                query_range,
+            )
+            .await?;
+        if shard_ranges.is_empty() {
+            shard_ranges =
+                match read_tenant_log_index_shard_ranges_from_object_store(store, prefix, tenant)
+                    .await
+                {
+                    Ok(shard_ranges) => shard_ranges,
+                    Err(BlockStoreError::ObjectStore(object_store::Error::NotFound { .. })) => {
+                        Vec::new()
+                    }
+                    Err(error) => return Err(error),
+                };
+        }
+
+        self.dynamic_index_cache.insert_shard_ranges(
+            cache_key,
+            required_from_ns,
+            shard_ranges.clone(),
+        );
+        Ok(shard_ranges)
+    }
+
+    async fn cached_tenant_shard_indexes(
+        &self,
+        store: &dyn ObjectStore,
+        prefix: &ObjectPath,
+        tenant: &str,
+        query_range: TimeRange,
+    ) -> Result<(LabelIndex, BlockIndex), BlockStoreError> {
+        let shard_ranges = self
+            .cached_tenant_shard_ranges(store, prefix, tenant, query_range)
+            .await?;
+        let mut indexes = Vec::new();
+        let mut misses = Vec::new();
+
+        for shard_range in shard_ranges
+            .into_iter()
+            .filter(|shard_range| shard_range.overlaps(query_range))
+        {
+            let cache_key = DynamicShardIndexCacheKey {
+                tenant: tenant.to_string(),
+                start_ns: shard_range.start_ns,
+                end_ns: shard_range.end_ns,
+            };
+            if let Some(index) = self.dynamic_index_cache.get_shard_index(&cache_key) {
+                indexes.push(index);
+            } else {
+                misses.push(shard_range);
+            }
+        }
+
+        let fetched = futures_util::stream::iter(misses)
+            .map(|shard_range| async move {
+                let (label_index, block_index) = read_tenant_log_index_shard_from_object_store(
+                    store,
+                    prefix,
+                    tenant,
+                    shard_range,
+                )
+                .await?;
+                Ok::<_, BlockStoreError>((shard_range, label_index, block_index))
+            })
+            .buffer_unordered(DYNAMIC_INDEX_SHARD_FETCH_CONCURRENCY)
+            .try_collect::<Vec<_>>()
+            .await?;
+
+        for (shard_range, label_index, block_index) in fetched {
+            let cache_key = DynamicShardIndexCacheKey {
+                tenant: tenant.to_string(),
+                start_ns: shard_range.start_ns,
+                end_ns: shard_range.end_ns,
+            };
+            self.dynamic_index_cache.insert_shard_index(
+                cache_key,
+                label_index.clone(),
+                block_index.clone(),
+            );
+            indexes.push((label_index, block_index));
+        }
+
+        Ok(merge_tenant_shard_indexes(tenant, indexes))
     }
 
     pub fn from_manifest(root: impl Into<PathBuf>) -> Result<Self, BlockStoreError> {
@@ -5308,25 +5902,23 @@ async fn build_service_router_with_shutdown(
             } else if let Some(wal_consumer) = dependencies.wal_consumer {
                 // Pre-connected consumer supplied directly (e.g. by tests).
                 let hot_tail = BufferedLogHotTail::default();
-                spawn_log_hot_tail_poller(wal_consumer, hot_tail.clone());
-                let frontier = if let Some(configured_store) = configured_store.as_ref()
-                    && let Some(prefix) =
-                        querier_object_store_prefix(config, Some(&configured_store.prefix))?
+                let (frontier, refresh_source) = load_querier_shared_compaction_frontier(
+                    config,
+                    configured_store.as_ref(),
+                    object_store,
+                )
+                .await?;
+                if let (Some(frontier), Some((store, prefix))) = (frontier.clone(), refresh_source)
                 {
-                    Some(
-                        shared_compaction_frontier_from_object_store(
-                            configured_store.store.as_ref(),
-                            &prefix,
-                        )
-                        .await?,
-                    )
-                } else if let Some(store) = object_store
-                    && let Some(prefix) = querier_object_store_prefix(config, None)?
-                {
-                    Some(shared_compaction_frontier_from_object_store(store, &prefix).await?)
-                } else {
-                    None
-                };
+                    spawn_compaction_frontier_refresher(
+                        store,
+                        prefix,
+                        frontier,
+                        hot_tail.clone(),
+                        token.clone(),
+                    );
+                }
+                spawn_log_hot_tail_poller(wal_consumer, hot_tail.clone(), frontier.clone());
                 if let Some(frontier) = frontier {
                     state = state.with_hot_tail_shared_frontier(hot_tail, frontier);
                 } else {
@@ -5336,6 +5928,22 @@ async fn build_service_router_with_shutdown(
                 // Deferred connect: the consumer and authorizer connect asynchronously so the
                 // querier's HTTP port binds without waiting for the broker to be ready (FIX B2).
                 let hot_tail = BufferedLogHotTail::default();
+                let (frontier, refresh_source) = load_querier_shared_compaction_frontier(
+                    config,
+                    configured_store.as_ref(),
+                    object_store,
+                )
+                .await?;
+                if let (Some(frontier), Some((store, prefix))) = (frontier.clone(), refresh_source)
+                {
+                    spawn_compaction_frontier_refresher(
+                        store,
+                        prefix,
+                        frontier,
+                        hot_tail.clone(),
+                        token.clone(),
+                    );
+                }
 
                 // Spawn the consumer connect + poll loop in a background task.
                 wal_handle = Some(spawn_wal_hot_tail_connect_and_poll(
@@ -5343,6 +5951,7 @@ async fn build_service_router_with_shutdown(
                     deferred.group_id,
                     deferred.topic.clone(),
                     hot_tail.clone(),
+                    frontier.clone(),
                     token,
                 ));
 
@@ -5352,24 +5961,6 @@ async fn build_service_router_with_shutdown(
                 spawn_query_authorizer_connect(deferred.bootstrap, deferred.topic, slot);
                 state = state.with_query_authorizer(swappable);
 
-                let frontier = if let Some(configured_store) = configured_store.as_ref()
-                    && let Some(prefix) =
-                        querier_object_store_prefix(config, Some(&configured_store.prefix))?
-                {
-                    Some(
-                        shared_compaction_frontier_from_object_store(
-                            configured_store.store.as_ref(),
-                            &prefix,
-                        )
-                        .await?,
-                    )
-                } else if let Some(store) = object_store
-                    && let Some(prefix) = querier_object_store_prefix(config, None)?
-                {
-                    Some(shared_compaction_frontier_from_object_store(store, &prefix).await?)
-                } else {
-                    None
-                };
                 if let Some(frontier) = frontier {
                     state = state.with_hot_tail_shared_frontier(hot_tail, frontier);
                 } else {
@@ -6531,12 +7122,6 @@ async fn loki_rule_group(
         .tenants
         .lock()
         .expect("Loki rule store lock poisoned");
-    if !rules.contains_key(&tenant) {
-        return text_response(
-            StatusCode::BAD_REQUEST,
-            "GetRuleGroup unsupported in rule local store\n",
-        );
-    }
     let Some(group) = rules
         .get(&tenant)
         .and_then(|namespaces| namespaces.get(&namespace))
@@ -11844,7 +12429,7 @@ async fn execute_http_stream_query(
     let delete_filters = active_log_delete_filters(&state, tenant, time_range)?;
     if let Some(cold_store) = &state.cold_store {
         let (records, frontier) = hot_tail_snapshot(&state, plan.time_range);
-        let response = execute_stream_query_from_object_store_with_hot_tail_frontier(
+        let scan = execute_stream_query_from_object_store_with_hot_tail_frontier_and_scan_options(
             Arc::clone(&cold_store.store),
             &cold_store.prefix,
             &plan,
@@ -11852,13 +12437,18 @@ async fn execute_http_stream_query(
             &records,
             &frontier,
             &delete_filters,
+            StreamScanOptions::from_stream_options(direction, limit, interval, end_exclusive),
         )
         .await
         .map_err(HttpQueryError::from)?;
         let response =
-            apply_loki_stream_options(response, direction, limit, interval, end_exclusive);
-        return Ok(add_loki_query_stats_for_stream_plan_with_hot_tail(
-            response, &plan, &records, &frontier,
+            apply_loki_stream_options(scan.value, direction, limit, interval, end_exclusive);
+        return Ok(add_loki_query_stats_for_stream_blocks_with_hot_tail(
+            response,
+            &scan.scanned_blocks,
+            &plan,
+            &records,
+            &frontier,
         ));
     }
     if let Some(hot_tail) = &state.hot_tail {
@@ -14667,7 +15257,12 @@ fn metadata_time_range(params: &SeriesParams) -> Result<Option<TimeRange>, HttpQ
 
 fn metadata_index_range(params: &SeriesParams) -> Result<TimeRange, HttpQueryError> {
     let Some(time_range) = metadata_time_range(params)? else {
-        return TimeRange::new(i64::MIN, i64::MAX).map_err(HttpQueryError::from);
+        let end_ns = current_unix_time_ns();
+        return TimeRange::new(
+            end_ns.saturating_sub(LOKI_METADATA_DEFAULT_INDEX_RANGE_NS),
+            end_ns,
+        )
+        .map_err(HttpQueryError::from);
     };
     validate_loki_volume_query_range_limit(time_range)?;
     Ok(time_range)
@@ -15508,6 +16103,7 @@ fn time_range(params: &QueryParams, kind: QueryKind) -> Result<TimeRange, HttpQu
 }
 
 const LOKI_DEFAULT_QUERY_RANGE_NS: i64 = 3_600_000_000_000;
+const LOKI_METADATA_DEFAULT_INDEX_RANGE_NS: i64 = 6 * 60 * 60 * 1_000_000_000;
 const LOKI_DEFAULT_TAIL_LIMIT: usize = 100;
 const LOKI_MAX_QUERY_RANGE_RESOLUTION_POINTS: i64 = 11_000;
 const LOKI_MAX_TAIL_DELAY_NS: i64 = 5_000_000_000;
@@ -15681,6 +16277,111 @@ pub async fn execute_stream_query_from_object_store(
     .await
 }
 
+struct ObjectStoreStreamScan {
+    value: Value,
+    scanned_blocks: Vec<BlockDescriptor>,
+}
+
+#[derive(Clone, Copy)]
+struct StreamScanOptions {
+    direction: LokiDirection,
+    limit: Option<usize>,
+    end_exclusive: Option<i64>,
+    allow_limit_short_circuit: bool,
+}
+
+impl StreamScanOptions {
+    fn exhaustive() -> Self {
+        Self {
+            direction: LokiDirection::Forward,
+            limit: None,
+            end_exclusive: None,
+            allow_limit_short_circuit: false,
+        }
+    }
+
+    fn from_stream_options(
+        direction: LokiDirection,
+        limit: Option<usize>,
+        interval: Option<i64>,
+        end_exclusive: Option<i64>,
+    ) -> Self {
+        Self {
+            direction,
+            limit,
+            end_exclusive,
+            allow_limit_short_circuit: limit.is_some() && interval.is_none(),
+        }
+    }
+
+    fn reached_limit(self, streams: &BTreeMap<Labels, Vec<[String; 2]>>) -> bool {
+        self.allow_limit_short_circuit
+            && self
+                .limit
+                .is_some_and(|limit| count_stream_map_lines(streams, self.end_exclusive) >= limit)
+    }
+
+    fn block_fetch_concurrency(self) -> usize {
+        if !self.allow_limit_short_circuit {
+            return OBJECT_STORE_STREAM_BLOCK_FETCH_CONCURRENCY;
+        }
+        self.limit
+            .map(|limit| OBJECT_STORE_STREAM_BLOCK_FETCH_CONCURRENCY.min(limit.max(1)))
+            .unwrap_or(OBJECT_STORE_STREAM_BLOCK_FETCH_CONCURRENCY)
+    }
+}
+
+fn count_stream_map_lines(
+    streams: &BTreeMap<Labels, Vec<[String; 2]>>,
+    end_exclusive: Option<i64>,
+) -> usize {
+    streams
+        .values()
+        .map(|values| {
+            values
+                .iter()
+                .filter(|entry| {
+                    end_exclusive.is_none_or(|end_exclusive| {
+                        entry[0]
+                            .parse::<i64>()
+                            .map_or(true, |timestamp| timestamp < end_exclusive)
+                    })
+                })
+                .count()
+        })
+        .fold(0_usize, usize::saturating_add)
+}
+
+fn object_store_stream_blocks_in_scan_order<'a>(
+    blocks: &'a [BlockDescriptor],
+    direction: LokiDirection,
+) -> Vec<&'a BlockDescriptor> {
+    let mut blocks = blocks.iter().collect::<Vec<_>>();
+    match direction {
+        LokiDirection::Forward => {
+            blocks.sort_by_key(|block| {
+                (
+                    block.key.time_range.start_ns,
+                    block.key.time_range.end_ns,
+                    block.key.partition,
+                    block.key.first_offset,
+                )
+            });
+        }
+        LokiDirection::Backward => {
+            blocks.sort_by_key(|block| {
+                (
+                    std::cmp::Reverse(block.key.time_range.end_ns),
+                    std::cmp::Reverse(block.key.time_range.start_ns),
+                    std::cmp::Reverse(block.key.partition),
+                    std::cmp::Reverse(block.key.last_offset),
+                )
+            });
+        }
+    }
+    blocks
+}
+
 #[must_use]
 pub fn stream_plan_scan_sql(plan: &StreamPlan) -> String {
     stream_plan_scan_sql_for_time_range(plan, plan.time_range)
@@ -15782,32 +16483,101 @@ async fn execute_stream_query_from_object_store_with_hot_tail_frontier(
     frontier: &CompactionFrontier,
     delete_filters: &[ActiveLogDeleteFilter],
 ) -> Result<Value, QueryError> {
+    Ok(
+        execute_stream_query_from_object_store_with_hot_tail_frontier_and_scan_options(
+            store,
+            prefix,
+            plan,
+            label_index,
+            hot_tail,
+            frontier,
+            delete_filters,
+            StreamScanOptions::exhaustive(),
+        )
+        .await?
+        .value,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_stream_query_from_object_store_with_hot_tail_frontier_and_scan_options(
+    store: Arc<dyn ObjectStore>,
+    prefix: &ObjectPath,
+    plan: &StreamPlan,
+    label_index: &LabelIndex,
+    hot_tail: &[WalLogRecord],
+    frontier: &CompactionFrontier,
+    delete_filters: &[ActiveLogDeleteFilter],
+    options: StreamScanOptions,
+) -> Result<ObjectStoreStreamScan, QueryError> {
     if plan.blocks.is_empty() || plan.fingerprints.is_empty() {
         let mut streams = BTreeMap::new();
         for record in hot_tail {
             append_matching_hot_log_record(&mut streams, plan, record, frontier, delete_filters);
         }
         sort_loki_stream_values(&mut streams);
-        return Ok(loki_streams_response(streams));
+        return Ok(ObjectStoreStreamScan {
+            value: loki_streams_response(streams),
+            scanned_blocks: Vec::new(),
+        });
     }
 
     let mut streams: BTreeMap<Labels, Vec<[String; 2]>> = BTreeMap::new();
     let mut warnings = Vec::new();
-    for block in &plan.blocks {
-        let Ok(batches) =
-            collect_object_store_stream_log_batches(Arc::clone(&store), prefix, block, plan).await
-        else {
-            warnings.push(format!("failed to read block {}", block.key.object_key()));
-            continue;
-        };
-        append_matching_log_batches(&mut streams, plan, label_index, &batches, delete_filters)?;
+    let mut scanned_blocks = Vec::new();
+
+    if matches!(options.direction, LokiDirection::Backward) {
+        for record in hot_tail {
+            append_matching_hot_log_record(&mut streams, plan, record, frontier, delete_filters);
+        }
     }
-    for record in hot_tail {
-        append_matching_hot_log_record(&mut streams, plan, record, frontier, delete_filters);
+
+    if !options.reached_limit(&streams) {
+        let ordered_blocks =
+            object_store_stream_blocks_in_scan_order(&plan.blocks, options.direction);
+        for block_batch in ordered_blocks.chunks(options.block_fetch_concurrency()) {
+            if options.reached_limit(&streams) {
+                break;
+            }
+            let results = futures_util::future::join_all(block_batch.iter().map(|block| {
+                let store = Arc::clone(&store);
+                let block = *block;
+                async move {
+                    let result =
+                        collect_object_store_stream_log_batches(store, prefix, block, plan).await;
+                    (block, result)
+                }
+            }))
+            .await;
+
+            for (block, result) in results {
+                scanned_blocks.push(block.clone());
+                let Ok(batches) = result else {
+                    warnings.push(format!("failed to read block {}", block.key.object_key()));
+                    continue;
+                };
+                append_matching_log_batches(
+                    &mut streams,
+                    plan,
+                    label_index,
+                    &batches,
+                    delete_filters,
+                )?;
+            }
+        }
+    }
+
+    if matches!(options.direction, LokiDirection::Forward) && !options.reached_limit(&streams) {
+        for record in hot_tail {
+            append_matching_hot_log_record(&mut streams, plan, record, frontier, delete_filters);
+        }
     }
     sort_loki_stream_values(&mut streams);
 
-    Ok(loki_streams_response_with_warnings(streams, &warnings))
+    Ok(ObjectStoreStreamScan {
+        value: loki_streams_response_with_warnings(streams, &warnings),
+        scanned_blocks,
+    })
 }
 
 async fn collect_object_store_stream_log_batches(
@@ -18284,13 +19054,29 @@ fn add_loki_query_stats_for_stream_plan(mut value: Value, plan: &StreamPlan) -> 
 }
 
 fn add_loki_query_stats_for_stream_plan_with_hot_tail(
-    mut value: Value,
+    value: Value,
     plan: &StreamPlan,
     hot_tail: &[WalLogRecord],
     frontier: &CompactionFrontier,
 ) -> Value {
-    let bytes = planned_block_bytes(plan);
-    let chunks = u64::try_from(plan.blocks.len()).unwrap_or(u64::MAX);
+    add_loki_query_stats_for_stream_blocks_with_hot_tail(
+        value,
+        &plan.blocks,
+        plan,
+        hot_tail,
+        frontier,
+    )
+}
+
+fn add_loki_query_stats_for_stream_blocks_with_hot_tail(
+    mut value: Value,
+    blocks: &[BlockDescriptor],
+    plan: &StreamPlan,
+    hot_tail: &[WalLogRecord],
+    frontier: &CompactionFrontier,
+) -> Value {
+    let bytes = planned_block_bytes_for_blocks(blocks);
+    let chunks = u64::try_from(blocks.len()).unwrap_or(u64::MAX);
     let lines = count_loki_stream_result_lines(&value);
     let ingester_lines = count_loki_stream_result_hot_tail_lines(&value, plan, hot_tail, frontier);
     let store_lines = lines.saturating_sub(ingester_lines);
@@ -18373,7 +19159,11 @@ fn populate_loki_query_scan_stats(
 }
 
 fn planned_block_bytes(plan: &StreamPlan) -> u64 {
-    plan.blocks
+    planned_block_bytes_for_blocks(&plan.blocks)
+}
+
+fn planned_block_bytes_for_blocks(blocks: &[BlockDescriptor]) -> u64 {
+    blocks
         .iter()
         .map(|block| block.size_bytes)
         .try_fold(0_u64, u64::checked_add)
@@ -19165,6 +19955,197 @@ impl IntoResponse for HttpQueryError {
 mod tests {
     use super::*;
 
+    #[derive(Clone)]
+    struct RecordingObjectStore {
+        inner: Arc<object_store::memory::InMemory>,
+        put_paths: Arc<Mutex<Vec<String>>>,
+        get_paths: Arc<Mutex<Vec<String>>>,
+        list_prefixes: Arc<Mutex<Vec<String>>>,
+        list_offsets: Arc<Mutex<Vec<String>>>,
+        get_delay: Duration,
+        active_gets: Arc<std::sync::atomic::AtomicUsize>,
+        max_active_gets: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl RecordingObjectStore {
+        fn new() -> Self {
+            Self {
+                inner: Arc::new(object_store::memory::InMemory::new()),
+                put_paths: Arc::new(Mutex::new(Vec::new())),
+                get_paths: Arc::new(Mutex::new(Vec::new())),
+                list_prefixes: Arc::new(Mutex::new(Vec::new())),
+                list_offsets: Arc::new(Mutex::new(Vec::new())),
+                get_delay: Duration::ZERO,
+                active_gets: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                max_active_gets: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }
+        }
+
+        fn with_get_delay(mut self, get_delay: Duration) -> Self {
+            self.get_delay = get_delay;
+            self
+        }
+
+        fn clear_recorded_paths(&self) {
+            self.put_paths.lock().unwrap().clear();
+            self.get_paths.lock().unwrap().clear();
+            self.list_prefixes.lock().unwrap().clear();
+            self.list_offsets.lock().unwrap().clear();
+        }
+
+        fn clear_put_paths(&self) {
+            self.put_paths.lock().unwrap().clear();
+        }
+
+        fn put_paths(&self) -> Vec<String> {
+            self.put_paths.lock().unwrap().clone()
+        }
+
+        fn get_paths(&self) -> Vec<String> {
+            self.get_paths.lock().unwrap().clone()
+        }
+
+        fn list_prefixes(&self) -> Vec<String> {
+            self.list_prefixes.lock().unwrap().clone()
+        }
+
+        fn list_offsets(&self) -> Vec<String> {
+            self.list_offsets.lock().unwrap().clone()
+        }
+
+        fn max_active_gets(&self) -> usize {
+            self.max_active_gets
+                .load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn record_get_start(&self) {
+            let active = self
+                .active_gets
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            let mut current = self
+                .max_active_gets
+                .load(std::sync::atomic::Ordering::SeqCst);
+            while active > current {
+                match self.max_active_gets.compare_exchange(
+                    current,
+                    active,
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                ) {
+                    Ok(_) => break,
+                    Err(observed) => current = observed,
+                }
+            }
+        }
+
+        fn record_get_end(&self) {
+            self.active_gets
+                .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    impl std::fmt::Debug for RecordingObjectStore {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("RecordingObjectStore")
+        }
+    }
+
+    impl std::fmt::Display for RecordingObjectStore {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("RecordingObjectStore")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ObjectStore for RecordingObjectStore {
+        async fn put_opts(
+            &self,
+            location: &object_store::path::Path,
+            payload: object_store::PutPayload,
+            opts: object_store::PutOptions,
+        ) -> object_store::Result<object_store::PutResult> {
+            self.put_paths.lock().unwrap().push(location.to_string());
+            self.inner.put_opts(location, payload, opts).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &object_store::path::Path,
+            opts: object_store::PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+            self.inner.put_multipart_opts(location, opts).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &object_store::path::Path,
+            options: object_store::GetOptions,
+        ) -> object_store::Result<object_store::GetResult> {
+            self.get_paths.lock().unwrap().push(location.to_string());
+            self.record_get_start();
+            if !self.get_delay.is_zero() {
+                sleep(self.get_delay).await;
+            }
+            let result = self.inner.get_opts(location, options).await;
+            self.record_get_end();
+            result
+        }
+
+        fn delete_stream(
+            &self,
+            locations: futures_util::stream::BoxStream<
+                'static,
+                object_store::Result<object_store::path::Path>,
+            >,
+        ) -> futures_util::stream::BoxStream<'static, object_store::Result<object_store::path::Path>>
+        {
+            self.inner.delete_stream(locations)
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&object_store::path::Path>,
+        ) -> futures_util::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+        {
+            self.list_prefixes
+                .lock()
+                .unwrap()
+                .push(prefix.map_or_else(String::new, ToString::to_string));
+            self.inner.list(prefix)
+        }
+
+        fn list_with_offset(
+            &self,
+            prefix: Option<&object_store::path::Path>,
+            offset: &object_store::path::Path,
+        ) -> futures_util::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+        {
+            self.list_prefixes
+                .lock()
+                .unwrap()
+                .push(prefix.map_or_else(String::new, ToString::to_string));
+            self.list_offsets.lock().unwrap().push(offset.to_string());
+            self.inner.list_with_offset(prefix, offset)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&object_store::path::Path>,
+        ) -> object_store::Result<object_store::ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy_opts(
+            &self,
+            from: &object_store::path::Path,
+            to: &object_store::path::Path,
+            options: object_store::CopyOptions,
+        ) -> object_store::Result<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
+    }
+
     /// The OTLP/HTTP logs handler must decompress `Content-Encoding: gzip`
     /// before protobuf-decoding. The OpenTelemetry SDK's `otlphttp` exporter
     /// (what the demo's Alloy uses) gzips by default, so a regression here means
@@ -19365,6 +20346,165 @@ mod tests {
     }
 
     #[test]
+    fn hot_tail_prune_compacted_rebuilds_records_and_time_index() {
+        let hot_tail = BufferedLogHotTail::default();
+        const BUCKET: i64 = HOT_TAIL_BUCKET_NS;
+
+        let mut compacted_by_offset = hot_tail_test_record(4 * BUCKET, "offset-old");
+        compacted_by_offset.position = Some(WalPosition {
+            partition: 0,
+            offset: 7,
+        });
+        let mut kept_by_offset = hot_tail_test_record(3 * BUCKET, "offset-new");
+        kept_by_offset.position = Some(WalPosition {
+            partition: 0,
+            offset: 8,
+        });
+        let compacted_by_time = hot_tail_test_record(2 * BUCKET, "time-old");
+        let kept_by_time = hot_tail_test_record(5 * BUCKET, "time-new");
+        let expected = vec![kept_by_offset.clone(), kept_by_time.clone()];
+
+        hot_tail.append_records(vec![
+            compacted_by_offset,
+            kept_by_offset,
+            compacted_by_time,
+            kept_by_time,
+        ]);
+
+        let frontier = CompactionFrontier::new(2 * BUCKET).with_partition_offset(0, 7);
+
+        assert_eq!(hot_tail.prune_compacted(&frontier), 2);
+        assert_eq!(hot_tail.records(), expected);
+        assert_eq!(hot_tail.records_in_range(0, 6 * BUCKET), expected);
+        assert!(hot_tail.records_in_range(2 * BUCKET, 2 * BUCKET).is_empty());
+        assert!(hot_tail.records_in_range(4 * BUCKET, 4 * BUCKET).is_empty());
+    }
+
+    #[tokio::test]
+    async fn compaction_frontier_refresh_prunes_hot_tail_from_object_store() {
+        let store = object_store::memory::InMemory::new();
+        let prefix = ObjectPath::default();
+        let frontier = SharedCompactionFrontier::default();
+        let hot_tail = BufferedLogHotTail::default();
+        let compacted = hot_tail_test_record(1_000, "old");
+        let fresh = hot_tail_test_record(3_000, "new");
+        hot_tail.append_records(vec![compacted, fresh.clone()]);
+        write_compaction_frontier_to_object_store(&store, &prefix, &CompactionFrontier::new(2_000))
+            .await
+            .unwrap();
+
+        let pruned = refresh_compaction_frontier_and_prune(&store, &prefix, &frontier, &hot_tail)
+            .await
+            .unwrap();
+
+        assert_eq!(pruned, 1);
+        assert_eq!(frontier.snapshot(), CompactionFrontier::new(2_000));
+        assert_eq!(hot_tail.records(), vec![fresh]);
+    }
+
+    #[tokio::test]
+    async fn appending_log_index_shard_does_not_rewrite_historical_shards_or_full_manifest() {
+        let store = RecordingObjectStore::new();
+        let prefix = ObjectPath::from("observability");
+        let tenant = "tenant-a";
+        let old_range_a = TimeRange::new(100, 199).unwrap();
+        let old_range_b = TimeRange::new(200, 299).unwrap();
+        let new_range = TimeRange::new(300, 399).unwrap();
+        let mut labels_index = LabelIndex::default();
+        let api =
+            labels_index.insert_series(tenant, BTreeMap::from([("app".into(), "api".into())]));
+        let worker =
+            labels_index.insert_series(tenant, BTreeMap::from([("app".into(), "worker".into())]));
+        let admin =
+            labels_index.insert_series(tenant, BTreeMap::from([("app".into(), "admin".into())]));
+        let mut block_index = BlockIndex::default();
+        block_index.insert(BlockDescriptor::new(
+            BlockKey::new(tenant, 0, 10, 19, old_range_a),
+            BTreeSet::from([api]),
+        ));
+        block_index.insert(BlockDescriptor::new(
+            BlockKey::new(tenant, 0, 20, 29, old_range_b),
+            BTreeSet::from([worker]),
+        ));
+        crabka_blockstore::write_tenant_log_index_shards_to_object_store(
+            &store,
+            &prefix,
+            tenant,
+            &[old_range_a, old_range_b],
+            &labels_index,
+            &block_index,
+        )
+        .await
+        .unwrap();
+
+        block_index.insert(BlockDescriptor::new(
+            BlockKey::new(tenant, 0, 30, 39, new_range),
+            BTreeSet::from([admin]),
+        ));
+        store.clear_put_paths();
+
+        write_tenant_compaction_indexes_to_object_store(
+            &store,
+            &prefix,
+            tenant,
+            new_range,
+            &labels_index,
+            &block_index,
+            LogCompactionIndexOutput::ShardManifests,
+        )
+        .await
+        .unwrap();
+
+        let put_paths = store.put_paths();
+        assert!(
+            !put_paths.contains(
+                &crabka_blockstore::log_tenant_index_manifest_object_path(&prefix, tenant)
+                    .to_string()
+            ),
+            "global tenant manifest should not be rewritten: {put_paths:?}"
+        );
+        assert!(
+            !put_paths.contains(
+                &crabka_blockstore::log_tenant_index_shard_catalog_object_path(&prefix, tenant)
+                    .to_string()
+            ),
+            "shard catalog should not be rewritten: {put_paths:?}"
+        );
+        assert!(
+            put_paths.contains(
+                &crabka_blockstore::log_tenant_index_shard_manifest_object_path(
+                    &prefix, tenant, new_range
+                )
+                .to_string()
+            ),
+            "new shard manifest should be written: {put_paths:?}"
+        );
+        assert!(
+            !put_paths.contains(
+                &crabka_blockstore::log_tenant_index_shard_manifest_object_path(
+                    &prefix,
+                    tenant,
+                    old_range_a,
+                )
+                .to_string()
+            ),
+            "old shard A should not be rewritten: {put_paths:?}"
+        );
+        assert!(
+            !put_paths.contains(
+                &crabka_blockstore::log_tenant_index_shard_manifest_object_path(
+                    &prefix,
+                    tenant,
+                    old_range_b,
+                )
+                .to_string()
+            ),
+            "old shard B should not be rewritten: {put_paths:?}"
+        );
+        assert_eq!(put_paths.len(), 1, "unexpected PUT chatter: {put_paths:?}");
+    }
+
+    #[test]
     fn detected_labels_empty_query_is_match_all() {
         // Grafana's Logs Drilldown loads `detected_labels?query=` with an empty
         // query to discover every label. An empty/blank query must parse to
@@ -19494,6 +20634,320 @@ mod tests {
             result.is_ok(),
             "expected Ok on absent cold index shards, got: {:?}",
             result.err()
+        );
+    }
+
+    #[tokio::test]
+    async fn querier_state_with_request_tenant_index_caches_shard_indexes_for_repeated_range() {
+        let store = RecordingObjectStore::new();
+        let prefix = ObjectPath::from("observability/logs");
+        let tenant = "tenant-a";
+        let query_range = TimeRange::new(0, 100).unwrap();
+        let mut labels_index = LabelIndex::default();
+        let api = labels_index.insert_series(tenant, crabka_blockstore::labels([("app", "api")]));
+        let mut block_index = BlockIndex::default();
+        let shard_range = TimeRange::new(10, 19).unwrap();
+        block_index.insert(BlockDescriptor::new(
+            BlockKey::new(tenant, 0, 42, 43, shard_range),
+            BTreeSet::from([api]),
+        ));
+        crabka_blockstore::write_tenant_log_index_shards_to_object_store(
+            &store,
+            &prefix,
+            tenant,
+            &[shard_range],
+            &labels_index,
+            &block_index,
+        )
+        .await
+        .unwrap();
+        store.clear_recorded_paths();
+
+        let state = QuerierState::new(
+            tempfile::tempdir().unwrap().keep(),
+            LabelIndex::default(),
+            BlockIndex::default(),
+        )
+        .with_dynamic_tenant_object_store_shards(Arc::new(store.clone()), prefix.clone());
+
+        let first = state
+            .with_request_tenant_index(tenant, query_range)
+            .await
+            .unwrap();
+        let second = state
+            .with_request_tenant_index(tenant, query_range)
+            .await
+            .unwrap();
+
+        assert!(first.label_index.label_names(tenant) == BTreeSet::from(["app".to_string()]));
+        assert!(second.label_index.label_names(tenant) == BTreeSet::from(["app".to_string()]));
+
+        let shard_prefix =
+            crabka_blockstore::log_tenant_index_shards_object_prefix(&prefix, tenant).to_string();
+        let shard_manifest = crabka_blockstore::log_tenant_index_shard_manifest_object_path(
+            &prefix,
+            tenant,
+            shard_range,
+        )
+        .to_string();
+        let list_count = store
+            .list_prefixes()
+            .into_iter()
+            .filter(|prefix| prefix == &shard_prefix)
+            .count();
+        let shard_get_count = store
+            .get_paths()
+            .into_iter()
+            .filter(|path| path == &shard_manifest)
+            .count();
+
+        assert!(list_count == 1, "shard prefix should be listed once");
+        assert!(
+            shard_get_count == 1,
+            "shard manifest should be fetched once"
+        );
+    }
+
+    #[tokio::test]
+    async fn querier_state_with_request_tenant_index_reuses_shard_indexes_for_moving_ranges() {
+        let store = RecordingObjectStore::new();
+        let prefix = ObjectPath::from("observability/logs");
+        let tenant = "tenant-a";
+        let first_query_range = TimeRange::new(0, 100).unwrap();
+        let moving_query_range = TimeRange::new(5, 105).unwrap();
+        let shard_range_a = TimeRange::new(10, 19).unwrap();
+        let shard_range_b = TimeRange::new(80, 89).unwrap();
+
+        let mut labels_index = LabelIndex::default();
+        let api = labels_index.insert_series(tenant, crabka_blockstore::labels([("app", "api")]));
+        let worker =
+            labels_index.insert_series(tenant, crabka_blockstore::labels([("app", "worker")]));
+        let mut block_index = BlockIndex::default();
+        block_index.insert(BlockDescriptor::new(
+            BlockKey::new(tenant, 0, 42, 43, shard_range_a),
+            BTreeSet::from([api]),
+        ));
+        block_index.insert(BlockDescriptor::new(
+            BlockKey::new(tenant, 0, 44, 45, shard_range_b),
+            BTreeSet::from([worker]),
+        ));
+        crabka_blockstore::write_tenant_log_index_shards_to_object_store(
+            &store,
+            &prefix,
+            tenant,
+            &[shard_range_a, shard_range_b],
+            &labels_index,
+            &block_index,
+        )
+        .await
+        .unwrap();
+        store.clear_recorded_paths();
+
+        let state = QuerierState::new(
+            tempfile::tempdir().unwrap().keep(),
+            LabelIndex::default(),
+            BlockIndex::default(),
+        )
+        .with_dynamic_tenant_object_store_shards(Arc::new(store.clone()), prefix.clone());
+
+        let first = state
+            .with_request_tenant_index(tenant, first_query_range)
+            .await
+            .unwrap();
+        let second = state
+            .with_request_tenant_index(tenant, moving_query_range)
+            .await
+            .unwrap();
+
+        assert!(first.label_index.label_names(tenant) == BTreeSet::from(["app".to_string()]));
+        assert!(second.label_index.label_names(tenant) == BTreeSet::from(["app".to_string()]));
+        assert!(first.block_index.blocks().len() == 2);
+        assert!(second.block_index.blocks().len() == 2);
+
+        let shard_prefix =
+            crabka_blockstore::log_tenant_index_shards_object_prefix(&prefix, tenant).to_string();
+        let shard_manifest_a = crabka_blockstore::log_tenant_index_shard_manifest_object_path(
+            &prefix,
+            tenant,
+            shard_range_a,
+        )
+        .to_string();
+        let shard_manifest_b = crabka_blockstore::log_tenant_index_shard_manifest_object_path(
+            &prefix,
+            tenant,
+            shard_range_b,
+        )
+        .to_string();
+        let list_count = store
+            .list_prefixes()
+            .into_iter()
+            .filter(|prefix| prefix == &shard_prefix)
+            .count();
+        let shard_get_count_a = store
+            .get_paths()
+            .into_iter()
+            .filter(|path| path == &shard_manifest_a)
+            .count();
+        let shard_get_count_b = store
+            .get_paths()
+            .into_iter()
+            .filter(|path| path == &shard_manifest_b)
+            .count();
+
+        assert!(list_count == 1, "shard prefix should be listed once");
+        assert!(
+            shard_get_count_a == 1,
+            "shard manifest A should be fetched once"
+        );
+        assert!(
+            shard_get_count_b == 1,
+            "shard manifest B should be fetched once"
+        );
+    }
+
+    #[tokio::test]
+    async fn querier_state_with_request_tenant_index_lists_shards_from_query_window_offset() {
+        let store = RecordingObjectStore::new();
+        let prefix = ObjectPath::from("observability/logs");
+        let tenant = "tenant-a";
+        let query_start = 1_700_000_000_000_000_000;
+        let query_end = query_start + 300_000_000_000;
+        let query_range = TimeRange::new(query_start, query_end).unwrap();
+        let old_shard_range =
+            TimeRange::new(query_start - 600_000_000_000, query_start - 599_000_000_000).unwrap();
+        let matching_shard_range = TimeRange::new(query_start + 10, query_start + 20).unwrap();
+
+        let mut labels_index = LabelIndex::default();
+        let api = labels_index.insert_series(tenant, crabka_blockstore::labels([("app", "api")]));
+        let mut block_index = BlockIndex::default();
+        block_index.insert(BlockDescriptor::new(
+            BlockKey::new(tenant, 0, 40, 41, old_shard_range),
+            BTreeSet::from([api]),
+        ));
+        block_index.insert(BlockDescriptor::new(
+            BlockKey::new(tenant, 0, 42, 43, matching_shard_range),
+            BTreeSet::from([api]),
+        ));
+        crabka_blockstore::write_tenant_log_index_shards_to_object_store(
+            &store,
+            &prefix,
+            tenant,
+            &[old_shard_range, matching_shard_range],
+            &labels_index,
+            &block_index,
+        )
+        .await
+        .unwrap();
+        store.clear_recorded_paths();
+
+        let state = QuerierState::new(
+            tempfile::tempdir().unwrap().keep(),
+            LabelIndex::default(),
+            BlockIndex::default(),
+        )
+        .with_dynamic_tenant_object_store_shards(Arc::new(store.clone()), prefix.clone());
+
+        let state = state
+            .with_request_tenant_index(tenant, query_range)
+            .await
+            .unwrap();
+
+        assert!(state.label_index.label_names(tenant) == BTreeSet::from(["app".to_string()]));
+        let expected_offset =
+            crabka_blockstore::log_tenant_index_shards_object_prefix(&prefix, tenant)
+                .join(format!("time={}", query_start - (query_end - query_start)))
+                .to_string();
+        assert!(
+            store.list_offsets().contains(&expected_offset),
+            "shard listing should start near the query window; offsets={:?}",
+            store.list_offsets()
+        );
+    }
+
+    #[test]
+    fn metadata_index_range_defaults_empty_metadata_requests_to_recent_window() {
+        const SIX_HOURS_NS: i64 = 6 * 60 * 60 * 1_000_000_000;
+        let before = current_unix_time_ns();
+        let range = metadata_index_range(&SeriesParams::default()).unwrap();
+        let after = current_unix_time_ns();
+
+        assert!(
+            range.start_ns >= before - SIX_HOURS_NS,
+            "default metadata index start should be within Loki's default recent window"
+        );
+        assert!(
+            range.end_ns <= after,
+            "default metadata index end should be now-ish, got {} after {}",
+            range.end_ns,
+            after
+        );
+        assert!(
+            range.end_ns - range.start_ns <= SIX_HOURS_NS,
+            "default metadata index range should not be all time"
+        );
+    }
+
+    #[tokio::test]
+    async fn object_store_stream_query_batches_cold_block_reads() {
+        let store = RecordingObjectStore::new().with_get_delay(Duration::from_millis(25));
+        let prefix = ObjectPath::from("observability/logs");
+        let tenant = "tenant-a";
+        let mut label_index = LabelIndex::default();
+        let api = label_index.insert_series(tenant, crabka_blockstore::labels([("app", "api")]));
+        let mut block_index = BlockIndex::default();
+
+        for block_id in 0..4 {
+            let start_ns = block_id * 10;
+            let end_ns = start_ns + 9;
+            let block = write_log_block_to_object_store(
+                &store,
+                &prefix,
+                &BlockKey::new(
+                    tenant,
+                    0,
+                    start_ns as i64,
+                    end_ns as i64,
+                    TimeRange::new(start_ns as i64, end_ns as i64).unwrap(),
+                ),
+                vec![LogRow::new(
+                    api,
+                    end_ns as i64,
+                    format!("api error {block_id}"),
+                    BTreeMap::new(),
+                )],
+            )
+            .await
+            .unwrap();
+            block_index.insert(block);
+        }
+
+        let plan = plan_stream_query(
+            tenant,
+            TimeRange::new(0, 39).unwrap(),
+            parse_query(r#"{app="api"} |= "error""#).unwrap(),
+            &label_index,
+            &block_index,
+        )
+        .unwrap();
+
+        let scan = execute_stream_query_from_object_store_with_hot_tail_frontier_and_scan_options(
+            Arc::new(store.clone()),
+            &prefix,
+            &plan,
+            &label_index,
+            &[],
+            &CompactionFrontier::new(i64::MAX),
+            &[],
+            StreamScanOptions::from_stream_options(LokiDirection::Forward, Some(100), None, None),
+        )
+        .await
+        .unwrap();
+
+        assert!(scan.scanned_blocks.len() == 4);
+        assert!(
+            store.max_active_gets() > 1,
+            "expected cold block reads to overlap, max_active_gets={}",
+            store.max_active_gets()
         );
     }
 

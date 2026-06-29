@@ -4,7 +4,7 @@
   "tags": ["crabka", "observability", "metrics"],
   "schemaVersion": 39,
   "version": 1,
-  "refresh": "15s",
+  "refresh": "30s",
   "time": { "from": "now-30m", "to": "now" },
   "templating": {
     "list": [
@@ -43,7 +43,7 @@
       "datasource": { "type": "prometheus", "uid": "${ds}" },
       "fieldConfig": { "defaults": { "unit": "percentunit", "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 0.01 }, { "color": "red", "value": 0.05 } ] } } },
       "gridPos": { "h": 8, "w": 8, "x": 16, "y": 8 },
-      "targets": [ { "refId": "A", "expr": "sum(rate(crabka_metrics_ingest_requests_total{status=\"error\"}[5m])) / clamp_min(sum(rate(crabka_metrics_ingest_requests_total[5m])), 1)" } ]
+      "targets": [ { "refId": "A", "expr": "(sum(rate(crabka_metrics_ingest_requests_total{status=\"error\"}[5m])) / clamp_min(sum(rate(crabka_metrics_ingest_requests_total[5m])), 1)) or vector(0)", "instant": true } ]
     },
     {
       "id": 14, "type": "timeseries", "title": "Ingest latency (p50 / p99, s)",
@@ -74,7 +74,7 @@
       "datasource": { "type": "prometheus", "uid": "${ds}" },
       "fieldConfig": { "defaults": { "unit": "percentunit", "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 0.01 }, { "color": "red", "value": 0.05 } ] } } },
       "gridPos": { "h": 8, "w": 8, "x": 8, "y": 25 },
-      "targets": [ { "refId": "A", "expr": "sum(rate(crabka_metrics_query_requests_total{status=\"error\"}[5m])) / clamp_min(sum(rate(crabka_metrics_query_requests_total[5m])), 1)" } ]
+      "targets": [ { "refId": "A", "expr": "(sum(rate(crabka_metrics_query_requests_total{status=\"error\"}[5m])) / clamp_min(sum(rate(crabka_metrics_query_requests_total[5m])), 1)) or vector(0)", "instant": true } ]
     },
     {
       "id": 23, "type": "timeseries", "title": "Query p99 latency (s) by route",

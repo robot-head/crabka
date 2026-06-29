@@ -9,7 +9,7 @@ A single `crabka-broker` is triple-duty: the demo app's event bus, the
 write-ahead log for all four telemetry backends, and a self-observed subject.
 One Grafana Alloy collects every signal from both sources (Crabka's own
 processes and the demo app) and writes to the backends, which persist through
-the broker (WAL) and a shared MinIO bucket (blocks).
+the broker (WAL) and a shared RustFS bucket set (blocks).
 
 ## Run
 
@@ -26,33 +26,54 @@ Data appears a few minutes after startup, as Alloy collects signals and the
 block-builders flush their first blocks (give it ~3–5 min on a cold start). The
 queriers refresh their indexes automatically.
 
-> **Known cold-boot caveat.** Under continuous jemalloc heap profiling, a WAL
-> block-builder (most often `logs-compactor` or `profiles-block-builder`) can
-> intermittently stall at its consumer group-join on a cold boot — a tokio
-> runtime-level lost wakeup that also freezes the in-process timers, so it can't
-> self-recover. If a signal's panel is still empty after ~5 minutes, restart
-> that service: `docker compose restart logs-compactor` /
-> `docker compose restart profiles-block-builder` (a fresh process almost always
-> clears it; a bad-luck boot may need a second try). This is a tracked
-> follow-up; it does not affect metrics/traces, and the data path itself is
-> correct once the consumer joins.
-
 Tune the load with `CRABKA_DEMO_ORDERS_PER_SEC` on the `demo-produce` service
 (default `50`; `0` pauses production). Lower it on a constrained host. Plan on
-**≥ 8 GB** of Docker memory (~20 containers).
+**≥ 8 GB** of Docker memory (~21 containers).
 
-The service binaries run under the jemalloc allocator with heap profiling
-active (`MALLOC_CONF=prof:true,prof_active:true`), so both CPU and heap
-flamegraphs are available.
+The service binaries run under the jemalloc allocator with heap profiling active
+at a coarse sample rate (`lg_prof_sample:25`, roughly one sample per 32 MiB) and
+with short dirty/muzzy decay so freed profiler/query pages return to the OS
+promptly. This keeps heap flamegraphs representative of long-lived allocations
+without the profiler's own backtrace bookkeeping dominating querier RSS.
+CPU pprof collection stays enabled but uses 5-second windows per 60-second
+scrape to keep profiler overhead bounded.
+Alloy's eBPF profiler is CPU-only for native code; Rust memory profiles in this
+demo therefore come from the services' `/debug/pprof/heap` endpoint.
+
+The traces block-builder has its own replay cap
+(`CRABKA_TRACES_BLOCK_BUILDER_MEM`, default `4g`) and a lower flush size
+(`CRABKA_TRACES_BLOCK_BUILDER_FLUSH_MAX_RECORDS`, default `5000`). Cold starts
+can replay a burst of broker self-traces before steady state, so these settings
+avoid a replay-time OOM while keeping the normal RSS small.
 
 ### Rebuild from source
 
 To build the image locally instead of pulling it (e.g. to try local changes),
-build + tag it under the same name from the **repo root**, then start as usual
-— Compose uses the local image when present:
+build + tag it under the same name from the **repo root** with melange + apko,
+then start as usual — Compose uses the local image when present:
 
 ```bash
-docker build -f demo/observability/Dockerfile -t ghcr.io/robot-head/crabka-demo:latest .
+go install chainguard.dev/melange@latest
+go install chainguard.dev/apko@latest
+
+mkdir -p packages .melange-cache
+melange keygen melange.rsa
+melange build packaging/melange/crabka-demo.yaml \
+  --source-dir . \
+  --signing-key melange.rsa \
+  --arch x86_64 \
+  --runner docker \
+  --cache-dir "$PWD/.melange-cache" \
+  --out-dir packages/
+
+apko build packaging/apko/crabka-demo.yaml \
+  ghcr.io/robot-head/crabka-demo:latest \
+  crabka-demo.tar \
+  --arch x86_64 \
+  --repository-append "$PWD/packages" \
+  --keyring-append "$PWD/melange.rsa.pub"
+
+docker load < crabka-demo.tar
 cd demo/observability && docker compose up -d
 ```
 
@@ -64,8 +85,9 @@ Actions workflow (Actions → *publish-demo-image* → *Run workflow* → image 
 - **Explore → Crabka Metrics** (Prometheus): `{job="broker"}` — the broker's own metrics.
 - **Explore → Crabka Logs** (Loki): `{service_name="crabka-logs"}`, `{service_name="observability-demo-app"}` — JSON logs.
 - **Explore → Crabka Traces** (Tempo): TraceQL `{}` — broker + demo-app spans.
-- **Explore → Crabka Profiles** (Pyroscope): service `broker` / `observability-demo-app` — CPU + heap flamegraphs.
-- The **“Crabka observes Crabka”** dashboard (folder *Crabka*) shows one panel per signal.
+- **Explore → Crabka Profiles** (Pyroscope): Crabka services — CPU + heap flamegraphs; demo app roles — CPU flamegraphs.
+- The **“Crabka observes Crabka”** dashboard (folder *Crabka*) shows one panel
+  per signal plus querier heap flamegraphs.
 
 ## Dashboards & alerts
 
@@ -79,6 +101,9 @@ Provisioned dashboards (folder *Crabka*):
 
 - **Crabka — Overview** — fleet liveness, ingest/query rate and error ratio per
   subsystem, broker throughput.
+- **Crabka — Runtime Resources** — container CPU, working-set memory, memory
+  limit ratio, CPU throttling, and top memory users across Crabka plus Grafana,
+  Alloy, cAdvisor, and RustFS.
 - **Crabka — Broker** — Kafka throughput, produce/fetch, partitions, ISR &
   controller health, and FedRAMP-MLA audit pipeline.
 - **Crabka — Metrics / Logs / Traces / Profiles** — per-subsystem RED: ingest
@@ -112,7 +137,9 @@ curl -s -H 'X-Scope-OrgID: demo' -X POST -H 'content-type: application/json' \
 ## Layout
 
 - `docker-compose.yml` — the stack
-- `Dockerfile` — single image with every Crabka binary + the demo app
-- `alloy/config.alloy` — Alloy collects all four signals from both sources
+- `../../packaging/melange/crabka-demo.yaml` — builds the all-in-one demo APK package
+- `../../packaging/apko/crabka-demo.yaml` — assembles the demo OCI image from that package
+- `alloy/config.alloy` — Alloy collects all four signals from both sources and
+  scrapes cAdvisor container resource metrics
 - `grafana/provisioning/` — datasources, dashboards (overview + broker + one per subsystem), and alert rules
-- `minio/bootstrap.sh` — creates one bucket per signal (`crabka-metrics`, `crabka-traces`, `crabka-logs`, `crabka-profiles`)
+- `rustfs/bootstrap.sh` — creates one bucket per signal (`crabka-metrics`, `crabka-traces`, `crabka-logs`, `crabka-profiles`)

@@ -178,7 +178,14 @@ impl AdminClient {
         filter: &AclEntryFilter,
     ) -> Result<Vec<AclEntry>, AdminError> {
         let req = filter_to_describe_request(filter);
-        let resp = self.conn.send(req).await?;
+        let resp = match self.conn.send(req.clone()).await {
+            Ok(resp) => resp,
+            Err(error) if AdminClient::is_retriable_transport_error(&error) => {
+                self.reconnect_bootstrap().await?;
+                self.conn.send(req).await?
+            }
+            Err(error) => return Err(AdminError::from(error)),
+        };
         parse_describe_acls(resp)
     }
 

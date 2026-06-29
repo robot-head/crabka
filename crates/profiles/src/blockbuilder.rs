@@ -21,6 +21,8 @@ use crate::wal::{PROFILES_WAL_TOPIC, ProfileRecord, WalMapping, WalSymbolSet};
 
 pub const STACKTRACE_PARTITION: u64 = 0;
 const NANOS_PER_MILLI: i64 = 1_000_000;
+const WAL_FETCH_MAX_BYTES: i32 = 2 * 1024 * 1024;
+const WAL_FETCH_PARTITION_MAX_BYTES: i32 = 256 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BuiltSample {
@@ -204,7 +206,10 @@ pub async fn run_with_config(config: BlockBuilderConfig) -> Result<(), ProfilesE
     };
     let mut consumer = Consumer::builder()
         .bootstrap(config.bootstrap)
-        .group_id(config.group_id)
+        .group_id(config.group_id.clone())
+        .group_instance_id(config.group_id)
+        .fetch_max_bytes(WAL_FETCH_MAX_BYTES)
+        .fetch_partition_max_bytes(WAL_FETCH_PARTITION_MAX_BYTES)
         .subscribe(vec![PROFILES_WAL_TOPIC.to_string()])
         .auto_offset_reset(AutoOffsetReset::Earliest)
         .build()

@@ -171,6 +171,12 @@ impl ProfileStore for ColdProfileStore {
         start_ms: i64,
         end_ms: i64,
     ) -> Result<Vec<String>, ProfileError> {
+        if is_unbounded_metadata_range(start_ms, end_ms) {
+            return self
+                .current_index()
+                .label_names_for(tenant, matchers)
+                .map_err(|err| ProfileError::Store(err.to_string()));
+        }
         let active = self
             .active_fingerprints_for_rows(tenant, matchers, start_ms, end_ms)
             .await?;
@@ -187,6 +193,12 @@ impl ProfileStore for ColdProfileStore {
         start_ms: i64,
         end_ms: i64,
     ) -> Result<Vec<String>, ProfileError> {
+        if is_unbounded_metadata_range(start_ms, end_ms) {
+            return self
+                .current_index()
+                .label_values_for(tenant, name, matchers)
+                .map_err(|err| ProfileError::Store(err.to_string()));
+        }
         let active = self
             .active_fingerprints_for_rows(tenant, matchers, start_ms, end_ms)
             .await?;
@@ -201,6 +213,9 @@ impl ProfileStore for ColdProfileStore {
         start_ms: i64,
         end_ms: i64,
     ) -> Result<Vec<String>, ProfileError> {
+        if is_unbounded_metadata_range(start_ms, end_ms) {
+            return Ok(self.current_index().profile_types(tenant));
+        }
         let active = self
             .active_fingerprints_for_rows(tenant, &[], start_ms, end_ms)
             .await?;
@@ -217,6 +232,12 @@ impl ProfileStore for ColdProfileStore {
         start_ms: i64,
         end_ms: i64,
     ) -> Result<Vec<Vec<(String, String)>>, ProfileError> {
+        if is_unbounded_metadata_range(start_ms, end_ms) {
+            return self
+                .current_index()
+                .series(tenant, matchers, label_names)
+                .map_err(|err| ProfileError::Store(err.to_string()));
+        }
         let active = self
             .active_fingerprints_for_rows(tenant, matchers, start_ms, end_ms)
             .await?;
@@ -249,6 +270,10 @@ impl ProfileStore for ColdProfileStore {
             newest_profile_time: bounds.map(|(_, newest)| newest),
         })
     }
+}
+
+fn is_unbounded_metadata_range(start_ms: i64, end_ms: i64) -> bool {
+    start_ms == 0 && end_ms == i64::MAX
 }
 
 impl ColdProfileStore {
@@ -852,6 +877,55 @@ mod tests {
 
         assert!(
             series == vec![vec![("service_name".to_string(), "api".to_string())]],
+            "{series:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cold_store_unbounded_label_metadata_uses_index_without_loading_blocks() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let api = record_at("t", "api", vec![0], 5, 1_000_000_000);
+        let worker = record_at("t", "worker", vec![0], 7, 3_000_000_000);
+        let records = vec![api.clone(), worker.clone()];
+        let meta = build_block(&store, "t", 0, &records, (0, 0))
+            .await
+            .unwrap()
+            .remove(0);
+        let mut index = ProfileIndex::new();
+        for rec in &records {
+            let labels = Labels::from_pairs(rec.labels.iter().cloned());
+            index.add_series("t", labels.fingerprint(), &labels);
+        }
+        index.add_block(&meta);
+        store
+            .delete(&Path::from(meta.object_key.clone()))
+            .await
+            .unwrap();
+        let cold = ColdProfileStore::new(store, Arc::new(index));
+
+        let types = cold.profile_types("t", 0, i64::MAX).await.unwrap();
+        let names = cold.label_names("t", &[], 0, i64::MAX).await.unwrap();
+        let values = cold
+            .label_values("t", "service_name", &[], 0, i64::MAX)
+            .await
+            .unwrap();
+        let series = cold
+            .series("t", &[], &["service_name".to_string()], 0, i64::MAX)
+            .await
+            .unwrap();
+
+        assert!(types == vec![PT.to_string()], "{types:?}");
+        assert!(names.contains(&"service_name".to_string()), "{names:?}");
+        assert!(
+            values == vec!["api".to_string(), "worker".to_string()],
+            "{values:?}"
+        );
+        assert!(
+            series
+                == vec![
+                    vec![("service_name".to_string(), "api".to_string())],
+                    vec![("service_name".to_string(), "worker".to_string())]
+                ],
             "{series:?}"
         );
     }

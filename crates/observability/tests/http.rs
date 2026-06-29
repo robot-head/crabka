@@ -5627,9 +5627,9 @@ async fn ruler_rule_group_read_endpoints_return_loki_not_found_errors() {
             .await
             .unwrap();
 
-        assert!(response.status() == StatusCode::BAD_REQUEST);
+        assert!(response.status() == StatusCode::NOT_FOUND);
         let body = text_body(response).await;
-        assert!(body == "GetRuleGroup unsupported in rule local store\n");
+        assert!(body == "group does not exist\n");
     }
 }
 
@@ -14390,6 +14390,104 @@ async fn configured_object_store_query_returns_partial_warning_for_missing_block
 }
 
 #[tokio::test]
+async fn configured_object_store_backward_limited_query_stops_after_newest_block() {
+    let object_dir = tempfile::tempdir().unwrap().keep();
+    let data_root = tempfile::tempdir().unwrap().keep();
+    let store = LocalFileSystem::new_with_prefix(&object_dir).unwrap();
+    let prefix = ObjectPath::from("indexes");
+    let mut label_index = LabelIndex::default();
+    let api = label_index.insert_series("tenant-a", labels([("app", "api"), ("env", "prod")]));
+    let missing_old_block = BlockDescriptor::new(
+        BlockKey::new("tenant-a", 0, 10, 19, TimeRange::new(10, 19).unwrap()),
+        BTreeSet::from([api]),
+    );
+    let newest_block = write_log_block_to_object_store(
+        &store,
+        &prefix,
+        &BlockKey::new("tenant-a", 0, 20, 29, TimeRange::new(20, 29).unwrap()),
+        vec![
+            LogRow::new(api, 20, "api older error", BTreeMap::new()),
+            LogRow::new(api, 29, "api newest error", BTreeMap::new()),
+        ],
+    )
+    .await
+    .unwrap();
+    let newest_block_bytes = newest_block.size_bytes;
+    let mut block_index = BlockIndex::default();
+    block_index.insert(missing_old_block);
+    block_index.insert(newest_block);
+    write_tenant_log_index_manifest_to_object_store(
+        &store,
+        &prefix,
+        "tenant-a",
+        &label_index,
+        &block_index,
+    )
+    .await
+    .unwrap();
+    let config = ServiceConfig {
+        target: Role::Querier,
+        listen_addr: "127.0.0.1:0".parse().unwrap(),
+        object_store_url: Some(format!("file://{}", object_dir.display())),
+        wal_bootstrap_server: None,
+        wal_topic: "__crabka_observability_logs_wal".to_string(),
+        wal_group_id: "crabka-observability-querier-tail".to_string(),
+        data_root,
+        querier_index_source: QuerierIndexSource::TenantObjectStoreManifest,
+        tenant: Some("tenant-a".to_string()),
+        index_prefix: Some(prefix.to_string()),
+        query_start_ns: None,
+        query_end_ns: None,
+        max_query_range_ns: None,
+        max_query_series: None,
+        max_query_bytes: None,
+        max_query_length: None,
+        max_ingest_body_bytes: None,
+        wal_append_timeout_ms: None,
+    };
+    let app = build_service_router(&config, ServiceDependencies::default(), None)
+        .await
+        .unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(
+                    "/loki/api/v1/query_range?query=%7Bapp%3D%22api%22%7D%20%7C%3D%20%22error%22&start=0&end=30&direction=backward&limit=1",
+                )
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::OK);
+    assert!(
+        json_body(response).await
+            == json!({
+                "status": "success",
+                "data": {
+                    "resultType": "streams",
+                    "result": [
+                        {
+                            "stream": {
+                                "app": "api",
+                                "detected_level": "unknown",
+                                "env": "prod"
+                            },
+                            "values": [
+                                ["29", "api newest error"]
+                            ]
+                        }
+                    ],
+                    "stats": expected_loki_stats_with(newest_block_bytes, 1, 1)
+                }
+            })
+    );
+}
+
+#[tokio::test]
 async fn configured_object_store_query_merges_hot_tail_with_source_split_stats() {
     let object_dir = tempfile::tempdir().unwrap().keep();
     let data_root = tempfile::tempdir().unwrap().keep();
@@ -19201,7 +19299,7 @@ async fn configured_object_store_shard_catalog_labels_endpoint_loads_request_ten
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/loki/api/v1/labels")
+                .uri("/loki/api/v1/labels?start=20&end=29")
                 .header("X-Scope-OrgID", "tenant-b")
                 .body(Body::empty())
                 .unwrap(),

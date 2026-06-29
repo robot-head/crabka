@@ -1,11 +1,17 @@
 // ---------------- OTLP receive (traces + logs from Crabka processes) ----------------
 otelcol.receiver.otlp "in" {
-  grpc { endpoint = "0.0.0.0:4317" }
-  http { endpoint = "0.0.0.0:4318" }
-  output {
-    traces = [otelcol.processor.batch.traces.input]
-    logs   = [otelcol.exporter.otlphttp.logs.input]
-  }
+	grpc {
+		endpoint = "0.0.0.0:4317"
+	}
+
+	http {
+		endpoint = "0.0.0.0:4318"
+	}
+
+	output {
+		traces = [otelcol.processor.batch.traces.input]
+		logs   = [otelcol.exporter.otlphttp.logs.input]
+	}
 }
 
 // Coalesce spans into fewer, larger exports so the distributor's per-request
@@ -13,26 +19,32 @@ otelcol.receiver.otlp "in" {
 // (drained into the WAL in ~one round-trip). Defense-in-depth alongside the
 // distributor's concurrent produce_spans.
 otelcol.processor.batch "traces" {
-  output {
-    traces = [otelcol.exporter.otlphttp.traces.input]
-  }
+	output {
+		traces = [otelcol.exporter.otlphttp.traces.input]
+	}
 }
 
 otelcol.exporter.otlphttp "traces" {
-  client {
-    endpoint = "http://traces-distributor:4318"
-    headers  = { "X-Scope-OrgID" = "demo" }
-    tls { insecure = true }
-  }
+	client {
+		endpoint = "http://traces-distributor:4318"
+		headers  = {"X-Scope-OrgID" = "demo"}
+
+		tls {
+			insecure = true
+		}
+	}
 }
 
 // Crabka also self-ships logs to stdout (JSON); the OTLP logs path is optional.
 otelcol.exporter.otlphttp "logs" {
-  client {
-    endpoint = "http://logs-distributor:3100/otlp"
-    headers  = { "X-Scope-OrgID" = "demo" }
-    tls { insecure = true }
-  }
+	client {
+		endpoint = "http://logs-distributor:3100/otlp"
+		headers  = {"X-Scope-OrgID" = "demo"}
+
+		tls {
+			insecure = true
+		}
+	}
 }
 
 // ---------------- Metrics: scrape every Crabka service's :9404 /metrics ----------------
@@ -44,150 +56,234 @@ otelcol.exporter.otlphttp "logs" {
 // no /metrics, so a metrics scrape would 404 (up=0). They remain in the
 // pyroscope scrape below for CPU profiles.
 prometheus.scrape "crabka" {
-  targets = [
-    { __address__ = "broker:9404",                 job = "broker" },
-    { __address__ = "metrics-distributor:9404",    job = "metrics-distributor" },
-    { __address__ = "metrics-querier:9404",         job = "metrics-querier" },
-    { __address__ = "metrics-compactor:9404",      job = "metrics-compactor" },
-    { __address__ = "traces-distributor:9404",     job = "traces-distributor" },
-    { __address__ = "traces-querier:9404",          job = "traces-querier" },
-    { __address__ = "traces-block-builder:9404",   job = "traces-block-builder" },
-    { __address__ = "logs-distributor:9404",       job = "logs-distributor" },
-    { __address__ = "logs-querier:9404",            job = "logs-querier" },
-    { __address__ = "logs-compactor:9404",         job = "logs-compactor" },
-    { __address__ = "profiles-distributor:9404",   job = "profiles-distributor" },
-    { __address__ = "profiles-querier:9404",        job = "profiles-querier" },
-    { __address__ = "profiles-block-builder:9404", job = "profiles-block-builder" },
-  ]
-  scrape_interval = "15s"
-  forward_to = [prometheus.remote_write.crabka.receiver]
+	targets = [
+		{__address__ = "broker:9404", job = "broker"},
+		{__address__ = "metrics-distributor:9404", job = "metrics-distributor"},
+		{__address__ = "metrics-querier:9404", job = "metrics-querier"},
+		{__address__ = "metrics-compactor:9404", job = "metrics-compactor"},
+		{__address__ = "traces-distributor:9404", job = "traces-distributor"},
+		{__address__ = "traces-querier:9404", job = "traces-querier"},
+		{__address__ = "traces-block-builder:9404", job = "traces-block-builder"},
+		{__address__ = "logs-distributor:9404", job = "logs-distributor"},
+		{__address__ = "logs-querier:9404", job = "logs-querier"},
+		{__address__ = "logs-compactor:9404", job = "logs-compactor"},
+		{__address__ = "profiles-distributor:9404", job = "profiles-distributor"},
+		{__address__ = "profiles-querier:9404", job = "profiles-querier"},
+		{__address__ = "profiles-block-builder:9404", job = "profiles-block-builder"},
+	]
+	scrape_interval = "15s"
+	forward_to      = [prometheus.remote_write.crabka.receiver]
+}
+
+// Container-level runtime metrics for both Crabka and the supporting
+// observability stack. cAdvisor contributes CPU, memory working set, limits,
+// throttling, network, and filesystem metrics labeled with Docker Compose
+// service metadata.
+prometheus.scrape "containers" {
+	targets = [
+		{__address__ = "cadvisor:8080", job = "cadvisor"},
+	]
+	scrape_interval = "15s"
+	forward_to      = [prometheus.relabel.container_resources.receiver]
+}
+
+prometheus.relabel "container_resources" {
+	forward_to = [prometheus.remote_write.crabka.receiver]
+
+	rule {
+		action        = "keep"
+		source_labels = ["__name__"]
+		regex         = "container_last_seen|container_cpu_usage_seconds_total|container_cpu_cfs_throttled_seconds_total|container_memory_working_set_bytes|container_spec_memory_limit_bytes|container_start_time_seconds|container_network_receive_bytes_total|container_network_transmit_bytes_total|container_fs_reads_bytes_total|container_fs_writes_bytes_total"
+	}
+
+	rule {
+		action        = "keep"
+		source_labels = ["container_label_com_docker_compose_project"]
+		regex         = "crabka-observability-demo"
+	}
+
+	rule {
+		action = "labelkeep"
+		regex  = "__name__|job|instance|id|image|name|cpu|device|interface|container_label_com_docker_compose_project|container_label_com_docker_compose_service"
+	}
 }
 
 prometheus.remote_write "crabka" {
-  endpoint {
-    url     = "http://metrics-distributor:4041/api/v1/push"
-    headers = { "X-Scope-OrgID" = "demo" }
-  }
+	endpoint {
+		url     = "http://metrics-distributor:4041/api/v1/push"
+		headers = {"X-Scope-OrgID" = "demo"}
+	}
 }
 
 // ---------------- Logs: tail container stdout → Loki push ----------------
 discovery.docker "containers" {
-  host = "unix:///var/run/docker.sock"
+	host = "unix:///var/run/docker.sock"
 }
 
 // Map the Docker compose service name to the Loki service_name label so logs
 // appear under a meaningful stream selector instead of "unknown_service".
 discovery.relabel "containers" {
-  targets = discovery.docker.containers.targets
-  rule {
-    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
-    target_label  = "service_name"
-  }
-  rule {
-    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
-    target_label  = "job"
-  }
+	targets = discovery.docker.containers.targets
+
+	rule {
+		source_labels = ["__meta_docker_container_label_com_docker_compose_project"]
+		regex         = "crabka-observability-demo"
+		action        = "keep"
+	}
+
+	rule {
+		source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+		target_label  = "service_name"
+	}
+
+	rule {
+		source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+		target_label  = "job"
+	}
 }
 
 loki.source.docker "containers" {
-  host       = "unix:///var/run/docker.sock"
-  targets    = discovery.relabel.containers.output
-  forward_to = [loki.write.crabka.receiver]
+	host       = "unix:///var/run/docker.sock"
+	targets    = discovery.relabel.containers.output
+	forward_to = [loki.write.crabka.receiver]
 }
 
 loki.write "crabka" {
-  endpoint {
-    url     = "http://logs-distributor:3100/loki/api/v1/push"
-    headers = { "X-Scope-OrgID" = "demo" }
-  }
+	endpoint {
+		url     = "http://logs-distributor:3100/loki/api/v1/push"
+		headers = {"X-Scope-OrgID" = "demo"}
+	}
 }
 
 // ---------------- Profiles: scrape Crabka :9404 pprof → Pyroscope ----------------
-// Two scrape blocks: the Crabka service binaries are built `--features
-// heap-profiling` so they expose CPU *and* jemalloc heap at /debug/pprof/heap;
-// the demo apps (observability-demo-app) are NOT, so scraping memory from them
-// 404s on every cycle. Split the memory profile out of the demo-app block.
+// Three scrape blocks keep target sets explicit. Crabka service binaries are
+// built `--features heap-profiling` in the demo image, so they expose CPU and
+// jemalloc heap at /debug/pprof/{profile,heap}. Demo app roles are CPU-only:
+// they depend on Turso, which already defines a global allocator.
 //
-// `scrape_interval = "60s"`: the CPU profile endpoint runs a 30s profile per
-// scrape behind a single global pprof guard. Scraping faster than that window
-// overlaps the guard — yielding `500 profiler: start running cpu profiler error`
-// and sustained SIGPROF overhead. 60s gives a 2x margin so profiles never overlap.
+// `delta_profiling_duration = "5s"` keeps CPU profiles useful without
+// near-continuous SIGPROF overhead; Alloy's default delta window is based on the
+// scrape interval and would otherwise profile each process for almost all 60s.
 pyroscope.scrape "crabka_services" {
-  targets = [
-    { __address__ = "broker:9404",               service_name = "broker" },
-    { __address__ = "metrics-distributor:9404",  service_name = "metrics-distributor" },
-    { __address__ = "traces-distributor:9404",   service_name = "traces-distributor" },
-    { __address__ = "logs-distributor:9404",     service_name = "logs-distributor" },
-    { __address__ = "profiles-distributor:9404", service_name = "profiles-distributor" },
-    { __address__ = "schema-registry:9404",      service_name = "schema-registry" },
-  ]
-  scrape_interval = "60s"
-  profiling_config {
-    profile.process_cpu { enabled = true }
-    profile.memory {
-      enabled = true
-      path    = "/debug/pprof/heap"
-    }
-    profile.goroutine { enabled = false }
-    profile.block     { enabled = false }
-    profile.mutex     { enabled = false }
-  }
-  forward_to = [pyroscope.write.crabka.receiver]
+	targets = [
+		{__address__ = "broker:9404", service_name = "broker"},
+		{__address__ = "metrics-distributor:9404", service_name = "metrics-distributor"},
+		{__address__ = "traces-distributor:9404", service_name = "traces-distributor"},
+		{__address__ = "logs-distributor:9404", service_name = "logs-distributor"},
+		{__address__ = "profiles-distributor:9404", service_name = "profiles-distributor"},
+		{__address__ = "schema-registry:9404", service_name = "schema-registry"},
+	]
+	scrape_interval          = "60s"
+	delta_profiling_duration = "5s"
+
+	profiling_config {
+		profile.process_cpu {
+			enabled = true
+		}
+
+		profile.memory {
+			enabled = true
+			path    = "/debug/pprof/heap"
+		}
+
+		profile.goroutine {
+			enabled = false
+		}
+
+		profile.block {
+			enabled = false
+		}
+
+		profile.mutex {
+			enabled = false
+		}
+	}
+	forward_to = [pyroscope.write.crabka.receiver]
 }
 
-// Demo apps: CPU only — they are built without --features heap-profiling, so
-// /debug/pprof/heap is not registered and scraping it would 404 every cycle.
+// Demo apps: CPU only. They are not built with --features heap-profiling because
+// the streams dependency graph already brings in Turso's global allocator.
 pyroscope.scrape "demo_apps" {
-  targets = [
-    { __address__ = "demo-produce:9404", service_name = "demo-produce" },
-    { __address__ = "demo-stream:9404",  service_name = "demo-stream" },
-  ]
-  scrape_interval = "60s"
-  profiling_config {
-    profile.process_cpu { enabled = true }
-    profile.memory    { enabled = false }
-    profile.goroutine { enabled = false }
-    profile.block     { enabled = false }
-    profile.mutex     { enabled = false }
-  }
-  forward_to = [pyroscope.write.crabka.receiver]
+	targets = [
+		{__address__ = "demo-produce:9404", service_name = "demo-produce"},
+		{__address__ = "demo-stream:9404", service_name = "demo-stream"},
+		{__address__ = "demo-consume:9404", service_name = "demo-consume"},
+	]
+	scrape_interval          = "60s"
+	delta_profiling_duration = "5s"
+
+	profiling_config {
+		profile.process_cpu {
+			enabled = true
+		}
+
+		profile.memory {
+			enabled = false
+		}
+
+		profile.goroutine {
+			enabled = false
+		}
+
+		profile.block {
+			enabled = false
+		}
+
+		profile.mutex {
+			enabled = false
+		}
+	}
+	forward_to = [pyroscope.write.crabka.receiver]
 }
 
-// CPU-only profiling for the compaction / block-builder / querier roles that the
-// `crabka_services` block above (broker + distributors + schema-registry) does
-// not cover — without this they are a profiling blind spot. CPU pprof is
-// signal-based and allocator-independent, so it works regardless of the
-// allocator. `profile.memory` is left off here to keep the per-scrape cost down
-// on the heavy DataFusion query/compaction roles; these binaries are still built
-// with `--features heap-profiling`, so `/debug/pprof/heap` exists and can be
-// enabled later if heap profiles are wanted. `scrape_interval = "60s"` for the
-// same reason as the blocks above (the CPU endpoint runs a 30s profile per
-// scrape behind one global pprof guard).
+// CPU + jemalloc heap profiling for the compaction / block-builder / querier
+// roles that the `crabka_services` block above (broker + distributors +
+// schema-registry) does not cover. These binaries are built with
+// `--features heap-profiling`, so /debug/pprof/heap exists. Worker CPU pprof
+// is intentionally less frequent than service/distributor pprof: profiling a
+// mostly-idle compactor for 5s every minute shows up as artificial steady CPU.
 pyroscope.scrape "crabka_workers" {
-  targets = [
-    { __address__ = "metrics-compactor:9404",      service_name = "metrics-compactor" },
-    { __address__ = "metrics-querier:9404",         service_name = "metrics-querier" },
-    { __address__ = "traces-block-builder:9404",    service_name = "traces-block-builder" },
-    { __address__ = "traces-querier:9404",          service_name = "traces-querier" },
-    { __address__ = "logs-compactor:9404",          service_name = "logs-compactor" },
-    { __address__ = "logs-querier:9404",            service_name = "logs-querier" },
-    { __address__ = "profiles-block-builder:9404",  service_name = "profiles-block-builder" },
-    { __address__ = "profiles-querier:9404",        service_name = "profiles-querier" },
-  ]
-  scrape_interval = "60s"
-  profiling_config {
-    profile.process_cpu { enabled = true }
-    profile.memory    { enabled = false }
-    profile.goroutine { enabled = false }
-    profile.block     { enabled = false }
-    profile.mutex     { enabled = false }
-  }
-  forward_to = [pyroscope.write.crabka.receiver]
+	targets = [
+		{__address__ = "metrics-compactor:9404", service_name = "metrics-compactor"},
+		{__address__ = "metrics-querier:9404", service_name = "metrics-querier"},
+		{__address__ = "traces-block-builder:9404", service_name = "traces-block-builder"},
+		{__address__ = "traces-querier:9404", service_name = "traces-querier"},
+		{__address__ = "logs-compactor:9404", service_name = "logs-compactor"},
+		{__address__ = "logs-querier:9404", service_name = "logs-querier"},
+		{__address__ = "profiles-block-builder:9404", service_name = "profiles-block-builder"},
+		{__address__ = "profiles-querier:9404", service_name = "profiles-querier"},
+	]
+	scrape_interval          = "120s"
+	delta_profiling_duration = "3s"
+
+	profiling_config {
+		profile.process_cpu {
+			enabled = true
+		}
+
+		profile.memory {
+			enabled = true
+			path    = "/debug/pprof/heap"
+		}
+
+		profile.goroutine {
+			enabled = false
+		}
+
+		profile.block {
+			enabled = false
+		}
+
+		profile.mutex {
+			enabled = false
+		}
+	}
+	forward_to = [pyroscope.write.crabka.receiver]
 }
 
 pyroscope.write "crabka" {
-  endpoint {
-    url     = "http://profiles-distributor:4040"
-    headers = { "X-Scope-OrgID" = "demo" }
-  }
+	endpoint {
+		url     = "http://profiles-distributor:4040"
+		headers = {"X-Scope-OrgID" = "demo"}
+	}
 }

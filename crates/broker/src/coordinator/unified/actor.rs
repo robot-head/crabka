@@ -553,7 +553,17 @@ async fn actor_loop(
                     }
                     GroupActorMessage::ClassicLeave { req, version, reply } => {
                         if let Some(state) = group.as_classic_mut() {
+                            let before_members: Vec<String> = state.members.keys().cloned().collect();
                             let responses = classic_ops::handle_leave(state, &req, version);
+                            let removed: Vec<String> = before_members
+                                .into_iter()
+                                .filter(|member_id| !state.members.contains_key(member_id))
+                                .collect();
+                            drain_removed_classic_waiters(
+                                &removed,
+                                &mut parked.joiners,
+                                &mut parked.followers,
+                            );
                             let _ = reply.send(responses);
                             // A leave can make every survivor "joined this round"
                             // true; complete the rebalance early if so (mirrors the
@@ -647,14 +657,19 @@ async fn actor_loop(
                     }
                 } else if let Some(state) = group.as_classic_mut() {
                     let dropped = state.expire_dead_members(Instant::now());
-                    if !dropped.is_empty() {
-                        tracing::info!(
-                            group = %gid, dropped = ?dropped,
-                            "expired members; waking joiners",
-                        );
-                        maybe_complete_classic(
-                            state,
-                            &mut parked.joiners,
+                        if !dropped.is_empty() {
+                            tracing::info!(
+                                group = %gid, dropped = ?dropped,
+                                "expired members; waking joiners",
+                            );
+                            drain_removed_classic_waiters(
+                                &dropped,
+                                &mut parked.joiners,
+                                &mut parked.followers,
+                            );
+                            maybe_complete_classic(
+                                state,
+                                &mut parked.joiners,
                             &mut parked.followers,
                         );
                     }
@@ -706,6 +721,10 @@ fn complete_classic_rebalance(
         });
     }
     let inconsistent = classic_ops::try_complete(state).is_err();
+    if inconsistent {
+        state.rebalance_deadline = None;
+        state.joined_this_round.clear();
+    }
     for (member_id, sender) in joiners.drain() {
         let result = if inconsistent {
             JoinResult {
@@ -718,6 +737,28 @@ fn complete_classic_rebalance(
             classic_ops::build_join_result(state, &member_id)
         };
         let _ = sender.send(result);
+    }
+}
+
+fn drain_removed_classic_waiters(
+    removed: &[String],
+    joiners: &mut HashMap<String, oneshot::Sender<JoinResult>>,
+    followers: &mut HashMap<String, oneshot::Sender<SyncResult>>,
+) {
+    for member_id in removed {
+        if let Some(sender) = joiners.remove(member_id) {
+            let _ = sender.send(JoinResult {
+                error_code: codes::UNKNOWN_MEMBER_ID,
+                member_id: member_id.clone(),
+                ..JoinResult::default()
+            });
+        }
+        if let Some(sender) = followers.remove(member_id) {
+            let _ = sender.send(SyncResult {
+                error_code: codes::UNKNOWN_MEMBER_ID,
+                ..SyncResult::default()
+            });
+        }
     }
 }
 
@@ -1889,6 +1930,59 @@ mod tests {
             crate::coordinator::unified::streams::config::StreamsGroupConfig::default(),
         ));
         (coord, log)
+    }
+
+    #[test]
+    fn inconsistent_classic_completion_clears_deadline() {
+        use super::super::classic_state::{Group as ClassicState, Member};
+
+        let mut state = ClassicState::new("g");
+        state.protocol_type = Some("consumer".into());
+        state.add_member(Member::new(
+            "m1",
+            "client",
+            "127.0.0.1",
+            Duration::from_secs(30),
+            Duration::from_secs(60),
+            vec![("range".into(), Bytes::new())],
+        ));
+        state.add_member(Member::new(
+            "m2",
+            "client",
+            "127.0.0.1",
+            Duration::from_secs(30),
+            Duration::from_secs(60),
+            vec![("cooperative-sticky".into(), Bytes::new())],
+        ));
+        state.rebalance_deadline = Some(Instant::now() - Duration::from_secs(1));
+        assert!(state.state == ClassicGroupState::PreparingRebalance);
+
+        let (tx1, _rx1) = tokio::sync::oneshot::channel();
+        let (tx2, _rx2) = tokio::sync::oneshot::channel();
+        let mut joiners = HashMap::from([("m1".to_string(), tx1), ("m2".to_string(), tx2)]);
+        let mut followers = HashMap::new();
+
+        complete_classic_rebalance(&mut state, &mut joiners, &mut followers);
+
+        assert!(
+            state.rebalance_deadline.is_none(),
+            "a failed protocol vote must not leave an already-fired deadline armed"
+        );
+    }
+
+    #[tokio::test]
+    async fn removed_classic_members_drain_parked_waiters() {
+        let (join_tx, join_rx) = tokio::sync::oneshot::channel();
+        let (sync_tx, sync_rx) = tokio::sync::oneshot::channel();
+        let mut joiners = HashMap::from([("m1".to_string(), join_tx)]);
+        let mut followers = HashMap::from([("m1".to_string(), sync_tx)]);
+
+        drain_removed_classic_waiters(&["m1".to_string()], &mut joiners, &mut followers);
+
+        assert!(joiners.is_empty());
+        assert!(followers.is_empty());
+        assert!(join_rx.await.unwrap().error_code == codes::UNKNOWN_MEMBER_ID);
+        assert!(sync_rx.await.unwrap().error_code == codes::UNKNOWN_MEMBER_ID);
     }
 
     /// A coordinator whose metadata image holds one topic `t` with `partitions`

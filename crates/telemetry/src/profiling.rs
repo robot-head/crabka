@@ -32,6 +32,12 @@ struct CpuQuery {
     seconds: Option<u64>,
 }
 
+#[cfg(all(unix, feature = "heap-profiling"))]
+#[derive(Debug, Deserialize)]
+struct HeapQuery {
+    seconds: Option<u64>,
+}
+
 /// CPU profile in pprof protobuf, sampled for `?seconds=N` (default 30, clamped 1..=60).
 #[cfg(unix)]
 async fn cpu_profile(Query(q): Query<CpuQuery>) -> axum::response::Response {
@@ -104,7 +110,7 @@ async fn cpu_profile(_q: Query<CpuQuery>) -> axum::response::Response {
 // cargo-mutants: optional heap-profiling route is feature-gated out of the default mutation run.
 #[cfg(all(unix, feature = "heap-profiling"))]
 #[cfg_attr(test, mutants::skip)]
-async fn heap_profile() -> axum::response::Response {
+async fn heap_profile(Query(q): Query<HeapQuery>) -> axum::response::Response {
     let Some(ctl) = jemalloc_pprof::PROF_CTL.as_ref() else {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -113,14 +119,25 @@ async fn heap_profile() -> axum::response::Response {
             .into_response();
     };
     let mut ctl = ctl.lock().await;
-    if !ctl.activated() {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "jemalloc prof not active",
-        )
-            .into_response();
+    let activated_here = !ctl.activated();
+    if activated_here {
+        if let Err(e) = ctl.activate() {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("jemalloc prof activate: {e}"),
+            )
+                .into_response();
+        }
+        let seconds = q.seconds.unwrap_or(5).clamp(1, 30);
+        tokio::time::sleep(Duration::from_secs(seconds)).await;
     }
-    match ctl.dump_pprof() {
+    let dump = ctl.dump_pprof();
+    if activated_here {
+        if let Err(e) = ctl.deactivate() {
+            tracing::warn!(error = %e, "could not deactivate jemalloc profiling after heap dump");
+        }
+    }
+    match dump {
         Ok(pprof) => (
             StatusCode::OK,
             [("content-type", "application/octet-stream")],

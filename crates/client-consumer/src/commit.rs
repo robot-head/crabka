@@ -7,7 +7,10 @@ use crabka_protocol::owned::offset_commit_request::OffsetCommitRequest;
 use crabka_protocol::owned::offset_commit_response::OffsetCommitResponse;
 
 use crate::consumer::Consumer;
-use crate::coordinator::{COORDINATOR_RETRY_TIMEOUT, find_coordinator, with_coordinator_refind};
+use crate::coordinator::{
+    COORDINATOR_RETRY_TIMEOUT, find_coordinator, is_retriable_transport_error,
+    with_coordinator_refind,
+};
 use crate::error::ConsumerError;
 use crate::offset_wire::build_commit_topics;
 use crate::position::PartitionPosition;
@@ -43,12 +46,14 @@ fn build_commit_request(
     group_id: String,
     generation_id_or_member_epoch: i32,
     member_id: String,
+    group_instance_id: Option<String>,
     topics: Vec<crabka_protocol::owned::offset_commit_request::OffsetCommitRequestTopic>,
 ) -> OffsetCommitRequest {
     OffsetCommitRequest {
         group_id,
         generation_id_or_member_epoch,
         member_id,
+        group_instance_id,
         topics,
         ..Default::default()
     }
@@ -71,7 +76,7 @@ fn commit_response_result(
 ) -> Result<(), ConsumerError> {
     match first_commit_error(resp) {
         0 => Ok(()),
-        22 | 27 if coordinator_alive => Ok(()),
+        22 | 25 | 27 if coordinator_alive => Ok(()),
         code => Err(ConsumerError::Server(code)),
     }
 }
@@ -104,6 +109,7 @@ impl Consumer {
             || {
                 let group_id = self.group_id.clone();
                 let member_id = self.member_id.clone();
+                let group_instance_id = self.group_instance_id.clone();
                 let topics = topics.clone();
                 let client = &self.client;
                 let target = self.coordinator_id.load(Ordering::Relaxed);
@@ -114,6 +120,7 @@ impl Consumer {
                             group_id,
                             self.current_generation.load(Ordering::Relaxed),
                             member_id,
+                            group_instance_id,
                             topics,
                         ))
                         .await
@@ -154,6 +161,7 @@ impl Consumer {
         let group_id = self.group_id.clone();
         let generation = self.current_generation.load(Ordering::Relaxed);
         let member_id = self.member_id.clone();
+        let group_instance_id = self.group_instance_id.clone();
         let offsets = self.next_offsets.clone();
         let positions = self.positions.clone();
         let topic_ids = self.topic_ids.clone();
@@ -173,7 +181,13 @@ impl Consumer {
             // retry — but don't block a background commit on the full retry
             // loop; one re-find recovers a coordinator move at-least-once.
             let make_req = |topics: Vec<_>| {
-                build_commit_request(group_id.clone(), generation, member_id.clone(), topics)
+                build_commit_request(
+                    group_id.clone(),
+                    generation,
+                    member_id.clone(),
+                    group_instance_id.clone(),
+                    topics,
+                )
             };
             let target = coordinator_id.load(Ordering::Relaxed);
             let res = client.broker(target).send(make_req(topics.clone())).await;
@@ -181,7 +195,7 @@ impl Consumer {
                 Ok(resp) => {
                     crate::coordinator::is_retriable_coordinator_code(first_commit_error(resp))
                 }
-                Err(crabka_client_core::ClientError::Disconnected) => true,
+                Err(e) if is_retriable_transport_error(e) => true,
                 Err(_) => false,
             };
             if moved {
@@ -281,11 +295,18 @@ mod tests {
             },
         ];
 
-        let req = build_commit_request("group-a".into(), 42, "member-a".into(), topics);
+        let req = build_commit_request(
+            "group-a".into(),
+            42,
+            "member-a".into(),
+            Some("instance-a".into()),
+            topics,
+        );
 
         assert!(req.group_id == "group-a");
         assert!(req.generation_id_or_member_epoch == 42);
         assert!(req.member_id == "member-a");
+        assert!(req.group_instance_id.as_deref() == Some("instance-a"));
         assert!(req.topics.len() == 1);
         assert!(req.topics[0].name == "topic");
         assert!(req.topics[0].partitions[0].partition_index == 3);
@@ -303,10 +324,12 @@ mod tests {
             commit_response_result(&response(&[0, 42]), true).unwrap_err(),
             ConsumerError::Server(42)
         ));
-        // ILLEGAL_GENERATION (22) and REBALANCE_IN_PROGRESS (27) DEFER while the
-        // coordinator is alive to rejoin (it republishes the generation and the
-        // offsets recommit next round) — a commit loop must survive a rebalance.
+        // ILLEGAL_GENERATION (22), UNKNOWN_MEMBER_ID (25), and
+        // REBALANCE_IN_PROGRESS (27) DEFER while the coordinator is alive to
+        // rejoin (it republishes the generation/member and the offsets recommit
+        // next round) — a commit loop must survive a rebalance or broker restart.
         assert!(commit_response_result(&response(&[22]), true).is_ok());
+        assert!(commit_response_result(&response(&[25]), true).is_ok());
         assert!(commit_response_result(&response(&[27]), true).is_ok());
         assert!(commit_response_result(&response(&[0, 22]), true).is_ok());
         // ...but they are FATAL if the coordinator task has exited: it can never
@@ -314,6 +337,10 @@ mod tests {
         assert!(matches!(
             commit_response_result(&response(&[22]), false).unwrap_err(),
             ConsumerError::Server(22)
+        ));
+        assert!(matches!(
+            commit_response_result(&response(&[25]), false).unwrap_err(),
+            ConsumerError::Server(25)
         ));
         assert!(matches!(
             commit_response_result(&response(&[27]), false).unwrap_err(),

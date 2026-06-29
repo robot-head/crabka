@@ -3,22 +3,23 @@
   "title": "Crabka observes Crabka",
   "schemaVersion": 39,
   "version": 1,
+  "refresh": "30s",
   "time": { "from": "now-15m", "to": "now" },
   "panels": [
     {
-      "id": 1, "type": "timeseries", "title": "Broker — scraped series count",
+      "id": 1, "type": "timeseries", "title": "Broker scrape health",
       "datasource": { "type": "prometheus", "uid": "crabka-prom" },
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
-      "targets": [ { "refId": "A", "expr": "count({job=\"broker\"})" } ]
+      "targets": [ { "refId": "A", "expr": "up{job=\"broker\"}", "legendFormat": "{{instance}}" } ]
     },
     {
-      "id": 2, "type": "logs", "title": "Crabka logs",
+      "id": 2, "type": "logs", "title": "Recent warnings and errors",
       "datasource": { "type": "loki", "uid": "crabka-loki" },
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
-      "targets": [ { "refId": "A", "expr": "{service_name=~\".+\"}" } ]
+      "targets": [ { "refId": "A", "expr": "{service_name=~\"broker|demo-produce|demo-stream|demo-consume\"} |~ \"WARN|ERROR|anomalous|error\"" } ]
     },
     {
-      "id": 3, "type": "traces", "title": "Recent traces",
+      "id": 3, "type": "table", "title": "Recent traces",
       "datasource": { "type": "tempo", "uid": "crabka-tempo" },
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
       "targets": [ { "refId": "A", "queryType": "traceql", "query": "{ .service.name != \"\" }", "limit": 20, "tableType": "spans" } ]
@@ -28,6 +29,31 @@
       "datasource": { "type": "grafana-pyroscope-datasource", "uid": "crabka-pyroscope" },
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
       "targets": [ { "refId": "A", "profileTypeId": "process_cpu:cpu:nanoseconds:cpu:nanoseconds", "labelSelector": "{service_name=\"broker\"}" } ]
+    },
+    { "id": 10, "type": "row", "title": "Querier heap profiles", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 16 } },
+    {
+      "id": 11, "type": "flamegraph", "title": "Metrics querier heap profile",
+      "datasource": { "type": "grafana-pyroscope-datasource", "uid": "crabka-pyroscope" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 17 },
+      "targets": [ { "refId": "A", "profileTypeId": "memory:inuse_space:bytes:space:bytes", "labelSelector": "{service_name=\"metrics-querier\"}" } ]
+    },
+    {
+      "id": 12, "type": "flamegraph", "title": "Logs querier heap profile",
+      "datasource": { "type": "grafana-pyroscope-datasource", "uid": "crabka-pyroscope" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 17 },
+      "targets": [ { "refId": "A", "profileTypeId": "memory:inuse_space:bytes:space:bytes", "labelSelector": "{service_name=\"logs-querier\"}" } ]
+    },
+    {
+      "id": 13, "type": "flamegraph", "title": "Traces querier heap profile",
+      "datasource": { "type": "grafana-pyroscope-datasource", "uid": "crabka-pyroscope" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 25 },
+      "targets": [ { "refId": "A", "profileTypeId": "memory:inuse_space:bytes:space:bytes", "labelSelector": "{service_name=\"traces-querier\"}" } ]
+    },
+    {
+      "id": 14, "type": "flamegraph", "title": "Profiles querier heap profile",
+      "datasource": { "type": "grafana-pyroscope-datasource", "uid": "crabka-pyroscope" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 25 },
+      "targets": [ { "refId": "A", "profileTypeId": "memory:inuse_space:bytes:space:bytes", "labelSelector": "{service_name=\"profiles-querier\"}" } ]
     }
   ]
 }

@@ -15,6 +15,9 @@ pub enum ConsumerError {
     #[error("rebalance failed: {0}")]
     RebalanceFailed(String),
 
+    #[error("startup failed after joining group: {0}")]
+    StartupAfterJoin(Box<ConsumerError>),
+
     #[error("not subscribed to any topic")]
     NotSubscribed,
 

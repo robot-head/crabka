@@ -64,6 +64,15 @@ pub(crate) fn is_retriable_coordinator_code(code: i16) -> bool {
     )
 }
 
+pub(crate) fn is_retriable_transport_error(e: &crabka_client_core::ClientError) -> bool {
+    matches!(
+        e,
+        crabka_client_core::ClientError::Connect { .. }
+            | crabka_client_core::ClientError::Disconnected
+            | crabka_client_core::ClientError::Io(_)
+    )
+}
+
 /// Read the effective `error_code` from a `FindCoordinatorResponse` across wire
 /// shapes: v4+ carries per-key rows in `coordinators` (we use the first), v0-v3
 /// uses the top-level field. crabka's broker populates both, so either read is
@@ -102,10 +111,15 @@ pub(crate) async fn find_coordinator(
     let resp = with_coordinator_retry(COORDINATOR_RETRY_TIMEOUT, coordinator_error_code, || {
         let group_id = group_id.to_string();
         async move {
-            client
-                .send(build_find_coordinator_request(group_id))
-                .await
-                .map_err(ConsumerError::from)
+            match client.send(build_find_coordinator_request(group_id)).await {
+                Ok(resp) => Ok(resp),
+                Err(e) => {
+                    if is_retriable_transport_error(&e) {
+                        client.reconnect_bootstrap().await;
+                    }
+                    Err(ConsumerError::from(e))
+                }
+            }
         }
     })
     .await?;
@@ -146,12 +160,17 @@ fn next_backoff(backoff: Duration, max_backoff: Duration) -> Duration {
     (backoff * 2).min(max_backoff)
 }
 
-fn build_leave_group_request(group_id: String, member_id: String) -> LeaveGroupRequest {
+pub(crate) fn build_leave_group_request(
+    group_id: String,
+    member_id: String,
+    group_instance_id: Option<String>,
+) -> LeaveGroupRequest {
     LeaveGroupRequest {
         group_id,
         member_id: member_id.clone(),
         members: vec![MemberIdentity {
             member_id,
+            group_instance_id,
             ..Default::default()
         }],
         ..Default::default()
@@ -162,11 +181,13 @@ fn build_heartbeat_request(
     group_id: String,
     generation_id: i32,
     member_id: String,
+    group_instance_id: Option<String>,
 ) -> HeartbeatRequest {
     HeartbeatRequest {
         group_id,
         generation_id,
         member_id,
+        group_instance_id,
         ..Default::default()
     }
 }
@@ -208,7 +229,7 @@ where
                 // Retriable broker code: the coordinator likely moved.
                 true
             }
-            Err(ConsumerError::Client(crabka_client_core::ClientError::Disconnected)) => {
+            Err(ConsumerError::Client(e)) if is_retriable_transport_error(&e) => {
                 if retry_deadline_elapsed(start, timeout) {
                     return Err(ConsumerError::CoordinatorUnavailable);
                 }
@@ -240,12 +261,12 @@ where
 }
 
 /// Send a group-coordinator RPC, retrying on cold-coordinator codes
-/// (14/15/16) and transient `Disconnected` transport errors with capped
+/// (14/15/16) and transient transport errors with capped
 /// exponential backoff until `timeout` elapses. `make` rebuilds the request
 /// each attempt (so it can be re-sent); `code` reads the response's
 /// `error_code`. On deadline, returns the last response (so the caller's
 /// `error_code` handling runs) or `CoordinatorUnavailable` if the last attempt
-/// was a disconnect.
+/// was a transport failure.
 pub(crate) async fn with_coordinator_retry<R, F, Fut>(
     timeout: Duration,
     code: impl Fn(&R) -> i16,
@@ -266,7 +287,7 @@ where
                     return Ok(r);
                 }
             }
-            Err(ConsumerError::Client(crabka_client_core::ClientError::Disconnected)) => {
+            Err(ConsumerError::Client(e)) if is_retriable_transport_error(&e) => {
                 if retry_deadline_elapsed(start, timeout) {
                     return Err(ConsumerError::CoordinatorUnavailable);
                 }
@@ -298,6 +319,7 @@ pub(crate) struct CoordinatorState {
     /// the same coordinator, and sees re-discovery updates the moment they land.
     pub coordinator_id: Arc<AtomicI32>,
     pub member_id: String,
+    pub group_instance_id: Option<String>,
     pub generation_id: i32,
     /// Published copy of `generation_id`, shared (`Arc<AtomicI32>`) with the
     /// parent `Consumer` so its commit path (`commit.rs`) stamps the CURRENT
@@ -560,6 +582,7 @@ async fn leave_group(state: &CoordinatorState) {
     let send = coordinator.send(build_leave_group_request(
         state.group_id.clone(),
         state.member_id.clone(),
+        state.group_instance_id.clone(),
     ));
     let _ = tokio::time::timeout(Duration::from_secs(5), send).await;
 }
@@ -579,6 +602,7 @@ async fn heartbeat_once(state: &CoordinatorState) -> HeartbeatOutcome {
             state.group_id.clone(),
             state.generation_id,
             state.member_id.clone(),
+            state.group_instance_id.clone(),
         ))
         .await;
     match result {
@@ -593,7 +617,7 @@ async fn heartbeat_once(state: &CoordinatorState) -> HeartbeatOutcome {
             }
             outcome
         }
-        Err(crabka_client_core::ClientError::Disconnected) => {
+        Err(e) if is_retriable_transport_error(&e) => {
             // Lost the socket to the coordinator (bounced / failed over):
             // evict + re-discover so the next tick reconnects to its current
             // address.
@@ -789,6 +813,7 @@ async fn commit_revoked(state: &CoordinatorState, revoked: &[(String, i32)]) {
             state.group_id.clone(),
             state.generation_id,
             state.member_id.clone(),
+            state.group_instance_id.clone(),
             topics,
         ))
         .await;
@@ -808,12 +833,14 @@ fn build_revoked_commit_request(
     group_id: String,
     generation_id: i32,
     member_id: String,
+    group_instance_id: Option<String>,
     topics: Vec<crabka_protocol::owned::offset_commit_request::OffsetCommitRequestTopic>,
 ) -> OffsetCommitRequest {
     OffsetCommitRequest {
         group_id,
         generation_id_or_member_epoch: generation_id,
         member_id,
+        group_instance_id,
         topics,
         ..Default::default()
     }
@@ -822,6 +849,7 @@ fn build_revoked_commit_request(
 fn build_join_group_request(
     group_id: String,
     member_id: String,
+    group_instance_id: Option<String>,
     session_timeout_ms: i32,
     rebalance_timeout_ms: i32,
     protocol_name: String,
@@ -831,6 +859,7 @@ fn build_join_group_request(
         group_id,
         protocol_type: "consumer".into(),
         member_id,
+        group_instance_id,
         session_timeout_ms,
         rebalance_timeout_ms,
         protocols: vec![JoinGroupRequestProtocol {
@@ -857,6 +886,7 @@ fn build_sync_group_request(
     group_id: String,
     generation_id: i32,
     member_id: String,
+    group_instance_id: Option<String>,
     chosen_protocol: String,
     assignments: Vec<SyncGroupRequestAssignment>,
 ) -> SyncGroupRequest {
@@ -864,6 +894,7 @@ fn build_sync_group_request(
         group_id,
         generation_id,
         member_id,
+        group_instance_id,
         protocol_type: Some("consumer".into()),
         protocol_name: Some(chosen_protocol),
         assignments,
@@ -901,6 +932,7 @@ async fn join_and_sync(
     // the rest of the task and the parent `Consumer` immediately.
     let client = state.client.clone();
     let group_id = state.group_id.clone();
+    let group_instance_id = state.group_instance_id.clone();
     let coordinator_id = Arc::clone(&state.coordinator_id);
 
     // First join: if we have no member_id, expect MEMBER_ID_REQUIRED (79) and
@@ -919,6 +951,7 @@ async fn join_and_sync(
             let member_id = state.member_id.clone();
             let protocol_name = protocol_name.clone();
             let subscription_bytes = subscription_bytes.clone();
+            let group_instance_id = group_instance_id.clone();
             let client = &client;
             let target = coordinator_id.load(Ordering::Relaxed);
             async move {
@@ -927,6 +960,7 @@ async fn join_and_sync(
                     .send(build_join_group_request(
                         group_id,
                         member_id,
+                        group_instance_id.clone(),
                         session_timeout_ms,
                         rebalance_timeout_ms,
                         protocol_name,
@@ -959,6 +993,7 @@ async fn join_and_sync(
                 let assigned_id = assigned_id.clone();
                 let protocol_name = protocol_name.clone();
                 let subscription_bytes = subscription_bytes.clone();
+                let group_instance_id = group_instance_id.clone();
                 let client = &client;
                 let target = coordinator_id.load(Ordering::Relaxed);
                 async move {
@@ -967,6 +1002,7 @@ async fn join_and_sync(
                         .send(build_join_group_request(
                             group_id,
                             assigned_id,
+                            group_instance_id.clone(),
                             session_timeout_ms,
                             rebalance_timeout_ms,
                             protocol_name,
@@ -1064,6 +1100,7 @@ async fn join_and_sync(
             let member_id = state.member_id.clone();
             let chosen_protocol = chosen_protocol.clone();
             let assignments_for_sync = assignments_for_sync.clone();
+            let group_instance_id = group_instance_id.clone();
             let client = &client;
             let target = coordinator_id.load(Ordering::Relaxed);
             async move {
@@ -1073,6 +1110,7 @@ async fn join_and_sync(
                         group_id,
                         generation_id,
                         member_id,
+                        group_instance_id.clone(),
                         chosen_protocol,
                         assignments_for_sync,
                     ))
@@ -1169,10 +1207,19 @@ fn should_prime_missing_partition(seen: bool) -> bool {
 mod retry_tests {
     use super::*;
     use assert2::assert;
+    use std::io;
+    use std::net::SocketAddr;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct Resp {
         error_code: i16,
+    }
+
+    fn refused_connect_error() -> ConsumerError {
+        ConsumerError::Client(crabka_client_core::ClientError::Connect {
+            addr: SocketAddr::from(([127, 0, 0, 1], 9092)),
+            source: io::Error::new(io::ErrorKind::ConnectionRefused, "refused"),
+        })
     }
 
     #[test]
@@ -1262,12 +1309,17 @@ mod retry_tests {
 
     #[test]
     fn leave_group_request_populates_legacy_and_batched_member_fields() {
-        let req = build_leave_group_request("group-a".into(), "member-a".into());
+        let req = build_leave_group_request(
+            "group-a".into(),
+            "member-a".into(),
+            Some("instance-a".into()),
+        );
 
         assert!(req.group_id == "group-a");
         assert!(req.member_id == "member-a");
         assert!(req.members.len() == 1);
         assert!(req.members[0].member_id == "member-a");
+        assert!(req.members[0].group_instance_id.as_deref() == Some("instance-a"));
     }
 
     #[test]
@@ -1282,12 +1334,18 @@ mod retry_tests {
             HashMap::from([(("topic-a".to_string(), 2), (42, 7))]),
             &HashMap::new(),
         );
-        let req =
-            build_revoked_commit_request("group-a".into(), 3, "member-a".into(), topics.clone());
+        let req = build_revoked_commit_request(
+            "group-a".into(),
+            3,
+            "member-a".into(),
+            Some("instance-a".into()),
+            topics.clone(),
+        );
 
         assert!(req.group_id == "group-a");
         assert!(req.generation_id_or_member_epoch == 3);
         assert!(req.member_id == "member-a");
+        assert!(req.group_instance_id.as_deref() == Some("instance-a"));
         assert!(req.topics == topics);
         assert!(UNKNOWN_EPOCH == -1);
     }
@@ -1297,6 +1355,7 @@ mod retry_tests {
         let req = build_join_group_request(
             "group-a".into(),
             "member-a".into(),
+            Some("instance-a".into()),
             10_000,
             30_000,
             "range".into(),
@@ -1306,6 +1365,7 @@ mod retry_tests {
         assert!(req.group_id == "group-a");
         assert!(req.protocol_type == "consumer");
         assert!(req.member_id == "member-a");
+        assert!(req.group_instance_id.as_deref() == Some("instance-a"));
         assert!(req.session_timeout_ms == 10_000);
         assert!(req.rebalance_timeout_ms == 30_000);
         assert!(req.protocols.len() == 1);
@@ -1329,6 +1389,7 @@ mod retry_tests {
             "group-a".into(),
             7,
             "member-a".into(),
+            Some("instance-a".into()),
             "range".into(),
             vec![assignment.clone()],
         );
@@ -1336,6 +1397,7 @@ mod retry_tests {
         assert!(req.group_id == "group-a");
         assert!(req.generation_id == 7);
         assert!(req.member_id == "member-a");
+        assert!(req.group_instance_id.as_deref() == Some("instance-a"));
         assert!(req.protocol_type == Some("consumer".into()));
         assert!(req.protocol_name == Some("range".into()));
         assert!(req.assignments == vec![assignment]);
@@ -1343,11 +1405,17 @@ mod retry_tests {
 
     #[test]
     fn heartbeat_request_preserves_group_generation_and_member() {
-        let req = build_heartbeat_request("group-a".into(), 42, "member-a".into());
+        let req = build_heartbeat_request(
+            "group-a".into(),
+            42,
+            "member-a".into(),
+            Some("instance-a".into()),
+        );
 
         assert!(req.group_id == "group-a");
         assert!(req.generation_id == 42);
         assert!(req.member_id == "member-a");
+        assert!(req.group_instance_id.as_deref() == Some("instance-a"));
     }
 
     #[test]
@@ -1440,6 +1508,23 @@ mod retry_tests {
         )
         .await;
         assert!(matches!(r, Err(ConsumerError::CoordinatorUnavailable)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn connect_past_deadline_surfaces_coordinator_unavailable() {
+        let calls = AtomicUsize::new(0);
+        let r = with_coordinator_retry(
+            Duration::from_millis(1),
+            |r: &Resp| r.error_code,
+            || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                async { Err::<Resp, _>(refused_connect_error()) }
+            },
+        )
+        .await;
+
+        assert!(matches!(r, Err(ConsumerError::CoordinatorUnavailable)));
+        assert!(calls.load(Ordering::SeqCst) > 1);
     }
 }
 
@@ -1578,5 +1663,43 @@ mod refind_tests {
         assert!(r.error_code == 25);
         assert!(calls.load(Ordering::SeqCst) == 1);
         assert!(coord.load(Ordering::Relaxed) == 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn connect_error_refinds_until_deadline() {
+        let client = Client::builder()
+            .bootstrap("127.0.0.1:1")
+            .connect_timeout(Duration::from_millis(10))
+            .request_timeout(Duration::from_millis(10))
+            .build()
+            .await
+            .unwrap();
+        let coord = AtomicI32::new(5);
+        let calls = AtomicUsize::new(0);
+        let r = with_coordinator_refind(
+            &client,
+            "g",
+            &coord,
+            Duration::from_millis(1),
+            |r: &Resp| r.error_code,
+            || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                async {
+                    Err::<Resp, _>(ConsumerError::Client(
+                        crabka_client_core::ClientError::Connect {
+                            addr: "127.0.0.1:9092".parse().unwrap(),
+                            source: std::io::Error::new(
+                                std::io::ErrorKind::ConnectionRefused,
+                                "refused",
+                            ),
+                        },
+                    ))
+                }
+            },
+        )
+        .await;
+
+        assert!(matches!(r, Err(ConsumerError::CoordinatorUnavailable)));
+        assert!(calls.load(Ordering::SeqCst) > 1);
     }
 }

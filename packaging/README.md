@@ -3,8 +3,10 @@
 The Crabka images are built **without a Dockerfile** from APK packages using
 Chainguard's [melange](https://github.com/chainguard-dev/melange) (compile the
 packages) and [apko](https://github.com/chainguard-dev/apko) (assemble the OCI
-image). See [`melange/crabka.yaml`](melange/crabka.yaml) for the build and the
-per-image [`apko/`](apko) configs for the image contents.
+image). See [`melange/crabka.yaml`](melange/crabka.yaml) for the production
+service build, [`melange/crabka-demo.yaml`](melange/crabka-demo.yaml) for the
+all-in-one observability demo payload, and the per-image [`apko/`](apko)
+configs for the image contents.
 
 `.github/workflows/publish-images.yml` compiles the packages natively per
 architecture (`linux/amd64` + `linux/arm64`, no QEMU), assembles a single
@@ -17,6 +19,13 @@ registries on a `crabka-broker-v*` release tag:
 | `crabka-operator`        | `robothead/crabka-operator`        | `ghcr.io/robot-head/crabka-operator`        |
 | `crabka-schema-registry` | `robothead/crabka-schema-registry` | `ghcr.io/robot-head/crabka-schema-registry` |
 | `bench-driver`           | `robothead/bench-driver`           | `ghcr.io/robot-head/bench-driver`           |
+
+The observability demo image is published manually by
+`.github/workflows/publish-demo-image.yml`:
+
+| Image         | GHCR                             |
+| ------------- | -------------------------------- |
+| `crabka-demo` | `ghcr.io/robot-head/crabka-demo` |
 
 ## Architectures
 

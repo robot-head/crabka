@@ -2,10 +2,13 @@
 //! folds records into the shared store, and publishes the last-applied offset
 //! (for read-your-writes). Mirrors remote-storage-topic's `partition_fetch_loop`.
 
-use std::net::ToSocketAddrs;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
+use std::time::Duration;
 
-use crabka_client_core::{ClientSecurity, Connection, ConnectionOptions, fetch_partition};
+use crabka_client_core::{
+    ClientError, ClientSecurity, Connection, ConnectionOptions, fetch_partition,
+};
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 use parking_lot::RwLock;
 use tokio::sync::watch;
@@ -19,6 +22,40 @@ use crate::store::StoreState;
 pub struct StoreReader {
     pub store: Arc<RwLock<StoreState>>,
     pub applied_rx: watch::Receiver<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FetchErrorAction {
+    Reconnect,
+    RetrySameConnection,
+}
+
+fn fetch_error_action(e: &ClientError) -> FetchErrorAction {
+    match e {
+        ClientError::Connect { .. }
+        | ClientError::Disconnected
+        | ClientError::Timeout(_)
+        | ClientError::Io(_) => FetchErrorAction::Reconnect,
+        ClientError::IncompatibleVersion { .. }
+        | ClientError::Server { .. }
+        | ClientError::Codec(_) => FetchErrorAction::RetrySameConnection,
+        _ => FetchErrorAction::RetrySameConnection,
+    }
+}
+
+fn resolve_bootstrap_addr(bootstrap: &str) -> Option<SocketAddr> {
+    bootstrap
+        .split(',')
+        .filter_map(|b| b.trim().to_socket_addrs().ok())
+        .find_map(|mut addrs| addrs.next())
+}
+
+async fn sleep_or_cancel(cancel: &CancellationToken, duration: Duration) -> bool {
+    tokio::select! {
+        biased;
+        () = cancel.cancelled() => true,
+        () = tokio::time::sleep(duration) => false,
+    }
 }
 
 /// Apply one decoded record to the store. Returns nothing; idempotent for
@@ -86,54 +123,72 @@ pub fn spawn(
     let store_bg = store.clone();
 
     tokio::spawn(async move {
-        let Some(addr) = bootstrap
-            .split(',')
-            .next()
-            .and_then(|b| b.trim().to_socket_addrs().ok())
-            .and_then(|mut a| a.next())
-        else {
-            tracing::error!(%bootstrap, "store reader: bad bootstrap addr");
-            return;
-        };
         let opts = ConnectionOptions {
             client_id,
             security: security.map(Box::new),
             ..Default::default()
         };
-        let conn = match Connection::connect_with_options(addr, opts).await {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::error!(error = %e, "store reader: connect failed");
-                return;
-            }
-        };
         let mut next = 0_i64;
         loop {
-            tokio::select! {
-                biased;
-                () = cancel.cancelled() => {
-                    conn.close();
+            let Some(addr) = resolve_bootstrap_addr(&bootstrap) else {
+                tracing::error!(%bootstrap, "store reader: bad bootstrap addr; backing off");
+                if sleep_or_cancel(&cancel, Duration::from_millis(250)).await {
                     return;
                 }
-                res = fetch_partition(&conn, &topic, topic_id, 0, next, 500, 1 << 20) => {
-                    match res {
-                        Ok(records) => {
-                            for r in records {
-                                if r.offset < next {
-                                    continue;
+                continue;
+            };
+            let conn = match Connection::connect_with_options(addr, opts.clone()).await {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!(error = %e, "store reader: connect failed; backing off");
+                    if sleep_or_cancel(&cancel, Duration::from_millis(250)).await {
+                        return;
+                    }
+                    continue;
+                }
+            };
+
+            loop {
+                tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => {
+                        conn.close();
+                        return;
+                    }
+                    res = fetch_partition(&conn, &topic, topic_id, 0, next, 500, 1 << 20) => {
+                        match res {
+                            Ok(records) => {
+                                for r in records {
+                                    if r.offset < next {
+                                        continue;
+                                    }
+                                    let key = r.key.as_deref().unwrap_or_default();
+                                    apply_record(
+                                        &store_bg,
+                                        SchemaRecord::decode(key, r.value.as_deref()),
+                                    );
+                                    next = r.offset + 1;
+                                    let _ = applied_tx.send(r.offset);
                                 }
-                                let key = r.key.as_deref().unwrap_or_default();
-                                apply_record(
-                                    &store_bg,
-                                    SchemaRecord::decode(key, r.value.as_deref()),
-                                );
-                                next = r.offset + 1;
-                                let _ = applied_tx.send(r.offset);
                             }
-                        }
-                        Err(e) => {
-                            tracing::warn!(error = %e, "store reader: fetch error; backing off");
-                            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                            Err(e) => {
+                                let action = fetch_error_action(&e);
+                                tracing::warn!(
+                                    error = %e,
+                                    action = ?action,
+                                    "store reader: fetch error; backing off"
+                                );
+                                if action == FetchErrorAction::Reconnect {
+                                    conn.close();
+                                    if sleep_or_cancel(&cancel, Duration::from_millis(250)).await {
+                                        return;
+                                    }
+                                    break;
+                                }
+                                if sleep_or_cancel(&cancel, Duration::from_millis(250)).await {
+                                    return;
+                                }
+                            }
                         }
                     }
                 }
@@ -148,6 +203,9 @@ pub fn spawn(
 mod tests {
     use super::*;
     use crate::kafkastore::record::{SchemaKey, SchemaValue};
+    use crabka_client_core::ClientError;
+    use std::io;
+    use std::time::Duration;
 
     #[test]
     fn apply_record_folds_schema_and_ignores_noop() {
@@ -169,6 +227,36 @@ mod tests {
         assert_eq!(
             store.read().schema_by_id(1, false).unwrap().1,
             "{\"type\":\"int\"}"
+        );
+    }
+
+    #[test]
+    fn fetch_transport_errors_force_reader_reconnect() {
+        assert_eq!(
+            fetch_error_action(&ClientError::Disconnected),
+            FetchErrorAction::Reconnect
+        );
+        assert_eq!(
+            fetch_error_action(&ClientError::Timeout(Duration::from_millis(1))),
+            FetchErrorAction::Reconnect
+        );
+        assert_eq!(
+            fetch_error_action(&ClientError::Connect {
+                addr: "127.0.0.1:9092".parse().unwrap(),
+                source: io::Error::new(io::ErrorKind::ConnectionRefused, "refused"),
+            }),
+            FetchErrorAction::Reconnect
+        );
+        assert_eq!(
+            fetch_error_action(&ClientError::Io(io::Error::new(
+                io::ErrorKind::ConnectionReset,
+                "reset",
+            ))),
+            FetchErrorAction::Reconnect
+        );
+        assert_eq!(
+            fetch_error_action(&ClientError::Server { error_code: 6 }),
+            FetchErrorAction::RetrySameConnection
         );
     }
 
