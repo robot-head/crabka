@@ -105,6 +105,28 @@ async fn add_voter_succeeds_when_caught_up() {
 }
 
 #[tokio::test]
+async fn add_voter_accepts_observer_at_lag_bound() {
+    let mut observer_index = std::collections::HashMap::new();
+    observer_index.insert(2u64, 990u64);
+    let mock = Mock(StdMutex::new(MockState {
+        voters: VoterSet::from_voters([voter(1)]),
+        leader_index: 1000,
+        is_leader: true,
+        observer_index,
+        ..Default::default()
+    }));
+    let lock = tokio::sync::Mutex::new(());
+    let coord = Coordinator::new(&mock, &lock, 10);
+
+    let out = coord.add_voter(AddVoter { voter: voter(2) }).await.unwrap();
+
+    assert!(out == ReconfigOutcome::Committed);
+    let st = mock.0.lock().unwrap();
+    assert!(st.membership.as_ref().unwrap() == &BTreeSet::from([1, 2]));
+    assert!(st.submitted.len() == 1);
+}
+
+#[tokio::test]
 async fn remove_last_voter_is_rejected() {
     let mock = Mock(StdMutex::new(MockState {
         voters: VoterSet::from_voters([voter(1)]),

@@ -171,6 +171,204 @@ pub struct KraftConfig {
     pub snapshot_interval_records: u64,
 }
 
+fn initial_election_at(
+    core: &QuorumStateMachine,
+    initial_leader: Option<NodeId>,
+    clock_base: Instant,
+    me: NodeId,
+    initial_epoch: LeaderEpoch,
+    election_timeout_ms: u64,
+) -> Option<Instant> {
+    match (
+        core.is_voter(),
+        initial_leader,
+        core.quorum_state().voters.len(),
+    ) {
+        (true, None, 1) => {
+            // Sole voter: there is no peer to race, so the election timeout
+            // jitter stagger is pure startup latency. Fire on the first tick;
+            // the lone-voter fast path already holds the only vote.
+            Some(clock_base)
+        }
+        (true, None, _) => {
+            // Same deterministic per-(node, epoch) jitter the core applies to
+            // re-election timers, so the first election round is staggered
+            // across closely-synchronized voters.
+            let jitter =
+                crate::kraft::core::election_jitter_ms(me, initial_epoch, election_timeout_ms);
+            let delay_ms = election_timeout_ms.saturating_add(jitter);
+            Some(
+                clock_base
+                    .checked_add(Duration::from_millis(delay_ms))
+                    .unwrap_or(clock_base),
+            )
+        }
+        _ => None,
+    }
+}
+
+fn heartbeat_period(election_timeout_ms: u64) -> Duration {
+    Duration::from_millis(election_timeout_ms.div_euclid(HEARTBEAT_DIVISOR).max(1))
+}
+
+fn election_timer_starts_election(is_voter: bool, is_leader: bool) -> bool {
+    matches!((is_voter, is_leader), (true, false))
+}
+
+fn following_leader_for_role(role: &Role) -> Option<NodeId> {
+    match role {
+        Role::Follower { leader_id, .. } => Some(*leader_id),
+        Role::Observer { leader_id, .. } => *leader_id,
+        _ => None,
+    }
+}
+
+fn should_serve_fetch_records(has_snapshot: bool, has_divergence: bool, is_leader: bool) -> bool {
+    matches!(
+        (has_snapshot, has_divergence, is_leader),
+        (false, false, true)
+    )
+}
+
+fn should_fail_waiters_on_leadership_change(
+    was_leader: bool,
+    is_leader: bool,
+    held_epoch: LeaderEpoch,
+    current_epoch: LeaderEpoch,
+) -> bool {
+    matches!(
+        (was_leader, is_leader, held_epoch == current_epoch),
+        (true, false, _) | (true, true, false)
+    )
+}
+
+fn instant_from_clock_base(clock_base: Instant, deadline: SimInstant) -> Instant {
+    clock_base
+        .checked_add(Duration::from_millis(deadline.0))
+        .unwrap_or(clock_base)
+}
+
+fn assigned_record_offset(assign_base: i64, delta: i64) -> i64 {
+    assign_base.saturating_add(delta)
+}
+
+fn append_result_is_consistent(expected_base: i64, returned_base: i64, log_end_after: i64) -> bool {
+    returned_base.cmp(&expected_base).is_eq() && log_end_after.cmp(&expected_base).is_gt()
+}
+
+fn validate_append_result(
+    context: &str,
+    expected_base: i64,
+    returned_base: i64,
+    log_end_after: i64,
+) -> Result<(), RaftError> {
+    if append_result_is_consistent(expected_base, returned_base, log_end_after) {
+        Ok(())
+    } else {
+        Err(RaftError::ChangeRejected(format!(
+            "{context} append invariant failed: expected base {expected_base}, got {returned_base}, log end {log_end_after}"
+        )))
+    }
+}
+
+fn submit_waiter_need_offset(base: i64, blob_count: usize) -> i64 {
+    base.saturating_add(i64::try_from(blob_count).unwrap_or(1))
+}
+
+fn is_single_voter_majority(majority: usize) -> bool {
+    matches!(majority, 1)
+}
+
+fn batch_base_in_apply_window(base_offset: i64, prev_hwm: i64, applied_hwm: i64) -> bool {
+    match base_offset.checked_sub(prev_hwm) {
+        Some(distance_from_prev) if distance_from_prev >= 0 => {
+            matches!(applied_hwm.checked_sub(base_offset), Some(distance_to_hwm) if distance_to_hwm > 0)
+        }
+        _ => false,
+    }
+}
+
+fn committed_records_since_snapshot(hwm: i64, last_snapshot_end_offset: i64) -> u64 {
+    u64::try_from(hwm.saturating_sub(last_snapshot_end_offset)).unwrap_or(0)
+}
+
+fn snapshot_interval_reached(advanced: u64, snapshot_interval_records: u64) -> bool {
+    matches!(
+        advanced.cmp(&snapshot_interval_records),
+        std::cmp::Ordering::Equal | std::cmp::Ordering::Greater
+    )
+}
+
+fn expected_hwm_after_advance(prev_hwm: i64, new_hwm: i64, log_end: i64) -> i64 {
+    prev_hwm.max(new_hwm.min(log_end))
+}
+
+fn hwm_advanced_as_expected(applied_hwm: i64, expected_hwm: i64) -> bool {
+    !applied_hwm.cmp(&expected_hwm).is_lt()
+}
+
+fn hwm_reaches_waiter(hwm: i64, need_offset: i64) -> bool {
+    matches!(
+        hwm.cmp(&need_offset),
+        std::cmp::Ordering::Equal | std::cmp::Ordering::Greater
+    )
+}
+
+fn metadata_fetch_offset_in_committed_window(fetch_offset: i64, high_watermark: i64) -> bool {
+    (0..high_watermark).contains(&fetch_offset)
+}
+
+fn fetch_batch_committed_before_hwm(base_offset: i64, high_watermark: i64) -> bool {
+    (i64::MIN..high_watermark).contains(&base_offset)
+}
+
+fn fetch_offset_has_records(fetch_offset: i64, log_end: i64) -> bool {
+    (0..log_end).contains(&fetch_offset)
+}
+
+fn fetch_epoch_for_request(
+    installed_snapshot_epoch: Option<LeaderEpoch>,
+    log_start: i64,
+    log_end: i64,
+    last_epoch: LeaderEpoch,
+) -> LeaderEpoch {
+    match installed_snapshot_epoch {
+        Some(epoch) if log_end.cmp(&log_start).is_eq() => epoch,
+        _ => last_epoch,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FetchBatchDisposition {
+    AlreadyPresent,
+    Append,
+    Gap,
+}
+
+fn classify_fetch_batch(at: i64, log_end: i64) -> FetchBatchDisposition {
+    match at.cmp(&log_end) {
+        std::cmp::Ordering::Less => FetchBatchDisposition::AlreadyPresent,
+        std::cmp::Ordering::Equal => FetchBatchDisposition::Append,
+        std::cmp::Ordering::Greater => FetchBatchDisposition::Gap,
+    }
+}
+
+fn should_start_snapshot_fetch(
+    snapshot_id: (i64, i32),
+    log_end: i64,
+    active_snapshot_id: Option<(i64, i32)>,
+) -> bool {
+    snapshot_id.0.cmp(&log_end).is_gt()
+        && !matches!(active_snapshot_id, Some(id) if id == snapshot_id)
+}
+
+fn snapshot_fetch_response_invalid(error_code: i16, from: NodeId, leader_id: NodeId) -> bool {
+    !matches!(
+        (error_code.cmp(&0), from.cmp(&leader_id)),
+        (std::cmp::Ordering::Equal, std::cmp::Ordering::Equal)
+    )
+}
+
 impl KraftController {
     /// Build the engine over an already-opened [`KraftLog`] and spawn its loop
     /// task. Recovery (snapshot + replay + quorum-state file) is wired by
@@ -239,31 +437,14 @@ impl KraftController {
         let clock_base = Instant::now();
         // A fresh voter arms its election timer so a bootstrap cluster elects
         // without an injected event. Observers/followers leave it disarmed.
-        let election_at = if core.is_voter() && initial_leader.is_none() {
-            if core.quorum_state().voters.len() == 1 {
-                // Sole voter: there is no peer to race, so the election
-                // timeout + jitter stagger — which exists only to prevent a
-                // lockstep-booting majority from splitting the vote on round
-                // one — is pure startup latency. Fire on the first tick;
-                // `start_election`'s lone-voter fast win (it already holds the
-                // only vote, so prevote reaches majority immediately) promotes
-                // this node to leader at once. Without this, a standalone
-                // broker waits the full ~8.5s timeout before even starting the
-                // election it is guaranteed to win.
-                Some(clock_base)
-            } else {
-                // Same deterministic per-(node, epoch) jitter the core applies
-                // to re-election timers, so the FIRST election round is also
-                // staggered across closely-synchronized voters (otherwise a
-                // bare majority that boots in lockstep splits the vote on round
-                // one).
-                let jitter =
-                    crate::kraft::core::election_jitter_ms(me, initial_epoch, election_timeout_ms);
-                Some(clock_base + Duration::from_millis(election_timeout_ms + jitter))
-            }
-        } else {
-            None
-        };
+        let election_at = initial_election_at(
+            &core,
+            initial_leader,
+            clock_base,
+            me,
+            initial_epoch,
+            election_timeout_ms,
+        );
 
         let engine = Engine {
             me,
@@ -517,8 +698,7 @@ impl Engine {
     /// fire-and-forget (see the module docs).
     async fn run(mut self, mut cmd_rx: mpsc::Receiver<Command>) {
         // Heartbeat ticks the whole time; the loop only acts on it while leader.
-        let hb_period =
-            Duration::from_millis((self.election_timeout_ms / HEARTBEAT_DIVISOR).max(1));
+        let hb_period = heartbeat_period(self.election_timeout_ms);
         let mut heartbeat = tokio::time::interval(hb_period);
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -610,7 +790,10 @@ impl Engine {
             TimerTick::Election => {
                 // The election timer is only armed for voters not currently
                 // leading. Firing it starts an election.
-                if self.core.is_voter() && !self.core.role().is_leader() {
+                if election_timer_starts_election(
+                    self.core.is_voter(),
+                    self.core.role().is_leader(),
+                ) {
                     self.on_event(Event::ElectionTimeout);
                 }
             }
@@ -646,11 +829,7 @@ impl Engine {
     /// The leader id we are actively following (Follower / attached Observer),
     /// if any.
     fn following_leader(&self) -> Option<NodeId> {
-        match self.core.role() {
-            Role::Follower { leader_id, .. } => Some(*leader_id),
-            Role::Observer { leader_id, .. } => *leader_id,
-            _ => None,
-        }
+        following_leader_for_role(self.core.role())
     }
 
     #[allow(clippy::too_many_lines)]
@@ -760,13 +939,14 @@ impl Engine {
                     } else {
                         None
                     };
-                    let records = if snapshot_id.is_some()
-                        || diverging.is_some()
-                        || !self.core.role().is_leader()
-                    {
-                        bytes::Bytes::new()
-                    } else {
+                    let records = if should_serve_fetch_records(
+                        snapshot_id.is_some(),
+                        diverging.is_some(),
+                        self.core.role().is_leader(),
+                    ) {
                         self.serve_fetch_records(fetch_offset)
+                    } else {
+                        bytes::Bytes::new()
                     };
                     // Advertise the ACTUAL current leader, not `self.me`: a
                     // follower serving a Fetch must redirect the fetcher to the
@@ -968,7 +1148,12 @@ impl Engine {
     fn fail_waiters_on_leadership_loss(&mut self) {
         let is_leader = self.core.role().is_leader();
         let epoch = self.core.quorum_state().leader_epoch;
-        let lost_leadership = self.was_leader && (!is_leader || epoch != self.held_epoch);
+        let lost_leadership = should_fail_waiters_on_leadership_change(
+            self.was_leader,
+            is_leader,
+            self.held_epoch,
+            epoch,
+        );
         if lost_leadership && !self.commit_waiters.is_empty() {
             let current_leader = self.core.quorum_state().leader_id;
             for w in self.commit_waiters.drain(..) {
@@ -986,14 +1171,22 @@ impl Engine {
 
     /// Convert a core [`SimInstant`] deadline into a `tokio::time::Instant`.
     fn deadline_instant(&self, deadline: SimInstant) -> Instant {
-        self.clock_base + Duration::from_millis(deadline.0)
+        instant_from_clock_base(self.clock_base, deadline)
     }
 
     /// Append the leader's `LeaderChange` control marker for `epoch`.
     fn append_leader_change(&mut self, epoch: LeaderEpoch) -> Result<i64, RaftError> {
         let voter_ids: Vec<NodeId> = self.core.quorum_state().voters.ids().into_iter().collect();
         let mut batch = leader_change_batch(epoch, self.me, &voter_ids);
-        self.log.append(&mut batch)
+        let expected_base = self.log.log_end_offset();
+        let base = self.log.append(&mut batch)?;
+        validate_append_result(
+            "leader-change",
+            expected_base,
+            base,
+            self.log.log_end_offset(),
+        )?;
+        Ok(base)
     }
 
     /// Handle a `submit_change`: leader appends + parks a waiter; non-leader
@@ -1033,7 +1226,7 @@ impl Engine {
                 MetadataRecord::V1BrokerRegistration(b) => {
                     let delta = i64::try_from(value_blobs.len()).unwrap_or(i64::MAX);
                     let mut b = b.clone();
-                    b.broker_epoch = assign_base + delta;
+                    b.broker_epoch = assigned_record_offset(assign_base, delta);
                     stamped = MetadataRecord::V1BrokerRegistration(b);
                     &stamped
                 }
@@ -1081,7 +1274,16 @@ impl Engine {
                 return;
             }
         };
-        let need_offset = base + i64::try_from(value_blobs.len()).unwrap_or(1);
+        if let Err(e) = validate_append_result(
+            "submit-change",
+            assign_base,
+            base,
+            self.log.log_end_offset(),
+        ) {
+            let _ = reply.send(Err(e));
+            return;
+        }
+        let need_offset = submit_waiter_need_offset(base, value_blobs.len());
 
         // Park the waiter, then try to advance the HWM immediately: a single
         // voter commits its own append with no peer fetch.
@@ -1093,7 +1295,7 @@ impl Engine {
         });
         // Drive a self-fetch so the core recomputes the HWM (single voter
         // commits immediately; multi-voter commits when followers fetch).
-        if self.core.quorum_state().majority() == 1 {
+        if is_single_voter_majority(self.core.quorum_state().majority()) {
             self.advance_and_apply(self.log.log_end_offset());
         }
         self.try_resolve_waiters();
@@ -1126,6 +1328,7 @@ impl Engine {
             records: kafka_records,
             ..Default::default()
         };
+        let expected_base = self.log.log_end_offset();
         let base = match self.log.append(&mut batch) {
             Ok(off) => off,
             Err(e) => {
@@ -1133,6 +1336,15 @@ impl Engine {
                 return -1;
             }
         };
+        if let Err(e) = validate_append_result(
+            "test append",
+            expected_base,
+            base,
+            self.log.log_end_offset(),
+        ) {
+            tracing::error!(?e, "kraft: test append invariant failed");
+            return -1;
+        }
         self.advance_and_apply(self.log.log_end_offset());
         base
     }
@@ -1141,8 +1353,24 @@ impl Engine {
     /// [`MetadataImage`], then publish and resolve any satisfied waiters.
     fn advance_and_apply(&mut self, new_hwm: i64) {
         let prev_hwm = self.log.hwm();
+        let expected_hwm = expected_hwm_after_advance(prev_hwm, new_hwm, self.log.log_end_offset());
         self.log.advance_hwm(new_hwm);
         let applied_hwm = self.log.hwm();
+        if !hwm_advanced_as_expected(applied_hwm, expected_hwm) {
+            tracing::error!(
+                prev_hwm,
+                new_hwm,
+                expected_hwm,
+                applied_hwm,
+                "kraft: high watermark failed to advance"
+            );
+            self.fail_waiters_reached_by(
+                expected_hwm,
+                "high watermark failed to advance to committed offset",
+            );
+            self.maybe_snapshot_and_prune();
+            return;
+        }
         if applied_hwm <= prev_hwm {
             self.try_resolve_waiters();
             self.maybe_snapshot_and_prune();
@@ -1152,7 +1380,7 @@ impl Engine {
             Ok(batches) => {
                 let mut changed = false;
                 for batch in &batches {
-                    if batch.base_offset < prev_hwm || batch.base_offset >= applied_hwm {
+                    if !batch_base_in_apply_window(batch.base_offset, prev_hwm, applied_hwm) {
                         continue;
                     }
                     // The LeaderChange control batch carries no metadata records;
@@ -1193,6 +1421,7 @@ impl Engine {
             }
             Err(e) => tracing::error!(?e, "kraft: read for apply failed"),
         }
+        self.publish_leader();
         self.try_resolve_waiters();
         self.maybe_snapshot_and_prune();
     }
@@ -1205,8 +1434,8 @@ impl Engine {
             return;
         }
         let hwm = self.log.hwm();
-        let advanced = u64::try_from((hwm - self.last_snapshot_end_offset).max(0)).unwrap_or(0);
-        if advanced < self.snapshot_interval_records {
+        let advanced = committed_records_since_snapshot(hwm, self.last_snapshot_end_offset);
+        if !snapshot_interval_reached(advanced, self.snapshot_interval_records) {
             return;
         }
         let bytes = match crate::snapshot::SnapshotWriter::serialize(&self.image, 0) {
@@ -1255,9 +1484,23 @@ impl Engine {
         let hwm = self.log.hwm();
         let mut still = Vec::new();
         for w in self.commit_waiters.drain(..) {
-            if hwm >= w.need_offset {
+            if hwm_reaches_waiter(hwm, w.need_offset) {
                 let result = w.rejection.map_or(Ok(()), Err);
                 let _ = w.reply.send(result);
+            } else {
+                still.push(w);
+            }
+        }
+        self.commit_waiters = still;
+    }
+
+    fn fail_waiters_reached_by(&mut self, hwm: i64, reason: &str) {
+        let mut still = Vec::new();
+        for w in self.commit_waiters.drain(..) {
+            if hwm_reaches_waiter(hwm, w.need_offset) {
+                let _ = w
+                    .reply
+                    .send(Err(RaftError::ChangeRejected(reason.to_string())));
             } else {
                 still.push(w);
             }
@@ -1313,14 +1556,12 @@ impl Engine {
     fn metadata_fetch_slice(&self, fetch_offset: i64, max_bytes: usize) -> MetadataFetchSlice {
         let high_watermark = self.log.hwm();
         let log_start_offset = self.log.log_start_offset();
-        let records = if fetch_offset < 0 || fetch_offset >= high_watermark {
-            bytes::Bytes::new()
-        } else {
+        let records = if metadata_fetch_offset_in_committed_window(fetch_offset, high_watermark) {
             match self.log.read_decoded(fetch_offset, max_bytes.max(1)) {
                 Ok(batches) => {
                     let committed: Vec<RecordBatch> = batches
                         .into_iter()
-                        .filter(|b| b.base_offset < high_watermark)
+                        .filter(|b| fetch_batch_committed_before_hwm(b.base_offset, high_watermark))
                         .collect();
                     encode_batches(&committed)
                 }
@@ -1329,6 +1570,8 @@ impl Engine {
                     bytes::Bytes::new()
                 }
             }
+        } else {
+            bytes::Bytes::new()
         };
         MetadataFetchSlice {
             records,
@@ -1403,10 +1646,12 @@ impl Engine {
         // truncate hint → a re-fetch loop. While we hold a freshly-installed
         // epoch AND the log is still empty at the boundary, fetch with that
         // epoch instead. Cleared once a normal fetch appends past the boundary.
-        let fetch_epoch = match self.installed_snapshot_epoch {
-            Some(ep) if self.log.log_end_offset() == self.log.log_start_offset() => ep,
-            _ => self.log.last_epoch(),
-        };
+        let fetch_epoch = fetch_epoch_for_request(
+            self.installed_snapshot_epoch,
+            self.log.log_start_offset(),
+            self.log.log_end_offset(),
+            self.log.last_epoch(),
+        );
         let body = wire::PeerRequest::Fetch {
             from: self.me,
             fetch_epoch,
@@ -1439,7 +1684,7 @@ impl Engine {
     /// `submit_change` waiters can commit once a majority has fetched.
     fn serve_fetch_records(&self, fetch_offset: i64) -> bytes::Bytes {
         let log_end = self.log.log_end_offset();
-        if fetch_offset < 0 || fetch_offset >= log_end {
+        if !fetch_offset_has_records(fetch_offset, log_end) {
             return bytes::Bytes::new();
         }
         let batches = match self.log.read_decoded(fetch_offset, MAX_APPLY_BYTES) {
@@ -1476,12 +1721,8 @@ impl Engine {
         // (or continue) a snapshot transfer, feed the core for liveness/epoch
         // bookkeeping, then stop — no append/apply on this response.
         if let Some(id) = snapshot_id {
-            if id.0 > self.log.log_end_offset()
-                && self
-                    .snapshot_fetch
-                    .as_ref()
-                    .is_none_or(|s| s.snapshot_id != id)
-            {
+            let active_id = self.snapshot_fetch.as_ref().map(|s| s.snapshot_id);
+            if should_start_snapshot_fetch(id, self.log.log_end_offset(), active_id) {
                 self.snapshot_fetch = Some(SnapshotFetchState::new(id, leader_id));
                 self.send_fetch_snapshot(leader_id, id, 0);
             }
@@ -1509,13 +1750,16 @@ impl Engine {
                     for mut batch in batches {
                         let at = batch.base_offset;
                         let log_end = self.log.log_end_offset();
-                        if at < log_end {
-                            continue; // already have it
-                        }
-                        if at > log_end {
-                            // Gap: we are missing earlier records. Stop; the next
-                            // fetch (from our true log end) will refill in order.
-                            break;
+                        match classify_fetch_batch(at, log_end) {
+                            FetchBatchDisposition::AlreadyPresent => {
+                                continue; // already have it
+                            }
+                            FetchBatchDisposition::Append => {}
+                            FetchBatchDisposition::Gap => {
+                                // Gap: we are missing earlier records. Stop; the next
+                                // fetch (from our true log end) will refill in order.
+                                break;
+                            }
                         }
                         if let Err(e) = self.log.append_at(&mut batch, at) {
                             tracing::error!(?e, at, "kraft: follower append_at failed");
@@ -1566,7 +1810,7 @@ impl Engine {
         let Some(state) = self.snapshot_fetch.as_mut() else {
             return;
         };
-        if error_code != 0 || from != state.leader_id {
+        if snapshot_fetch_response_invalid(error_code, from, state.leader_id) {
             self.snapshot_fetch = None;
             self.send_fetch(from);
             return;
@@ -1875,9 +2119,8 @@ fn load_quorum_state(
     cur.copy_to_slice(&mut cid);
     let _ = cluster_id; // file is authoritative for cluster id
     let leader_epoch = cur.get_u32();
-    let leader_present = cur.get_u8() != 0;
-    let leader_raw = cur.get_u64();
-    let leader_id = leader_present.then_some(leader_raw);
+    let _leader_present_tag = cur.get_u8();
+    let _leader_raw = cur.get_u64();
     let voted_present = cur.get_u8() != 0;
     let voted_id = cur.get_u64();
     let mut dir_bytes = [0u8; 16];
@@ -1894,7 +2137,6 @@ fn load_quorum_state(
     // and never re-discover the real leader elected while it was down. Start
     // with no known leader; the node re-attaches via the current leader's
     // `BeginQuorumEpoch` heartbeat (higher epoch → Follower) or a re-election.
-    let _ = leader_id;
     Ok(Some(QuorumState {
         cluster_id: Uuid::from_bytes(cid),
         leader_epoch,
@@ -1953,11 +2195,15 @@ fn latest_checkpoint_id(dir: &std::path::Path) -> Option<(i64, i32)> {
         let (Ok(off), Ok(ep)) = (off.parse::<i64>(), ep.parse::<i32>()) else {
             continue;
         };
-        if best.is_none_or(|cur| (off, ep) > cur) {
+        if best.is_none_or(|cur| checkpoint_id_is_newer((off, ep), cur)) {
             best = Some((off, ep));
         }
     }
     best
+}
+
+fn checkpoint_id_is_newer(candidate: (i64, i32), current: (i64, i32)) -> bool {
+    matches!(candidate.cmp(&current), std::cmp::Ordering::Greater)
 }
 
 /// Delete every `.checkpoint` in `dir` except the latest `(end_offset, epoch)`,
@@ -2058,6 +2304,826 @@ mod tests {
         (ctrl, dir)
     }
 
+    fn build_engine_only(me: NodeId, ids: &[NodeId]) -> (Engine, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = KraftLog::open(dir.path()).expect("open log");
+        let core = QuorumStateMachine::new(
+            me,
+            QuorumState::bootstrap(uuid::Uuid::nil(), voter_set(ids)),
+            1000,
+        );
+        let image = MetadataImage::new(uuid::Uuid::nil());
+        let (image_tx, _image_rx) = watch::channel(Arc::new(image.clone()));
+        let (leader_tx, _leader_rx) = watch::channel(core.quorum_state().leader_id);
+        let initial_snapshot = QuorumStateSnapshot {
+            leader_id: core.quorum_state().leader_id,
+            leader_epoch: core.quorum_state().leader_epoch,
+            high_watermark: log.hwm(),
+            log_end_offset: log.log_end_offset(),
+            log_start_offset: log.log_start_offset(),
+            voters: initial_state_voters(&core),
+            per_voter_fetch_offset: std::collections::BTreeMap::new(),
+        };
+        let (quorum_tx, _quorum_rx) = watch::channel(initial_snapshot);
+        let (cmd_tx, _cmd_rx) = mpsc::channel(1);
+        let held_epoch = core.quorum_state().leader_epoch;
+        let was_leader = core.role().is_leader();
+        let clock_base = Instant::now();
+        (
+            Engine {
+                me,
+                core,
+                log,
+                image,
+                peers: Arc::new(NullPeerSender),
+                image_tx,
+                leader_tx,
+                quorum_tx,
+                cmd_tx,
+                data_dir: dir.path().to_path_buf(),
+                clock_base,
+                election_timeout_ms: 1000,
+                election_at: None,
+                fetch_at: None,
+                fetch_misses: 0,
+                commit_waiters: Vec::new(),
+                was_leader,
+                held_epoch,
+                snapshot_interval_records: 0,
+                last_snapshot_end_offset: 0,
+                snapshot_fetch: None,
+                installed_snapshot_epoch: None,
+            },
+            dir,
+        )
+    }
+
+    #[derive(Debug)]
+    struct CapturedPeerSend {
+        peer: NodeId,
+        api_key: i16,
+        body: bytes::Bytes,
+    }
+
+    struct RecordingPeerSender {
+        sends: mpsc::UnboundedSender<CapturedPeerSend>,
+        response: bytes::Bytes,
+    }
+
+    #[async_trait::async_trait]
+    impl PeerSender for RecordingPeerSender {
+        async fn send(
+            &self,
+            peer: NodeId,
+            api_key: i16,
+            body: bytes::Bytes,
+        ) -> Result<bytes::Bytes, RaftError> {
+            self.sends
+                .send(CapturedPeerSend {
+                    peer,
+                    api_key,
+                    body,
+                })
+                .expect("record peer send");
+            Ok(self.response.clone())
+        }
+    }
+
+    fn record_peer_sends(
+        engine: &mut Engine,
+        response: bytes::Bytes,
+    ) -> mpsc::UnboundedReceiver<CapturedPeerSend> {
+        let (sends, rx) = mpsc::unbounded_channel();
+        engine.peers = Arc::new(RecordingPeerSender { sends, response });
+        rx
+    }
+
+    async fn recv_peer_send(
+        rx: &mut mpsc::UnboundedReceiver<CapturedPeerSend>,
+    ) -> CapturedPeerSend {
+        tokio::time::timeout(StdDuration::from_secs(1), rx.recv())
+            .await
+            .expect("peer send timed out")
+            .expect("peer send channel closed")
+    }
+
+    async fn recv_peer_send_with_api(
+        rx: &mut mpsc::UnboundedReceiver<CapturedPeerSend>,
+        api_key: i16,
+    ) -> CapturedPeerSend {
+        let deadline = tokio::time::Instant::now() + StdDuration::from_secs(1);
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let send = tokio::time::timeout(remaining, rx.recv())
+                .await
+                .expect("peer send with api timed out")
+                .expect("peer send channel closed");
+            if send.api_key == api_key {
+                return send;
+            }
+        }
+    }
+
+    fn one_offset_batch(base_offset: i64, epoch: i32, value: &[u8]) -> RecordBatch {
+        RecordBatch {
+            base_offset,
+            partition_leader_epoch: epoch,
+            last_offset_delta: 0,
+            records: vec![Record {
+                value: Some(bytes::Bytes::copy_from_slice(value)),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn initial_election_deadline_matches_startup_role() {
+        let base = Instant::now();
+        let single = QuorumStateMachine::new(
+            1,
+            QuorumState::bootstrap(uuid::Uuid::nil(), voter_set(&[1])),
+            400,
+        );
+        assert!(initial_election_at(&single, None, base, 1, 0, 400) == Some(base));
+
+        let known_leader = QuorumStateMachine::new(
+            1,
+            QuorumState::bootstrap(uuid::Uuid::nil(), voter_set(&[1, 2, 3])),
+            400,
+        );
+        assert!(initial_election_at(&known_leader, Some(2), base, 1, 0, 400).is_none());
+
+        let non_voter = QuorumStateMachine::new(
+            4,
+            QuorumState::bootstrap(uuid::Uuid::nil(), voter_set(&[1, 2, 3])),
+            400,
+        );
+        assert!(initial_election_at(&non_voter, None, base, 4, 0, 400).is_none());
+
+        let multi = QuorumStateMachine::new(
+            1,
+            QuorumState::bootstrap(uuid::Uuid::nil(), voter_set(&[1, 2, 3])),
+            400,
+        );
+        let jitter = crate::kraft::core::election_jitter_ms(1, 0, 400);
+        let at = initial_election_at(&multi, None, base, 1, 0, 400).expect("multi voter timer");
+        assert!(at.duration_since(base) == Duration::from_millis(400 + jitter));
+    }
+
+    #[test]
+    fn initial_state_voters_preserves_configured_quorum_ids() {
+        let (engine, _dir) = build_engine_only(2, &[1, 2, 3]);
+        assert!(initial_state_voters(&engine.core) == vec![1, 2, 3]);
+        assert!(engine.quorum_tx.borrow().voters == vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn heartbeat_period_is_one_third_of_election_timeout_with_floor() {
+        assert!(heartbeat_period(1000) == Duration::from_millis(333));
+        assert!(heartbeat_period(120) == Duration::from_millis(40));
+        assert!(heartbeat_period(2) == Duration::from_millis(1));
+        assert!(heartbeat_period(0) == Duration::from_millis(1));
+    }
+
+    #[test]
+    fn election_timer_only_starts_non_leader_voters() {
+        assert!(election_timer_starts_election(true, false));
+        assert!(!election_timer_starts_election(true, true));
+        assert!(!election_timer_starts_election(false, false));
+        assert!(!election_timer_starts_election(false, true));
+    }
+
+    #[test]
+    fn following_leader_for_role_reports_followed_leader_only() {
+        assert!(
+            following_leader_for_role(&Role::Follower {
+                leader_id: 7,
+                fetch_deadline: SimInstant(10),
+            }) == Some(7)
+        );
+        assert!(
+            following_leader_for_role(&Role::Observer {
+                leader_id: Some(9),
+                fetch_deadline: SimInstant(10),
+            }) == Some(9)
+        );
+        assert!(
+            following_leader_for_role(&Role::Observer {
+                leader_id: None,
+                fetch_deadline: SimInstant(10),
+            })
+            .is_none()
+        );
+        assert!(
+            following_leader_for_role(&Role::Leader {
+                replicas: std::collections::BTreeMap::new(),
+                high_watermark: 0,
+                epoch_start_offset: 0,
+            })
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn fetch_records_are_served_only_by_clean_leader_fetches() {
+        assert!(should_serve_fetch_records(false, false, true));
+        assert!(!should_serve_fetch_records(true, false, true));
+        assert!(!should_serve_fetch_records(false, true, true));
+        assert!(!should_serve_fetch_records(false, false, false));
+    }
+
+    #[test]
+    fn leadership_loss_detection_handles_stepdown_and_epoch_bump() {
+        assert!(should_fail_waiters_on_leadership_change(true, false, 3, 3));
+        assert!(should_fail_waiters_on_leadership_change(true, true, 3, 4));
+        assert!(!should_fail_waiters_on_leadership_change(true, true, 3, 3));
+        assert!(!should_fail_waiters_on_leadership_change(
+            false, false, 3, 4
+        ));
+    }
+
+    #[test]
+    fn deadline_instant_offsets_from_engine_clock_base() {
+        let base = Instant::now();
+        let at = instant_from_clock_base(base, SimInstant(250));
+        assert!(at.checked_duration_since(base) == Some(Duration::from_millis(250)));
+    }
+
+    #[test]
+    fn submit_offset_helpers_use_base_plus_blob_count() {
+        assert!(assigned_record_offset(9, 0) == 9);
+        assert!(assigned_record_offset(9, 3) == 12);
+        assert!(submit_waiter_need_offset(9, 3) == 12);
+        assert!(submit_waiter_need_offset(9, 0) == 9);
+    }
+
+    #[test]
+    fn append_result_must_match_previous_log_end_and_advance_log() {
+        assert!(append_result_is_consistent(4, 4, 5));
+        assert!(!append_result_is_consistent(4, -1, 5));
+        assert!(!append_result_is_consistent(4, 5, 5));
+        assert!(!append_result_is_consistent(4, 4, 4));
+        assert!(validate_append_result("test", 4, 4, 5).is_ok());
+        assert!(validate_append_result("test", 4, -1, 4).is_err());
+    }
+
+    #[test]
+    fn single_voter_majority_detection_is_exact() {
+        assert!(is_single_voter_majority(1));
+        assert!(!is_single_voter_majority(0));
+        assert!(!is_single_voter_majority(2));
+    }
+
+    #[test]
+    fn apply_window_includes_only_newly_committed_batch_bases() {
+        assert!(batch_base_in_apply_window(5, 5, 6));
+        assert!(batch_base_in_apply_window(6, 5, 8));
+        assert!(!batch_base_in_apply_window(4, 5, 8));
+        assert!(!batch_base_in_apply_window(8, 5, 8));
+    }
+
+    #[test]
+    fn snapshot_threshold_uses_positive_hwm_delta_from_last_snapshot() {
+        assert!(committed_records_since_snapshot(10, 4) == 6);
+        assert!(committed_records_since_snapshot(4, 10) == 0);
+        assert!(snapshot_interval_reached(3, 3));
+        assert!(snapshot_interval_reached(4, 3));
+        assert!(!snapshot_interval_reached(2, 3));
+    }
+
+    #[test]
+    fn expected_hwm_after_advance_is_monotonic_and_clamped_to_log_end() {
+        assert!(expected_hwm_after_advance(2, 5, 4) == 4);
+        assert!(expected_hwm_after_advance(2, 1, 4) == 2);
+        assert!(expected_hwm_after_advance(2, 3, 4) == 3);
+        assert!(hwm_advanced_as_expected(4, 4));
+        assert!(hwm_advanced_as_expected(5, 4));
+        assert!(!hwm_advanced_as_expected(3, 4));
+    }
+
+    #[test]
+    fn waiter_resolution_requires_hwm_to_reach_need_offset() {
+        assert!(hwm_reaches_waiter(5, 5));
+        assert!(hwm_reaches_waiter(6, 5));
+        assert!(!hwm_reaches_waiter(4, 5));
+    }
+
+    #[test]
+    fn metadata_fetch_window_is_committed_half_open_range() {
+        assert!(metadata_fetch_offset_in_committed_window(0, 1));
+        assert!(metadata_fetch_offset_in_committed_window(4, 5));
+        assert!(!metadata_fetch_offset_in_committed_window(-1, 5));
+        assert!(!metadata_fetch_offset_in_committed_window(5, 5));
+        assert!(fetch_batch_committed_before_hwm(4, 5));
+        assert!(!fetch_batch_committed_before_hwm(5, 5));
+    }
+
+    #[test]
+    fn fetch_record_offsets_are_inside_log_window_only() {
+        assert!(fetch_offset_has_records(0, 1));
+        assert!(fetch_offset_has_records(4, 5));
+        assert!(!fetch_offset_has_records(-1, 5));
+        assert!(!fetch_offset_has_records(5, 5));
+    }
+
+    #[test]
+    fn fetch_epoch_uses_installed_snapshot_epoch_only_at_empty_boundary() {
+        assert!(fetch_epoch_for_request(Some(7), 10, 10, 3) == 7);
+        assert!(fetch_epoch_for_request(Some(7), 10, 11, 3) == 3);
+        assert!(fetch_epoch_for_request(None, 10, 10, 3) == 3);
+    }
+
+    #[test]
+    fn fetch_batch_classifier_separates_duplicate_append_and_gap() {
+        assert!(classify_fetch_batch(4, 5) == FetchBatchDisposition::AlreadyPresent);
+        assert!(classify_fetch_batch(5, 5) == FetchBatchDisposition::Append);
+        assert!(classify_fetch_batch(6, 5) == FetchBatchDisposition::Gap);
+    }
+
+    #[test]
+    fn snapshot_fetch_hint_starts_only_for_future_non_duplicate_snapshots() {
+        assert!(should_start_snapshot_fetch((11, 2), 10, None));
+        assert!(!should_start_snapshot_fetch((10, 2), 10, None));
+        assert!(!should_start_snapshot_fetch((11, 2), 10, Some((11, 2))));
+        assert!(should_start_snapshot_fetch((12, 2), 10, Some((11, 2))));
+    }
+
+    #[test]
+    fn snapshot_fetch_response_is_invalid_unless_success_from_active_leader() {
+        assert!(!snapshot_fetch_response_invalid(0, 2, 2));
+        assert!(snapshot_fetch_response_invalid(1, 2, 2));
+        assert!(snapshot_fetch_response_invalid(0, 3, 2));
+        assert!(snapshot_fetch_response_invalid(1, 3, 2));
+    }
+
+    #[test]
+    fn checkpoint_id_ordering_prefers_higher_offset_then_epoch_without_equal_replacement() {
+        assert!(checkpoint_id_is_newer((11, 1), (10, 9)));
+        assert!(checkpoint_id_is_newer((10, 9), (10, 2)));
+        assert!(!checkpoint_id_is_newer((10, 2), (10, 9)));
+        assert!(!checkpoint_id_is_newer((10, 9), (10, 9)));
+    }
+
+    #[test]
+    fn execute_local_only_appends_leader_change_batch_to_log() {
+        let (mut engine, _dir) = build_engine_only(1, &[1, 2, 3]);
+        let start = engine.log.log_end_offset();
+
+        engine.execute_local_only(vec![Action::AppendLeaderChange { epoch: 4 }]);
+
+        assert!(engine.log.log_end_offset() == start + 1);
+        let batches = engine
+            .log
+            .read_decoded(start, MAX_APPLY_BYTES)
+            .expect("read appended leader-change");
+        assert!(batches.len() == 1);
+        let batch = &batches[0];
+        assert!(batch.base_offset == start);
+        assert!(batch.partition_leader_epoch == 4);
+        assert!(batch.attributes.is_control_batch());
+        assert!(batch.records.len() == 1);
+    }
+
+    #[test]
+    fn leader_change_batch_encodes_control_record_payload() {
+        use crabka_protocol::Decode;
+        use crabka_protocol::owned::leader_change_message::LeaderChangeMessage;
+        use crabka_protocol::records::metadata::control::{ControlRecordType, control_record_key};
+
+        let batch = leader_change_batch(7, 2, &[1, 2, 3]);
+
+        assert!(batch.partition_leader_epoch == 7);
+        assert!(batch.attributes.is_control_batch());
+        assert!(batch.last_offset_delta == 0);
+        assert!(batch.records.len() == 1);
+        let record = &batch.records[0];
+        assert!(record.offset_delta == 0);
+        assert!(record.key.as_ref() == Some(&control_record_key(ControlRecordType::LeaderChange)));
+        let value = record.value.as_ref().expect("leader change value");
+        let mut cur: &[u8] = value;
+        let decoded = LeaderChangeMessage::decode(&mut cur, 0).expect("decode leader change");
+        assert!(cur.is_empty());
+        assert!(decoded.version == 0);
+        assert!(decoded.leader_id == 2);
+        let voters: Vec<i32> = decoded.voters.iter().map(|v| v.voter_id).collect();
+        let granting_voters: Vec<i32> =
+            decoded.granting_voters.iter().map(|v| v.voter_id).collect();
+        assert!(voters == vec![1, 2, 3]);
+        assert!(granting_voters == vec![1, 2, 3]);
+    }
+
+    fn elect_single_voter_engine(engine: &mut Engine) {
+        engine.on_event(Event::ElectionTimeout);
+        assert!(
+            engine.core.role().is_leader(),
+            "engine did not become leader: {:?}",
+            engine.core.role()
+        );
+    }
+
+    #[tokio::test]
+    async fn engine_following_leader_reflects_current_role() {
+        let (mut follower, _dir) = build_engine_only(1, &[1, 2, 3]);
+        assert!(follower.following_leader().is_none());
+
+        follower.on_event(Event::ReceiveBeginQuorumEpoch {
+            leader_id: 2,
+            leader_epoch: 1,
+        });
+        assert!(follower.following_leader() == Some(2));
+
+        let (mut leader, _leader_dir) = build_engine_only(1, &[1]);
+        elect_single_voter_engine(&mut leader);
+        assert!(leader.following_leader().is_none());
+    }
+
+    #[test]
+    fn direct_single_voter_submit_applies_image_and_resolves_waiter() {
+        let (mut engine, _dir) = build_engine_only(1, &[1]);
+        elect_single_voter_engine(&mut engine);
+        assert!(engine.image.topic("direct").is_none());
+
+        let (reply, mut rx) = oneshot::channel();
+        engine.on_submit_change(topic_record("direct"), reply);
+
+        assert!(matches!(rx.try_recv(), Ok(Ok(()))));
+        assert!(engine.image.topic("direct").is_some());
+        assert!(engine.log.hwm() == engine.log.log_end_offset());
+        assert!(engine.commit_waiters.is_empty());
+    }
+
+    #[test]
+    fn broker_registration_epoch_is_assigned_from_appended_offset() {
+        use crabka_metadata::{BrokerRegistrationRecord, MetadataRecord};
+
+        let (mut engine, _dir) = build_engine_only(1, &[1]);
+        elect_single_voter_engine(&mut engine);
+
+        let (reply, mut rx) = oneshot::channel();
+        engine.on_submit_change(topic_record("anchor"), reply);
+        assert!(matches!(rx.try_recv(), Ok(Ok(()))));
+
+        let base = engine.log.log_end_offset();
+        let reg = MetadataRecord::V1BrokerRegistration(BrokerRegistrationRecord {
+            node_id: 7,
+            broker_epoch: 0,
+            incarnation_id: uuid::Uuid::from_u128(7),
+            host: "broker-7".into(),
+            port: 9092,
+            rack: None,
+            endpoints: vec![],
+        });
+        let (reply, mut rx) = oneshot::channel();
+        engine.on_submit_change(vec![reg], reply);
+
+        assert!(matches!(rx.try_recv(), Ok(Ok(()))));
+        assert!(engine.image.broker_epoch(7) == Some(base));
+    }
+
+    #[test]
+    fn replay_committed_rebuilds_image_from_log_records() {
+        let (mut engine, _dir) = build_engine_only(1, &[1]);
+        elect_single_voter_engine(&mut engine);
+        let (reply, mut rx) = oneshot::channel();
+        engine.on_submit_change(topic_record("replayed"), reply);
+        assert!(matches!(rx.try_recv(), Ok(Ok(()))));
+
+        let mut recovered = MetadataImage::new(uuid::Uuid::nil());
+        replay_committed(&engine.log, &mut recovered, 0);
+
+        assert!(recovered.topic("replayed").is_some());
+    }
+
+    #[test]
+    fn try_resolve_waiters_resolves_at_exact_hwm_and_keeps_future_waiter() {
+        let (mut engine, _dir) = build_engine_only(1, &[1]);
+        for offset in 0..5 {
+            let mut batch = one_offset_batch(offset, 1, b"x");
+            engine.log.append(&mut batch).expect("append");
+        }
+        engine.log.advance_hwm(5);
+
+        let (ready_tx, mut ready_rx) = oneshot::channel();
+        let (future_tx, mut future_rx) = oneshot::channel();
+        engine.commit_waiters.push(CommitWaiter {
+            base_offset: 4,
+            need_offset: 5,
+            rejection: None,
+            reply: ready_tx,
+        });
+        engine.commit_waiters.push(CommitWaiter {
+            base_offset: 5,
+            need_offset: 6,
+            rejection: None,
+            reply: future_tx,
+        });
+
+        engine.try_resolve_waiters();
+
+        assert!(matches!(ready_rx.try_recv(), Ok(Ok(()))));
+        assert!(matches!(
+            future_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(engine.commit_waiters.len() == 1);
+        assert!(engine.commit_waiters[0].need_offset == 6);
+    }
+
+    #[test]
+    fn fail_waiters_reached_by_fails_only_waiters_at_or_below_target_hwm() {
+        let (mut engine, _dir) = build_engine_only(1, &[1]);
+        let (ready_tx, mut ready_rx) = oneshot::channel();
+        let (future_tx, mut future_rx) = oneshot::channel();
+        engine.commit_waiters.push(CommitWaiter {
+            base_offset: 4,
+            need_offset: 5,
+            rejection: None,
+            reply: ready_tx,
+        });
+        engine.commit_waiters.push(CommitWaiter {
+            base_offset: 5,
+            need_offset: 6,
+            rejection: None,
+            reply: future_tx,
+        });
+
+        engine.fail_waiters_reached_by(5, "test hwm stall");
+
+        assert!(matches!(
+            ready_rx.try_recv(),
+            Ok(Err(RaftError::ChangeRejected(_)))
+        ));
+        assert!(matches!(
+            future_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(engine.commit_waiters.len() == 1);
+        assert!(engine.commit_waiters[0].need_offset == 6);
+    }
+
+    #[test]
+    fn publish_leader_updates_leader_and_quorum_watchers() {
+        let (mut engine, _dir) = build_engine_only(1, &[1]);
+        let mut leader_rx = engine.leader_tx.subscribe();
+        let quorum_rx = engine.quorum_tx.subscribe();
+
+        engine.on_event(Event::ElectionTimeout);
+
+        assert!(*leader_rx.borrow_and_update() == Some(1));
+        assert!(quorum_rx.borrow().leader_id == Some(1));
+        assert!(quorum_rx.borrow().log_end_offset == engine.log.log_end_offset());
+    }
+
+    #[tokio::test]
+    async fn broadcast_end_quorum_epoch_sends_to_every_other_voter() {
+        let (mut engine, _dir) = build_engine_only(1, &[1, 2, 3]);
+        let mut sends =
+            record_peer_sends(&mut engine, wire::PeerResponse::Ack { epoch: 4 }.encode());
+
+        engine.broadcast_end_quorum_epoch(4);
+
+        let mut peers = Vec::new();
+        for _ in 0..2 {
+            let send = recv_peer_send(&mut sends).await;
+            assert!(send.api_key == api_key::END_QUORUM_EPOCH);
+            match wire::decode_end(&send.body) {
+                Some(wire::PeerRequest::EndQuorumEpoch {
+                    leader_id,
+                    leader_epoch,
+                }) => {
+                    assert!(leader_id == 1);
+                    assert!(leader_epoch == 4);
+                }
+                other => panic!("unexpected end quorum request: {other:?}"),
+            }
+            peers.push(send.peer);
+        }
+        peers.sort_unstable();
+        assert!(peers == vec![2, 3]);
+    }
+
+    #[test]
+    fn metadata_fetch_slice_excludes_negative_hwm_and_uncommitted_batches() {
+        let (mut engine, _dir) = build_engine_only(1, &[1]);
+        let mut first = one_offset_batch(0, 1, b"a");
+        let mut second = one_offset_batch(1, 1, b"b");
+        engine.log.append(&mut first).expect("append first");
+        engine.log.append(&mut second).expect("append second");
+        engine.log.advance_hwm(1);
+
+        assert!(
+            engine
+                .metadata_fetch_slice(-1, MAX_APPLY_BYTES)
+                .records
+                .is_empty()
+        );
+        assert!(
+            engine
+                .metadata_fetch_slice(1, MAX_APPLY_BYTES)
+                .records
+                .is_empty()
+        );
+
+        let slice = engine.metadata_fetch_slice(0, MAX_APPLY_BYTES);
+        let decoded = decode_batches(&slice.records).expect("decode fetch slice");
+        assert!(decoded.len() == 1);
+        assert!(decoded[0].base_offset == 0);
+        assert!(slice.high_watermark == 1);
+    }
+
+    #[tokio::test]
+    async fn send_fetch_uses_snapshot_epoch_only_until_log_extends_past_boundary() {
+        let (mut engine, _dir) = build_engine_only(1, &[1, 2]);
+        engine.log.install_snapshot(10).expect("install snapshot");
+        engine.installed_snapshot_epoch = Some(7);
+        let fetch_response = wire::PeerResponse::Fetch {
+            leader_id: 2,
+            leader_epoch: 7,
+            diverging: None,
+            snapshot_id: None,
+            hwm: 10,
+            records: bytes::Bytes::new(),
+        }
+        .encode();
+        let mut sends = record_peer_sends(&mut engine, fetch_response.clone());
+
+        engine.send_fetch(2);
+        let send = recv_peer_send(&mut sends).await;
+        match wire::decode_fetch(&send.body) {
+            Some(wire::PeerRequest::Fetch {
+                fetch_epoch,
+                fetch_offset,
+                ..
+            }) => {
+                assert!(fetch_epoch == 7);
+                assert!(fetch_offset == 10);
+            }
+            other => panic!("unexpected fetch request: {other:?}"),
+        }
+
+        let mut batch = one_offset_batch(10, 9, b"after-snapshot");
+        engine
+            .log
+            .append_at(&mut batch, 10)
+            .expect("append after snapshot");
+        engine.send_fetch(2);
+        let send = recv_peer_send(&mut sends).await;
+        match wire::decode_fetch(&send.body) {
+            Some(wire::PeerRequest::Fetch {
+                fetch_epoch,
+                fetch_offset,
+                ..
+            }) => {
+                assert!(fetch_epoch == 9);
+                assert!(fetch_offset == 11);
+            }
+            other => panic!("unexpected fetch request: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn serve_fetch_records_returns_batches_only_for_offsets_inside_log() {
+        let (mut engine, _dir) = build_engine_only(1, &[1]);
+        let mut batch = one_offset_batch(0, 1, b"a");
+        engine.log.append(&mut batch).expect("append");
+
+        assert!(engine.serve_fetch_records(-1).is_empty());
+        assert!(engine.serve_fetch_records(1).is_empty());
+        let records = engine.serve_fetch_records(0);
+        let decoded = decode_batches(&records).expect("decode served records");
+        assert!(decoded.len() == 1);
+        assert!(decoded[0].base_offset == 0);
+    }
+
+    #[tokio::test]
+    async fn fetch_response_snapshot_hint_starts_once_and_ignores_stale_hint() {
+        let (mut engine, _dir) = build_engine_only(1, &[1, 2]);
+        let fetch_snapshot_response = wire::PeerResponse::FetchSnapshot {
+            snapshot_id: (11, 3),
+            size: 0,
+            position: 0,
+            bytes: bytes::Bytes::new(),
+            error_code: 0,
+        }
+        .encode();
+        let mut sends = record_peer_sends(&mut engine, fetch_snapshot_response);
+
+        let body = wire::PeerResponse::Fetch {
+            leader_id: 2,
+            leader_epoch: 3,
+            diverging: None,
+            snapshot_id: Some((11, 3)),
+            hwm: 11,
+            records: bytes::Bytes::new(),
+        }
+        .encode();
+        engine.on_fetch_response(2, &body);
+        let send = recv_peer_send_with_api(&mut sends, api_key::FETCH_SNAPSHOT).await;
+        match wire::decode_fetch_snapshot(&send.body) {
+            Some(wire::PeerRequest::FetchSnapshot {
+                snapshot_id,
+                position,
+                ..
+            }) => {
+                assert!(snapshot_id == (11, 3));
+                assert!(position == 0);
+            }
+            other => panic!("unexpected fetch snapshot request: {other:?}"),
+        }
+        assert!(
+            engine
+                .snapshot_fetch
+                .as_ref()
+                .is_some_and(|s| s.snapshot_id == (11, 3))
+        );
+
+        engine.on_fetch_response(2, &body);
+        assert!(
+            tokio::time::timeout(StdDuration::from_millis(20), async {
+                loop {
+                    let send = recv_peer_send(&mut sends).await;
+                    if send.api_key == api_key::FETCH_SNAPSHOT {
+                        return send;
+                    }
+                }
+            })
+            .await
+            .is_err()
+        );
+
+        engine.log.install_snapshot(11).expect("install snapshot");
+        engine.snapshot_fetch = None;
+        engine.on_fetch_response(2, &body);
+        assert!(engine.snapshot_fetch.is_none());
+    }
+
+    #[tokio::test]
+    async fn fetch_snapshot_response_error_or_wrong_leader_aborts_transfer() {
+        let (mut engine, _dir) = build_engine_only(1, &[1, 2]);
+        let fetch_response = wire::PeerResponse::Fetch {
+            leader_id: 2,
+            leader_epoch: 3,
+            diverging: None,
+            snapshot_id: None,
+            hwm: 0,
+            records: bytes::Bytes::new(),
+        }
+        .encode();
+        let mut sends = record_peer_sends(&mut engine, fetch_response);
+
+        engine.snapshot_fetch = Some(SnapshotFetchState::new((12, 3), 2));
+        let error_body = wire::PeerResponse::FetchSnapshot {
+            snapshot_id: (12, 3),
+            size: 0,
+            position: 0,
+            bytes: bytes::Bytes::new(),
+            error_code: 99,
+        }
+        .encode();
+        engine.on_fetch_snapshot_response(2, &error_body);
+        assert!(engine.snapshot_fetch.is_none());
+        let send = recv_peer_send_with_api(&mut sends, api_key::FETCH).await;
+        assert!(send.peer == 2);
+
+        engine.snapshot_fetch = Some(SnapshotFetchState::new((12, 3), 2));
+        let ok_body = wire::PeerResponse::FetchSnapshot {
+            snapshot_id: (12, 3),
+            size: 0,
+            position: 0,
+            bytes: bytes::Bytes::new(),
+            error_code: 0,
+        }
+        .encode();
+        engine.on_fetch_snapshot_response(3, &ok_body);
+        assert!(engine.snapshot_fetch.is_none());
+        let send = recv_peer_send_with_api(&mut sends, api_key::FETCH).await;
+        assert!(send.peer == 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sleep_until_opt_waits_for_some_and_never_completes_for_none() {
+        assert!(
+            tokio::time::timeout(StdDuration::from_millis(1), sleep_until_opt(None))
+                .await
+                .is_err()
+        );
+
+        let deadline = Instant::now() + Duration::from_millis(50);
+        let mut sleep = Box::pin(sleep_until_opt(Some(deadline)));
+        assert!(
+            tokio::time::timeout(StdDuration::from_millis(1), &mut sleep)
+                .await
+                .is_err()
+        );
+        tokio::time::advance(Duration::from_millis(50)).await;
+        assert!(
+            tokio::time::timeout(StdDuration::from_millis(1), sleep)
+                .await
+                .is_ok()
+        );
+    }
+
     /// A realistic single-partition create batch: a `V1Topic` plus its one
     /// `V1Partition`. KIP-631 framing derives the topic's partition count from
     /// the partition records (the `TopicRecord` wire shape carries no count), so
@@ -2094,14 +3160,31 @@ mod tests {
     }
 
     async fn await_leader(ctrl: &KraftController, want: Option<NodeId>) {
-        let mut rx = ctrl.watch_leader();
-        for _ in 0..200 {
-            if *rx.borrow() == want {
-                return;
+        let result = tokio::time::timeout(StdDuration::from_secs(2), async {
+            let mut rx = ctrl.watch_leader();
+            loop {
+                if *rx.borrow() == want {
+                    return;
+                }
+                rx.changed().await.expect("leader watch closed");
             }
-            let _ = tokio::time::timeout(StdDuration::from_secs(5), rx.changed()).await;
-        }
-        assert!(*rx.borrow() == want, "leader did not reach {want:?}");
+        })
+        .await;
+        assert!(
+            result.is_ok(),
+            "leader did not reach {want:?}; current {:?}",
+            *ctrl.watch_leader().borrow()
+        );
+    }
+
+    async fn submit_change_with_timeout(
+        ctrl: &KraftController,
+        records: Vec<crabka_metadata::MetadataRecord>,
+        context: &str,
+    ) -> Result<(), RaftError> {
+        tokio::time::timeout(StdDuration::from_secs(2), ctrl.submit_change(records))
+            .await
+            .unwrap_or_else(|_| panic!("{context} submit_change timed out"))
     }
 
     #[tokio::test]
@@ -2113,9 +3196,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn node_id_reports_configured_node() {
+        let (ctrl, _dir) = build(7, &[7]);
+        assert!(ctrl.node_id() == 7);
+        ctrl.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn injected_election_makes_single_voter_leader() {
         let (ctrl, _dir) = build(1, &[1]);
         ctrl.inject_event(Event::ElectionTimeout).await.unwrap();
+        await_leader(&ctrl, Some(1)).await;
+        ctrl.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn injected_vote_sequence_makes_multi_voter_leader_before_timer() {
+        let (ctrl, _dir) = build_with_timeout(1, &[1, 2, 3], 60_000);
+        elect_leader_with_helper(&ctrl, 1, 2).await;
+        ctrl.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn injected_election_timer_makes_single_voter_leader() {
+        let (ctrl, _dir) = build(1, &[1]);
+        ctrl.cmd_tx
+            .send(Command::Timer(TimerTick::Election))
+            .await
+            .unwrap();
         await_leader(&ctrl, Some(1)).await;
         ctrl.shutdown().await;
     }
@@ -2237,8 +3345,11 @@ mod tests {
         ctrl.inject_event(Event::ElectionTimeout).await.unwrap();
         await_leader(&ctrl, Some(1)).await;
 
-        ctrl.submit_change(topic_record("t")).await.unwrap();
-        let dup = ctrl.submit_change(topic_record("t")).await;
+        submit_change_with_timeout(&ctrl, topic_record("t"), "first duplicate-test submit")
+            .await
+            .unwrap();
+        let dup =
+            submit_change_with_timeout(&ctrl, topic_record("t"), "duplicate-test submit").await;
         assert!(matches!(dup, Err(RaftError::Metadata(_))), "got {dup:?}");
         ctrl.shutdown().await;
     }
@@ -2406,7 +3517,9 @@ mod tests {
             );
             ctrl.inject_event(Event::ElectionTimeout).await.unwrap();
             await_leader(&ctrl, Some(1)).await;
-            ctrl.submit_change(topic_record("recovered")).await.unwrap();
+            submit_change_with_timeout(&ctrl, topic_record("recovered"), "recovery seed")
+                .await
+                .unwrap();
             assert!(ctrl.current_image().topic("recovered").is_some());
             ctrl.trigger_snapshot().await.unwrap();
             ctrl.shutdown().await;
@@ -2454,6 +3567,27 @@ mod tests {
         assert!(loaded.cluster_id == cid);
     }
 
+    #[test]
+    fn load_quorum_state_reports_unreadable_non_missing_file_errors() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(dir.path().join(QUORUM_STATE_FILE)).expect("mkdir quorum-state path");
+
+        let loaded = load_quorum_state(dir.path(), uuid::Uuid::nil(), &voter_set(&[1]));
+
+        assert!(matches!(loaded, Err(RaftError::Storage(_))));
+    }
+
+    #[test]
+    fn load_quorum_state_ignores_truncated_file_without_panicking() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join(QUORUM_STATE_FILE), [0u8; 53]).expect("write short state");
+
+        let loaded = load_quorum_state(dir.path(), uuid::Uuid::nil(), &voter_set(&[1]))
+            .expect("short file is ignored");
+
+        assert!(loaded.is_none());
+    }
+
     // ---- snapshot trigger + prune ----
 
     /// A single-voter leader with `snapshot_interval_records = 3` snapshots and
@@ -2470,7 +3604,9 @@ mod tests {
         // commit advances the HWM well past the 3-record interval, so a
         // snapshot+prune fires.
         for name in ["a", "b", "c", "d"] {
-            ctrl.submit_change(topic_record(name)).await.unwrap();
+            submit_change_with_timeout(&ctrl, topic_record(name), "snapshot threshold submit")
+                .await
+                .unwrap();
         }
 
         // A checkpoint was written.
@@ -2487,6 +3623,41 @@ mod tests {
             qs.log_start_offset
         );
         ctrl.shutdown().await;
+    }
+
+    #[test]
+    fn latest_checkpoint_id_picks_highest_offset_then_epoch() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cp_dir = checkpoint_dir(dir.path());
+        write_checkpoint(&cp_dir, 10, 2, b"ten-two").expect("write checkpoint 10/2");
+        write_checkpoint(&cp_dir, 10, 9, b"ten-nine").expect("write checkpoint 10/9");
+        write_checkpoint(&cp_dir, 11, 1, b"eleven-one").expect("write checkpoint 11/1");
+
+        assert!(latest_checkpoint_id(&cp_dir) == Some((11, 1)));
+        let latest = load_latest_checkpoint(&cp_dir)
+            .expect("load latest")
+            .expect("latest exists");
+        assert!(latest == b"eleven-one");
+    }
+
+    #[test]
+    fn retain_latest_checkpoint_deletes_older_checkpoints_only() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cp_dir = checkpoint_dir(dir.path());
+        write_checkpoint(&cp_dir, 5, 1, b"old").expect("write old");
+        write_checkpoint(&cp_dir, 6, 1, b"new").expect("write new");
+        write_checkpoint(&cp_dir, 6, 0, b"older-same-offset").expect("write older same offset");
+
+        retain_latest_checkpoint(&cp_dir);
+
+        assert!(load_checkpoint_by_id(&cp_dir, 6, 1).is_some());
+        assert!(load_checkpoint_by_id(&cp_dir, 5, 1).is_none());
+        assert!(load_checkpoint_by_id(&cp_dir, 6, 0).is_none());
+        let entries: Vec<_> = std::fs::read_dir(&cp_dir)
+            .expect("read checkpoint dir")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("read entries");
+        assert!(entries.len() == 1);
     }
 
     #[tokio::test]
@@ -2511,14 +3682,16 @@ mod tests {
         };
 
         let base1 = ctrl.quorum_state().await.unwrap().log_end_offset;
-        ctrl.submit_change(reg(7))
+        submit_change_with_timeout(&ctrl, reg(7), "first broker registration")
             .await
             .expect("first registration");
         let e1 = ctrl.current_image().broker_epoch(7);
         assert!(e1 == Some(base1), "epoch {e1:?} != commit offset {base1}");
 
         let base2 = ctrl.quorum_state().await.unwrap().log_end_offset;
-        ctrl.submit_change(reg(7)).await.expect("re-registration");
+        submit_change_with_timeout(&ctrl, reg(7), "broker re-registration")
+            .await
+            .expect("re-registration");
         let e2 = ctrl.current_image().broker_epoch(7);
         assert!(e2 == Some(base2), "re-reg epoch {e2:?} != offset {base2}");
         assert!(base2 > base1 && e2 > e1, "epoch must strictly increase");

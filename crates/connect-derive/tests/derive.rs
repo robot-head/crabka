@@ -1,11 +1,20 @@
-#[test]
-fn ui_compile_failures() {
+use std::path::Path;
+
+#[allow(clippy::unnecessary_wraps)]
+fn ui_compile_failure(path: &Path) -> datatest_stable::Result<()> {
     let cases = trybuild::TestCases::new();
-    cases.compile_fail("tests/ui/*.rs");
+    cases.compile_fail(path);
+    Ok(())
 }
 
-#[test]
-fn pass_cases() {
+#[allow(clippy::unnecessary_wraps)]
+fn pass_case(path: &Path) -> datatest_stable::Result<()> {
     let cases = trybuild::TestCases::new();
-    cases.pass("tests/pass/*.rs");
+    cases.pass(path);
+    Ok(())
+}
+
+datatest_stable::harness! {
+    { test = ui_compile_failure, root = "tests/ui", pattern = r".*\.rs$" },
+    { test = pass_case, root = "tests/pass", pattern = r".*\.rs$" },
 }

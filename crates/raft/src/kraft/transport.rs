@@ -183,6 +183,27 @@ impl PeerSender for NullPeerSender {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert2::assert;
+
+    #[tokio::test]
+    async fn null_peer_sender_reports_target_as_current_leader() {
+        let err = NullPeerSender
+            .send(7, api_key::FETCH, Bytes::new())
+            .await
+            .expect_err("null sender should reject peer sends");
+
+        assert!(matches!(
+            err,
+            RaftError::NotLeader {
+                current_leader: Some(7)
+            }
+        ));
+    }
+}
+
 /// KIP-595 api keys used by the engine's peer sends.
 pub mod api_key {
     pub const FETCH: i16 = 1;
@@ -354,7 +375,6 @@ pub mod wire {
                     pre_vote,
                 } => {
                     let req = VoteRequest {
-                        cluster_id: None,
                         voter_id: node_to_wire(voter_id),
                         topics: vec![vote_req::TopicData {
                             topic_name: METADATA_TOPIC.to_string(),
@@ -378,8 +398,6 @@ pub mod wire {
                     leader_epoch,
                 } => {
                     let req = BeginQuorumEpochRequest {
-                        cluster_id: None,
-                        voter_id: -1,
                         topics: vec![bqe_req::TopicData {
                             topic_name: METADATA_TOPIC.to_string(),
                             partitions: vec![bqe_req::PartitionData {
@@ -399,7 +417,6 @@ pub mod wire {
                     leader_epoch,
                 } => {
                     let req = EndQuorumEpochRequest {
-                        cluster_id: None,
                         topics: vec![eqe_req::TopicData {
                             topic_name: METADATA_TOPIC.to_string(),
                             partitions: vec![eqe_req::PartitionData {
@@ -557,7 +574,6 @@ pub mod wire {
                 }],
                 ..Default::default()
             }],
-            cluster_id: None,
             ..Default::default()
         };
         encode_body(&req, FETCH_SNAPSHOT_VERSION)
@@ -616,12 +632,10 @@ pub mod wire {
             match self {
                 PeerResponse::Vote { epoch, granted } => {
                     let resp = VoteResponse {
-                        error_code: 0,
                         topics: vec![vote_resp::TopicData {
                             topic_name: METADATA_TOPIC.to_string(),
                             partitions: vec![vote_resp::PartitionData {
                                 partition_index: METADATA_PARTITION,
-                                error_code: 0,
                                 leader_id: -1,
                                 leader_epoch: epoch_to_wire(*epoch),
                                 vote_granted: *granted,
@@ -637,14 +651,12 @@ pub mod wire {
                     // A Begin/End ack is encoded as the corresponding
                     // BeginQuorumEpochResponse with the responder's leader_epoch.
                     let resp = BeginQuorumEpochResponse {
-                        error_code: 0,
                         topics: vec![
                             crabka_protocol::owned::begin_quorum_epoch_response::TopicData {
                                 topic_name: METADATA_TOPIC.to_string(),
                                 partitions: vec![
                                     crabka_protocol::owned::begin_quorum_epoch_response::PartitionData {
                                         partition_index: METADATA_PARTITION,
-                                        error_code: 0,
                                         leader_id: -1,
                                         leader_epoch: epoch_to_wire(*epoch),
                                         ..Default::default()
@@ -666,8 +678,6 @@ pub mod wire {
                     records,
                 } => {
                     let mut partition = fetch_resp::PartitionData {
-                        partition_index: METADATA_PARTITION,
-                        error_code: 0,
                         high_watermark: *hwm,
                         current_leader: fetch_resp::LeaderIdAndEpoch {
                             leader_id: node_to_wire(*leader_id),
@@ -829,6 +839,43 @@ pub mod wire {
         }
 
         #[test]
+        fn generic_request_decode_accepts_vote_request() {
+            let req = PeerRequest::Vote {
+                voter_id: 9,
+                candidate_epoch: 3,
+                candidate: 7,
+                last_epoch: 2,
+                last_offset: 42,
+                pre_vote: true,
+            };
+            assert!(PeerRequest::decode(&req.encode()) == Some(req));
+        }
+
+        #[test]
+        fn encoded_vote_request_carries_target_voter_and_empty_cluster_id() {
+            use crabka_protocol::Decode;
+
+            let req = PeerRequest::Vote {
+                voter_id: 9,
+                candidate_epoch: 3,
+                candidate: 7,
+                last_epoch: 2,
+                last_offset: 42,
+                pre_vote: true,
+            };
+            let mut cur = &req.encode()[..];
+            let raw = VoteRequest::decode(&mut cur, VOTE_VERSION).expect("decode vote request");
+            assert!(raw.cluster_id.is_none());
+            assert!(raw.voter_id == 9);
+            let partition = &raw.topics[0].partitions[0];
+            assert!(partition.replica_epoch == 3);
+            assert!(partition.replica_id == 7);
+            assert!(partition.last_offset_epoch == 2);
+            assert!(partition.last_offset == 42);
+            assert!(partition.pre_vote);
+        }
+
+        #[test]
         fn begin_end_round_trip() {
             let begin = PeerRequest::BeginQuorumEpoch {
                 leader_id: 5,
@@ -843,6 +890,36 @@ pub mod wire {
         }
 
         #[test]
+        fn encoded_begin_and_end_requests_carry_quorum_defaults_and_leader() {
+            use crabka_protocol::Decode;
+
+            let begin = PeerRequest::BeginQuorumEpoch {
+                leader_id: 5,
+                leader_epoch: 9,
+            };
+            let mut begin_cur = &begin.encode()[..];
+            let raw_begin = BeginQuorumEpochRequest::decode(&mut begin_cur, QUORUM_EPOCH_VERSION)
+                .expect("decode begin request");
+            assert!(raw_begin.cluster_id.is_none());
+            assert!(raw_begin.voter_id == -1);
+            let begin_partition = &raw_begin.topics[0].partitions[0];
+            assert!(begin_partition.leader_id == 5);
+            assert!(begin_partition.leader_epoch == 9);
+
+            let end = PeerRequest::EndQuorumEpoch {
+                leader_id: 1,
+                leader_epoch: 4,
+            };
+            let mut end_cur = &end.encode()[..];
+            let raw_end = EndQuorumEpochRequest::decode(&mut end_cur, QUORUM_EPOCH_VERSION)
+                .expect("decode end request");
+            assert!(raw_end.cluster_id.is_none());
+            let end_partition = &raw_end.topics[0].partitions[0];
+            assert!(end_partition.leader_id == 1);
+            assert!(end_partition.leader_epoch == 4);
+        }
+
+        #[test]
         fn fetch_request_round_trips() {
             let req = PeerRequest::Fetch {
                 from: 2,
@@ -853,12 +930,50 @@ pub mod wire {
         }
 
         #[test]
+        fn encoded_fetch_request_carries_replica_state_epoch_sentinel() {
+            use crabka_protocol::Decode;
+            use crabka_protocol::owned::fetch_request::FetchRequest;
+
+            let req = PeerRequest::Fetch {
+                from: 2,
+                fetch_epoch: 1,
+                fetch_offset: 11,
+            };
+            let mut cur = &req.encode()[..];
+            let raw = FetchRequest::decode(&mut cur, FETCH_VERSION).expect("decode fetch request");
+            assert!(raw.replica_state.replica_id == 2);
+            assert!(raw.replica_state.replica_epoch == -1);
+            let partition = &raw.topics[0].partitions[0];
+            assert!(partition.current_leader_epoch == 1);
+            assert!(partition.last_fetched_epoch == 1);
+            assert!(partition.fetch_offset == 11);
+        }
+
+        #[test]
         fn vote_response_round_trips() {
             let resp = PeerResponse::Vote {
                 epoch: 3,
                 granted: true,
             };
             assert!(PeerResponse::decode_vote(&resp.encode()) == Some(resp));
+        }
+
+        #[test]
+        fn encoded_vote_response_carries_success_error_codes() {
+            use crabka_protocol::Decode;
+
+            let resp = PeerResponse::Vote {
+                epoch: 3,
+                granted: true,
+            };
+            let mut cur = &resp.encode()[..];
+            let raw = VoteResponse::decode(&mut cur, VOTE_VERSION).expect("decode vote response");
+            assert!(raw.error_code == 0);
+            let partition = &raw.topics[0].partitions[0];
+            assert!(partition.partition_index == METADATA_PARTITION);
+            assert!(partition.error_code == 0);
+            assert!(partition.leader_epoch == 3);
+            assert!(partition.vote_granted);
         }
 
         #[test]
@@ -902,6 +1017,22 @@ pub mod wire {
         }
 
         #[test]
+        fn encoded_ack_response_carries_success_error_codes() {
+            use crabka_protocol::Decode;
+
+            let resp = PeerResponse::Ack { epoch: 8 };
+            let mut cur = &resp.encode()[..];
+            let raw = BeginQuorumEpochResponse::decode(&mut cur, QUORUM_EPOCH_VERSION)
+                .expect("decode ack");
+            assert!(raw.error_code == 0);
+            let partition = &raw.topics[0].partitions[0];
+            assert!(partition.partition_index == METADATA_PARTITION);
+            assert!(partition.error_code == 0);
+            assert!(partition.leader_id == -1);
+            assert!(partition.leader_epoch == 8);
+        }
+
+        #[test]
         fn fetch_response_carries_snapshot_id() {
             let resp = PeerResponse::Fetch {
                 leader_id: 1,
@@ -923,6 +1054,29 @@ pub mod wire {
                 max_bytes: 4096,
             };
             assert!(decode_fetch_snapshot(&req.encode()) == Some(req));
+        }
+
+        #[test]
+        fn encoded_fetch_snapshot_request_carries_empty_cluster_id() {
+            use crabka_protocol::Decode;
+
+            let req = PeerRequest::FetchSnapshot {
+                from: 2,
+                snapshot_id: (42, 3),
+                position: 128,
+                max_bytes: 4096,
+            };
+            let mut cur = &req.encode()[..];
+            let raw = FetchSnapshotRequest::decode(&mut cur, FETCH_SNAPSHOT_VERSION)
+                .expect("decode fetch snapshot request");
+            assert!(raw.cluster_id.is_none());
+            assert!(raw.replica_id == 2);
+            assert!(raw.max_bytes == 4096);
+            let partition = &raw.topics[0].partitions[0];
+            assert!(partition.current_leader_epoch == 3);
+            assert!(partition.snapshot_id.end_offset == 42);
+            assert!(partition.snapshot_id.epoch == 3);
+            assert!(partition.position == 128);
         }
 
         #[test]
@@ -961,6 +1115,30 @@ pub mod wire {
                 records: Bytes::new(),
             };
             assert!(PeerResponse::decode_fetch(&diverged.encode()) == Some(diverged));
+        }
+
+        #[test]
+        fn encoded_fetch_response_carries_partition_success_fields() {
+            use crabka_protocol::Decode;
+            use crabka_protocol::owned::fetch_response::FetchResponse;
+
+            let resp = PeerResponse::Fetch {
+                leader_id: 2,
+                leader_epoch: 5,
+                diverging: None,
+                snapshot_id: None,
+                hwm: 7,
+                records: Bytes::new(),
+            };
+            let mut cur = &resp.encode()[..];
+            let raw =
+                FetchResponse::decode(&mut cur, FETCH_VERSION).expect("decode fetch response");
+            let partition = &raw.responses[0].partitions[0];
+            assert!(partition.partition_index == METADATA_PARTITION);
+            assert!(partition.error_code == 0);
+            assert!(partition.high_watermark == 7);
+            assert!(partition.current_leader.leader_id == 2);
+            assert!(partition.current_leader.leader_epoch == 5);
         }
 
         #[test]

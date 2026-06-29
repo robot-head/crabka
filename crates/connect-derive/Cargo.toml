@@ -27,4 +27,9 @@ syn = { workspace = true }
 # minor line so `cargo publish` can package this crate before crabka-connect is
 # published at the same workspace version.
 crabka-connect = { version = "0.3", path = "../connect", default-features = false }
+datatest-stable = { workspace = true }
 trybuild = { workspace = true }
+
+[[test]]
+name = "derive"
+harness = false

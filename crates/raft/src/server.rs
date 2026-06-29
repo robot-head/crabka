@@ -153,10 +153,19 @@ fn truncated(needed: usize) -> RaftError {
     RaftError::Protocol(crabka_protocol::ProtocolError::UnexpectedEof { needed })
 }
 
+fn require_remaining(available: usize, required: usize) -> Result<(), RaftError> {
+    match required.checked_sub(available) {
+        Some(0) | None => Ok(()),
+        Some(needed) => Err(truncated(needed)),
+    }
+}
+
 async fn read_one_request<S>(stream: &mut S) -> Result<(i16, i16, i32, Bytes), RaftError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    const REQUEST_HEADER_FIXED_LEN: usize = 8;
+
     let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf).await.map_err(io_err)?;
     let raw_len = i32::from_be_bytes(len_buf);
@@ -167,24 +176,16 @@ where
     // RequestHeader v2 (flexible): api_key(i16), api_version(i16),
     // correlation_id(i32), client_id(NULLABLE_STRING), tagged_fields(varint=0).
     let mut cur: &[u8] = &frame;
-    let fixed = 2 + 2 + 4;
-    if cur.remaining() < fixed {
-        return Err(truncated(fixed - cur.remaining()));
-    }
+    require_remaining(cur.remaining(), REQUEST_HEADER_FIXED_LEN)?;
     let api_key_n = cur.get_i16();
     let api_version = cur.get_i16();
     let correlation_id = cur.get_i32();
 
     // Skip client_id: NULLABLE_STRING (i16 length + bytes; -1 = null).
-    if cur.remaining() < 2 {
-        return Err(truncated(2 - cur.remaining()));
-    }
+    require_remaining(cur.remaining(), 2)?;
     let cs_len = cur.get_i16();
-    if cs_len > 0 {
-        let n = usize::try_from(cs_len).unwrap_or(0);
-        if cur.remaining() < n {
-            return Err(truncated(n - cur.remaining()));
-        }
+    if let Ok(n @ 1..) = usize::try_from(cs_len) {
+        require_remaining(cur.remaining(), n)?;
         cur.advance(n);
     }
     // tagged_fields: single varint zero.
@@ -260,30 +261,26 @@ where
 fn api_versions_response_body(req_version: i16) -> Bytes {
     use crabka_protocol::Encode;
     use crabka_protocol::owned::api_versions_response::{ApiVersion, ApiVersionsResponse};
-    // (api_key, min_version, max_version) — versions Crabka's transport codec
-    // emits (Vote v2, Begin/End QuorumEpoch v1, Fetch v17, FetchSnapshot v1) plus
-    // ApiVersions itself.
-    const KEYS: &[(i16, i16, i16)] = &[
-        (1, 0, 17), // Fetch
-        (18, 0, 4), // ApiVersions
-        (52, 0, 2), // Vote
-        (53, 0, 1), // BeginQuorumEpoch
-        (54, 0, 1), // EndQuorumEpoch
-        (59, 0, 1), // FetchSnapshot
-        (60, 0, 2), // DescribeCluster (KIP-919)
+    // (api_key, max_version) — min_version/error_code/throttle_time_ms are all
+    // protocol defaults of 0, so leave them implicit.
+    const KEYS: &[(i16, i16)] = &[
+        (1, 17), // Fetch
+        (18, 4), // ApiVersions
+        (52, 2), // Vote
+        (53, 1), // BeginQuorumEpoch
+        (54, 1), // EndQuorumEpoch
+        (59, 1), // FetchSnapshot
+        (60, 2), // DescribeCluster (KIP-919)
     ];
     let resp = ApiVersionsResponse {
-        error_code: 0,
         api_keys: KEYS
             .iter()
-            .map(|&(api_key, min_version, max_version)| ApiVersion {
+            .map(|&(api_key, max_version)| ApiVersion {
                 api_key,
-                min_version,
                 max_version,
                 ..Default::default()
             })
             .collect(),
-        throttle_time_ms: 0,
         ..Default::default()
     };
     // JVM dials at v4 (flexible); Crabka's own client at v0 (non-flexible). The
@@ -551,6 +548,500 @@ fn build_describe_cluster_body(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use assert2::assert;
+    use bytes::{BufMut, Bytes};
+    use crabka_metadata::{MetadataRecord, TopicRecord};
+    use crabka_protocol::Decode;
+    use tokio::io::AsyncWriteExt;
+    use uuid::Uuid;
+
+    fn length_prefixed(frame: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(frame.len() + 4);
+        out.extend_from_slice(&(u32::try_from(frame.len()).unwrap()).to_be_bytes());
+        out.extend_from_slice(frame);
+        out
+    }
+
+    fn request_frame(
+        api_key: i16,
+        api_version: i16,
+        correlation_id: i32,
+        client_id: &str,
+        body: &[u8],
+    ) -> Vec<u8> {
+        let mut frame = bytes::BytesMut::new();
+        frame.put_i16(api_key);
+        frame.put_i16(api_version);
+        frame.put_i32(correlation_id);
+        frame.put_i16(i16::try_from(client_id.len()).unwrap());
+        frame.put_slice(client_id.as_bytes());
+        frame.put_u8(0);
+        frame.put_slice(body);
+        length_prefixed(&frame)
+    }
+
+    fn raw_request_frame(
+        api_key: i16,
+        api_version: i16,
+        correlation_id: i32,
+        client_id_len: i16,
+        client_id_bytes: &[u8],
+        tagged_or_body: &[u8],
+    ) -> Vec<u8> {
+        let mut frame = bytes::BytesMut::new();
+        frame.put_i16(api_key);
+        frame.put_i16(api_version);
+        frame.put_i32(correlation_id);
+        frame.put_i16(client_id_len);
+        frame.put_slice(client_id_bytes);
+        frame.put_slice(tagged_or_body);
+        length_prefixed(&frame)
+    }
+
+    fn voter(id: u64, endpoints: Vec<crabka_metadata::VoterEndpoint>) -> crabka_metadata::Voter {
+        crabka_metadata::Voter {
+            id,
+            directory_id: Uuid::from_u128(u128::from(id)),
+            endpoints,
+            kraft_version: crabka_metadata::KRaftVersionRange::default(),
+        }
+    }
+
+    fn controller_endpoint(host: &str, port: u16) -> crabka_metadata::VoterEndpoint {
+        crabka_metadata::VoterEndpoint {
+            name: "CONTROLLER".into(),
+            host: host.into(),
+            port,
+        }
+    }
+
+    fn test_engine_with_voters(
+        me: u64,
+        voters: impl IntoIterator<Item = crabka_metadata::Voter>,
+    ) -> (KraftController, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let ctrl = KraftController::open(
+            dir.path().to_path_buf(),
+            me,
+            Uuid::nil(),
+            crabka_metadata::VoterSet::from_voters(voters),
+            50,
+            std::sync::Arc::new(crate::kraft::NullPeerSender),
+            0,
+        )
+        .expect("open engine");
+        (ctrl, dir)
+    }
+
+    fn single_voter_engine() -> (KraftController, tempfile::TempDir) {
+        test_engine_with_voters(
+            1,
+            [voter(1, vec![controller_endpoint("controller-1", 9093)])],
+        )
+    }
+
+    async fn wait_for_leader(engine: &KraftController) {
+        let mut rx = engine.watch_leader();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            rx.wait_for(Option::is_some),
+        )
+        .await
+        .expect("leader elected")
+        .expect("leader channel open");
+    }
+
+    fn topic_record(name: &str) -> MetadataRecord {
+        MetadataRecord::V1Topic(TopicRecord {
+            name: name.into(),
+            topic_id: Uuid::new_v4(),
+            partitions: 1,
+            replication_factor: 1,
+        })
+    }
+
+    fn submit_change_body(records: &[MetadataRecord]) -> Bytes {
+        let records = records.to_vec();
+        let records =
+            <serde_wincode::SerdeCompat<Vec<MetadataRecord>> as wincode::Serialize>::serialize(
+                &records,
+            )
+            .expect("wincode");
+        let req = CrabkaSubmitChangeRequest {
+            records: Bytes::from(records),
+        };
+        let mut out = Vec::new();
+        req.encode_v0(&mut out).expect("submit request");
+        Bytes::from(out)
+    }
+
+    fn metadata_fetch_body(fetch_offset: i64, max_bytes: i32) -> Bytes {
+        let req = CrabkaMetadataFetchRequest {
+            fetch_offset,
+            max_bytes,
+        };
+        let mut out = Vec::new();
+        req.encode_v0(&mut out);
+        Bytes::from(out)
+    }
+
+    fn describe_cluster_body(version: i16, endpoint_type: i8) -> Bytes {
+        use crabka_protocol::Encode;
+        use crabka_protocol::owned::describe_cluster_request::DescribeClusterRequest;
+
+        let req = DescribeClusterRequest {
+            endpoint_type,
+            ..Default::default()
+        };
+        let mut out = bytes::BytesMut::new();
+        req.encode(&mut out, version).expect("describe request");
+        out.freeze()
+    }
+
+    fn decode_submit_change_response(body: &[u8]) -> CrabkaSubmitChangeResponse {
+        let mut cur = body;
+        CrabkaSubmitChangeResponse::decode_v0(&mut cur).expect("submit response")
+    }
+
+    fn decode_metadata_fetch_response(body: &[u8]) -> CrabkaMetadataFetchResponse {
+        let mut cur = body;
+        CrabkaMetadataFetchResponse::decode_v0(&mut cur).expect("metadata fetch response")
+    }
+
+    #[test]
+    fn is_eof_only_matches_unexpected_eof_io_errors() {
+        let eof = super::RaftError::Storage(crabka_log::LogError::Io(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "eof",
+        )));
+        assert!(super::is_eof(&eof));
+
+        let broken_pipe = super::RaftError::Storage(crabka_log::LogError::Io(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "broken",
+        )));
+        assert!(!super::is_eof(&broken_pipe));
+
+        let protocol =
+            super::RaftError::Protocol(crabka_protocol::ProtocolError::InvalidValue("not io"));
+        assert!(!super::is_eof(&protocol));
+    }
+
+    #[tokio::test]
+    async fn read_one_request_decodes_flexible_header_and_body() {
+        let (mut client, mut server) = tokio::io::duplex(128);
+        let frame = request_frame(52, 2, 123, "raft-client", b"payload");
+        let writer = tokio::spawn(async move {
+            client.write_all(&frame).await.unwrap();
+        });
+
+        let (api_key, api_version, correlation_id, body) =
+            super::read_one_request(&mut server).await.expect("decode");
+
+        assert!(api_key == 52);
+        assert!(api_version == 2);
+        assert!(correlation_id == 123);
+        assert!(body.as_ref() == b"payload");
+        writer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn read_one_request_reports_fixed_header_shortfall() {
+        let (mut client, mut server) = tokio::io::duplex(128);
+        let frame = length_prefixed(&[0, 52, 0, 2]);
+        let writer = tokio::spawn(async move {
+            client.write_all(&frame).await.unwrap();
+        });
+
+        let err = super::read_one_request(&mut server)
+            .await
+            .expect_err("short fixed header");
+
+        assert!(matches!(
+            err,
+            super::RaftError::Protocol(crabka_protocol::ProtocolError::UnexpectedEof { needed: 4 })
+        ));
+        writer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn read_one_request_reports_client_id_length_shortfall() {
+        let (mut client, mut server) = tokio::io::duplex(128);
+        let mut fixed = bytes::BytesMut::new();
+        fixed.put_i16(52);
+        fixed.put_i16(2);
+        fixed.put_i32(123);
+        let frame = length_prefixed(&fixed);
+        let writer = tokio::spawn(async move {
+            client.write_all(&frame).await.unwrap();
+        });
+
+        let err = super::read_one_request(&mut server)
+            .await
+            .expect_err("missing client id length");
+
+        assert!(matches!(
+            err,
+            super::RaftError::Protocol(crabka_protocol::ProtocolError::UnexpectedEof { needed: 2 })
+        ));
+        writer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn read_one_request_accepts_null_client_id_with_no_body() {
+        let (mut client, mut server) = tokio::io::duplex(128);
+        let frame = raw_request_frame(52, 2, 123, -1, &[], &[]);
+        let writer = tokio::spawn(async move {
+            client.write_all(&frame).await.unwrap();
+        });
+
+        let (api_key, api_version, correlation_id, body) =
+            super::read_one_request(&mut server).await.expect("decode");
+
+        assert!(api_key == 52);
+        assert!(api_version == 2);
+        assert!(correlation_id == 123);
+        assert!(body.is_empty());
+        writer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn read_one_request_reports_partial_client_id_length_shortfall() {
+        let (mut client, mut server) = tokio::io::duplex(128);
+        let mut fixed = bytes::BytesMut::new();
+        fixed.put_i16(52);
+        fixed.put_i16(2);
+        fixed.put_i32(123);
+        fixed.put_u8(0x80);
+        let frame = length_prefixed(&fixed);
+        let writer = tokio::spawn(async move {
+            client.write_all(&frame).await.unwrap();
+        });
+
+        let err = super::read_one_request(&mut server)
+            .await
+            .expect_err("partial client id length");
+
+        assert!(matches!(
+            err,
+            super::RaftError::Protocol(crabka_protocol::ProtocolError::UnexpectedEof { needed: 1 })
+        ));
+        writer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn read_one_request_reports_client_id_bytes_shortfall() {
+        let (mut client, mut server) = tokio::io::duplex(128);
+        let frame = raw_request_frame(52, 2, 123, 4, b"x", &[]);
+        let writer = tokio::spawn(async move {
+            client.write_all(&frame).await.unwrap();
+        });
+
+        let err = super::read_one_request(&mut server)
+            .await
+            .expect_err("partial client id");
+
+        assert!(matches!(
+            err,
+            super::RaftError::Protocol(crabka_protocol::ProtocolError::UnexpectedEof { needed: 3 })
+        ));
+        writer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn read_one_request_keeps_nonzero_tagged_byte_as_body() {
+        let (mut client, mut server) = tokio::io::duplex(128);
+        let frame = raw_request_frame(52, 2, 123, 0, &[], &[1, b'p', b'a', b'y']);
+        let writer = tokio::spawn(async move {
+            client.write_all(&frame).await.unwrap();
+        });
+
+        let (_, _, _, body) = super::read_one_request(&mut server).await.expect("decode");
+
+        assert!(body.as_ref() == &[1, b'p', b'a', b'y']);
+        writer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dispatch_routes_kip595_peer_apis_to_engine() {
+        use crate::kraft::transport::wire::{PeerRequest, PeerResponse};
+
+        let (engine, _dir) = single_voter_engine();
+        wait_for_leader(&engine).await;
+
+        let vote = PeerRequest::Vote {
+            voter_id: 1,
+            candidate_epoch: 1,
+            candidate: 2,
+            last_epoch: 0,
+            last_offset: 0,
+            pre_vote: false,
+        }
+        .encode();
+        let vote_resp = super::dispatch(api_key::VOTE, vote, &engine)
+            .await
+            .expect("vote dispatch");
+        assert!(PeerResponse::decode_vote(&vote_resp).is_some());
+
+        let fetch = PeerRequest::Fetch {
+            from: 2,
+            fetch_epoch: 1,
+            fetch_offset: 0,
+        }
+        .encode();
+        let fetch_resp = super::dispatch(api_key::FETCH, fetch, &engine)
+            .await
+            .expect("fetch dispatch");
+        assert!(PeerResponse::decode_fetch(&fetch_resp).is_some());
+
+        let snapshot = PeerRequest::FetchSnapshot {
+            from: 2,
+            snapshot_id: (10, 1),
+            position: 0,
+            max_bytes: 32,
+        }
+        .encode();
+        let snapshot_resp = super::dispatch(api_key::FETCH_SNAPSHOT, snapshot, &engine)
+            .await
+            .expect("snapshot dispatch");
+        assert!(matches!(
+            PeerResponse::decode_fetch_snapshot(&snapshot_resp),
+            Some(PeerResponse::FetchSnapshot { error_code: 98, .. })
+        ));
+
+        let begin = PeerRequest::BeginQuorumEpoch {
+            leader_id: 1,
+            leader_epoch: 1,
+        }
+        .encode();
+        let begin_resp = super::dispatch(api_key::BEGIN_QUORUM_EPOCH, begin, &engine)
+            .await
+            .expect("begin dispatch");
+        assert!(!begin_resp.is_empty());
+
+        let end = PeerRequest::EndQuorumEpoch {
+            leader_id: 1,
+            leader_epoch: 1,
+        }
+        .encode();
+        let end_resp = super::dispatch(api_key::END_QUORUM_EPOCH, end, &engine)
+            .await
+            .expect("end dispatch");
+        assert!(!end_resp.is_empty());
+    }
+
+    #[tokio::test]
+    async fn dispatch_submit_change_encodes_success_and_decode_errors() {
+        let (engine, _dir) = single_voter_engine();
+        wait_for_leader(&engine).await;
+
+        let ok_body = super::dispatch(
+            API_KEY_SUBMIT_CHANGE,
+            submit_change_body(&[topic_record("submit-ok")]),
+            &engine,
+        )
+        .await
+        .expect("submit dispatch");
+        let ok = decode_submit_change_response(&ok_body);
+        assert!(ok.error_code == 0);
+        assert!(ok.leader_hint == -1);
+
+        let bad_req = CrabkaSubmitChangeRequest {
+            records: Bytes::from_static(b"not-wincode"),
+        };
+        let mut bad_body = Vec::new();
+        bad_req.encode_v0(&mut bad_body).unwrap();
+        let err_body = super::dispatch(API_KEY_SUBMIT_CHANGE, Bytes::from(bad_body), &engine)
+            .await
+            .expect("decode failure dispatch");
+        let err = decode_submit_change_response(&err_body);
+        assert!(err.error_code == 2);
+        assert!(err.leader_hint == -1);
+    }
+
+    #[tokio::test]
+    async fn dispatch_submit_change_encodes_metadata_rejection() {
+        let (engine, _dir) = single_voter_engine();
+        wait_for_leader(&engine).await;
+
+        let topic = topic_record("duplicate");
+        let first = super::dispatch(
+            API_KEY_SUBMIT_CHANGE,
+            submit_change_body(std::slice::from_ref(&topic)),
+            &engine,
+        )
+        .await
+        .expect("first submit");
+        assert!(decode_submit_change_response(&first).error_code == 0);
+
+        let duplicate =
+            super::dispatch(API_KEY_SUBMIT_CHANGE, submit_change_body(&[topic]), &engine)
+                .await
+                .expect("duplicate submit");
+        let duplicate = decode_submit_change_response(&duplicate);
+        assert!(duplicate.error_code == 2);
+        assert!(duplicate.leader_hint == -1);
+    }
+
+    #[tokio::test]
+    async fn dispatch_metadata_fetch_clamps_negative_request_and_reports_unknown_leader() {
+        let (engine, _dir) = test_engine_with_voters(1, std::iter::empty());
+
+        let body = super::dispatch(API_KEY_METADATA_FETCH, metadata_fetch_body(-5, -1), &engine)
+            .await
+            .expect("metadata fetch dispatch");
+
+        let resp = decode_metadata_fetch_response(&body);
+        assert!(resp.error_code == 0);
+        assert!(resp.leader_hint == -1);
+        assert!(resp.high_watermark == 0);
+        assert!(resp.records.is_empty());
+    }
+
+    #[tokio::test]
+    async fn dispatch_metadata_fetch_returns_committed_records_and_leader_hint() {
+        let (engine, _dir) = single_voter_engine();
+        wait_for_leader(&engine).await;
+        engine
+            .submit_change(vec![topic_record("metadata-fetch")])
+            .await
+            .expect("submit");
+
+        let body = super::dispatch(
+            API_KEY_METADATA_FETCH,
+            metadata_fetch_body(0, 1_048_576),
+            &engine,
+        )
+        .await
+        .expect("metadata fetch dispatch");
+
+        let resp = decode_metadata_fetch_response(&body);
+        assert!(resp.error_code == 0);
+        assert!(resp.leader_hint == 1);
+        assert!(resp.high_watermark >= 1);
+        assert!(!resp.records.is_empty());
+    }
+
+    #[tokio::test]
+    async fn describe_cluster_response_body_projects_controller_fallbacks() {
+        use crabka_protocol::owned::describe_cluster_response::DescribeClusterResponse;
+
+        let (engine, _dir) = test_engine_with_voters(1, [voter(u64::MAX, Vec::new())]);
+        let body = super::describe_cluster_response_body(1, &describe_cluster_body(1, 2), &engine)
+            .await
+            .expect("describe cluster");
+
+        let mut cur = &body[..];
+        let resp = DescribeClusterResponse::decode(&mut cur, 1).expect("describe response");
+        assert!(cur.is_empty());
+        assert!(resp.controller_id == -1);
+        assert!(resp.brokers.len() == 1);
+        assert!(resp.brokers[0].broker_id == -1);
+        assert!(resp.brokers[0].host.is_empty());
+        assert!(resp.brokers[0].port == -1);
+    }
+
     #[test]
     fn api_versions_body_advertises_kip595_set_both_shapes() {
         use crabka_protocol::Decode;

@@ -87,9 +87,7 @@ impl KraftLog {
     /// Advance the high watermark (monotonic; never past the log end).
     pub fn advance_hwm(&mut self, new_hwm: i64) {
         let clamped = new_hwm.min(self.log.log_end_offset());
-        if clamped > self.hwm {
-            self.hwm = clamped;
-        }
+        self.hwm = self.hwm.max(clamped);
         debug_assert!(self.hwm <= self.log.log_end_offset());
     }
 
@@ -208,6 +206,38 @@ mod tests {
         let out = log.read_decoded(0, 1 << 20).unwrap();
         assert!(out.len() == 2);
         assert!(out[0].partition_leader_epoch == 1);
+    }
+
+    #[test]
+    fn append_return_matches_assigned_base_and_advances_public_end_offset() {
+        let (mut log, _dir) = open_tmp();
+
+        let first = log.append(&mut batch(0, 1, b"a")).unwrap();
+        let second = log.append(&mut batch(0, 1, b"b")).unwrap();
+        let decoded = log.read_decoded(0, 1 << 20).unwrap();
+
+        assert!(first == 0);
+        assert!(second == 1);
+        assert!(decoded.len() == 2);
+        assert!(decoded[0].base_offset == first);
+        assert!(decoded[1].base_offset == second);
+        assert!(log.log_end_offset() == i64::try_from(decoded.len()).unwrap());
+        assert!(log.log_end_offset() == LogView::end_offset(&log));
+    }
+
+    #[test]
+    fn public_hwm_accessor_tracks_committed_offset_after_advance_and_snapshot() {
+        let (mut log, _dir) = open_tmp();
+        for _ in 0..3 {
+            log.append(&mut batch(0, 1, b"x")).unwrap();
+        }
+        log.advance_hwm(2);
+        assert!(log.hwm() == 2);
+
+        log.install_snapshot(9).unwrap();
+        assert!(log.hwm() == 9);
+        assert!(log.log_start_offset() == 9);
+        assert!(log.log_end_offset() == 9);
     }
 
     #[test]

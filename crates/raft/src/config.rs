@@ -154,3 +154,31 @@ impl ControllerConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert2::assert;
+
+    #[test]
+    fn for_tests_uses_expected_snapshot_defaults() {
+        let cfg = ControllerConfig::for_tests(7, PathBuf::from("/tmp/raft-test"));
+
+        assert!(cfg.max_bytes_between_snapshots == 20 * 1024 * 1024);
+        assert!(cfg.max_snapshot_interval == Duration::from_hours(1));
+        assert!(cfg.snapshot_interval_records == 0);
+    }
+
+    #[test]
+    fn debug_reports_configuration_fields_and_optional_hooks() {
+        let cfg = ControllerConfig::for_tests(7, PathBuf::from("/tmp/raft-test"));
+        let rendered = format!("{cfg:?}");
+
+        assert!(rendered.contains("ControllerConfig"));
+        assert!(rendered.contains("node_id: 7"));
+        assert!(rendered.contains("client_id: \"crabka-controller-test\""));
+        assert!(rendered.contains("dialer: false"));
+        assert!(rendered.contains("handshake: false"));
+        assert!(rendered.contains("max_bytes_between_snapshots: 20971520"));
+    }
+}

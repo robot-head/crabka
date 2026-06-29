@@ -69,6 +69,7 @@ tikv-jemallocator = { version = "0.7", optional = true, features = ["profiling",
 assert2 = { workspace = true }
 crabka-client-core = { path = "../client-core", version = "0.3.8" }
 crabka-protocol = { path = "../protocol", version = "0.3.8" }
+datatest-stable = { workspace = true }
 http-body-util = "0.1"
 parquet = { workspace = true }
 tempfile = { workspace = true }
@@ -79,3 +80,7 @@ tower = { workspace = true, features = ["util"] }
 [build-dependencies]
 protox = { workspace = true }
 tonic-prost-build = { workspace = true }
+
+[[test]]
+name = "traceql_conformance"
+harness = false
