@@ -54,7 +54,7 @@ protoc-bin-vendored = { workspace = true }
 
 [dev-dependencies]
 assert2 = { workspace = true }
-crabka-broker = { version = "0.3.8", path = "../broker", features = ["test-helpers"] }
+crabka-broker = { version = "0.3", path = "../broker", features = ["test-helpers"] }
 mutants = { workspace = true }
 tempfile.workspace = true
 tower.workspace = true

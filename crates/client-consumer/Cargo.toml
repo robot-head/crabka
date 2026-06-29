@@ -32,9 +32,9 @@ futures-util = { workspace = true }
 
 [dev-dependencies]
 assert2 = { workspace = true }
-crabka-broker = { version = "0.3.8", path = "../broker", features = ["test-helpers"] }
-crabka-client-producer = { version = "0.3.8", path = "../client-producer" }
-crabka-security = { version = "0.3.8", path = "../security" }
+crabka-broker = { version = "0.3", path = "../broker", features = ["test-helpers"] }
+crabka-client-producer = { version = "0.3", path = "../client-producer" }
+crabka-security = { version = "0.3", path = "../security" }
 mutants = { workspace = true }
 stateright = { workspace = true }
 tempfile = { workspace = true }

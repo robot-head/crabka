@@ -74,8 +74,8 @@ tikv-jemallocator = { version = "0.7", optional = true, features = ["profiling",
 
 [dev-dependencies]
 assert2 = { workspace = true }
-crabka-broker = { version = "0.3.8", path = "../broker", features = ["test-helpers"] }
-crabka-client-consumer = { version = "0.3.8", path = "../client-consumer" }
+crabka-broker = { version = "0.3", path = "../broker", features = ["test-helpers"] }
+crabka-client-consumer = { version = "0.3", path = "../client-consumer" }
 ring = { workspace = true }
 tempfile.workspace = true
 testcontainers.workspace = true
