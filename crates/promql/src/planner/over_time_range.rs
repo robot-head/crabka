@@ -311,6 +311,30 @@ mod tests {
         assert!(approx_eq(got[0].1, 4.0));
     }
 
+    #[test]
+    fn over_time_family_lookup_covers_operator_families() {
+        let cases = [
+            ("sum_over_time", OverTimeFamily::Sum),
+            ("avg_over_time", OverTimeFamily::Avg),
+            ("count_over_time", OverTimeFamily::Count),
+            ("min_over_time", OverTimeFamily::Min),
+            ("max_over_time", OverTimeFamily::Max),
+            ("stddev_over_time", OverTimeFamily::Stddev),
+            ("stdvar_over_time", OverTimeFamily::Stdvar),
+            ("last_over_time", OverTimeFamily::Last),
+            ("present_over_time", OverTimeFamily::Present),
+            ("quantile_over_time", OverTimeFamily::Quantile),
+        ];
+        for (name, family) in cases {
+            assert!(over_time_family_from_function_name(name) == Some(family));
+        }
+
+        assert!(over_time_family_from_function_name("mad_over_time").is_none());
+        assert!(over_time_family_from_function_name("first_over_time").is_none());
+        assert!(over_time_family_from_function_name("ts_of_min_over_time").is_none());
+        assert!(over_time_family_from_function_name("rate").is_none());
+    }
+
     /// `quantile_over_time(0.5, ...)` over 2,4,4,4,5,5,7,9 yields the median 4.5.
     #[tokio::test]
     async fn quantile_over_time_plan_threads_phi() {

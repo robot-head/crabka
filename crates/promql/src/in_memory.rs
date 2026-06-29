@@ -464,20 +464,14 @@ impl InMemoryMetricStore {
         let mut by_fp: BTreeMap<SeriesFingerprint, Labels> = BTreeMap::new();
         if let Some(rows) = self.floats.get(tenant) {
             for row in rows {
-                if row.ts_ms >= start_ms
-                    && row.ts_ms <= end_ms
-                    && all_match(row.fp, &row.labels, matchers)?
-                {
+                if row_matches(row.fp, &row.labels, row.ts_ms, matchers, start_ms, end_ms)? {
                     by_fp.entry(row.fp).or_insert_with(|| row.labels.clone());
                 }
             }
         }
         if let Some(rows) = self.hists.get(tenant) {
             for row in rows {
-                if row.ts_ms >= start_ms
-                    && row.ts_ms <= end_ms
-                    && all_match(row.fp, &row.labels, matchers)?
-                {
+                if row_matches(row.fp, &row.labels, row.ts_ms, matchers, start_ms, end_ms)? {
                     by_fp.entry(row.fp).or_insert_with(|| row.labels.clone());
                 }
             }
@@ -620,6 +614,23 @@ fn all_match(fp: SeriesFingerprint, labels: &Labels, matchers: &[LabelMatcher]) 
     Ok(true)
 }
 
+fn row_matches(
+    fp: SeriesFingerprint,
+    labels: &Labels,
+    ts_ms: i64,
+    matchers: &[LabelMatcher],
+    start_ms: i64,
+    end_ms: i64,
+) -> Result<bool> {
+    if ts_ms.cmp(&start_ms).is_lt() {
+        return Ok(false);
+    }
+    if ts_ms.cmp(&end_ms).is_gt() {
+        return Ok(false);
+    }
+    all_match(fp, labels, matchers)
+}
+
 #[async_trait::async_trait]
 impl MetricStore for InMemoryMetricStore {
     async fn scan(
@@ -634,10 +645,7 @@ impl MetricStore for InMemoryMetricStore {
         let mut float_rows = Vec::new();
         if let Some(rows) = self.floats.get(tenant) {
             for row in rows {
-                if row.ts_ms >= start_ms
-                    && row.ts_ms <= end_ms
-                    && all_match(row.fp, &row.labels, matchers)?
-                {
+                if row_matches(row.fp, &row.labels, row.ts_ms, matchers, start_ms, end_ms)? {
                     float_rows.push((row.fp, row.ts_ms, row.value));
                 }
             }
@@ -656,10 +664,7 @@ impl MetricStore for InMemoryMetricStore {
         let mut hist_rows = Vec::new();
         if let Some(rows) = self.hists.get(tenant) {
             for row in rows {
-                if row.ts_ms >= start_ms
-                    && row.ts_ms <= end_ms
-                    && all_match(row.fp, &row.labels, matchers)?
-                {
+                if row_matches(row.fp, &row.labels, row.ts_ms, matchers, start_ms, end_ms)? {
                     hist_rows.push((row.fp, row.ts_ms, row.hist.clone()));
                 }
             }
@@ -1012,6 +1017,156 @@ mod tests {
         }
     }
 
+    async fn count_rows(result: &ScanResult, table: &str) -> i64 {
+        let df = result
+            .ctx
+            .sql(&format!("SELECT count(*) AS c FROM {table}"))
+            .await
+            .unwrap();
+        let output = df.collect().await.unwrap();
+        output[0].column(0).as_primitive::<Int64Type>().value(0)
+    }
+
+    fn float_record(tenant: &str, labels: &Labels, timestamp_ms: i64, value: f64) -> WalRecord {
+        WalRecord {
+            tenant: tenant.to_string(),
+            labels: labels
+                .iter()
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect(),
+            payload: SamplePayload::Float {
+                timestamp_ms,
+                value,
+                start_timestamp_ms: None,
+            },
+            exemplars: Vec::new(),
+        }
+    }
+
+    fn store_with_float_and_hist_series() -> (InMemoryMetricStore, Labels) {
+        let mut store = InMemoryMetricStore::new();
+        let up_api = lbls(&[("__name__", "up"), ("job", "api")]);
+        let up_worker = lbls(&[("__name__", "up"), ("job", "worker")]);
+        let latency = lbls(&[("__name__", "latency_seconds"), ("job", "api")]);
+        store.push_float("tenant-a", up_api.clone(), 1_000, 1.0);
+        store.push_float("tenant-a", up_worker, 2_000, 2.0);
+        store.push_histogram("tenant-a", latency, 3_000, native_histogram());
+        (store, up_api)
+    }
+
+    fn expected_label_name_cardinality() -> Vec<LabelNameCardinality> {
+        vec![
+            LabelNameCardinality {
+                name: "__name__".to_string(),
+                series_count: 3,
+            },
+            LabelNameCardinality {
+                name: "job".to_string(),
+                series_count: 3,
+            },
+        ]
+    }
+
+    fn expected_label_value_cardinality() -> Vec<LabelValueCardinality> {
+        vec![
+            LabelValueCardinality {
+                label_name: "__name__".to_string(),
+                label_value: "up".to_string(),
+                series_count: 2,
+            },
+            LabelValueCardinality {
+                label_name: "job".to_string(),
+                label_value: "api".to_string(),
+                series_count: 2,
+            },
+            LabelValueCardinality {
+                label_name: "__name__".to_string(),
+                label_value: "latency_seconds".to_string(),
+                series_count: 1,
+            },
+            LabelValueCardinality {
+                label_name: "job".to_string(),
+                label_value: "worker".to_string(),
+                series_count: 1,
+            },
+        ]
+    }
+
+    fn expected_metric_name_stats() -> Vec<NamedTsdbStat> {
+        vec![
+            NamedTsdbStat {
+                name: "up".to_string(),
+                value: 2,
+            },
+            NamedTsdbStat {
+                name: "latency_seconds".to_string(),
+                value: 1,
+            },
+        ]
+    }
+
+    fn expected_label_value_count_stats() -> Vec<NamedTsdbStat> {
+        vec![
+            NamedTsdbStat {
+                name: "__name__".to_string(),
+                value: 2,
+            },
+            NamedTsdbStat {
+                name: "job".to_string(),
+                value: 2,
+            },
+        ]
+    }
+
+    fn expected_label_memory_stats() -> Vec<NamedTsdbStat> {
+        vec![
+            NamedTsdbStat {
+                name: "__name__".to_string(),
+                value: 43,
+            },
+            NamedTsdbStat {
+                name: "job".to_string(),
+                value: 21,
+            },
+        ]
+    }
+
+    fn expected_label_pair_stats() -> Vec<NamedTsdbStat> {
+        vec![
+            NamedTsdbStat {
+                name: "__name__=up".to_string(),
+                value: 2,
+            },
+            NamedTsdbStat {
+                name: "job=api".to_string(),
+                value: 2,
+            },
+            NamedTsdbStat {
+                name: "__name__=latency_seconds".to_string(),
+                value: 1,
+            },
+            NamedTsdbStat {
+                name: "job=worker".to_string(),
+                value: 1,
+            },
+        ]
+    }
+
+    #[test]
+    fn row_matches_rejects_outside_bounds_before_matching_labels() {
+        let labels = lbls(&[("__name__", "up"), ("job", "api")]);
+        let matchers = [LabelMatcher::new("__name__", MatchOp::Eq, "up")];
+        let fp = labels.fingerprint();
+
+        assert!(!row_matches(fp, &labels, 999, &matchers, 1_000, 2_000).unwrap());
+        assert!(row_matches(fp, &labels, 1_000, &matchers, 1_000, 2_000).unwrap());
+        assert!(row_matches(fp, &labels, 2_000, &matchers, 1_000, 2_000).unwrap());
+        assert!(!row_matches(fp, &labels, 2_001, &matchers, 1_000, 2_000).unwrap());
+
+        let mismatch = [LabelMatcher::new("job", MatchOp::Eq, "worker")];
+        assert!(!row_matches(fp, &labels, 1_500, &mismatch, 1_000, 2_000).unwrap());
+    }
+
     #[tokio::test]
     async fn replay_wal_records_populates_queryable_head() {
         let mut store = InMemoryMetricStore::new();
@@ -1091,6 +1246,129 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bulk_wal_replay_and_retention_are_observable() {
+        assert!(DEFAULT_RETENTION_MS == 21_600_000);
+
+        let records = [
+            float_record(
+                "tenant-a",
+                &lbls(&[("__name__", "up"), ("job", "api")]),
+                10_000,
+                1.0,
+            ),
+            float_record(
+                "tenant-a",
+                &lbls(&[("__name__", "up"), ("job", "worker")]),
+                20_000,
+                2.0,
+            ),
+        ];
+
+        let mut store = InMemoryMetricStore::with_retention_ms(5_000);
+        assert!(store.retention_ms() == 5_000);
+        store.set_retention_ms(7_000);
+        assert!(store.retention_ms() == 7_000);
+        store.apply_wal_records(&records);
+
+        let matchers = [LabelMatcher::new("__name__", MatchOp::Eq, "up")];
+        let series = store
+            .series("tenant-a", &matchers, 0, 30_000)
+            .await
+            .unwrap();
+        assert!(series.len() == 2);
+
+        let head = WalHead::with_retention_ms(9_000);
+        assert!(head.retention_ms() == 9_000);
+        head.apply_wal_records(&records);
+        let jobs = head
+            .label_values("tenant-a", "job", &matchers, 0, 30_000)
+            .await
+            .unwrap();
+        assert!(jobs == vec!["api".to_string(), "worker".to_string()]);
+
+        let stats = head.prune(20_000);
+        assert!(
+            stats
+                == PruneStats {
+                    samples_dropped: 1,
+                    series_dropped: 1,
+                }
+        );
+        let jobs = head
+            .label_values("tenant-a", "job", &matchers, 0, 30_000)
+            .await
+            .unwrap();
+        assert!(jobs == vec!["worker".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn wal_head_delegates_metadata_cardinality_stats_and_blocks() {
+        let (mut store, up_api) = store_with_float_and_hist_series();
+        store.set_retention_ms(12_345);
+        store.push_exemplar(
+            "tenant-a",
+            up_api.clone(),
+            lbls(&[("trace_id", "abc")]),
+            1_500,
+            1.5,
+        );
+        store.push_metadata("tenant-a", "up", "gauge", "Target health.", "");
+        store.push_tsdb_block("tenant-a", "block-a", 0, 5_000, 3, 3);
+        store.record_offset(0, 7);
+        store.record_offset(0, 9);
+
+        let head = WalHead::from_store(store);
+        assert!(head.retention_ms() == 12_345);
+        assert!(
+            head.watermarks().get(&0)
+                == Some(&PartitionWatermark {
+                    low_water_offset: 7,
+                    high_water_offset: 9,
+                })
+        );
+
+        let matchers = [LabelMatcher::new("__name__", MatchOp::Eq, "up")];
+        let names = head
+            .label_names("tenant-a", &matchers, 0, 5_000)
+            .await
+            .unwrap();
+        assert!(names == vec!["__name__".to_string(), "job".to_string()]);
+        let jobs = head
+            .label_values("tenant-a", "job", &matchers, 0, 5_000)
+            .await
+            .unwrap();
+        assert!(jobs == vec!["api".to_string(), "worker".to_string()]);
+        assert!(
+            head.exemplars("tenant-a", &matchers, 0, 5_000)
+                .await
+                .unwrap()[0]
+                .labels
+                == lbls(&[("trace_id", "abc")])
+        );
+        assert!(head.metadata("tenant-a", Some("up")).await.unwrap()[0].help == "Target health.");
+        assert!(
+            head.cardinality_active_series("tenant-a")
+                .await
+                .unwrap()
+                .len()
+                == 3
+        );
+        assert!(
+            head.cardinality_label_names("tenant-a").await.unwrap()
+                == expected_label_name_cardinality()
+        );
+        assert!(
+            head.cardinality_label_values("tenant-a").await.unwrap()
+                == expected_label_value_cardinality()
+        );
+        let stats = head.tsdb_stats("tenant-a").await.unwrap();
+        assert!(stats.head_stats.num_series == 3);
+        assert!(stats.head_stats.num_samples == 3);
+        assert!(stats.series_count_by_metric_name == expected_metric_name_stats());
+        assert!(head.tsdb_blocks("tenant-a").await.unwrap()[0].id == "block-a");
+    }
+
+    #[tokio::test]
     async fn cloned_wal_head_sees_records_replayed_through_original_handle() {
         let head = WalHead::new();
         let query_handle = head.clone();
@@ -1135,15 +1413,45 @@ mod tests {
         let result = store.scan("t", &matchers, 0, 1500).await.unwrap();
         let table = result.float_table.clone().unwrap();
         assert!(result.histogram_table.is_none());
+        assert!(count_rows(&result, &table).await == 1);
+    }
 
-        let df = result
-            .ctx
-            .sql(&format!("SELECT count(*) AS c FROM {table}"))
-            .await
-            .unwrap();
-        let output = df.collect().await.unwrap();
-        let count = output[0].column(0).as_primitive::<Int64Type>().value(0);
-        assert!(count == 1);
+    #[tokio::test]
+    async fn scan_filters_histograms_by_matcher_tenant_and_time() {
+        let mut store = InMemoryMetricStore::new();
+        store.push_histogram(
+            "t",
+            lbls(&[("__name__", "latency_seconds"), ("job", "api")]),
+            1_000,
+            native_histogram(),
+        );
+        store.push_histogram(
+            "t",
+            lbls(&[("__name__", "latency_seconds"), ("job", "api")]),
+            5_000,
+            native_histogram(),
+        );
+        store.push_histogram(
+            "t",
+            lbls(&[("__name__", "latency_seconds"), ("job", "worker")]),
+            1_000,
+            native_histogram(),
+        );
+        store.push_histogram(
+            "other",
+            lbls(&[("__name__", "latency_seconds"), ("job", "api")]),
+            1_000,
+            native_histogram(),
+        );
+
+        let matchers = [
+            LabelMatcher::new("__name__", MatchOp::Eq, "latency_seconds"),
+            LabelMatcher::new("job", MatchOp::Eq, "api"),
+        ];
+        let result = store.scan("t", &matchers, 0, 1_500).await.unwrap();
+        assert!(result.float_table.is_none());
+        let table = result.histogram_table.clone().unwrap();
+        assert!(count_rows(&result, &table).await == 1);
     }
 
     #[tokio::test]
@@ -1167,6 +1475,23 @@ mod tests {
             .await
             .unwrap();
         assert!(values == vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn series_filters_histograms_by_matcher_and_time() {
+        let mut store = InMemoryMetricStore::new();
+        let api = lbls(&[("__name__", "latency_seconds"), ("job", "api")]);
+        let worker = lbls(&[("__name__", "latency_seconds"), ("job", "worker")]);
+        store.push_histogram("t", api.clone(), 1_000, native_histogram());
+        store.push_histogram("t", api.clone(), 5_000, native_histogram());
+        store.push_histogram("t", worker, 1_000, native_histogram());
+
+        let matchers = [
+            LabelMatcher::new("__name__", MatchOp::Eq, "latency_seconds"),
+            LabelMatcher::new("job", MatchOp::Eq, "api"),
+        ];
+        let series = store.series("t", &matchers, 0, 1_500).await.unwrap();
+        assert!(series == vec![api]);
     }
 
     #[tokio::test]
@@ -1226,6 +1551,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn query_shard_neq_matcher_excludes_matching_fingerprint_modulo() {
+        let mut store = InMemoryMetricStore::new();
+        let series = (0..12)
+            .map(|id| lbls(&[("__name__", "up"), ("series", &id.to_string())]))
+            .collect::<Vec<_>>();
+        for labels in &series {
+            store.push_float("t", labels.clone(), 1, 1.0);
+        }
+
+        let expected = series
+            .iter()
+            .filter(|labels| labels.fingerprint() % 2 != 0)
+            .map(|labels| (labels.fingerprint(), labels.clone()))
+            .collect::<BTreeMap<_, _>>()
+            .into_values()
+            .collect::<Vec<_>>();
+        assert!(!expected.is_empty());
+        assert!(expected.len() < series.len());
+
+        let matchers = [
+            LabelMatcher::new("__name__", MatchOp::Eq, "up"),
+            LabelMatcher::new("__query_shard__", MatchOp::Neq, "1_of_2"),
+        ];
+        let got = store.series("t", &matchers, 0, 10).await.unwrap();
+
+        assert!(got == expected);
+    }
+
+    #[tokio::test]
     async fn prune_drops_old_samples() {
         let mut store = InMemoryMetricStore::with_retention_ms(1_000);
         let series = lbls(&[("__name__", "up"), ("job", "api")]);
@@ -1261,6 +1615,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn prune_counts_partial_histogram_and_exemplar_retention() {
+        let mut store = InMemoryMetricStore::with_retention_ms(1_000);
+        let live = lbls(&[("__name__", "latency_seconds"), ("job", "api")]);
+        let stale = lbls(&[("__name__", "latency_seconds"), ("job", "old")]);
+        store.push_float("t", live.clone(), 8_999, 1.0);
+        store.push_float("t", live.clone(), 9_000, 2.0);
+        store.push_float("t", stale.clone(), 1_000, 3.0);
+        store.push_histogram("t", live.clone(), 8_999, native_histogram());
+        store.push_histogram("t", live.clone(), 9_000, native_histogram());
+        store.push_exemplar("t", live.clone(), lbls(&[("trace_id", "old")]), 8_999, 1.0);
+        store.push_exemplar("t", live.clone(), lbls(&[("trace_id", "new")]), 9_000, 2.0);
+
+        let stats = store.prune(10_000);
+        assert!(
+            stats
+                == PruneStats {
+                    samples_dropped: 4,
+                    series_dropped: 1,
+                }
+        );
+
+        let matchers = [LabelMatcher::new("job", MatchOp::Eq, "api")];
+        let result = store
+            .scan("t", &matchers, i64::MIN, i64::MAX)
+            .await
+            .unwrap();
+        assert!(count_rows(&result, result.float_table.as_ref().unwrap()).await == 1);
+        assert!(count_rows(&result, result.histogram_table.as_ref().unwrap()).await == 1);
+        let exemplars = store
+            .exemplars("t", &matchers, i64::MIN, i64::MAX)
+            .await
+            .unwrap();
+        assert!(exemplars.len() == 1);
+        assert!(exemplars[0].labels == lbls(&[("trace_id", "new")]));
+        let stale_matchers = [LabelMatcher::new("job", MatchOp::Eq, "old")];
+        assert!(
+            store
+                .series("t", &stale_matchers, i64::MIN, i64::MAX)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
     async fn prune_removes_emptied_series_from_index() {
         let mut store = InMemoryMetricStore::with_retention_ms(1_000);
         let stale = lbls(&[("__name__", "up"), ("job", "old")]);
@@ -1285,6 +1684,35 @@ mod tests {
             .await
             .unwrap();
         assert!(jobs == vec!["new".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn store_cardinality_and_tsdb_stats_include_float_and_hist_series() {
+        let (store, _) = store_with_float_and_hist_series();
+
+        assert!(
+            store.cardinality_label_names("tenant-a").await.unwrap()
+                == expected_label_name_cardinality()
+        );
+        assert!(
+            store.cardinality_label_values("tenant-a").await.unwrap()
+                == expected_label_value_cardinality()
+        );
+
+        let stats = store.tsdb_stats("tenant-a").await.unwrap();
+        assert!(
+            stats.head_stats
+                == TsdbHeadStats {
+                    num_series: 3,
+                    num_samples: 3,
+                    num_chunks: 3,
+                    min_time: 1_000,
+                    max_time: 3_000,
+                }
+        );
+        assert!(stats.label_value_count_by_label_name == expected_label_value_count_stats());
+        assert!(stats.memory_in_bytes_by_label_name == expected_label_memory_stats());
+        assert!(stats.series_count_by_label_value_pair == expected_label_pair_stats());
     }
 
     #[test]

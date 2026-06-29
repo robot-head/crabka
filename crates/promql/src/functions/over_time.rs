@@ -194,19 +194,20 @@ fn over_time_mean(values: &[f64]) -> f64 {
     let (mut mean, mut comp) = (0.0_f64, 0.0_f64);
     for &value in values {
         count += 1.0;
-        if mean.is_infinite() {
-            if value.is_infinite() && (value > 0.0) == (mean > 0.0) {
-                continue;
-            }
-            if !value.is_infinite() && !value.is_nan() {
-                continue;
-            }
+        if keep_infinite_mean(mean, value) {
+            continue;
         }
         let (new_mean, new_comp) = kahan_sum_inc(value / count - mean / count, mean, comp);
         mean = new_mean;
         comp = new_comp;
     }
     mean + comp
+}
+
+fn keep_infinite_mean(mean: f64, value: f64) -> bool {
+    mean.is_infinite()
+        && ((value.is_infinite() && value.is_sign_positive() == mean.is_sign_positive())
+            || (!value.is_infinite() && !value.is_nan()))
 }
 
 /// One Kahan-compensated incremental sum step, a port of Prometheus' `kahanSumInc`
@@ -643,6 +644,149 @@ mod tests {
             run_udf(OverTimeFamily::Quantile, window, 0.5)[0],
             4.5
         ));
+    }
+
+    #[test]
+    fn extremum_ties_preserve_first_signed_zero() {
+        let min = fold_extremum(&[0.0, -0.0], Extremum::Min);
+        assert!(min.to_bits() == 0.0_f64.to_bits());
+
+        let max = fold_extremum(&[-0.0, 0.0], Extremum::Max);
+        assert!(max.to_bits() == (-0.0_f64).to_bits());
+    }
+
+    #[test]
+    fn variance_uses_compensated_welford_terms() {
+        let small = over_time_variance(&[1.0, 1e-16, 1e-16, 1e-16]);
+        assert!(small.to_bits() == 0x3fc7_ffff_ffff_fffe);
+
+        let large = over_time_variance(&[1e-16, 1e16, 1e16, 5.0, 1e8, -1e8]);
+        assert!(large.to_bits() == 0x4671_87bd_f63d_b730);
+    }
+
+    #[test]
+    fn mean_uses_compensated_updates() {
+        let mean = over_time_mean(&[1e16, 1e-16, 1e-16, -1e16]);
+        assert!(mean.to_bits() == 0.25_f64.to_bits());
+    }
+
+    #[test]
+    fn infinite_mean_guard_matches_prometheus_cases() {
+        assert!(keep_infinite_mean(f64::INFINITY, f64::INFINITY));
+        assert!(keep_infinite_mean(f64::INFINITY, 1.0));
+        assert!(keep_infinite_mean(f64::NEG_INFINITY, f64::NEG_INFINITY));
+        assert!(keep_infinite_mean(f64::NEG_INFINITY, -1.0));
+
+        assert!(!keep_infinite_mean(f64::INFINITY, f64::NEG_INFINITY));
+        assert!(!keep_infinite_mean(f64::NEG_INFINITY, f64::INFINITY));
+        assert!(!keep_infinite_mean(f64::INFINITY, f64::NAN));
+        assert!(!keep_infinite_mean(1.0, 1.0));
+    }
+
+    #[test]
+    fn kahan_sum_inc_recovers_lost_low_bits() {
+        let (sum, comp) = kahan_sum_inc(1e-16, 1.0, 0.0);
+        assert!(sum.to_bits() == 1.0_f64.to_bits());
+        assert!(comp.to_bits() == 1e-16_f64.to_bits());
+
+        let (sum, comp) = kahan_sum_inc(1.0, 1e-16, 0.0);
+        assert!(sum.to_bits() == 1.0_f64.to_bits());
+        assert!(comp.to_bits() == 1e-16_f64.to_bits());
+    }
+
+    #[test]
+    fn quantile_boundaries_match_prometheus() {
+        let values = [3.0, 1.0, 2.0];
+        assert!(quantile_value(-0.1, &values).unwrap().is_infinite());
+        assert!(quantile_value(-0.1, &values).unwrap().is_sign_negative());
+        assert!(approx_eq(quantile_value(0.0, &values).unwrap(), 1.0));
+        assert!(approx_eq(quantile_value(1.0, &values).unwrap(), 3.0));
+        assert!(quantile_value(1.1, &values).unwrap().is_infinite());
+        assert!(quantile_value(1.1, &values).unwrap().is_sign_positive());
+    }
+
+    fn dict_i64(values: Vec<i64>, ranges: impl IntoIterator<Item = (u32, u32)>) -> ArrayRef {
+        Arc::new(
+            RangeArray::from_ranges(Arc::new(Int64Array::from(values)) as ArrayRef, ranges)
+                .unwrap()
+                .into_dict_array()
+                .unwrap(),
+        )
+    }
+
+    fn dict_f64(values: Vec<f64>, ranges: impl IntoIterator<Item = (u32, u32)>) -> ArrayRef {
+        Arc::new(
+            RangeArray::from_ranges(Arc::new(Float64Array::from(values)) as ArrayRef, ranges)
+                .unwrap()
+                .into_dict_array()
+                .unwrap(),
+        )
+    }
+
+    fn invoke_sum_with_columns(
+        rows: usize,
+        eval_col: ArrayRef,
+        ts_dict: ArrayRef,
+        val_dict: ArrayRef,
+    ) -> DfResult<ColumnarValue> {
+        let return_field = Arc::new(Field::new("out", DataType::Float64, true));
+        let arg_fields = vec![
+            Arc::new(Field::new("eval_timestamp", DataType::Int64, false)),
+            Arc::new(Field::new(
+                "timestamp_range",
+                ts_dict.data_type().clone(),
+                false,
+            )),
+            Arc::new(Field::new(
+                "value_range",
+                val_dict.data_type().clone(),
+                false,
+            )),
+        ];
+        let args = ScalarFunctionArgs {
+            args: vec![
+                ColumnarValue::Array(eval_col),
+                ColumnarValue::Array(ts_dict),
+                ColumnarValue::Array(val_dict),
+            ],
+            arg_fields,
+            number_rows: rows,
+            return_field,
+            config_options: Arc::new(datafusion::config::ConfigOptions::default()),
+        };
+        OverTimeUdf::new(OverTimeFamily::Sum).invoke_with_args(args)
+    }
+
+    #[test]
+    fn invoke_rejects_each_row_count_mismatch() {
+        let err = invoke_sum_with_columns(
+            2,
+            Arc::new(Int64Array::from(vec![60_000, 120_000])) as ArrayRef,
+            dict_i64(vec![60_000], [(0, 1)]),
+            dict_f64(vec![1.0, 2.0], [(0, 1), (1, 1)]),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("row-count mismatch"));
+
+        let err = invoke_sum_with_columns(
+            2,
+            Arc::new(Int64Array::from(vec![60_000])) as ArrayRef,
+            dict_i64(vec![60_000, 120_000], [(0, 1), (1, 1)]),
+            dict_f64(vec![1.0, 2.0], [(0, 1), (1, 1)]),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("row-count mismatch"));
+    }
+
+    #[test]
+    fn scalar_f64_rejects_empty_or_null_array_fallback() {
+        let empty = ColumnarValue::Array(Arc::new(Float64Array::from(Vec::<f64>::new())));
+        assert!(scalar_f64(&empty, "phi", "prom_quantile_over_time").is_err());
+
+        let null = ColumnarValue::Array(Arc::new(Float64Array::from(vec![None])));
+        assert!(scalar_f64(&null, "phi", "prom_quantile_over_time").is_err());
     }
 
     /// `last_over_time` returns the latest sample's value even when the window
