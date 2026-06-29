@@ -184,8 +184,23 @@ mod tests {
     };
     use crabka_security::{AuthMethod, Principal};
     use std::net::SocketAddr;
+    use std::sync::Arc;
 
+    use crate::authorizer::{AuthorizationRequest, AuthorizationResult, Authorizer};
     use crate::config::BrokerConfig;
+
+    #[derive(Debug)]
+    struct DenyAll;
+
+    impl Authorizer for DenyAll {
+        fn authorize(
+            &self,
+            _source: &dyn crabka_authz::AclSource,
+            _req: &AuthorizationRequest<'_>,
+        ) -> AuthorizationResult {
+            AuthorizationResult::Deny
+        }
+    }
 
     fn encode_request(version: i16, req: &AlterConfigsRequest) -> Bytes {
         let mut buf = BytesMut::with_capacity(req.encoded_len(version));
@@ -213,17 +228,35 @@ mod tests {
         }
     }
 
-    async fn start_broker() -> (crate::broker::BrokerHandle, tempfile::TempDir) {
+    async fn start_broker(
+        authorizer: Arc<dyn Authorizer>,
+    ) -> (crate::broker::BrokerHandle, tempfile::TempDir) {
         let dir = tempfile::TempDir::new().expect("tempdir");
-        let cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
+        let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
+        cfg.authorizer = authorizer;
         let handle = Broker::start(cfg).await.expect("start broker");
         (handle, dir)
     }
 
-    #[tokio::test]
-    async fn handle_preserves_resource_identity_for_unsupported_type() {
+    fn resource(resource_type: i8, resource_name: &str) -> AlterConfigsResource {
+        AlterConfigsResource {
+            resource_type,
+            resource_name: resource_name.into(),
+            configs: vec![AlterableConfig {
+                name: "retention.ms".into(),
+                value: Some("60000".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    async fn drive_one(
+        authorizer: Arc<dyn Authorizer>,
+        resource: AlterConfigsResource,
+    ) -> AlterConfigsResponse {
         let version = 2;
-        let (broker_handle, _dir) = start_broker().await;
+        let (broker_handle, _dir) = start_broker(authorizer).await;
         let broker = broker_handle.broker_arc_for_test();
         let principal = Principal {
             name: "admin".into(),
@@ -233,16 +266,7 @@ mod tests {
         let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
         let ctx = test_context(&principal, &peer);
         let req = AlterConfigsRequest {
-            resources: vec![AlterConfigsResource {
-                resource_type: 77,
-                resource_name: "mystery".into(),
-                configs: vec![AlterableConfig {
-                    name: "retention.ms".into(),
-                    value: Some("60000".into()),
-                    ..Default::default()
-                }],
-                ..Default::default()
-            }],
+            resources: vec![resource],
             validate_only: false,
             ..Default::default()
         };
@@ -252,6 +276,17 @@ mod tests {
             .await
             .expect("handle");
         let resp = decode_response(version, resp);
+        broker_handle.shutdown().await;
+        resp
+    }
+
+    #[tokio::test]
+    async fn handle_preserves_resource_identity_for_unsupported_type() {
+        let resp = drive_one(
+            Arc::new(crate::authorizer::AllowAllAuthorizer),
+            resource(77, "mystery"),
+        )
+        .await;
 
         assert!(resp.throttle_time_ms == 0);
         assert!(resp.responses.len() == 1);
@@ -264,6 +299,47 @@ mod tests {
         );
         assert!(resp.responses[0].resource_type == 77);
         assert!(resp.responses[0].resource_name == "mystery");
-        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn topic_resource_denial_uses_topic_authorization_error() {
+        let resp = drive_one(Arc::new(DenyAll), resource(RESOURCE_TYPE_TOPIC, "orders")).await;
+
+        assert!(resp.responses.len() == 1);
+        assert!(resp.responses[0].error_code == codes::TOPIC_AUTHORIZATION_FAILED);
+        assert!(resp.responses[0].error_message.is_none());
+        assert!(resp.responses[0].resource_type == RESOURCE_TYPE_TOPIC);
+        assert!(resp.responses[0].resource_name == "orders");
+    }
+
+    #[tokio::test]
+    async fn broker_resource_denial_uses_cluster_authorization_error() {
+        let resp = drive_one(Arc::new(DenyAll), resource(RESOURCE_TYPE_BROKER, "1")).await;
+
+        assert!(resp.responses.len() == 1);
+        assert!(resp.responses[0].error_code == codes::CLUSTER_AUTHORIZATION_FAILED);
+        assert!(resp.responses[0].error_message.is_none());
+        assert!(resp.responses[0].resource_type == RESOURCE_TYPE_BROKER);
+        assert!(resp.responses[0].resource_name == "1");
+    }
+
+    #[tokio::test]
+    async fn authorized_broker_resource_is_reported_unsupported() {
+        let resp = drive_one(
+            Arc::new(crate::authorizer::AllowAllAuthorizer),
+            resource(RESOURCE_TYPE_BROKER, "1"),
+        )
+        .await;
+
+        assert!(resp.responses.len() == 1);
+        assert!(resp.responses[0].error_code == codes::INVALID_RESOURCE_TYPE);
+        assert!(
+            resp.responses[0]
+                .error_message
+                .as_deref()
+                .is_some_and(|m| { m.contains("resource_type=4") && m.contains("not supported") })
+        );
+        assert!(resp.responses[0].resource_type == RESOURCE_TYPE_BROKER);
+        assert!(resp.responses[0].resource_name == "1");
     }
 }

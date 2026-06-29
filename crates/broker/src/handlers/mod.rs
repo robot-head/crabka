@@ -376,6 +376,58 @@ mod tests {
     }
 
     #[test]
+    fn build_table_registers_the_complete_plain_dispatch_set() {
+        let table = build_table();
+
+        let expected: &[(i16, HandlerFn)] = &[
+            (18, api_versions::handle as HandlerFn),
+            (
+                25,
+                crate::txn::handlers::add_offset_commits_to_txn::handle as HandlerFn,
+            ),
+            (
+                27,
+                crate::txn::handlers::write_txn_markers::handle as HandlerFn,
+            ),
+            (59, fetch_snapshot::handle as HandlerFn),
+            (69, consumer_group_describe::handle as HandlerFn),
+            (73, assign_replicas_to_dirs::handle as HandlerFn),
+            (
+                83,
+                crate::share_coordinator::handlers::initialize::handle as HandlerFn,
+            ),
+            (
+                84,
+                crate::share_coordinator::handlers::read::handle as HandlerFn,
+            ),
+            (
+                85,
+                crate::share_coordinator::handlers::write::handle as HandlerFn,
+            ),
+            (
+                86,
+                crate::share_coordinator::handlers::delete::handle as HandlerFn,
+            ),
+            (
+                87,
+                crate::share_coordinator::handlers::read_summary::handle as HandlerFn,
+            ),
+            (89, streams_group_describe::handle as HandlerFn),
+        ];
+
+        assert!(table.table.len() == expected.len());
+        for &(api_key, handler) in expected {
+            assert!(std::ptr::fn_addr_eq(
+                table.get(api_key).expect("plain handler is registered"),
+                handler
+            ));
+        }
+        for intercepted_api_key in [0, 1, 3, 19, 20, 33, 44, 56, 60, 63, 71, 72] {
+            assert!(table.get(intercepted_api_key).is_none());
+        }
+    }
+
+    #[test]
     fn audit_admin_emits_admin_operation_event() {
         let (log, mut rx) = crabka_audit::AuditLog::new(8);
         let principal = Principal {

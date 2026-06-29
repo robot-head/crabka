@@ -67,7 +67,8 @@ pub(crate) async fn handle(
                 &AlterPartitionResponse {
                     throttle_time_ms: 0,
                     error_code: codes::NOT_CONTROLLER,
-                    ..Default::default()
+                    topics: Vec::new(),
+                    unknown_tagged_fields: Default::default(),
                 },
             );
         }
@@ -100,7 +101,7 @@ pub(crate) async fn handle(
             resp_topics.push(RespTopicData {
                 topic_id: req_topic.topic_id,
                 partitions: resp_partitions,
-                ..Default::default()
+                unknown_tagged_fields: Default::default(),
             });
         }
 
@@ -116,7 +117,7 @@ pub(crate) async fn handle(
                 throttle_time_ms: 0,
                 error_code: codes::NONE,
                 topics: resp_topics,
-                ..Default::default()
+                unknown_tagged_fields: Default::default(),
             },
         )
     }
@@ -249,7 +250,7 @@ fn handle_partition(
         isr: effective_isr_i32.to_vec(),
         leader_recovery_state: 0,
         partition_epoch: new_partition_epoch,
-        ..Default::default()
+        unknown_tagged_fields: Default::default(),
     }
 }
 
@@ -268,7 +269,7 @@ fn error_part(
         isr: isr.to_vec(),
         leader_recovery_state: 0,
         partition_epoch: 0,
-        ..Default::default()
+        unknown_tagged_fields: Default::default(),
     }
 }
 
@@ -299,7 +300,8 @@ fn denied_response(version: i16) -> Result<Bytes, BrokerError> {
         &AlterPartitionResponse {
             throttle_time_ms: 0,
             error_code: codes::CLUSTER_AUTHORIZATION_FAILED,
-            ..Default::default()
+            topics: Vec::new(),
+            unknown_tagged_fields: Default::default(),
         },
     )
 }
@@ -317,7 +319,33 @@ mod tests {
     use crabka_metadata::{
         BrokerRegistrationRecord, MetadataImage, MetadataRecord, PartitionRecord, TopicRecord,
     };
-    use crabka_protocol::owned::alter_partition_request::BrokerState;
+    use crabka_protocol::owned::alter_partition_request::{
+        BrokerState, PartitionData as ReqPartitionData, TopicData as ReqTopicData,
+    };
+    use crabka_protocol::owned::alter_partition_response::{self, AlterPartitionResponse};
+    use crabka_protocol::primitives::uuid::Uuid as ProtoUuid;
+    use crabka_security::{AuthMethod, Principal};
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use crate::authorizer::{AuthorizationRequest, AuthorizationResult, Authorizer};
+    use crate::config::BrokerConfig;
+
+    const TOPIC_ID_BYTES: [u8; 16] = [7; 16];
+
+    #[derive(Debug)]
+    struct DenyAll;
+
+    impl Authorizer for DenyAll {
+        fn authorize(
+            &self,
+            _source: &dyn crabka_authz::AclSource,
+            _req: &AuthorizationRequest<'_>,
+        ) -> AuthorizationResult {
+            AuthorizationResult::Deny
+        }
+    }
 
     fn reg(node_id: u64, epoch: i64) -> MetadataRecord {
         MetadataRecord::V1BrokerRegistration(BrokerRegistrationRecord {
@@ -337,7 +365,7 @@ mod tests {
         let mut image = MetadataImage::new(uuid::Uuid::nil());
         image.apply(&MetadataRecord::V1Topic(TopicRecord {
             name: "t".into(),
-            topic_id: uuid::Uuid::nil(),
+            topic_id: topic_id(),
             partitions: 1,
             replication_factor: 3,
         }));
@@ -359,10 +387,109 @@ mod tests {
         image
     }
 
+    fn topic_id() -> uuid::Uuid {
+        uuid::Uuid::from_bytes(TOPIC_ID_BYTES)
+    }
+
+    fn wire_topic_id() -> ProtoUuid {
+        ProtoUuid(TOPIC_ID_BYTES)
+    }
+
     fn bs(broker_id: i32, broker_epoch: i64) -> BrokerState {
         BrokerState {
             broker_id,
             broker_epoch,
+            ..Default::default()
+        }
+    }
+
+    fn encode_request(version: i16, req: &AlterPartitionRequest) -> Bytes {
+        let mut buf = BytesMut::with_capacity(req.encoded_len(version));
+        req.encode(&mut buf, version).expect("encode request");
+        buf.freeze()
+    }
+
+    fn decode_response(version: i16, bytes: Bytes) -> AlterPartitionResponse {
+        let mut cur: &[u8] = bytes.as_ref();
+        let resp = AlterPartitionResponse::decode(&mut cur, version).expect("decode response");
+        assert!(cur.is_empty(), "response decoder consumed all bytes");
+        resp
+    }
+
+    fn test_context<'a>(
+        principal: &'a Principal,
+        peer: &'a SocketAddr,
+    ) -> crate::handlers::RequestContext<'a> {
+        crate::handlers::RequestContext {
+            principal,
+            peer,
+            client_id: "broker-client",
+            sendfile_capable: false,
+            connection_listener_name: "PLAINTEXT",
+        }
+    }
+
+    async fn start_broker(
+        authorizer: Arc<dyn Authorizer>,
+    ) -> (crate::broker::BrokerHandle, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
+        cfg.authorizer = authorizer;
+        let handle = Broker::start(cfg).await.expect("start broker");
+        (handle, dir)
+    }
+
+    async fn wait_for_leader(broker: &Broker) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if broker
+                .controller
+                .watch_leader()
+                .borrow()
+                .is_some_and(|n| n == broker.config.node_id)
+            {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() <= deadline,
+                "broker did not become controller leader"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    async fn seed_partition(broker: &Broker) {
+        broker
+            .controller
+            .submit_change(vec![
+                MetadataRecord::V1Topic(TopicRecord {
+                    name: "t".into(),
+                    topic_id: topic_id(),
+                    partitions: 1,
+                    replication_factor: 1,
+                }),
+                MetadataRecord::V1Partition(PartitionRecord {
+                    topic: "t".into(),
+                    partition: 0,
+                    leader: 1,
+                    replicas: vec![1],
+                    isr: vec![1],
+                    leader_epoch: 5,
+                    adding_replicas: vec![],
+                    removing_replicas: vec![],
+                    directories: vec![],
+                    partition_epoch: 0,
+                }),
+            ])
+            .await
+            .expect("seed topic partition");
+    }
+
+    fn request_with_topics(topics: Vec<ReqTopicData>) -> AlterPartitionRequest {
+        AlterPartitionRequest {
+            broker_id: 1,
+            broker_epoch: -1,
+            topics,
             ..Default::default()
         }
     }
@@ -372,8 +499,6 @@ mod tests {
     /// `CLUSTER_AUTHORIZATION_FAILED`.
     #[test]
     fn cluster_action_denied_yields_cluster_authorization_failed() {
-        use crabka_protocol::owned::alter_partition_response::{self, AlterPartitionResponse};
-
         let authorizer =
             crate::authorizer::SimpleAclAuthorizer::new(std::collections::HashSet::new());
         let image = MetadataImage::new(uuid::Uuid::nil());
@@ -398,6 +523,110 @@ mod tests {
         assert!(resp.error_code == codes::CLUSTER_AUTHORIZATION_FAILED);
     }
 
+    #[tokio::test]
+    async fn handle_denies_cluster_action_for_whole_request() {
+        let version = alter_partition_response::MAX_VERSION;
+        let (broker_handle, _dir) = start_broker(Arc::new(DenyAll)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let principal = Principal {
+            name: "replica".into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        };
+        let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+        let ctx = test_context(&principal, &peer);
+        let req_bytes = encode_request(version, &request_with_topics(Vec::new()));
+
+        let resp = super::handle(&broker, version, 123, &req_bytes, &ctx)
+            .await
+            .expect("handle");
+        let resp = decode_response(version, resp);
+
+        assert!(resp.throttle_time_ms == 0);
+        assert!(resp.error_code == codes::CLUSTER_AUTHORIZATION_FAILED);
+        assert!(resp.topics.is_empty());
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn leader_accepts_empty_alter_partition_request() {
+        let version = alter_partition_response::MAX_VERSION;
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        wait_for_leader(&broker).await;
+        let principal = Principal {
+            name: "replica".into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        };
+        let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+        let ctx = test_context(&principal, &peer);
+        let req_bytes = encode_request(version, &request_with_topics(Vec::new()));
+
+        let resp = super::handle(&broker, version, 123, &req_bytes, &ctx)
+            .await
+            .expect("handle");
+        let resp = decode_response(version, resp);
+
+        assert!(resp.throttle_time_ms == 0);
+        assert!(resp.error_code == codes::NONE);
+        assert!(resp.topics.is_empty());
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_returns_topic_partition_response_and_commits_isr_change() {
+        let version = 2;
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        wait_for_leader(&broker).await;
+        seed_partition(&broker).await;
+        let principal = Principal {
+            name: "replica".into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        };
+        let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+        let ctx = test_context(&principal, &peer);
+        let req = request_with_topics(vec![ReqTopicData {
+            topic_id: wire_topic_id(),
+            partitions: vec![ReqPartitionData {
+                partition_index: 0,
+                leader_epoch: 5,
+                new_isr: vec![1],
+                partition_epoch: 0,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }]);
+        let req_bytes = encode_request(version, &req);
+
+        let resp = super::handle(&broker, version, 123, &req_bytes, &ctx)
+            .await
+            .expect("handle");
+        let resp = decode_response(version, resp);
+
+        assert!(resp.throttle_time_ms == 0);
+        assert!(resp.error_code == codes::NONE);
+        assert!(resp.topics.len() == 1);
+        assert!(resp.topics[0].topic_id == wire_topic_id());
+        assert!(resp.topics[0].partitions.len() == 1);
+        let part = &resp.topics[0].partitions[0];
+        assert!(part.partition_index == 0);
+        assert!(part.error_code == codes::NONE);
+        assert!(part.leader_id == 1);
+        assert!(part.leader_epoch == 5);
+        assert!(part.isr == vec![1]);
+        assert!(part.partition_epoch == 1);
+
+        let image = broker.controller.current_image();
+        let committed = image.partition("t", 0).expect("partition committed");
+        assert!(committed.partition_epoch == 1);
+        broker_handle.shutdown().await;
+    }
+
     #[test]
     fn matching_epochs_succeed() {
         let image = image_with(&[(1, 10), (2, 20), (3, 30)]);
@@ -406,6 +635,20 @@ mod tests {
         let resp = handle_partition(&image, Some("t"), 0, 5, &[], &isr, &mut changes);
         assert!(resp.error_code == codes::NONE, "got {}", resp.error_code);
         assert!(changes.len() == 1);
+    }
+
+    #[test]
+    fn explicit_v2_isr_wins_when_epoch_states_are_also_present() {
+        let image = image_with(&[(1, 10), (2, 20), (3, 30)]);
+        let mut changes = Vec::new();
+        let resp = handle_partition(&image, Some("t"), 0, 5, &[1, 2], &[bs(3, 30)], &mut changes);
+        assert!(resp.error_code == codes::NONE, "got {}", resp.error_code);
+        assert!(resp.isr == vec![1, 2]);
+        assert!(changes.len() == 1);
+        let MetadataRecord::V1Partition(record) = &changes[0] else {
+            panic!("wrong change variant");
+        };
+        assert!(record.isr == vec![1, 2]);
     }
 
     #[test]
