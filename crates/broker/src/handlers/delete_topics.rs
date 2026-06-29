@@ -2,6 +2,8 @@
 //! so every topic deletion is recorded in the metadata quorum before the
 //! partition dirs and in-memory state are torn down.
 
+use std::time::Duration;
+
 use bytes::{Bytes, BytesMut};
 use crabka_metadata::{AclOperation, DeleteTopicRecord, MetadataRecord};
 use crabka_protocol::owned::delete_topics_request::DeleteTopicsRequest;
@@ -15,6 +17,67 @@ use crate::broker::Broker;
 use crate::codes;
 use crate::error::BrokerError;
 use crate::log_dir;
+
+fn requested_by_topic_id(name: Option<&String>, id: WireUuid) -> bool {
+    name.is_none_or(std::string::String::is_empty) && id != WireUuid::ZERO
+}
+
+fn delete_topic_result(
+    name: Option<String>,
+    topic_id: WireUuid,
+    error_code: i16,
+) -> DeletableTopicResult {
+    DeletableTopicResult {
+        name,
+        topic_id,
+        error_code,
+        ..Default::default()
+    }
+}
+
+fn delete_topics_response(
+    responses: Vec<DeletableTopicResult>,
+    throttle_time_ms: i32,
+) -> DeleteTopicsResponse {
+    DeleteTopicsResponse {
+        responses,
+        throttle_time_ms,
+        ..Default::default()
+    }
+}
+
+fn deleted_topic_resources(results: &[DeletableTopicResult]) -> Vec<crabka_audit::AuditResource> {
+    results
+        .iter()
+        .filter(|t| t.error_code == codes::NONE)
+        .filter_map(|t| {
+            t.name.as_deref().map(|n| crabka_audit::AuditResource {
+                resource_type: "Topic".to_string(),
+                name: n.to_string(),
+            })
+        })
+        .collect()
+}
+
+fn audit_deleted_topics(
+    audit_log: &crabka_audit::AuditLog,
+    ctx: &crate::handlers::RequestContext<'_>,
+    deleted: Vec<crabka_audit::AuditResource>,
+) {
+    if !deleted.is_empty() {
+        crate::handlers::audit_admin(
+            audit_log,
+            ctx,
+            "DeleteTopics",
+            crabka_audit::AuditOutcome::Success,
+            deleted,
+        );
+    }
+}
+
+fn should_wait_for_quota_delay(delay: Duration) -> bool {
+    delay > Duration::ZERO
+}
 
 #[allow(clippy::too_many_lines)]
 #[tracing::instrument(
@@ -51,11 +114,7 @@ pub(crate) async fn handle(
     if req.topic_names.is_empty() {
         for state in &req.topics {
             let id = state.topic_id;
-            let requested_by_id = state
-                .name
-                .as_ref()
-                .is_none_or(std::string::String::is_empty)
-                && id != WireUuid::ZERO;
+            let requested_by_id = requested_by_topic_id(state.name.as_ref(), id);
             if requested_by_id {
                 // id-only path: look up by topic_id in the image index.
                 let uuid = uuid::Uuid::from_bytes(id.0);
@@ -121,21 +180,17 @@ pub(crate) async fn handle(
             } else {
                 codes::UNKNOWN_TOPIC_OR_PARTITION
             };
-            results.push(DeletableTopicResult {
-                topic_id: req_topic_id,
-                error_code,
-                ..Default::default()
-            });
+            results.push(delete_topic_result(None, req_topic_id, error_code));
             continue;
         };
 
         // Per-topic ACL check.
         if denied_topics.contains(&name) {
-            results.push(DeletableTopicResult {
-                name: Some(name),
-                error_code: codes::TOPIC_AUTHORIZATION_FAILED,
-                ..Default::default()
-            });
+            results.push(delete_topic_result(
+                Some(name),
+                WireUuid::ZERO,
+                codes::TOPIC_AUTHORIZATION_FAILED,
+            ));
             continue;
         }
 
@@ -214,33 +269,15 @@ pub(crate) async fn handle(
             }
         };
 
-        results.push(DeletableTopicResult {
-            name: Some(name),
-            error_code,
-            ..Default::default()
-        });
+        results.push(delete_topic_result(Some(name), WireUuid::ZERO, error_code));
     }
 
     // Audit: emit one AdminOperation record for the successfully-deleted topics.
-    let deleted: Vec<crabka_audit::AuditResource> = results
-        .iter()
-        .filter(|t| t.error_code == 0)
-        .filter_map(|t| {
-            t.name.as_deref().map(|n| crabka_audit::AuditResource {
-                resource_type: "Topic".to_string(),
-                name: n.to_string(),
-            })
-        })
-        .collect();
-    if !deleted.is_empty() {
-        crate::handlers::audit_admin(
-            broker.audit_log.as_ref(),
-            ctx,
-            "DeleteTopics",
-            crabka_audit::AuditOutcome::Success,
-            deleted,
-        );
-    }
+    audit_deleted_topics(
+        broker.audit_log.as_ref(),
+        ctx,
+        deleted_topic_resources(&results),
+    );
 
     // KIP-599: apply controller_mutation_rate throttle after response assembly.
     let delay = crate::quota::consume_controller_mutation_quota(
@@ -251,16 +288,268 @@ pub(crate) async fn handle(
         mutation_count,
     );
     let throttle_time_ms = i32::try_from(delay.as_millis()).unwrap_or(i32::MAX);
-    if delay > std::time::Duration::ZERO {
+    if should_wait_for_quota_delay(delay) {
         tokio::time::sleep(delay).await;
     }
 
-    let resp = DeleteTopicsResponse {
-        responses: results,
-        throttle_time_ms,
-        ..Default::default()
-    };
+    let resp = delete_topics_response(results, throttle_time_ms);
     let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
     resp.encode(&mut buf, version)?;
     Ok(buf.freeze())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert2::assert;
+    use crabka_protocol::Decode;
+    use crabka_protocol::owned::delete_topics_request::{DeleteTopicState, DeleteTopicsRequest};
+    use crabka_security::{AuthMethod, Principal};
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    use crate::authorizer::{AuthorizationRequest, Authorizer};
+    use crate::broker::{Broker, BrokerHandle};
+    use crate::config::BrokerConfig;
+
+    const VERSION: i16 = 6;
+
+    #[derive(Debug)]
+    struct DenyAll;
+
+    impl Authorizer for DenyAll {
+        fn authorize(
+            &self,
+            _source: &dyn crabka_authz::AclSource,
+            _req: &AuthorizationRequest<'_>,
+        ) -> AuthorizationResult {
+            AuthorizationResult::Deny
+        }
+    }
+
+    fn named_state(name: &str) -> DeleteTopicState {
+        DeleteTopicState {
+            name: Some(name.into()),
+            ..Default::default()
+        }
+    }
+
+    fn id_state(id: WireUuid) -> DeleteTopicState {
+        DeleteTopicState {
+            name: None,
+            topic_id: id,
+            ..Default::default()
+        }
+    }
+
+    fn request(topics: Vec<DeleteTopicState>) -> DeleteTopicsRequest {
+        DeleteTopicsRequest {
+            topics,
+            timeout_ms: 5_000,
+            ..Default::default()
+        }
+    }
+
+    fn encode_request(req: &DeleteTopicsRequest) -> Bytes {
+        let mut buf = BytesMut::with_capacity(req.encoded_len(VERSION));
+        req.encode(&mut buf, VERSION).expect("encode request");
+        buf.freeze()
+    }
+
+    fn decode_response(bytes: Bytes) -> DeleteTopicsResponse {
+        let mut cur: &[u8] = bytes.as_ref();
+        let resp = DeleteTopicsResponse::decode(&mut cur, VERSION).expect("decode response");
+        assert!(cur.is_empty(), "response decoder consumed all bytes");
+        resp
+    }
+
+    fn test_context<'a>(
+        principal: &'a Principal,
+        peer: &'a SocketAddr,
+    ) -> crate::handlers::RequestContext<'a> {
+        crate::handlers::RequestContext {
+            principal,
+            peer,
+            client_id: "admin-client",
+            sendfile_capable: false,
+            connection_listener_name: "PLAINTEXT",
+        }
+    }
+
+    fn principal(name: &str) -> Principal {
+        Principal {
+            name: name.into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        }
+    }
+
+    fn peer() -> SocketAddr {
+        "127.0.0.1:9092".parse().unwrap()
+    }
+
+    async fn start_broker(authorizer: Arc<dyn Authorizer>) -> (BrokerHandle, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
+        cfg.audit_enabled = false;
+        cfg.authorizer = authorizer;
+        let handle = Broker::start(cfg).await.expect("start broker");
+        (handle, dir)
+    }
+
+    async fn drive(
+        broker: &Broker,
+        req: &DeleteTopicsRequest,
+        principal: &Principal,
+        peer: &SocketAddr,
+    ) -> DeleteTopicsResponse {
+        let ctx = test_context(principal, peer);
+        let req_bytes = encode_request(req);
+        let bytes = handle(broker, VERSION, 123, &req_bytes, &ctx)
+            .await
+            .expect("handle");
+        decode_response(bytes)
+    }
+
+    #[test]
+    fn requested_by_topic_id_requires_empty_name_and_nonzero_id() {
+        let id = WireUuid([7; 16]);
+        let empty = String::new();
+        let named = String::from("orders");
+
+        assert!(requested_by_topic_id(None, id));
+        assert!(requested_by_topic_id(Some(&empty), id));
+        assert!(!requested_by_topic_id(Some(&named), id));
+        assert!(!requested_by_topic_id(None, WireUuid::ZERO));
+    }
+
+    #[test]
+    fn response_helpers_preserve_topic_identity_error_and_throttle_fields() {
+        let id = WireUuid([9; 16]);
+        let unknown_id = delete_topic_result(None, id, codes::UNKNOWN_TOPIC_ID);
+        assert!(unknown_id.name.is_none());
+        assert!(unknown_id.topic_id == id);
+        assert!(unknown_id.error_code == codes::UNKNOWN_TOPIC_ID);
+
+        let denied = delete_topic_result(
+            Some("secret".into()),
+            WireUuid::ZERO,
+            codes::TOPIC_AUTHORIZATION_FAILED,
+        );
+        assert!(denied.name.as_deref() == Some("secret"));
+        assert!(denied.topic_id == WireUuid::ZERO);
+        assert!(denied.error_code == codes::TOPIC_AUTHORIZATION_FAILED);
+
+        let resp = delete_topics_response(vec![denied], 123);
+        assert!(resp.throttle_time_ms == 123);
+        assert!(resp.responses.len() == 1);
+        assert!(resp.responses[0].name.as_deref() == Some("secret"));
+    }
+
+    #[test]
+    fn deleted_topic_resources_include_only_successful_named_topics() {
+        let results = vec![
+            delete_topic_result(Some("ok".into()), WireUuid::ZERO, codes::NONE),
+            delete_topic_result(
+                Some("denied".into()),
+                WireUuid::ZERO,
+                codes::TOPIC_AUTHORIZATION_FAILED,
+            ),
+            delete_topic_result(None, WireUuid([1; 16]), codes::NONE),
+        ];
+
+        let resources = deleted_topic_resources(&results);
+
+        assert!(resources.len() == 1);
+        assert!(resources[0].resource_type == "Topic");
+        assert!(resources[0].name == "ok");
+    }
+
+    #[test]
+    fn audit_deleted_topics_skips_empty_and_emits_non_empty_admin_event() {
+        let (log, mut rx) = crabka_audit::AuditLog::new(8);
+        let p = principal("admin");
+        let peer = peer();
+        let ctx = test_context(&p, &peer);
+
+        audit_deleted_topics(log.as_ref(), &ctx, Vec::new());
+        assert!(
+            rx.try_recv().is_err(),
+            "empty audit resource list is a no-op"
+        );
+
+        audit_deleted_topics(
+            log.as_ref(),
+            &ctx,
+            vec![crabka_audit::AuditResource {
+                resource_type: "Topic".into(),
+                name: "orders".into(),
+            }],
+        );
+
+        let event = rx.try_recv().expect("admin audit event");
+        let crabka_audit::AuditEvent::AdminOperation {
+            outcome,
+            principal,
+            operation,
+            resources,
+            ..
+        } = event
+        else {
+            panic!("expected AdminOperation");
+        };
+        assert!(outcome == crabka_audit::AuditOutcome::Success);
+        assert!(principal.name == "admin");
+        assert!(operation == "DeleteTopics");
+        assert!(resources.len() == 1);
+        assert!(resources[0].resource_type == "Topic");
+        assert!(resources[0].name == "orders");
+    }
+
+    #[test]
+    fn should_wait_for_quota_delay_only_waits_for_positive_delay() {
+        assert!(!should_wait_for_quota_delay(Duration::ZERO));
+        assert!(should_wait_for_quota_delay(Duration::from_millis(1)));
+    }
+
+    #[tokio::test]
+    async fn handle_denied_topic_returns_authorization_failure() {
+        let (broker_handle, _dir) = start_broker(Arc::new(DenyAll)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let p = principal("alice");
+        let peer = peer();
+        let req = request(vec![named_state("secret")]);
+
+        let resp = drive(&broker, &req, &p, &peer).await;
+
+        assert!(resp.throttle_time_ms == 0);
+        assert!(resp.responses.len() == 1);
+        assert!(resp.responses[0].name.as_deref() == Some("secret"));
+        assert!(resp.responses[0].topic_id == WireUuid::ZERO);
+        assert!(resp.responses[0].error_code == codes::TOPIC_AUTHORIZATION_FAILED);
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_unknown_name_and_id_preserve_error_rows() {
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let p = principal("admin");
+        let peer = peer();
+        let bogus_id = WireUuid([8; 16]);
+        let req = request(vec![named_state("missing"), id_state(bogus_id)]);
+
+        let resp = drive(&broker, &req, &p, &peer).await;
+
+        assert!(resp.throttle_time_ms == 0);
+        assert!(resp.responses.len() == 2);
+        assert!(resp.responses[0].name.as_deref() == Some("missing"));
+        assert!(resp.responses[0].topic_id == WireUuid::ZERO);
+        assert!(resp.responses[0].error_code == codes::UNKNOWN_TOPIC_OR_PARTITION);
+        assert!(resp.responses[1].name.is_none());
+        assert!(resp.responses[1].topic_id == bogus_id);
+        assert!(resp.responses[1].error_code == codes::UNKNOWN_TOPIC_ID);
+        broker_handle.shutdown().await;
+    }
 }

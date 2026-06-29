@@ -17,6 +17,68 @@ use crate::broker::Broker;
 use crate::codes;
 use crate::error::BrokerError;
 
+fn denied_topic_names(
+    acl_results: &std::collections::HashMap<&str, AuthorizationResult>,
+) -> std::collections::HashSet<String> {
+    acl_results
+        .iter()
+        .filter_map(|(name, r)| {
+            if *r == AuthorizationResult::Deny {
+                Some((*name).to_string())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn partition_result(
+    partition_index: i32,
+    low_watermark: i64,
+    error_code: i16,
+) -> DeleteRecordsPartitionResult {
+    DeleteRecordsPartitionResult {
+        partition_index,
+        low_watermark,
+        error_code,
+        ..Default::default()
+    }
+}
+
+fn error_partition_result(partition_index: i32, error_code: i16) -> DeleteRecordsPartitionResult {
+    partition_result(partition_index, -1, error_code)
+}
+
+fn topic_result(
+    name: String,
+    partitions: Vec<DeleteRecordsPartitionResult>,
+) -> DeleteRecordsTopicResult {
+    DeleteRecordsTopicResult {
+        name,
+        partitions,
+        ..Default::default()
+    }
+}
+
+fn delete_records_response(topics: Vec<DeleteRecordsTopicResult>) -> DeleteRecordsResponse {
+    DeleteRecordsResponse {
+        topics,
+        ..Default::default()
+    }
+}
+
+fn target_offset(requested_offset: i64, high_watermark: i64) -> i64 {
+    if requested_offset == -1 {
+        high_watermark
+    } else {
+        requested_offset
+    }
+}
+
+fn offset_out_of_range(target: i64, log_end_offset: i64) -> bool {
+    target < 0 || target > log_end_offset
+}
+
 #[allow(clippy::too_many_lines)]
 #[tracing::instrument(
     name = "handle_delete_records",
@@ -53,16 +115,7 @@ pub(crate) async fn handle(
         AclOperation::Delete,
         topic_names.iter().copied(),
     );
-    let denied_topics: std::collections::HashSet<String> = acl_results
-        .iter()
-        .filter_map(|(name, r)| {
-            if *r == AuthorizationResult::Deny {
-                Some((*name).to_string())
-            } else {
-                None
-            }
-        })
-        .collect();
+    let denied_topics = denied_topic_names(&acl_results);
 
     let mut topic_results: Vec<DeleteRecordsTopicResult> = Vec::with_capacity(req.topics.len());
 
@@ -72,18 +125,11 @@ pub(crate) async fn handle(
             let part_results: Vec<DeleteRecordsPartitionResult> = topic
                 .partitions
                 .iter()
-                .map(|fp| DeleteRecordsPartitionResult {
-                    partition_index: fp.partition_index,
-                    low_watermark: -1,
-                    error_code: codes::TOPIC_AUTHORIZATION_FAILED,
-                    ..Default::default()
+                .map(|fp| {
+                    error_partition_result(fp.partition_index, codes::TOPIC_AUTHORIZATION_FAILED)
                 })
                 .collect();
-            topic_results.push(DeleteRecordsTopicResult {
-                name: topic.name,
-                partitions: part_results,
-                ..Default::default()
-            });
+            topic_results.push(topic_result(topic.name, part_results));
             continue;
         }
 
@@ -93,12 +139,10 @@ pub(crate) async fn handle(
         for fp in topic.partitions {
             let part_opt = partitions.get(&topic.name, fp.partition_index);
             let Some(part) = part_opt else {
-                part_results.push(DeleteRecordsPartitionResult {
-                    partition_index: fp.partition_index,
-                    low_watermark: -1,
-                    error_code: codes::UNKNOWN_TOPIC_OR_PARTITION,
-                    ..Default::default()
-                });
+                part_results.push(error_partition_result(
+                    fp.partition_index,
+                    codes::UNKNOWN_TOPIC_OR_PARTITION,
+                ));
                 continue;
             };
 
@@ -106,67 +150,252 @@ pub(crate) async fn handle(
                 .current_leader
                 .load(std::sync::atomic::Ordering::Acquire);
             if cur_leader != node_id {
-                part_results.push(DeleteRecordsPartitionResult {
-                    partition_index: fp.partition_index,
-                    low_watermark: -1,
-                    error_code: codes::NOT_LEADER_OR_FOLLOWER,
-                    ..Default::default()
-                });
+                part_results.push(error_partition_result(
+                    fp.partition_index,
+                    codes::NOT_LEADER_OR_FOLLOWER,
+                ));
                 continue;
             }
 
             // Translate offset == -1 → high_watermark per Kafka semantics.
             let leo = part.log_end_offset();
             let hw = part.high_watermark().await;
-            let target = if fp.offset == -1 { hw } else { fp.offset };
+            let target = target_offset(fp.offset, hw);
 
-            if target < 0 || target > leo {
-                part_results.push(DeleteRecordsPartitionResult {
-                    partition_index: fp.partition_index,
-                    low_watermark: -1,
-                    error_code: codes::OFFSET_OUT_OF_RANGE,
-                    ..Default::default()
-                });
+            if offset_out_of_range(target, leo) {
+                part_results.push(error_partition_result(
+                    fp.partition_index,
+                    codes::OFFSET_OUT_OF_RANGE,
+                ));
                 continue;
             }
 
             match part.trim_to_offset(target).await {
                 Ok(new_start) => {
-                    part_results.push(DeleteRecordsPartitionResult {
-                        partition_index: fp.partition_index,
-                        low_watermark: new_start,
-                        error_code: codes::NONE,
-                        ..Default::default()
-                    });
+                    part_results.push(partition_result(fp.partition_index, new_start, codes::NONE));
                 }
                 Err(e) => {
                     tracing::warn!(
                         topic = %topic.name, partition = fp.partition_index, error = %e,
                         "DeleteRecords: trim_to_offset failed"
                     );
-                    part_results.push(DeleteRecordsPartitionResult {
-                        partition_index: fp.partition_index,
-                        low_watermark: -1,
-                        error_code: codes::UNKNOWN_SERVER_ERROR,
-                        ..Default::default()
-                    });
+                    part_results.push(error_partition_result(
+                        fp.partition_index,
+                        codes::UNKNOWN_SERVER_ERROR,
+                    ));
                 }
             }
         }
 
-        topic_results.push(DeleteRecordsTopicResult {
-            name: topic.name,
-            partitions: part_results,
-            ..Default::default()
-        });
+        topic_results.push(topic_result(topic.name, part_results));
     }
 
-    let resp = DeleteRecordsResponse {
-        topics: topic_results,
-        throttle_time_ms: 0,
-        ..Default::default()
-    };
+    let resp = delete_records_response(topic_results);
     let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
     resp.encode(&mut buf, version)?;
     Ok(buf.freeze())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert2::assert;
+    use crabka_protocol::Decode;
+    use crabka_protocol::owned::delete_records_request::{
+        DeleteRecordsPartition, DeleteRecordsTopic,
+    };
+    use crabka_security::{AuthMethod, Principal};
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    use crate::authorizer::{AuthorizationRequest, Authorizer};
+    use crate::broker::{Broker, BrokerHandle};
+    use crate::config::BrokerConfig;
+
+    const VERSION: i16 = 2;
+
+    #[derive(Debug)]
+    struct DenyAll;
+
+    impl Authorizer for DenyAll {
+        fn authorize(
+            &self,
+            _source: &dyn crabka_authz::AclSource,
+            _req: &AuthorizationRequest<'_>,
+        ) -> AuthorizationResult {
+            AuthorizationResult::Deny
+        }
+    }
+
+    fn request(topic: &str, partitions: &[(i32, i64)]) -> DeleteRecordsRequest {
+        DeleteRecordsRequest {
+            topics: vec![DeleteRecordsTopic {
+                name: topic.into(),
+                partitions: partitions
+                    .iter()
+                    .map(|(partition_index, offset)| DeleteRecordsPartition {
+                        partition_index: *partition_index,
+                        offset: *offset,
+                        ..Default::default()
+                    })
+                    .collect(),
+                ..Default::default()
+            }],
+            timeout_ms: 5_000,
+            ..Default::default()
+        }
+    }
+
+    fn encode_request(req: &DeleteRecordsRequest) -> Bytes {
+        let mut buf = BytesMut::with_capacity(req.encoded_len(VERSION));
+        req.encode(&mut buf, VERSION).expect("encode request");
+        buf.freeze()
+    }
+
+    fn decode_response(bytes: Bytes) -> DeleteRecordsResponse {
+        let mut cur: &[u8] = bytes.as_ref();
+        let resp = DeleteRecordsResponse::decode(&mut cur, VERSION).expect("decode response");
+        assert!(cur.is_empty(), "response decoder consumed all bytes");
+        resp
+    }
+
+    fn test_context<'a>(
+        principal: &'a Principal,
+        peer: &'a SocketAddr,
+    ) -> crate::handlers::RequestContext<'a> {
+        crate::handlers::RequestContext {
+            principal,
+            peer,
+            client_id: "admin-client",
+            sendfile_capable: false,
+            connection_listener_name: "PLAINTEXT",
+        }
+    }
+
+    fn principal(name: &str) -> Principal {
+        Principal {
+            name: name.into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        }
+    }
+
+    fn peer() -> SocketAddr {
+        "127.0.0.1:9092".parse().unwrap()
+    }
+
+    async fn start_broker(authorizer: Arc<dyn Authorizer>) -> (BrokerHandle, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
+        cfg.audit_enabled = false;
+        cfg.authorizer = authorizer;
+        let handle = Broker::start(cfg).await.expect("start broker");
+        (handle, dir)
+    }
+
+    async fn drive(
+        broker: &Broker,
+        req: &DeleteRecordsRequest,
+        principal: &Principal,
+        peer: &SocketAddr,
+    ) -> DeleteRecordsResponse {
+        let ctx = test_context(principal, peer);
+        let req_bytes = encode_request(req);
+        let bytes = handle(broker, VERSION, 123, &req_bytes, &ctx)
+            .await
+            .expect("handle");
+        decode_response(bytes)
+    }
+
+    #[test]
+    fn denied_topic_names_keeps_only_denied_decisions() {
+        let acl_results = std::collections::HashMap::from([
+            ("denied", AuthorizationResult::Deny),
+            ("allowed", AuthorizationResult::Allow),
+        ]);
+
+        let denied = denied_topic_names(&acl_results);
+
+        assert!(denied.len() == 1);
+        assert!(denied.contains("denied"));
+        assert!(!denied.contains("allowed"));
+    }
+
+    #[test]
+    fn offset_helpers_cover_delete_records_boundaries() {
+        assert!(target_offset(-1, 42) == 42);
+        assert!(target_offset(-2, 42) == -2);
+        assert!(target_offset(7, 42) == 7);
+
+        assert!(!offset_out_of_range(0, 10));
+        assert!(!offset_out_of_range(10, 10));
+        assert!(offset_out_of_range(-1, 10));
+        assert!(offset_out_of_range(11, 10));
+    }
+
+    #[test]
+    fn response_helpers_preserve_topic_and_partition_fields() {
+        let denied = error_partition_result(7, codes::TOPIC_AUTHORIZATION_FAILED);
+        assert!(denied.partition_index == 7);
+        assert!(denied.low_watermark == -1);
+        assert!(denied.error_code == codes::TOPIC_AUTHORIZATION_FAILED);
+
+        let ok = partition_result(3, 44, codes::NONE);
+        assert!(ok.partition_index == 3);
+        assert!(ok.low_watermark == 44);
+        assert!(ok.error_code == codes::NONE);
+
+        let topic = topic_result("orders".into(), vec![denied]);
+        assert!(topic.name == "orders");
+        assert!(topic.partitions.len() == 1);
+
+        let resp = delete_records_response(vec![topic]);
+        assert!(resp.throttle_time_ms == 0);
+        assert!(resp.topics.len() == 1);
+        assert!(resp.topics[0].name == "orders");
+    }
+
+    #[tokio::test]
+    async fn handle_denied_topic_returns_topic_auth_rows() {
+        let (broker_handle, _dir) = start_broker(Arc::new(DenyAll)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let p = principal("alice");
+        let peer = peer();
+        let req = request("secret", &[(0, 3), (2, -1)]);
+
+        let resp = drive(&broker, &req, &p, &peer).await;
+
+        assert!(resp.throttle_time_ms == 0);
+        assert!(resp.topics.len() == 1);
+        assert!(resp.topics[0].name == "secret");
+        assert!(resp.topics[0].partitions.len() == 2);
+        assert!(resp.topics[0].partitions[0].partition_index == 0);
+        assert!(resp.topics[0].partitions[0].low_watermark == -1);
+        assert!(resp.topics[0].partitions[0].error_code == codes::TOPIC_AUTHORIZATION_FAILED);
+        assert!(resp.topics[0].partitions[1].partition_index == 2);
+        assert!(resp.topics[0].partitions[1].low_watermark == -1);
+        assert!(resp.topics[0].partitions[1].error_code == codes::TOPIC_AUTHORIZATION_FAILED);
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_unknown_partition_preserves_requested_index() {
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let p = principal("admin");
+        let peer = peer();
+        let req = request("missing", &[(4, 0)]);
+
+        let resp = drive(&broker, &req, &p, &peer).await;
+
+        assert!(resp.topics.len() == 1);
+        assert!(resp.topics[0].name == "missing");
+        assert!(resp.topics[0].partitions.len() == 1);
+        let row = &resp.topics[0].partitions[0];
+        assert!(row.partition_index == 4);
+        assert!(row.low_watermark == -1);
+        assert!(row.error_code == codes::UNKNOWN_TOPIC_OR_PARTITION);
+        broker_handle.shutdown().await;
+    }
 }
