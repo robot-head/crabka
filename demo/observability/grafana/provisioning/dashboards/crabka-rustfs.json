@@ -3,7 +3,7 @@
   "title": "Crabka - RustFS Object Store",
   "tags": ["crabka", "rustfs", "object-store"],
   "schemaVersion": 39,
-  "version": 8,
+  "version": 10,
   "refresh": "1m",
   "time": { "from": "now-30m", "to": "now" },
   "templating": {
@@ -137,11 +137,12 @@
     },
     { "id": 20, "type": "row", "title": "RustFS storage and background work", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 31 } },
     {
-      "id": 21, "type": "stat", "title": "Cluster usage",
+      "id": 21, "type": "stat", "title": "RustFS object metric bytes",
+      "description": "RustFS-reported bucket/object usage. This can lag or undercount S3-visible data, but it is still useful beside raw drive usage.",
       "datasource": { "type": "prometheus", "uid": "${ds}" },
       "fieldConfig": { "defaults": { "unit": "bytes" } },
       "gridPos": { "h": 6, "w": 6, "x": 0, "y": 32 },
-      "targets": [ { "refId": "A", "expr": "max(rustfs_cluster_capacity_used_bytes) or max(rustfs_cluster_usage_objects_total_bytes) or sum(rustfs_cluster_usage_buckets_total_bytes) or vector(0)", "instant": true } ]
+      "targets": [ { "refId": "A", "expr": "sum(rustfs_cluster_usage_buckets_total_bytes) or max(rustfs_cluster_usage_objects_total_bytes) or sum(rustfs_bucket_api_usage_bytes) or vector(0)", "instant": true } ]
     },
     {
       "id": 22, "type": "stat", "title": "Objects",
@@ -207,17 +208,33 @@
     },
     { "id": 29, "type": "row", "title": "Storage growth and S3 operations", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 54 } },
     {
+      "id": 39, "type": "stat", "title": "Raw drive used",
+      "description": "RustFS raw drive usage can include retained backend parts and filesystem usage outside live S3 objects.",
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "fieldConfig": { "defaults": { "unit": "bytes" } },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 55 },
+      "targets": [ { "refId": "A", "expr": "max(rustfs_cluster_capacity_used_bytes) or sum(rustfs_system_drive_used_bytes) or sum(rustfs_node_disk_used_bytes) or vector(0)", "instant": true } ]
+    },
+    {
+      "id": 40, "type": "stat", "title": "Drive/object metric delta",
+      "description": "Difference between raw drive usage and RustFS-reported object bytes. Large values point to backend-retained parts, undercounted object metrics, or unrelated filesystem usage.",
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "fieldConfig": { "defaults": { "unit": "bytes" } },
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 55 },
+      "targets": [ { "refId": "A", "expr": "clamp_min(((max(rustfs_cluster_capacity_used_bytes) or sum(rustfs_system_drive_used_bytes) or sum(rustfs_node_disk_used_bytes) or vector(0)) - (sum(rustfs_cluster_usage_buckets_total_bytes) or max(rustfs_cluster_usage_objects_total_bytes) or sum(rustfs_bucket_api_usage_bytes) or vector(0))), 0)", "instant": true } ]
+    },
+    {
       "id": 36, "type": "table", "title": "S3 operation rate by bucket",
       "datasource": { "type": "prometheus", "uid": "${ds}" },
       "fieldConfig": { "defaults": { "unit": "reqps" } },
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 55 },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 59 },
       "targets": [ { "refId": "A", "expr": "topk(30, sum by (bucket, op) (rate(rustfs_s3_operations_total[$__rate_interval])))", "legendFormat": "{{bucket}} {{op}}", "instant": true } ]
     },
     {
       "id": 37, "type": "table", "title": "Bucket objects and versions",
       "datasource": { "type": "prometheus", "uid": "${ds}" },
       "fieldConfig": { "defaults": { "unit": "short" } },
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 55 },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 59 },
       "targets": [
         { "refId": "A", "expr": "rustfs_cluster_usage_buckets_objects_count", "legendFormat": "{{bucket}} objects", "instant": true },
         { "refId": "B", "expr": "rustfs_cluster_usage_buckets_versions_count", "legendFormat": "{{bucket}} versions", "instant": true },
@@ -228,7 +245,7 @@
       "id": 38, "type": "timeseries", "title": "Background storage work",
       "datasource": { "type": "prometheus", "uid": "${ds}" },
       "fieldConfig": { "defaults": { "unit": "ops" } },
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 55 },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 59 },
       "targets": [
         { "refId": "A", "expr": "sum by (kind) (rate(rustfs_page_cache_reclaim_duration_seconds_count[$__rate_interval]))", "legendFormat": "page cache reclaim {{kind}}" },
         { "refId": "B", "expr": "sum by (source) (rate(rustfs_capacity_update_duration_seconds_count[$__rate_interval]))", "legendFormat": "capacity update {{source}}" },
@@ -236,12 +253,12 @@
         { "refId": "D", "expr": "sum by (type) (rate(rustfs_lock_acquire_total[$__rate_interval]))", "legendFormat": "lock acquire {{type}}" }
       ]
     },
-    { "id": 30, "type": "row", "title": "Object-store chatter, logs, and traces", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 63 } },
+    { "id": 30, "type": "row", "title": "Object-store chatter, logs, and traces", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 67 } },
     {
       "id": 31, "type": "timeseries", "title": "RustFS network I/O",
       "datasource": { "type": "prometheus", "uid": "${ds}" },
       "fieldConfig": { "defaults": { "unit": "Bps" } },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 64 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 68 },
       "targets": [
         { "refId": "A", "expr": "sum(rate(container_network_receive_bytes_total{container_label_com_docker_compose_project=\"crabka-observability-demo\", container_label_com_docker_compose_service=\"rustfs\", image!=\"\"}[$__rate_interval]))", "legendFormat": "container receive" },
         { "refId": "B", "expr": "sum(rate(container_network_transmit_bytes_total{container_label_com_docker_compose_project=\"crabka-observability-demo\", container_label_com_docker_compose_service=\"rustfs\", image!=\"\"}[$__rate_interval]))", "legendFormat": "container transmit" },
@@ -253,26 +270,26 @@
       "id": 32, "type": "table", "title": "Object-store client network I/O",
       "datasource": { "type": "prometheus", "uid": "${ds}" },
       "fieldConfig": { "defaults": { "unit": "Bps" } },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 64 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 68 },
       "targets": [ { "refId": "A", "expr": "topk(12, sum by (container_label_com_docker_compose_service) (rate(container_network_receive_bytes_total{container_label_com_docker_compose_project=\"crabka-observability-demo\", container_label_com_docker_compose_service=~\"rustfs|.*-querier|.*-compactor|.*-block-builder\", image!=\"\"}[$__rate_interval])) + sum by (container_label_com_docker_compose_service) (rate(container_network_transmit_bytes_total{container_label_com_docker_compose_project=\"crabka-observability-demo\", container_label_com_docker_compose_service=~\"rustfs|.*-querier|.*-compactor|.*-block-builder\", image!=\"\"}[$__rate_interval])))", "legendFormat": "{{container_label_com_docker_compose_service}}", "instant": true } ]
     },
     {
       "id": 33, "type": "logs", "title": "Recent RustFS warnings and errors",
       "datasource": { "type": "loki", "uid": "crabka-loki" },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 72 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 76 },
       "targets": [ { "refId": "A", "expr": "{service_name=\"rustfs\"} |~ \"WARN|ERROR|warn|error|failed|panic|timeout\"" } ]
     },
     {
       "id": 34, "type": "logs", "title": "Object-store client retry logs",
       "datasource": { "type": "loki", "uid": "crabka-loki" },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 72 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 76 },
       "targets": [ { "refId": "A", "expr": "{service_name=~\"logs-querier|metrics-querier|traces-querier|profiles-querier|logs-compactor|metrics-compactor|traces-block-builder|profiles-block-builder\"} |= \"object_store::client::retry\"" } ]
     },
     {
       "id": 35, "type": "table", "title": "Recent traces",
       "datasource": { "type": "tempo", "uid": "crabka-tempo" },
       "description": "RustFS OTLP traces make S3 object-store requests visible in the same trace backend as Crabka services.",
-      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 80 },
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 84 },
       "targets": [ { "refId": "A", "queryType": "traceql", "query": "{}", "limit": 40, "tableType": "spans" } ]
     }
   ]

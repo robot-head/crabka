@@ -576,6 +576,9 @@ fn rustfs_dashboard_surfaces_object_store_health_and_io() {
         "Filesystem I/O",
         "RustFS uptime",
         "Restarts (1h)",
+        "RustFS object metric bytes",
+        "Raw drive used",
+        "Drive/object metric delta",
         "Storage growth and S3 operations",
         "S3 operation rate by bucket",
         "Bucket objects and versions",
@@ -598,6 +601,8 @@ fn rustfs_dashboard_surfaces_object_store_health_and_io() {
         "container_fs_writes_bytes_total",
         "container_start_time_seconds",
         "rustfs_s3_operations_total",
+        "rustfs_cluster_capacity_used_bytes",
+        "rustfs_cluster_usage_buckets_total_bytes",
         "rustfs_cluster_usage_buckets_objects_count",
         "rustfs_cluster_usage_buckets_versions_count",
         "rustfs_cluster_usage_buckets_object_version_count_distribution",
@@ -622,6 +627,16 @@ fn rustfs_dashboard_surfaces_object_store_health_and_io() {
     assert!(
         dashboard.contains("object_store::client::retry"),
         "RustFS dashboard should surface S3/object-store retry chatter from Crabka clients"
+    );
+    assert!(
+        !dashboard.contains(
+            "max(rustfs_cluster_capacity_used_bytes) or max(rustfs_cluster_usage_objects_total_bytes)"
+        ),
+        "object usage panels must not prefer raw drive capacity over RustFS object metrics"
+    );
+    assert!(
+        dashboard.contains("clamp_min(((max(rustfs_cluster_capacity_used_bytes)"),
+        "RustFS dashboard should make raw-drive to object-metric deltas visible"
     );
 }
 
