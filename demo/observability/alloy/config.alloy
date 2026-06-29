@@ -1,4 +1,4 @@
-// ---------------- OTLP receive (traces + logs from Crabka processes) ----------------
+// ---------------- OTLP receive (traces + native metrics) ----------------
 otelcol.receiver.otlp "in" {
 	grpc {
 		endpoint = "0.0.0.0:4317"
@@ -9,9 +9,23 @@ otelcol.receiver.otlp "in" {
 	}
 
 	output {
-		traces = [otelcol.processor.batch.traces.input]
-		logs   = [otelcol.exporter.otlphttp.logs.input]
+		metrics = [otelcol.exporter.prometheus.otlp_metrics.input]
+		traces  = [otelcol.processor.batch.traces.input]
 	}
+}
+
+// Convert OTLP metrics (for example RustFS native observability metrics) into
+// Prometheus samples and remote-write them into Crabka Metrics. Keep metric
+// names as emitted by the source so dashboards can use RustFS's documented
+// rustfs_<subsystem>_<metric> names directly.
+otelcol.exporter.prometheus "otlp_metrics" {
+	forward_to = [prometheus.remote_write.crabka.receiver]
+
+	add_metric_suffixes              = false
+	include_scope_info               = false
+	include_scope_labels             = false
+	include_target_info              = false
+	resource_to_telemetry_conversion = true
 }
 
 // Coalesce spans into fewer, larger exports so the distributor's per-request
@@ -27,18 +41,6 @@ otelcol.processor.batch "traces" {
 otelcol.exporter.otlphttp "traces" {
 	client {
 		endpoint = "http://traces-distributor:4318"
-		headers  = {"X-Scope-OrgID" = "demo"}
-
-		tls {
-			insecure = true
-		}
-	}
-}
-
-// Crabka also self-ships logs to stdout (JSON); the OTLP logs path is optional.
-otelcol.exporter.otlphttp "logs" {
-	client {
-		endpoint = "http://logs-distributor:3100/otlp"
 		headers  = {"X-Scope-OrgID" = "demo"}
 
 		tls {

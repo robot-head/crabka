@@ -15252,7 +15252,12 @@ fn metadata_time_range(params: &SeriesParams) -> Result<Option<TimeRange>, HttpQ
         return Ok(None);
     }
 
-    optional_start_end_range(params.start, params.since, params.end).map(Some)
+    let end = if params.start.is_none() && params.since.is_some() && params.end.is_none() {
+        Some(current_unix_time_ns())
+    } else {
+        params.end
+    };
+    optional_start_end_range(params.start, params.since, end).map(Some)
 }
 
 fn metadata_index_range(params: &SeriesParams) -> Result<TimeRange, HttpQueryError> {

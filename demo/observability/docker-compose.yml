@@ -146,10 +146,29 @@ services:
     environment:
       RUSTFS_ACCESS_KEY: rustfsadmin
       RUSTFS_SECRET_KEY: rustfsadmin
+      RUSTFS_OBS_ENDPOINT: http://alloy:4318
+      RUSTFS_OBS_TRACES_EXPORT_ENABLED: "true"
+      RUSTFS_OBS_METRICS_EXPORT_ENABLED: "true"
+      # RustFS treats non-production environments as local development and
+      # prints full tracing span lifecycle events to stdout. That makes traces
+      # easy to spot, but overwhelms the demo logs/query path. Keep local stdout
+      # quiet and export RustFS telemetry through OTLP instead.
+      RUSTFS_OBS_LOGS_EXPORT_ENABLED: "false"
+      RUSTFS_OBS_SAMPLE_RATIO: "0.05"
+      RUSTFS_OBS_SERVICE_NAME: rustfs
+      RUSTFS_OBS_ENVIRONMENT: production
+      RUSTFS_OBS_METER_INTERVAL: "15"
+      RUSTFS_OBS_LOGGER_LEVEL: info
+      RUSTFS_OBS_LOG_STDOUT_ENABLED: "false"
+      # Use the documented fixed-size buffer behavior in this constrained
+      # single-node fixture; adaptive buffers are useful in production but add
+      # avoidable memory variance while testing dashboards.
+      RUSTFS_BUFFER_PROFILE_DISABLE: "true"
     ports: ["9000:9000", "9001:9001"]
     volumes: ["rustfs-data:/data"]
     depends_on:
       rustfs-permissions: { condition: service_completed_successfully }
+      alloy: { condition: service_started }
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:9000/health"]
       interval: 5s

@@ -15489,6 +15489,65 @@ async fn label_values_endpoint_applies_since_when_start_is_absent() {
 }
 
 #[tokio::test]
+async fn labels_endpoint_applies_since_with_default_end() {
+    let dir = tempfile::tempdir().unwrap().keep();
+    let now_ns = i64::try_from(current_unix_epoch_nanos()).unwrap();
+    let recent_range = TimeRange::new(now_ns - 1_000_000_000, now_ns - 1_000_000_000).unwrap();
+    let old_range = TimeRange::new(now_ns - 600_000_000_000, now_ns - 600_000_000_000).unwrap();
+    let mut label_index = LabelIndex::default();
+    let recent = label_index.insert_series(
+        "tenant-a",
+        labels([("app", "api"), ("env", "prod"), ("zone", "west")]),
+    );
+    let old = label_index.insert_series(
+        "tenant-a",
+        labels([("app", "api"), ("env", "prod"), ("legacy", "true")]),
+    );
+    let mut block_index = BlockIndex::default();
+    block_index.insert(BlockDescriptor::new(
+        BlockKey::new(
+            "tenant-a",
+            0,
+            recent_range.start_ns,
+            recent_range.end_ns,
+            recent_range,
+        ),
+        BTreeSet::from([recent]),
+    ));
+    block_index.insert(BlockDescriptor::new(
+        BlockKey::new(
+            "tenant-a",
+            0,
+            old_range.start_ns,
+            old_range.end_ns,
+            old_range,
+        ),
+        BTreeSet::from([old]),
+    ));
+    let app = loki_router(QuerierState::new(dir, label_index, block_index));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/labels?since=5m")
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::OK);
+    assert!(
+        json_body(response).await
+            == json!({
+                "status": "success",
+                "data": ["app", "env", "zone"]
+            })
+    );
+}
+
+#[tokio::test]
 async fn labels_endpoint_applies_selector_query() {
     let dir = tempfile::tempdir().unwrap().keep();
     let mut label_index = LabelIndex::default();
