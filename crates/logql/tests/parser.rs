@@ -1703,13 +1703,40 @@ fn query_evaluator_accepts_signed_decimal_unwrap_samples() {
     let query = parse_query(r#"{app="api"} | logfmt | unwrap cost | __error__ = """#).unwrap();
     let labels = BTreeMap::from([("app".to_string(), "api".to_string())]);
 
+    let positive = query
+        .evaluate_with_fields(&labels, "cost=+1.5", &BTreeMap::new())
+        .unwrap();
     let evaluation = query
         .evaluate_with_fields(&labels, "cost=-1.5", &BTreeMap::new())
         .unwrap();
 
+    check!(positive.fields.get("__crabka_unwrap_sample_value__") == Some(&"1.5".to_string()));
+    check!(!positive.fields.contains_key("__error__"));
+    check!(!positive.fields.contains_key("__error_details__"));
     check!(evaluation.fields.get("__crabka_unwrap_sample_value__") == Some(&"-1.5".to_string()));
     check!(!evaluation.fields.contains_key("__error__"));
     check!(!evaluation.fields.contains_key("__error_details__"));
+}
+
+#[test]
+fn query_evaluator_rejects_repeated_sample_signs() {
+    let query = parse_query(r#"{app="api"} | logfmt | unwrap cost"#).unwrap();
+    let labels = BTreeMap::from([("app".to_string(), "api".to_string())]);
+
+    let evaluation = query
+        .evaluate_with_fields(&labels, "cost=++1.5", &BTreeMap::new())
+        .unwrap();
+
+    check!(evaluation.fields.get("__error__") == Some(&"SampleExtractionErr".to_string()));
+    check!(
+        evaluation.fields.get("__error_details__")
+            == Some(&"unwrap label `cost` cannot be converted".to_string())
+    );
+    check!(
+        !evaluation
+            .fields
+            .contains_key("__crabka_unwrap_sample_value__")
+    );
 }
 
 #[test]

@@ -221,6 +221,9 @@ fn parse_decimal_sample_literal(value: &str) -> Option<(i128, u128)> {
         Some(b'+') => (false, &value[1..]),
         _ => (false, value),
     };
+    if value.starts_with('+') || value.starts_with('-') {
+        return None;
+    }
     if value.is_empty() {
         return None;
     }
