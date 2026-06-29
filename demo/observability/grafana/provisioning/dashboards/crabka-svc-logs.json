@@ -4,7 +4,7 @@
   "tags": ["crabka", "observability", "logs"],
   "schemaVersion": 39,
   "version": 1,
-  "refresh": "30s",
+  "refresh": "1m",
   "time": { "from": "now-30m", "to": "now" },
   "templating": {
     "list": [

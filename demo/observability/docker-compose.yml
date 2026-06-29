@@ -140,6 +140,7 @@ services:
 
   rustfs:
     image: rustfs/rustfs:latest
+    restart: unless-stopped
     # Resource caps (see x-rustfs-res / .env); the cap bounds object-store cache and query bursts.
     <<: *rustfs-res
     command: ["/data"]
@@ -160,10 +161,18 @@ services:
       RUSTFS_OBS_METER_INTERVAL: "15"
       RUSTFS_OBS_LOGGER_LEVEL: info
       RUSTFS_OBS_LOG_STDOUT_ENABLED: "false"
-      # Use the documented fixed-size buffer behavior in this constrained
-      # single-node fixture; adaptive buffers are useful in production but add
-      # avoidable memory variance while testing dashboards.
-      RUSTFS_BUFFER_PROFILE_DISABLE: "true"
+      # This fixture stores many small parquet/json blocks and must stay inside
+      # a laptop-friendly memory cap. Keep adaptive sizing enabled, but use the
+      # small-object profile instead of GeneralPurpose's 1 MiB unknown-size
+      # buffers.
+      RUSTFS_BUFFER_PROFILE: WebWorkload
+      RUSTFS_OBJECT_IO_STORAGE_MEDIA_OVERRIDE: hdd
+      RUSTFS_ALLOCATOR_RECLAIM_ENABLED: "true"
+      RUSTFS_ALLOCATOR_RECLAIM_INTERVAL_SECS: "15"
+      RUSTFS_ALLOCATOR_RECLAIM_IDLE_INTERVALS: "1"
+      RUSTFS_OBJECT_FILE_CACHE_RECLAIM_READ_ENABLE: "true"
+      RUSTFS_OBJECT_FILE_CACHE_RECLAIM_WRITE_ENABLE: "true"
+      RUSTFS_OBJECT_FILE_CACHE_RECLAIM_THRESHOLD: "65536"
     ports: ["9000:9000", "9001:9001"]
     volumes: ["rustfs-data:/data"]
     depends_on:

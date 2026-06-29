@@ -155,7 +155,7 @@
       "datasource": { "type": "prometheus", "uid": "${ds}" },
       "fieldConfig": { "defaults": { "unit": "short" } },
       "gridPos": { "h": 6, "w": 6, "x": 12, "y": 32 },
-      "targets": [ { "refId": "A", "expr": "max(rustfs_cluster_usage_objects_buckets_count) or count(rustfs_cluster_usage_buckets_total_bytes) or vector(0)", "instant": true } ]
+      "targets": [ { "refId": "A", "expr": "max(rustfs_cluster_buckets_total) or count(rustfs_cluster_usage_buckets_total_bytes) or vector(0)", "instant": true } ]
     },
     {
       "id": 24, "type": "stat", "title": "Drive free ratio",
