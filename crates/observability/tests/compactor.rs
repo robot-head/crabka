@@ -1070,6 +1070,56 @@ async fn compactor_runtime_writes_shard_indexes_without_index_metadata_rewrites(
 }
 
 #[tokio::test]
+async fn compactor_runtime_writes_shards_with_only_the_new_block() {
+    let store = RecordingObjectStore::new();
+    let config = compactor_config("observability/logs");
+    let dependencies =
+        ServiceDependencies::default().with_wal_consumer(RecordingWalConsumer::new(vec![
+            vec![
+                kafka_wal_record(&wal_record_without_position(10, "api first"), 5, 42),
+                kafka_wal_record(&wal_record_without_position(30, "api first later"), 5, 43),
+            ],
+            vec![
+                kafka_wal_record(&wal_record_without_position(20, "api second"), 5, 44),
+                kafka_wal_record(&wal_record_without_position(40, "api second later"), 5, 45),
+            ],
+            Vec::new(),
+        ]));
+
+    let descriptors = run_compactor_until_idle(&config, dependencies, Some(&store))
+        .await
+        .unwrap();
+
+    let prefix = ObjectPath::from("observability/logs");
+    let api = series_fingerprint(&labels([("app", "api"), ("env", "prod")]));
+    let (_, first_blocks) = read_tenant_log_index_shard_from_object_store(
+        &store,
+        &prefix,
+        "tenant-a",
+        descriptors[0].key.time_range,
+    )
+    .await
+    .unwrap();
+    let (_, second_blocks) = read_tenant_log_index_shard_from_object_store(
+        &store,
+        &prefix,
+        "tenant-a",
+        descriptors[1].key.time_range,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        first_blocks.match_blocks("tenant-a", TimeRange::new(0, 50).unwrap(), &[api])
+            == vec![descriptors[0].clone()]
+    );
+    assert!(
+        second_blocks.match_blocks("tenant-a", TimeRange::new(0, 50).unwrap(), &[api])
+            == vec![descriptors[1].clone()]
+    );
+}
+
+#[tokio::test]
 async fn compactor_runtime_appends_batches_without_loading_tenant_manifest() {
     let store = RecordingObjectStore::new();
     let config = compactor_config("observability/logs");
