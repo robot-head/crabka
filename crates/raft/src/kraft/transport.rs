@@ -398,7 +398,6 @@ pub mod wire {
                     leader_epoch,
                 } => {
                     let req = BeginQuorumEpochRequest {
-                        voter_id: -1,
                         topics: vec![bqe_req::TopicData {
                             topic_name: METADATA_TOPIC.to_string(),
                             partitions: vec![bqe_req::PartitionData {
