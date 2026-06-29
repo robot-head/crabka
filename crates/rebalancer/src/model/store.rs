@@ -249,6 +249,16 @@ mod tests {
     }
 
     #[test]
+    fn open_propagates_non_not_found_io_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join(DEFAULT_FILENAME)).unwrap();
+
+        let err = ProposalStore::open(dir.path(), 4).unwrap_err();
+
+        assert!(matches!(err, StoreError::Io(_)));
+    }
+
+    #[test]
     fn persist_round_trips_via_open() {
         let dir = tempfile::tempdir().unwrap();
         {

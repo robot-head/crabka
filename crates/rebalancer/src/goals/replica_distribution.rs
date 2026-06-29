@@ -273,6 +273,35 @@ mod tests {
     }
 
     #[test]
+    fn full_length_replica_vector_with_unknown_brokers_is_not_expandable() {
+        let parts = vec![part(0, vec![1, 99], 1), part(1, vec![1], 1)];
+        let s = state_with(parts, vec![1, 2]);
+
+        let mvs = ReplicaDistribution.propose(&s, &ctx_with_cap(1));
+
+        assert!(mvs.len() == 1);
+        assert!(mvs[0].partition == 1);
+        assert!(mvs[0].old_replicas == vec![1]);
+        assert!(mvs[0].new_replicas == vec![2]);
+    }
+
+    #[test]
+    fn rehomes_leader_when_hot_replica_was_leader() {
+        let parts = vec![
+            part(0, vec![1], 1),
+            part(1, vec![1], 1),
+            part(2, vec![2], 2),
+        ];
+        let s = state_with(parts, vec![1, 2, 3]);
+
+        let mvs = ReplicaDistribution.propose(&s, &ctx_with_cap(1));
+
+        assert!(mvs.len() == 1);
+        assert!(mvs[0].old_leader == 1);
+        assert!(mvs[0].new_leader == 3);
+    }
+
+    #[test]
     fn old_replicas_reflects_original_state() {
         // Force a double-swap on the same partition. With a single
         // partition replicated on brokers 1 + 2 on a 4-broker cluster,
@@ -319,6 +348,13 @@ mod tests {
                 "movement old_leader must reflect the original cluster state, \
                  not an intermediate working-state snapshot"
             );
+        }
+    }
+
+    fn ctx_with_cap(cap: usize) -> GoalContext {
+        GoalContext {
+            max_movements_per_proposal: cap,
+            ..ctx()
         }
     }
 }
