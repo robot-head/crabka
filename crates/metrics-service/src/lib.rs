@@ -5,7 +5,7 @@
 // awaits in the PromQL operator-path evaluation); the default limit is too low.
 #![recursion_limit = "256"]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::path::Path as StdPath;
 use std::sync::Arc;
@@ -880,6 +880,7 @@ pub struct RefreshingMetricBlockStore {
     base: Url,
     manifest_prefix: String,
     hot_store: WalHead,
+    manifest_cache: Arc<tokio::sync::RwLock<BTreeMap<String, CompactionIndexManifest>>>,
     cold_cache: Arc<tokio::sync::RwLock<Option<CachedMetricBlockStore>>>,
     cold_refresh: tokio::sync::Mutex<()>,
 }
@@ -912,6 +913,7 @@ impl RefreshingMetricBlockStore {
             base,
             manifest_prefix: manifest_prefix.into(),
             hot_store,
+            manifest_cache: Arc::new(tokio::sync::RwLock::new(BTreeMap::new())),
             cold_cache: Arc::new(tokio::sync::RwLock::new(None)),
             cold_refresh: tokio::sync::Mutex::new(()),
         }
@@ -950,11 +952,12 @@ impl RefreshingMetricBlockStore {
             }
         }
 
-        let manifests = load_compaction_manifests_for_range(
+        let manifests = load_compaction_manifests_for_range_with_cache(
             self.store.clone(),
             &self.manifest_prefix,
             start_ms,
             end_ms,
+            &self.manifest_cache,
         )
         .await?;
         let cold = MetricBlockStore::from_compaction_manifests(
@@ -1140,31 +1143,77 @@ pub async fn load_compaction_manifests_for_range(
     load_compaction_manifests_filtered(store, manifest_prefix, Some((start_ms, end_ms))).await
 }
 
+async fn load_compaction_manifests_for_range_with_cache(
+    store: Arc<dyn ObjectStore>,
+    manifest_prefix: &str,
+    start_ms: i64,
+    end_ms: i64,
+    cache: &tokio::sync::RwLock<BTreeMap<String, CompactionIndexManifest>>,
+) -> Result<Vec<CompactionIndexManifest>, MetricsServiceError> {
+    load_compaction_manifests_filtered_with_cache(
+        store,
+        manifest_prefix,
+        Some((start_ms, end_ms)),
+        Some(cache),
+    )
+    .await
+}
+
 async fn load_compaction_manifests_filtered(
     store: Arc<dyn ObjectStore>,
     manifest_prefix: &str,
     time_range: Option<(i64, i64)>,
 ) -> Result<Vec<CompactionIndexManifest>, MetricsServiceError> {
+    load_compaction_manifests_filtered_with_cache(store, manifest_prefix, time_range, None).await
+}
+
+async fn load_compaction_manifests_filtered_with_cache(
+    store: Arc<dyn ObjectStore>,
+    manifest_prefix: &str,
+    time_range: Option<(i64, i64)>,
+    cache: Option<&tokio::sync::RwLock<BTreeMap<String, CompactionIndexManifest>>>,
+) -> Result<Vec<CompactionIndexManifest>, MetricsServiceError> {
     let prefix = (!manifest_prefix.is_empty()).then(|| Path::from(manifest_prefix));
     let mut objects = store.list(prefix.as_ref()).try_collect::<Vec<_>>().await?;
     objects.sort_by(|left, right| left.location.cmp(&right.location));
 
+    let objects = objects
+        .into_iter()
+        .filter(|object| {
+            let key = object.location.as_ref();
+            StdPath::new(key)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("index"))
+        })
+        .collect::<Vec<_>>();
+    let live_keys = objects
+        .iter()
+        .map(|object| object.location.as_ref().to_string())
+        .collect::<BTreeSet<_>>();
     let mut manifests = Vec::new();
+    let mut fetched = Vec::<(String, CompactionIndexManifest)>::new();
     for object in objects {
         let key = object.location.as_ref();
-        if !StdPath::new(key)
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("index"))
+        let manifest = if let Some(cache) = cache
+            && let Some(manifest) = cache.read().await.get(key).cloned()
         {
-            continue;
-        }
-        let bytes = store.get(&object.location).await?.bytes().await?;
-        let manifest = CompactionIndexManifest::decode(&bytes)?;
+            manifest
+        } else {
+            let bytes = store.get(&object.location).await?.bytes().await?;
+            let manifest = CompactionIndexManifest::decode(&bytes)?;
+            fetched.push((key.to_string(), manifest.clone()));
+            manifest
+        };
         if time_range.is_none_or(|(start_ms, end_ms)| {
             manifest.max_ts >= start_ms && manifest.min_ts <= end_ms
         }) {
             manifests.push(manifest);
         }
+    }
+    if let Some(cache) = cache {
+        let mut guard = cache.write().await;
+        guard.retain(|key, _| live_keys.contains(key));
+        guard.extend(fetched);
     }
     Ok(manifests)
 }
@@ -1292,6 +1341,7 @@ mod tests {
     struct CountingObjectStore {
         inner: Arc<InMemory>,
         list_calls: Arc<AtomicUsize>,
+        get_calls: Arc<AtomicUsize>,
         list_delay: std::time::Duration,
     }
 
@@ -1300,6 +1350,7 @@ mod tests {
             Self {
                 inner: Arc::new(InMemory::new()),
                 list_calls,
+                get_calls: Arc::new(AtomicUsize::new(0)),
                 list_delay,
             }
         }
@@ -1341,6 +1392,12 @@ mod tests {
             location: &Path,
             options: GetOptions,
         ) -> object_store::Result<GetResult> {
+            if std::path::Path::new(location.as_ref())
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("index"))
+            {
+                self.get_calls.fetch_add(1, Ordering::SeqCst);
+            }
             self.inner.get_opts(location, options).await
         }
 
@@ -2183,6 +2240,72 @@ rules:
             .unwrap();
         assert!(old.len() == 1);
         assert!(old[0].get("job").unwrap() == "old");
+    }
+
+    #[tokio::test]
+    async fn refreshing_blockstore_reuses_decoded_manifests_across_cold_refreshes() {
+        let list_calls = Arc::new(AtomicUsize::new(0));
+        let object_store = Arc::new(CountingObjectStore::new(
+            Arc::clone(&list_calls),
+            std::time::Duration::ZERO,
+        ));
+        let get_calls = Arc::clone(&object_store.get_calls);
+        let object_store: std::sync::Arc<dyn ObjectStore> = object_store;
+        let base = url::Url::parse("memory:///").unwrap();
+        let writer_store = crabka_blockstore::BlockStore::new(object_store.clone(), base.clone());
+        let sink = crabka_metrics::ObjectStoreCompactionIndexSink::new(object_store.clone());
+
+        write_float_manifest(
+            &writer_store,
+            &sink,
+            "tenant-a",
+            "old",
+            10_000,
+            "metrics/tenant-a/float/old.parquet",
+            1,
+        )
+        .await;
+        write_float_manifest(
+            &writer_store,
+            &sink,
+            "tenant-a",
+            "new",
+            1_000_000,
+            "metrics/tenant-a/float/new.parquet",
+            2,
+        )
+        .await;
+
+        let metric_store = super::RefreshingMetricBlockStore::new(
+            object_store,
+            base,
+            "metrics/tenant-a",
+            crabka_promql::WalHead::new(),
+        );
+        let matchers = [crabka_blockstore::LabelMatcher::new(
+            "__name__",
+            crabka_blockstore::MatchOp::Eq,
+            "up",
+        )];
+
+        let old = metric_store
+            .series("tenant-a", &matchers, 0, 20_000)
+            .await
+            .unwrap();
+        let new = metric_store
+            .series("tenant-a", &matchers, 990_000, 1_010_000)
+            .await
+            .unwrap();
+
+        assert!(old.len() == 1);
+        assert!(old[0].get("job").unwrap() == "old");
+        assert!(new.len() == 1);
+        assert!(new[0].get("job").unwrap() == "new");
+        assert!(list_calls.load(Ordering::SeqCst) == 2);
+        assert!(
+            get_calls.load(Ordering::SeqCst) == 2,
+            "cold refresh should list for new manifest keys but not re-download known .index objects"
+        );
     }
 
     #[tokio::test]
