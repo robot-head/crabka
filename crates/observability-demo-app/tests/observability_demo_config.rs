@@ -54,6 +54,11 @@ fn grafana_alerting_config() -> String {
     .expect("read Grafana alerting provisioning config")
 }
 
+fn rustfs_bootstrap_script() -> String {
+    std::fs::read_to_string(repo_root().join("demo/observability/rustfs/bootstrap.sh"))
+        .expect("read RustFS bootstrap script")
+}
+
 fn dashboard(name: &str) -> String {
     std::fs::read_to_string(repo_root().join(format!(
         "demo/observability/grafana/provisioning/dashboards/{name}"
@@ -326,6 +331,36 @@ fn demo_image_is_built_with_apko_and_melange() {
     assert!(
         !compose.contains("image: crabka-demo:latest"),
         "compose should not require a short local crabka-demo tag for broker-format"
+    );
+}
+
+#[test]
+fn rustfs_bootstrap_verifies_obsolete_log_manifest_cleanup() {
+    let bootstrap = rustfs_bootstrap_script();
+    assert!(
+        bootstrap
+            .contains("obsolete_logs_manifest_key=\"logs/tenant=demo/index/logs/manifest.json\""),
+        "RustFS bootstrap should target the obsolete full logs manifest left by older demo revisions"
+    );
+    assert!(
+        bootstrap.contains("for attempt in 1 2 3 4 5; do"),
+        "RustFS bootstrap should retry obsolete manifest cleanup because RustFS can be busy during setup"
+    );
+    assert!(
+        bootstrap.contains("s3api delete-object"),
+        "RustFS bootstrap should use the S3 API delete operation for obsolete manifest cleanup"
+    );
+    assert!(
+        bootstrap.contains("s3api wait object-not-exists"),
+        "RustFS bootstrap should verify the obsolete manifest is gone after delete"
+    );
+    assert!(
+        bootstrap.contains("failed to remove obsolete logs full manifest"),
+        "RustFS bootstrap should fail loudly when an obsolete manifest survives cleanup"
+    );
+    assert!(
+        !bootstrap.contains("manifest.json >/dev/null 2>&1 || true"),
+        "obsolete manifest cleanup must not be silently ignored"
     );
 }
 
