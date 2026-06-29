@@ -246,12 +246,6 @@ fn parse_decimal_sample_literal(value: &str) -> Option<(i128, u128)> {
     if whole.is_empty() && fractional.is_empty() {
         return None;
     }
-    if !whole.bytes().all(|byte| byte.is_ascii_digit())
-        || !fractional.bytes().all(|byte| byte.is_ascii_digit())
-    {
-        return None;
-    }
-
     let mut digits = String::with_capacity(whole.len() + fractional.len());
     digits.push_str(whole);
     digits.push_str(fractional);

@@ -1158,24 +1158,12 @@ fn tokenize_template_command(command: &str) -> Result<Vec<String>, ParseError> {
             .expect("template token offset cannot overflow");
         if matches!(ch, '"' | '`') {
             let (token, next) = parse_template_quoted_token(command, pos, ch)?;
-            if next <= pos || next > command.len() || !is_wrapped_template_token(&token, ch) {
-                return Err(template_parse_error(
-                    "template token parser did not advance",
-                ));
-            }
+            ensure_template_quoted_token(command, pos, &token, next, ch)?;
             tokens.push(token);
             pos = next;
         } else if ch == '(' {
             let (token, next) = parse_template_parenthesized_token(command, pos)?;
-            if next <= pos
-                || next > command.len()
-                || !token.starts_with('(')
-                || !token.ends_with(')')
-            {
-                return Err(template_parse_error(
-                    "template token parser did not advance",
-                ));
-            }
+            ensure_template_parenthesized_token(command, pos, &token, next)?;
             tokens.push(token);
             pos = next;
         } else {
@@ -1192,6 +1180,60 @@ fn tokenize_template_command(command: &str) -> Result<Vec<String>, ParseError> {
         }
     }
     Ok(tokens)
+}
+
+fn ensure_template_quoted_token(
+    command: &str,
+    pos: usize,
+    token: &str,
+    next: usize,
+    quote: char,
+) -> Result<(), ParseError> {
+    if next <= pos {
+        return Err(template_parse_error(
+            "template token parser did not advance",
+        ));
+    }
+    if next > command.len() {
+        return Err(template_parse_error(
+            "template token parser advanced past command",
+        ));
+    }
+    if !is_wrapped_template_token(token, quote) {
+        return Err(template_parse_error(
+            "template token parser returned unwrapped quoted token",
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_template_parenthesized_token(
+    command: &str,
+    pos: usize,
+    token: &str,
+    next: usize,
+) -> Result<(), ParseError> {
+    if next <= pos {
+        return Err(template_parse_error(
+            "template token parser did not advance",
+        ));
+    }
+    if next > command.len() {
+        return Err(template_parse_error(
+            "template token parser advanced past command",
+        ));
+    }
+    if !token.starts_with('(') {
+        return Err(template_parse_error(
+            "template token parser returned token without opening parenthesis",
+        ));
+    }
+    if !token.ends_with(')') {
+        return Err(template_parse_error(
+            "template token parser returned token without closing parenthesis",
+        ));
+    }
+    Ok(())
 }
 
 fn parse_template_parenthesized_token(
@@ -2561,9 +2603,6 @@ fn js_escape_template_string(value: &str) -> String {
             '>' => escaped.push_str("\\u003E"),
             '&' => escaped.push_str("\\u0026"),
             '=' => escaped.push_str("\\u003D"),
-            '\n' => escaped.push_str("\\u000A"),
-            '\r' => escaped.push_str("\\u000D"),
-            '\t' => escaped.push_str("\\u0009"),
             '\u{2028}' => escaped.push_str("\\u2028"),
             '\u{2029}' => escaped.push_str("\\u2029"),
             ch if ch.is_control() => push_template_unicode_escape(&mut escaped, u32::from(ch)),
@@ -2652,16 +2691,16 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        LineFormat, TemplatePart, TemplateRuntimeValue, evaluate_template_index,
-        evaluate_template_slice, format_go_time_layout, format_template_bytes,
-        format_template_date, format_template_float, format_template_float_round,
-        format_template_integer_binary, format_template_ordering, format_template_to_date,
-        format_template_to_date_in_zone, is_template_control_assignment_variable_char,
-        is_template_variable_name_char_invalid, js_escape_template_string,
-        parse_go_time_layout_value, parse_template_fractional_nanoseconds,
-        parse_template_parenthesized_token, parse_template_parts, parse_template_quoted_token,
-        parse_template_timezone_offset, parse_variable_template_digits,
-        push_template_unicode_escape, quoted_template_token_value,
+        LineFormat, TemplatePart, TemplateRuntimeValue, ensure_template_parenthesized_token,
+        ensure_template_quoted_token, evaluate_template_index, evaluate_template_slice,
+        format_go_time_layout, format_template_bytes, format_template_date, format_template_float,
+        format_template_float_round, format_template_integer_binary, format_template_ordering,
+        format_template_to_date, format_template_to_date_in_zone,
+        is_template_control_assignment_variable_char, is_template_variable_name_char_invalid,
+        js_escape_template_string, parse_go_time_layout_value,
+        parse_template_fractional_nanoseconds, parse_template_parenthesized_token,
+        parse_template_parts, parse_template_quoted_token, parse_template_timezone_offset,
+        parse_variable_template_digits, push_template_unicode_escape, quoted_template_token_value,
         skip_leading_template_whitespace, substring_template_string, template_compare_values,
         template_index_value, template_slice_bounds, template_value_is_collection,
         tokenize_template_command, trim_template_body_end, urldecode_template_string,
@@ -2697,6 +2736,20 @@ mod tests {
         assert!(is_template_variable_name_char_invalid(' '));
         assert!(is_template_variable_name_char_invalid('\t'));
         assert!(!is_template_variable_name_char_invalid('_'));
+    }
+
+    #[test]
+    fn template_token_guards_reject_non_advancing_or_unwrapped_results() {
+        assert!(ensure_template_quoted_token("`ok`", 0, "`ok`", 4, '`').is_ok());
+        assert!(ensure_template_quoted_token("`ok`", 0, "`ok`", 0, '`').is_err());
+        assert!(ensure_template_quoted_token("`ok`", 0, "`ok`", 5, '`').is_err());
+        assert!(ensure_template_quoted_token("`ok`", 0, "`ok", 3, '`').is_err());
+
+        assert!(ensure_template_parenthesized_token("(ok)", 0, "(ok)", 4).is_ok());
+        assert!(ensure_template_parenthesized_token("(ok)", 0, "(ok)", 0).is_err());
+        assert!(ensure_template_parenthesized_token("(ok)", 0, "(ok)", 5).is_err());
+        assert!(ensure_template_parenthesized_token("(ok)", 0, "ok)", 3).is_err());
+        assert!(ensure_template_parenthesized_token("(ok)", 0, "(ok", 3).is_err());
     }
 
     #[test]
@@ -2752,6 +2805,16 @@ mod tests {
             quoted_template_token_value("\"\"").unwrap(),
             Some(String::new())
         );
+        assert_eq!(quoted_template_token_value("`unterminated").unwrap(), None);
+        assert_eq!(quoted_template_token_value("unterminated`").unwrap(), None);
+        assert_eq!(quoted_template_token_value("\"unterminated").unwrap(), None);
+        assert_eq!(quoted_template_token_value("unterminated\"").unwrap(), None);
+    }
+
+    #[test]
+    fn template_trim_right_allows_adjacent_literal() {
+        let format = LineFormat::new(r#"{{ "ok" -}}tail"#).unwrap();
+        assert_eq!(format.render("line", &BTreeMap::new()), "oktail");
     }
 
     #[test]

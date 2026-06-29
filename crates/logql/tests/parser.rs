@@ -2346,6 +2346,21 @@ fn parses_parenthesized_metric_expression_operands() {
 }
 
 #[test]
+fn parses_parenthesized_metric_query_with_quoted_close_parenthesis() {
+    let query =
+        parse_metric_scalar_arithmetic_query(r#"(count_over_time({app="api"} |= ")" [30s])) * 2"#)
+            .unwrap();
+
+    check!(query.query.aggregation == RangeAggregation::CountOverTime);
+    check!(
+        query.query.stream.pipeline
+            == vec![PipelineStage::LineFilter(
+                LineFilter::new(LineFilterOp::Contains, ")").unwrap()
+            )]
+    );
+}
+
+#[test]
 fn rejects_parenthesized_metric_operands_with_trailing_text() {
     check!(
         parse_metric_scalar_comparison_query(
@@ -2372,6 +2387,22 @@ fn parses_metric_function_arguments_with_nested_commas_and_quotes() {
 
     check!(label_join.query.vector_aggregation.is_some());
     check!(label_join.separator == ",");
+
+    let label_replace = parse_metric_label_replace_query(
+        r#"label_replace(sum by (app, env) (count_over_time({app="api"} |= ")" [30s])), "service", "$1", "app", "(.*)")"#,
+    )
+    .unwrap();
+
+    check!(
+        label_replace.query.vector_aggregation
+            == Some(VectorAggregation {
+                op: VectorAggregationOp::Sum,
+                grouping: Some(VectorGrouping::By(vec![
+                    "app".to_string(),
+                    "env".to_string()
+                ])),
+            })
+    );
 }
 
 #[test]
@@ -2453,6 +2484,36 @@ fn parses_metric_binary_arguments_with_nested_operator_characters() {
     .unwrap();
     check!(set.op == crabka_logql::MetricBinarySetOp::Or);
     check!(set.left.range_ns == 30_000_000_000);
+}
+
+#[test]
+fn parses_metric_binary_arguments_with_quoted_parentheses_and_nested_keywords() {
+    let comparison = parse_metric_binary_comparison_query(
+        r#"count_over_time({app="api"} |= ")" [30s]) > bool count_over_time({app="worker"}[15s])"#,
+    )
+    .unwrap();
+    check!(comparison.left.range_ns == 30_000_000_000);
+    check!(comparison.right.range_ns == 15_000_000_000);
+
+    let arithmetic = parse_metric_binary_arithmetic_query(
+        r#"count_over_time({app="api"} |= ")" [30s] offset -5m) + count_over_time({app="worker"}[15s])"#,
+    )
+    .unwrap();
+    check!(arithmetic.op == crabka_logql::MetricScalarArithmeticOp::Add);
+    check!(arithmetic.left.offset_ns == -300_000_000_000);
+
+    let set = parse_metric_binary_set_query(
+        r#"sum by (or) (count_over_time({app="api"} |= ")" [30s])) and count_over_time({app="worker"}[15s])"#,
+    )
+    .unwrap();
+    check!(set.op == crabka_logql::MetricBinarySetOp::And);
+    check!(
+        set.left.vector_aggregation
+            == Some(VectorAggregation {
+                op: VectorAggregationOp::Sum,
+                grouping: Some(VectorGrouping::By(vec!["or".to_string()])),
+            })
+    );
 }
 
 #[test]
@@ -2957,7 +3018,12 @@ fn rejects_invalid_metric_scalar_literals() {
 #[test]
 fn parses_and_rejects_field_value_literal_boundaries() {
     check!(parse_query(r#"{app="api"} | logfmt | status = -5"#).is_ok());
-    check!(parse_query(r#"{app="api"} | logfmt | status = -"#).is_err());
+    let error = parse_query(r#"{app="api"} | logfmt | status = -"#).unwrap_err();
+    check!(
+        error
+            .to_string()
+            .contains("expected field comparison value")
+    );
     check!(parse_query(r#"{app="api"} | logfmt | size = 1.5MiB"#).is_ok());
     check!(parse_query(r#"{app="api"} | logfmt | size = 1.5XYZ"#).is_err());
 }
