@@ -467,6 +467,8 @@ fn compose_and_alloy_collect_container_resource_metrics() {
         "container metrics should be written into Crabka metrics"
     );
     for metric in [
+        "container_memory_rss",
+        "container_memory_cache",
         "container_network_receive_bytes_total",
         "container_network_transmit_bytes_total",
         "container_fs_reads_bytes_total",
@@ -497,6 +499,18 @@ fn runtime_resources_dashboard_surfaces_stack_cpu_and_memory() {
     assert!(
         dashboard.contains("container_memory_working_set_bytes"),
         "runtime dashboard should chart container working-set memory"
+    );
+    assert!(
+        dashboard.contains("container_memory_rss") && dashboard.contains("container_memory_cache"),
+        "runtime dashboard should break down querier memory into RSS and cache"
+    );
+    assert!(
+        dashboard.contains("Querier memory breakdown"),
+        "runtime dashboard should include a querier memory breakdown panel"
+    );
+    assert!(
+        dashboard.contains("container_label_com_docker_compose_service=~\\\".*-querier\\\""),
+        "querier memory breakdown should focus on querier services"
     );
     assert!(
         dashboard.contains("container_label_com_docker_compose_project"),

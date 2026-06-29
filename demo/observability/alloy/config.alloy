@@ -78,9 +78,9 @@ prometheus.scrape "crabka" {
 }
 
 // Container-level runtime metrics for both Crabka and the supporting
-// observability stack. cAdvisor contributes CPU, memory working set, limits,
-// throttling, network, and filesystem metrics labeled with Docker Compose
-// service metadata.
+// observability stack. cAdvisor contributes CPU, memory working set, RSS/cache,
+// limits, throttling, network, and filesystem metrics labeled with Docker
+// Compose service metadata.
 prometheus.scrape "containers" {
 	targets = [
 		{__address__ = "cadvisor:8080", job = "cadvisor"},
@@ -95,7 +95,7 @@ prometheus.relabel "container_resources" {
 	rule {
 		action        = "keep"
 		source_labels = ["__name__"]
-		regex         = "container_last_seen|container_cpu_usage_seconds_total|container_cpu_cfs_throttled_seconds_total|container_memory_working_set_bytes|container_spec_memory_limit_bytes|container_start_time_seconds|container_network_receive_bytes_total|container_network_transmit_bytes_total|container_fs_reads_bytes_total|container_fs_writes_bytes_total"
+		regex         = "container_last_seen|container_cpu_usage_seconds_total|container_cpu_cfs_throttled_seconds_total|container_memory_working_set_bytes|container_memory_rss|container_memory_cache|container_spec_memory_limit_bytes|container_start_time_seconds|container_network_receive_bytes_total|container_network_transmit_bytes_total|container_fs_reads_bytes_total|container_fs_writes_bytes_total"
 	}
 
 	rule {
