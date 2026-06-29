@@ -298,6 +298,24 @@ mod tests {
     }
 
     #[test]
+    fn collision_uses_unused_rack_not_lower_id_used_rack_broker() {
+        let brokers = vec![
+            broker(0, Some("a")),
+            broker(1, Some("a")),
+            broker(2, Some("a")),
+            broker(3, Some("b")),
+            broker(4, Some("c")),
+        ];
+        let parts = vec![part("t", 0, vec![1, 2, 3], 1)];
+        let s = state_with(parts, brokers);
+
+        let mvs = RackAware.propose(&s, &ctx());
+
+        assert!(mvs.len() == 1);
+        assert!(mvs[0].new_replicas == vec![1, 4, 3]);
+    }
+
+    #[test]
     fn collision_rehomes_leader_when_donor_was_leader() {
         let brokers = vec![
             broker(1, Some("a")),
