@@ -164,6 +164,8 @@ async fn read_one_request<S>(stream: &mut S) -> Result<(i16, i16, i32, Bytes), R
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    const REQUEST_HEADER_FIXED_LEN: usize = 8;
+
     let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf).await.map_err(io_err)?;
     let raw_len = i32::from_be_bytes(len_buf);
@@ -174,7 +176,6 @@ where
     // RequestHeader v2 (flexible): api_key(i16), api_version(i16),
     // correlation_id(i32), client_id(NULLABLE_STRING), tagged_fields(varint=0).
     let mut cur: &[u8] = &frame;
-    const REQUEST_HEADER_FIXED_LEN: usize = 8;
     require_remaining(cur.remaining(), REQUEST_HEADER_FIXED_LEN)?;
     let api_key_n = cur.get_i16();
     let api_version = cur.get_i16();
@@ -660,7 +661,8 @@ mod tests {
         })
     }
 
-    fn submit_change_body(records: Vec<MetadataRecord>) -> Bytes {
+    fn submit_change_body(records: &[MetadataRecord]) -> Bytes {
+        let records = records.to_vec();
         let records =
             <serde_wincode::SerdeCompat<Vec<MetadataRecord>> as wincode::Serialize>::serialize(
                 &records,
@@ -936,7 +938,7 @@ mod tests {
 
         let ok_body = super::dispatch(
             API_KEY_SUBMIT_CHANGE,
-            submit_change_body(vec![topic_record("submit-ok")]),
+            submit_change_body(&[topic_record("submit-ok")]),
             &engine,
         )
         .await
@@ -966,20 +968,17 @@ mod tests {
         let topic = topic_record("duplicate");
         let first = super::dispatch(
             API_KEY_SUBMIT_CHANGE,
-            submit_change_body(vec![topic.clone()]),
+            submit_change_body(std::slice::from_ref(&topic)),
             &engine,
         )
         .await
         .expect("first submit");
         assert!(decode_submit_change_response(&first).error_code == 0);
 
-        let duplicate = super::dispatch(
-            API_KEY_SUBMIT_CHANGE,
-            submit_change_body(vec![topic]),
-            &engine,
-        )
-        .await
-        .expect("duplicate submit");
+        let duplicate =
+            super::dispatch(API_KEY_SUBMIT_CHANGE, submit_change_body(&[topic]), &engine)
+                .await
+                .expect("duplicate submit");
         let duplicate = decode_submit_change_response(&duplicate);
         assert!(duplicate.error_code == 2);
         assert!(duplicate.leader_hint == -1);

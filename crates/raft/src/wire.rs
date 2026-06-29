@@ -55,11 +55,11 @@ impl CrabkaSubmitChangeRequest {
     }
 
     pub fn decode_v0(buf: &mut &[u8]) -> Result<Self, ProtocolError> {
-        require_remaining(*buf, I32_LEN)?;
+        require_remaining(buf, I32_LEN)?;
         let len = buf.get_i32();
         let len = usize::try_from(len)
             .map_err(|_| ProtocolError::InvalidValue("negative records length"))?;
-        require_remaining(*buf, len)?;
+        require_remaining(buf, len)?;
         let records = Bytes::copy_from_slice(&buf[..len]);
         buf.advance(len);
         Ok(Self { records })
@@ -83,7 +83,7 @@ impl CrabkaSubmitChangeResponse {
     }
 
     pub fn decode_v0(buf: &mut &[u8]) -> Result<Self, ProtocolError> {
-        require_remaining(*buf, SUBMIT_CHANGE_RESPONSE_LEN)?;
+        require_remaining(buf, SUBMIT_CHANGE_RESPONSE_LEN)?;
         Ok(Self {
             error_code: buf.get_i16(),
             leader_hint: buf.get_i64(),
@@ -106,7 +106,7 @@ impl CrabkaMetadataFetchRequest {
     }
 
     pub fn decode_v0(buf: &mut &[u8]) -> Result<Self, ProtocolError> {
-        require_remaining(*buf, METADATA_FETCH_REQUEST_LEN)?;
+        require_remaining(buf, METADATA_FETCH_REQUEST_LEN)?;
         Ok(Self {
             fetch_offset: buf.get_i64(),
             max_bytes: buf.get_i32(),
@@ -143,7 +143,7 @@ impl CrabkaMetadataFetchResponse {
     }
 
     pub fn decode_v0(buf: &mut &[u8]) -> Result<Self, ProtocolError> {
-        require_remaining(*buf, METADATA_FETCH_RESPONSE_FIXED_LEN)?;
+        require_remaining(buf, METADATA_FETCH_RESPONSE_FIXED_LEN)?;
         let error_code = buf.get_i16();
         let leader_hint = buf.get_i64();
         let log_start_offset = buf.get_i64();
@@ -151,7 +151,7 @@ impl CrabkaMetadataFetchResponse {
         let len = buf.get_i32();
         let len = usize::try_from(len)
             .map_err(|_| ProtocolError::InvalidValue("negative records length"))?;
-        require_remaining(*buf, len)?;
+        require_remaining(buf, len)?;
         let records = Bytes::copy_from_slice(&buf[..len]);
         buf.advance(len);
         Ok(Self {
