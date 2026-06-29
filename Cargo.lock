@@ -3287,6 +3287,7 @@ dependencies = [
  "crabka-logfmt",
  "flate2",
  "jemalloc_pprof",
+ "mutants",
  "opentelemetry",
  "opentelemetry-appender-tracing",
  "opentelemetry-otlp",
