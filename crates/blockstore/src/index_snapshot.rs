@@ -72,7 +72,10 @@ pub async fn list_index_snapshot_objects(
     let mut objects = Vec::new();
     while let Some(meta) = stream.next().await {
         let meta = meta?;
-        if meta.location.as_ref().ends_with(".json") {
+        if std::path::Path::new(meta.location.as_ref())
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+        {
             objects.push(meta);
         }
     }

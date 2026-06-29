@@ -363,7 +363,7 @@ impl ProfileIndex {
         path: &Path,
         max_bytes: usize,
     ) -> Result<Self> {
-        let meta = store.head(&path).await?;
+        let meta = store.head(path).await?;
         if meta.size > max_bytes as u64 {
             return Err(BlockStoreError::InvalidBlock(format!(
                 "profile index snapshot `{}` is {} bytes, exceeds cap of {max_bytes} bytes",

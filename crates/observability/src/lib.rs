@@ -2604,6 +2604,7 @@ impl BufferedLogHotTail {
         }
     }
 
+    #[must_use]
     pub fn prune_compacted(&self, frontier: &CompactionFrontier) -> usize {
         self.buffer
             .lock()
@@ -2806,7 +2807,7 @@ async fn poll_log_hot_tail_once_with_frontier(
     let decoded = records.len();
     hot_tail.append_records(records);
     if let Some(frontier) = frontier {
-        hot_tail.prune_compacted(&frontier.snapshot());
+        let _ = hot_tail.prune_compacted(&frontier.snapshot());
     }
     Ok(decoded)
 }
@@ -16374,10 +16375,10 @@ fn count_stream_map_lines(
         .fold(0_usize, usize::saturating_add)
 }
 
-fn object_store_stream_blocks_in_scan_order<'a>(
-    blocks: &'a [BlockDescriptor],
+fn object_store_stream_blocks_in_scan_order(
+    blocks: &[BlockDescriptor],
     direction: LokiDirection,
-) -> Vec<&'a BlockDescriptor> {
+) -> Vec<&BlockDescriptor> {
     let mut blocks = blocks.iter().collect::<Vec<_>>();
     match direction {
         LokiDirection::Forward => {
@@ -20937,7 +20938,7 @@ mod tests {
         let api = label_index.insert_series(tenant, crabka_blockstore::labels([("app", "api")]));
         let mut block_index = BlockIndex::default();
 
-        for block_id in 0..4 {
+        for block_id in 0_i64..4 {
             let start_ns = block_id * 10;
             let end_ns = start_ns + 9;
             let block = write_log_block_to_object_store(
@@ -20946,13 +20947,13 @@ mod tests {
                 &BlockKey::new(
                     tenant,
                     0,
-                    start_ns as i64,
-                    end_ns as i64,
-                    TimeRange::new(start_ns as i64, end_ns as i64).unwrap(),
+                    start_ns,
+                    end_ns,
+                    TimeRange::new(start_ns, end_ns).unwrap(),
                 ),
                 vec![LogRow::new(
                     api,
-                    end_ns as i64,
+                    end_ns,
                     format!("api error {block_id}"),
                     BTreeMap::new(),
                 )],

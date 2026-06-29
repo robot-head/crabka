@@ -36,9 +36,6 @@ fn fetch_error_action(e: &ClientError) -> FetchErrorAction {
         | ClientError::Disconnected
         | ClientError::Timeout(_)
         | ClientError::Io(_) => FetchErrorAction::Reconnect,
-        ClientError::IncompatibleVersion { .. }
-        | ClientError::Server { .. }
-        | ClientError::Codec(_) => FetchErrorAction::RetrySameConnection,
         _ => FetchErrorAction::RetrySameConnection,
     }
 }
