@@ -50,20 +50,9 @@ pub(crate) async fn handle(
         let results = req
             .creations
             .iter()
-            .map(|_| AclCreationResult {
-                error_code: codes::CLUSTER_AUTHORIZATION_FAILED,
-                error_message: Some("create-acls denied".into()),
-                ..Default::default()
-            })
+            .map(|_| acl_error_result(codes::CLUSTER_AUTHORIZATION_FAILED, "create-acls denied"))
             .collect();
-        return encode_response(
-            &CreateAclsResponse {
-                throttle_time_ms: 0,
-                results,
-                ..Default::default()
-            },
-            api_version,
-        );
+        return encode_response(&create_acls_response(results), api_version);
     }
 
     let mut results: Vec<AclCreationResult> = Vec::with_capacity(req.creations.len());
@@ -77,11 +66,7 @@ pub(crate) async fn handle(
                 to_submit.push((idx, MetadataRecord::V1AccessControlEntry(entry)));
             }
             Err((code, msg)) => {
-                results.push(AclCreationResult {
-                    error_code: code,
-                    error_message: Some(msg.into()),
-                    ..Default::default()
-                });
+                results.push(acl_error_result(code, msg));
             }
         }
     }
@@ -90,45 +75,77 @@ pub(crate) async fn handle(
         let records: Vec<MetadataRecord> = to_submit.iter().map(|(_, r)| r.clone()).collect();
         if let Err(e) = broker.controller.submit_change(records).await {
             tracing::warn!(error = %e, "create-acls submit failed");
-            for (idx, _) in &to_submit {
-                results[*idx] = AclCreationResult {
-                    error_code: codes::COORDINATOR_NOT_AVAILABLE,
-                    error_message: Some(format!("submit failed: {e}")),
-                    ..Default::default()
-                };
-            }
+            apply_submit_error(&mut results, &to_submit, &e);
         }
     }
 
     // Audit: emit one AdminOperation record for successfully-created ACLs.
     // `to_submit` carries (result_idx, record) for every creation that passed
     // validation; entries whose result slot still has error_code == 0 were committed.
-    let created_acls: Vec<crabka_audit::AuditResource> = to_submit
+    audit_created_acls(
+        broker.audit_log.as_ref(),
+        ctx,
+        created_acl_resources(&req, &results, &to_submit),
+    );
+
+    encode_response(&create_acls_response(results), api_version)
+}
+
+fn acl_error_result(code: i16, msg: impl Into<String>) -> AclCreationResult {
+    AclCreationResult {
+        error_code: code,
+        error_message: Some(msg.into()),
+        ..Default::default()
+    }
+}
+
+fn create_acls_response(results: Vec<AclCreationResult>) -> CreateAclsResponse {
+    CreateAclsResponse {
+        results,
+        ..Default::default()
+    }
+}
+
+fn apply_submit_error<E: std::fmt::Display>(
+    results: &mut [AclCreationResult],
+    to_submit: &[(usize, MetadataRecord)],
+    err: E,
+) {
+    let msg = format!("submit failed: {err}");
+    for (idx, _) in to_submit {
+        results[*idx] = acl_error_result(codes::COORDINATOR_NOT_AVAILABLE, msg.clone());
+    }
+}
+
+fn created_acl_resources(
+    req: &CreateAclsRequest,
+    results: &[AclCreationResult],
+    to_submit: &[(usize, MetadataRecord)],
+) -> Vec<crabka_audit::AuditResource> {
+    to_submit
         .iter()
         .filter(|(idx, _)| results[*idx].error_code == 0)
         .map(|(idx, _)| crabka_audit::AuditResource {
             resource_type: "Acl".to_string(),
             name: req.creations[*idx].resource_name.clone(),
         })
-        .collect();
+        .collect()
+}
+
+fn audit_created_acls(
+    audit_log: &crabka_audit::AuditLog,
+    ctx: &crate::handlers::RequestContext<'_>,
+    created_acls: Vec<crabka_audit::AuditResource>,
+) {
     if !created_acls.is_empty() {
         crate::handlers::audit_admin(
-            broker.audit_log.as_ref(),
+            audit_log,
             ctx,
             "CreateAcls",
             crabka_audit::AuditOutcome::Success,
             created_acls,
         );
     }
-
-    encode_response(
-        &CreateAclsResponse {
-            throttle_time_ms: 0,
-            results,
-            ..Default::default()
-        },
-        api_version,
-    )
 }
 
 fn validate(
@@ -180,4 +197,328 @@ fn encode_response<R: Encode>(
     resp.encode(&mut body, api_version)
         .map_err(|e| crate::error::BrokerError::Replication(format!("encode CreateAcls: {e}")))?;
     Ok(Bytes::from(body))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert2::assert;
+    use crabka_metadata::{AclOperation, PatternType, PermissionType, ResourceType};
+    use crabka_protocol::Decode;
+    use crabka_protocol::owned::create_acls_request::AclCreation;
+    use crabka_security::{AuthMethod, Principal};
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    use crate::authorizer::{AuthorizationRequest, Authorizer};
+    use crate::broker::{Broker, BrokerHandle};
+    use crate::config::BrokerConfig;
+
+    const VERSION: i16 = 3;
+    const RESOURCE_TYPE_TOPIC: i8 = 2;
+    const PATTERN_TYPE_LITERAL: i8 = 3;
+    const OPERATION_READ: i8 = 3;
+    const OPERATION_WRITE: i8 = 4;
+    const PERMISSION_ALLOW: i8 = 3;
+
+    #[derive(Debug)]
+    struct DenyAll;
+
+    impl Authorizer for DenyAll {
+        fn authorize(
+            &self,
+            _source: &dyn crabka_authz::AclSource,
+            _req: &AuthorizationRequest<'_>,
+        ) -> AuthorizationResult {
+            AuthorizationResult::Deny
+        }
+    }
+
+    fn creation(resource_name: &str, principal: &str, operation: i8) -> AclCreation {
+        AclCreation {
+            resource_type: RESOURCE_TYPE_TOPIC,
+            resource_name: resource_name.into(),
+            resource_pattern_type: PATTERN_TYPE_LITERAL,
+            principal: principal.into(),
+            host: "*".into(),
+            operation,
+            permission_type: PERMISSION_ALLOW,
+            ..Default::default()
+        }
+    }
+
+    fn request(creations: Vec<AclCreation>) -> CreateAclsRequest {
+        CreateAclsRequest {
+            creations,
+            ..Default::default()
+        }
+    }
+
+    fn decode_response(bytes: Bytes) -> CreateAclsResponse {
+        let mut cur: &[u8] = bytes.as_ref();
+        let resp = CreateAclsResponse::decode(&mut cur, VERSION).expect("decode response");
+        assert!(cur.is_empty(), "response decoder consumed all bytes");
+        resp
+    }
+
+    fn test_context<'a>(
+        principal: &'a Principal,
+        peer: &'a SocketAddr,
+    ) -> crate::handlers::RequestContext<'a> {
+        crate::handlers::RequestContext {
+            principal,
+            peer,
+            client_id: "admin-client",
+            sendfile_capable: false,
+            connection_listener_name: "PLAINTEXT",
+        }
+    }
+
+    async fn start_broker(authorizer: Arc<dyn Authorizer>) -> (BrokerHandle, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
+        cfg.audit_enabled = false;
+        cfg.authorizer = authorizer;
+        let handle = Broker::start(cfg).await.expect("start broker");
+        (handle, dir)
+    }
+
+    fn principal(name: &str) -> Principal {
+        Principal {
+            name: name.into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        }
+    }
+
+    fn peer() -> SocketAddr {
+        "127.0.0.1:9092".parse().unwrap()
+    }
+
+    fn all_acls(handle: &BrokerHandle) -> Vec<crabka_metadata::AclEntry> {
+        handle
+            .controller_image_for_test()
+            .all_acls()
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn validate_accepts_exact_length_boundaries_and_rejects_above_them() {
+        let resource_name = "r".repeat(MAX_RESOURCE_NAME_LEN);
+        let principal_name = format!("User:{}", "a".repeat(MAX_PRINCIPAL_LEN - "User:".len()));
+        let c = creation(&resource_name, &principal_name, OPERATION_READ);
+
+        let entry = validate(&c).expect("exact boundary lengths are valid");
+        assert!(entry.resource_name == resource_name);
+        assert!(entry.principal == principal_name);
+
+        let mut too_long_resource = c.clone();
+        too_long_resource.resource_name = "r".repeat(MAX_RESOURCE_NAME_LEN + 1);
+        let err = validate(&too_long_resource).unwrap_err();
+        assert!(err.0 == codes::INVALID_REQUEST);
+        assert!(err.1 == "resource_name too long");
+
+        let mut too_long_principal = c;
+        too_long_principal.principal =
+            format!("User:{}", "a".repeat(MAX_PRINCIPAL_LEN + 1 - "User:".len()));
+        let err = validate(&too_long_principal).unwrap_err();
+        assert!(err.0 == codes::INVALID_REQUEST);
+        assert!(err.1 == "principal too long");
+    }
+
+    #[test]
+    fn validate_rejects_malformed_resource_principal_and_host() {
+        let valid = creation("topic-a", "User:alice", OPERATION_READ);
+        let entry = validate(&valid).expect("valid ACL creation");
+        assert!(entry.resource_type == ResourceType::Topic);
+        assert!(entry.pattern_type == PatternType::Literal);
+        assert!(entry.operation == AclOperation::Read);
+        assert!(entry.permission_type == PermissionType::Allow);
+
+        let mut empty_name = valid.clone();
+        empty_name.resource_name.clear();
+        assert!(validate(&empty_name).unwrap_err().1 == "empty resource_name");
+
+        let mut nul_name = valid.clone();
+        nul_name.resource_name = "bad\0name".into();
+        assert!(validate(&nul_name).unwrap_err().1 == "resource_name contains NUL");
+
+        let mut bad_principal = valid.clone();
+        bad_principal.principal = "alice".into();
+        assert!(validate(&bad_principal).unwrap_err().1 == "principal must start with User:");
+
+        let mut empty_host = valid;
+        empty_host.host.clear();
+        assert!(validate(&empty_host).unwrap_err().1 == "empty host");
+    }
+
+    #[test]
+    fn error_and_submit_helpers_preserve_non_default_result_fields() {
+        let err = acl_error_result(codes::INVALID_REQUEST, "bad acl");
+        assert!(err.error_code == codes::INVALID_REQUEST);
+        assert!(err.error_message.as_deref() == Some("bad acl"));
+
+        let mut results = vec![
+            AclCreationResult::default(),
+            acl_error_result(codes::INVALID_REQUEST, "already invalid"),
+        ];
+        let submitted = vec![(
+            0usize,
+            MetadataRecord::V1AccessControlEntry(
+                validate(&creation("topic-a", "User:alice", OPERATION_READ))
+                    .expect("valid creation"),
+            ),
+        )];
+
+        apply_submit_error(&mut results, &submitted, "not controller");
+
+        assert!(results[0].error_code == codes::COORDINATOR_NOT_AVAILABLE);
+        assert!(results[0].error_message.as_deref() == Some("submit failed: not controller"));
+        assert!(results[1].error_code == codes::INVALID_REQUEST);
+        assert!(results[1].error_message.as_deref() == Some("already invalid"));
+    }
+
+    #[test]
+    fn created_acl_resources_include_only_successful_submitted_creations() {
+        let req = request(vec![
+            creation("topic-ok", "User:alice", OPERATION_READ),
+            creation("topic-bad", "User:bob", OPERATION_WRITE),
+        ]);
+        let submitted = vec![
+            (
+                0usize,
+                MetadataRecord::V1AccessControlEntry(validate(&req.creations[0]).unwrap()),
+            ),
+            (
+                1usize,
+                MetadataRecord::V1AccessControlEntry(validate(&req.creations[1]).unwrap()),
+            ),
+        ];
+        let results = vec![
+            AclCreationResult::default(),
+            acl_error_result(codes::COORDINATOR_NOT_AVAILABLE, "submit failed"),
+        ];
+
+        let resources = created_acl_resources(&req, &results, &submitted);
+
+        assert!(resources.len() == 1);
+        assert!(resources[0].resource_type == "Acl");
+        assert!(resources[0].name == "topic-ok");
+    }
+
+    #[test]
+    fn audit_created_acls_skips_empty_and_emits_non_empty_admin_event() {
+        let (log, mut rx) = crabka_audit::AuditLog::new(8);
+        let p = principal("admin");
+        let peer = peer();
+        let ctx = test_context(&p, &peer);
+
+        audit_created_acls(log.as_ref(), &ctx, Vec::new());
+        assert!(
+            rx.try_recv().is_err(),
+            "empty audit resource list is a no-op"
+        );
+
+        audit_created_acls(
+            log.as_ref(),
+            &ctx,
+            vec![crabka_audit::AuditResource {
+                resource_type: "Acl".into(),
+                name: "topic-ok".into(),
+            }],
+        );
+
+        let event = rx.try_recv().expect("admin audit event");
+        let crabka_audit::AuditEvent::AdminOperation {
+            outcome,
+            principal,
+            operation,
+            resources,
+            ..
+        } = event
+        else {
+            panic!("expected AdminOperation");
+        };
+        assert!(outcome == crabka_audit::AuditOutcome::Success);
+        assert!(principal.name == "admin");
+        assert!(operation == "CreateAcls");
+        assert!(resources.len() == 1);
+        assert!(resources[0].resource_type == "Acl");
+        assert!(resources[0].name == "topic-ok");
+    }
+
+    #[test]
+    fn encode_response_writes_decodable_results() {
+        let bytes = encode_response(
+            &create_acls_response(vec![acl_error_result(codes::INVALID_REQUEST, "bad acl")]),
+            VERSION,
+        )
+        .expect("encode");
+        let decoded = decode_response(bytes);
+
+        assert!(decoded.throttle_time_ms == 0);
+        assert!(decoded.results.len() == 1);
+        assert!(decoded.results[0].error_code == codes::INVALID_REQUEST);
+        assert!(decoded.results[0].error_message.as_deref() == Some("bad acl"));
+    }
+
+    #[tokio::test]
+    async fn handle_denies_cluster_alter_for_each_creation() {
+        let (broker_handle, _dir) = start_broker(Arc::new(DenyAll)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let p = principal("alice");
+        let peer = peer();
+        let ctx = test_context(&p, &peer);
+        let req = request(vec![
+            creation("topic-a", "User:bob", OPERATION_READ),
+            creation("topic-b", "User:carol", OPERATION_WRITE),
+        ]);
+
+        let resp = handle(&broker, req, &ctx, VERSION).await.expect("handle");
+        let resp = decode_response(resp);
+
+        assert!(resp.throttle_time_ms == 0);
+        assert!(resp.results.len() == 2);
+        for result in &resp.results {
+            assert!(result.error_code == codes::CLUSTER_AUTHORIZATION_FAILED);
+            assert!(result.error_message.as_deref() == Some("create-acls denied"));
+        }
+        assert!(all_acls(&broker_handle).is_empty());
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_submits_valid_creations_and_reports_invalid_creations_in_order() {
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let p = principal("admin");
+        let peer = peer();
+        let ctx = test_context(&p, &peer);
+        let mut invalid = creation("", "User:bob", OPERATION_WRITE);
+        invalid.resource_name.clear();
+        let req = request(vec![
+            creation("topic-a", "User:alice", OPERATION_READ),
+            invalid,
+        ]);
+
+        let resp = handle(&broker, req, &ctx, VERSION).await.expect("handle");
+        let resp = decode_response(resp);
+
+        assert!(resp.throttle_time_ms == 0);
+        assert!(resp.results.len() == 2);
+        assert!(resp.results[0].error_code == 0);
+        assert!(resp.results[0].error_message.is_none());
+        assert!(resp.results[1].error_code == codes::INVALID_REQUEST);
+        assert!(resp.results[1].error_message.as_deref() == Some("empty resource_name"));
+
+        let acls = all_acls(&broker_handle);
+        assert!(acls.len() == 1);
+        assert!(acls[0].resource_type == ResourceType::Topic);
+        assert!(acls[0].resource_name == "topic-a");
+        assert!(acls[0].principal == "User:alice");
+        assert!(acls[0].operation == AclOperation::Read);
+        broker_handle.shutdown().await;
+    }
 }

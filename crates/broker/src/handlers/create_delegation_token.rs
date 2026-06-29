@@ -176,7 +176,6 @@ pub(crate) async fn handle<S: BuildHasher>(
     let (requester_type, requester_name) = (caller.principal_type, caller.name);
 
     CreateDelegationTokenResponse {
-        error_code: 0,
         principal_type: owner.principal_type.clone(),
         principal_name: owner.name.clone(),
         token_requester_principal_type: requester_type,
