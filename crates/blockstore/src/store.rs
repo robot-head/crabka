@@ -31,7 +31,7 @@ pub struct ScanTableRequest<'a> {
 pub struct BlockStore {
     store: Arc<dyn ObjectStore>,
     base: Url,
-    index: Index,
+    index: Arc<Index>,
 }
 
 impl BlockStore {
@@ -40,7 +40,7 @@ impl BlockStore {
         Self {
             store,
             base,
-            index: Index::new(),
+            index: Arc::new(Index::new()),
         }
     }
 
@@ -55,7 +55,7 @@ impl BlockStore {
     }
 
     pub fn index_mut(&mut self) -> &mut Index {
-        &mut self.index
+        Arc::make_mut(&mut self.index)
     }
 
     #[must_use]
@@ -303,6 +303,33 @@ mod tests {
             .resolve("t", &[LabelMatcher::new("app", MatchOp::Eq, "api")])
             .unwrap();
         assert!(got == std::collections::BTreeSet::from([api.fingerprint()]));
+    }
+
+    #[tokio::test]
+    async fn cloned_blockstore_shares_index_until_mutated() {
+        let (bs, _schema) = seeded_store().await;
+        let cloned = bs.clone();
+        assert!(Arc::ptr_eq(&bs.index, &cloned.index));
+
+        let mut mutated = cloned.clone();
+        let mut web = Labels::new();
+        web.insert("app", "web");
+        mutated.index_mut().add_series("t", web.fingerprint(), &web);
+
+        assert!(!Arc::ptr_eq(&bs.index, &mutated.index));
+        assert!(
+            bs.index()
+                .resolve("t", &[LabelMatcher::new("app", MatchOp::Eq, "web")])
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            mutated
+                .index()
+                .resolve("t", &[LabelMatcher::new("app", MatchOp::Eq, "web")])
+                .unwrap()
+                == std::collections::BTreeSet::from([web.fingerprint()])
+        );
     }
 
     #[tokio::test]

@@ -15,6 +15,7 @@ use crate::block::BlockMeta;
 use crate::block_index::BlockIndex;
 use crate::error::{BlockStoreError, Result};
 use crate::index::Index;
+use crate::index_snapshot::{latest_index_snapshot_path, put_index_snapshot};
 use crate::labels::{Labels, SeriesFingerprint};
 use crate::matcher::LabelMatcher;
 
@@ -330,8 +331,23 @@ impl ProfileIndex {
         Ok(())
     }
 
+    pub async fn save_latest_snapshot(
+        &self,
+        store: &Arc<dyn ObjectStore>,
+        key: &str,
+    ) -> Result<String> {
+        put_index_snapshot(store, key, serde_json::to_vec(self)?).await
+    }
+
     pub async fn load(store: &Arc<dyn ObjectStore>, key: &str) -> Result<Self> {
         Self::load_with_cap(store, key, MAX_PROFILE_INDEX_SNAPSHOT_BYTES).await
+    }
+
+    pub async fn load_latest_snapshot(store: &Arc<dyn ObjectStore>, key: &str) -> Result<Self> {
+        if let Some(path) = latest_index_snapshot_path(store, key).await? {
+            return Self::load_path_with_cap(store, &path, MAX_PROFILE_INDEX_SNAPSHOT_BYTES).await;
+        }
+        Self::load(store, key).await
     }
 
     async fn load_with_cap(
@@ -339,15 +355,22 @@ impl ProfileIndex {
         key: &str,
         max_bytes: usize,
     ) -> Result<Self> {
-        let path = Path::from(key);
-        let meta = store.head(&path).await?;
+        Self::load_path_with_cap(store, &Path::from(key), max_bytes).await
+    }
+
+    async fn load_path_with_cap(
+        store: &Arc<dyn ObjectStore>,
+        path: &Path,
+        max_bytes: usize,
+    ) -> Result<Self> {
+        let meta = store.head(path).await?;
         if meta.size > max_bytes as u64 {
             return Err(BlockStoreError::InvalidBlock(format!(
-                "profile index snapshot `{key}` is {} bytes, exceeds cap of {max_bytes} bytes",
-                meta.size
+                "profile index snapshot `{}` is {} bytes, exceeds cap of {max_bytes} bytes",
+                path, meta.size
             )));
         }
-        let bytes = store.get(&path).await?.bytes().await?;
+        let bytes = store.get(path).await?.bytes().await?;
         Ok(serde_json::from_slice(&bytes)?)
     }
 }
@@ -727,6 +750,59 @@ mod tests {
             .unwrap();
         assert!(loaded.profile_types("t").len() == 2);
         assert!(loaded.stacktrace_partitions("blocks/p1.parquet") == vec![0, 1]);
+    }
+
+    #[tokio::test]
+    async fn latest_snapshot_round_trips_without_rewriting_legacy_key() {
+        use object_store::memory::InMemory;
+
+        let mut index = seed();
+        index.add_profile_block("t", "blocks/p1.parquet", vec![0, 1]);
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+
+        let snapshot_key = index
+            .save_latest_snapshot(&store, "index/profiles.json")
+            .await
+            .unwrap();
+        let loaded = ProfileIndex::load_latest_snapshot(&store, "index/profiles.json")
+            .await
+            .unwrap();
+
+        assert!(snapshot_key.starts_with("index/profiles/snapshots/"));
+        assert!(
+            store
+                .head(&Path::from("index/profiles.json"))
+                .await
+                .is_err()
+        );
+        assert!(loaded.profile_types("t").len() == 2);
+        assert!(loaded.stacktrace_partitions("blocks/p1.parquet") == vec![0, 1]);
+    }
+
+    #[tokio::test]
+    async fn latest_snapshot_retains_bounded_snapshot_set() {
+        use futures::StreamExt as _;
+        use object_store::memory::InMemory;
+
+        let index = seed();
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+
+        for _ in 0..(crate::index_snapshot::DEFAULT_INDEX_SNAPSHOT_RETAIN + 3) {
+            index
+                .save_latest_snapshot(&store, "index/profiles.json")
+                .await
+                .unwrap();
+        }
+
+        let prefix = Path::from(crate::index_snapshot_prefix_for_key("index/profiles.json"));
+        let mut stream = store.list(Some(&prefix));
+        let mut count = 0;
+        while let Some(meta) = stream.next().await {
+            meta.unwrap();
+            count += 1;
+        }
+
+        assert!(count == crate::index_snapshot::DEFAULT_INDEX_SNAPSHOT_RETAIN);
     }
 
     #[tokio::test]

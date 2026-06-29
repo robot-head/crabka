@@ -1,12 +1,11 @@
 name: publish-demo-image
 
-# Manually publishes the all-in-one demo image for the full-signal
-# observability demo (demo/observability/). Unlike the per-service apko images
-# in publish-images.yml, this is a single convenience bundle of every Crabka
-# binary the demo needs — built `--features heap-profiling` with debug symbols
-# for readable CPU/heap flamegraphs — via demo/observability/Dockerfile. It
-# exists so people can `docker compose up` the demo without a lengthy local
-# build.
+# Manually publishes the all-in-one image for the full-signal observability demo
+# (demo/observability/). The payload is built as signed APK packages with
+# melange, then apko assembles and publishes a multi-arch OCI image. Crabka
+# service binaries are built with `--features heap-profiling`; the demo app is
+# built without that feature because its dependency graph already defines a
+# global allocator.
 #
 # Trigger from the Actions tab ("Run workflow") and pass the image tag.
 #
@@ -31,18 +30,105 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build-push:
-    runs-on: ubuntu-latest
-    # The Dockerfile compiles every demo binary in release with debug symbols;
-    # a cold cargo build of the workspace is slow, so allow plenty of headroom.
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
-    permissions:
-      contents: read
-      packages: write # push the image to GHCR via GITHUB_TOKEN
     steps:
       - uses: actions/checkout@v7
 
-      - uses: docker/setup-buildx-action@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+
+      - name: Install melange
+        run: |
+          go install chainguard.dev/melange@latest
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+
+      - name: Cache melange/cargo build artifacts
+        uses: actions/cache@v6
+        with:
+          path: .melange-cache
+          key: demo-melange-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            demo-melange-${{ matrix.arch }}-
+
+      - name: Set melange package version from the workspace
+        run: |
+          set -euo pipefail
+          ver="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml","rb"))["workspace"]["package"]["version"])')"
+          sed -i -E "s/^(  version:).*/\1 ${ver}/" packaging/melange/crabka-demo.yaml
+          echo "crabka-demo package version set to ${ver}"
+
+      - name: Build demo APK package
+        run: |
+          mkdir -p packages .melange-cache
+          melange keygen "melange-demo-${{ matrix.arch }}.rsa"
+          melange build packaging/melange/crabka-demo.yaml \
+            --source-dir . \
+            --signing-key "melange-demo-${{ matrix.arch }}.rsa" \
+            --arch ${{ matrix.arch }} \
+            --runner docker \
+            --cache-dir "$PWD/.melange-cache" \
+            --out-dir packages/
+
+      - name: Upload APK repository + keyring
+        uses: actions/upload-artifact@v7
+        with:
+          name: demo-apk-repository-${{ matrix.arch }}
+          path: |
+            packages/
+            melange-demo-${{ matrix.arch }}.rsa.pub
+          retention-days: 1
+          if-no-files-found: error
+
+  publish:
+    needs: [build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+
+      - name: Install apko
+        run: |
+          go install chainguard.dev/apko@latest
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+
+      - name: Download x86_64 APK repository
+        uses: actions/download-artifact@v8
+        with:
+          name: demo-apk-repository-x86_64
+          path: dist/x86_64
+
+      - name: Download aarch64 APK repository
+        uses: actions/download-artifact@v8
+        with:
+          name: demo-apk-repository-aarch64
+          path: dist/aarch64
+
+      - name: Assemble multi-arch APK repository
+        run: |
+          set -euo pipefail
+          mkdir -p packages
+          cp -r dist/x86_64/packages/. packages/
+          cp -r dist/aarch64/packages/. packages/
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v4
@@ -51,22 +137,52 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push demo image
-        uses: docker/build-push-action@v7
+      - name: Publish demo image + capture digest
+        id: publish
+        run: |
+          set -euo pipefail
+          TAGS=(
+            "ghcr.io/${{ github.repository_owner }}/crabka-demo:${{ inputs.tag }}"
+          )
+          if [[ "${{ inputs.tag }}" != "latest" ]]; then
+            TAGS+=("ghcr.io/${{ github.repository_owner }}/crabka-demo:latest")
+          fi
+
+          mkdir -p sbom
+          REF="$(apko publish packaging/apko/crabka-demo.yaml \
+            "${TAGS[@]}" \
+            --sbom-path sbom \
+            --repository-append "${PWD}/packages" \
+            --keyring-append "${PWD}/dist/x86_64/melange-demo-x86_64.rsa.pub" \
+            --keyring-append "${PWD}/dist/aarch64/melange-demo-aarch64.rsa.pub")"
+          echo "apko published: ${REF}"
+
+          DIGEST="$(printf '%s\n' "${REF}" | grep -oE 'sha256:[0-9a-f]{64}' | head -n1)"
+          if [[ -z "${DIGEST}" ]]; then
+            echo "::error::could not parse image digest from apko output" >&2
+            exit 1
+          fi
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+
+          SBOM="$(find sbom -type f -name '*index*.spdx.json' | head -n1 || true)"
+          [[ -z "${SBOM}" ]] && SBOM="$(find sbom -type f -name '*.spdx.json' | head -n1 || true)"
+          if [[ -z "${SBOM}" ]]; then
+            echo "::error::no SBOM produced by apko in ./sbom" >&2
+            exit 1
+          fi
+          echo "sbom=${SBOM}" >> "$GITHUB_OUTPUT"
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v4
         with:
-          context: .
-          file: demo/observability/Dockerfile
-          push: true
-          # Publish the requested tag AND move `latest`: the demo compose
-          # (demo/observability/docker-compose.yml) pulls `:latest`, so every
-          # versioned publish updates it to keep `docker compose up` working
-          # out of the box while the version tag stays an immutable pin. The
-          # second line is empty when `tag` is already `latest`, so it is never
-          # listed twice (build-push-action ignores blank tag lines).
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/crabka-demo:${{ inputs.tag }}
-            ${{ inputs.tag != 'latest' && format('ghcr.io/{0}/crabka-demo:latest', github.repository_owner) || '' }}
-          # Cache the Docker layers across runs (the cargo build dominates, but
-          # the apt/base layers and any unchanged stages still benefit).
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          subject-name: ghcr.io/${{ github.repository_owner }}/crabka-demo
+          subject-digest: ${{ steps.publish.outputs.digest }}
+          push-to-registry: true
+
+      - name: Attest SBOM
+        uses: actions/attest-sbom@v4
+        with:
+          subject-name: ghcr.io/${{ github.repository_owner }}/crabka-demo
+          subject-digest: ${{ steps.publish.outputs.digest }}
+          sbom-path: ${{ steps.publish.outputs.sbom }}
+          push-to-registry: true

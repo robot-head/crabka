@@ -53,6 +53,10 @@ struct Cli {
     compactor_max_blocks_per_job: usize,
     #[arg(long)]
     compactor_downsample_resolution_ns: Option<i64>,
+    #[arg(long, default_value_t = crabka_profiles::blockbuilder::DEFAULT_FLUSH_RECORDS)]
+    block_builder_flush_records: usize,
+    #[arg(long, default_value_t = crabka_profiles::blockbuilder::DEFAULT_FLUSH_MAX_AGE.as_millis() as u64)]
+    block_builder_flush_max_age_ms: u64,
     /// debuginfod base URLs (comma-separated) to fetch DWARF for unsymbolized
     /// native frames. Empty by default: the symbolizer makes NO outbound
     /// requests unless an operator explicitly opts in by supplying URLs.
@@ -115,7 +119,7 @@ fn spawn_profile_index_refresh(
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tick.tick().await;
-            if let Ok(index) = ProfileIndex::load(&store, &index_key).await {
+            if let Ok(index) = ProfileIndex::load_latest_snapshot(&store, &index_key).await {
                 cold.replace_index(Arc::new(index));
             }
         }
@@ -173,11 +177,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Target::BlockBuilder => {
             let configured = build_object_store(&cli.object_store_url)
                 .map_err(|e| format!("object store: {e}"))?;
-            crabka_profiles::blockbuilder::run_with_config(BlockBuilderConfig::new(
-                cli.bootstrap,
-                configured.store,
-            ))
-            .await?;
+            let mut config = BlockBuilderConfig::new(cli.bootstrap, configured.store);
+            config.flush_records = cli.block_builder_flush_records;
+            config.flush_max_age = Duration::from_millis(cli.block_builder_flush_max_age_ms);
+            crabka_profiles::blockbuilder::run_with_config(config).await?;
         }
         Target::Querier => {
             let overrides = load_profiles_limits_overrides_config(
@@ -186,7 +189,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let configured = build_object_store(&cli.object_store_url)
                 .map_err(|e| format!("object store: {e}"))?;
             let index_key = configured.object_key("index/profiles.json");
-            let index = ProfileIndex::load(&configured.store, &index_key)
+            let index = ProfileIndex::load_latest_snapshot(&configured.store, &index_key)
                 .await
                 .unwrap_or_else(|_| ProfileIndex::new());
             let refresh_store = Arc::clone(&configured.store);
@@ -216,7 +219,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let configured = build_object_store(&cli.object_store_url)
                 .map_err(|e| format!("object store: {e}"))?;
             let index_key = configured.object_key("index/profiles.json");
-            let index = ProfileIndex::load(&configured.store, &index_key)
+            let index = ProfileIndex::load_latest_snapshot(&configured.store, &index_key)
                 .await
                 .unwrap_or_else(|_| ProfileIndex::new());
             let refresh_store = Arc::clone(&configured.store);
@@ -257,7 +260,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let configured = build_object_store(&cli.object_store_url)
                 .map_err(|e| format!("object store: {e}"))?;
             let index_key = configured.object_key("index/profiles.json");
-            let mut index = ProfileIndex::load(&configured.store, &index_key)
+            let mut index = ProfileIndex::load_latest_snapshot(&configured.store, &index_key)
                 .await
                 .unwrap_or_else(|_| ProfileIndex::new());
             let downsample = cli
@@ -270,7 +273,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 downsample,
             )
             .await?;
-            index.save(&configured.store, &index_key).await?;
+            index
+                .save_latest_snapshot(&configured.store, &index_key)
+                .await?;
             tracing::info!(
                 compacted_blocks = metas.len(),
                 downsample_resolution_ns = ?cli.compactor_downsample_resolution_ns,
@@ -331,6 +336,23 @@ mod tests {
         let cli = Cli::try_parse_from(["crabka-profiles", "--target", "block-builder"]).unwrap();
 
         assert!(matches!(cli.target, Target::BlockBuilder));
+    }
+
+    #[test]
+    fn parses_block_builder_flush_options() {
+        let cli = Cli::try_parse_from([
+            "crabka-profiles",
+            "--target",
+            "block-builder",
+            "--block-builder-flush-records",
+            "4096",
+            "--block-builder-flush-max-age-ms",
+            "60000",
+        ])
+        .unwrap();
+
+        assert!(cli.block_builder_flush_records == 4096);
+        assert!(cli.block_builder_flush_max_age_ms == 60_000);
     }
 
     #[test]

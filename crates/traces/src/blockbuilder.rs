@@ -520,8 +520,9 @@ pub async fn flush_partition_windows(
         }
     }
     index
-        .save(&object_store, &config.index_key)
+        .save_latest_snapshot(&object_store, &config.index_key)
         .await
+        .map(|_| ())
         .map_err(|err| TracesError::Block(err.to_string()))
 }
 

@@ -1,0 +1,18 @@
+contents:
+  repositories:
+    - https://packages.wolfi.dev/os
+  keyring:
+    - https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
+  packages:
+    - ca-certificates-bundle
+    - tzdata
+    - wolfi-baselayout
+    - busybox
+    - curl
+    - crabka-demo
+
+work-dir: /data
+
+archs:
+  - x86_64
+  - aarch64

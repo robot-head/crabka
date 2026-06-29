@@ -4,7 +4,7 @@
   "tags": ["crabka", "overview"],
   "schemaVersion": 39,
   "version": 1,
-  "refresh": "15s",
+  "refresh": "1m",
   "time": { "from": "now-30m", "to": "now" },
   "templating": {
     "list": [
@@ -19,14 +19,14 @@
       "description": "Scrape targets reporting up=1 out of all configured.",
       "gridPos": { "h": 5, "w": 6, "x": 0, "y": 1 },
       "fieldConfig": { "defaults": { "thresholds": { "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] } } },
-      "targets": [ { "refId": "A", "expr": "sum(up)" } ]
+      "targets": [ { "refId": "A", "expr": "sum(up)", "instant": true } ]
     },
     {
       "id": 3, "type": "stat", "title": "Services down",
       "datasource": { "type": "prometheus", "uid": "${ds}" },
       "gridPos": { "h": 5, "w": 6, "x": 6, "y": 1 },
       "fieldConfig": { "defaults": { "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] } } },
-      "targets": [ { "refId": "A", "expr": "count(up == 0) or vector(0)" } ]
+      "targets": [ { "refId": "A", "expr": "count(up == 0) or vector(0)", "instant": true } ]
     },
     {
       "id": 4, "type": "timeseries", "title": "Liveness (up) by service",
@@ -66,10 +66,10 @@
       "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0 } },
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 15 },
       "targets": [
-        { "refId": "A", "expr": "sum(rate(crabka_metrics_ingest_requests_total{status=\"error\"}[5m])) / clamp_min(sum(rate(crabka_metrics_ingest_requests_total[5m])), 1)", "legendFormat": "metrics" },
-        { "refId": "B", "expr": "sum(rate(crabka_logs_ingest_requests_total{status=\"error\"}[5m])) / clamp_min(sum(rate(crabka_logs_ingest_requests_total[5m])), 1)", "legendFormat": "logs" },
-        { "refId": "C", "expr": "sum(rate(crabka_traces_ingest_requests_total{status=\"error\"}[5m])) / clamp_min(sum(rate(crabka_traces_ingest_requests_total[5m])), 1)", "legendFormat": "traces" },
-        { "refId": "D", "expr": "sum(rate(crabka_profiles_ingest_requests_total{status=\"error\"}[5m])) / clamp_min(sum(rate(crabka_profiles_ingest_requests_total[5m])), 1)", "legendFormat": "profiles" }
+        { "refId": "A", "expr": "(sum(rate(crabka_metrics_ingest_requests_total{status=\"error\"}[5m])) / clamp_min(sum(rate(crabka_metrics_ingest_requests_total[5m])), 1)) or vector(0)", "legendFormat": "metrics" },
+        { "refId": "B", "expr": "(sum(rate(crabka_logs_ingest_requests_total{status=\"error\"}[5m])) / clamp_min(sum(rate(crabka_logs_ingest_requests_total[5m])), 1)) or vector(0)", "legendFormat": "logs" },
+        { "refId": "C", "expr": "(sum(rate(crabka_traces_ingest_requests_total{status=\"error\"}[5m])) / clamp_min(sum(rate(crabka_traces_ingest_requests_total[5m])), 1)) or vector(0)", "legendFormat": "traces" },
+        { "refId": "D", "expr": "(sum(rate(crabka_profiles_ingest_requests_total{status=\"error\"}[5m])) / clamp_min(sum(rate(crabka_profiles_ingest_requests_total[5m])), 1)) or vector(0)", "legendFormat": "profiles" }
       ]
     },
     {

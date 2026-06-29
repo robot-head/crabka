@@ -5,7 +5,8 @@ use std::sync::Arc;
 use std::sync::RwLock;
 
 use crabka_blockstore::{
-    LabelMatcher, Labels, MatchOp, QUERY_SHARD_LABEL, SeriesFingerprint, parse_query_shard_selector,
+    LabelMatcher, Labels, MatchOp, QUERY_SHARD_LABEL, QueryShardSelector, SeriesFingerprint,
+    parse_query_shard_selector,
 };
 use crabka_metrics::{
     NativeHistogram, SamplePayload, WalRecord, encode_float_samples, encode_native_histograms,
@@ -461,17 +462,18 @@ impl InMemoryMetricStore {
         start_ms: i64,
         end_ms: i64,
     ) -> Result<Vec<Labels>> {
+        let matchers = prepare_matchers(matchers)?;
         let mut by_fp: BTreeMap<SeriesFingerprint, Labels> = BTreeMap::new();
         if let Some(rows) = self.floats.get(tenant) {
             for row in rows {
-                if row_matches(row.fp, &row.labels, row.ts_ms, matchers, start_ms, end_ms)? {
+                if row_matches(row.fp, &row.labels, row.ts_ms, &matchers, start_ms, end_ms) {
                     by_fp.entry(row.fp).or_insert_with(|| row.labels.clone());
                 }
             }
         }
         if let Some(rows) = self.hists.get(tenant) {
             for row in rows {
-                if row_matches(row.fp, &row.labels, row.ts_ms, matchers, start_ms, end_ms)? {
+                if row_matches(row.fp, &row.labels, row.ts_ms, &matchers, start_ms, end_ms) {
                     by_fp.entry(row.fp).or_insert_with(|| row.labels.clone());
                 }
             }
@@ -571,33 +573,60 @@ impl MetricStore for WalHead {
     }
 }
 
-fn matcher_matches(fp: SeriesFingerprint, labels: &Labels, matcher: &LabelMatcher) -> Result<bool> {
-    if matcher.name == QUERY_SHARD_LABEL {
-        let selector = parse_query_shard_selector(&matcher.value)
-            .map_err(|error| PromqlError::Plan(format!("invalid query shard matcher: {error}")))?;
-        return match matcher.op {
-            MatchOp::Eq => Ok(selector.matches(fp)),
-            MatchOp::Neq => Ok(!selector.matches(fp)),
-            MatchOp::Re | MatchOp::Nre => Err(PromqlError::Plan(
-                "query shard matcher must use equality or inequality".into(),
-            )),
-        };
+enum PreparedMatcher {
+    LabelEq { name: String, value: String },
+    LabelNeq { name: String, value: String },
+    LabelRe { name: String, regex: regex::Regex },
+    LabelNre { name: String, regex: regex::Regex },
+    QueryShardEq(QueryShardSelector),
+    QueryShardNeq(QueryShardSelector),
+}
+
+impl PreparedMatcher {
+    fn new(matcher: &LabelMatcher) -> Result<Self> {
+        if matcher.name == QUERY_SHARD_LABEL {
+            let selector = parse_query_shard_selector(&matcher.value).map_err(|error| {
+                PromqlError::Plan(format!("invalid query shard matcher: {error}"))
+            })?;
+            return match matcher.op {
+                MatchOp::Eq => Ok(Self::QueryShardEq(selector)),
+                MatchOp::Neq => Ok(Self::QueryShardNeq(selector)),
+                MatchOp::Re | MatchOp::Nre => Err(PromqlError::Plan(
+                    "query shard matcher must use equality or inequality".into(),
+                )),
+            };
+        }
+
+        match matcher.op {
+            MatchOp::Eq => Ok(Self::LabelEq {
+                name: matcher.name.clone(),
+                value: matcher.value.clone(),
+            }),
+            MatchOp::Neq => Ok(Self::LabelNeq {
+                name: matcher.name.clone(),
+                value: matcher.value.clone(),
+            }),
+            MatchOp::Re => Ok(Self::LabelRe {
+                name: matcher.name.clone(),
+                regex: regex_anchored(&matcher.value)?,
+            }),
+            MatchOp::Nre => Ok(Self::LabelNre {
+                name: matcher.name.clone(),
+                regex: regex_anchored(&matcher.value)?,
+            }),
+        }
     }
 
-    let actual = labels.get(&matcher.name).unwrap_or("");
-    Ok(match matcher.op {
-        MatchOp::Eq => actual == matcher.value,
-        MatchOp::Neq => actual != matcher.value,
-        MatchOp::Re | MatchOp::Nre => {
-            let regex = regex_anchored(&matcher.value)?;
-            let regex_hit = regex.is_match(actual);
-            if matcher.op == MatchOp::Re {
-                regex_hit
-            } else {
-                !regex_hit
-            }
+    fn matches(&self, fp: SeriesFingerprint, labels: &Labels) -> bool {
+        match self {
+            Self::LabelEq { name, value } => labels.get(name).unwrap_or("") == value.as_str(),
+            Self::LabelNeq { name, value } => labels.get(name).unwrap_or("") != value.as_str(),
+            Self::LabelRe { name, regex } => regex.is_match(labels.get(name).unwrap_or("")),
+            Self::LabelNre { name, regex } => !regex.is_match(labels.get(name).unwrap_or("")),
+            Self::QueryShardEq(selector) => selector.matches(fp),
+            Self::QueryShardNeq(selector) => !selector.matches(fp),
         }
-    })
+    }
 }
 
 fn regex_anchored(pattern: &str) -> Result<regex::Regex> {
@@ -605,28 +634,32 @@ fn regex_anchored(pattern: &str) -> Result<regex::Regex> {
         .map_err(|error| PromqlError::Plan(format!("bad regex `{pattern}`: {error}")))
 }
 
-fn all_match(fp: SeriesFingerprint, labels: &Labels, matchers: &[LabelMatcher]) -> Result<bool> {
+fn prepare_matchers(matchers: &[LabelMatcher]) -> Result<Vec<PreparedMatcher>> {
+    matchers.iter().map(PreparedMatcher::new).collect()
+}
+
+fn all_match(fp: SeriesFingerprint, labels: &Labels, matchers: &[PreparedMatcher]) -> bool {
     for matcher in matchers {
-        if !matcher_matches(fp, labels, matcher)? {
-            return Ok(false);
+        if !matcher.matches(fp, labels) {
+            return false;
         }
     }
-    Ok(true)
+    true
 }
 
 fn row_matches(
     fp: SeriesFingerprint,
     labels: &Labels,
     ts_ms: i64,
-    matchers: &[LabelMatcher],
+    matchers: &[PreparedMatcher],
     start_ms: i64,
     end_ms: i64,
-) -> Result<bool> {
+) -> bool {
     if ts_ms.cmp(&start_ms).is_lt() {
-        return Ok(false);
+        return false;
     }
     if ts_ms.cmp(&end_ms).is_gt() {
-        return Ok(false);
+        return false;
     }
     all_match(fp, labels, matchers)
 }
@@ -641,11 +674,12 @@ impl MetricStore for InMemoryMetricStore {
         end_ms: i64,
     ) -> Result<ScanResult> {
         let ctx = SessionContext::new();
+        let matchers = prepare_matchers(matchers)?;
 
         let mut float_rows = Vec::new();
         if let Some(rows) = self.floats.get(tenant) {
             for row in rows {
-                if row_matches(row.fp, &row.labels, row.ts_ms, matchers, start_ms, end_ms)? {
+                if row_matches(row.fp, &row.labels, row.ts_ms, &matchers, start_ms, end_ms) {
                     float_rows.push((row.fp, row.ts_ms, row.value));
                 }
             }
@@ -664,7 +698,7 @@ impl MetricStore for InMemoryMetricStore {
         let mut hist_rows = Vec::new();
         if let Some(rows) = self.hists.get(tenant) {
             for row in rows {
-                if row_matches(row.fp, &row.labels, row.ts_ms, matchers, start_ms, end_ms)? {
+                if row_matches(row.fp, &row.labels, row.ts_ms, &matchers, start_ms, end_ms) {
                     hist_rows.push((row.fp, row.ts_ms, row.hist.clone()));
                 }
             }
@@ -737,6 +771,7 @@ impl MetricStore for InMemoryMetricStore {
         start_ms: i64,
         end_ms: i64,
     ) -> Result<Vec<ExemplarRecord>> {
+        let matchers = prepare_matchers(matchers)?;
         let mut exemplars = Vec::new();
         if let Some(rows) = self.exemplars.get(tenant) {
             for row in rows {
@@ -745,8 +780,8 @@ impl MetricStore for InMemoryMetricStore {
                     && all_match(
                         row.series_labels.fingerprint(),
                         &row.series_labels,
-                        matchers,
-                    )?
+                        &matchers,
+                    )
                 {
                     exemplars.push(ExemplarRecord {
                         series_labels: row.series_labels.clone(),
@@ -1155,16 +1190,18 @@ mod tests {
     #[test]
     fn row_matches_rejects_outside_bounds_before_matching_labels() {
         let labels = lbls(&[("__name__", "up"), ("job", "api")]);
-        let matchers = [LabelMatcher::new("__name__", MatchOp::Eq, "up")];
+        let matchers = prepare_matchers(&[LabelMatcher::new("__name__", MatchOp::Eq, "up")])
+            .expect("matchers");
         let fp = labels.fingerprint();
 
-        assert!(!row_matches(fp, &labels, 999, &matchers, 1_000, 2_000).unwrap());
-        assert!(row_matches(fp, &labels, 1_000, &matchers, 1_000, 2_000).unwrap());
-        assert!(row_matches(fp, &labels, 2_000, &matchers, 1_000, 2_000).unwrap());
-        assert!(!row_matches(fp, &labels, 2_001, &matchers, 1_000, 2_000).unwrap());
+        assert!(!row_matches(fp, &labels, 999, &matchers, 1_000, 2_000));
+        assert!(row_matches(fp, &labels, 1_000, &matchers, 1_000, 2_000));
+        assert!(row_matches(fp, &labels, 2_000, &matchers, 1_000, 2_000));
+        assert!(!row_matches(fp, &labels, 2_001, &matchers, 1_000, 2_000));
 
-        let mismatch = [LabelMatcher::new("job", MatchOp::Eq, "worker")];
-        assert!(!row_matches(fp, &labels, 1_500, &mismatch, 1_000, 2_000).unwrap());
+        let mismatch =
+            prepare_matchers(&[LabelMatcher::new("job", MatchOp::Eq, "worker")]).expect("matchers");
+        assert!(!row_matches(fp, &labels, 1_500, &mismatch, 1_000, 2_000));
     }
 
     #[tokio::test]
@@ -1462,6 +1499,20 @@ mod tests {
         let result = store.scan("t", &matchers, 0, 5000).await.unwrap();
         assert!(result.float_table.is_none());
         assert!(result.histogram_table.is_none());
+    }
+
+    #[tokio::test]
+    async fn scan_validates_regex_matchers_before_row_iteration() {
+        let store = InMemoryMetricStore::new();
+        let matchers = [LabelMatcher::new("__name__", MatchOp::Re, "[")];
+
+        let error = match store.scan("missing", &matchers, 0, 5000).await {
+            Ok(_) => panic!("expected invalid regex to fail before scanning rows"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(error, PromqlError::Plan(_)));
+        assert!(error.to_string().contains("bad regex"));
     }
 
     #[tokio::test]

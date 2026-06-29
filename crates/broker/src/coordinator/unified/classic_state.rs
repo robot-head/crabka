@@ -441,6 +441,9 @@ impl Group {
                 self.state = GroupState::Empty;
                 self.leader_id = None;
                 self.protocol_name = None;
+                self.rebalance_deadline = None;
+                self.joined_this_round.clear();
+                self.rebalance_from_empty = false;
             } else {
                 self.state = GroupState::PreparingRebalance;
                 // Live-membership change (a member timed out), not a
@@ -719,5 +722,27 @@ mod tests {
         let dropped = g.expire_dead_members(Instant::now());
         assert!(dropped == vec!["m1".to_string()]);
         assert!(g.state == GroupState::Empty);
+    }
+
+    #[test]
+    fn expire_last_dead_member_clears_rebalance_bookkeeping() {
+        let mut g = Group::new("g");
+        let mut m = sample_member("m1");
+        m.session_timeout = Duration::from_millis(1);
+        m.last_heartbeat = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
+        g.add_member(m);
+        g.rebalance_deadline = Some(Instant::now() + Duration::from_secs(3));
+        g.rebalance_from_empty = true;
+        assert!(g.joined_this_round.contains("m1"));
+
+        let dropped = g.expire_dead_members(Instant::now());
+
+        assert!(dropped == vec!["m1".to_string()]);
+        assert!(g.state == GroupState::Empty);
+        assert!(g.leader_id.is_none());
+        assert!(g.protocol_name.is_none());
+        assert!(g.rebalance_deadline.is_none());
+        assert!(g.joined_this_round.is_empty());
+        assert!(!g.rebalance_from_empty);
     }
 }

@@ -17,6 +17,7 @@ use crate::request::ProtocolRequest;
 /// an `Arc` and the connection options via a value clone.
 #[derive(Clone)]
 pub struct Client {
+    bootstrap: String,
     pool: Arc<BrokerPool>,
     #[allow(dead_code)]
     options: ConnectionOptions,
@@ -52,13 +53,28 @@ impl Client {
     ) -> Result<Self, ClientError> {
         let addrs = bootstrap::resolve(&bootstrap).await?;
         let pool = Arc::new(BrokerPool::new(addrs, options.clone()));
-        Ok(Client { pool, options })
+        Ok(Client {
+            bootstrap,
+            pool,
+            options,
+        })
     }
 
     /// Send a request to the bootstrap broker (or any cached open connection).
     pub async fn send<R: ProtocolRequest>(&self, req: R) -> Result<R::Response, ClientError> {
         let conn = self.pool.bootstrap_connection().await?;
         conn.send(req).await
+    }
+
+    /// Drop the cached bootstrap connection and refresh the bootstrap address
+    /// list from the original bootstrap string. Callers that know their
+    /// bootstrap request is safe to retry can use this after a transport error
+    /// before sending again.
+    pub async fn reconnect_bootstrap(&self) {
+        self.pool.evict_bootstrap();
+        if let Ok(addrs) = bootstrap::resolve(&self.bootstrap).await {
+            self.pool.replace_bootstrap(addrs);
+        }
     }
 
     /// Whether the pool knows a dialable address for `broker_id` (learned via
@@ -80,7 +96,7 @@ impl Client {
     #[must_use]
     pub fn broker(&self, broker_id: i32) -> BrokerHandle<'_> {
         BrokerHandle {
-            pool: &self.pool,
+            client: self,
             broker_id,
         }
     }
@@ -109,10 +125,16 @@ impl Client {
             // `evict_broker` (that keys on real broker ids, not the bootstrap's
             // synthetic `-1`), so without this the producer/consumer would keep
             // refreshing over the same dead connection and stay pinned to a stale
-            // leader forever. Drop the bootstrap connection and retry once so the
-            // refresh re-resolves to a live bootstrap address.
-            Err(ClientError::Timeout(_) | ClientError::Disconnected | ClientError::Io(_)) => {
-                self.pool.evict_bootstrap();
+            // leader forever. Drop the bootstrap connection, re-resolve the
+            // original bootstrap string in case DNS changed (e.g. Compose
+            // recreated `broker` with a new container IP), and retry once.
+            Err(
+                ClientError::Connect { .. }
+                | ClientError::Timeout(_)
+                | ClientError::Disconnected
+                | ClientError::Io(_),
+            ) => {
+                self.reconnect_bootstrap().await;
                 self.send(MetadataRequest::default()).await?
             }
             Err(e) => return Err(e),
@@ -148,7 +170,19 @@ impl Client {
         current_leader_epoch: i32,
         leader_epoch: i32,
     ) -> Result<crate::offset_for_leader_epoch::EpochEndOffset, ClientError> {
-        let conn = self.pool.bootstrap_connection().await?;
+        let conn = match self.pool.bootstrap_connection().await {
+            Ok(conn) => conn,
+            Err(
+                ClientError::Connect { .. }
+                | ClientError::Timeout(_)
+                | ClientError::Disconnected
+                | ClientError::Io(_),
+            ) => {
+                self.reconnect_bootstrap().await;
+                self.pool.bootstrap_connection().await?
+            }
+            Err(e) => return Err(e),
+        };
         crate::offset_for_leader_epoch::offset_for_leader_epoch(
             &conn,
             topic,
@@ -180,7 +214,17 @@ impl Client {
         current_leader_epoch: i32,
         leader_epoch: i32,
     ) -> Result<crate::offset_for_leader_epoch::EpochEndOffset, ClientError> {
-        let conn = self.pool.get(broker_id).await?;
+        let conn = match self.pool.get(broker_id).await {
+            Ok(conn) => conn,
+            Err(ClientError::Connect { .. } | ClientError::Timeout(_) | ClientError::Io(_))
+                if self.pool.knows_broker(broker_id) =>
+            {
+                self.pool.evict(broker_id);
+                self.refresh_metadata().await?;
+                self.pool.get(broker_id).await?
+            }
+            Err(e) => return Err(e),
+        };
         crate::offset_for_leader_epoch::offset_for_leader_epoch(
             &conn,
             topic,
@@ -205,7 +249,7 @@ impl Client {
 ///
 /// Obtained via [`Client::broker`].
 pub struct BrokerHandle<'a> {
-    pool: &'a BrokerPool,
+    client: &'a Client,
     broker_id: i32,
 }
 
@@ -224,10 +268,25 @@ impl BrokerHandle<'_> {
     // cargo-mutants: live-broker send path; not unit-testable
     #[cfg_attr(test, mutants::skip)]
     pub async fn send<R: ProtocolRequest>(&self, req: R) -> Result<R::Response, ClientError> {
-        let conn = match self.pool.get(self.broker_id).await {
+        let conn = match self.client.pool.get(self.broker_id).await {
             Ok(conn) => conn,
-            Err(ClientError::Disconnected) if !self.pool.knows_broker(self.broker_id) => {
-                self.pool.bootstrap_connection().await?
+            Err(ClientError::Disconnected) if !self.client.pool.knows_broker(self.broker_id) => {
+                self.client.pool.bootstrap_connection().await?
+            }
+            Err(ClientError::Connect { .. } | ClientError::Timeout(_) | ClientError::Io(_))
+                if self.client.pool.knows_broker(self.broker_id) =>
+            {
+                self.client.pool.evict(self.broker_id);
+                self.client.refresh_metadata().await?;
+                match self.client.pool.get(self.broker_id).await {
+                    Ok(conn) => conn,
+                    Err(ClientError::Disconnected)
+                        if !self.client.pool.knows_broker(self.broker_id) =>
+                    {
+                        self.client.pool.bootstrap_connection().await?
+                    }
+                    Err(e) => return Err(e),
+                }
             }
             Err(e) => return Err(e),
         };
@@ -247,6 +306,8 @@ mod bootstrap_failover_tests {
     use crabka_protocol::owned::metadata_response::{
         FLEXIBLE_MIN as META_FLEXIBLE_MIN, MetadataResponse, MetadataResponseBroker,
     };
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU16, Ordering};
 
     fn api_versions_v0() -> Vec<u8> {
         let resp = ApiVersionsResponse {
@@ -273,11 +334,15 @@ mod bootstrap_failover_tests {
     }
 
     fn metadata_v(version: i16, node_id: i32) -> Vec<u8> {
+        metadata_v_with_port(version, node_id, 9092)
+    }
+
+    fn metadata_v_with_port(version: i16, node_id: i32, port: u16) -> Vec<u8> {
         let resp = MetadataResponse {
             brokers: vec![MetadataResponseBroker {
                 node_id,
                 host: "127.0.0.1".into(),
-                port: 9092,
+                port: i32::from(port),
                 ..Default::default()
             }],
             ..Default::default()
@@ -299,6 +364,25 @@ mod bootstrap_failover_tests {
             }
             if api_key == metadata_request::API_KEY {
                 return Some(metadata_v(version, node_id));
+            }
+            None
+        }
+    }
+
+    fn dynamic_port_handler(
+        node_id: i32,
+        port: Arc<AtomicU16>,
+    ) -> impl FnMut(i16, i16, i32, &[u8]) -> Option<Vec<u8>> + Send + 'static {
+        move |api_key, version, _corr, _body| {
+            if api_key == api_versions_request::API_KEY {
+                return Some(api_versions_v0());
+            }
+            if api_key == metadata_request::API_KEY {
+                return Some(metadata_v_with_port(
+                    version,
+                    node_id,
+                    port.load(Ordering::SeqCst),
+                ));
             }
             None
         }
@@ -338,6 +422,67 @@ mod bootstrap_failover_tests {
             .refresh_metadata()
             .await
             .expect("refresh must fail over to live bootstrap B after A dies");
+        assert2::assert!(!md.brokers.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reconnect_bootstrap_forces_next_send_to_redial() {
+        let a = MockBroker::start(handler(0)).await;
+        let b = MockBroker::start(handler(1)).await;
+        let bootstrap = format!("{},{}", a.addr, b.addr);
+        let client = Client::builder()
+            .bootstrap(bootstrap)
+            .request_timeout(std::time::Duration::from_millis(500))
+            .build()
+            .await
+            .expect("client builds");
+
+        let _ = client
+            .send(crabka_protocol::owned::metadata_request::MetadataRequest::default())
+            .await
+            .expect("first send succeeds via A");
+
+        a.stop();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        client.reconnect_bootstrap().await;
+
+        let md = client
+            .send(crabka_protocol::owned::metadata_request::MetadataRequest::default())
+            .await
+            .expect("send after reconnect_bootstrap reaches B");
+        assert2::assert!(!md.brokers.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn broker_send_refreshes_metadata_when_learned_address_is_stale() {
+        let a_port = Arc::new(AtomicU16::new(0));
+        let b_port = Arc::new(AtomicU16::new(0));
+        let a = MockBroker::start(dynamic_port_handler(1, a_port.clone())).await;
+        a_port.store(a.addr.port(), Ordering::SeqCst);
+        let b = MockBroker::start(dynamic_port_handler(1, b_port.clone())).await;
+        b_port.store(b.addr.port(), Ordering::SeqCst);
+
+        let bootstrap = format!("{},{}", a.addr, b.addr);
+        let client = Client::builder()
+            .bootstrap(bootstrap)
+            .connect_timeout(std::time::Duration::from_millis(500))
+            .request_timeout(std::time::Duration::from_millis(500))
+            .build()
+            .await
+            .expect("client builds");
+
+        client
+            .refresh_metadata()
+            .await
+            .expect("first metadata refresh learns broker 1 at A");
+        a.stop();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let md = client
+            .broker(1)
+            .send(crabka_protocol::owned::metadata_request::MetadataRequest::default())
+            .await
+            .expect("broker send should refresh metadata and redial broker 1 at B");
         assert2::assert!(!md.brokers.is_empty());
     }
 }

@@ -34,6 +34,8 @@ assert2            = { workspace = true }
 crabka-broker      = { version = "0.3", path = "../broker" }
 crabka-client-consumer = { version = "0.3", path = "../client-consumer" }
 crabka-client-producer = { version = "0.3", path = "../client-producer" }
+futures-util       = { workspace = true }
 tempfile           = { workspace = true }
 tokio              = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+tokio-util         = { workspace = true, features = ["codec"] }
 tracing-subscriber = { workspace = true }

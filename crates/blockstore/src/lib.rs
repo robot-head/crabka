@@ -13,6 +13,7 @@ mod block_index;
 mod bloom;
 mod error;
 mod index;
+mod index_snapshot;
 mod labels;
 mod log_blockstore;
 mod matcher;
@@ -34,6 +35,7 @@ pub use block_index::{BlockIndex, BlockSchema, RequiredColumn, series_block_sche
 pub use bloom::{ShardedTraceBloom, fnv1_32};
 pub use error::{BlockStoreError, Result};
 pub use index::{Index, MAX_INDEX_SNAPSHOT_BYTES};
+pub use index_snapshot::{DEFAULT_INDEX_SNAPSHOT_RETAIN, index_snapshot_prefix_for_key};
 pub use labels::{Labels, SeriesFingerprint};
 pub use matcher::{
     LabelMatcher, MatchOp, QUERY_SHARD_LABEL, QueryShardSelector, parse_query_shard_selector,
@@ -45,17 +47,21 @@ pub use log_blockstore::{
     BlockDescriptor, BlockIndex as LogBlockIndex, BlockKey, BlockStoreError as LogBlockStoreError,
     LabelIndex, LabelPredicate, Labels as LogLabels, LogBlockTableProvider, LogRow,
     MatchOp as LogMatchOp, SeriesFingerprint as LogSeriesFingerprint, StructuredMetadata,
-    TimeRange, block_path, labels, log_block_object_path, log_index_manifest_object_path,
-    log_index_manifest_path, log_tenant_index_manifest_object_path,
-    log_tenant_index_shard_catalog_object_path, log_tenant_index_shard_manifest_object_path,
-    read_log_block, read_log_block_from_object_store, read_log_index_manifest,
-    read_log_index_manifest_from_object_store, read_tenant_log_index_manifest_from_object_store,
+    TimeRange, block_path, labels, list_tenant_log_index_shard_ranges_from_object_store,
+    list_tenant_log_index_shard_ranges_overlapping_query_from_object_store, log_block_object_path,
+    log_index_manifest_object_path, log_index_manifest_path, log_tenant_index_manifest_object_path,
+    log_tenant_index_shard_catalog_object_path, log_tenant_index_shard_list_offset_object_path,
+    log_tenant_index_shard_list_offset_start_ns, log_tenant_index_shard_manifest_object_path,
+    log_tenant_index_shards_object_prefix, read_log_block, read_log_block_from_object_store,
+    read_log_index_manifest, read_log_index_manifest_from_object_store,
+    read_tenant_log_index_manifest_from_object_store,
     read_tenant_log_index_shard_from_object_store,
     read_tenant_log_index_shard_ranges_from_object_store,
     read_tenant_log_index_shards_from_object_store, register_log_blocks,
     register_log_blocks_from_object_store, series_fingerprint, write_log_block,
     write_log_block_to_object_store, write_log_index_manifest,
     write_log_index_manifest_to_object_store, write_tenant_log_index_manifest_to_object_store,
+    write_tenant_log_index_shard_catalog_to_object_store,
     write_tenant_log_index_shard_to_object_store, write_tenant_log_index_shards_to_object_store,
 };
 pub use profile_block::{ProfileSampleRow, encode_profile_samples};

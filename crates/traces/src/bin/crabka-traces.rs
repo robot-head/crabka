@@ -39,6 +39,9 @@ use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
+const WAL_FETCH_MAX_BYTES: i32 = 2 * 1024 * 1024;
+const WAL_FETCH_PARTITION_MAX_BYTES: i32 = 256 * 1024;
+
 #[derive(Debug, Parser)]
 #[expect(
     clippy::struct_excessive_bools,
@@ -282,12 +285,20 @@ async fn run_block_builder(
     shutdown: CancellationToken,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let promoted_attrs = promoted_attrs_from_cli(&cli)?;
-    let consumer = wal_consumer(cli.bootstrap.clone(), "crabka-traces-block-builder").await?;
+    let consumer = wal_consumer(
+        cli.bootstrap.clone(),
+        "crabka-traces-block-builder",
+        Some("crabka-traces-block-builder"),
+    )
+    .await?;
     let configured = build_object_store(&cli)?;
     let writer = BlockWriter::new(configured.store.clone());
-    let index = Arc::new(Mutex::new(TraceIndex::new()));
     let object_key_prefix = configured.prefix.to_string();
     let trace_index_key = configured.object_key(&cli.trace_index_key);
+    let initial_index = TraceIndex::load_latest_snapshot(&configured.store, &trace_index_key)
+        .await
+        .unwrap_or_else(|_| TraceIndex::new());
+    let index = Arc::new(Mutex::new(initial_index));
     blockbuilder::run(
         consumer,
         writer,
@@ -312,7 +323,7 @@ async fn run_live_store(
     shutdown: CancellationToken,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let addr: SocketAddr = cli.listen.parse()?;
-    let consumer = wal_consumer(cli.bootstrap.clone(), "crabka-traces-live-store").await?;
+    let consumer = wal_consumer(cli.bootstrap.clone(), "crabka-traces-live-store", None).await?;
     let store = Arc::new(RwLock::new(LiveStore::new(cli.retention_ns)));
     let router = build_live_store_router(&cli, Arc::clone(&store))?;
     let live_shutdown = shutdown.clone();
@@ -345,8 +356,12 @@ async fn run_querier(
     let (router, store, trace_index_key, trace_index) =
         build_querier_router_with_live(&cli, metrics, live_store.clone()).await?;
     if let Some(live_store) = live_store {
-        let consumer =
-            wal_consumer(cli.bootstrap.clone(), "crabka-traces-querier-live-store").await?;
+        let consumer = wal_consumer(
+            cli.bootstrap.clone(),
+            "crabka-traces-querier-live-store",
+            None,
+        )
+        .await?;
         let live_shutdown = shutdown.clone();
         tokio::spawn(async move {
             if let Err(err) = livestore::run(consumer, live_store, live_shutdown).await {
@@ -367,7 +382,7 @@ async fn run_querier(
             tokio::select! {
                 () = refresh_shutdown.cancelled() => break,
                 _ = tick.tick() => {
-                    if let Ok(idx) = TraceIndex::load(&refresh_store, &trace_index_key).await {
+                    if let Ok(idx) = TraceIndex::load_latest_snapshot(&refresh_store, &trace_index_key).await {
                         refresh_index.store(Arc::new(idx));
                     }
                 }
@@ -403,7 +418,7 @@ async fn build_querier_router_with_live(
 > {
     let configured = build_object_store(cli)?;
     let trace_index_key = configured.object_key(&cli.trace_index_key);
-    let initial = TraceIndex::load(&configured.store, &trace_index_key)
+    let initial = TraceIndex::load_latest_snapshot(&configured.store, &trace_index_key)
         .await
         .unwrap_or_else(|_| TraceIndex::new());
     let trace_index: SharedTraceIndex = Arc::new(ArcSwap::from_pointee(initial));
@@ -651,7 +666,7 @@ async fn build_trace_index_catalog(
     }
     let configured = build_object_store(cli)?;
     let trace_index_key = configured.object_key(&cli.trace_index_key);
-    let trace_index = TraceIndex::load(&configured.store, &trace_index_key)
+    let trace_index = TraceIndex::load_latest_snapshot(&configured.store, &trace_index_key)
         .await
         .unwrap_or_else(|_| TraceIndex::new());
     let blocks = BlockStore::new(configured.store, configured.root);
@@ -705,7 +720,7 @@ async fn run_compactor(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send 
     let configured = build_object_store(&cli)?;
     let writer = BlockWriter::new(configured.store.clone());
     let trace_index_key = configured.object_key(&cli.trace_index_key);
-    let mut index = TraceIndex::load(&configured.store, &trace_index_key)
+    let mut index = TraceIndex::load_latest_snapshot(&configured.store, &trace_index_key)
         .await
         .unwrap_or_else(|_| TraceIndex::new());
     compact_index_window(
@@ -717,7 +732,9 @@ async fn run_compactor(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send 
         cli.compaction_end_ns,
     )
     .await?;
-    index.save(&configured.store, &trace_index_key).await?;
+    index
+        .save_latest_snapshot(&configured.store, &trace_index_key)
+        .await?;
     Ok(())
 }
 
@@ -780,7 +797,7 @@ async fn run_metrics_generator(
     };
     apply_metrics_generator_cli_overrides(&mut cfg, &cli);
 
-    let consumer = wal_consumer(cli.bootstrap, "crabka-traces-metrics-generator").await?;
+    let consumer = wal_consumer(cli.bootstrap, "crabka-traces-metrics-generator", None).await?;
     let source = Arc::new(KafkaSpanSource::new(consumer));
     let sink = Arc::new(PrometheusRemoteWriteSink::new(cfg.remote_write_url.clone()));
     let service = MetricsGenService::new(cfg, Arc::new(SystemClock), source, sink);
@@ -815,10 +832,14 @@ fn apply_metrics_generator_cli_overrides(cfg: &mut MetricsGenConfig, cli: &Cli) 
 async fn wal_consumer(
     bootstrap: String,
     group_id: &str,
+    group_instance_id: Option<&str>,
 ) -> Result<Consumer, crabka_client_consumer::ConsumerError> {
     Consumer::builder()
         .bootstrap(bootstrap)
         .group_id(group_id.to_string())
+        .maybe_group_instance_id(group_instance_id)
+        .fetch_max_bytes(WAL_FETCH_MAX_BYTES)
+        .fetch_partition_max_bytes(WAL_FETCH_PARTITION_MAX_BYTES)
         .subscribe(vec![TRACES_WAL_TOPIC.to_string()])
         .auto_offset_reset(AutoOffsetReset::Earliest)
         .build()

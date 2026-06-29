@@ -29,6 +29,7 @@ datasources:
     url: http://logs-querier:3100
     jsonData:
       httpHeaderName1: X-Scope-OrgID
+      manageAlerts: false
     secureJsonData:
       httpHeaderValue1: demo
     editable: false

@@ -371,7 +371,9 @@ async fn boot_stack() -> Stack {
     q_cfg.object_store_url = Some(object_store_url);
     q_cfg.index_prefix = Some("observability/logs".to_string());
     q_cfg.tenant = Some(TENANT.to_string());
-    q_cfg.querier_index_source = QuerierIndexSource::TenantObjectStoreManifest;
+    q_cfg.querier_index_source = QuerierIndexSource::TenantObjectStoreShards;
+    q_cfg.query_start_ns = Some(start_ns);
+    q_cfg.query_end_ns = Some(end_ns);
     let querier = build_service_router(
         &q_cfg,
         build_service_dependencies(&q_cfg).await.unwrap(),

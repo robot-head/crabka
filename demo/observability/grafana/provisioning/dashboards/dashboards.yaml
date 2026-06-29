@@ -3,6 +3,7 @@ providers:
   - name: crabka
     orgId: 1
     folder: Crabka
+    folderUid: crabka
     type: file
     disableDeletion: false
     allowUiUpdates: true

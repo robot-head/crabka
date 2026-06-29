@@ -5,11 +5,11 @@
 // awaits in the PromQL operator-path evaluation); the default limit is too low.
 #![recursion_limit = "256"]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::path::Path as StdPath;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::Router;
 use bytes::Bytes;
@@ -216,6 +216,7 @@ pub fn replay_wal_head_records(
     records: &[WalHeadConsumerRecord],
 ) -> Result<WalHeadReplayResult, WalHeadReplayError> {
     let mut committed_offsets = BTreeMap::<i32, i64>::new();
+    let mut newest_timestamp_ms: Option<i64> = None;
     let mut replayed_records = 0;
     for record in records {
         if record.topic != wal_topic {
@@ -230,12 +231,19 @@ pub fn replay_wal_head_records(
             })?;
         let wal_record = WalRecord::decode(value)
             .map_err(|error| WalHeadReplayError::Decode(error.to_string()))?;
-        head.apply_wal_record(&wal_record);
+        if let Some(timestamp_ms) = wal_record_max_timestamp_ms(&wal_record) {
+            newest_timestamp_ms =
+                Some(newest_timestamp_ms.map_or(timestamp_ms, |current| current.max(timestamp_ms)));
+        }
+        head.apply_wal_record_at(&wal_record, record.partition, record.offset);
         replayed_records += 1;
         committed_offsets
             .entry(record.partition)
             .and_modify(|offset| *offset = (*offset).max(record.offset + 1))
             .or_insert(record.offset + 1);
+    }
+    if let Some(timestamp_ms) = newest_timestamp_ms {
+        head.prune(timestamp_ms);
     }
 
     Ok(WalHeadReplayResult {
@@ -246,6 +254,20 @@ pub fn replay_wal_head_records(
             .map(|(partition, offset)| WalHeadPartitionOffset { partition, offset })
             .collect(),
     })
+}
+
+fn wal_record_max_timestamp_ms(record: &WalRecord) -> Option<i64> {
+    record
+        .payload
+        .timestamp_ms()
+        .into_iter()
+        .chain(
+            record
+                .exemplars
+                .iter()
+                .map(|exemplar| exemplar.timestamp_ms),
+        )
+        .max()
 }
 
 #[async_trait::async_trait]
@@ -858,7 +880,24 @@ pub struct RefreshingMetricBlockStore {
     base: Url,
     manifest_prefix: String,
     hot_store: WalHead,
-    cold_cache: Arc<tokio::sync::RwLock<Option<(Instant, MetricBlockStore)>>>,
+    manifest_cache: Arc<tokio::sync::RwLock<BTreeMap<String, CompactionIndexManifest>>>,
+    cold_cache: Arc<tokio::sync::RwLock<Option<CachedMetricBlockStore>>>,
+    cold_refresh: tokio::sync::Mutex<()>,
+}
+
+struct CachedMetricBlockStore {
+    cached_at: Instant,
+    start_ms: i64,
+    end_ms: i64,
+    cold: MetricBlockStore,
+}
+
+const UNBOUNDED_COMPATIBILITY_LOOKBACK: Duration = Duration::from_secs(60 * 60);
+
+impl CachedMetricBlockStore {
+    fn covers(&self, start_ms: i64, end_ms: i64, ttl: Duration) -> bool {
+        self.cached_at.elapsed() < ttl && self.start_ms <= start_ms && self.end_ms >= end_ms
+    }
 }
 
 impl RefreshingMetricBlockStore {
@@ -874,35 +913,88 @@ impl RefreshingMetricBlockStore {
             base,
             manifest_prefix: manifest_prefix.into(),
             hot_store,
+            manifest_cache: Arc::new(tokio::sync::RwLock::new(BTreeMap::new())),
             cold_cache: Arc::new(tokio::sync::RwLock::new(None)),
+            cold_refresh: tokio::sync::Mutex::new(()),
         }
     }
 
     async fn current_store(
         &self,
+        start_ms: i64,
+        end_ms: i64,
     ) -> Result<MergedMetricStore<MetricBlockStore, WalHead>, MetricsServiceError> {
         const TTL: Duration = Duration::from_secs(30);
+        let (start_ms, end_ms) = normalize_refresh_range(start_ms, end_ms);
 
         {
             let guard = self.cold_cache.read().await;
-            if let Some((cached_at, ref cold)) = *guard
-                && cached_at.elapsed() < TTL
+            if let Some(entry) = guard.as_ref()
+                && entry.covers(start_ms, end_ms, TTL)
             {
-                return Ok(MergedMetricStore::new(cold.clone(), self.hot_store.clone()));
+                return Ok(MergedMetricStore::new(
+                    entry.cold.clone(),
+                    self.hot_store.clone(),
+                ));
             }
         }
 
-        let manifests =
-            load_compaction_manifests(self.store.clone(), &self.manifest_prefix).await?;
+        let _refresh_guard = self.cold_refresh.lock().await;
+        {
+            let guard = self.cold_cache.read().await;
+            if let Some(entry) = guard.as_ref()
+                && entry.covers(start_ms, end_ms, TTL)
+            {
+                return Ok(MergedMetricStore::new(
+                    entry.cold.clone(),
+                    self.hot_store.clone(),
+                ));
+            }
+        }
+
+        let manifests = load_compaction_manifests_for_range_with_cache(
+            self.store.clone(),
+            &self.manifest_prefix,
+            start_ms,
+            end_ms,
+            &self.manifest_cache,
+        )
+        .await?;
         let cold = MetricBlockStore::from_compaction_manifests(
             BlockStore::new(self.store.clone(), self.base.clone()),
             Some(BlockStore::new(self.store.clone(), self.base.clone())),
             &manifests,
         );
         let merged = MergedMetricStore::new(cold.clone(), self.hot_store.clone());
-        *self.cold_cache.write().await = Some((Instant::now(), cold));
+        *self.cold_cache.write().await = Some(CachedMetricBlockStore {
+            cached_at: Instant::now(),
+            start_ms,
+            end_ms,
+            cold,
+        });
         Ok(merged)
     }
+}
+
+fn normalize_refresh_range(start_ms: i64, end_ms: i64) -> (i64, i64) {
+    if start_ms == i64::MIN && end_ms == i64::MAX {
+        return (
+            unix_time_ms().saturating_sub(duration_ms(UNBOUNDED_COMPATIBILITY_LOOKBACK)),
+            i64::MAX,
+        );
+    }
+    (start_ms, end_ms)
+}
+
+fn unix_time_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or(0)
+}
+
+fn duration_ms(duration: Duration) -> i64 {
+    duration.as_millis().min(i64::MAX as u128) as i64
 }
 
 #[async_trait::async_trait]
@@ -914,7 +1006,7 @@ impl MetricStore for RefreshingMetricBlockStore {
         start_ms: i64,
         end_ms: i64,
     ) -> Result<ScanResult, crabka_promql::PromqlError> {
-        self.current_store()
+        self.current_store(start_ms, end_ms)
             .await?
             .scan(tenant, matchers, start_ms, end_ms)
             .await
@@ -927,7 +1019,7 @@ impl MetricStore for RefreshingMetricBlockStore {
         start_ms: i64,
         end_ms: i64,
     ) -> Result<Vec<String>, crabka_promql::PromqlError> {
-        self.current_store()
+        self.current_store(start_ms, end_ms)
             .await?
             .label_names(tenant, matchers, start_ms, end_ms)
             .await
@@ -941,7 +1033,7 @@ impl MetricStore for RefreshingMetricBlockStore {
         start_ms: i64,
         end_ms: i64,
     ) -> Result<Vec<String>, crabka_promql::PromqlError> {
-        self.current_store()
+        self.current_store(start_ms, end_ms)
             .await?
             .label_values(tenant, name, matchers, start_ms, end_ms)
             .await
@@ -954,7 +1046,7 @@ impl MetricStore for RefreshingMetricBlockStore {
         start_ms: i64,
         end_ms: i64,
     ) -> Result<Vec<Labels>, crabka_promql::PromqlError> {
-        self.current_store()
+        self.current_store(start_ms, end_ms)
             .await?
             .series(tenant, matchers, start_ms, end_ms)
             .await
@@ -967,7 +1059,7 @@ impl MetricStore for RefreshingMetricBlockStore {
         start_ms: i64,
         end_ms: i64,
     ) -> Result<Vec<ExemplarRecord>, crabka_promql::PromqlError> {
-        self.current_store()
+        self.current_store(start_ms, end_ms)
             .await?
             .exemplars(tenant, matchers, start_ms, end_ms)
             .await
@@ -978,14 +1070,17 @@ impl MetricStore for RefreshingMetricBlockStore {
         tenant: &str,
         metric: Option<&str>,
     ) -> Result<Vec<MetadataRecord>, crabka_promql::PromqlError> {
-        self.current_store().await?.metadata(tenant, metric).await
+        self.current_store(i64::MIN, i64::MAX)
+            .await?
+            .metadata(tenant, metric)
+            .await
     }
 
     async fn cardinality_label_names(
         &self,
         tenant: &str,
     ) -> Result<Vec<LabelNameCardinality>, crabka_promql::PromqlError> {
-        self.current_store()
+        self.current_store(i64::MIN, i64::MAX)
             .await?
             .cardinality_label_names(tenant)
             .await
@@ -995,7 +1090,7 @@ impl MetricStore for RefreshingMetricBlockStore {
         &self,
         tenant: &str,
     ) -> Result<Vec<LabelValueCardinality>, crabka_promql::PromqlError> {
-        self.current_store()
+        self.current_store(i64::MIN, i64::MAX)
             .await?
             .cardinality_label_values(tenant)
             .await
@@ -1005,7 +1100,7 @@ impl MetricStore for RefreshingMetricBlockStore {
         &self,
         tenant: &str,
     ) -> Result<Vec<Labels>, crabka_promql::PromqlError> {
-        self.current_store()
+        self.current_store(i64::MIN, i64::MAX)
             .await?
             .cardinality_active_series(tenant)
             .await
@@ -1015,14 +1110,20 @@ impl MetricStore for RefreshingMetricBlockStore {
         &self,
         tenant: &str,
     ) -> Result<crabka_promql::TsdbStats, crabka_promql::PromqlError> {
-        self.current_store().await?.tsdb_stats(tenant).await
+        self.current_store(i64::MIN, i64::MAX)
+            .await?
+            .tsdb_stats(tenant)
+            .await
     }
 
     async fn tsdb_blocks(
         &self,
         tenant: &str,
     ) -> Result<Vec<TsdbBlock>, crabka_promql::PromqlError> {
-        self.current_store().await?.tsdb_blocks(tenant).await
+        self.current_store(i64::MIN, i64::MAX)
+            .await?
+            .tsdb_blocks(tenant)
+            .await
     }
 }
 
@@ -1030,21 +1131,89 @@ pub async fn load_compaction_manifests(
     store: Arc<dyn ObjectStore>,
     manifest_prefix: &str,
 ) -> Result<Vec<CompactionIndexManifest>, MetricsServiceError> {
+    load_compaction_manifests_filtered(store, manifest_prefix, None).await
+}
+
+pub async fn load_compaction_manifests_for_range(
+    store: Arc<dyn ObjectStore>,
+    manifest_prefix: &str,
+    start_ms: i64,
+    end_ms: i64,
+) -> Result<Vec<CompactionIndexManifest>, MetricsServiceError> {
+    load_compaction_manifests_filtered(store, manifest_prefix, Some((start_ms, end_ms))).await
+}
+
+async fn load_compaction_manifests_for_range_with_cache(
+    store: Arc<dyn ObjectStore>,
+    manifest_prefix: &str,
+    start_ms: i64,
+    end_ms: i64,
+    cache: &tokio::sync::RwLock<BTreeMap<String, CompactionIndexManifest>>,
+) -> Result<Vec<CompactionIndexManifest>, MetricsServiceError> {
+    load_compaction_manifests_filtered_with_cache(
+        store,
+        manifest_prefix,
+        Some((start_ms, end_ms)),
+        Some(cache),
+    )
+    .await
+}
+
+async fn load_compaction_manifests_filtered(
+    store: Arc<dyn ObjectStore>,
+    manifest_prefix: &str,
+    time_range: Option<(i64, i64)>,
+) -> Result<Vec<CompactionIndexManifest>, MetricsServiceError> {
+    load_compaction_manifests_filtered_with_cache(store, manifest_prefix, time_range, None).await
+}
+
+async fn load_compaction_manifests_filtered_with_cache(
+    store: Arc<dyn ObjectStore>,
+    manifest_prefix: &str,
+    time_range: Option<(i64, i64)>,
+    cache: Option<&tokio::sync::RwLock<BTreeMap<String, CompactionIndexManifest>>>,
+) -> Result<Vec<CompactionIndexManifest>, MetricsServiceError> {
     let prefix = (!manifest_prefix.is_empty()).then(|| Path::from(manifest_prefix));
     let mut objects = store.list(prefix.as_ref()).try_collect::<Vec<_>>().await?;
     objects.sort_by(|left, right| left.location.cmp(&right.location));
 
+    let objects = objects
+        .into_iter()
+        .filter(|object| {
+            let key = object.location.as_ref();
+            StdPath::new(key)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("index"))
+        })
+        .collect::<Vec<_>>();
+    let live_keys = objects
+        .iter()
+        .map(|object| object.location.as_ref().to_string())
+        .collect::<BTreeSet<_>>();
     let mut manifests = Vec::new();
+    let mut fetched = Vec::<(String, CompactionIndexManifest)>::new();
     for object in objects {
         let key = object.location.as_ref();
-        if !StdPath::new(key)
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("index"))
+        let manifest = if let Some(cache) = cache
+            && let Some(manifest) = cache.read().await.get(key).cloned()
         {
-            continue;
+            manifest
+        } else {
+            let bytes = store.get(&object.location).await?.bytes().await?;
+            let manifest = CompactionIndexManifest::decode(&bytes)?;
+            fetched.push((key.to_string(), manifest.clone()));
+            manifest
+        };
+        if time_range.is_none_or(|(start_ms, end_ms)| {
+            manifest.max_ts >= start_ms && manifest.min_ts <= end_ms
+        }) {
+            manifests.push(manifest);
         }
-        let bytes = store.get(&object.location).await?.bytes().await?;
-        manifests.push(CompactionIndexManifest::decode(&bytes)?);
+    }
+    if let Some(cache) = cache {
+        let mut guard = cache.write().await;
+        guard.retain(|key, _| live_keys.contains(key));
+        guard.extend(fetched);
     }
     Ok(manifests)
 }
@@ -1114,8 +1283,18 @@ mod tests {
     use bytes::Bytes;
     use crabka_client_consumer::ConsumerRecord;
     use crabka_promql::{AlertmanagerSink, MetricStore};
+    use futures::StreamExt;
+    use futures::stream::BoxStream;
     use object_store::ObjectStore;
     use object_store::memory::InMemory;
+    use object_store::path::Path;
+    use object_store::{
+        CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta,
+        PutMultipartOptions, PutOptions, PutPayload, PutResult,
+    };
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
     use tower::ServiceExt;
 
     struct RecordingWalHeadConsumer {
@@ -1156,6 +1335,105 @@ mod tests {
             key: None,
             value: value.map(Bytes::from),
             headers: Vec::new(),
+        }
+    }
+
+    struct CountingObjectStore {
+        inner: Arc<InMemory>,
+        list_calls: Arc<AtomicUsize>,
+        get_calls: Arc<AtomicUsize>,
+        list_delay: std::time::Duration,
+    }
+
+    impl CountingObjectStore {
+        fn new(list_calls: Arc<AtomicUsize>, list_delay: std::time::Duration) -> Self {
+            Self {
+                inner: Arc::new(InMemory::new()),
+                list_calls,
+                get_calls: Arc::new(AtomicUsize::new(0)),
+                list_delay,
+            }
+        }
+    }
+
+    impl std::fmt::Debug for CountingObjectStore {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("CountingObjectStore")
+        }
+    }
+
+    impl std::fmt::Display for CountingObjectStore {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("CountingObjectStore")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ObjectStore for CountingObjectStore {
+        async fn put_opts(
+            &self,
+            location: &Path,
+            payload: PutPayload,
+            opts: PutOptions,
+        ) -> object_store::Result<PutResult> {
+            self.inner.put_opts(location, payload, opts).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &Path,
+            opts: PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn MultipartUpload>> {
+            self.inner.put_multipart_opts(location, opts).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &Path,
+            options: GetOptions,
+        ) -> object_store::Result<GetResult> {
+            if std::path::Path::new(location.as_ref())
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("index"))
+            {
+                self.get_calls.fetch_add(1, Ordering::SeqCst);
+            }
+            self.inner.get_opts(location, options).await
+        }
+
+        fn delete_stream(
+            &self,
+            locations: BoxStream<'static, object_store::Result<Path>>,
+        ) -> BoxStream<'static, object_store::Result<Path>> {
+            self.inner.delete_stream(locations)
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&Path>,
+        ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+            self.list_calls.fetch_add(1, Ordering::SeqCst);
+            let delay = self.list_delay;
+            Box::pin(self.inner.list(prefix).then(move |item| async move {
+                tokio::time::sleep(delay).await;
+                item
+            }))
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&Path>,
+        ) -> object_store::Result<ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy_opts(
+            &self,
+            from: &Path,
+            to: &Path,
+            options: CopyOptions,
+        ) -> object_store::Result<()> {
+            self.inner.copy_opts(from, to, options).await
         }
     }
 
@@ -1791,6 +2069,302 @@ rules:
     }
 
     #[tokio::test]
+    async fn refreshing_blockstore_singleflights_concurrent_cold_cache_loads() {
+        let list_calls = Arc::new(AtomicUsize::new(0));
+        let object_store: std::sync::Arc<dyn ObjectStore> =
+            std::sync::Arc::new(CountingObjectStore::new(
+                Arc::clone(&list_calls),
+                std::time::Duration::from_millis(25),
+            ));
+        let base = url::Url::parse("memory:///").unwrap();
+        let writer_store = crabka_blockstore::BlockStore::new(object_store.clone(), base.clone());
+        let mut labels = crabka_blockstore::Labels::new();
+        labels.insert("__name__", "up");
+        labels.insert("job", "api");
+        let fp = labels.fingerprint();
+        let batch = crabka_metrics::encode_float_samples(&[(fp, 10_000, 1.0)]).unwrap();
+        let block_meta = writer_store
+            .writer()
+            .write_block(
+                "tenant-a",
+                "metrics/tenant-a/float/0005.parquet",
+                crabka_metrics::float_sample_schema(),
+                &[batch],
+            )
+            .await
+            .unwrap();
+        let plan = crabka_metrics::CompactionObjectPlan {
+            block_key: block_meta.object_key.clone(),
+            index_key: "metrics/tenant-a/float/0005.index".to_string(),
+            first_offset: 4,
+            last_offset: 4,
+            row_count: block_meta.row_count,
+        };
+        let manifest = crabka_metrics::CompactionIndexManifest::from_block_meta(
+            crabka_metrics::MetricBlockKind::Float,
+            &plan,
+            &block_meta,
+            vec![crabka_metrics::CompactionSeriesLabels {
+                fingerprint: fp,
+                labels,
+            }],
+        );
+        crabka_metrics::CompactionIndexSink::write_manifest(
+            &crabka_metrics::ObjectStoreCompactionIndexSink::new(object_store.clone()),
+            &manifest,
+        )
+        .await
+        .unwrap();
+
+        let metric_store = super::RefreshingMetricBlockStore::new(
+            object_store,
+            base,
+            "metrics/tenant-a",
+            crabka_promql::WalHead::new(),
+        );
+        let matchers = Vec::<crabka_blockstore::LabelMatcher>::new();
+
+        let (a, b, c, d) = tokio::join!(
+            metric_store.series("tenant-a", &matchers, 0, 20_000),
+            metric_store.series("tenant-a", &matchers, 0, 20_000),
+            metric_store.series("tenant-a", &matchers, 0, 20_000),
+            metric_store.series("tenant-a", &matchers, 0, 20_000),
+        );
+
+        assert!(a.unwrap().len() == 1);
+        assert!(b.unwrap().len() == 1);
+        assert!(c.unwrap().len() == 1);
+        assert!(d.unwrap().len() == 1);
+        assert!(list_calls.load(Ordering::SeqCst) == 1);
+    }
+
+    #[tokio::test]
+    async fn refreshing_blockstore_bounds_cold_manifests_to_query_time() {
+        let object_store: std::sync::Arc<dyn ObjectStore> = std::sync::Arc::new(InMemory::new());
+        let base = url::Url::parse("memory:///").unwrap();
+        let writer_store = crabka_blockstore::BlockStore::new(object_store.clone(), base.clone());
+        let sink = crabka_metrics::ObjectStoreCompactionIndexSink::new(object_store.clone());
+
+        let mut old_labels = crabka_blockstore::Labels::new();
+        old_labels.insert("__name__", "up");
+        old_labels.insert("job", "old");
+        let old_fp = old_labels.fingerprint();
+        let old_batch = crabka_metrics::encode_float_samples(&[(old_fp, 10_000, 1.0)]).unwrap();
+        let old_block = writer_store
+            .writer()
+            .write_block(
+                "tenant-a",
+                "metrics/tenant-a/float/old.parquet",
+                crabka_metrics::float_sample_schema(),
+                &[old_batch],
+            )
+            .await
+            .unwrap();
+        let old_plan = crabka_metrics::CompactionObjectPlan {
+            block_key: old_block.object_key.clone(),
+            index_key: "metrics/tenant-a/float/old.index".to_string(),
+            first_offset: 1,
+            last_offset: 1,
+            row_count: old_block.row_count,
+        };
+        let old_manifest = crabka_metrics::CompactionIndexManifest::from_block_meta(
+            crabka_metrics::MetricBlockKind::Float,
+            &old_plan,
+            &old_block,
+            vec![crabka_metrics::CompactionSeriesLabels {
+                fingerprint: old_fp,
+                labels: old_labels,
+            }],
+        );
+        crabka_metrics::CompactionIndexSink::write_manifest(&sink, &old_manifest)
+            .await
+            .unwrap();
+
+        let mut new_labels = crabka_blockstore::Labels::new();
+        new_labels.insert("__name__", "up");
+        new_labels.insert("job", "new");
+        let new_fp = new_labels.fingerprint();
+        let new_batch = crabka_metrics::encode_float_samples(&[(new_fp, 1_000_000, 1.0)]).unwrap();
+        let new_block = writer_store
+            .writer()
+            .write_block(
+                "tenant-a",
+                "metrics/tenant-a/float/new.parquet",
+                crabka_metrics::float_sample_schema(),
+                &[new_batch],
+            )
+            .await
+            .unwrap();
+        let new_plan = crabka_metrics::CompactionObjectPlan {
+            block_key: new_block.object_key.clone(),
+            index_key: "metrics/tenant-a/float/new.index".to_string(),
+            first_offset: 2,
+            last_offset: 2,
+            row_count: new_block.row_count,
+        };
+        let new_manifest = crabka_metrics::CompactionIndexManifest::from_block_meta(
+            crabka_metrics::MetricBlockKind::Float,
+            &new_plan,
+            &new_block,
+            vec![crabka_metrics::CompactionSeriesLabels {
+                fingerprint: new_fp,
+                labels: new_labels,
+            }],
+        );
+        crabka_metrics::CompactionIndexSink::write_manifest(&sink, &new_manifest)
+            .await
+            .unwrap();
+
+        let metric_store = super::RefreshingMetricBlockStore::new(
+            object_store,
+            base,
+            "metrics/tenant-a",
+            crabka_promql::WalHead::new(),
+        );
+        let matchers = [crabka_blockstore::LabelMatcher::new(
+            "__name__",
+            crabka_blockstore::MatchOp::Eq,
+            "up",
+        )];
+
+        let recent = metric_store
+            .series("tenant-a", &matchers, 990_000, 1_010_000)
+            .await
+            .unwrap();
+        assert!(recent.len() == 1);
+        assert!(recent[0].get("job").unwrap() == "new");
+
+        let old = metric_store
+            .series("tenant-a", &matchers, 0, 20_000)
+            .await
+            .unwrap();
+        assert!(old.len() == 1);
+        assert!(old[0].get("job").unwrap() == "old");
+    }
+
+    #[tokio::test]
+    async fn refreshing_blockstore_reuses_decoded_manifests_across_cold_refreshes() {
+        let list_calls = Arc::new(AtomicUsize::new(0));
+        let object_store = Arc::new(CountingObjectStore::new(
+            Arc::clone(&list_calls),
+            std::time::Duration::ZERO,
+        ));
+        let get_calls = Arc::clone(&object_store.get_calls);
+        let object_store: std::sync::Arc<dyn ObjectStore> = object_store;
+        let base = url::Url::parse("memory:///").unwrap();
+        let writer_store = crabka_blockstore::BlockStore::new(object_store.clone(), base.clone());
+        let sink = crabka_metrics::ObjectStoreCompactionIndexSink::new(object_store.clone());
+
+        write_float_manifest(
+            &writer_store,
+            &sink,
+            "tenant-a",
+            "old",
+            10_000,
+            "metrics/tenant-a/float/old.parquet",
+            1,
+        )
+        .await;
+        write_float_manifest(
+            &writer_store,
+            &sink,
+            "tenant-a",
+            "new",
+            1_000_000,
+            "metrics/tenant-a/float/new.parquet",
+            2,
+        )
+        .await;
+
+        let metric_store = super::RefreshingMetricBlockStore::new(
+            object_store,
+            base,
+            "metrics/tenant-a",
+            crabka_promql::WalHead::new(),
+        );
+        let matchers = [crabka_blockstore::LabelMatcher::new(
+            "__name__",
+            crabka_blockstore::MatchOp::Eq,
+            "up",
+        )];
+
+        let old = metric_store
+            .series("tenant-a", &matchers, 0, 20_000)
+            .await
+            .unwrap();
+        let new = metric_store
+            .series("tenant-a", &matchers, 990_000, 1_010_000)
+            .await
+            .unwrap();
+
+        assert!(old.len() == 1);
+        assert!(old[0].get("job").unwrap() == "old");
+        assert!(new.len() == 1);
+        assert!(new[0].get("job").unwrap() == "new");
+        assert!(list_calls.load(Ordering::SeqCst) == 2);
+        assert!(
+            get_calls.load(Ordering::SeqCst) == 2,
+            "cold refresh should list for new manifest keys but not re-download known .index objects"
+        );
+    }
+
+    #[tokio::test]
+    async fn refreshing_blockstore_tsdb_stats_ignores_stale_compacted_blocks() {
+        let object_store: std::sync::Arc<dyn ObjectStore> = std::sync::Arc::new(InMemory::new());
+        let base = url::Url::parse("memory:///").unwrap();
+        let writer_store = crabka_blockstore::BlockStore::new(object_store.clone(), base.clone());
+        let sink = crabka_metrics::ObjectStoreCompactionIndexSink::new(object_store.clone());
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before Unix epoch")
+            .as_millis() as i64;
+
+        write_float_manifest(
+            &writer_store,
+            &sink,
+            "tenant-a",
+            "old",
+            now_ms - 2 * 60 * 60 * 1_000,
+            "metrics/tenant-a/float/stale.parquet",
+            1,
+        )
+        .await;
+        write_float_manifest(
+            &writer_store,
+            &sink,
+            "tenant-a",
+            "recent",
+            now_ms - 60_000,
+            "metrics/tenant-a/float/recent.parquet",
+            2,
+        )
+        .await;
+
+        let metric_store = super::RefreshingMetricBlockStore::new(
+            object_store,
+            base,
+            "metrics/tenant-a",
+            crabka_promql::WalHead::new(),
+        );
+
+        let stats = metric_store.tsdb_stats("tenant-a").await.unwrap();
+
+        assert!(stats.head_stats.num_series == 1);
+        assert!(
+            stats
+                .series_count_by_label_value_pair
+                .iter()
+                .any(|stat| stat.name == "job=recent" && stat.value == 1)
+        );
+        assert!(
+            stats
+                .series_count_by_label_value_pair
+                .iter()
+                .all(|stat| stat.name != "job=old")
+        );
+    }
+
+    #[tokio::test]
     async fn refreshing_router_merges_hot_head_with_compacted_blocks() {
         let object_store: std::sync::Arc<dyn ObjectStore> = std::sync::Arc::new(InMemory::new());
         let base = url::Url::parse("memory:///").unwrap();
@@ -1871,6 +2445,51 @@ rules:
         assert!(body["data"]["result"][0]["value"][1] == "2");
     }
 
+    async fn write_float_manifest(
+        writer_store: &crabka_blockstore::BlockStore,
+        sink: &crabka_metrics::ObjectStoreCompactionIndexSink,
+        tenant: &str,
+        job: &str,
+        ts_ms: i64,
+        object_key: &str,
+        offset: i64,
+    ) {
+        let mut labels = crabka_blockstore::Labels::new();
+        labels.insert("__name__", "up");
+        labels.insert("job", job);
+        let fp = labels.fingerprint();
+        let batch = crabka_metrics::encode_float_samples(&[(fp, ts_ms, 1.0)]).unwrap();
+        let block_meta = writer_store
+            .writer()
+            .write_block(
+                tenant,
+                object_key,
+                crabka_metrics::float_sample_schema(),
+                &[batch],
+            )
+            .await
+            .unwrap();
+        let plan = crabka_metrics::CompactionObjectPlan {
+            block_key: block_meta.object_key.clone(),
+            index_key: format!("{object_key}.index"),
+            first_offset: offset,
+            last_offset: offset,
+            row_count: block_meta.row_count,
+        };
+        let manifest = crabka_metrics::CompactionIndexManifest::from_block_meta(
+            crabka_metrics::MetricBlockKind::Float,
+            &plan,
+            &block_meta,
+            vec![crabka_metrics::CompactionSeriesLabels {
+                fingerprint: fp,
+                labels,
+            }],
+        );
+        crabka_metrics::CompactionIndexSink::write_manifest(sink, &manifest)
+            .await
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn replay_wal_head_records_decodes_applies_and_reports_commit_offsets() {
         let head = crabka_promql::WalHead::new();
@@ -1920,6 +2539,56 @@ rules:
             .await
             .expect("series");
         assert!(values.len() == 1);
+    }
+
+    #[tokio::test]
+    async fn replay_wal_head_records_prunes_outside_head_retention() {
+        let head = crabka_promql::WalHead::with_retention_ms(1_000);
+        let record = |job: &str, timestamp_ms: i64| crabka_metrics::WalRecord {
+            tenant: "tenant-a".to_string(),
+            labels: vec![
+                ("__name__".to_string(), "up".to_string()),
+                ("job".to_string(), job.to_string()),
+            ],
+            payload: crabka_metrics::SamplePayload::Float {
+                timestamp_ms,
+                value: 1.0,
+                start_timestamp_ms: None,
+            },
+            exemplars: Vec::new(),
+        };
+
+        super::replay_wal_head_records(
+            &head,
+            "__crabka_metrics_wal",
+            &[
+                super::WalHeadConsumerRecord {
+                    topic: "__crabka_metrics_wal".to_string(),
+                    partition: 0,
+                    offset: 1,
+                    value: Some(record("old", 1_000).encode().unwrap()),
+                },
+                super::WalHeadConsumerRecord {
+                    topic: "__crabka_metrics_wal".to_string(),
+                    partition: 0,
+                    offset: 2,
+                    value: Some(record("new", 10_000).encode().unwrap()),
+                },
+            ],
+        )
+        .unwrap();
+
+        let matchers = [crabka_blockstore::LabelMatcher::new(
+            "__name__",
+            crabka_blockstore::MatchOp::Eq,
+            "up",
+        )];
+        let jobs = head
+            .label_values("tenant-a", "job", &matchers, i64::MIN, i64::MAX)
+            .await
+            .expect("label values");
+
+        assert_eq!(jobs, vec!["new".to_string()]);
     }
 
     #[test]

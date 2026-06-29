@@ -2,7 +2,7 @@
 //! connect on first use.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use dashmap::DashMap;
 
@@ -70,7 +70,7 @@ impl BrokerConnector for TcpConnector {
 pub struct BrokerPool<C: BrokerConnector = TcpConnector> {
     by_id: DashMap<i32, Arc<C::Conn>>,
     by_addr: DashMap<i32, SocketAddr>,
-    bootstrap: Vec<SocketAddr>,
+    bootstrap: RwLock<Vec<SocketAddr>>,
     connector: C,
 }
 
@@ -95,7 +95,7 @@ impl<C: BrokerConnector> BrokerPool<C> {
         Self {
             by_id: DashMap::new(),
             by_addr: DashMap::new(),
-            bootstrap,
+            bootstrap: RwLock::new(bootstrap),
             connector,
         }
     }
@@ -139,15 +139,29 @@ impl<C: BrokerConnector> BrokerPool<C> {
         self.by_id.remove(&BOOTSTRAP_ID);
     }
 
+    /// Replace the bootstrap address list and drop the cached bootstrap
+    /// connection so the next bootstrap send dials the fresh addresses.
+    pub fn replace_bootstrap(&self, bootstrap: Vec<SocketAddr>) {
+        match self.bootstrap.write() {
+            Ok(mut guard) => *guard = bootstrap,
+            Err(poisoned) => *poisoned.into_inner() = bootstrap,
+        }
+        self.evict_bootstrap();
+    }
+
     /// Get-or-connect to the first reachable bootstrap address. The bootstrap
     /// connection is cached under the synthetic broker id `-1`.
     pub async fn bootstrap_connection(&self) -> Result<Arc<C::Conn>, ClientError> {
         if let Some(entry) = self.by_id.get(&BOOTSTRAP_ID) {
             return Ok(entry.clone());
         }
+        let bootstrap = match self.bootstrap.read() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
         let mut last_err: Option<ClientError> = None;
-        for addr in &self.bootstrap {
-            match self.connector.dial(*addr).await {
+        for addr in bootstrap {
+            match self.connector.dial(addr).await {
                 Ok(c) => {
                     let arc = Arc::new(c);
                     self.by_id.insert(BOOTSTRAP_ID, arc.clone());
@@ -442,6 +456,28 @@ mod tests {
         let before = dials.load(Ordering::Relaxed);
         let _ = pool.bootstrap_connection().await.unwrap();
         assert!(dials.load(Ordering::Relaxed) == before + 1);
+    }
+
+    #[tokio::test]
+    async fn replace_bootstrap_addresses_forces_redial_to_new_address() {
+        let dials = Arc::new(AtomicUsize::new(0));
+        let pool = BrokerPool::with_connector(
+            vec![addr(1111)],
+            CountingConnector {
+                dials: dials.clone(),
+                fail: vec![],
+            },
+        );
+
+        let first = pool.bootstrap_connection().await.unwrap();
+        assert!(first.addr == addr(1111));
+        assert!(dials.load(Ordering::Relaxed) == 1);
+
+        pool.replace_bootstrap(vec![addr(2222)]);
+
+        let second = pool.bootstrap_connection().await.unwrap();
+        assert!(second.addr == addr(2222));
+        assert!(dials.load(Ordering::Relaxed) == 2);
     }
 
     #[tokio::test]

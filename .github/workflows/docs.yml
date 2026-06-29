@@ -222,6 +222,8 @@ jobs:
           # never in CI. Two separate excludes rather than an `(a|b)` alternation
           # because the lychee-action `eval`s the args, so the parens/pipe of a
           # grouped regex are parsed as a shell subshell/pipe and error out.
+          # `--exclude codspeed.io`: the external badge host can time out from
+          # GitHub runners; CodSpeed reports through its dedicated PR check.
           # `--exclude www.sigstore.dev`: the Sigstore homepage is a valid
           # external reference for chart provenance, but it intermittently times
           # out from GitHub-hosted runners and makes PR docs builds flaky.
@@ -235,6 +237,7 @@ jobs:
             --exclude cwiki\.apache\.org
             --exclude localhost
             --exclude 127\.0\.0\.1
+            --exclude codspeed\.io
             --exclude www\.sigstore\.dev
             --include-fragments
             --fallback-extensions html

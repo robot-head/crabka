@@ -215,6 +215,39 @@ groups:
                 - evaluator: { type: lt, params: [1] }
               refId: C
 
+      - uid: crabka-obs-container-restarted
+        title: Observability container restarted recently
+        condition: C
+        for: 0m
+        labels: { severity: warning, area: observability }
+        annotations:
+          summary: "Container restarted: {{ $labels.container_label_com_docker_compose_service }}"
+          description: "container_start_time_seconds changed in the last 15m for {{ $labels.container_label_com_docker_compose_service }}; Grafana queries can see transient EOFs while the service rejoins."
+        noDataState: OK
+        execErrState: Error
+        data:
+          - refId: A
+            relativeTimeRange: { from: 900, to: 0 }
+            datasourceUid: crabka-prom
+            model:
+              datasource: { type: prometheus, uid: crabka-prom }
+              editorMode: code
+              expr: 'changes(max by (container_label_com_docker_compose_service) (container_start_time_seconds{container_label_com_docker_compose_project=~"crabka-observability-.*", container_label_com_docker_compose_service=~"alloy|cadvisor|grafana|metrics-querier|logs-querier|traces-querier|profiles-querier", image!=""})[15m:15s])'
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: A
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              datasource: { type: __expr__, uid: __expr__ }
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+              refId: C
+
       - uid: crabka-metrics-ingest-errors
         title: Metrics ingest error ratio high
         condition: C

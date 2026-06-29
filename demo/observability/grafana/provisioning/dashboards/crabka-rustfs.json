@@ -1,0 +1,296 @@
+{
+  "uid": "crabka-rustfs",
+  "title": "Crabka - RustFS Object Store",
+  "tags": ["crabka", "rustfs", "object-store"],
+  "schemaVersion": 39,
+  "version": 10,
+  "refresh": "1m",
+  "time": { "from": "now-30m", "to": "now" },
+  "templating": {
+    "list": [
+      { "name": "ds", "type": "datasource", "query": "prometheus", "current": { "text": "Crabka Metrics", "value": "crabka-prom" }, "hide": 0 }
+    ]
+  },
+  "panels": [
+    { "id": 1, "type": "row", "title": "RustFS runtime health", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 } },
+    {
+      "id": 2, "type": "stat", "title": "Container memory working set",
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "fieldConfig": { "defaults": { "unit": "bytes" } },
+      "gridPos": { "h": 5, "w": 4, "x": 0, "y": 1 },
+      "targets": [ { "refId": "A", "expr": "max(container_memory_working_set_bytes{container_label_com_docker_compose_project=~\"crabka-observability-.*\", container_label_com_docker_compose_service=\"rustfs\", image!=\"\"})", "instant": true } ]
+    },
+    {
+      "id": 3, "type": "stat", "title": "Native process RSS",
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "fieldConfig": { "defaults": { "unit": "bytes" } },
+      "description": "RustFS native process memory from OTLP metrics, falling back to cAdvisor if native metrics are not present.",
+      "gridPos": { "h": 5, "w": 4, "x": 4, "y": 1 },
+      "targets": [ { "refId": "A", "expr": "max(rustfs_system_process_resident_memory_bytes) or max(rustfs_process_memory_bytes) or max(container_memory_working_set_bytes{container_label_com_docker_compose_project=~\"crabka-observability-.*\", container_label_com_docker_compose_service=\"rustfs\", image!=\"\"})", "instant": true } ]
+    },
+    {
+      "id": 4, "type": "stat", "title": "Memory limit ratio",
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 } },
+      "gridPos": { "h": 5, "w": 4, "x": 8, "y": 1 },
+      "targets": [ { "refId": "A", "expr": "max(container_memory_working_set_bytes{container_label_com_docker_compose_project=~\"crabka-observability-.*\", container_label_com_docker_compose_service=\"rustfs\", image!=\"\"}) / clamp_min(max(container_spec_memory_limit_bytes{container_label_com_docker_compose_project=~\"crabka-observability-.*\", container_label_com_docker_compose_service=\"rustfs\", image!=\"\"}), 1)", "instant": true } ]
+    },
+    {
+      "id": 5, "type": "stat", "title": "RustFS uptime",
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "gridPos": { "h": 5, "w": 4, "x": 12, "y": 1 },
+      "targets": [ { "refId": "A", "expr": "max(rustfs_system_process_uptime_seconds) or max(rustfs_process_uptime_seconds) or (time() - max(container_start_time_seconds{container_label_com_docker_compose_project=~\"crabka-observability-.*\", container_label_com_docker_compose_service=\"rustfs\", image!=\"\"}))", "instant": true } ]
+    },
+    {
+      "id": 6, "type": "stat", "title": "CPU cores",
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "fieldConfig": { "defaults": { "unit": "cores" } },
+      "gridPos": { "h": 5, "w": 4, "x": 16, "y": 1 },
+      "targets": [ { "refId": "A", "expr": "sum(rate(rustfs_system_process_cpu_total_seconds[5m])) or (max(rustfs_process_cpu_percent) / 100) or sum(rate(container_cpu_usage_seconds_total{container_label_com_docker_compose_project=~\"crabka-observability-.*\", container_label_com_docker_compose_service=\"rustfs\", image!=\"\"}[5m]))", "instant": true } ]
+    },
+    {
+      "id": 7, "type": "stat", "title": "Restarts (1h)",
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "gridPos": { "h": 5, "w": 4, "x": 20, "y": 1 },
+      "targets": [ { "refId": "A", "expr": "changes(max(container_start_time_seconds{container_label_com_docker_compose_project=~\"crabka-observability-.*\", container_label_com_docker_compose_service=\"rustfs\", image!=\"\"})[1h:15s])", "instant": true } ]
+    },
+    {
+      "id": 8, "type": "timeseries", "title": "CPU usage",
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "fieldConfig": { "defaults": { "unit": "cores" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(container_cpu_usage_seconds_total{container_label_com_docker_compose_project=~\"crabka-observability-.*\", container_label_com_docker_compose_service=\"rustfs\", image!=\"\"}[$__rate_interval]))", "legendFormat": "container" },
+        { "refId": "B", "expr": "sum(rate(rustfs_system_process_cpu_total_seconds[$__rate_interval]))", "legendFormat": "native process" }
+      ]
+    },
+    {
+      "id": 9, "type": "timeseries", "title": "Memory",
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "fieldConfig": { "defaults": { "unit": "bytes" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "targets": [
+        { "refId": "A", "expr": "max(container_memory_working_set_bytes{container_label_com_docker_compose_project=~\"crabka-observability-.*\", container_label_com_docker_compose_service=\"rustfs\", image!=\"\"})", "legendFormat": "container working set" },
+        { "refId": "B", "expr": "max(rustfs_system_process_resident_memory_bytes) or max(rustfs_process_memory_bytes)", "legendFormat": "native process RSS" },
+        { "refId": "C", "expr": "max(rustfs_system_memory_available)", "legendFormat": "native available" }
+      ]
+    },
+    { "id": 10, "type": "row", "title": "RustFS native S3/API metrics", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 } },
+    {
+      "id": 11, "type": "timeseries", "title": "API request rate",
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "fieldConfig": { "defaults": { "unit": "reqps" } },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 15 },
+      "targets": [
+        { "refId": "A", "expr": "sum by (method) (rate(rustfs_http_server_requests_total[$__rate_interval]))", "legendFormat": "{{method}}" },
+        { "refId": "B", "expr": "sum(rate(rustfs_io_get_object_requests_total[$__rate_interval]))", "legendFormat": "get object" }
+      ]
+    },
+    {
+      "id": 12, "type": "stat", "title": "API error ratio",
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 } },
+      "gridPos": { "h": 8, "w": 4, "x": 8, "y": 15 },
+      "targets": [ { "refId": "A", "expr": "(sum(rate(rustfs_http_server_request_duration_seconds_count{status_class!~\"2..|3..\"}[5m])) / clamp_min(sum(rate(rustfs_http_server_request_duration_seconds_count[5m])), 1)) or vector(0)", "instant": true } ]
+    },
+    {
+      "id": 13, "type": "timeseries", "title": "Active requests and I/O queue",
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 15 },
+      "targets": [
+        { "refId": "A", "expr": "sum(rustfs_http_server_active_requests)", "legendFormat": "HTTP active" },
+        { "refId": "B", "expr": "sum(rustfs_io_queue_permits_in_use)", "legendFormat": "I/O permits in use" },
+        { "refId": "C", "expr": "sum(rustfs_io_queue_permits_available)", "legendFormat": "I/O permits available" }
+      ]
+    },
+    {
+      "id": 14, "type": "timeseries", "title": "API traffic",
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "fieldConfig": { "defaults": { "unit": "Bps" } },
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 15 },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(rustfs_http_server_request_body_bytes_total[$__rate_interval]))", "legendFormat": "request body" },
+        { "refId": "B", "expr": "sum(rate(rustfs_http_server_response_body_bytes_total[$__rate_interval]))", "legendFormat": "response body" },
+        { "refId": "C", "expr": "sum(rate(rustfs_io_transfer_bytes_total[$__rate_interval]))", "legendFormat": "I/O transfer" }
+      ]
+    },
+    {
+      "id": 15, "type": "timeseries", "title": "API TTFB p50/p99",
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 23 },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.50, sum by (le) (rate(rustfs_http_server_request_duration_seconds_bucket[5m])))", "legendFormat": "http p50" },
+        { "refId": "B", "expr": "histogram_quantile(0.99, sum by (le) (rate(rustfs_http_server_request_duration_seconds_bucket[5m])))", "legendFormat": "http p99" },
+        { "refId": "C", "expr": "histogram_quantile(0.99, sum by (le) (rate(rustfs_io_get_object_request_duration_seconds_bucket[5m])))", "legendFormat": "get object p99" }
+      ]
+    },
+    {
+      "id": 16, "type": "table", "title": "Top API operations",
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "fieldConfig": { "defaults": { "unit": "reqps" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 23 },
+      "targets": [ { "refId": "A", "expr": "topk(20, sum by (method) (rate(rustfs_http_server_requests_total[$__rate_interval])))", "instant": true } ]
+    },
+    { "id": 20, "type": "row", "title": "RustFS storage and background work", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 31 } },
+    {
+      "id": 21, "type": "stat", "title": "RustFS object metric bytes",
+      "description": "RustFS-reported bucket/object usage. This can lag or undercount S3-visible data, but it is still useful beside raw drive usage.",
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "fieldConfig": { "defaults": { "unit": "bytes" } },
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 32 },
+      "targets": [ { "refId": "A", "expr": "sum(rustfs_cluster_usage_buckets_total_bytes) or max(rustfs_cluster_usage_objects_total_bytes) or sum(rustfs_bucket_api_usage_bytes) or vector(0)", "instant": true } ]
+    },
+    {
+      "id": 22, "type": "stat", "title": "Objects",
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 32 },
+      "targets": [ { "refId": "A", "expr": "max(rustfs_cluster_usage_objects_count) or sum(rustfs_cluster_usage_buckets_objects_count) or vector(0)", "instant": true } ]
+    },
+    {
+      "id": 23, "type": "stat", "title": "Buckets",
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 32 },
+      "targets": [ { "refId": "A", "expr": "max(rustfs_cluster_buckets_total) or count(rustfs_cluster_usage_buckets_total_bytes) or vector(0)", "instant": true } ]
+    },
+    {
+      "id": 24, "type": "stat", "title": "Drive free ratio",
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 } },
+      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 32 },
+      "targets": [ { "refId": "A", "expr": "(max(rustfs_cluster_capacity_free_bytes) / clamp_min(max(rustfs_cluster_capacity_raw_total_bytes), 1)) or (sum(rustfs_system_drive_free_bytes) / clamp_min(sum(rustfs_system_drive_total_bytes), 1)) or vector(0)", "instant": true } ]
+    },
+    {
+      "id": 25, "type": "table", "title": "Bucket usage",
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "fieldConfig": { "defaults": { "unit": "bytes" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 38 },
+      "targets": [ { "refId": "A", "expr": "topk(20, rustfs_cluster_usage_buckets_total_bytes or rustfs_bucket_api_usage_bytes)", "instant": true } ]
+    },
+    {
+      "id": 26, "type": "timeseries", "title": "Drive health and capacity",
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 38 },
+      "targets": [
+        { "refId": "A", "expr": "sum(rustfs_cluster_health_drives_online_count) or sum(rustfs_system_drive_online_count)", "legendFormat": "online drives" },
+        { "refId": "B", "expr": "sum(rustfs_cluster_health_drives_offline_count) or sum(rustfs_system_drive_offline_count)", "legendFormat": "offline drives" },
+        { "refId": "C", "expr": "min(rustfs_cluster_erasure_set_health) or min(rustfs_system_drive_health)", "legendFormat": "min health" }
+      ]
+    },
+    {
+      "id": 27, "type": "timeseries", "title": "I/O queue pressure",
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 46 },
+      "targets": [
+        { "refId": "A", "expr": "max(rustfs_io_queue_utilization_percent)", "legendFormat": "queue utilization percent" },
+        { "refId": "B", "expr": "sum(rate(rustfs_io_queue_congestion_total[$__rate_interval]))", "legendFormat": "congestion events/s" },
+        { "refId": "C", "expr": "max(rustfs_io_queue_permits_in_use)", "legendFormat": "permits in use" }
+      ]
+    },
+    {
+      "id": 28, "type": "timeseries", "title": "Filesystem I/O",
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "fieldConfig": { "defaults": { "unit": "Bps" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 46 },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(container_fs_reads_bytes_total{container_label_com_docker_compose_project=~\"crabka-observability-.*\", container_label_com_docker_compose_service=\"rustfs\", image!=\"\"}[$__rate_interval]))", "legendFormat": "container read" },
+        { "refId": "B", "expr": "sum(rate(container_fs_writes_bytes_total{container_label_com_docker_compose_project=~\"crabka-observability-.*\", container_label_com_docker_compose_service=\"rustfs\", image!=\"\"}[$__rate_interval]))", "legendFormat": "container write" },
+        { "refId": "C", "expr": "sum(rate(rustfs_io_transfer_bytes_total[$__rate_interval]))", "legendFormat": "native transfer" },
+        { "refId": "D", "expr": "sum(rate(rustfs_system_process_io_write_bytes[$__rate_interval]))", "legendFormat": "native write" }
+      ]
+    },
+    { "id": 29, "type": "row", "title": "Storage growth and S3 operations", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 54 } },
+    {
+      "id": 39, "type": "stat", "title": "Raw drive used",
+      "description": "RustFS raw drive usage can include retained backend parts and filesystem usage outside live S3 objects.",
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "fieldConfig": { "defaults": { "unit": "bytes" } },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 55 },
+      "targets": [ { "refId": "A", "expr": "max(rustfs_cluster_capacity_used_bytes) or sum(rustfs_system_drive_used_bytes) or sum(rustfs_node_disk_used_bytes) or vector(0)", "instant": true } ]
+    },
+    {
+      "id": 40, "type": "stat", "title": "Drive/object metric delta",
+      "description": "Difference between raw drive usage and RustFS-reported object bytes. Large values point to backend-retained parts, undercounted object metrics, or unrelated filesystem usage.",
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "fieldConfig": { "defaults": { "unit": "bytes" } },
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 55 },
+      "targets": [ { "refId": "A", "expr": "clamp_min(((max(rustfs_cluster_capacity_used_bytes) or sum(rustfs_system_drive_used_bytes) or sum(rustfs_node_disk_used_bytes) or vector(0)) - (sum(rustfs_cluster_usage_buckets_total_bytes) or max(rustfs_cluster_usage_objects_total_bytes) or sum(rustfs_bucket_api_usage_bytes) or vector(0))), 0)", "instant": true } ]
+    },
+    {
+      "id": 36, "type": "table", "title": "S3 operation rate by bucket",
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "fieldConfig": { "defaults": { "unit": "reqps" } },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 59 },
+      "targets": [ { "refId": "A", "expr": "topk(30, sum by (bucket, op) (rate(rustfs_s3_operations_total[$__rate_interval])))", "legendFormat": "{{bucket}} {{op}}", "instant": true } ]
+    },
+    {
+      "id": 37, "type": "table", "title": "Bucket objects and versions",
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 59 },
+      "targets": [
+        { "refId": "A", "expr": "rustfs_cluster_usage_buckets_objects_count", "legendFormat": "{{bucket}} objects", "instant": true },
+        { "refId": "B", "expr": "rustfs_cluster_usage_buckets_versions_count", "legendFormat": "{{bucket}} versions", "instant": true },
+        { "refId": "C", "expr": "rustfs_cluster_usage_buckets_object_version_count_distribution", "legendFormat": "{{bucket}} {{range}}", "instant": true }
+      ]
+    },
+    {
+      "id": 38, "type": "timeseries", "title": "Background storage work",
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 59 },
+      "targets": [
+        { "refId": "A", "expr": "sum by (kind) (rate(rustfs_page_cache_reclaim_duration_seconds_count[$__rate_interval]))", "legendFormat": "page cache reclaim {{kind}}" },
+        { "refId": "B", "expr": "sum by (source) (rate(rustfs_capacity_update_duration_seconds_count[$__rate_interval]))", "legendFormat": "capacity update {{source}}" },
+        { "refId": "C", "expr": "sum by (disk) (rate(rustfs_capacity_scan_disk_duration_seconds_count[$__rate_interval]))", "legendFormat": "capacity scan {{disk}}" },
+        { "refId": "D", "expr": "sum by (type) (rate(rustfs_lock_acquire_total[$__rate_interval]))", "legendFormat": "lock acquire {{type}}" }
+      ]
+    },
+    { "id": 30, "type": "row", "title": "Object-store chatter, logs, and traces", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 67 } },
+    {
+      "id": 31, "type": "timeseries", "title": "RustFS network I/O",
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "fieldConfig": { "defaults": { "unit": "Bps" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 68 },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(container_network_receive_bytes_total{container_label_com_docker_compose_project=~\"crabka-observability-.*\", container_label_com_docker_compose_service=\"rustfs\", image!=\"\"}[$__rate_interval]))", "legendFormat": "container receive" },
+        { "refId": "B", "expr": "sum(rate(container_network_transmit_bytes_total{container_label_com_docker_compose_project=~\"crabka-observability-.*\", container_label_com_docker_compose_service=\"rustfs\", image!=\"\"}[$__rate_interval]))", "legendFormat": "container transmit" },
+        { "refId": "C", "expr": "sum(rate(rustfs_system_network_internode_recv_bytes_total[$__rate_interval]))", "legendFormat": "native internode receive" },
+        { "refId": "D", "expr": "sum(rate(rustfs_system_network_internode_sent_bytes_total[$__rate_interval]))", "legendFormat": "native internode sent" }
+      ]
+    },
+    {
+      "id": 32, "type": "table", "title": "Object-store client network I/O",
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "fieldConfig": { "defaults": { "unit": "Bps" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 68 },
+      "targets": [ { "refId": "A", "expr": "topk(12, sum by (container_label_com_docker_compose_service) (rate(container_network_receive_bytes_total{container_label_com_docker_compose_project=~\"crabka-observability-.*\", container_label_com_docker_compose_service=~\"rustfs|.*-querier|.*-compactor|.*-block-builder\", image!=\"\"}[$__rate_interval])) + sum by (container_label_com_docker_compose_service) (rate(container_network_transmit_bytes_total{container_label_com_docker_compose_project=~\"crabka-observability-.*\", container_label_com_docker_compose_service=~\"rustfs|.*-querier|.*-compactor|.*-block-builder\", image!=\"\"}[$__rate_interval])))", "legendFormat": "{{container_label_com_docker_compose_service}}", "instant": true } ]
+    },
+    {
+      "id": 33, "type": "logs", "title": "Recent RustFS warnings and errors",
+      "datasource": { "type": "loki", "uid": "crabka-loki" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 76 },
+      "targets": [ { "refId": "A", "expr": "{service_name=\"rustfs\"} |~ \"WARN|ERROR|warn|error|failed|panic|timeout\"" } ]
+    },
+    {
+      "id": 34, "type": "logs", "title": "Object-store client retry logs",
+      "datasource": { "type": "loki", "uid": "crabka-loki" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 76 },
+      "targets": [ { "refId": "A", "expr": "{service_name=~\"logs-querier|metrics-querier|traces-querier|profiles-querier|logs-compactor|metrics-compactor|traces-block-builder|profiles-block-builder\"} |= \"object_store::client::retry\"" } ]
+    },
+    {
+      "id": 35, "type": "table", "title": "Recent traces",
+      "datasource": { "type": "tempo", "uid": "crabka-tempo" },
+      "description": "RustFS OTLP traces make S3 object-store requests visible in the same trace backend as Crabka services.",
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 84 },
+      "targets": [ { "refId": "A", "queryType": "traceql", "query": "{}", "limit": 40, "tableType": "spans" } ]
+    }
+  ]
+}

@@ -1,13 +1,15 @@
 name: crabka-observability-demo
 
 x-s3-env: &s3-env
-  AWS_ACCESS_KEY_ID: minioadmin
-  AWS_SECRET_ACCESS_KEY: minioadmin
-  AWS_ENDPOINT_URL: http://minio:9000
+  AWS_ACCESS_KEY_ID: rustfsadmin
+  AWS_SECRET_ACCESS_KEY: rustfsadmin
+  AWS_ENDPOINT_URL: http://rustfs:9000
   AWS_ALLOW_HTTP: "true"
   AWS_REGION: us-east-1
+  AWS_EC2_METADATA_DISABLED: "true"
 
 x-otlp-env: &otlp-env
+  RUST_LOG: "${CRABKA_RUST_LOG:-info,pprof::profiler=warn,object_store::client::retry=warn}"
   CRABKA_OTLP_ENDPOINT: http://alloy:4317
   # Head sampling ratio. Every Crabka service self-instruments at 100% by
   # default, and the traces pipeline (distributor/broker/block-builder) traces
@@ -18,23 +20,24 @@ x-otlp-env: &otlp-env
   # converges while still leaving plenty of demo traces to view.
   CRABKA_OTLP_SAMPLE_RATIO: "0.05"
   CRABKA_ADMIN_LISTEN_ADDR: 0.0.0.0:9404
-  # Activate jemalloc heap profiling (the image is built --features
-  # heap-profiling). Default sample rate (~every 512 KiB) — NOT lg_prof_sample:0,
-  # which backtraces every allocation and is pathologically slow. A prof-sampling
-  # latency race once stalled crabka-client-consumer's group rejoin; that is fixed
-  # in client-core (independent reader/writer io tasks). NOTE: a separate cold-start
-  # hang — a WAL consumer left with an EMPTY assignment when its topic is created
-  # after it joins — is NOT a prof problem (reproduced with prof off; the lock
-  # protocol is proven deadlock-free by a stateright model); it is fixed in the
-  # consumer coordinator's metadata-change-triggered rejoin, so consumers recover
-  # under prof now.
-  MALLOC_CONF: "prof:true,prof_active:true"
+  # Enable jemalloc heap profiling support continuously so heap profiles include
+  # long-lived allocations, but sample coarsely (~every 1 MiB) so small demo
+  # services still produce useful heap profiles without tracing every
+  # allocation. NOT
+  # lg_prof_sample:0, which backtraces every allocation.
+  # Short dirty/muzzy decay plus the jemalloc background thread keeps inactive
+  # heap-profile and query allocations from sitting in RSS indefinitely.
+  MALLOC_CONF: "prof:true,prof_active:true,lg_prof_sample:20,background_thread:true,dirty_decay_ms:1000,muzzy_decay_ms:1000"
 
 # Every Crabka service runs the same all-in-one demo image. By default this
 # PULLS the prebuilt image from GHCR (published by the publish-demo-image
 # workflow) so `docker compose up` needs no local build. To run from source
-# instead, build + tag it under the same name from the repo root:
-#   docker build -f demo/observability/Dockerfile -t ghcr.io/robot-head/crabka-demo:latest .
+# instead, build an apko image from the repo root and docker-load/tag it under
+# the same name:
+#   melange keygen melange.rsa
+#   melange build packaging/melange/crabka-demo.yaml --source-dir . --signing-key melange.rsa --arch x86_64 --runner docker --cache-dir "$PWD/.melange-cache" --out-dir packages/
+#   apko build packaging/apko/crabka-demo.yaml ghcr.io/robot-head/crabka-demo:latest crabka-demo.tar --arch x86_64 --repository-append "$PWD/packages" --keyring-append "$PWD/melange.rsa.pub"
+#   docker load < crabka-demo.tar
 # then `docker compose up -d` (Compose uses the local image when present).
 x-crabka-image: &crabka-image
   image: ghcr.io/robot-head/crabka-demo:latest
@@ -72,14 +75,18 @@ x-registry-res: &registry-res
   mem_limit: ${CRABKA_SCHEMA_REGISTRY_MEM:-768m}
   memswap_limit: ${CRABKA_SCHEMA_REGISTRY_MEM:-768m}
   cpus: ${CRABKA_SCHEMA_REGISTRY_CPUS:-1}
-x-minio-res: &minio-res
-  mem_limit: ${CRABKA_MINIO_MEM:-2g}
-  memswap_limit: ${CRABKA_MINIO_MEM:-2g}
-  cpus: ${CRABKA_MINIO_CPUS:-2}
+x-rustfs-res: &rustfs-res
+  mem_limit: ${CRABKA_RUSTFS_MEM:-2g}
+  memswap_limit: ${CRABKA_RUSTFS_MEM:-2g}
+  cpus: ${CRABKA_RUSTFS_CPUS:-2}
 x-alloy-res: &alloy-res
   mem_limit: ${CRABKA_ALLOY_MEM:-512m}
   memswap_limit: ${CRABKA_ALLOY_MEM:-512m}
   cpus: ${CRABKA_ALLOY_CPUS:-1}
+x-cadvisor-res: &cadvisor-res
+  mem_limit: ${CRABKA_CADVISOR_MEM:-512m}
+  memswap_limit: ${CRABKA_CADVISOR_MEM:-512m}
+  cpus: ${CRABKA_CADVISOR_CPUS:-1}
 x-grafana-res: &grafana-res
   mem_limit: ${CRABKA_GRAFANA_MEM:-1g}
   memswap_limit: ${CRABKA_GRAFANA_MEM:-1g}
@@ -103,7 +110,7 @@ services:
   # already have a broker-data volume from before this flag was added, wipe it
   # with `docker compose down -v` and restart.
   broker-format:
-    image: crabka-demo:latest
+    image: ghcr.io/robot-head/crabka-demo:latest
     <<: *setup-res
     restart: "no"
     entrypoint: ["sh", "-c", "test -f /data/meta.properties.json || crabka format --log-dir /data --standalone --node-id 1 --controller-listener broker:9093 --feature streams.version=1"]
@@ -126,29 +133,67 @@ services:
       timeout: 3s
       retries: 30
 
-  minio:
-    image: minio/minio:latest
-    # Resource caps (see x-minio-res / .env); heap is ~0.4 GiB, the rest is reclaimable page cache.
-    <<: *minio-res
-    command: ["server", "/data", "--console-address", ":9001"]
+  rustfs-permissions:
+    image: busybox:1.37
+    <<: *setup-res
+    restart: "no"
+    command: ["sh", "-c", "mkdir -p /data && chown -R 10001:10001 /data"]
+    volumes: ["rustfs-data:/data"]
+
+  rustfs:
+    image: rustfs/rustfs:latest
+    restart: unless-stopped
+    # Resource caps (see x-rustfs-res / .env); the cap bounds object-store cache and query bursts.
+    <<: *rustfs-res
+    command: ["/data"]
     environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
+      RUSTFS_ACCESS_KEY: rustfsadmin
+      RUSTFS_SECRET_KEY: rustfsadmin
+      RUSTFS_OBS_ENDPOINT: http://alloy:4318
+      RUSTFS_OBS_TRACES_EXPORT_ENABLED: "true"
+      RUSTFS_OBS_METRICS_EXPORT_ENABLED: "true"
+      # RustFS treats non-production environments as local development and
+      # prints full tracing span lifecycle events to stdout. That makes traces
+      # easy to spot, but overwhelms the demo logs/query path. Keep local stdout
+      # quiet and export RustFS telemetry through OTLP instead.
+      RUSTFS_OBS_LOGS_EXPORT_ENABLED: "false"
+      RUSTFS_OBS_SAMPLE_RATIO: "0.05"
+      RUSTFS_OBS_SERVICE_NAME: rustfs
+      RUSTFS_OBS_ENVIRONMENT: production
+      RUSTFS_OBS_METER_INTERVAL: "15"
+      RUSTFS_OBS_LOGGER_LEVEL: info
+      RUSTFS_OBS_LOG_STDOUT_ENABLED: "false"
+      # This fixture stores many small parquet/json blocks and must stay inside
+      # a laptop-friendly memory cap. Keep adaptive sizing enabled, but use the
+      # small-object profile instead of GeneralPurpose's 1 MiB unknown-size
+      # buffers.
+      RUSTFS_BUFFER_PROFILE: WebWorkload
+      RUSTFS_OBJECT_IO_STORAGE_MEDIA_OVERRIDE: hdd
+      RUSTFS_ALLOCATOR_RECLAIM_ENABLED: "true"
+      RUSTFS_ALLOCATOR_RECLAIM_INTERVAL_SECS: "15"
+      RUSTFS_ALLOCATOR_RECLAIM_IDLE_INTERVALS: "1"
+      RUSTFS_OBJECT_FILE_CACHE_RECLAIM_READ_ENABLE: "true"
+      RUSTFS_OBJECT_FILE_CACHE_RECLAIM_WRITE_ENABLE: "true"
+      RUSTFS_OBJECT_FILE_CACHE_RECLAIM_THRESHOLD: "65536"
     ports: ["9000:9000", "9001:9001"]
-    volumes: ["minio-data:/data"]
+    volumes: ["rustfs-data:/data"]
+    depends_on:
+      rustfs-permissions: { condition: service_completed_successfully }
+      alloy: { condition: service_started }
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:9000/minio/health/live"]
+      test: ["CMD", "curl", "-fsS", "http://localhost:9000/health"]
       interval: 5s
       timeout: 3s
       retries: 30
 
-  minio-setup:
-    image: minio/mc:latest
+  rustfs-setup:
+    image: amazon/aws-cli:latest
     <<: *setup-res
+    environment: { <<: *s3-env }
     depends_on:
-      minio: { condition: service_healthy }
+      rustfs: { condition: service_healthy }
     entrypoint: ["/bin/sh", "/bootstrap.sh"]
-    volumes: ["./minio/bootstrap.sh:/bootstrap.sh:ro"]
+    volumes: ["./rustfs/bootstrap.sh:/bootstrap.sh:ro"]
 
   # One-shot: pre-create the WAL topics (the broker does not auto-create on
   # produce — producing to a missing topic returns NOT_LEADER_OR_FOLLOWER) plus
@@ -164,10 +209,17 @@ services:
       - /bin/sh
       - -c
       - >
+        WAL_RETENTION_MS=${CRABKA_OBSERVABILITY_WAL_RETENTION_MS:-900000};
+        WAL_SEGMENT_BYTES=${CRABKA_OBSERVABILITY_WAL_SEGMENT_BYTES:-67108864};
         for t in __crabka_metrics_wal __crabka_traces_wal __crabka_profiles_wal
         __crabka_observability_logs_wal orders order-counts; do
         /opt/kafka/bin/kafka-topics.sh --bootstrap-server broker:9092 --create
-        --if-not-exists --topic "$$t" --partitions 1 --replication-factor 1 || exit 1;
+        --if-not-exists --topic "$$t" --partitions 1 --replication-factor 1
+        --config retention.ms=$$WAL_RETENTION_MS
+        --config segment.bytes=$$WAL_SEGMENT_BYTES || exit 1;
+        /opt/kafka/bin/kafka-configs.sh --bootstrap-server broker:9092 --alter
+        --entity-type topics --entity-name "$$t"
+        --add-config retention.ms=$$WAL_RETENTION_MS,segment.bytes=$$WAL_SEGMENT_BYTES || exit 1;
         done; echo "topics ready"
 
   schema-registry:
@@ -193,17 +245,17 @@ services:
     command: ["crabka-metrics", "--target=compactor", "--object-store-url=s3://crabka-metrics", "--bootstrap=broker:9092"]
     environment: { <<: [*s3-env, *otlp-env] }
     depends_on:
-      minio-setup: { condition: service_completed_successfully }
+      rustfs-setup: { condition: service_completed_successfully }
       broker: { condition: service_healthy }
 
   metrics-querier:
     # crabka-metrics-service uses --wal-bootstrap (its own flag name).
     <<: [*crabka-image, *querier-res]
-    command: ["crabka-metrics-service", "--target=querier", "--listen=0.0.0.0:9090", "--object-store-url=s3://crabka-metrics", "--manifest-prefix=metrics", "--wal-bootstrap=broker:9092"]
+    command: ["crabka-metrics-service", "--target=querier", "--listen=0.0.0.0:9090", "--object-store-url=s3://crabka-metrics", "--manifest-prefix=metrics", "--wal-bootstrap=broker:9092", "--wal-head-retention-ms=${CRABKA_METRICS_QUERIER_WAL_HEAD_RETENTION_MS:-300000}"]
     environment: { <<: [*s3-env, *otlp-env] }
     ports: ["9090:9090"]
     depends_on:
-      minio-setup: { condition: service_completed_successfully }
+      rustfs-setup: { condition: service_completed_successfully }
       broker: { condition: service_healthy }
 
   # ---- TRACES (Tempo) ----
@@ -216,10 +268,12 @@ services:
 
   traces-block-builder:
     <<: [*crabka-image, *compactor-res]
-    command: ["crabka-traces", "--target=block-builder", "--bootstrap=broker:9092", "--object-store-url=s3://crabka-traces"]
+    mem_limit: ${CRABKA_TRACES_BLOCK_BUILDER_MEM:-4g}
+    memswap_limit: ${CRABKA_TRACES_BLOCK_BUILDER_MEM:-4g}
+    command: ["crabka-traces", "--target=block-builder", "--bootstrap=broker:9092", "--object-store-url=s3://crabka-traces", "--block-builder-flush-max-records=${CRABKA_TRACES_BLOCK_BUILDER_FLUSH_MAX_RECORDS:-50000}", "--block-builder-flush-max-age-ms=${CRABKA_TRACES_BLOCK_BUILDER_FLUSH_MAX_AGE_MS:-60000}"]
     environment: { <<: [*s3-env, *otlp-env] }
     depends_on:
-      minio-setup: { condition: service_completed_successfully }
+      rustfs-setup: { condition: service_completed_successfully }
       broker: { condition: service_healthy }
 
   traces-querier:
@@ -228,7 +282,7 @@ services:
     environment: { <<: [*s3-env, *otlp-env] }
     ports: ["3200:3200"]
     depends_on:
-      minio-setup: { condition: service_completed_successfully }
+      rustfs-setup: { condition: service_completed_successfully }
 
   # ---- LOGS (Loki) — binary is `crabka-observability` (the logs service) ----
   logs-distributor:
@@ -237,7 +291,7 @@ services:
     environment: { <<: [*s3-env, *otlp-env] }
     depends_on:
       broker: { condition: service_healthy }
-      minio-setup: { condition: service_completed_successfully }
+      rustfs-setup: { condition: service_completed_successfully }
 
   logs-compactor:
     <<: [*crabka-image, *compactor-res]
@@ -245,7 +299,7 @@ services:
     environment: { <<: [*s3-env, *otlp-env] }
     depends_on:
       broker: { condition: service_healthy }
-      minio-setup: { condition: service_completed_successfully }
+      rustfs-setup: { condition: service_completed_successfully }
 
   logs-querier:
     # --wal-group-id MUST differ from the compactor's default
@@ -253,12 +307,12 @@ services:
     # logs WAL, so a shared group id makes them fight over the one partition and
     # the querier's consumer spins on REBALANCE_IN_PROGRESS(27). A distinct group
     # lets each independently tail the WAL.
-    # --querier-index-source=tenant-object-store-manifest reads the index the
-    # compactor wrote to S3 (default `local-manifest` reads the querier's empty
-    # local disk -> no labels/series). With no --tenant, the tenant is resolved
-    # per-request from X-Scope-OrgID.
+    # --querier-index-source=tenant-object-store-shards reads the incremental
+    # shard catalog the compactor writes to S3 (default `local-manifest` reads
+    # the querier's empty local disk -> no labels/series). With no --tenant, the
+    # tenant is resolved per-request from X-Scope-OrgID.
     <<: [*crabka-image, *querier-res]
-    command: ["crabka-observability", "--target=querier", "--listen-addr=0.0.0.0:3100", "--wal-bootstrap-server=broker:9092", "--object-store-url=s3://crabka-logs", "--index-prefix=logs", "--querier-index-source=tenant-object-store-manifest", "--wal-group-id=crabka-observability-querier"]
+    command: ["crabka-observability", "--target=querier", "--listen-addr=0.0.0.0:3100", "--wal-bootstrap-server=broker:9092", "--object-store-url=s3://crabka-logs", "--index-prefix=logs", "--querier-index-source=tenant-object-store-shards", "--wal-group-id=crabka-observability-querier"]
     environment: { <<: [*s3-env, *otlp-env] }
     ports: ["3100:3100"]
     # The hot-tail WAL consumer (--wal-bootstrap-server) connects to the broker at
@@ -266,7 +320,7 @@ services:
     # consumer-group join fails, and the tail never recovers -> empty labels/streams
     # until the container is restarted. Wait for the broker like the compactor does.
     depends_on:
-      minio-setup: { condition: service_completed_successfully }
+      rustfs-setup: { condition: service_completed_successfully }
       broker: { condition: service_healthy }
 
   # ---- PROFILES (Pyroscope) ----
@@ -279,10 +333,10 @@ services:
 
   profiles-block-builder:
     <<: [*crabka-image, *compactor-res]
-    command: ["crabka-profiles", "--target=block-builder", "--bootstrap=broker:9092", "--object-store-url=s3://crabka-profiles"]
+    command: ["crabka-profiles", "--target=block-builder", "--bootstrap=broker:9092", "--object-store-url=s3://crabka-profiles", "--block-builder-flush-records=${CRABKA_PROFILES_BLOCK_BUILDER_FLUSH_RECORDS:-4096}", "--block-builder-flush-max-age-ms=${CRABKA_PROFILES_BLOCK_BUILDER_FLUSH_MAX_AGE_MS:-60000}"]
     environment: { <<: [*s3-env, *otlp-env] }
     depends_on:
-      minio-setup: { condition: service_completed_successfully }
+      rustfs-setup: { condition: service_completed_successfully }
       broker: { condition: service_healthy }
 
   profiles-querier:
@@ -300,7 +354,7 @@ services:
     # and the hot store stays empty -> profiles (especially sparse ones like memory)
     # return nothing until the container is restarted. Wait for the broker.
     depends_on:
-      minio-setup: { condition: service_completed_successfully }
+      rustfs-setup: { condition: service_completed_successfully }
       broker: { condition: service_healthy }
 
   # ---- COLLECTOR + GRAFANA ----
@@ -314,6 +368,20 @@ services:
     ports: ["12345:12345"]
     depends_on:
       broker: { condition: service_healthy }
+
+  cadvisor:
+    image: ghcr.io/google/cadvisor:0.60.1
+    <<: *cadvisor-res
+    command:
+      - "--docker_only=true"
+      - "--housekeeping_interval=15s"
+      - "--disable_metrics=app,cpuLoad,disk,oom_event,percpu,perf_event,pressure"
+    volumes:
+      - "/:/rootfs:ro"
+      - "/var/run:/var/run:ro"
+      - "/sys:/sys:ro"
+      - "/var/lib/docker:/var/lib/docker:ro"
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
 
   grafana:
     image: grafana/grafana:13.0
@@ -367,4 +435,4 @@ services:
 
 volumes:
   broker-data:
-  minio-data:
+  rustfs-data:

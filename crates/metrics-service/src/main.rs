@@ -7,6 +7,7 @@
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
+use std::future::Future;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -18,14 +19,17 @@ use crabka_client_producer::Producer;
 use crabka_metrics::{OverridesProvider, WAL_TOPIC};
 use crabka_metrics_service::{
     KafkaRecordingRuleWalSink, KafkaRulerStateSink, PrometheusRulerStateSink, RULER_STATE_TOPIC,
-    RulerAlertmanagerSink, RulerStateFanoutSink, run_ruler_evaluation_loop,
-    run_ruler_state_consumer_loop, run_wal_head_consumer_loop, serve_prometheus_router_joinable,
+    RulerAlertmanagerSink, RulerStateFanoutSink, WalHeadConsumerCommit, WalHeadConsumerPoll,
+    run_ruler_evaluation_loop, run_ruler_state_consumer_loop, run_wal_head_consumer_loop,
+    serve_prometheus_router_joinable,
 };
 use crabka_promql::{
     EngineOpts, PrometheusApiState, QueryFrontendOptions, RulerShard, WalHead, prometheus_router,
 };
 use crabka_telemetry::OtlpConfig;
 use object_store::ObjectStore;
+
+const DEFAULT_WAL_HEAD_RETENTION_MS: i64 = 5 * 60 * 1_000;
 
 #[derive(Debug, Parser)]
 struct Cli {
@@ -43,6 +47,8 @@ struct Cli {
     query_frontend_split_ms: i64,
     #[arg(long, default_value_t = 1)]
     query_frontend_shards: usize,
+    #[arg(long, default_value_t = 2)]
+    max_concurrent_queries: usize,
     #[arg(long, default_value = "metrics-query-cache")]
     query_frontend_cache_prefix: String,
     #[arg(long, default_value = "anonymous")]
@@ -67,6 +73,8 @@ struct Cli {
     wal_topic: String,
     #[arg(long, default_value_t = 500)]
     wal_poll_ms: u64,
+    #[arg(long, default_value_t = DEFAULT_WAL_HEAD_RETENTION_MS)]
+    wal_head_retention_ms: i64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -121,6 +129,7 @@ async fn run_query_frontend(
         WalHead::new(),
     );
     let mut state = PrometheusApiState::new(Arc::new(metric_store), EngineOpts::default())
+        .with_max_concurrent_queries(cli.max_concurrent_queries)
         .with_metrics(metrics)
         .with_query_frontend_cache(
             QueryFrontendOptions {
@@ -161,6 +170,7 @@ async fn run_ruler(
         WalHead::new(),
     );
     let mut state = PrometheusApiState::new(Arc::new(metric_store), EngineOpts::default())
+        .with_max_concurrent_queries(cli.max_concurrent_queries)
         .with_metrics(metrics);
     if let Some(overrides) = load_runtime_overrides(cli.runtime_overrides.as_deref())? {
         state = state.with_query_limits(overrides);
@@ -256,41 +266,33 @@ async fn run_querier(
     let object_store_url = url::Url::parse(&cli.object_store_url)?;
     let (store, _prefix) = object_store::parse_url_opts(&object_store_url, std::env::vars())?;
     let store: Arc<dyn ObjectStore> = Arc::from(store);
-    let head = WalHead::new();
+    let head = WalHead::with_retention_ms(cli.wal_head_retention_ms);
     let shutdown = Shutdown::new();
     spawn_ctrl_c_listener(shutdown.clone());
     if let Some(bootstrap) = cli.wal_bootstrap.clone() {
-        let mut consumer = Consumer::builder()
-            .bootstrap(bootstrap)
-            .group_id(cli.wal_group_id.clone())
-            .client_id(cli.wal_client_id.clone())
-            .auto_offset_reset(AutoOffsetReset::Earliest)
-            .subscribe([cli.wal_topic.clone()])
-            .build()
-            .await?;
         let wal_head = head.clone();
         let wal_topic = cli.wal_topic.clone();
         let poll_timeout = Duration::from_millis(cli.wal_poll_ms);
-        // The WAL head consumer is critical: without it the querier serves a
-        // frozen head. Observe the shared shutdown, and if the loop returns
-        // (only on error) surface it and trigger shutdown so the process winds
-        // down loudly instead of serving stale data headless.
-        let consumer_shutdown = shutdown.clone();
-        let consumer_stop = consumer_shutdown.rx.clone();
-        tokio::spawn(async move {
-            let result = run_wal_head_consumer_loop(
-                &mut consumer,
-                &wal_head,
-                &wal_topic,
-                poll_timeout,
-                move |_| *consumer_stop.borrow(),
-            )
-            .await;
-            if let Err(error) = result {
-                tracing::error!(%error, "metrics WAL head consumer stopped; shutting down");
-            }
-            consumer_shutdown.trigger();
-        });
+        let group_id = cli.wal_group_id.clone();
+        let client_id = cli.wal_client_id.clone();
+        let subscribe_topic = cli.wal_topic.clone();
+        spawn_wal_head_consumer_task(
+            move || async move {
+                Consumer::builder()
+                    .bootstrap(bootstrap)
+                    .group_id(group_id)
+                    .client_id(client_id)
+                    .auto_offset_reset(AutoOffsetReset::Earliest)
+                    .subscribe([subscribe_topic])
+                    .build()
+                    .await
+                    .map_err(|error| error.to_string())
+            },
+            wal_head,
+            wal_topic,
+            poll_timeout,
+            shutdown.clone(),
+        );
     }
     let metric_store = crabka_metrics_service::RefreshingMetricBlockStore::new(
         store,
@@ -299,6 +301,7 @@ async fn run_querier(
         head,
     );
     let mut state = PrometheusApiState::new(Arc::new(metric_store), EngineOpts::default())
+        .with_max_concurrent_queries(cli.max_concurrent_queries)
         .with_metrics(metrics);
     if let Some(overrides) = load_runtime_overrides(cli.runtime_overrides.as_deref())? {
         state = state.with_query_limits(overrides);
@@ -311,6 +314,43 @@ async fn run_querier(
     // before the process exits.
     server.await?;
     Ok(())
+}
+
+fn spawn_wal_head_consumer_task<C, Build, BuildFuture>(
+    build_consumer: Build,
+    wal_head: WalHead,
+    wal_topic: String,
+    poll_timeout: Duration,
+    shutdown: Shutdown,
+) -> tokio::task::JoinHandle<()>
+where
+    C: WalHeadConsumerPoll + WalHeadConsumerCommit + Send + 'static,
+    Build: FnOnce() -> BuildFuture + Send + 'static,
+    BuildFuture: Future<Output = Result<C, String>> + Send + 'static,
+{
+    tokio::spawn(async move {
+        let mut consumer = match build_consumer().await {
+            Ok(consumer) => consumer,
+            Err(error) => {
+                tracing::error!(%error, "metrics WAL head consumer failed to start; shutting down");
+                shutdown.trigger();
+                return;
+            }
+        };
+        let consumer_stop = shutdown.rx.clone();
+        let result = run_wal_head_consumer_loop(
+            &mut consumer,
+            &wal_head,
+            &wal_topic,
+            poll_timeout,
+            move |_| *consumer_stop.borrow(),
+        )
+        .await;
+        if let Err(error) = result {
+            tracing::error!(%error, "metrics WAL head consumer stopped; shutting down");
+        }
+        shutdown.trigger();
+    })
 }
 
 /// A single process-wide shutdown signal shared by the HTTP server and every
@@ -502,6 +542,8 @@ mod tests {
             "querier-a",
             "--wal-topic",
             "__crabka_metrics_wal",
+            "--wal-head-retention-ms",
+            "600000",
         ])
         .unwrap();
 
@@ -509,6 +551,14 @@ mod tests {
         assert!(cli.wal_group_id == "metrics-querier");
         assert!(cli.wal_client_id == "querier-a");
         assert!(cli.wal_topic == "__crabka_metrics_wal");
+        assert!(cli.wal_head_retention_ms == 600_000);
+    }
+
+    #[test]
+    fn querier_wal_head_retention_default_is_bounded_for_demo_load() {
+        let cli = Cli::try_parse_from(["crabka-metrics-service", "--target", "querier"]).unwrap();
+
+        assert!(cli.wal_head_retention_ms == 300_000);
     }
 
     #[test]
@@ -549,5 +599,55 @@ mod tests {
         assert!(!*stop.borrow());
         shutdown.trigger();
         assert!(*stop.borrow());
+    }
+
+    #[tokio::test]
+    async fn wal_head_consumer_startup_runs_in_background() {
+        let shutdown = Shutdown::new();
+        let (_tx, rx) = tokio::sync::oneshot::channel::<()>();
+
+        let task = spawn_wal_head_consumer_task(
+            || async move {
+                let _ = rx.await;
+                Ok(PendingWalHeadConsumer)
+            },
+            crabka_promql::WalHead::new(),
+            "__crabka_metrics_wal".to_string(),
+            std::time::Duration::from_millis(1),
+            shutdown.clone(),
+        );
+
+        let signalled =
+            tokio::time::timeout(std::time::Duration::from_millis(25), shutdown.signalled()).await;
+        task.abort();
+
+        assert!(
+            signalled.is_err(),
+            "pending WAL startup should not block caller or trigger shutdown"
+        );
+    }
+
+    struct PendingWalHeadConsumer;
+
+    #[async_trait::async_trait]
+    impl crabka_metrics_service::WalHeadConsumerPoll for PendingWalHeadConsumer {
+        async fn poll(
+            &mut self,
+            _timeout: std::time::Duration,
+        ) -> Result<
+            Vec<crabka_client_consumer::ConsumerRecord>,
+            crabka_metrics_service::WalHeadConsumerError,
+        > {
+            std::future::pending().await
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crabka_metrics_service::WalHeadConsumerCommit for PendingWalHeadConsumer {
+        async fn commit_sync(
+            &mut self,
+        ) -> Result<(), crabka_metrics_service::WalHeadConsumerError> {
+            Ok(())
+        }
     }
 }

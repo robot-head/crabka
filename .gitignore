@@ -17,10 +17,14 @@ MODULE.bazel.lock
 *.class
 
 # melange / apko build artifacts
+.melange-cache/
 melange.rsa
 melange.rsa.pub
 packages/
 crabka-operator.tar
+crabka-demo.tar
+sbom-*.spdx.json
+.tmp-*.log
 .worktree
 .worktrees/
 

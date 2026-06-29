@@ -1,0 +1,132 @@
+{
+  "uid": "crabka-runtime",
+  "title": "Crabka - Runtime Resources",
+  "tags": ["crabka", "runtime", "containers"],
+  "schemaVersion": 39,
+  "version": 2,
+  "refresh": "1m",
+  "time": { "from": "now-30m", "to": "now" },
+  "templating": {
+    "list": [
+      { "name": "ds", "type": "datasource", "query": "prometheus", "current": { "text": "Crabka Metrics", "value": "crabka-prom" }, "hide": 0 }
+    ]
+  },
+  "panels": [
+    { "id": 1, "type": "row", "title": "Container resources", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 } },
+    {
+      "id": 2, "type": "stat", "title": "Containers reporting",
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 1 },
+      "targets": [ { "refId": "A", "expr": "count(count by (container_label_com_docker_compose_service) (container_last_seen{container_label_com_docker_compose_project=~\"crabka-observability-.*\", container_label_com_docker_compose_service!=\"\"}))", "instant": true } ]
+    },
+    {
+      "id": 3, "type": "timeseries", "title": "CPU usage by service",
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "fieldConfig": { "defaults": { "unit": "cores" } },
+      "gridPos": { "h": 8, "w": 18, "x": 6, "y": 1 },
+      "targets": [ { "refId": "A", "expr": "sum by (container_label_com_docker_compose_service) (rate(container_cpu_usage_seconds_total{container_label_com_docker_compose_project=~\"crabka-observability-.*\", container_label_com_docker_compose_service!=\"\", container_label_com_docker_compose_service!~\"broker-format|rustfs-permissions|rustfs-setup|topic-setup\", image!=\"\"}[$__rate_interval]))", "legendFormat": "{{container_label_com_docker_compose_service}}" } ]
+    },
+    {
+      "id": 4, "type": "timeseries", "title": "Memory working set by service",
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "fieldConfig": { "defaults": { "unit": "bytes" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 9 },
+      "targets": [ { "refId": "A", "expr": "max by (container_label_com_docker_compose_service) (container_memory_working_set_bytes{container_label_com_docker_compose_project=~\"crabka-observability-.*\", container_label_com_docker_compose_service!=\"\", container_label_com_docker_compose_service!~\"broker-format|rustfs-permissions|rustfs-setup|topic-setup\", image!=\"\"})", "legendFormat": "{{container_label_com_docker_compose_service}}" } ]
+    },
+    {
+      "id": 5, "type": "timeseries", "title": "Memory limit ratio by service",
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 9 },
+      "targets": [ { "refId": "A", "expr": "max by (container_label_com_docker_compose_service) (container_memory_working_set_bytes{container_label_com_docker_compose_project=~\"crabka-observability-.*\", container_label_com_docker_compose_service!=\"\", container_label_com_docker_compose_service!~\"broker-format|rustfs-permissions|rustfs-setup|topic-setup\", image!=\"\"}) / clamp_min(max by (container_label_com_docker_compose_service) (container_spec_memory_limit_bytes{container_label_com_docker_compose_project=~\"crabka-observability-.*\", container_label_com_docker_compose_service!=\"\", container_label_com_docker_compose_service!~\"broker-format|rustfs-permissions|rustfs-setup|topic-setup\", image!=\"\"}), 1)", "legendFormat": "{{container_label_com_docker_compose_service}}" } ]
+    },
+    { "id": 6, "type": "row", "title": "Liveness and restarts", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 17 } },
+    {
+      "id": 7, "type": "table", "title": "Shortest container uptime",
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 18 },
+      "targets": [ { "refId": "A", "expr": "sort(time() - max by (container_label_com_docker_compose_service) (container_start_time_seconds{container_label_com_docker_compose_project=~\"crabka-observability-.*\", container_label_com_docker_compose_service!=\"\", container_label_com_docker_compose_service!~\"broker-format|rustfs-permissions|rustfs-setup|topic-setup\", image!=\"\"}))", "legendFormat": "{{container_label_com_docker_compose_service}}", "instant": true } ]
+    },
+    {
+      "id": 8, "type": "table", "title": "Container start changes (1h)",
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 18 },
+      "targets": [ { "refId": "A", "expr": "sort_desc(changes(max by (container_label_com_docker_compose_service) (container_start_time_seconds{container_label_com_docker_compose_project=~\"crabka-observability-.*\", container_label_com_docker_compose_service!=\"\", container_label_com_docker_compose_service!~\"broker-format|rustfs-permissions|rustfs-setup|topic-setup\", image!=\"\"})[1h:15s]))", "legendFormat": "{{container_label_com_docker_compose_service}}", "instant": true } ]
+    },
+    { "id": 10, "type": "row", "title": "Saturation and hotspots", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 26 } },
+    {
+      "id": 11, "type": "timeseries", "title": "CPU throttled seconds/s",
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "fieldConfig": { "defaults": { "unit": "s/s" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 27 },
+      "targets": [ { "refId": "A", "expr": "sum by (container_label_com_docker_compose_service) (rate(container_cpu_cfs_throttled_seconds_total{container_label_com_docker_compose_project=~\"crabka-observability-.*\", container_label_com_docker_compose_service!=\"\", container_label_com_docker_compose_service!~\"broker-format|rustfs-permissions|rustfs-setup|topic-setup\", image!=\"\"}[$__rate_interval]))", "legendFormat": "{{container_label_com_docker_compose_service}}" } ]
+    },
+    {
+      "id": 12, "type": "table", "title": "Top memory users",
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 27 },
+      "targets": [ { "refId": "A", "expr": "topk(10, max by (container_label_com_docker_compose_service) (container_memory_working_set_bytes{container_label_com_docker_compose_project=~\"crabka-observability-.*\", container_label_com_docker_compose_service!=\"\", container_label_com_docker_compose_service!~\"broker-format|rustfs-permissions|rustfs-setup|topic-setup\", image!=\"\"}))", "legendFormat": "{{container_label_com_docker_compose_service}}", "instant": true } ]
+    },
+    {
+      "id": 13, "type": "timeseries", "title": "Key stack memory",
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "fieldConfig": { "defaults": { "unit": "bytes" } },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 35 },
+      "targets": [ { "refId": "A", "expr": "max by (container_label_com_docker_compose_service) (container_memory_working_set_bytes{container_label_com_docker_compose_project=~\"crabka-observability-.*\", container_label_com_docker_compose_service=~\"rustfs|grafana|alloy|cadvisor|metrics-querier|traces-querier|logs-querier|profiles-querier\", image!=\"\"})", "legendFormat": "{{container_label_com_docker_compose_service}}" } ]
+    },
+    {
+      "id": 19, "type": "timeseries", "title": "Querier memory breakdown",
+      "description": "Breaks querier memory into cAdvisor working set, RSS, and cache. RSS tracks private/process memory pressure; cache shows file/page-cache contribution.",
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "fieldConfig": { "defaults": { "unit": "bytes" } },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 43 },
+      "targets": [
+        { "refId": "A", "expr": "max by (container_label_com_docker_compose_service) (container_memory_working_set_bytes{container_label_com_docker_compose_project=~\"crabka-observability-.*\", container_label_com_docker_compose_service=~\".*-querier\", image!=\"\"})", "legendFormat": "{{container_label_com_docker_compose_service}} working set" },
+        { "refId": "B", "expr": "max by (container_label_com_docker_compose_service) (container_memory_rss{container_label_com_docker_compose_project=~\"crabka-observability-.*\", container_label_com_docker_compose_service=~\".*-querier\", image!=\"\"})", "legendFormat": "{{container_label_com_docker_compose_service}} rss" },
+        { "refId": "C", "expr": "max by (container_label_com_docker_compose_service) (container_memory_cache{container_label_com_docker_compose_project=~\"crabka-observability-.*\", container_label_com_docker_compose_service=~\".*-querier\", image!=\"\"})", "legendFormat": "{{container_label_com_docker_compose_service}} cache" }
+      ]
+    },
+    { "id": 14, "type": "row", "title": "Container I/O", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 51 } },
+    {
+      "id": 15, "type": "timeseries", "title": "Network I/O by service",
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "fieldConfig": { "defaults": { "unit": "Bps" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 52 },
+      "targets": [
+        { "refId": "A", "expr": "sum by (container_label_com_docker_compose_service) (rate(container_network_receive_bytes_total{container_label_com_docker_compose_project=~\"crabka-observability-.*\", container_label_com_docker_compose_service!=\"\", container_label_com_docker_compose_service!~\"broker-format|rustfs-permissions|rustfs-setup|topic-setup\", image!=\"\"}[$__rate_interval]))", "legendFormat": "{{container_label_com_docker_compose_service}} receive" },
+        { "refId": "B", "expr": "sum by (container_label_com_docker_compose_service) (rate(container_network_transmit_bytes_total{container_label_com_docker_compose_project=~\"crabka-observability-.*\", container_label_com_docker_compose_service!=\"\", container_label_com_docker_compose_service!~\"broker-format|rustfs-permissions|rustfs-setup|topic-setup\", image!=\"\"}[$__rate_interval]))", "legendFormat": "{{container_label_com_docker_compose_service}} transmit" }
+      ]
+    },
+    {
+      "id": 16, "type": "timeseries", "title": "Filesystem I/O by service",
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "fieldConfig": { "defaults": { "unit": "Bps" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 52 },
+      "targets": [
+        { "refId": "A", "expr": "sum by (container_label_com_docker_compose_service) (rate(container_fs_reads_bytes_total{container_label_com_docker_compose_project=~\"crabka-observability-.*\", container_label_com_docker_compose_service!=\"\", container_label_com_docker_compose_service!~\"broker-format|rustfs-permissions|rustfs-setup|topic-setup\", image!=\"\"}[$__rate_interval]))", "legendFormat": "{{container_label_com_docker_compose_service}} read" },
+        { "refId": "B", "expr": "sum by (container_label_com_docker_compose_service) (rate(container_fs_writes_bytes_total{container_label_com_docker_compose_project=~\"crabka-observability-.*\", container_label_com_docker_compose_service!=\"\", container_label_com_docker_compose_service!~\"broker-format|rustfs-permissions|rustfs-setup|topic-setup\", image!=\"\"}[$__rate_interval]))", "legendFormat": "{{container_label_com_docker_compose_service}} write" }
+      ]
+    },
+    {
+      "id": 17, "type": "table", "title": "Top network I/O users",
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "fieldConfig": { "defaults": { "unit": "Bps" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 60 },
+      "targets": [ { "refId": "A", "expr": "topk(10, sum by (container_label_com_docker_compose_service) (rate(container_network_receive_bytes_total{container_label_com_docker_compose_project=~\"crabka-observability-.*\", container_label_com_docker_compose_service!=\"\", container_label_com_docker_compose_service!~\"broker-format|rustfs-permissions|rustfs-setup|topic-setup\", image!=\"\"}[$__rate_interval])) + sum by (container_label_com_docker_compose_service) (rate(container_network_transmit_bytes_total{container_label_com_docker_compose_project=~\"crabka-observability-.*\", container_label_com_docker_compose_service!=\"\", container_label_com_docker_compose_service!~\"broker-format|rustfs-permissions|rustfs-setup|topic-setup\", image!=\"\"}[$__rate_interval])))", "legendFormat": "{{container_label_com_docker_compose_service}}", "instant": true } ]
+    },
+    {
+      "id": 18, "type": "timeseries", "title": "Object-store path I/O",
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "fieldConfig": { "defaults": { "unit": "Bps" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 60 },
+      "targets": [
+        { "refId": "A", "expr": "sum by (container_label_com_docker_compose_service) (rate(container_network_receive_bytes_total{container_label_com_docker_compose_project=~\"crabka-observability-.*\", container_label_com_docker_compose_service=~\"rustfs|.*-querier|.*-compactor|.*-block-builder\", image!=\"\"}[$__rate_interval]))", "legendFormat": "{{container_label_com_docker_compose_service}} net in" },
+        { "refId": "B", "expr": "sum by (container_label_com_docker_compose_service) (rate(container_network_transmit_bytes_total{container_label_com_docker_compose_project=~\"crabka-observability-.*\", container_label_com_docker_compose_service=~\"rustfs|.*-querier|.*-compactor|.*-block-builder\", image!=\"\"}[$__rate_interval]))", "legendFormat": "{{container_label_com_docker_compose_service}} net out" },
+        { "refId": "C", "expr": "sum by (container_label_com_docker_compose_service) (rate(container_fs_reads_bytes_total{container_label_com_docker_compose_project=~\"crabka-observability-.*\", container_label_com_docker_compose_service=\"rustfs\", image!=\"\"}[$__rate_interval]))", "legendFormat": "rustfs fs read" },
+        { "refId": "D", "expr": "sum by (container_label_com_docker_compose_service) (rate(container_fs_writes_bytes_total{container_label_com_docker_compose_project=~\"crabka-observability-.*\", container_label_com_docker_compose_service=\"rustfs\", image!=\"\"}[$__rate_interval]))", "legendFormat": "rustfs fs write" }
+      ]
+    }
+  ]
+}

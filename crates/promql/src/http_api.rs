@@ -24,6 +24,7 @@ use prost::Message;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use url::form_urlencoded;
 
 use crate::metrics::ServiceMetrics;
@@ -50,6 +51,7 @@ pub struct PrometheusApiState<S: MetricStore> {
     ruler_evaluation_time_ms: RwLock<i64>,
     query_frontend: Option<QueryFrontendState>,
     query_limits: Option<OverridesProvider>,
+    query_gate: Option<Arc<Semaphore>>,
     metrics: Option<ServiceMetrics>,
     start_time: SystemTime,
 }
@@ -105,6 +107,7 @@ impl<S: MetricStore> PrometheusApiState<S> {
             ruler_evaluation_time_ms: RwLock::new(0),
             query_frontend: None,
             query_limits: None,
+            query_gate: None,
             metrics: None,
             start_time: SystemTime::now(),
         }
@@ -113,6 +116,12 @@ impl<S: MetricStore> PrometheusApiState<S> {
     #[must_use]
     pub fn with_query_limits(mut self, limits: OverridesProvider) -> Self {
         self.query_limits = Some(limits);
+        self
+    }
+
+    #[must_use]
+    pub fn with_max_concurrent_queries(mut self, max_concurrent_queries: usize) -> Self {
+        self.query_gate = Some(Arc::new(Semaphore::new(max_concurrent_queries.max(1))));
         self
     }
 
@@ -227,6 +236,20 @@ impl<S: MetricStore> PrometheusApiState<S> {
             .read()
             .ok()
             .and_then(|group_state| group_state.last_eval_ms(tenant, namespace, group))
+    }
+}
+
+async fn acquire_query_permit<S: MetricStore>(
+    state: &PrometheusApiState<S>,
+) -> Option<OwnedSemaphorePermit> {
+    match &state.query_gate {
+        Some(gate) => Some(
+            Arc::clone(gate)
+                .acquire_owned()
+                .await
+                .expect("query semaphore is never closed"),
+        ),
+        None => None,
     }
 }
 
@@ -480,6 +503,7 @@ async fn query_inner<S: MetricStore>(
     params: InstantQueryParams,
 ) -> Response {
     let started = std::time::Instant::now();
+    let _query_permit = acquire_query_permit(&state).await;
     let response = query_dispatch(&state, &headers, params).await;
     record_query_response(&state, "query", &response, started);
     response
@@ -552,6 +576,7 @@ async fn query_range_inner<S: MetricStore>(
     params: RangeQueryParams,
 ) -> Response {
     let started = std::time::Instant::now();
+    let _query_permit = acquire_query_permit(&state).await;
     let response = query_range_dispatch(&state, &headers, params).await;
     record_query_response(&state, "query_range", &response, started);
     response
@@ -2036,7 +2061,10 @@ fn yaml_response(status: StatusCode, value: &impl serde::Serialize) -> Response 
 }
 
 fn optional_timestamp_ms(value: Option<&str>) -> Result<i64, ApiError> {
-    value.map_or(Ok(0), timestamp_ms)
+    match value {
+        Some(value) => timestamp_ms(value),
+        None => unix_now_ms(),
+    }
 }
 
 fn unix_now_ms() -> Result<i64, ApiError> {
@@ -3492,7 +3520,11 @@ impl IntoResponse for ApiError {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use std::time::Duration;
 
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
@@ -3500,7 +3532,144 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
-    use crate::InMemoryMetricStore;
+    use crate::{InMemoryMetricStore, LabelNameCardinality, LabelValueCardinality, TsdbHeadStats};
+
+    struct SlowEmptyStore {
+        active: Arc<AtomicUsize>,
+        max_active: Arc<AtomicUsize>,
+    }
+
+    impl SlowEmptyStore {
+        fn new(active: Arc<AtomicUsize>, max_active: Arc<AtomicUsize>) -> Self {
+            Self { active, max_active }
+        }
+
+        async fn enter(&self) {
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            let mut current = self.max_active.load(Ordering::SeqCst);
+            while active > current {
+                match self.max_active.compare_exchange(
+                    current,
+                    active,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                ) {
+                    Ok(_) => break,
+                    Err(next) => current = next,
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            self.active.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MetricStore for SlowEmptyStore {
+        async fn scan(
+            &self,
+            _tenant: &str,
+            _matchers: &[LabelMatcher],
+            _start_ms: i64,
+            _end_ms: i64,
+        ) -> Result<ScanResult, PromqlError> {
+            self.enter().await;
+            Ok(ScanResult {
+                ctx: datafusion::prelude::SessionContext::new(),
+                float_table: None,
+                histogram_table: None,
+            })
+        }
+
+        async fn label_names(
+            &self,
+            _tenant: &str,
+            _matchers: &[LabelMatcher],
+            _start_ms: i64,
+            _end_ms: i64,
+        ) -> Result<Vec<String>, PromqlError> {
+            Ok(Vec::new())
+        }
+
+        async fn label_values(
+            &self,
+            _tenant: &str,
+            _name: &str,
+            _matchers: &[LabelMatcher],
+            _start_ms: i64,
+            _end_ms: i64,
+        ) -> Result<Vec<String>, PromqlError> {
+            Ok(Vec::new())
+        }
+
+        async fn series(
+            &self,
+            _tenant: &str,
+            _matchers: &[LabelMatcher],
+            _start_ms: i64,
+            _end_ms: i64,
+        ) -> Result<Vec<Labels>, PromqlError> {
+            Ok(Vec::new())
+        }
+
+        async fn exemplars(
+            &self,
+            _tenant: &str,
+            _matchers: &[LabelMatcher],
+            _start_ms: i64,
+            _end_ms: i64,
+        ) -> Result<Vec<ExemplarRecord>, PromqlError> {
+            Ok(Vec::new())
+        }
+
+        async fn metadata(
+            &self,
+            _tenant: &str,
+            _metric: Option<&str>,
+        ) -> Result<Vec<MetadataRecord>, PromqlError> {
+            Ok(Vec::new())
+        }
+
+        async fn cardinality_label_names(
+            &self,
+            _tenant: &str,
+        ) -> Result<Vec<LabelNameCardinality>, PromqlError> {
+            Ok(Vec::new())
+        }
+
+        async fn cardinality_label_values(
+            &self,
+            _tenant: &str,
+        ) -> Result<Vec<LabelValueCardinality>, PromqlError> {
+            Ok(Vec::new())
+        }
+
+        async fn cardinality_active_series(
+            &self,
+            _tenant: &str,
+        ) -> Result<Vec<Labels>, PromqlError> {
+            Ok(Vec::new())
+        }
+
+        async fn tsdb_stats(&self, _tenant: &str) -> Result<TsdbStats, PromqlError> {
+            Ok(TsdbStats {
+                head_stats: TsdbHeadStats {
+                    num_series: 0,
+                    num_samples: 0,
+                    num_chunks: 0,
+                    min_time: 0,
+                    max_time: 0,
+                },
+                series_count_by_metric_name: Vec::new(),
+                label_value_count_by_label_name: Vec::new(),
+                memory_in_bytes_by_label_name: Vec::new(),
+                series_count_by_label_value_pair: Vec::new(),
+            })
+        }
+
+        async fn tsdb_blocks(&self, _tenant: &str) -> Result<Vec<TsdbBlock>, PromqlError> {
+            Ok(Vec::new())
+        }
+    }
 
     #[test]
     fn float_formatting_matches_go() {
@@ -3633,6 +3802,75 @@ mod tests {
             "exceeded maximum resolution of 11,000 points per timeseries. \
              Try decreasing the query resolution (?step=XX)"
         );
+    }
+
+    #[tokio::test]
+    async fn instant_query_without_time_defaults_to_current_time() {
+        let mut store = InMemoryMetricStore::new();
+        let mut labels = Labels::new();
+        labels.insert("__name__", "up");
+        labels.insert("job", "api");
+        store.push_float("tenant-a", labels, unix_now_ms().unwrap(), 1.0);
+
+        let state = Arc::new(PrometheusApiState::new(
+            Arc::new(store),
+            EngineOpts::default(),
+        ));
+
+        let response = prometheus_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/query?query=up")
+                    .header("x-scope-orgid", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["status"], "success");
+        assert_eq!(body["data"]["result"][0]["metric"]["job"], "api");
+        assert_eq!(body["data"]["result"][0]["value"][1], "1");
+    }
+
+    #[tokio::test]
+    async fn query_handlers_respect_configured_concurrency_limit() {
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let state = Arc::new(
+            PrometheusApiState::new(
+                Arc::new(SlowEmptyStore::new(
+                    Arc::clone(&active),
+                    Arc::clone(&max_active),
+                )),
+                EngineOpts::default(),
+            )
+            .with_max_concurrent_queries(1),
+        );
+        let router = prometheus_router(state);
+
+        let one = router.clone().oneshot(
+            Request::builder()
+                .uri("/api/v1/query?query=up")
+                .header("x-scope-orgid", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        );
+        let two = router.oneshot(
+            Request::builder()
+                .uri("/api/v1/query?query=up")
+                .header("x-scope-orgid", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        );
+
+        let (one, two) = tokio::join!(one, two);
+        assert_eq!(one.unwrap().status(), StatusCode::OK);
+        assert_eq!(two.unwrap().status(), StatusCode::OK);
+        assert_eq!(max_active.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

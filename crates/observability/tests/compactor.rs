@@ -9,13 +9,12 @@ use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use crabka_blockstore::{
-    BlockKey, LabelIndex, LogBlockIndex as BlockIndex, LogRow, TimeRange, labels,
-    log_block_object_path, read_log_block, read_log_block_from_object_store,
-    read_log_index_manifest, read_tenant_log_index_manifest_from_object_store,
-    read_tenant_log_index_shard_from_object_store,
-    read_tenant_log_index_shard_ranges_from_object_store,
-    read_tenant_log_index_shards_from_object_store, series_fingerprint, write_log_block,
-    write_log_block_to_object_store, write_log_index_manifest,
+    BlockKey, LabelIndex, LogBlockIndex as BlockIndex, LogBlockStoreError, LogRow, TimeRange,
+    labels, list_tenant_log_index_shard_ranges_from_object_store, log_block_object_path,
+    read_log_block, read_log_block_from_object_store, read_log_index_manifest,
+    read_tenant_log_index_manifest_from_object_store,
+    read_tenant_log_index_shard_from_object_store, read_tenant_log_index_shards_from_object_store,
+    series_fingerprint, write_log_block, write_log_block_to_object_store, write_log_index_manifest,
     write_tenant_log_index_manifest_to_object_store, write_tenant_log_index_shards_to_object_store,
 };
 use crabka_client_consumer::ConsumerError;
@@ -40,6 +39,120 @@ use prost::bytes::Bytes;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
 use tower::ServiceExt as _;
+
+#[derive(Clone)]
+struct RecordingObjectStore {
+    inner: Arc<object_store::memory::InMemory>,
+    get_paths: Arc<std::sync::Mutex<Vec<String>>>,
+    put_paths: Arc<std::sync::Mutex<Vec<(String, usize)>>>,
+}
+
+impl RecordingObjectStore {
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(object_store::memory::InMemory::new()),
+            get_paths: Arc::new(std::sync::Mutex::new(Vec::new())),
+            put_paths: Arc::new(std::sync::Mutex::new(Vec::new())),
+        }
+    }
+
+    fn get_paths(&self) -> Vec<String> {
+        self.get_paths.lock().unwrap().clone()
+    }
+
+    fn put_paths(&self) -> Vec<(String, usize)> {
+        self.put_paths.lock().unwrap().clone()
+    }
+}
+
+impl fmt::Debug for RecordingObjectStore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("RecordingObjectStore")
+    }
+}
+
+impl fmt::Display for RecordingObjectStore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("RecordingObjectStore")
+    }
+}
+
+async fn read_all_tenant_shard_indexes(
+    store: &dyn ObjectStore,
+    prefix: &ObjectPath,
+    tenant: &str,
+) -> Result<(LabelIndex, BlockIndex), LogBlockStoreError> {
+    read_tenant_log_index_shards_from_object_store(
+        store,
+        prefix,
+        tenant,
+        TimeRange::new(i64::MIN, i64::MAX)?,
+    )
+    .await
+}
+
+#[async_trait]
+impl ObjectStore for RecordingObjectStore {
+    async fn put_opts(
+        &self,
+        location: &ObjectPath,
+        payload: PutPayload,
+        opts: PutOptions,
+    ) -> object_store::Result<PutResult> {
+        self.put_paths
+            .lock()
+            .unwrap()
+            .push((location.to_string(), payload.content_length()));
+        self.inner.put_opts(location, payload, opts).await
+    }
+
+    async fn put_multipart_opts(
+        &self,
+        location: &ObjectPath,
+        opts: PutMultipartOptions,
+    ) -> object_store::Result<Box<dyn MultipartUpload>> {
+        self.inner.put_multipart_opts(location, opts).await
+    }
+
+    async fn get_opts(
+        &self,
+        location: &ObjectPath,
+        options: GetOptions,
+    ) -> object_store::Result<GetResult> {
+        self.get_paths.lock().unwrap().push(location.to_string());
+        self.inner.get_opts(location, options).await
+    }
+
+    fn delete_stream(
+        &self,
+        locations: BoxStream<'static, object_store::Result<ObjectPath>>,
+    ) -> BoxStream<'static, object_store::Result<ObjectPath>> {
+        self.inner.delete_stream(locations)
+    }
+
+    fn list(
+        &self,
+        prefix: Option<&ObjectPath>,
+    ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+        self.inner.list(prefix)
+    }
+
+    async fn list_with_delimiter(
+        &self,
+        prefix: Option<&ObjectPath>,
+    ) -> object_store::Result<ListResult> {
+        self.inner.list_with_delimiter(prefix).await
+    }
+
+    async fn copy_opts(
+        &self,
+        from: &ObjectPath,
+        to: &ObjectPath,
+        options: CopyOptions,
+    ) -> object_store::Result<()> {
+        self.inner.copy_opts(from, to, options).await
+    }
+}
 
 #[tokio::test]
 async fn compactor_writes_block_then_tenant_index_manifest() {
@@ -79,10 +192,9 @@ async fn compactor_writes_block_then_tenant_index_manifest() {
         rows.iter().map(|row| row.line.as_str()).collect::<Vec<_>>() == vec!["api ok", "api error"]
     );
 
-    let (loaded_labels, loaded_blocks) =
-        read_tenant_log_index_manifest_from_object_store(&store, &prefix, "tenant-a")
-            .await
-            .unwrap();
+    let (loaded_labels, loaded_blocks) = read_all_tenant_shard_indexes(&store, &prefix, "tenant-a")
+        .await
+        .unwrap();
 
     assert!(loaded_labels.label_values("tenant-a", "app") == BTreeSet::from(["api".into()]));
     assert!(
@@ -252,10 +364,9 @@ async fn compactor_decodes_native_kafka_log_records_from_headers() {
 
     let labels = labels([("app", "api"), ("env", "prod")]);
     let fingerprint = series_fingerprint(&labels);
-    let (loaded_labels, loaded_blocks) =
-        read_tenant_log_index_manifest_from_object_store(&store, &prefix, "tenant-a")
-            .await
-            .unwrap();
+    let (loaded_labels, loaded_blocks) = read_all_tenant_shard_indexes(&store, &prefix, "tenant-a")
+        .await
+        .unwrap();
     assert!(loaded_labels.label_values("tenant-a", "app") == BTreeSet::from(["api".into()]));
     assert!(
         loaded_blocks.match_blocks(
@@ -763,10 +874,9 @@ async fn compactor_once_loads_existing_manifest_after_restart() {
         .expect("second compacted descriptor");
 
     let prefix = ObjectPath::from("observability/logs");
-    let (loaded_labels, loaded_blocks) =
-        read_tenant_log_index_manifest_from_object_store(&store, &prefix, "tenant-a")
-            .await
-            .unwrap();
+    let (loaded_labels, loaded_blocks) = read_all_tenant_shard_indexes(&store, &prefix, "tenant-a")
+        .await
+        .unwrap();
     let api_labels = labels([("app", "api"), ("env", "prod")]);
     let api = series_fingerprint(&api_labels);
 
@@ -802,7 +912,7 @@ async fn compactor_runtime_updates_object_store_shard_catalog_incrementally() {
 
     let prefix = ObjectPath::from("observability/logs");
     let shard_ranges =
-        read_tenant_log_index_shard_ranges_from_object_store(&store, &prefix, "tenant-a")
+        list_tenant_log_index_shard_ranges_from_object_store(&store, &prefix, "tenant-a")
             .await
             .unwrap();
     assert!(
@@ -883,10 +993,9 @@ async fn compactor_runtime_preserves_indexes_across_polled_batches_until_idle() 
 
     assert!(descriptors.len() == 2);
     let prefix = ObjectPath::from("observability/logs");
-    let (loaded_labels, loaded_blocks) =
-        read_tenant_log_index_manifest_from_object_store(&store, &prefix, "tenant-a")
-            .await
-            .unwrap();
+    let (loaded_labels, loaded_blocks) = read_all_tenant_shard_indexes(&store, &prefix, "tenant-a")
+        .await
+        .unwrap();
     let api_labels = labels([("app", "api"), ("env", "prod")]);
     let api = series_fingerprint(&api_labels);
 
@@ -894,6 +1003,215 @@ async fn compactor_runtime_preserves_indexes_across_polled_batches_until_idle() 
     assert!(
         loaded_blocks.match_blocks("tenant-a", TimeRange::new(0, 30).unwrap(), &[api])
             == descriptors
+    );
+}
+
+#[tokio::test]
+async fn compactor_runtime_writes_shard_indexes_without_index_metadata_rewrites() {
+    let store = RecordingObjectStore::new();
+    let config = compactor_config("observability/logs");
+    let dependencies =
+        ServiceDependencies::default().with_wal_consumer(RecordingWalConsumer::new(vec![
+            vec![kafka_wal_record(
+                &wal_record_without_position(10, "api ok"),
+                5,
+                42,
+            )],
+            vec![kafka_wal_record(
+                &wal_record_without_position(19, "api error"),
+                5,
+                43,
+            )],
+            Vec::new(),
+        ]));
+
+    let descriptors = run_compactor_until_idle(&config, dependencies, Some(&store))
+        .await
+        .unwrap();
+
+    let prefix = ObjectPath::from("observability/logs");
+    let manifest_path =
+        crabka_blockstore::log_tenant_index_manifest_object_path(&prefix, "tenant-a").to_string();
+    let shard_catalog_path =
+        crabka_blockstore::log_tenant_index_shard_catalog_object_path(&prefix, "tenant-a")
+            .to_string();
+    let manifest_puts = store
+        .put_paths()
+        .into_iter()
+        .filter(|(path, _)| path == &manifest_path)
+        .count();
+    let shard_catalog_puts = store
+        .put_paths()
+        .into_iter()
+        .filter(|(path, _)| path == &shard_catalog_path)
+        .count();
+    let (_, loaded_blocks) = read_tenant_log_index_shards_from_object_store(
+        &store,
+        &prefix,
+        "tenant-a",
+        TimeRange::new(i64::MIN, i64::MAX).unwrap(),
+    )
+    .await
+    .unwrap();
+    let api = series_fingerprint(&labels([("app", "api"), ("env", "prod")]));
+
+    assert!(
+        manifest_puts == 0,
+        "service compactor should not rewrite the full tenant manifest"
+    );
+    assert!(
+        shard_catalog_puts == 0,
+        "service compactor should not rewrite the shard catalog"
+    );
+    assert!(
+        loaded_blocks.match_blocks("tenant-a", TimeRange::new(0, 30).unwrap(), &[api])
+            == descriptors
+    );
+}
+
+#[tokio::test]
+async fn compactor_runtime_writes_shards_with_only_the_new_block() {
+    let store = RecordingObjectStore::new();
+    let config = compactor_config("observability/logs");
+    let dependencies =
+        ServiceDependencies::default().with_wal_consumer(RecordingWalConsumer::new(vec![
+            vec![
+                kafka_wal_record(&wal_record_without_position(10, "api first"), 5, 42),
+                kafka_wal_record(&wal_record_without_position(30, "api first later"), 5, 43),
+            ],
+            vec![
+                kafka_wal_record(&wal_record_without_position(20, "api second"), 5, 44),
+                kafka_wal_record(&wal_record_without_position(40, "api second later"), 5, 45),
+            ],
+            Vec::new(),
+        ]));
+
+    let descriptors = run_compactor_until_idle(&config, dependencies, Some(&store))
+        .await
+        .unwrap();
+
+    let prefix = ObjectPath::from("observability/logs");
+    let api = series_fingerprint(&labels([("app", "api"), ("env", "prod")]));
+    let (_, first_blocks) = read_tenant_log_index_shard_from_object_store(
+        &store,
+        &prefix,
+        "tenant-a",
+        descriptors[0].key.time_range,
+    )
+    .await
+    .unwrap();
+    let (_, second_blocks) = read_tenant_log_index_shard_from_object_store(
+        &store,
+        &prefix,
+        "tenant-a",
+        descriptors[1].key.time_range,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        first_blocks.match_blocks("tenant-a", TimeRange::new(0, 50).unwrap(), &[api])
+            == vec![descriptors[0].clone()]
+    );
+    assert!(
+        second_blocks.match_blocks("tenant-a", TimeRange::new(0, 50).unwrap(), &[api])
+            == vec![descriptors[1].clone()]
+    );
+}
+
+#[tokio::test]
+async fn compactor_runtime_appends_batches_without_loading_tenant_manifest() {
+    let store = RecordingObjectStore::new();
+    let config = compactor_config("observability/logs");
+    let dependencies =
+        ServiceDependencies::default().with_wal_consumer(RecordingWalConsumer::new(vec![
+            vec![kafka_wal_record(
+                &wal_record_without_position(10, "api ok"),
+                5,
+                42,
+            )],
+            vec![kafka_wal_record(
+                &wal_record_without_position(19, "api error"),
+                5,
+                43,
+            )],
+            Vec::new(),
+        ]));
+
+    let descriptors = run_compactor_until_idle(&config, dependencies, Some(&store))
+        .await
+        .unwrap();
+
+    let manifest_path = crabka_blockstore::log_tenant_index_manifest_object_path(
+        &ObjectPath::from("observability/logs"),
+        "tenant-a",
+    )
+    .to_string();
+    let manifest_gets = store
+        .get_paths()
+        .into_iter()
+        .filter(|path| path == &manifest_path)
+        .count();
+
+    assert!(descriptors.len() == 2);
+    assert!(
+        manifest_gets == 0,
+        "normal append compaction should not load the historical tenant manifest"
+    );
+}
+
+#[tokio::test]
+async fn compactor_runtime_appends_shard_without_loading_historical_shards() {
+    let store = RecordingObjectStore::new();
+    let prefix = ObjectPath::from("observability/logs");
+    let tenant = "tenant-a";
+    let old_range = TimeRange::new(1, 1).unwrap();
+    let old_key = BlockKey::new(tenant, 5, 40, 40, old_range);
+    let mut old_labels = LabelIndex::default();
+    let old_fingerprint = old_labels.insert_series(tenant, labels([("app", "api")]));
+    let mut old_blocks = BlockIndex::default();
+    old_blocks.insert(crabka_blockstore::BlockDescriptor::new_with_size(
+        old_key,
+        BTreeSet::from([old_fingerprint]),
+        1,
+    ));
+    write_tenant_log_index_shards_to_object_store(
+        &store,
+        &prefix,
+        tenant,
+        &[old_range],
+        &old_labels,
+        &old_blocks,
+    )
+    .await
+    .unwrap();
+    store.get_paths.lock().unwrap().clear();
+
+    let config = compactor_config("observability/logs");
+    let dependencies =
+        ServiceDependencies::default().with_wal_consumer(RecordingWalConsumer::new(vec![
+            vec![kafka_wal_record(
+                &wal_record_without_position(10, "api ok"),
+                5,
+                42,
+            )],
+            Vec::new(),
+        ]));
+
+    let descriptors = run_compactor_until_idle(&config, dependencies, Some(&store))
+        .await
+        .unwrap();
+
+    let old_shard_manifest =
+        crabka_blockstore::log_tenant_index_shard_manifest_object_path(&prefix, tenant, old_range)
+            .to_string();
+    assert!(descriptors.len() == 1);
+    assert!(
+        !store
+            .get_paths()
+            .into_iter()
+            .any(|path| path == old_shard_manifest),
+        "appending a new shard should not load historical shard manifests"
     );
 }
 
@@ -935,11 +1253,11 @@ async fn compactor_runtime_splits_mixed_tenant_wal_batch_into_tenant_blocks() {
 
     let prefix = ObjectPath::from("observability/logs");
     let (tenant_a_labels, tenant_a_blocks) =
-        read_tenant_log_index_manifest_from_object_store(&store, &prefix, "tenant-a")
+        read_all_tenant_shard_indexes(&store, &prefix, "tenant-a")
             .await
             .unwrap();
     let (tenant_b_labels, tenant_b_blocks) =
-        read_tenant_log_index_manifest_from_object_store(&store, &prefix, "tenant-b")
+        read_all_tenant_shard_indexes(&store, &prefix, "tenant-b")
             .await
             .unwrap();
     let api_labels = labels([("app", "api"), ("env", "prod")]);
@@ -1006,18 +1324,13 @@ async fn compactor_runtime_retries_object_store_errors_before_committing_offsets
                 6,
                 42,
             )],
-            vec![kafka_wal_record(
-                &wal_record_without_position(10, "api ok"),
-                6,
-                42,
-            )],
             Vec::new(),
         ]));
 
     let descriptors = tokio::time::timeout(
-        Duration::from_millis(500),
+        Duration::from_secs(1),
         run_compactor_until_shutdown(&config, dependencies, Some(&store), async {
-            tokio::time::sleep(Duration::from_millis(80)).await;
+            tokio::time::sleep(Duration::from_millis(250)).await;
         }),
     )
     .await
@@ -1035,11 +1348,11 @@ async fn compactor_runtime_retries_object_store_errors_before_committing_offsets
 }
 
 #[tokio::test]
-async fn compactor_runtime_retries_shard_catalog_write_errors_before_committing_offsets() {
+async fn compactor_runtime_retries_shard_manifest_write_errors_before_committing_offsets() {
     let dir = tempfile::tempdir().unwrap();
     let store = FailingPutObjectStore::fail_first_matching_put(
         LocalFileSystem::new_with_prefix(dir.path()).unwrap(),
-        "shards/manifest.json",
+        "shards/time=10-10/manifest.json",
     );
     let config = compactor_config("observability/logs");
     let dependencies =
@@ -1049,18 +1362,13 @@ async fn compactor_runtime_retries_shard_catalog_write_errors_before_committing_
                 6,
                 42,
             )],
-            vec![kafka_wal_record(
-                &wal_record_without_position(10, "api ok"),
-                6,
-                42,
-            )],
             Vec::new(),
         ]));
 
     let descriptors = tokio::time::timeout(
-        Duration::from_millis(500),
+        Duration::from_secs(1),
         run_compactor_until_shutdown(&config, dependencies, Some(&store), async {
-            tokio::time::sleep(Duration::from_millis(80)).await;
+            tokio::time::sleep(Duration::from_millis(250)).await;
         }),
     )
     .await
@@ -1078,7 +1386,7 @@ async fn compactor_runtime_retries_shard_catalog_write_errors_before_committing_
     assert!(rows.iter().map(|row| row.line.as_str()).collect::<Vec<_>>() == vec!["api ok"]);
 
     let shard_ranges =
-        read_tenant_log_index_shard_ranges_from_object_store(&store, &prefix, "tenant-a")
+        list_tenant_log_index_shard_ranges_from_object_store(&store, &prefix, "tenant-a")
             .await
             .unwrap();
     assert!(shard_ranges == vec![key.time_range]);
@@ -1103,9 +1411,9 @@ async fn compactor_runtime_retries_compaction_frontier_write_errors_after_commit
         ]));
 
     let descriptors = tokio::time::timeout(
-        Duration::from_millis(500),
+        Duration::from_secs(1),
         run_compactor_until_shutdown(&config, dependencies, Some(&store), async {
-            tokio::time::sleep(Duration::from_millis(80)).await;
+            tokio::time::sleep(Duration::from_millis(250)).await;
         }),
     )
     .await
@@ -1238,10 +1546,9 @@ async fn compactor_runtime_loads_existing_manifest_after_restart() {
     );
 
     let prefix = ObjectPath::from("observability/logs");
-    let (loaded_labels, loaded_blocks) =
-        read_tenant_log_index_manifest_from_object_store(&store, &prefix, "tenant-a")
-            .await
-            .unwrap();
+    let (loaded_labels, loaded_blocks) = read_all_tenant_shard_indexes(&store, &prefix, "tenant-a")
+        .await
+        .unwrap();
     let api_labels = labels([("app", "api"), ("env", "prod")]);
     let api = series_fingerprint(&api_labels);
 
@@ -1306,10 +1613,9 @@ async fn compactor_runtime_reprocesses_uncommitted_wal_without_duplicate_manifes
     assert!(rows.iter().map(|row| row.line.as_str()).collect::<Vec<_>>() == vec!["api ok"]);
     assert!(rewritten_bytes == first_bytes);
 
-    let (_, loaded_blocks) =
-        read_tenant_log_index_manifest_from_object_store(&store, &prefix, "tenant-a")
-            .await
-            .unwrap();
+    let (_, loaded_blocks) = read_all_tenant_shard_indexes(&store, &prefix, "tenant-a")
+        .await
+        .unwrap();
     let api_labels = labels([("app", "api"), ("env", "prod")]);
     let api = series_fingerprint(&api_labels);
 
@@ -1351,6 +1657,48 @@ async fn compactor_service_target_keeps_running_after_idle() {
     server.abort();
 
     assert!(rows.iter().map(|row| row.line.as_str()).collect::<Vec<_>>() == vec!["api ok"]);
+}
+
+#[tokio::test]
+async fn compactor_service_accumulates_adjacent_small_wal_polls_into_one_block() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = LocalFileSystem::new_with_prefix(dir.path()).unwrap();
+    let config = compactor_config("observability/logs");
+    let dependencies =
+        ServiceDependencies::default().with_wal_consumer(RecordingWalConsumer::new(vec![
+            vec![kafka_wal_record(
+                &wal_record_without_position(10, "first"),
+                6,
+                42,
+            )],
+            vec![kafka_wal_record(
+                &wal_record_without_position(20, "second"),
+                6,
+                43,
+            )],
+            Vec::new(),
+        ]));
+
+    let descriptors = run_compactor_until_shutdown(
+        &config,
+        dependencies,
+        Some(&store),
+        tokio::time::sleep(Duration::from_millis(50)),
+    )
+    .await
+    .unwrap();
+
+    assert!(descriptors.len() == 1);
+    assert!(descriptors[0].key.first_offset == 42);
+    assert!(descriptors[0].key.last_offset == 43);
+
+    let prefix = ObjectPath::from("observability/logs");
+    let rows = read_log_block_from_object_store(&store, &prefix, &descriptors[0].key)
+        .await
+        .unwrap();
+    assert!(
+        rows.iter().map(|row| row.line.as_str()).collect::<Vec<_>>() == vec!["first", "second"]
+    );
 }
 
 #[tokio::test]

@@ -19,6 +19,8 @@ use crate::error::ConsumerError;
 const BOOTSTRAP_LEADER: i32 = -1;
 const UNKNOWN_FETCH_OFFSET: i64 = -1;
 const UNKNOWN_LEADER_ID: i32 = -1;
+pub(crate) const DEFAULT_FETCH_PARTITION_MAX_BYTES: i32 = 1 << 20;
+pub(crate) const DEFAULT_FETCH_MAX_BYTES: i32 = 50 * 1024 * 1024;
 
 /// One fetchable partition's request fields:
 /// `(partition, fetch_offset, current_leader_epoch, last_fetched_epoch)`.
@@ -50,10 +52,15 @@ fn is_read_committed(isolation_level: IsolationLevel) -> bool {
 fn is_transient_transport_error(e: &crabka_client_core::ClientError) -> bool {
     matches!(
         e,
-        crabka_client_core::ClientError::Disconnected
+        crabka_client_core::ClientError::Connect { .. }
+            | crabka_client_core::ClientError::Disconnected
             | crabka_client_core::ClientError::Timeout(_)
             | crabka_client_core::ClientError::Io(_)
     )
+}
+
+fn is_transient_poll_error(e: &ConsumerError) -> bool {
+    matches!(e, ConsumerError::Client(client) if is_transient_transport_error(client))
 }
 
 fn aborted_txn_started(first_offset: i64, batch_base_offset: i64) -> bool {
@@ -80,6 +87,7 @@ fn build_fetch_topic(
     name: String,
     topic_id: crabka_protocol::primitives::uuid::Uuid,
     partitions: Vec<FetchSpec>,
+    partition_max_bytes: i32,
 ) -> FetchTopic {
     FetchTopic {
         topic: name,
@@ -92,7 +100,7 @@ fn build_fetch_topic(
                     fetch_offset: off,
                     current_leader_epoch: leader_epoch,
                     last_fetched_epoch,
-                    partition_max_bytes: 1 << 20,
+                    partition_max_bytes,
                     ..Default::default()
                 },
             )
@@ -104,12 +112,13 @@ fn build_fetch_topic(
 fn build_fetch_request(
     timeout_ms: i32,
     isolation_level: IsolationLevel,
+    max_bytes: i32,
     topics: Vec<FetchTopic>,
 ) -> FetchRequest {
     FetchRequest {
         max_wait_ms: timeout_ms,
         min_bytes: 1,
-        max_bytes: 50 * 1024 * 1024,
+        max_bytes,
         isolation_level: isolation_level.wire(),
         topics,
         ..Default::default()
@@ -160,13 +169,32 @@ impl Consumer {
 
         // 1. Resolve any i64::MAX sentinels (auto.offset.reset=Latest) via
         //    ListOffsets(timestamp=-1).
-        self.resolve_latest_sentinels().await?;
+        if let Err(e) = self.resolve_latest_sentinels().await {
+            if is_transient_poll_error(&e) {
+                self.client.reconnect_bootstrap().await;
+                return Ok(Vec::new());
+            }
+            return Err(e);
+        }
 
         // KIP-320: refresh leader epochs and proactively validate any position
         // whose leader epoch advanced, before fetching. Truncated partitions
         // are reset here (or surfaced for auto.offset.reset=None below).
-        self.refresh_leader_epochs().await?;
-        let truncated = self.validate_positions().await?;
+        if let Err(e) = self.refresh_leader_epochs().await {
+            if is_transient_poll_error(&e) {
+                self.client.reconnect_bootstrap().await;
+                return Ok(Vec::new());
+            }
+            return Err(e);
+        }
+        let truncated = match self.validate_positions().await {
+            Ok(truncated) => truncated,
+            Err(e) if is_transient_poll_error(&e) => {
+                self.client.reconnect_bootstrap().await;
+                return Ok(Vec::new());
+            }
+            Err(e) => return Err(e),
+        };
         if !truncated.is_empty() {
             self.apply_truncation(&truncated).await?;
         }
@@ -246,12 +274,26 @@ impl Consumer {
                 .into_iter()
                 .map(|(name, plist)| {
                     let topic_id = topic_ids.get(&name).copied().unwrap_or_default();
-                    build_fetch_topic(name, topic_id, plist)
+                    build_fetch_topic(name, topic_id, plist, self.fetch_partition_max_bytes)
                 })
                 .collect();
-            let req = build_fetch_request(timeout_ms, self.isolation_level, topics);
+            let req = build_fetch_request(
+                timeout_ms,
+                self.isolation_level,
+                self.fetch_max_bytes,
+                topics,
+            );
             let resp = if should_use_bootstrap_leader(leader) {
-                self.client.send(req).await?
+                match self.client.send(req).await {
+                    Ok(resp) => resp,
+                    Err(e) => {
+                        if is_transient_transport_error(&e) {
+                            self.client.reconnect_bootstrap().await;
+                            continue;
+                        }
+                        return Err(e.into());
+                    }
+                }
             } else {
                 match self.client.broker(leader).send(req).await {
                     Ok(resp) => resp,
@@ -684,9 +726,20 @@ mod offset_advance_tests {
         assert!(is_transient_transport_error(&ClientError::Io(
             io::Error::new(io::ErrorKind::ConnectionReset, "reset")
         )));
+        assert!(is_transient_transport_error(&ClientError::Connect {
+            addr: "127.0.0.1:9092".parse().unwrap(),
+            source: io::Error::new(io::ErrorKind::ConnectionRefused, "refused"),
+        }));
+        assert!(is_transient_poll_error(&ConsumerError::Client(
+            ClientError::Connect {
+                addr: "127.0.0.1:9092".parse().unwrap(),
+                source: io::Error::new(io::ErrorKind::ConnectionRefused, "refused"),
+            }
+        )));
         assert!(!is_transient_transport_error(&ClientError::Server {
             error_code: 6
         }));
+        assert!(!is_transient_poll_error(&ConsumerError::Server(6)));
         assert!(!is_transient_transport_error(
             &ClientError::IncompatibleVersion {
                 api_key: 1,
@@ -700,7 +753,7 @@ mod offset_advance_tests {
 
     #[test]
     fn build_fetch_request_preserves_topic_partition_and_limits() {
-        let topic = build_fetch_topic("topic-a".into(), id(7), vec![(2, 42, 5, 4)]);
+        let topic = build_fetch_topic("topic-a".into(), id(7), vec![(2, 42, 5, 4)], 128 * 1024);
         assert!(topic.topic == "topic-a");
         assert!(topic.topic_id == id(7));
         assert!(topic.partitions.len() == 1);
@@ -708,12 +761,17 @@ mod offset_advance_tests {
         assert!(topic.partitions[0].fetch_offset == 42);
         assert!(topic.partitions[0].current_leader_epoch == 5);
         assert!(topic.partitions[0].last_fetched_epoch == 4);
-        assert!(topic.partitions[0].partition_max_bytes == 1 << 20);
+        assert!(topic.partitions[0].partition_max_bytes == 128 * 1024);
 
-        let req = build_fetch_request(123, IsolationLevel::ReadCommitted, vec![topic]);
+        let req = build_fetch_request(
+            123,
+            IsolationLevel::ReadCommitted,
+            2 * 1024 * 1024,
+            vec![topic],
+        );
         assert!(req.max_wait_ms == 123);
         assert!(req.min_bytes == 1);
-        assert!(req.max_bytes == 50 * 1024 * 1024);
+        assert!(req.max_bytes == 2 * 1024 * 1024);
         assert!(req.isolation_level == IsolationLevel::ReadCommitted.wire());
         assert!(req.topics.len() == 1);
     }
