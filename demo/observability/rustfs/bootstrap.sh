@@ -15,7 +15,8 @@ done
 # revisions also rewrote one full tenant manifest and one shard catalog on every
 # compaction batch; on RustFS those static keys left large stale on-disk
 # overwrite parts even though S3 exposes only the latest object. Remove the
-# obsolete keys when reusing an old volume.
+# obsolete logical keys when reusing an old volume so new services do not read
+# them. Recreate the compose volumes to reclaim any stale backend parts.
 obsolete_logs_manifest_bucket="crabka-logs"
 obsolete_logs_manifest_key="logs/tenant=demo/index/logs/manifest.json"
 obsolete_logs_shard_catalog_key="logs/tenant=demo/index/logs/shards/manifest.json"

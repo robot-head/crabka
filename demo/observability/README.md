@@ -47,6 +47,26 @@ the same S3 keys; RustFS can leave those old physical parts on disk even after
 the latest S3 object is small or deleted. Current images use append-style log
 shards and immutable trace/profile index snapshots to avoid new overwrite churn.
 
+When local Docker disk use looks high, check the named volumes separately from
+the live S3-visible object sizes:
+
+```bash
+docker system df -v
+docker volume ls --filter name=crabka-observability-demo
+```
+
+The demo's persistent footprint is normally dominated by
+`crabka-observability-demo_rustfs-data` and `crabka-observability-demo_broker-data`.
+If a host was used with older demo images, RustFS may still contain many
+UUID-named backend directories below legacy keys such as
+`crabka-traces/index/traces.json`, `crabka-profiles/index/profiles.json`, and
+`crabka-logs/logs/tenant=demo/index/logs/manifest.json`. Those directories are
+old overwrite generations, not additional logical S3 objects. Recreating the
+compose volumes is the reliable way to reclaim them. The old MinIO fixture used
+`crabka-observability-demo_minio-data`; after switching to RustFS, that volume is
+not used by this compose file and can be removed if no older checkout still
+needs it.
+
 The traces block-builder has its own replay cap
 (`CRABKA_TRACES_BLOCK_BUILDER_MEM`, default `4g`) and a lower flush size
 (`CRABKA_TRACES_BLOCK_BUILDER_FLUSH_MAX_RECORDS`, default `5000`). Cold starts
