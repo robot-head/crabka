@@ -142,4 +142,47 @@ mod tests {
         };
         assert!(sample.value == SampleValue::Float(1.0));
     }
+
+    #[test]
+    fn annotations_extend_merges_and_deduplicates() {
+        let mut annotations = Annotations::new();
+        annotations.warn("mixed float and histogram samples");
+        annotations.info("histogram ignored");
+
+        let mut other = Annotations::new();
+        other.warn("mixed float and histogram samples");
+        other.warn("counter reset detected");
+        other.info("histogram ignored");
+        other.info("stale sample skipped");
+
+        annotations.extend(&other);
+
+        assert!(
+            annotations.warnings
+                == vec![
+                    "mixed float and histogram samples".to_string(),
+                    "counter reset detected".to_string(),
+                ]
+        );
+        assert!(
+            annotations.infos
+                == vec![
+                    "histogram ignored".to_string(),
+                    "stale sample skipped".to_string(),
+                ]
+        );
+    }
+
+    #[test]
+    fn annotations_empty_requires_no_warning_or_info_messages() {
+        assert!(Annotations::new().is_empty());
+
+        let mut warnings = Annotations::new();
+        warnings.warn("warn");
+        assert!(!warnings.is_empty());
+
+        let mut infos = Annotations::new();
+        infos.info("info");
+        assert!(!infos.is_empty());
+    }
 }
