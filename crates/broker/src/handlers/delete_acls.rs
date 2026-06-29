@@ -47,21 +47,15 @@ pub(crate) async fn handle(
         let filter_results = req
             .filters
             .iter()
-            .map(|_| DeleteAclsFilterResult {
-                error_code: codes::CLUSTER_AUTHORIZATION_FAILED,
-                error_message: Some("delete-acls denied".into()),
-                matching_acls: vec![],
-                ..Default::default()
+            .map(|_| {
+                filter_result(
+                    codes::CLUSTER_AUTHORIZATION_FAILED,
+                    Some("delete-acls denied".into()),
+                    Vec::new(),
+                )
             })
             .collect();
-        return encode_response(
-            &DeleteAclsResponse {
-                throttle_time_ms: 0,
-                filter_results,
-                ..Default::default()
-            },
-            api_version,
-        );
+        return encode_response(&delete_acls_response(filter_results), api_version);
     }
 
     let mut filter_results: Vec<DeleteAclsFilterResult> = Vec::with_capacity(req.filters.len());
@@ -74,34 +68,17 @@ pub(crate) async fn handle(
                     image.all_acls().filter(|e| filter.matches(e)).collect();
                 let matching_acls = matched
                     .iter()
-                    .map(|e| DeleteAclsMatchingAcl {
-                        error_code: 0,
-                        error_message: None,
-                        resource_type: resource_type_to_wire(e.resource_type),
-                        resource_name: e.resource_name.clone(),
-                        pattern_type: pattern_type_to_wire(e.pattern_type),
-                        principal: e.principal.clone(),
-                        host: e.host.clone(),
-                        operation: operation_to_wire(e.operation),
-                        permission_type: permission_to_wire(e.permission_type),
-                        ..Default::default()
-                    })
+                    .map(|e| matching_acl_result(e))
                     .collect::<Vec<_>>();
-                filter_results.push(DeleteAclsFilterResult {
-                    error_code: 0,
-                    error_message: None,
-                    matching_acls,
-                    ..Default::default()
-                });
+                filter_results.push(filter_result(codes::NONE, None, matching_acls));
                 to_submit.push(MetadataRecord::V1DeleteAccessControlEntry(filter));
             }
             Err(_) => {
-                filter_results.push(DeleteAclsFilterResult {
-                    error_code: codes::INVALID_REQUEST,
-                    error_message: Some("malformed filter axis".into()),
-                    matching_acls: vec![],
-                    ..Default::default()
-                });
+                filter_results.push(filter_result(
+                    codes::INVALID_REQUEST,
+                    Some("malformed filter axis".into()),
+                    Vec::new(),
+                ));
             }
         }
     }
@@ -110,44 +87,92 @@ pub(crate) async fn handle(
         && let Err(e) = broker.controller.submit_change(to_submit).await
     {
         tracing::warn!(error = %e, "delete-acls submit failed");
-        for r in &mut filter_results {
-            if r.error_code == 0 {
-                r.error_code = codes::COORDINATOR_NOT_AVAILABLE;
-                r.error_message = Some(format!("submit failed: {e}"));
-            }
-        }
+        apply_submit_error(&mut filter_results, &e);
     }
 
     // Audit: emit one AdminOperation record for successfully-deleted ACLs.
     // Collect resource_name from each matching ACL in every filter result that
     // committed without error (error_code == 0).
-    let deleted_acls: Vec<crabka_audit::AuditResource> = filter_results
+    audit_deleted_acls(
+        broker.audit_log.as_ref(),
+        ctx,
+        deleted_acl_resources(&filter_results),
+    );
+
+    encode_response(&delete_acls_response(filter_results), api_version)
+}
+
+fn matching_acl_result(e: &AclEntry) -> DeleteAclsMatchingAcl {
+    DeleteAclsMatchingAcl {
+        resource_type: resource_type_to_wire(e.resource_type),
+        resource_name: e.resource_name.clone(),
+        pattern_type: pattern_type_to_wire(e.pattern_type),
+        principal: e.principal.clone(),
+        host: e.host.clone(),
+        operation: operation_to_wire(e.operation),
+        permission_type: permission_to_wire(e.permission_type),
+        ..Default::default()
+    }
+}
+
+fn filter_result(
+    error_code: i16,
+    error_message: Option<String>,
+    matching_acls: Vec<DeleteAclsMatchingAcl>,
+) -> DeleteAclsFilterResult {
+    DeleteAclsFilterResult {
+        error_code,
+        error_message,
+        matching_acls,
+        ..Default::default()
+    }
+}
+
+fn delete_acls_response(filter_results: Vec<DeleteAclsFilterResult>) -> DeleteAclsResponse {
+    DeleteAclsResponse {
+        filter_results,
+        ..Default::default()
+    }
+}
+
+fn apply_submit_error<E: std::fmt::Display>(filter_results: &mut [DeleteAclsFilterResult], err: E) {
+    let msg = format!("submit failed: {err}");
+    for r in filter_results {
+        if r.error_code == codes::NONE {
+            r.error_code = codes::COORDINATOR_NOT_AVAILABLE;
+            r.error_message = Some(msg.clone());
+        }
+    }
+}
+
+fn deleted_acl_resources(
+    filter_results: &[DeleteAclsFilterResult],
+) -> Vec<crabka_audit::AuditResource> {
+    filter_results
         .iter()
-        .filter(|r| r.error_code == 0)
+        .filter(|r| r.error_code == codes::NONE)
         .flat_map(|r| r.matching_acls.iter())
         .map(|m| crabka_audit::AuditResource {
             resource_type: "Acl".to_string(),
             name: m.resource_name.clone(),
         })
-        .collect();
+        .collect()
+}
+
+fn audit_deleted_acls(
+    audit_log: &crabka_audit::AuditLog,
+    ctx: &crate::handlers::RequestContext<'_>,
+    deleted_acls: Vec<crabka_audit::AuditResource>,
+) {
     if !deleted_acls.is_empty() {
         crate::handlers::audit_admin(
-            broker.audit_log.as_ref(),
+            audit_log,
             ctx,
             "DeleteAcls",
             crabka_audit::AuditOutcome::Success,
             deleted_acls,
         );
     }
-
-    encode_response(
-        &DeleteAclsResponse {
-            throttle_time_ms: 0,
-            filter_results,
-            ..Default::default()
-        },
-        api_version,
-    )
 }
 
 fn build_filter(f: &DeleteAclsFilter) -> Result<AclEntryFilter, super::acl_wire::WireAclError> {
@@ -173,4 +198,326 @@ fn encode_response<R: Encode>(
     resp.encode(&mut body, api_version)
         .map_err(|e| crate::error::BrokerError::Replication(format!("encode DeleteAcls: {e}")))?;
     Ok(Bytes::from(body))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert2::assert;
+    use crabka_metadata::{AclOperation, PatternType, PermissionType, ResourceType};
+    use crabka_protocol::Decode;
+    use crabka_security::{AuthMethod, Principal};
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    use crate::authorizer::{AuthorizationRequest, Authorizer};
+    use crate::broker::{Broker, BrokerHandle};
+    use crate::config::BrokerConfig;
+
+    const VERSION: i16 = 3;
+    const RESOURCE_TYPE_TOPIC: i8 = 2;
+    const PATTERN_TYPE_ANY: i8 = 1;
+    const PATTERN_TYPE_LITERAL: i8 = 3;
+    const OPERATION_ANY: i8 = 1;
+    const OPERATION_READ: i8 = 3;
+    const OPERATION_WRITE: i8 = 4;
+    const PERMISSION_ANY: i8 = 1;
+    const PERMISSION_ALLOW: i8 = 3;
+
+    #[derive(Debug)]
+    struct DenyAll;
+
+    impl Authorizer for DenyAll {
+        fn authorize(
+            &self,
+            _source: &dyn crabka_authz::AclSource,
+            _req: &AuthorizationRequest<'_>,
+        ) -> AuthorizationResult {
+            AuthorizationResult::Deny
+        }
+    }
+
+    fn acl(resource_name: &str, principal: &str, operation: AclOperation) -> AclEntry {
+        AclEntry {
+            resource_type: ResourceType::Topic,
+            resource_name: resource_name.into(),
+            pattern_type: PatternType::Literal,
+            principal: principal.into(),
+            host: "*".into(),
+            operation,
+            permission_type: PermissionType::Allow,
+        }
+    }
+
+    fn filter(resource_name: Option<&str>, principal: Option<&str>) -> DeleteAclsFilter {
+        DeleteAclsFilter {
+            resource_type_filter: RESOURCE_TYPE_TOPIC,
+            resource_name_filter: resource_name.map(Into::into),
+            pattern_type_filter: PATTERN_TYPE_LITERAL,
+            principal_filter: principal.map(Into::into),
+            host_filter: Some("*".into()),
+            operation: OPERATION_READ,
+            permission_type: PERMISSION_ALLOW,
+            ..Default::default()
+        }
+    }
+
+    fn request(filters: Vec<DeleteAclsFilter>) -> DeleteAclsRequest {
+        DeleteAclsRequest {
+            filters,
+            ..Default::default()
+        }
+    }
+
+    fn decode_response(bytes: Bytes) -> DeleteAclsResponse {
+        let mut cur: &[u8] = bytes.as_ref();
+        let resp = DeleteAclsResponse::decode(&mut cur, VERSION).expect("decode response");
+        assert!(cur.is_empty(), "response decoder consumed all bytes");
+        resp
+    }
+
+    fn test_context<'a>(
+        principal: &'a Principal,
+        peer: &'a SocketAddr,
+    ) -> crate::handlers::RequestContext<'a> {
+        crate::handlers::RequestContext {
+            principal,
+            peer,
+            client_id: "admin-client",
+            sendfile_capable: false,
+            connection_listener_name: "PLAINTEXT",
+        }
+    }
+
+    fn principal(name: &str) -> Principal {
+        Principal {
+            name: name.into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        }
+    }
+
+    fn peer() -> SocketAddr {
+        "127.0.0.1:9092".parse().unwrap()
+    }
+
+    async fn start_broker(authorizer: Arc<dyn Authorizer>) -> (BrokerHandle, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
+        cfg.audit_enabled = false;
+        cfg.authorizer = authorizer;
+        let handle = Broker::start(cfg).await.expect("start broker");
+        (handle, dir)
+    }
+
+    async fn seed_acls(handle: &BrokerHandle, entries: Vec<AclEntry>) {
+        handle
+            .broker_arc_for_test()
+            .controller
+            .submit_change(
+                entries
+                    .into_iter()
+                    .map(MetadataRecord::V1AccessControlEntry)
+                    .collect(),
+            )
+            .await
+            .expect("seed ACLs");
+    }
+
+    fn all_acls(handle: &BrokerHandle) -> Vec<AclEntry> {
+        handle
+            .controller_image_for_test()
+            .all_acls()
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn build_filter_collapses_empty_strings_and_decodes_axes() {
+        let f = DeleteAclsFilter {
+            resource_type_filter: RESOURCE_TYPE_TOPIC,
+            resource_name_filter: Some(String::new()),
+            pattern_type_filter: PATTERN_TYPE_ANY,
+            principal_filter: Some(String::new()),
+            host_filter: Some(String::new()),
+            operation: OPERATION_ANY,
+            permission_type: PERMISSION_ANY,
+            ..Default::default()
+        };
+
+        let built = build_filter(&f).expect("filter");
+
+        assert!(built.resource_type == Some(ResourceType::Topic));
+        assert!(built.resource_name.is_none());
+        assert!(built.pattern_type.is_none());
+        assert!(built.principal.is_none());
+        assert!(built.host.is_none());
+        assert!(built.operation.is_none());
+        assert!(built.permission_type.is_none());
+    }
+
+    #[test]
+    fn build_filter_rejects_malformed_axes() {
+        let mut f = filter(Some("orders"), Some("User:alice"));
+        f.resource_type_filter = 99;
+        assert!(build_filter(&f).is_err());
+
+        let mut f = filter(Some("orders"), Some("User:alice"));
+        f.pattern_type_filter = 99;
+        assert!(build_filter(&f).is_err());
+
+        let mut f = filter(Some("orders"), Some("User:alice"));
+        f.operation = 99;
+        assert!(build_filter(&f).is_err());
+    }
+
+    #[test]
+    fn helpers_preserve_matching_acl_and_submit_error_fields() {
+        let matched = matching_acl_result(&acl("orders", "User:alice", AclOperation::Read));
+        assert!(matched.error_code == codes::NONE);
+        assert!(matched.error_message.is_none());
+        assert!(matched.resource_type == RESOURCE_TYPE_TOPIC);
+        assert!(matched.resource_name == "orders");
+        assert!(matched.pattern_type == PATTERN_TYPE_LITERAL);
+        assert!(matched.principal == "User:alice");
+        assert!(matched.host == "*");
+        assert!(matched.operation == OPERATION_READ);
+        assert!(matched.permission_type == PERMISSION_ALLOW);
+
+        let mut results = vec![
+            filter_result(codes::NONE, None, vec![matched]),
+            filter_result(
+                codes::INVALID_REQUEST,
+                Some("malformed filter axis".into()),
+                Vec::new(),
+            ),
+        ];
+        apply_submit_error(&mut results, "not controller");
+
+        assert!(results[0].error_code == codes::COORDINATOR_NOT_AVAILABLE);
+        assert!(results[0].error_message.as_deref() == Some("submit failed: not controller"));
+        assert!(results[1].error_code == codes::INVALID_REQUEST);
+        assert!(results[1].error_message.as_deref() == Some("malformed filter axis"));
+    }
+
+    #[test]
+    fn deleted_acl_resources_include_only_successful_matches() {
+        let ok = filter_result(
+            codes::NONE,
+            None,
+            vec![matching_acl_result(&acl(
+                "orders",
+                "User:alice",
+                AclOperation::Read,
+            ))],
+        );
+        let failed = filter_result(
+            codes::COORDINATOR_NOT_AVAILABLE,
+            Some("submit failed".into()),
+            vec![matching_acl_result(&acl(
+                "payments",
+                "User:bob",
+                AclOperation::Write,
+            ))],
+        );
+
+        let resources = deleted_acl_resources(&[ok, failed]);
+
+        assert!(resources.len() == 1);
+        assert!(resources[0].resource_type == "Acl");
+        assert!(resources[0].name == "orders");
+    }
+
+    #[test]
+    fn encode_response_writes_decodable_filter_results() {
+        let bytes = encode_response(
+            &delete_acls_response(vec![filter_result(
+                codes::INVALID_REQUEST,
+                Some("malformed filter axis".into()),
+                Vec::new(),
+            )]),
+            VERSION,
+        )
+        .expect("encode");
+        let resp = decode_response(bytes);
+
+        assert!(resp.throttle_time_ms == 0);
+        assert!(resp.filter_results.len() == 1);
+        assert!(resp.filter_results[0].error_code == codes::INVALID_REQUEST);
+        assert!(resp.filter_results[0].error_message.as_deref() == Some("malformed filter axis"));
+        assert!(resp.filter_results[0].matching_acls.is_empty());
+    }
+
+    #[tokio::test]
+    async fn handle_denies_cluster_alter_for_each_filter() {
+        let (broker_handle, _dir) = start_broker(Arc::new(DenyAll)).await;
+        seed_acls(
+            &broker_handle,
+            vec![acl("orders", "User:alice", AclOperation::Read)],
+        )
+        .await;
+        let broker = broker_handle.broker_arc_for_test();
+        let p = principal("alice");
+        let peer = peer();
+        let ctx = test_context(&p, &peer);
+        let req = request(vec![
+            filter(Some("orders"), Some("User:alice")),
+            filter(Some("payments"), Some("User:bob")),
+        ]);
+
+        let resp = handle(&broker, req, &ctx, VERSION).await.expect("handle");
+        let resp = decode_response(resp);
+
+        assert!(resp.throttle_time_ms == 0);
+        assert!(resp.filter_results.len() == 2);
+        for result in &resp.filter_results {
+            assert!(result.error_code == codes::CLUSTER_AUTHORIZATION_FAILED);
+            assert!(result.error_message.as_deref() == Some("delete-acls denied"));
+            assert!(result.matching_acls.is_empty());
+        }
+        assert!(all_acls(&broker_handle).len() == 1);
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_returns_matching_acl_fields_and_deletes_only_matches() {
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer)).await;
+        seed_acls(
+            &broker_handle,
+            vec![
+                acl("orders", "User:alice", AclOperation::Read),
+                acl("payments", "User:bob", AclOperation::Write),
+            ],
+        )
+        .await;
+        let broker = broker_handle.broker_arc_for_test();
+        let p = principal("admin");
+        let peer = peer();
+        let ctx = test_context(&p, &peer);
+        let req = request(vec![filter(Some("orders"), Some("User:alice"))]);
+
+        let resp = handle(&broker, req, &ctx, VERSION).await.expect("handle");
+        let resp = decode_response(resp);
+
+        assert!(resp.filter_results.len() == 1);
+        let result = &resp.filter_results[0];
+        assert!(result.error_code == codes::NONE);
+        assert!(result.error_message.is_none());
+        assert!(result.matching_acls.len() == 1);
+        let matched = &result.matching_acls[0];
+        assert!(matched.resource_type == RESOURCE_TYPE_TOPIC);
+        assert!(matched.resource_name == "orders");
+        assert!(matched.pattern_type == PATTERN_TYPE_LITERAL);
+        assert!(matched.principal == "User:alice");
+        assert!(matched.host == "*");
+        assert!(matched.operation == OPERATION_READ);
+        assert!(matched.permission_type == PERMISSION_ALLOW);
+
+        let remaining = all_acls(&broker_handle);
+        assert!(remaining.len() == 1);
+        assert!(remaining[0].resource_name == "payments");
+        assert!(remaining[0].principal == "User:bob");
+        broker_handle.shutdown().await;
+    }
 }

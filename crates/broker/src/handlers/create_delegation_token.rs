@@ -185,7 +185,6 @@ pub(crate) async fn handle<S: BuildHasher>(
         max_timestamp_ms,
         token_id,
         hmac: bytes::Bytes::from(hmac),
-        throttle_time_ms: 0,
         ..Default::default()
     }
 }

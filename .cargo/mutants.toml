@@ -350,6 +350,11 @@ exclude_re = [
     "broker/src/handlers/broker_heartbeat\\.rs.*delete field should_shut_down from struct BrokerHeartbeatResponse expression in (handle|not_controller_response|denied_response_body)",
     "broker/src/handlers/broker_heartbeat\\.rs.*delete field error_code from struct BrokerHeartbeatResponse expression in (handle|success_response)",
     "broker/src/handlers/broker_heartbeat\\.rs.*delete field is_fenced from struct BrokerHeartbeatResponse expression in (handle|success_response)",
+    # Equivalent throttle guard mutant: `delay >= Duration::ZERO` differs only
+    # by awaiting `sleep(Duration::ZERO)` on the no-throttle path. Non-zero
+    # throttle branches are asserted by focused handler tests.
+    "broker/src/handlers/create_partitions\\.rs.*replace > with >= in handle",
+    "broker/src/handlers/create_topics\\.rs.*replace > with >= in handle",
     "broker/src/handlers/consumer_group_describe\\.rs.*delete field error_code from struct DescribedGroup expression in (handle|ok_row)",
     # The offset is the human-facing VerifyBreak.offset diagnostic (standard Kafka
     # base_offset + offset_delta), not the tamper verdict.
