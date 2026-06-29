@@ -342,4 +342,63 @@ mod tests {
         assert!(CpuCapacity.propose(&s, &ctx).is_empty());
         assert!(CpuCapacity.is_satisfied_with_ctx(&s, &ctx));
     }
+
+    #[test]
+    fn exact_cpu_capacity_limit_is_satisfied() {
+        let parts: Vec<_> = (0..2).map(|i| part("t", i, vec![1, 2], 1)).collect();
+        let s = state_with(parts, vec![1, 2, 3]);
+        // 500_000 micros/sec x 2 partitions = exactly 1.0 core.
+        let samples: Vec<_> = (0..2).map(|i| (1, "t", i, 0.0, 500_000.0)).collect();
+        let store = store_with_counter_pair(samples);
+        let ctx = ctx_with(caps(1, 1.0), store);
+        assert!(CpuCapacity.propose(&s, &ctx).is_empty());
+        assert!(CpuCapacity.is_satisfied_with_ctx(&s, &ctx));
+    }
+
+    #[test]
+    fn zero_cpu_capacity_is_treated_as_unlimited() {
+        let parts: Vec<_> = (0..3).map(|i| part("t", i, vec![1, 2], 1)).collect();
+        let s = state_with(parts, vec![1, 2, 3]);
+        let samples: Vec<_> = (0..3).map(|i| (1, "t", i, 0.0, 600_000.0)).collect();
+        let store = store_with_counter_pair(samples);
+        let ctx = ctx_with(caps(1, 0.0), store);
+        assert!(CpuCapacity.propose(&s, &ctx).is_empty());
+        assert!(CpuCapacity.is_satisfied_with_ctx(&s, &ctx));
+    }
+
+    #[test]
+    fn full_replica_set_has_no_legal_cpu_capacity_move() {
+        let parts: Vec<_> = (0..3).map(|i| part("t", i, vec![1, 2, 3], 1)).collect();
+        let s = state_with(parts, vec![1, 2, 3]);
+        let samples: Vec<_> = (0..3).map(|i| (1, "t", i, 0.0, 600_000.0)).collect();
+        let store = store_with_counter_pair(samples);
+        let ctx = ctx_with(caps(1, 1.0), store);
+        assert!(CpuCapacity.propose(&s, &ctx).is_empty());
+    }
+
+    #[test]
+    fn cpu_capacity_rehomes_leader_when_hot_leader_moves() {
+        let parts: Vec<_> = (0..3).map(|i| part("t", i, vec![1, 2], 1)).collect();
+        let s = state_with(parts, vec![1, 2, 3]);
+        let samples: Vec<_> = (0..3).map(|i| (1, "t", i, 0.0, 600_000.0)).collect();
+        let store = store_with_counter_pair(samples);
+        let ctx = ctx_with(caps(1, 1.0), store);
+        let mvs = CpuCapacity.propose(&s, &ctx);
+        assert!(!mvs.is_empty());
+        assert!(mvs[0].old_leader == 1);
+        assert!(mvs[0].new_leader != 1);
+        assert!(mvs[0].new_replicas.contains(&mvs[0].new_leader));
+    }
+
+    #[test]
+    fn movement_cap_limits_cpu_capacity_swaps() {
+        let parts: Vec<_> = (0..5).map(|i| part("t", i, vec![1, 2], 1)).collect();
+        let s = state_with(parts, vec![1, 2, 3]);
+        let samples: Vec<_> = (0..5).map(|i| (1, "t", i, 0.0, 600_000.0)).collect();
+        let store = store_with_counter_pair(samples);
+        let mut ctx = ctx_with(caps(1, 1.0), store);
+        ctx.max_movements_per_proposal = 1;
+        let mvs = CpuCapacity.propose(&s, &ctx);
+        assert!(mvs.len() == 1);
+    }
 }

@@ -387,7 +387,9 @@ mod tests {
     use crate::executor::phases::tests::{MockCall, MockClient};
     use crate::model::Movement;
     use crate::model::proposal::ProposalSummary;
+    use crate::state_topic::{StateBackend, StateTopicError};
     use assert2::assert;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     fn cfg(dir: &std::path::Path) -> ExecutorConfig {
         ExecutorConfig {
@@ -399,7 +401,71 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct RecordingBackend {
+        state: std::sync::Mutex<Option<InFlightFile>>,
+        writes: std::sync::Mutex<Vec<InFlightFile>>,
+        deletes: AtomicUsize,
+        loaded: AtomicBool,
+    }
+
+    impl RecordingBackend {
+        fn new_loaded() -> Self {
+            Self {
+                loaded: AtomicBool::new(true),
+                ..Self::default()
+            }
+        }
+
+        fn with_state(file: InFlightFile) -> Self {
+            Self {
+                state: std::sync::Mutex::new(Some(file)),
+                loaded: AtomicBool::new(true),
+                ..Self::default()
+            }
+        }
+
+        fn writes(&self) -> Vec<InFlightFile> {
+            self.writes.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl StateBackend for RecordingBackend {
+        fn loaded(&self) -> Option<InFlightFile> {
+            self.state.lock().unwrap().clone()
+        }
+
+        fn is_loaded(&self) -> bool {
+            self.loaded.load(Ordering::Acquire)
+        }
+
+        async fn write(&self, f: &InFlightFile) -> Result<(), StateTopicError> {
+            self.writes.lock().unwrap().push(f.clone());
+            *self.state.lock().unwrap() = Some(f.clone());
+            Ok(())
+        }
+
+        async fn delete(&self) -> Result<(), StateTopicError> {
+            self.deletes.fetch_add(1, Ordering::SeqCst);
+            *self.state.lock().unwrap() = None;
+            Ok(())
+        }
+    }
+
     fn state_with_store(dir: &std::path::Path, p: Proposal) -> ExecutorState {
+        state_with_backend(
+            dir,
+            p,
+            Arc::new(crate::state_topic::fake::InMemoryBackend::new_loaded()),
+        )
+    }
+
+    fn state_with_backend(
+        dir: &std::path::Path,
+        p: Proposal,
+        state_topic: Arc<dyn StateBackend>,
+    ) -> ExecutorState {
         let store = Arc::new(ProposalStore::new(20));
         store.insert(p);
         let mut registry = prometheus_client::registry::Registry::with_prefix("crabka_rebalancer");
@@ -409,7 +475,7 @@ mod tests {
             config: cfg(dir),
             metrics,
             in_flight: Arc::new(Mutex::new(None)),
-            state_topic: Arc::new(crate::state_topic::fake::InMemoryBackend::new_loaded()),
+            state_topic,
         }
     }
 
@@ -460,6 +526,7 @@ mod tests {
         let client = Arc::new(MockClient::new());
         let cancel = CancellationToken::new();
         let exec = Execution::new(client.clone(), state.clone(), p, 50_000_000, cancel);
+        let before = now_ms();
         exec.run().await;
 
         let calls = client.calls();
@@ -471,6 +538,7 @@ mod tests {
         let after = state.store.get("p1").unwrap();
         assert!(after.status == ProposalStatus::Completed);
         assert!(after.terminated_at_ms > 0);
+        assert!(after.terminated_at_ms >= before);
 
         // After a clean terminal the backend should have been tombstoned.
         assert!(state.state_topic.loaded().is_none());
@@ -553,6 +621,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn submit_failure_persists_failed_clear_throttle_before_cleanup() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = proposal_with_movements("p1", vec![mv("t", 0, vec![1], vec![2])]);
+        let backend = Arc::new(RecordingBackend::new_loaded());
+        let state = state_with_backend(dir.path(), p.clone(), backend.clone());
+
+        let client = Arc::new(MockClient::new());
+        client
+            .submit_remaining_failures
+            .store(usize::MAX, std::sync::atomic::Ordering::SeqCst);
+
+        let cancel = CancellationToken::new();
+        let exec = Execution::new(client, state.clone(), p, 50_000_000, cancel);
+        exec.run().await;
+
+        let writes = backend.writes();
+        assert!(
+            writes.iter().any(|f| {
+                f.phase == Phase::ClearThrottle
+                    && f.target_terminal_status == Some(ProposalStatus::Failed)
+                    && f.failure_reason
+                        .as_deref()
+                        .is_some_and(|reason| reason.contains("Submit"))
+            }),
+            "expected a persisted failed ClearThrottle phase, got {writes:?}"
+        );
+        assert!(backend.deletes.load(Ordering::SeqCst) == 1);
+    }
+
+    #[tokio::test]
     async fn resume_from_clear_throttle_commits_target_terminal() {
         let dir = tempfile::tempdir().unwrap();
         let p = proposal_with_movements("p1", vec![mv("t", 0, vec![1], vec![2])]);
@@ -598,5 +696,33 @@ mod tests {
             })
             .count();
         assert!(dels == 1);
+    }
+
+    #[tokio::test]
+    async fn cancelled_resume_from_clear_throttle_preserves_terminal_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = proposal_with_movements("p1", vec![mv("t", 0, vec![1], vec![2])]);
+        let mut in_flight = InFlightFile::new(p.id.clone(), Phase::ClearThrottle, 1, 50_000_000);
+        in_flight.target_terminal_status = Some(ProposalStatus::Completed);
+
+        let backend = Arc::new(RecordingBackend::with_state(in_flight.clone()));
+        let state = state_with_backend(dir.path(), p.clone(), backend);
+        let client = Arc::new(MockClient::new());
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let exec = Execution::resume(client.clone(), state.clone(), p, &in_flight, cancel);
+
+        tokio::time::timeout(Duration::from_secs(1), exec.run())
+            .await
+            .expect("clear-throttle resume should terminate");
+
+        let after = state.store.get("p1").unwrap();
+        assert!(after.status == ProposalStatus::Completed);
+        assert!(
+            !client
+                .calls()
+                .iter()
+                .any(|c| matches!(c, MockCall::Cancel(_)))
+        );
     }
 }

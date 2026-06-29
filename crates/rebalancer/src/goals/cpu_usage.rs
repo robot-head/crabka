@@ -274,4 +274,39 @@ mod tests {
             "within-threshold should no-op"
         );
     }
+
+    #[test]
+    fn imbalance_pct_uses_difference_times_100_over_total() {
+        let totals = std::collections::HashMap::from([(1, 300.0), (2, 100.0)]);
+        assert!(CpuUsage::imbalance_pct(&totals) == 50);
+    }
+
+    #[test]
+    fn full_replica_set_has_no_legal_cpu_usage_move() {
+        let parts: Vec<_> = (0..2).map(|i| part("t", i, vec![1, 2, 3], 1)).collect();
+        let s = state_with(parts, vec![1, 2, 3]);
+        let samples: Vec<(i32, &str, i32, f64, f64)> = (0..2)
+            .map(|i| (1, "t", i, 0.0, 100_000.0))
+            .chain((0..2).map(|i| (2, "t", i, 0.0, 1_000.0)))
+            .chain((0..2).map(|i| (3, "t", i, 0.0, 1_000.0)))
+            .collect();
+        let store = store_with_counter_pair(samples);
+        let ctx = ctx_with(store);
+        assert!(CpuUsage.propose(&s, &ctx).is_empty());
+    }
+
+    #[test]
+    fn movement_cap_limits_cpu_usage_swaps() {
+        let parts: Vec<_> = (0..5).map(|i| part("t", i, vec![1, 2], 1)).collect();
+        let s = state_with(parts, vec![1, 2, 3]);
+        let samples: Vec<(i32, &str, i32, f64, f64)> = (0..5)
+            .map(|i| (1, "t", i, 0.0, 100_000.0))
+            .chain((0..5).map(|i| (2, "t", i, 0.0, 1_000.0)))
+            .collect();
+        let store = store_with_counter_pair(samples);
+        let mut ctx = ctx_with(store);
+        ctx.max_movements_per_proposal = 1;
+        let mvs = CpuUsage.propose(&s, &ctx);
+        assert!(mvs.len() == 1);
+    }
 }

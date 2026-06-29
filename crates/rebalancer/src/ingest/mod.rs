@@ -126,12 +126,16 @@ pub async fn snapshot_once(client: &Client) -> Result<ClusterState, anyhow::Erro
     }
 
     Ok(ClusterState {
-        cluster_id: Some(dc.cluster_id.clone()).filter(|s| !s.is_empty()),
+        cluster_id: normalize_cluster_id(&dc.cluster_id),
         snapshot_at_ms: now_ms(),
         brokers,
         partitions,
         in_flight_reassignments: in_flight,
     })
+}
+
+fn normalize_cluster_id(cluster_id: &str) -> Option<String> {
+    Some(cluster_id.to_string()).filter(|s| !s.is_empty())
 }
 
 fn now_ms() -> i64 {
@@ -168,5 +172,26 @@ mod tests {
         let v = inner.as_ref().expect("Some after swap");
         assert!(v.snapshot_at_ms == 42);
         assert!(v.cluster_id.as_deref() == Some("c"));
+    }
+
+    #[test]
+    fn normalize_cluster_id_drops_empty_ids_only() {
+        assert!(normalize_cluster_id("").is_none());
+        assert!(normalize_cluster_id("cluster-a").as_deref() == Some("cluster-a"));
+    }
+
+    #[test]
+    fn now_ms_tracks_wall_clock_millis() {
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let got = now_ms();
+        let after = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        assert!(got >= i64::try_from(before).unwrap());
+        assert!(got <= i64::try_from(after).unwrap_or(i64::MAX));
     }
 }

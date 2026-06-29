@@ -231,4 +231,33 @@ mod tests {
             "broker 2 not in ISR anywhere; expected no movements, got {mvs:?}"
         );
     }
+
+    #[test]
+    fn broker_at_minimum_is_not_under_served() {
+        let parts = vec![
+            part("t", 0, vec![1, 2], 1),
+            part("t", 1, vec![1, 2], 2),
+            part("t", 2, vec![1, 2], 2),
+            part("t", 3, vec![1, 2], 2),
+        ];
+        let s = state_with(parts, vec![1, 2]);
+
+        assert!(
+            MinTopicLeadersPerBroker
+                .propose(&s, &ctx_with(1))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn donor_at_minimum_is_not_drained() {
+        let parts = vec![part("t", 0, vec![1, 2], 1)];
+        let s = state_with(parts, vec![1, 2]);
+
+        assert!(
+            MinTopicLeadersPerBroker
+                .propose(&s, &ctx_with(1))
+                .is_empty()
+        );
+    }
 }

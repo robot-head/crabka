@@ -259,4 +259,55 @@ mod tests {
             "within-threshold should no-op"
         );
     }
+
+    #[test]
+    fn imbalance_pct_uses_difference_times_100_over_total() {
+        let totals = std::collections::HashMap::from([(1, 300.0), (2, 100.0)]);
+        assert!(DiskUsage::imbalance_pct(&totals) == 50);
+    }
+
+    #[test]
+    fn nonzero_imbalanced_disk_usage_moves_and_rehomes_hot_leader() {
+        let parts = vec![part("hot", 0, vec![1], 1), part("cold", 0, vec![2], 2)];
+        let s = state_with(parts, vec![1, 2]);
+        let store = store_with_disk_samples(vec![(1, "hot", 0, 300.0), (2, "cold", 0, 100.0)]);
+        let mut ctx = ctx_with(store);
+        ctx.max_movements_per_proposal = 1;
+
+        let mvs = DiskUsage.propose(&s, &ctx);
+
+        assert!(mvs.len() == 1);
+        assert!(mvs[0].old_replicas == vec![1]);
+        assert!(mvs[0].new_replicas == vec![2]);
+        assert!(mvs[0].old_leader == 1);
+        assert!(mvs[0].new_leader == 2);
+    }
+
+    #[test]
+    fn replica_vector_at_broker_count_without_cold_is_not_expandable() {
+        let parts = vec![part("t", 0, vec![1, 99], 1)];
+        let s = state_with(parts, vec![1, 2]);
+        let store = store_with_disk_samples(vec![(1, "t", 0, 300.0)]);
+        let ctx = ctx_with(store);
+
+        assert!(DiskUsage.propose(&s, &ctx).is_empty());
+    }
+
+    #[test]
+    fn movement_cap_limits_disk_usage_swaps() {
+        let mut parts: Vec<_> = (0..5).map(|i| part("hot", i, vec![1], 1)).collect();
+        parts.push(part("cold", 0, vec![2], 2));
+        let s = state_with(parts, vec![1, 2, 3]);
+        let samples: Vec<_> = (0..5)
+            .map(|i| (1, "hot", i, 100.0))
+            .chain(std::iter::once((2, "cold", 0, 1.0)))
+            .collect();
+        let store = store_with_disk_samples(samples);
+        let mut ctx = ctx_with(store);
+        ctx.max_movements_per_proposal = 1;
+
+        let mvs = DiskUsage.propose(&s, &ctx);
+
+        assert!(mvs.len() == 1);
+    }
 }

@@ -250,4 +250,28 @@ mod tests {
         let mvs = NetworkInUsage.propose(&s, &ctx);
         assert!(!mvs.is_empty(), "expected swaps");
     }
+
+    #[test]
+    fn imbalance_pct_uses_difference_times_100_over_total() {
+        let totals = std::collections::HashMap::from([(1, 300.0), (2, 100.0)]);
+        assert!(NetworkInUsage::imbalance_pct(&totals) == 50);
+    }
+
+    #[test]
+    fn nonzero_imbalanced_network_in_usage_moves() {
+        let parts = vec![part("hot", 0, vec![1], 1), part("cold", 0, vec![2], 2)];
+        let s = state_with(parts, vec![1, 2]);
+        let store = store_with_counter_pair(vec![
+            (1, "hot", 0, 0.0, 300_000.0),
+            (2, "cold", 0, 0.0, 100_000.0),
+        ]);
+        let mut ctx = ctx_with(store);
+        ctx.max_movements_per_proposal = 1;
+
+        let mvs = NetworkInUsage.propose(&s, &ctx);
+
+        assert!(mvs.len() == 1);
+        assert!(mvs[0].old_replicas == vec![1]);
+        assert!(mvs[0].new_replicas == vec![2]);
+    }
 }

@@ -22,6 +22,22 @@ use crabka_rebalancer::metrics::RebalancerMetrics;
 use crabka_rebalancer::model::proposal::ProposalStatus;
 use crabka_rebalancer::model::store::ProposalStore;
 
+fn should_warn_state_topic_load(is_loaded: bool) -> bool {
+    !is_loaded
+}
+
+fn should_continue_recovery_load_wait(is_loaded: bool) -> bool {
+    !is_loaded
+}
+
+fn recovery_load_timed_out(elapsed: Duration, timeout: Duration) -> bool {
+    elapsed > timeout
+}
+
+fn detector_enabled(tick_interval_secs: u64) -> bool {
+    tick_interval_secs > 0
+}
+
 #[derive(Debug, Parser)]
 #[command(
     name = "crabka-rebalancer",
@@ -342,7 +358,7 @@ async fn main() -> anyhow::Result<()> {
         let topic_for_warn = args.state_topic_name.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(timeout_secs)).await;
-            if !warn_state.is_loaded() {
+            if should_warn_state_topic_load(warn_state.is_loaded()) {
                 warn!(
                     topic = %topic_for_warn,
                     timeout_secs,
@@ -383,8 +399,8 @@ async fn main() -> anyhow::Result<()> {
         let load_timeout = Duration::from_secs(args.state_load_timeout_secs);
         async move {
             let start = std::time::Instant::now();
-            while !state_topic.is_loaded() {
-                if start.elapsed() > load_timeout {
+            while should_continue_recovery_load_wait(state_topic.is_loaded()) {
+                if recovery_load_timed_out(start.elapsed(), load_timeout) {
                     warn!(
                         timeout_secs = load_timeout.as_secs(),
                         "state-topic load did not converge within timeout; \
@@ -526,7 +542,7 @@ async fn main() -> anyhow::Result<()> {
         broker_usages: usage_store.clone(),
     };
 
-    if args.detector_tick_interval_secs > 0 {
+    if detector_enabled(args.detector_tick_interval_secs) {
         let detector_cfg = crabka_rebalancer::detector::DetectorConfig {
             tick_interval: Duration::from_secs(args.detector_tick_interval_secs),
             broker_death_threshold: Duration::from_secs(args.detector_broker_death_threshold_secs),
@@ -611,4 +627,37 @@ async fn main() -> anyhow::Result<()> {
 
     let _ = tokio::time::timeout(Duration::from_secs(5), ingester_handle).await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn state_topic_load_warning_only_before_loaded() {
+        assert!(should_warn_state_topic_load(false));
+        assert!(!should_warn_state_topic_load(true));
+    }
+
+    #[test]
+    fn recovery_load_wait_continues_only_before_loaded() {
+        assert!(should_continue_recovery_load_wait(false));
+        assert!(!should_continue_recovery_load_wait(true));
+    }
+
+    #[test]
+    fn recovery_load_timeout_is_strictly_after_deadline() {
+        let timeout = Duration::from_secs(5);
+        assert!(!recovery_load_timed_out(Duration::from_secs(5), timeout));
+        assert!(recovery_load_timed_out(
+            Duration::from_secs(5) + Duration::from_millis(1),
+            timeout
+        ));
+    }
+
+    #[test]
+    fn detector_is_disabled_only_at_zero_interval() {
+        assert!(!detector_enabled(0));
+        assert!(detector_enabled(1));
+    }
 }

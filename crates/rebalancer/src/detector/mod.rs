@@ -331,8 +331,15 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::capacity::BrokerCapacities;
+    use crate::executor::{ExecutorConfig, ExecutorState};
+    use crate::goals::GoalContext;
+    use crate::model::ProposalStore;
     use crate::model::{BrokerView, PartitionView};
+    use crate::scraper::UsageStore;
     use assert2::assert;
+    use std::sync::Arc;
+    use tokio_util::sync::CancellationToken;
 
     fn make_state(snapshot_at_ms: i64, broker_ids: &[i32]) -> ClusterState {
         ClusterState {
@@ -358,6 +365,81 @@ mod tests {
         }
     }
 
+    fn make_under_replicated_state(snapshot_at_ms: i64, is_under: bool) -> ClusterState {
+        let isr = if is_under { vec![1] } else { vec![1, 2] };
+        ClusterState {
+            cluster_id: None,
+            snapshot_at_ms,
+            brokers: vec![
+                BrokerView {
+                    id: 1,
+                    host: "h1".into(),
+                    port: 9092,
+                    rack: None,
+                },
+                BrokerView {
+                    id: 2,
+                    host: "h2".into(),
+                    port: 9092,
+                    rack: None,
+                },
+            ],
+            partitions: vec![PartitionView {
+                topic: "t".into(),
+                partition: 0,
+                replicas: vec![1, 2],
+                leader: 1,
+                isr,
+            }],
+            in_flight_reassignments: vec![],
+        }
+    }
+
+    fn detector_with(
+        cfg: DetectorConfig,
+        snapshot: SharedSnapshot,
+        anomaly_store: Arc<AnomalyStore>,
+        proposal_store: Arc<ProposalStore>,
+        metrics: DetectorMetrics,
+        shutdown: CancellationToken,
+    ) -> Detector {
+        let usage_store = Arc::new(UsageStore::default());
+        let capacities = Arc::new(BrokerCapacities::default());
+        let goal_ctx = GoalContext {
+            imbalance_threshold_pct: 10,
+            max_movements_per_proposal: 256,
+            min_topic_leaders_per_broker: 0,
+            broker_capacities: capacities.clone(),
+            broker_usages: usage_store.clone(),
+        };
+        let executor_state = ExecutorState {
+            store: proposal_store.clone(),
+            config: ExecutorConfig {
+                data_dir: std::path::PathBuf::new(),
+                default_throttle_bytes_per_sec: 50_000_000,
+                poll_interval: Duration::from_millis(10),
+                execute_deadline: Duration::from_secs(1),
+                batch_size: 200,
+            },
+            metrics: crate::metrics::RebalancerMetrics::default(),
+            in_flight: Arc::new(AsyncMutex::new(None)),
+            state_topic: Arc::new(crate::state_topic::fake::InMemoryBackend::new_loaded()),
+        };
+        Detector::new(
+            cfg,
+            snapshot,
+            usage_store,
+            capacities,
+            anomaly_store,
+            proposal_store,
+            executor_state,
+            Arc::new(crate::api::GoalRegistry::default_registry()),
+            goal_ctx,
+            metrics,
+            shutdown,
+        )
+    }
+
     #[test]
     fn snapshot_history_evicts_when_full() {
         let mut h = SnapshotHistory::new(2);
@@ -378,5 +460,96 @@ mod tests {
         let got = h.oldest_since(15).expect("memo at 20 satisfies cutoff");
         assert!(got.snapshot_at_ms == 20);
         assert!(h.oldest_since(1000).is_none());
+    }
+
+    #[test]
+    fn snapshot_history_is_empty_tracks_pushes() {
+        let mut h = SnapshotHistory::new(2);
+        assert!(h.is_empty());
+        h.push(&make_state(10, &[1]));
+        assert!(!h.is_empty());
+    }
+
+    #[tokio::test]
+    async fn detector_run_waits_until_shutdown() {
+        let snapshot = crate::ingest::new_shared_snapshot();
+        let anomaly_store = Arc::new(AnomalyStore::new(10));
+        let proposal_store = Arc::new(ProposalStore::new(10));
+        let shutdown = CancellationToken::new();
+        let detector = detector_with(
+            DetectorConfig {
+                tick_interval: Duration::from_secs(60),
+                ..DetectorConfig::default()
+            },
+            snapshot,
+            anomaly_store,
+            proposal_store,
+            DetectorMetrics::default(),
+            shutdown.clone(),
+        );
+
+        let handle = tokio::spawn(detector.run());
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(!handle.is_finished());
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .expect("detector should stop after cancellation")
+            .expect("detector task should join");
+    }
+
+    #[tokio::test]
+    async fn tick_once_detects_then_resolves_under_replicated_partition() {
+        let snapshot = crate::ingest::new_shared_snapshot();
+        snapshot.store(Arc::new(Some(make_under_replicated_state(200_000, true))));
+        let anomaly_store = Arc::new(AnomalyStore::new(10));
+        let proposal_store = Arc::new(ProposalStore::new(10));
+        let metrics = DetectorMetrics::default();
+        let detector = detector_with(
+            DetectorConfig {
+                under_replicated_threshold: Duration::from_secs(120),
+                auto_trigger_enabled: false,
+                ..DetectorConfig::default()
+            },
+            snapshot.clone(),
+            anomaly_store.clone(),
+            proposal_store,
+            metrics.clone(),
+            CancellationToken::new(),
+        );
+        {
+            let mut history = detector.history.lock().await;
+            history.push(&make_under_replicated_state(80_000, true));
+        }
+
+        detector.tick_once(200_000).await;
+
+        let key = AnomalyKey::Partition {
+            topic: "t".into(),
+            partition: 0,
+        };
+        let open = anomaly_store
+            .find_open(AnomalyKind::UnderReplicatedPartitions, &key)
+            .expect("under-replicated anomaly should be open");
+        assert!(open.severity == AnomalySeverity::Critical);
+        assert!(metrics.anomalies_detected_under_replicated.get() == 1);
+        assert!(metrics.anomalies_open_under_replicated.get() == 1);
+
+        snapshot.store(Arc::new(Some(make_under_replicated_state(210_000, false))));
+        detector.tick_once(210_000).await;
+
+        assert!(
+            anomaly_store
+                .find_open(AnomalyKind::UnderReplicatedPartitions, &key)
+                .is_none()
+        );
+        let resolved = anomaly_store
+            .list(0, true)
+            .into_iter()
+            .find(|a| a.id == open.id)
+            .expect("resolved anomaly remains in history");
+        assert!(resolved.resolved_at_ms == Some(210_000));
+        assert!(metrics.anomalies_resolved_under_replicated.get() == 1);
+        assert!(metrics.anomalies_open_under_replicated.get() == 0);
     }
 }

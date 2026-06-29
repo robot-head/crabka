@@ -747,4 +747,142 @@ mod tests {
             }
         ));
     }
+
+    #[test]
+    fn hard_goal_at_exact_cap_succeeds() {
+        let movements = (0..3)
+            .map(|i| Movement {
+                topic: "t".into(),
+                partition: i,
+                old_replicas: vec![1, 2],
+                new_replicas: vec![1, 2],
+                old_leader: 2,
+                new_leader: 1,
+            })
+            .collect();
+        let mut s = state();
+        s.partitions = (0..3)
+            .map(|i| PartitionView {
+                topic: "t".into(),
+                partition: i,
+                replicas: vec![1, 2],
+                leader: 2,
+                isr: vec![1, 2],
+            })
+            .collect();
+        let bulk = FixedGoal {
+            name: "bulk",
+            priority: GoalPriority::Hard,
+            movements,
+        };
+        let ctx = GoalContext {
+            imbalance_threshold_pct: 10,
+            max_movements_per_proposal: 3,
+            min_topic_leaders_per_broker: 0,
+            broker_capacities: Arc::new(BrokerCapacities::default()),
+            broker_usages: Arc::new(UsageStore::default()),
+        };
+        let goals: Vec<&dyn Goal> = vec![&bulk];
+        let out = optimize(&s, &goals, &ctx).expect("hard movements exactly at cap fit");
+        assert!(out.proposal.movements.len() == 3);
+    }
+
+    #[test]
+    fn apply_movement_retains_isr_members_and_adds_new_leader() {
+        let mut s = state();
+        s.partitions[0].replicas = vec![1, 2];
+        s.partitions[0].leader = 2;
+        s.partitions[0].isr = vec![2];
+        let m = Movement {
+            topic: "t".into(),
+            partition: 0,
+            old_replicas: vec![1, 2],
+            new_replicas: vec![1, 3],
+            old_leader: 2,
+            new_leader: 3,
+        };
+
+        apply_movement(&mut s, &m);
+
+        let p = &s.partitions[0];
+        assert!(p.replicas == vec![1, 3]);
+        assert!(p.leader == 3);
+        assert!(p.isr == vec![3]);
+    }
+
+    #[test]
+    fn compute_summary_counts_replica_and_leader_changes_and_maxima() {
+        let before = ClusterState {
+            cluster_id: None,
+            snapshot_at_ms: 0,
+            brokers: vec![
+                BrokerView {
+                    id: 1,
+                    host: "h1".into(),
+                    port: 9092,
+                    rack: None,
+                },
+                BrokerView {
+                    id: 2,
+                    host: "h2".into(),
+                    port: 9092,
+                    rack: None,
+                },
+                BrokerView {
+                    id: 3,
+                    host: "h3".into(),
+                    port: 9092,
+                    rack: None,
+                },
+            ],
+            partitions: vec![
+                PartitionView {
+                    topic: "t".into(),
+                    partition: 0,
+                    replicas: vec![1, 2],
+                    leader: 1,
+                    isr: vec![1, 2],
+                },
+                PartitionView {
+                    topic: "t".into(),
+                    partition: 1,
+                    replicas: vec![1, 2],
+                    leader: 1,
+                    isr: vec![1, 2],
+                },
+            ],
+            in_flight_reassignments: vec![],
+        };
+        let movements = vec![
+            Movement {
+                topic: "t".into(),
+                partition: 0,
+                old_replicas: vec![1, 2],
+                new_replicas: vec![1, 3],
+                old_leader: 1,
+                new_leader: 1,
+            },
+            Movement {
+                topic: "t".into(),
+                partition: 1,
+                old_replicas: vec![1, 2],
+                new_replicas: vec![1, 2],
+                old_leader: 1,
+                new_leader: 2,
+            },
+        ];
+        let mut after = before.clone();
+        for movement in &movements {
+            apply_movement(&mut after, movement);
+        }
+
+        let summary = compute_summary(&before, &after, &movements);
+
+        assert!(summary.replica_movements == 1);
+        assert!(summary.leader_movements == 1);
+        assert!(summary.max_replicas_before == 2);
+        assert!(summary.max_replicas_after == 2);
+        assert!(summary.max_leaders_before == 2);
+        assert!(summary.max_leaders_after == 1);
+    }
 }
