@@ -430,7 +430,7 @@ mod tests {
         s.insert(1, vec![sample(MetricKind::BytesIn, "t", 0, 100.0)], 1_000);
 
         let rate = s.bytes_in_rate(1, "t", 0, Window::FiveMin, 1_000).unwrap();
-        assert!(rate == 0.0);
+        assert!(rate.abs() < f64::EPSILON);
     }
 
     /// Regression: a broker that stops emitting must not keep producing

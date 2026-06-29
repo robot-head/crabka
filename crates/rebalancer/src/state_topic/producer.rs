@@ -212,7 +212,7 @@ mod tests {
     async fn unreachable_client(suffix: &str) -> Client {
         Client::builder()
             .bootstrap("127.0.0.1:1")
-            .client_id(&unreachable_client_id(suffix))
+            .client_id(unreachable_client_id(suffix))
             .connect_timeout(Duration::from_millis(50))
             .request_timeout(Duration::from_millis(50))
             .build()

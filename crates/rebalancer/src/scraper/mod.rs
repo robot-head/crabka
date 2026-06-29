@@ -394,7 +394,7 @@ mod tests {
         let shutdown = CancellationToken::new();
         let scraper = Scraper::new(
             TargetSource::Static(vec![]),
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             Arc::new(UsageStore::default()),
             shutdown.clone(),
         );

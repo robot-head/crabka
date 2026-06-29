@@ -478,7 +478,7 @@ mod tests {
         let shutdown = CancellationToken::new();
         let detector = detector_with(
             DetectorConfig {
-                tick_interval: Duration::from_secs(60),
+                tick_interval: Duration::from_mins(1),
                 ..DetectorConfig::default()
             },
             snapshot,
@@ -507,7 +507,7 @@ mod tests {
         let metrics = DetectorMetrics::default();
         let detector = detector_with(
             DetectorConfig {
-                under_replicated_threshold: Duration::from_secs(120),
+                under_replicated_threshold: Duration::from_mins(2),
                 auto_trigger_enabled: false,
                 ..DetectorConfig::default()
             },
