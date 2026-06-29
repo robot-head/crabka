@@ -56,7 +56,7 @@ stateright = "=0.31.0"
 # unit-testable (and mutation-killable) without a live broker/quorum/database.
 # Dev-dependency only — `#[cfg_attr(test, mockall::automock)]` keeps it out of
 # shipped builds.
-mockall = "0.14"
+mockall = "0.15"
 # mutants: `#[cfg_attr(test, mutants::skip)]` attribute for cargo-mutants. Used
 # only where `exclude_re` cannot reliably suppress a mutant (struct-field-deletion
 # mutants on a live-IO adapter). Dev-dependency only; expands to nothing.
