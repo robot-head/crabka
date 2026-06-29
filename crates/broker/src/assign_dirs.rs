@@ -114,10 +114,13 @@ pub(crate) async fn send_assignments(
         .map_err(|e| format!("connect: {e}"))?;
 
     let resp = client.send(req).await.map_err(|e| format!("send: {e}"))?;
-    if resp.error_code != 0 {
+    validate_assign_response(resp.error_code)
+}
+
+fn validate_assign_response(error_code: i16) -> Result<(), String> {
+    if error_code != 0 {
         return Err(format!(
-            "AssignReplicasToDirs rejected by controller: error_code={}",
-            resp.error_code
+            "AssignReplicasToDirs rejected by controller: error_code={error_code}"
         ));
     }
     Ok(())
@@ -193,6 +196,14 @@ mod tests {
     fn build_request_empty_assignments() {
         let req = build_request(1, &[]);
         assert!(req.broker_id == 1);
+        assert!(req.broker_epoch == -1);
         assert!(req.directories.is_empty());
+    }
+
+    #[test]
+    fn validate_assign_response_rejects_controller_error() {
+        assert!(validate_assign_response(0).is_ok());
+        let err = validate_assign_response(42).expect_err("non-zero error_code must fail");
+        assert!(err.contains("error_code=42"));
     }
 }

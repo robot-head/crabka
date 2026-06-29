@@ -16,7 +16,7 @@ pub(crate) fn recover_from_partition_tail(partition: &Partition) -> Option<(u64,
     // Read a bounded tail window (audit records are small).  4096 offsets
     // comfortably exceeds the worst-case run of consecutive checkpoints
     // between chained records; the 1 MiB byte cap keeps the read cheap.
-    let start = (leo - 4096).max(0);
+    let start = tail_window_start(leo);
     let out = partition.read_log(start, 1 << 20).ok()?;
     let mut last: Option<(u64, [u8; 32])> = None;
     for batch in &out.batches {
@@ -51,4 +51,22 @@ fn header_bytes(rec: &crabka_protocol::records::Record, key: &str) -> Option<Vec
 
 fn header_str(rec: &crabka_protocol::records::Record, key: &str) -> Option<String> {
     header_bytes(rec, key).and_then(|v| std::str::from_utf8(&v).ok().map(str::to_owned))
+}
+
+fn tail_window_start(log_end_offset: i64) -> i64 {
+    (log_end_offset - 4096).max(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert2::assert;
+
+    #[test]
+    fn tail_window_start_keeps_only_last_4096_offsets() {
+        assert!(tail_window_start(0) == 0);
+        assert!(tail_window_start(4096) == 0);
+        assert!(tail_window_start(4097) == 1);
+        assert!(tail_window_start(8192) == 4096);
+    }
 }

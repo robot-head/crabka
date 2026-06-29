@@ -81,12 +81,7 @@ pub(crate) async fn run(params: AutoJoinParams) {
         return;
     };
     let directory_id = crabka_protocol::primitives::uuid::Uuid(*params.directory_id.as_bytes());
-    let listener = Listener {
-        name: "CONTROLLER".to_string(),
-        host: bound.ip().to_string(),
-        port: bound.port(),
-        ..Default::default()
-    };
+    let listener = controller_listener(bound);
 
     let protocol = params.listener_protocol;
     let client = params.inter_broker_client;
@@ -101,21 +96,16 @@ pub(crate) async fn run(params: AutoJoinParams) {
             return;
         }
 
-        let target = bootstrap_servers[next_server % bootstrap_servers.len()];
+        let target = select_bootstrap_server(&bootstrap_servers, next_server);
         next_server = next_server.wrapping_add(1);
 
-        let req = AddRaftVoterRequest {
-            cluster_id: cluster_id.map(|u| u.to_string()),
-            timeout_ms: 30_000,
-            voter_id,
-            voter_directory_id: directory_id,
-            listeners: vec![listener.clone()],
-            ack_when_committed: true,
-            ..Default::default()
-        };
+        let req =
+            build_add_raft_voter_request(cluster_id, voter_id, directory_id, listener.clone());
 
         match send_add_raft_voter(&client, protocol, target, &req).await {
-            Ok(resp) => log_join_outcome(self_id, target, &resp),
+            Ok(resp) => {
+                let _: JoinOutcome = log_join_outcome(self_id, target, &resp);
+            }
             Err(e) => {
                 tracing::debug!(
                     node_id = self_id,
@@ -130,6 +120,48 @@ pub(crate) async fn run(params: AutoJoinParams) {
     }
 }
 
+fn controller_listener(bound: std::net::SocketAddr) -> Listener {
+    Listener {
+        name: "CONTROLLER".to_string(),
+        host: bound.ip().to_string(),
+        port: bound.port(),
+        ..Default::default()
+    }
+}
+
+fn select_bootstrap_server(
+    bootstrap_servers: &[std::net::SocketAddr],
+    attempt: usize,
+) -> std::net::SocketAddr {
+    bootstrap_servers[attempt % bootstrap_servers.len()]
+}
+
+fn build_add_raft_voter_request(
+    cluster_id: Option<uuid::Uuid>,
+    voter_id: i32,
+    directory_id: crabka_protocol::primitives::uuid::Uuid,
+    listener: Listener,
+) -> AddRaftVoterRequest {
+    AddRaftVoterRequest {
+        cluster_id: cluster_id.map(|u| u.to_string()),
+        timeout_ms: 30_000,
+        voter_id,
+        voter_directory_id: directory_id,
+        listeners: vec![listener],
+        ack_when_committed: true,
+        ..Default::default()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JoinOutcome {
+    Accepted,
+    NotLeader,
+    TimedOut,
+    NotCaughtUp,
+    Unexpected(i16),
+}
+
 /// Log the leader's `AddRaftVoter` reply at the appropriate level. None of the
 /// outcomes terminate the loop — the `voters().contains` check at the top of
 /// `run` is the sole exit — so this is purely diagnostic.
@@ -137,7 +169,7 @@ fn log_join_outcome(
     self_id: crabka_raft::NodeId,
     target: std::net::SocketAddr,
     resp: &AddRaftVoterResponse,
-) {
+) -> JoinOutcome {
     match resp.error_code {
         codes::NONE => {
             tracing::info!(
@@ -148,6 +180,7 @@ fn log_join_outcome(
             // The committed V1Voters record may not be visible in our local
             // image yet (we're still catching up); the next loop iteration's
             // `voters().contains` check confirms before exiting.
+            JoinOutcome::Accepted
         }
         codes::NOT_LEADER_OR_FOLLOWER => {
             // Not the leader. The error message may name the current leader,
@@ -159,6 +192,7 @@ fn log_join_outcome(
                 msg = ?resp.error_message,
                 "auto-join target is not the leader; trying next bootstrap server"
             );
+            JoinOutcome::NotLeader
         }
         codes::REQUEST_TIMED_OUT => {
             tracing::debug!(
@@ -166,6 +200,7 @@ fn log_join_outcome(
                 server = %target,
                 "auto-join: reconfiguration in progress on leader; retrying"
             );
+            JoinOutcome::TimedOut
         }
         codes::INVALID_REQUEST => {
             // Observer not yet caught up within the lag bound. Keep replicating
@@ -176,6 +211,7 @@ fn log_join_outcome(
                 msg = ?resp.error_message,
                 "auto-join: not yet caught up; retrying"
             );
+            JoinOutcome::NotCaughtUp
         }
         other => {
             tracing::warn!(
@@ -185,6 +221,7 @@ fn log_join_outcome(
                 msg = ?resp.error_message,
                 "auto-join: unexpected error_code; retrying"
             );
+            JoinOutcome::Unexpected(other)
         }
     }
 }
@@ -235,6 +272,103 @@ async fn send_add_raft_voter(
 mod tests {
     use super::*;
 
+    #[test]
+    fn controller_listener_uses_bound_controller_endpoint() {
+        let listener = controller_listener("192.0.2.10:19093".parse().unwrap());
+        assert_eq!(listener.name, "CONTROLLER");
+        assert_eq!(listener.host, "192.0.2.10");
+        assert_eq!(listener.port, 19093);
+    }
+
+    #[test]
+    fn select_bootstrap_server_wraps_attempts() {
+        let servers: Vec<std::net::SocketAddr> =
+            ["127.0.0.1:9092", "127.0.0.1:9093", "127.0.0.1:9094"]
+                .into_iter()
+                .map(|s| s.parse().unwrap())
+                .collect();
+
+        assert_eq!(select_bootstrap_server(&servers, 0), servers[0]);
+        assert_eq!(select_bootstrap_server(&servers, 2), servers[2]);
+        assert_eq!(select_bootstrap_server(&servers, 3), servers[0]);
+        assert_eq!(select_bootstrap_server(&servers, 5), servers[2]);
+    }
+
+    #[test]
+    fn build_add_raft_voter_request_carries_joiner_identity() {
+        let cluster_id = uuid::Uuid::from_u128(0xCAFE);
+        let dir = uuid::Uuid::from_u128(0xD1E);
+        let listener = controller_listener("127.0.0.1:19093".parse().unwrap());
+        let req = build_add_raft_voter_request(
+            Some(cluster_id),
+            7,
+            crabka_protocol::primitives::uuid::Uuid(*dir.as_bytes()),
+            listener,
+        );
+
+        let cluster_id_string = cluster_id.to_string();
+        assert_eq!(req.cluster_id.as_deref(), Some(cluster_id_string.as_str()));
+        assert_eq!(req.timeout_ms, 30_000);
+        assert_eq!(req.voter_id, 7);
+        assert_eq!(req.voter_directory_id.0, *dir.as_bytes());
+        assert_eq!(req.listeners.len(), 1);
+        assert_eq!(req.listeners[0].name, "CONTROLLER");
+        assert_eq!(req.listeners[0].host, "127.0.0.1");
+        assert_eq!(req.listeners[0].port, 19093);
+        assert!(req.ack_when_committed);
+    }
+
+    #[test]
+    fn log_join_outcome_classifies_response_codes() {
+        let target = "127.0.0.1:9092".parse().unwrap();
+        let response = |error_code| AddRaftVoterResponse {
+            error_code,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            log_join_outcome(1, target, &response(codes::NONE)),
+            JoinOutcome::Accepted
+        );
+        assert_eq!(
+            log_join_outcome(1, target, &response(codes::NOT_LEADER_OR_FOLLOWER)),
+            JoinOutcome::NotLeader
+        );
+        assert_eq!(
+            log_join_outcome(1, target, &response(codes::REQUEST_TIMED_OUT)),
+            JoinOutcome::TimedOut
+        );
+        assert_eq!(
+            log_join_outcome(1, target, &response(codes::INVALID_REQUEST)),
+            JoinOutcome::NotCaughtUp
+        );
+        assert_eq!(
+            log_join_outcome(1, target, &response(1234)),
+            JoinOutcome::Unexpected(1234)
+        );
+    }
+
+    #[tokio::test]
+    async fn send_add_raft_voter_errors_when_target_is_unreachable() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral port");
+        let target = listener.local_addr().expect("local addr");
+        drop(listener);
+
+        let client = crate::network::client::InterBrokerClient::new(None, None);
+        let req = AddRaftVoterRequest::default();
+        let err = send_add_raft_voter(
+            &client,
+            crabka_security::ListenerProtocol::Plaintext,
+            target,
+            &req,
+        )
+        .await
+        .expect_err("closed port must not produce a successful default response");
+        assert!(err.contains("dial"), "unexpected error: {err}");
+    }
+
     /// `run` returns immediately when `auto_join` is disabled — no panic, no
     /// network dial. Build params with a real controller + inter-broker client
     /// but `auto_join = false`, and a deliberately bogus bootstrap server. If
@@ -250,7 +384,7 @@ mod tests {
 
         let params = AutoJoinParams {
             auto_join: false,
-            node_id: 1,
+            node_id: 999,
             directory_id: uuid::Uuid::from_u128(1),
             cluster_id: None,
             // Unroutable: would hang the loop if `run` ignored auto_join=false.

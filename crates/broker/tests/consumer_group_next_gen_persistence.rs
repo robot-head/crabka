@@ -133,6 +133,16 @@ async fn next_gen_state_cleared_after_leave_then_restart() {
         let resp = client.send(join).await.unwrap();
         assert!(resp.error_code == 0);
         member_id = resp.member_id.unwrap();
+        broker.wait_until_group_member_count("gpx", 1).await;
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(75),
+                broker.wait_until_group_empty("gpx"),
+            )
+            .await
+            .is_err(),
+            "group-empty waiter must not complete while a member is live"
+        );
         let leave = ConsumerGroupHeartbeatRequest {
             group_id: "gpx".into(),
             member_id: member_id.clone(),

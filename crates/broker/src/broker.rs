@@ -4028,6 +4028,109 @@ mod tests {
     use assert2::assert;
     use tempfile::tempdir;
 
+    struct MockMetadataSource {
+        image: Arc<crabka_metadata::MetadataImage>,
+        leader_tx: tokio::sync::watch::Sender<Option<crabka_raft::NodeId>>,
+    }
+
+    impl MockMetadataSource {
+        fn new(image: crabka_metadata::MetadataImage, leader: Option<crabka_raft::NodeId>) -> Self {
+            let (leader_tx, _) = tokio::sync::watch::channel(leader);
+            Self {
+                image: Arc::new(image),
+                leader_tx,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::metadata_source::MetadataSource for MockMetadataSource {
+        fn current_image(&self) -> Arc<crabka_metadata::MetadataImage> {
+            self.image.clone()
+        }
+
+        fn watch_image(&self) -> tokio::sync::watch::Receiver<Arc<crabka_metadata::MetadataImage>> {
+            let (_, rx) = tokio::sync::watch::channel(self.image.clone());
+            rx
+        }
+
+        fn watch_leader(&self) -> tokio::sync::watch::Receiver<Option<crabka_raft::NodeId>> {
+            self.leader_tx.subscribe()
+        }
+
+        fn quorum_state(&self) -> crabka_raft::QuorumState {
+            crabka_raft::QuorumState {
+                current_term: 0,
+                last_applied_index: 0,
+                current_leader: *self.leader_tx.borrow(),
+                voters: Vec::new(),
+                voter_nodes: std::collections::BTreeMap::new(),
+                per_voter_matched_index: std::collections::BTreeMap::new(),
+            }
+        }
+
+        async fn submit_change(
+            &self,
+            _records: Vec<crabka_metadata::MetadataRecord>,
+        ) -> Result<(), crabka_raft::RaftError> {
+            Err(crabka_raft::RaftError::Unsupported("mock metadata source"))
+        }
+
+        async fn change_membership(
+            &self,
+            _new_voters: std::collections::BTreeSet<crabka_raft::NodeId>,
+        ) -> Result<(), crabka_raft::RaftError> {
+            Err(crabka_raft::RaftError::Unsupported("mock metadata source"))
+        }
+
+        async fn add_learner(
+            &self,
+            _node_id: crabka_raft::NodeId,
+            _node: crabka_raft::Node,
+        ) -> Result<(), crabka_raft::RaftError> {
+            Err(crabka_raft::RaftError::Unsupported("mock metadata source"))
+        }
+
+        fn controller_bound_addr(&self) -> std::net::SocketAddr {
+            "127.0.0.1:9093".parse().unwrap()
+        }
+
+        fn read_snapshot_range(
+            &self,
+            _position: i64,
+            _max_bytes: i32,
+        ) -> crabka_raft::SnapshotRange {
+            crabka_raft::SnapshotRange::NoSnapshot
+        }
+
+        async fn trigger_snapshot(&self) -> Result<(), crabka_raft::RaftError> {
+            Err(crabka_raft::RaftError::Unsupported("mock metadata source"))
+        }
+
+        async fn add_voter(
+            &self,
+            _req: crabka_raft::AddVoter,
+        ) -> Result<crabka_raft::ReconfigOutcome, crabka_raft::RaftError> {
+            Err(crabka_raft::RaftError::Unsupported("mock metadata source"))
+        }
+
+        async fn remove_voter(
+            &self,
+            _req: crabka_raft::RemoveVoter,
+        ) -> Result<crabka_raft::ReconfigOutcome, crabka_raft::RaftError> {
+            Err(crabka_raft::RaftError::Unsupported("mock metadata source"))
+        }
+
+        async fn update_voter(
+            &self,
+            _req: crabka_raft::UpdateVoter,
+        ) -> Result<crabka_raft::ReconfigOutcome, crabka_raft::RaftError> {
+            Err(crabka_raft::RaftError::Unsupported("mock metadata source"))
+        }
+
+        async fn cancel(&self) {}
+    }
+
     #[test]
     fn static_voter_set_keeps_peer_hostnames_for_per_dial_resolution() {
         // Peer endpoint hosts MUST be the configured DNS names, NOT resolved to
@@ -4167,6 +4270,188 @@ mod tests {
                 == "192.168.1.5:9094"
         );
         assert!(loopback_bootstrap("[::]:9092".parse::<SocketAddr>().unwrap()) == "[::1]:9092");
+        assert!(
+            loopback_bootstrap("[2001:db8::5]:9092".parse::<SocketAddr>().unwrap())
+                == "[2001:db8::5]:9092"
+        );
+    }
+
+    #[test]
+    fn controller_adapters_report_leadership_from_leader_watch() {
+        let source: Arc<dyn crate::metadata_source::MetadataSource> =
+            Arc::new(MockMetadataSource::new(
+                crabka_metadata::MetadataImage::new(uuid::Uuid::from_u128(1)),
+                Some(7),
+            ));
+
+        let leader_adapter = ControllerAdapter {
+            handle: source.clone(),
+            node_id: 7,
+        };
+        let follower_adapter = ControllerAdapter {
+            handle: source.clone(),
+            node_id: 8,
+        };
+        assert!(crate::leader_rebalance::ControllerLike::is_leader(
+            &leader_adapter
+        ));
+        assert!(!crate::leader_rebalance::ControllerLike::is_leader(
+            &follower_adapter
+        ));
+
+        let leader_adapter = ReassignmentControllerAdapter {
+            handle: source.clone(),
+            node_id: 7,
+        };
+        let follower_adapter = ReassignmentControllerAdapter {
+            handle: source,
+            node_id: 8,
+        };
+        assert!(crate::reassignment::ReassignmentController::is_leader(
+            &leader_adapter
+        ));
+        assert!(!crate::reassignment::ReassignmentController::is_leader(
+            &follower_adapter
+        ));
+    }
+
+    #[test]
+    fn image_watcher_adapters_forward_current_image() {
+        let cluster_id = uuid::Uuid::from_u128(0x5150);
+        let source: Arc<dyn crate::metadata_source::MetadataSource> = Arc::new(
+            MockMetadataSource::new(crabka_metadata::MetadataImage::new(cluster_id), Some(1)),
+        );
+
+        let quota = QuotaControllerAdapter {
+            handle: source.clone(),
+        };
+        assert!(crate::quota::ImageWatcher::current_image(&quota).cluster_id() == cluster_id);
+
+        let cleanup = DelegationTokenCleanupControllerAdapter { handle: source };
+        assert!(
+            crate::delegation_token_cleanup::DelegationTokenController::current_image(&cleanup)
+                .cluster_id()
+                == cluster_id
+        );
+    }
+
+    #[tokio::test]
+    async fn rlmm_bootstrap_backoff_returns_false_when_cancelled() {
+        let shutdown = CancellationToken::new();
+        shutdown.cancel();
+        let mut backoff = std::time::Duration::from_secs(60);
+
+        assert!(!rlmm_bootstrap_backoff(&mut backoff, &shutdown).await);
+        assert!(backoff == std::time::Duration::from_secs(60));
+    }
+
+    #[tokio::test]
+    async fn single_broker_handle_helpers_observe_real_state_and_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = BrokerConfig::for_tests(dir.path().to_path_buf());
+        let handle = Broker::start(config).await.expect("broker start");
+
+        assert!(!handle.has_partition("missing-mutant-topic", 0).await);
+        assert!(
+            handle
+                .test_advance_log_start("missing-mutant-topic", 0, 10)
+                .await
+                .is_err()
+        );
+        assert!(
+            handle
+                .change_membership([1_u64].into_iter().collect())
+                .await
+                .is_err()
+        );
+
+        let leader = handle.wait_until_controller_leader().await;
+        assert!(leader == handle.node_id());
+
+        let own_directory = handle
+            .voter_directory_id_for_test(handle.node_id())
+            .expect("own voter directory id");
+        assert!(own_directory != uuid::Uuid::nil());
+        assert!(
+            handle
+                .voter_directory_id_for_test(handle.node_id() + 10_000)
+                .is_none()
+        );
+
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn wait_helpers_remain_pending_until_their_conditions_are_met() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = BrokerConfig::for_tests(dir.path().to_path_buf());
+        let handle = Broker::start(config).await.expect("broker start");
+        let timeout = std::time::Duration::from_millis(75);
+        let topic_id = uuid::Uuid::from_u128(0xFEED);
+
+        assert!(
+            tokio::time::timeout(
+                timeout,
+                handle.wait_for_share_state_summary("missing-mutant-group", topic_id, 0),
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            tokio::time::timeout(
+                timeout,
+                handle.wait_until_share_spso("missing-mutant-group", topic_id, 0, 1),
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            tokio::time::timeout(
+                timeout,
+                handle.wait_until_share_delivery_complete("missing-mutant-group", topic_id, 0, 1),
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            tokio::time::timeout(
+                timeout,
+                handle.wait_until_group_member_count("missing-mutant-group", 1),
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            tokio::time::timeout(
+                timeout,
+                handle.wait_until_streams_group_member_count("missing-mutant-streams", 1),
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            tokio::time::timeout(timeout, handle.wait_until_brokers_registered(2))
+                .await
+                .is_err()
+        );
+        assert!(
+            tokio::time::timeout(
+                timeout,
+                handle.wait_until_partition_leader_changed("missing-mutant-topic", 0, 1),
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            tokio::time::timeout(
+                timeout,
+                handle.wait_until_isr_len("missing-mutant-topic", 0, 1)
+            )
+            .await
+            .is_err()
+        );
+
+        handle.shutdown().await;
     }
 
     #[test]

@@ -374,6 +374,15 @@ async fn drained_streams_group_downgrades_and_preserves_offsets() {
             == Some(crabka_broker::coordinator::unified::GroupType::Streams),
         "precondition: group must be Streams before downgrade"
     );
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(75),
+            broker.wait_until_streams_group_empty("g"),
+        )
+        .await
+        .is_err(),
+        "streams-group-empty waiter must not complete while a member is live"
+    );
 
     // Commit offset 42 via the simple-consumer path (empty member_id, epoch
     // -1) — the streams offset-home actor allows commits from unjoined clients.

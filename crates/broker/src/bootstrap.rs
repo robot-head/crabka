@@ -243,4 +243,14 @@ mod tests {
             Err(BrokerError::BootstrapFile { .. })
         ));
     }
+
+    #[test]
+    fn zero_length_record_has_body_decode_error_not_prefix_truncation() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("bootstrap.records.bin"), 0u32.to_le_bytes()).unwrap();
+        let err = load_bootstrap_records(dir.path()).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("decode:"), "unexpected error: {msg}");
+        assert!(!msg.contains("truncated length prefix"));
+    }
 }
