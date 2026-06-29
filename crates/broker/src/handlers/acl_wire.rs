@@ -191,6 +191,8 @@ mod tests {
     fn resource_type_concrete_rejects_any() {
         assert!(resource_type_concrete(1) == Err(WireAclError::AnyRequiresFilter));
         assert!(resource_type_concrete(2) == Ok(ResourceType::Topic));
+        assert!(resource_type_concrete(3) == Ok(ResourceType::Group));
+        assert!(resource_type_concrete(4) == Ok(ResourceType::Cluster));
     }
 
     #[test]

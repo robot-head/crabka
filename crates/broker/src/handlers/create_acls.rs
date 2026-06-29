@@ -113,7 +113,7 @@ pub(crate) async fn handle(
         .collect();
     if !created_acls.is_empty() {
         crate::handlers::audit_admin(
-            broker,
+            broker.audit_log.as_ref(),
             ctx,
             "CreateAcls",
             crabka_audit::AuditOutcome::Success,

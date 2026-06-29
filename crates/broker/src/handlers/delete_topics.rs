@@ -234,7 +234,7 @@ pub(crate) async fn handle(
         .collect();
     if !deleted.is_empty() {
         crate::handlers::audit_admin(
-            broker,
+            broker.audit_log.as_ref(),
             ctx,
             "DeleteTopics",
             crabka_audit::AuditOutcome::Success,

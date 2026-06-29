@@ -161,28 +161,26 @@ pub(crate) mod update_raft_voter;
 /// has been applied and the set of successfully-affected resources is known.
 /// A no-op when `resources` is empty (caller guards with `if !resources.is_empty()`).
 pub(crate) fn audit_admin(
-    broker: &crate::broker::Broker,
+    audit_log: &crabka_audit::AuditLog,
     ctx: &RequestContext<'_>,
     operation: &str,
     outcome: crabka_audit::AuditOutcome,
     resources: Vec<crabka_audit::AuditResource>,
 ) {
-    broker
-        .audit_log
-        .emit(crabka_audit::AuditEvent::AdminOperation {
-            outcome,
-            principal: crabka_audit::AuditPrincipal {
-                name: ctx.principal.name.clone(),
-                auth_method: format!("{:?}", ctx.principal.auth_method),
-            },
-            source: crabka_audit::AuditEndpoint {
-                ip: ctx.peer.ip().to_string(),
-                port: ctx.peer.port(),
-            },
-            operation: operation.to_string(),
-            resources,
-            time_ms: crate::time_util::now_ms(),
-        });
+    audit_log.emit(crabka_audit::AuditEvent::AdminOperation {
+        outcome,
+        principal: crabka_audit::AuditPrincipal {
+            name: ctx.principal.name.clone(),
+            auth_method: format!("{:?}", ctx.principal.auth_method),
+        },
+        source: crabka_audit::AuditEndpoint {
+            ip: ctx.peer.ip().to_string(),
+            port: ctx.peer.port(),
+        },
+        operation: operation.to_string(),
+        resources,
+        time_ms: crate::time_util::now_ms(),
+    });
 }
 
 /// Build the dispatch table for plain 4-arg handlers. Inline-intercepted
@@ -315,4 +313,102 @@ pub(crate) fn build_table() -> HandlerTable {
     // 72 (PushTelemetry) intercepted inline in `network::dispatch` for the
     // same reason — it needs the per-connection context to authorize pushes.
     t
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::SocketAddr;
+
+    use assert2::assert;
+    use crabka_security::{AuthMethod, Principal};
+
+    use super::*;
+
+    fn table_test_handler(
+        _broker: &crate::broker::Broker,
+        _version: i16,
+        _correlation_id: i32,
+        _req_bytes: &[u8],
+    ) -> futures_util::future::BoxFuture<'static, Result<Bytes, BrokerError>> {
+        Box::pin(async { Ok(Bytes::new()) })
+    }
+
+    #[test]
+    fn handler_table_register_get_round_trips_handler() {
+        let mut table = HandlerTable::new();
+
+        assert!(table.get(1234).is_none());
+        table.register(1234, table_test_handler);
+
+        let registered = table.get(1234).expect("registered handler");
+        assert!(std::ptr::fn_addr_eq(
+            registered,
+            table_test_handler as HandlerFn
+        ));
+        assert!(table.get(4321).is_none());
+    }
+
+    #[test]
+    fn build_table_registers_required_plain_handlers() {
+        let table = build_table();
+
+        assert!(std::ptr::fn_addr_eq(
+            table.get(18).expect("ApiVersions is registered"),
+            api_versions::handle as HandlerFn
+        ));
+        assert!(table.get(59).is_some());
+        assert!(table.get(69).is_some());
+        assert!(table.get(89).is_some());
+    }
+
+    #[test]
+    fn audit_admin_emits_admin_operation_event() {
+        let (log, mut rx) = crabka_audit::AuditLog::new(8);
+        let principal = Principal {
+            name: "admin".into(),
+            auth_method: AuthMethod::SaslPlain,
+            groups: Vec::new(),
+        };
+        let peer: SocketAddr = "192.0.2.10:9092".parse().unwrap();
+        let ctx = RequestContext {
+            principal: &principal,
+            peer: &peer,
+            client_id: "admin-client",
+            sendfile_capable: false,
+            connection_listener_name: "PLAINTEXT",
+        };
+
+        audit_admin(
+            log.as_ref(),
+            &ctx,
+            "CreateTopics",
+            crabka_audit::AuditOutcome::Success,
+            vec![crabka_audit::AuditResource {
+                resource_type: "Topic".into(),
+                name: "orders".into(),
+            }],
+        );
+
+        match rx.try_recv().expect("admin audit event") {
+            crabka_audit::AuditEvent::AdminOperation {
+                outcome,
+                principal,
+                source,
+                operation,
+                resources,
+                ..
+            } => {
+                assert!(outcome == crabka_audit::AuditOutcome::Success);
+                assert!(principal.name == "admin");
+                assert!(principal.auth_method == "SaslPlain");
+                assert!(source.ip == "192.0.2.10");
+                assert!(source.port == 9092);
+                assert!(operation == "CreateTopics");
+                assert!(resources.len() == 1);
+                assert!(resources[0].resource_type == "Topic");
+                assert!(resources[0].name == "orders");
+            }
+            other => panic!("expected admin operation event, got {other:?}"),
+        }
+    }
 }
