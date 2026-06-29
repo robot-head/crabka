@@ -19,7 +19,6 @@ workspace = true
 [features]
 default = []
 mock = []
-sspi-keytab = ["crabka-security/sspi-keytab"]
 
 [dependencies]
 crabka-protocol = { version = "0.3.8", path = "../protocol", default-features = false }

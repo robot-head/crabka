@@ -4,8 +4,7 @@ load("@rules_rust//rust:defs.bzl", "rust_library")
 # @crabka//:client_minimal from //:BUILD.bazel.
 #
 # Its dependency closure is intentionally small: producer/consumer/admin/core +
-# Avro/Protobuf serdes, with no polars/arrow/jsonschema. GSSAPI rides along only
-# when //:gssapi is set (the gate lives on //crates/client-core).
+# Avro/Protobuf serdes, with no polars/arrow/jsonschema.
 rust_library(
     name = "client_minimal",
     srcs = ["lib.rs"],

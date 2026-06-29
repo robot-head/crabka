@@ -54,7 +54,7 @@ tikv-jemallocator = { version = "0.7", optional = true, features = ["profiling",
 
 [build-dependencies]
 prost-build = { workspace = true }
-protoc-fetcher = { workspace = true }
+protoc-bin-vendored = { workspace = true }
 
 [dev-dependencies]
 assert2 = { workspace = true }

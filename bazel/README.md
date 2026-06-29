@@ -12,7 +12,7 @@ so there is no second dependency set to keep in sync.
 | --- | --- |
 | `MODULE.bazel` | bzlmod: pins `rules_rust`, the Rust toolchain (1.96.0 / edition 2024), and the `crate_universe` repo (`@crates`) spliced from the Cargo workspace. |
 | `.bazelrc`, `.bazelversion` | Bazel settings + version pin. |
-| `//:BUILD.bazel` | Re-exported public targets + the `//:gssapi` flag. |
+| `//:BUILD.bazel` | Re-exported public targets. |
 | `//crates/<crate>:BUILD.bazel` | `rust_library` targets for the in-scope crates. |
 | `//crates:BUILD.bazel` | Exports the remaining workspace members' `Cargo.toml`s so crate_universe can splice the whole workspace. |
 | `//bazel/client_minimal` | The lean facade crate (Bazel-only; not a Cargo member). |
@@ -39,24 +39,9 @@ the Avro + Protobuf serdes. It deliberately **omits**:
 
 ## GSSAPI / Kerberos (`sspi`)
 
-The SASL/GSSAPI path rides on `sspi`, a git-patched dependency (see
-`[patch.crates-io]` in the root `Cargo.toml`). It is **off by default**. Enable it
-with:
-
-```sh
-bazel build @crabka//:client_minimal --//:gssapi=true   # or: --config=gssapi
-```
-
-That flips `:gssapi_enabled`, which turns on the `sspi-keytab` feature and links
-the `sspi` crate in `//crates/security` (and, transitively, `//crates/client-core`).
-
-`sspi` is an *optional* dependency that nothing activates in the default Cargo
-resolution, so the main `from_cargo` splice prunes it (a single feature set can't
-both keep the default build lean and vendor the gated dep). It is instead vendored
-in its own `from_specs` repo, `@crates_gssapi`, straight from the pinned git
-revision — kept in sync with `[patch.crates-io]` / `Cargo.lock`. Its resolved
-lockfile is committed at `//bazel/gssapi:Cargo.gssapi.lock`; if the git rev in
-`Cargo.lock` changes, update the `rev` in `MODULE.bazel` to match.
+The SASL/GSSAPI path rides on the released `sspi` crate and is part of the
+default client build. Bazel gets it from the same `Cargo.toml` / `Cargo.lock`
+splice as the rest of the workspace.
 
 ## Two implementation notes
 

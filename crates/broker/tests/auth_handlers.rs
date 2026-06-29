@@ -2435,7 +2435,6 @@ async fn drive_inter_broker_client_then_apiversions(
 /// live KDC and is covered by the E2E parity tests (Task 10); this case only
 /// proves the mechanism is wired through handshake advertisement and that the
 /// keytab is not touched until the first `SaslAuthenticate` round.
-#[cfg(feature = "sspi-keytab")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn gssapi_handshake_advertised_when_enabled() {
     let log_dir = tempfile::tempdir().unwrap();
@@ -2518,7 +2517,6 @@ async fn gssapi_handshake_advertised_when_enabled() {
 /// KRB5_CONFIG=crates/security/tests/fixtures/kdc/krb5.conf SSPI_KDC_URL=tcp://localhost:88 \
 ///   cargo test -p crabka-broker gssapi_inter_broker -- --ignored
 /// ```
-#[cfg(feature = "sspi-keytab")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires the MIT KDC fixture (docker compose up) + exported KRB5_CONFIG/SSPI_KDC_URL"]
 async fn gssapi_inter_broker_client_authenticates_from_keytab() {
