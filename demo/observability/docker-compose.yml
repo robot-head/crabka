@@ -370,7 +370,7 @@ services:
       broker: { condition: service_healthy }
 
   cadvisor:
-    image: ghcr.io/google/cadvisor:0.60.1
+    image: ghcr.io/google/cadvisor:v0.60.3
     <<: *cadvisor-res
     command:
       - "--docker_only=true"
