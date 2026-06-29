@@ -153,6 +153,80 @@ fn encode_resp(version: i16, resp: &AddRaftVoterResponse) -> Result<Bytes, Broke
 mod tests {
     use super::*;
     use assert2::assert;
+    use crabka_protocol::owned::add_raft_voter_request::Listener;
+    use crabka_protocol::primitives::uuid::Uuid as ProtoUuid;
+    use crabka_security::{AuthMethod, Principal};
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    use crate::authorizer::{AuthorizationRequest, Authorizer};
+    use crate::config::BrokerConfig;
+
+    #[derive(Debug)]
+    struct DenyAll;
+
+    impl Authorizer for DenyAll {
+        fn authorize(
+            &self,
+            _source: &dyn crabka_authz::AclSource,
+            _req: &AuthorizationRequest<'_>,
+        ) -> AuthorizationResult {
+            AuthorizationResult::Deny
+        }
+    }
+
+    fn request(voter_id: i32) -> AddRaftVoterRequest {
+        AddRaftVoterRequest {
+            cluster_id: Some("cluster".into()),
+            timeout_ms: 1_000,
+            voter_id,
+            voter_directory_id: ProtoUuid([2; 16]),
+            listeners: vec![Listener {
+                name: "CONTROLLER".into(),
+                host: "127.0.0.1".into(),
+                port: 9093,
+                ..Default::default()
+            }],
+            ack_when_committed: true,
+            ..Default::default()
+        }
+    }
+
+    fn encode_request(version: i16, req: &AddRaftVoterRequest) -> Bytes {
+        let mut buf = BytesMut::with_capacity(req.encoded_len(version));
+        req.encode(&mut buf, version).expect("encode request");
+        buf.freeze()
+    }
+
+    fn decode_response(version: i16, bytes: Bytes) -> AddRaftVoterResponse {
+        let mut cur: &[u8] = bytes.as_ref();
+        let resp = AddRaftVoterResponse::decode(&mut cur, version).expect("decode response");
+        assert!(cur.is_empty(), "response decoder consumed all bytes");
+        resp
+    }
+
+    fn test_context<'a>(
+        principal: &'a Principal,
+        peer: &'a SocketAddr,
+    ) -> crate::handlers::RequestContext<'a> {
+        crate::handlers::RequestContext {
+            principal,
+            peer,
+            client_id: "admin-client",
+            sendfile_capable: false,
+            connection_listener_name: "PLAINTEXT",
+        }
+    }
+
+    async fn start_broker(
+        authorizer: Arc<dyn Authorizer>,
+    ) -> (crate::broker::BrokerHandle, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
+        cfg.authorizer = authorizer;
+        let handle = Broker::start(cfg).await.expect("start broker");
+        (handle, dir)
+    }
 
     #[test]
     fn committed_maps_to_none() {
@@ -208,5 +282,87 @@ mod tests {
             assert!(decoded.error_code == codes::NOT_LEADER_OR_FOLLOWER);
             assert!(cur.is_empty(), "all bytes consumed at v{version}");
         }
+    }
+
+    #[tokio::test]
+    async fn handle_denies_cluster_alter_without_calling_reconfig() {
+        let version = 1;
+        let (broker_handle, _dir) = start_broker(Arc::new(DenyAll)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let principal = Principal {
+            name: "alice".into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        };
+        let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+        let ctx = test_context(&principal, &peer);
+        let req_bytes = encode_request(version, &request(2));
+
+        let resp = super::handle(&broker, version, 123, &req_bytes, &ctx)
+            .await
+            .expect("handle");
+        let resp = decode_response(version, resp);
+
+        assert!(resp.error_code == codes::CLUSTER_AUTHORIZATION_FAILED);
+        assert!(resp.error_message.as_deref() == Some("add-raft-voter denied"));
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_rejects_negative_voter_id_before_reconfig() {
+        let version = 1;
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let principal = Principal {
+            name: "admin".into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        };
+        let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+        let ctx = test_context(&principal, &peer);
+        let req_bytes = encode_request(version, &request(-7));
+
+        let resp = super::handle(&broker, version, 123, &req_bytes, &ctx)
+            .await
+            .expect("handle");
+        let resp = decode_response(version, resp);
+
+        assert!(resp.error_code == codes::INVALID_REQUEST);
+        assert!(
+            resp.error_message.as_deref().is_some_and(|m| {
+                m.contains("voter_id must be non-negative") && m.contains("-7")
+            })
+        );
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_reports_reconfig_error_from_controller() {
+        let version = 1;
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let principal = Principal {
+            name: "admin".into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        };
+        let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+        let ctx = test_context(&principal, &peer);
+        let req_bytes = encode_request(version, &request(2));
+
+        let resp = super::handle(&broker, version, 123, &req_bytes, &ctx)
+            .await
+            .expect("handle");
+        let resp = decode_response(version, resp);
+
+        assert!(resp.error_code == codes::UNKNOWN_SERVER_ERROR);
+        assert!(
+            resp.error_message
+                .as_deref()
+                .is_some_and(|m| m.contains("dynamic reconfig unsupported"))
+        );
+        broker_handle.shutdown().await;
     }
 }

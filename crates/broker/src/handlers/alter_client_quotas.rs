@@ -78,18 +78,13 @@ pub(crate) async fn handle(
         && let Err(e) = broker.controller.submit_change(to_submit).await
     {
         tracing::warn!(error = %e, "alter-client-quotas submit failed");
-        for r in &mut entry_results {
-            if r.error_code == 0 {
-                r.error_code = COORDINATOR_NOT_AVAILABLE;
-                r.error_message = Some(format!("submit failed: {e}"));
-            }
-        }
+        apply_submit_error(&mut entry_results, e);
     }
 
     let resp = AlterClientQuotasResponse {
         throttle_time_ms: 0,
         entries: entry_results,
-        ..Default::default()
+        unknown_tagged_fields: Default::default(),
     };
     encode_response(&resp, api_version)
 }
@@ -189,6 +184,16 @@ fn err_entry(entity: &[EntityData], code: i16, msg: String) -> RespEntry {
     }
 }
 
+fn apply_submit_error(entry_results: &mut [RespEntry], error: impl std::fmt::Display) {
+    let message = format!("submit failed: {error}");
+    for r in entry_results {
+        if r.error_code == 0 {
+            r.error_code = COORDINATOR_NOT_AVAILABLE;
+            r.error_message = Some(message.clone());
+        }
+    }
+}
+
 fn encode_whole_request_error(
     req: &AlterClientQuotasRequest,
     code: i16,
@@ -203,7 +208,7 @@ fn encode_whole_request_error(
     let resp = AlterClientQuotasResponse {
         throttle_time_ms: 0,
         entries,
-        ..Default::default()
+        unknown_tagged_fields: Default::default(),
     };
     encode_response(&resp, api_version)
 }
@@ -223,7 +228,28 @@ fn encode_response<R: Encode>(
 mod tests {
     use super::*;
     use assert2::assert;
+    use crabka_protocol::Decode;
     use crabka_protocol::owned::alter_client_quotas_request::{EntityData, EntryData, OpData};
+    use crabka_security::{AuthMethod, Principal};
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    use crate::authorizer::{AuthorizationRequest, Authorizer};
+    use crate::broker::{Broker, BrokerHandle};
+    use crate::config::BrokerConfig;
+
+    #[derive(Debug)]
+    struct DenyAll;
+
+    impl Authorizer for DenyAll {
+        fn authorize(
+            &self,
+            _source: &dyn crabka_authz::AclSource,
+            _req: &AuthorizationRequest<'_>,
+        ) -> AuthorizationResult {
+            AuthorizationResult::Deny
+        }
+    }
 
     fn entry(entity: Vec<(&str, Option<&str>)>, ops: Vec<(&str, f64, bool)>) -> EntryData {
         EntryData {
@@ -246,6 +272,51 @@ mod tests {
                 .collect(),
             ..Default::default()
         }
+    }
+
+    fn request(entries: Vec<EntryData>, validate_only: bool) -> AlterClientQuotasRequest {
+        AlterClientQuotasRequest {
+            entries,
+            validate_only,
+            ..Default::default()
+        }
+    }
+
+    fn decode_response(version: i16, bytes: Bytes) -> AlterClientQuotasResponse {
+        let mut cur: &[u8] = bytes.as_ref();
+        let resp = AlterClientQuotasResponse::decode(&mut cur, version).expect("decode response");
+        assert!(cur.is_empty(), "response decoder consumed all bytes");
+        resp
+    }
+
+    fn test_context<'a>(
+        principal: &'a Principal,
+        peer: &'a SocketAddr,
+    ) -> crate::handlers::RequestContext<'a> {
+        crate::handlers::RequestContext {
+            principal,
+            peer,
+            client_id: "admin-client",
+            sendfile_capable: false,
+            connection_listener_name: "PLAINTEXT",
+        }
+    }
+
+    async fn start_broker(authorizer: Arc<dyn Authorizer>) -> (BrokerHandle, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
+        cfg.authorizer = authorizer;
+        let handle = Broker::start(cfg).await.expect("start broker");
+        (handle, dir)
+    }
+
+    fn quota_value(handle: &BrokerHandle, user: &str, quota_key: &str) -> Option<f64> {
+        let key: crabka_metadata::EntityKey = vec![("user".into(), Some(user.into()))];
+        handle
+            .controller_image_for_test()
+            .client_quotas()
+            .get(&key)
+            .and_then(|configs| configs.get(quota_key).copied())
     }
 
     #[test]
@@ -369,5 +440,144 @@ mod tests {
         };
         assert!(r.config_key == "controller_mutation_rate");
         assert!(r.config_value == Some(2.0));
+    }
+
+    #[test]
+    fn submit_error_only_stamps_successful_entries() {
+        let mut results = vec![
+            ok_entry(&[EntityData {
+                entity_type: "user".into(),
+                entity_name: Some("alice".into()),
+                ..Default::default()
+            }]),
+            err_entry(
+                &[EntityData {
+                    entity_type: "user".into(),
+                    entity_name: Some("bob".into()),
+                    ..Default::default()
+                }],
+                INVALID_REQUEST,
+                "invalid bob quota".into(),
+            ),
+        ];
+
+        apply_submit_error(&mut results, "raft unavailable");
+
+        assert!(results[0].error_code == COORDINATOR_NOT_AVAILABLE);
+        assert!(results[0].error_message.as_deref() == Some("submit failed: raft unavailable"));
+        assert!(results[1].error_code == INVALID_REQUEST);
+        assert!(results[1].error_message.as_deref() == Some("invalid bob quota"));
+    }
+
+    #[tokio::test]
+    async fn handle_denies_cluster_alter_for_each_entry() {
+        let version = 1;
+        let (broker_handle, _dir) = start_broker(Arc::new(DenyAll)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let principal = Principal {
+            name: "alice".into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        };
+        let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+        let ctx = test_context(&principal, &peer);
+        let req = request(
+            vec![entry(
+                vec![("user", Some("alice"))],
+                vec![("producer_byte_rate", 1024.0, false)],
+            )],
+            false,
+        );
+
+        let resp = handle(&broker, req, &ctx, version).await.expect("handle");
+        let resp = decode_response(version, resp);
+
+        assert!(resp.throttle_time_ms == 0);
+        assert!(resp.entries.len() == 1);
+        assert!(resp.entries[0].error_code == CLUSTER_AUTHORIZATION_FAILED);
+        assert!(resp.entries[0].error_message.as_deref() == Some("alter-client-quotas denied"));
+        assert!(resp.entries[0].entity[0].entity_type == "user");
+        assert!(resp.entries[0].entity[0].entity_name.as_deref() == Some("alice"));
+        assert!(quota_value(&broker_handle, "alice", "producer_byte_rate").is_none());
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_returns_entry_results_and_submits_valid_changes() {
+        let version = 1;
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let principal = Principal {
+            name: "admin".into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        };
+        let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+        let ctx = test_context(&principal, &peer);
+        let req = request(
+            vec![
+                entry(
+                    vec![("user", Some("alice"))],
+                    vec![("producer_byte_rate", 1024.0, false)],
+                ),
+                entry(
+                    vec![("user", Some("bob"))],
+                    vec![("unknown_quota_key", 1.0, false)],
+                ),
+            ],
+            false,
+        );
+
+        let resp = handle(&broker, req, &ctx, version).await.expect("handle");
+        let resp = decode_response(version, resp);
+
+        assert!(resp.throttle_time_ms == 0);
+        assert!(resp.entries.len() == 2);
+        assert!(resp.entries[0].error_code == 0);
+        assert!(resp.entries[0].error_message.is_none());
+        assert!(resp.entries[0].entity[0].entity_name.as_deref() == Some("alice"));
+        assert!(resp.entries[1].error_code == INVALID_CONFIG);
+        assert!(
+            resp.entries[1]
+                .error_message
+                .as_deref()
+                .is_some_and(|m| m.contains("unknown quota key"))
+        );
+        assert!(quota_value(&broker_handle, "alice", "producer_byte_rate") == Some(1024.0));
+        assert!(quota_value(&broker_handle, "bob", "unknown_quota_key").is_none());
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_validate_only_reports_success_without_submitting() {
+        let version = 1;
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let principal = Principal {
+            name: "admin".into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        };
+        let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+        let ctx = test_context(&principal, &peer);
+        let req = request(
+            vec![entry(
+                vec![("user", Some("carol"))],
+                vec![("producer_byte_rate", 2048.0, false)],
+            )],
+            true,
+        );
+
+        let resp = handle(&broker, req, &ctx, version).await.expect("handle");
+        let resp = decode_response(version, resp);
+
+        assert!(resp.throttle_time_ms == 0);
+        assert!(resp.entries.len() == 1);
+        assert!(resp.entries[0].error_code == 0);
+        assert!(resp.entries[0].error_message.is_none());
+        assert!(quota_value(&broker_handle, "carol", "producer_byte_rate").is_none());
+        broker_handle.shutdown().await;
     }
 }
