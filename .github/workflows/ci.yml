@@ -241,6 +241,8 @@ jobs:
       - name: html_root_url in sync
         if: matrix.os == 'ubuntu-latest'
         run: ./tools/html-root-url.sh
+      - uses: ./.github/actions/free-disk-space
+        if: matrix.os == 'ubuntu-latest'
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.toolchain }}
