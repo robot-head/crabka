@@ -51,7 +51,7 @@ pub(crate) async fn handle(
             resource_name: resource.resource_name.clone(),
             error_code: codes::NONE,
             error_message: None,
-            ..Default::default()
+            unknown_tagged_fields: Default::default(),
         };
 
         // ── ACL preamble ────────────────────────────────────────
@@ -168,9 +168,102 @@ pub(crate) async fn handle(
     let resp = AlterConfigsResponse {
         responses,
         throttle_time_ms: 0,
-        ..Default::default()
+        unknown_tagged_fields: Default::default(),
     };
     let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
     resp.encode(&mut buf, version)?;
     Ok(buf.freeze())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert2::assert;
+    use crabka_protocol::owned::alter_configs_request::{
+        AlterConfigsRequest, AlterConfigsResource, AlterableConfig,
+    };
+    use crabka_security::{AuthMethod, Principal};
+    use std::net::SocketAddr;
+
+    use crate::config::BrokerConfig;
+
+    fn encode_request(version: i16, req: &AlterConfigsRequest) -> Bytes {
+        let mut buf = BytesMut::with_capacity(req.encoded_len(version));
+        req.encode(&mut buf, version).expect("encode request");
+        buf.freeze()
+    }
+
+    fn decode_response(version: i16, bytes: Bytes) -> AlterConfigsResponse {
+        let mut cur: &[u8] = bytes.as_ref();
+        let resp = AlterConfigsResponse::decode(&mut cur, version).expect("decode response");
+        assert!(cur.is_empty(), "response decoder consumed all bytes");
+        resp
+    }
+
+    fn test_context<'a>(
+        principal: &'a Principal,
+        peer: &'a SocketAddr,
+    ) -> crate::handlers::RequestContext<'a> {
+        crate::handlers::RequestContext {
+            principal,
+            peer,
+            client_id: "admin-client",
+            sendfile_capable: false,
+            connection_listener_name: "PLAINTEXT",
+        }
+    }
+
+    async fn start_broker() -> (crate::broker::BrokerHandle, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
+        let handle = Broker::start(cfg).await.expect("start broker");
+        (handle, dir)
+    }
+
+    #[tokio::test]
+    async fn handle_preserves_resource_identity_for_unsupported_type() {
+        let version = 2;
+        let (broker_handle, _dir) = start_broker().await;
+        let broker = broker_handle.broker_arc_for_test();
+        let principal = Principal {
+            name: "admin".into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        };
+        let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+        let ctx = test_context(&principal, &peer);
+        let req = AlterConfigsRequest {
+            resources: vec![AlterConfigsResource {
+                resource_type: 77,
+                resource_name: "mystery".into(),
+                configs: vec![AlterableConfig {
+                    name: "retention.ms".into(),
+                    value: Some("60000".into()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            validate_only: false,
+            ..Default::default()
+        };
+        let req_bytes = encode_request(version, &req);
+
+        let resp = handle(&broker, version, 123, &req_bytes, &ctx)
+            .await
+            .expect("handle");
+        let resp = decode_response(version, resp);
+
+        assert!(resp.throttle_time_ms == 0);
+        assert!(resp.responses.len() == 1);
+        assert!(resp.responses[0].error_code == codes::INVALID_RESOURCE_TYPE);
+        assert!(
+            resp.responses[0]
+                .error_message
+                .as_deref()
+                .is_some_and(|m| { m.contains("resource_type=77") && m.contains("not supported") })
+        );
+        assert!(resp.responses[0].resource_type == 77);
+        assert!(resp.responses[0].resource_name == "mystery");
+        broker_handle.shutdown().await;
+    }
 }

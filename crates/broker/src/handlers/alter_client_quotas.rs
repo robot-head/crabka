@@ -161,10 +161,10 @@ fn ok_entry(entity: &[EntityData]) -> RespEntry {
             .map(|e| RespEntity {
                 entity_type: e.entity_type.clone(),
                 entity_name: e.entity_name.clone(),
-                ..Default::default()
+                unknown_tagged_fields: Default::default(),
             })
             .collect(),
-        ..Default::default()
+        unknown_tagged_fields: Default::default(),
     }
 }
 
@@ -177,10 +177,10 @@ fn err_entry(entity: &[EntityData], code: i16, msg: String) -> RespEntry {
             .map(|e| RespEntity {
                 entity_type: e.entity_type.clone(),
                 entity_name: e.entity_name.clone(),
-                ..Default::default()
+                unknown_tagged_fields: Default::default(),
             })
             .collect(),
-        ..Default::default()
+        unknown_tagged_fields: Default::default(),
     }
 }
 
@@ -359,6 +359,30 @@ mod tests {
     }
 
     #[test]
+    fn inclusive_boundary_values_are_accepted() {
+        let e = entry(
+            vec![("user", Some("alice"))],
+            vec![
+                ("producer_byte_rate", 0.0, false),
+                ("request_percentage", 100.0, false),
+            ],
+        );
+
+        let records = process_one_entry(&e).expect("boundary values are valid");
+        assert!(records.len() == 2);
+        let MetadataRecord::V1ClientQuota(producer) = &records[0] else {
+            panic!("wrong variant")
+        };
+        let MetadataRecord::V1ClientQuota(request_percentage) = &records[1] else {
+            panic!("wrong variant")
+        };
+        assert!(producer.config_key == "producer_byte_rate");
+        assert!(producer.config_value == Some(0.0));
+        assert!(request_percentage.config_key == "request_percentage");
+        assert!(request_percentage.config_value == Some(100.0));
+    }
+
+    #[test]
     fn unsupported_entity_type_rejected() {
         let e = entry(
             vec![("group", Some("g1"))],
@@ -443,6 +467,29 @@ mod tests {
     }
 
     #[test]
+    fn entry_helpers_preserve_wire_fields() {
+        let entity = [EntityData {
+            entity_type: "user".into(),
+            entity_name: Some("alice".into()),
+            ..Default::default()
+        }];
+
+        let ok = ok_entry(&entity);
+        assert!(ok.error_code == 0);
+        assert!(ok.error_message.is_none());
+        assert!(ok.entity.len() == 1);
+        assert!(ok.entity[0].entity_type == "user");
+        assert!(ok.entity[0].entity_name.as_deref() == Some("alice"));
+
+        let err = err_entry(&entity, INVALID_CONFIG, "bad quota".into());
+        assert!(err.error_code == INVALID_CONFIG);
+        assert!(err.error_message.as_deref() == Some("bad quota"));
+        assert!(err.entity.len() == 1);
+        assert!(err.entity[0].entity_type == "user");
+        assert!(err.entity[0].entity_name.as_deref() == Some("alice"));
+    }
+
+    #[test]
     fn submit_error_only_stamps_successful_entries() {
         let mut results = vec![
             ok_entry(&[EntityData {
@@ -467,6 +514,62 @@ mod tests {
         assert!(results[0].error_message.as_deref() == Some("submit failed: raft unavailable"));
         assert!(results[1].error_code == INVALID_REQUEST);
         assert!(results[1].error_message.as_deref() == Some("invalid bob quota"));
+    }
+
+    #[test]
+    fn whole_request_error_encodes_all_entries() {
+        let version = 1;
+        let req = request(
+            vec![
+                entry(vec![("user", Some("alice"))], vec![]),
+                entry(vec![("client-id", Some("app"))], vec![]),
+            ],
+            false,
+        );
+
+        let bytes =
+            encode_whole_request_error(&req, CLUSTER_AUTHORIZATION_FAILED, "denied", version)
+                .expect("encode");
+        let resp = decode_response(version, bytes);
+
+        assert!(resp.throttle_time_ms == 0);
+        assert!(resp.entries.len() == 2);
+        assert!(resp.entries[0].error_code == CLUSTER_AUTHORIZATION_FAILED);
+        assert!(resp.entries[0].error_message.as_deref() == Some("denied"));
+        assert!(resp.entries[0].entity[0].entity_type == "user");
+        assert!(resp.entries[0].entity[0].entity_name.as_deref() == Some("alice"));
+        assert!(resp.entries[1].error_code == CLUSTER_AUTHORIZATION_FAILED);
+        assert!(resp.entries[1].error_message.as_deref() == Some("denied"));
+        assert!(resp.entries[1].entity[0].entity_type == "client-id");
+        assert!(resp.entries[1].entity[0].entity_name.as_deref() == Some("app"));
+    }
+
+    #[test]
+    fn encode_response_writes_decodable_body() {
+        let version = 1;
+        let resp = AlterClientQuotasResponse {
+            throttle_time_ms: 123,
+            entries: vec![err_entry(
+                &[EntityData {
+                    entity_type: "user".into(),
+                    entity_name: Some("alice".into()),
+                    ..Default::default()
+                }],
+                INVALID_REQUEST,
+                "bad request".into(),
+            )],
+            unknown_tagged_fields: Default::default(),
+        };
+
+        let bytes = encode_response(&resp, version).expect("encode");
+        let decoded = decode_response(version, bytes);
+
+        assert!(decoded.throttle_time_ms == 123);
+        assert!(decoded.entries.len() == 1);
+        assert!(decoded.entries[0].error_code == INVALID_REQUEST);
+        assert!(decoded.entries[0].error_message.as_deref() == Some("bad request"));
+        assert!(decoded.entries[0].entity[0].entity_type == "user");
+        assert!(decoded.entries[0].entity[0].entity_name.as_deref() == Some("alice"));
     }
 
     #[tokio::test]
