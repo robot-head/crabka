@@ -268,7 +268,7 @@ services:
     <<: [*crabka-image, *compactor-res]
     mem_limit: ${CRABKA_TRACES_BLOCK_BUILDER_MEM:-4g}
     memswap_limit: ${CRABKA_TRACES_BLOCK_BUILDER_MEM:-4g}
-    command: ["crabka-traces", "--target=block-builder", "--bootstrap=broker:9092", "--object-store-url=s3://crabka-traces", "--block-builder-flush-max-records=${CRABKA_TRACES_BLOCK_BUILDER_FLUSH_MAX_RECORDS:-5000}"]
+    command: ["crabka-traces", "--target=block-builder", "--bootstrap=broker:9092", "--object-store-url=s3://crabka-traces", "--block-builder-flush-max-records=${CRABKA_TRACES_BLOCK_BUILDER_FLUSH_MAX_RECORDS:-50000}", "--block-builder-flush-max-age-ms=${CRABKA_TRACES_BLOCK_BUILDER_FLUSH_MAX_AGE_MS:-60000}"]
     environment: { <<: [*s3-env, *otlp-env] }
     depends_on:
       rustfs-setup: { condition: service_completed_successfully }
@@ -331,7 +331,7 @@ services:
 
   profiles-block-builder:
     <<: [*crabka-image, *compactor-res]
-    command: ["crabka-profiles", "--target=block-builder", "--bootstrap=broker:9092", "--object-store-url=s3://crabka-profiles"]
+    command: ["crabka-profiles", "--target=block-builder", "--bootstrap=broker:9092", "--object-store-url=s3://crabka-profiles", "--block-builder-flush-records=${CRABKA_PROFILES_BLOCK_BUILDER_FLUSH_RECORDS:-4096}", "--block-builder-flush-max-age-ms=${CRABKA_PROFILES_BLOCK_BUILDER_FLUSH_MAX_AGE_MS:-60000}"]
     environment: { <<: [*s3-env, *otlp-env] }
     depends_on:
       rustfs-setup: { condition: service_completed_successfully }

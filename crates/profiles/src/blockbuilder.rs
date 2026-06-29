@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::io::Cursor;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use arrow::record_batch::RecordBatch;
 use crabka_blockstore::{
@@ -23,6 +23,8 @@ pub const STACKTRACE_PARTITION: u64 = 0;
 const NANOS_PER_MILLI: i64 = 1_000_000;
 const WAL_FETCH_MAX_BYTES: i32 = 2 * 1024 * 1024;
 const WAL_FETCH_PARTITION_MAX_BYTES: i32 = 256 * 1024;
+pub const DEFAULT_FLUSH_RECORDS: usize = 1024;
+pub const DEFAULT_FLUSH_MAX_AGE: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BuiltSample {
@@ -44,6 +46,7 @@ pub struct BlockBuilderConfig {
     pub store: Arc<dyn ObjectStore>,
     pub index_key: String,
     pub flush_records: usize,
+    pub flush_max_age: Duration,
     pub poll_timeout: Duration,
 }
 
@@ -55,7 +58,8 @@ impl BlockBuilderConfig {
             group_id: "crabka-profiles-block-builder".to_string(),
             store,
             index_key: "index/profiles.json".to_string(),
-            flush_records: 1024,
+            flush_records: DEFAULT_FLUSH_RECORDS,
+            flush_max_age: DEFAULT_FLUSH_MAX_AGE,
             poll_timeout: Duration::from_millis(500),
         }
     }
@@ -199,6 +203,49 @@ pub async fn build_block(
     }])
 }
 
+#[derive(Debug)]
+struct ConsumerRecordAccumulator {
+    records: Vec<ConsumerRecord>,
+    oldest_record_at: Option<Instant>,
+    flush_records: usize,
+    flush_max_age: Duration,
+}
+
+impl ConsumerRecordAccumulator {
+    fn new(flush_records: usize, flush_max_age: Duration) -> Self {
+        Self {
+            records: Vec::new(),
+            oldest_record_at: None,
+            flush_records: flush_records.max(1),
+            flush_max_age,
+        }
+    }
+
+    fn push(&mut self, mut records: Vec<ConsumerRecord>, now: Instant) {
+        if records.is_empty() {
+            return;
+        }
+        self.oldest_record_at.get_or_insert(now);
+        self.records.append(&mut records);
+    }
+
+    fn should_flush(&self, now: Instant) -> bool {
+        if self.records.is_empty() {
+            return false;
+        }
+        if self.records.len() >= self.flush_records {
+            return true;
+        }
+        self.oldest_record_at
+            .is_some_and(|oldest| now.saturating_duration_since(oldest) >= self.flush_max_age)
+    }
+
+    fn take(&mut self) -> Vec<ConsumerRecord> {
+        self.oldest_record_at = None;
+        std::mem::take(&mut self.records)
+    }
+}
+
 pub async fn run_with_config(config: BlockBuilderConfig) -> Result<(), ProfilesError> {
     let mut index = match ProfileIndex::load(&config.store, &config.index_key).await {
         Ok(index) => index,
@@ -216,14 +263,19 @@ pub async fn run_with_config(config: BlockBuilderConfig) -> Result<(), ProfilesE
         .await
         .map_err(|err| ProfilesError::Block(format!("consumer build failed: {err}")))?;
 
+    let mut accumulator =
+        ConsumerRecordAccumulator::new(config.flush_records, config.flush_max_age);
     loop {
         let records = consumer
             .poll(config.poll_timeout)
             .await
             .map_err(|err| ProfilesError::Block(format!("consumer poll failed: {err}")))?;
-        if records.is_empty() {
+        let now = Instant::now();
+        accumulator.push(records, now);
+        if !accumulator.should_flush(now) {
             continue;
         }
+        let records = accumulator.take();
         flush_consumer_records_with_index(
             &config.store,
             &mut index,
@@ -576,6 +628,33 @@ mod tests {
         assert!(index.profile_types("t") == vec!["process_cpu:cpu:nanoseconds:cpu:nanoseconds"]);
         assert!(BlockIndex::block_count(&index, "t") == 1);
         assert!(BlockIndex::block_count(&index, "u") == 1);
+    }
+
+    #[test]
+    fn accumulator_flushes_on_record_threshold() {
+        let mut accumulator = ConsumerRecordAccumulator::new(2, Duration::from_secs(60));
+        let start = Instant::now();
+
+        accumulator.push(vec![consumer_record(0, 10, rec("cpu", 5))], start);
+        assert!(!accumulator.should_flush(start));
+
+        accumulator.push(
+            vec![consumer_record(0, 11, rec("cpu", 7))],
+            start + Duration::from_millis(1),
+        );
+        assert!(accumulator.should_flush(start + Duration::from_millis(1)));
+        assert!(accumulator.take().len() == 2);
+        assert!(!accumulator.should_flush(start + Duration::from_secs(120)));
+    }
+
+    #[test]
+    fn accumulator_flushes_on_max_age() {
+        let mut accumulator = ConsumerRecordAccumulator::new(100, Duration::from_secs(10));
+        let start = Instant::now();
+
+        accumulator.push(vec![consumer_record(0, 10, rec("cpu", 5))], start);
+        assert!(!accumulator.should_flush(start + Duration::from_secs(9)));
+        assert!(accumulator.should_flush(start + Duration::from_secs(10)));
     }
 
     fn consumer_record(partition: i32, offset: i64, record: ProfileRecord) -> ConsumerRecord {

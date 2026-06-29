@@ -534,13 +534,17 @@ fn rustfs_dashboard_surfaces_object_store_health_and_io() {
         "RustFS dashboard should have a clear object-store title"
     );
     for title in [
-        "RustFS memory working set",
-        "RustFS memory limit ratio",
-        "RustFS CPU usage",
+        "Container memory working set",
+        "Memory limit ratio",
+        "CPU usage",
         "RustFS network I/O",
-        "RustFS filesystem I/O",
+        "Filesystem I/O",
         "RustFS uptime",
-        "RustFS restarts (1h)",
+        "Restarts (1h)",
+        "Storage growth and S3 operations",
+        "S3 operation rate by bucket",
+        "Bucket objects and versions",
+        "Background storage work",
         "Recent RustFS warnings and errors",
         "Object-store client retry logs",
     ] {
@@ -558,10 +562,18 @@ fn rustfs_dashboard_surfaces_object_store_health_and_io() {
         "container_fs_reads_bytes_total",
         "container_fs_writes_bytes_total",
         "container_start_time_seconds",
+        "rustfs_s3_operations_total",
+        "rustfs_cluster_usage_buckets_objects_count",
+        "rustfs_cluster_usage_buckets_versions_count",
+        "rustfs_cluster_usage_buckets_object_version_count_distribution",
+        "rustfs_page_cache_reclaim_duration_seconds_count",
+        "rustfs_capacity_update_duration_seconds_count",
+        "rustfs_capacity_scan_disk_duration_seconds_count",
+        "rustfs_lock_acquire_total",
     ] {
         assert!(
             dashboard.contains(metric),
-            "RustFS dashboard should query cAdvisor metric {metric}"
+            "RustFS dashboard should query metric {metric}"
         );
     }
     assert!(
