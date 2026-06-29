@@ -1541,7 +1541,7 @@ fn split_sample_tokens<'a>(src: &'a str, line: Line<'_>) -> Result<Vec<&'a str>>
     let mut index = 0;
     let bytes = src.as_bytes();
 
-    while index < src.len() {
+    loop {
         while index < src.len() && bytes[index].is_ascii_whitespace() {
             index += 1;
         }
@@ -2009,6 +2009,14 @@ clear
         assert!((actual - expected).abs() < f64::EPSILON);
     }
 
+    fn test_line(raw: &str) -> Line<'_> {
+        Line {
+            number: 1,
+            raw,
+            trimmed: raw.trim(),
+        }
+    }
+
     #[test]
     fn parses_descending_expanding_point_notation() {
         let file = parse_test_file(
@@ -2026,6 +2034,70 @@ load 1m
         assert_sample_value(&series[0].values[0], 99.0);
         assert_sample_value(&series[0].values[1], 98.0);
         assert_sample_value(&series[0].values[2], 97.0);
+    }
+
+    #[test]
+    fn split_metric_and_tail_ignores_quoted_label_syntax() {
+        let line = test_line(
+            r#"metric{label="hello world",brace="{",escaped="quoted \" space",rbrace="}" next="value"} 1 2"#,
+        );
+
+        let (metric, tail) = split_metric_and_tail(line.trimmed, line).unwrap();
+
+        assert!(
+            metric
+                == r#"metric{label="hello world",brace="{",escaped="quoted \" space",rbrace="}" next="value"}"#
+        );
+        assert!(tail == "1 2");
+
+        let line = test_line(r"metric\ 1 2");
+        let (metric, tail) = split_metric_and_tail(line.trimmed, line).unwrap();
+
+        assert!(metric == r"metric\");
+        assert!(tail == "1 2");
+    }
+
+    #[test]
+    fn parses_signed_expanding_point_notation() {
+        let line = test_line("+1+2x2");
+        let positive = parse_sample_token(line.trimmed, line).unwrap();
+        assert!(positive.len() == 3);
+        assert_sample_value(&positive[0], 1.0);
+        assert_sample_value(&positive[1], 3.0);
+        assert_sample_value(&positive[2], 5.0);
+
+        let line = test_line("-1+2x2");
+        let negative = parse_sample_token(line.trimmed, line).unwrap();
+        assert!(negative.len() == 3);
+        assert_sample_value(&negative[0], -1.0);
+        assert_sample_value(&negative[1], 1.0);
+        assert_sample_value(&negative[2], 3.0);
+    }
+
+    #[test]
+    fn parses_infinite_native_histogram_bucket_bounds() {
+        let line = test_line("+Inf");
+
+        let positive_with_sign = parse_bucket_bound("+Inf", line).unwrap();
+        assert!(positive_with_sign.is_infinite());
+        assert!(positive_with_sign.is_sign_positive());
+
+        let positive_without_sign = parse_bucket_bound("Inf", line).unwrap();
+        assert!(positive_without_sign.is_infinite());
+        assert!(positive_without_sign.is_sign_positive());
+
+        let negative = parse_bucket_bound("-Inf", line).unwrap();
+        assert!(negative.is_infinite());
+        assert!(negative.is_sign_negative());
+    }
+
+    #[test]
+    fn split_sample_tokens_handles_trailing_whitespace() {
+        let line = test_line("1 2   ");
+
+        let tokens = split_sample_tokens(line.raw, line).unwrap();
+
+        assert!(tokens == vec!["1", "2"]);
     }
 
     #[tokio::test]

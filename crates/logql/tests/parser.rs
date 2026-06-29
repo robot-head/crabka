@@ -195,6 +195,34 @@ fn query_evaluator_applies_matchers_and_pipeline() {
 }
 
 #[test]
+fn pipeline_stage_public_bool_helpers_reflect_stage_behavior() {
+    let filter =
+        PipelineStage::LineFilter(LineFilter::new(LineFilterOp::Contains, "error").unwrap());
+    check!(filter.matches("level=error status=500"));
+    check!(!filter.matches("level=info status=200"));
+
+    let mut matching_line = "level=error status=500".to_string();
+    let mut matching_fields = BTreeMap::new();
+    check!(filter.apply(&mut matching_line, &mut matching_fields));
+
+    let mut filtered_line = "level=info status=200".to_string();
+    let mut filtered_fields = BTreeMap::new();
+    check!(!filter.apply(&mut filtered_line, &mut filtered_fields));
+
+    let parser = PipelineStage::Parser(ParserStage::Logfmt);
+    let mut parsed_line = "status=500".to_string();
+    let mut parsed_fields = BTreeMap::new();
+    check!(parser.apply(&mut parsed_line, &mut parsed_fields));
+    check!(parsed_fields.get("status") == Some(&"500".to_string()));
+
+    check!(PipelineStage::Decolorize.mutates_line());
+    check!(PipelineStage::Parser(ParserStage::Unpack).mutates_line());
+    check!(PipelineStage::LineFormat(LineFormat::new("{{.msg}}").unwrap()).mutates_line());
+    check!(!parser.mutates_line());
+    check!(!filter.mutates_line());
+}
+
+#[test]
 fn query_evaluator_treats_empty_compatible_regex_matcher_as_matching_absent_label() {
     let query = parse_query(r#"{app="api", env=~".*"}"#).unwrap();
 
@@ -212,6 +240,26 @@ fn query_evaluator_treats_empty_compatible_regex_matcher_as_matching_absent_labe
     check!(!query.matches(
         &BTreeMap::from([("app".to_string(), "worker".to_string())]),
         "worker line"
+    ));
+}
+
+#[test]
+fn query_evaluator_applies_negative_regex_label_matchers_to_present_labels() {
+    let query = parse_query(r#"{app="api", zone!~"test|stage"}"#).unwrap();
+
+    check!(query.matches(
+        &BTreeMap::from([
+            ("app".to_string(), "api".to_string()),
+            ("zone".to_string(), "prod".to_string()),
+        ]),
+        "api line"
+    ));
+    check!(!query.matches(
+        &BTreeMap::from([
+            ("app".to_string(), "api".to_string()),
+            ("zone".to_string(), "stage".to_string()),
+        ]),
+        "api line"
     ));
 }
 
@@ -480,6 +528,18 @@ fn query_evaluator_line_format_exposes_line_and_timestamp_aliases() {
 }
 
 #[test]
+fn query_evaluator_matches_with_fields_at_uses_timestamped_pipeline_result() {
+    let query = parse_query(
+        r#"{app="api"} | line_format `{{ __timestamp__ | unixEpochMillis }}` |= "1234""#,
+    )
+    .unwrap();
+    let labels = BTreeMap::from([("app".to_string(), "api".to_string())]);
+
+    check!(query.matches_with_fields_at(&labels, "raw", &BTreeMap::new(), 1_234_000_000));
+    check!(!query.matches_with_fields_at(&labels, "raw", &BTreeMap::new(), 9_999_000_000));
+}
+
+#[test]
 fn query_evaluator_line_format_formats_current_timestamp_with_date_helper() {
     let query = parse_query(
         r#"{app="api"} | line_format `{{ __timestamp__ | date "2006-01-02T15:04:05.00Z-07:00" }} {{ __timestamp__ | date "2006-01-02" }}`"#,
@@ -648,6 +708,18 @@ fn query_evaluator_line_format_uses_range_else_for_empty_from_json_arrays() {
 }
 
 #[test]
+fn query_evaluator_line_format_finds_outer_else_after_nested_control_blocks() {
+    let format = LineFormat::new(
+        r#"{{ if .outer }}{{ if .inner }}I{{ else }}i{{ end }}{{ range fromJson "[1]" }}R{{ else }}r{{ end }}{{ with .inner }}W{{ else }}w{{ end }}{{ else }}O{{ end }}"#,
+    )
+    .unwrap();
+    let fields = BTreeMap::from([("outer".to_string(), "yes".to_string())]);
+
+    check!(format.render("raw", &fields) == "iRw");
+    check!(format.render("raw", &BTreeMap::new()) == "O");
+}
+
+#[test]
 fn query_evaluator_line_format_applies_go_template_index_and_slice_helpers() {
     let query = parse_query(
         r#"{app="api"} | json payload="payload" | line_format `{{ index (fromJson .payload) "servers" 1 "name" }}|{{ index (fromJson .payload) "status" }}|{{ slice "abcdef" 1 4 }}|{{ slice (index (fromJson .payload) "servers") 0 1 }}`"#,
@@ -700,6 +772,13 @@ fn query_evaluator_line_format_applies_template_string_pipelines() {
 
     check!(query.matches(&labels, r#"status=500 path=/checkout msg=API_ERROR"#));
     check!(!query.matches(&labels, r#"status=500 path=/health msg=API_ERROR"#));
+}
+
+#[test]
+fn query_evaluator_line_format_does_not_split_pipeline_inside_backtick_strings() {
+    let format = LineFormat::new(r#"{{ .missing | default `fallback|value` }}"#).unwrap();
+
+    check!(format.render("raw", &BTreeMap::new()) == "fallback|value");
 }
 
 #[test]
@@ -781,6 +860,23 @@ fn query_evaluator_line_format_applies_go_template_print_helpers() {
         .unwrap();
 
     check!(result.line == "status=500 method=GET|status 500\n|a%3D1+b%3Dtwo%26x%3D%2Fapi");
+}
+
+#[test]
+fn query_evaluator_line_format_tokenizes_commands_with_spaced_arguments() {
+    let format = LineFormat::new(r#"{{ printf "%s:%s"   "GET"   "200" }}"#).unwrap();
+
+    check!(format.render("raw", &BTreeMap::new()) == "GET:200");
+}
+
+#[test]
+fn query_evaluator_line_format_prints_spaces_between_adjacent_non_strings() {
+    let format = LineFormat::new(
+        r#"{{ print 1 2 }}|{{ print "a" 1 }}|{{ print (fromJson "1") (fromJson "2") }}|{{ println 1 2 }}"#,
+    )
+    .unwrap();
+
+    check!(format.render("raw", &BTreeMap::new()) == "1 2|a1|1 2|1 2\n");
 }
 
 #[test]
@@ -932,6 +1028,19 @@ fn query_evaluator_line_format_applies_json_template_truthiness() {
 }
 
 #[test]
+fn query_evaluator_line_format_applies_integer_and_json_scalar_truthiness() {
+    let format = LineFormat::new(
+        r#"{{ if 1 }}int-one{{ else }}int-zero{{ end }}|{{ if 0 }}bad{{ else }}int-zero{{ end }}|{{ if fromJson "1" }}json-one{{ else }}bad{{ end }}|{{ if fromJson "0" }}bad{{ else }}json-zero{{ end }}|{{ if fromJson "9223372036854775808" }}json-big{{ else }}bad{{ end }}|{{ if fromJson "0.25" }}json-fraction{{ else }}bad{{ end }}|{{ if fromJson "0.0" }}bad{{ else }}json-zero-fraction{{ end }}|{{ if fromJson "\"\"" }}bad{{ else }}json-empty-string{{ end }}|{{ if fromJson "\"ok\"" }}json-string{{ else }}bad{{ end }}|{{ if fromJson "[0]" }}json-array{{ else }}bad{{ end }}"#,
+    )
+    .unwrap();
+
+    check!(
+        format.render("raw", &BTreeMap::new())
+            == "int-one|int-zero|json-one|json-zero|json-big|json-fraction|json-zero-fraction|json-empty-string|json-string|json-array"
+    );
+}
+
+#[test]
 fn query_evaluator_line_format_applies_with_template_blocks() {
     let query = parse_query(
         r#"{app="api"} | logfmt | line_format `{{ with .method }}method={{ . }}{{ else }}missing{{ end }}`"#,
@@ -1030,6 +1139,13 @@ fn query_evaluator_line_format_reassigns_template_variables() {
 }
 
 #[test]
+fn query_evaluator_line_format_preserves_bare_values_ending_with_parenthesis() {
+    let format = LineFormat::new("{{ status) }}").unwrap();
+
+    check!(format.render("raw", &BTreeMap::new()) == "status)");
+}
+
+#[test]
 fn query_evaluator_line_format_applies_template_trim_markers() {
     let query =
         parse_query(r#"{app="api"} | logfmt | line_format `left {{- .method -}} right`"#).unwrap();
@@ -1040,6 +1156,31 @@ fn query_evaluator_line_format_applies_template_trim_markers() {
         .unwrap();
 
     check!(output.line == "leftGETright");
+}
+
+#[test]
+fn query_evaluator_line_format_does_not_trim_right_without_dash_marker() {
+    let format = LineFormat::new("left {{ .method  }} right").unwrap();
+    let fields = BTreeMap::from([("method".to_string(), "GET".to_string())]);
+
+    check!(format.render("raw", &fields) == "left GET right");
+}
+
+#[test]
+fn query_evaluator_line_format_skips_trailing_whitespace_after_right_trim_marker() {
+    let format = LineFormat::new("{{ .method -}}   ").unwrap();
+    let fields = BTreeMap::from([("method".to_string(), "GET".to_string())]);
+
+    check!(format.render("raw", &fields) == "GET");
+}
+
+#[test]
+fn query_evaluator_line_format_trims_control_body_before_left_trimmed_else() {
+    let format = LineFormat::new("{{ if .method }}hit \n\t {{- else }}miss{{ end }}").unwrap();
+    let fields = BTreeMap::from([("method".to_string(), "GET".to_string())]);
+
+    check!(format.render("raw", &fields) == "hit");
+    check!(format.render("raw", &BTreeMap::new()) == "miss");
 }
 
 #[test]
@@ -1055,6 +1196,44 @@ fn query_evaluator_line_format_ignores_template_comments() {
         .unwrap();
 
     check!(output.line == "beforeafter GET");
+}
+
+#[test]
+fn rejects_unclosed_or_unopened_template_comments() {
+    check!(LineFormat::new("before{{/* hidden }}after").is_err());
+    check!(LineFormat::new("before{{ hidden */}}after").is_err());
+}
+
+#[test]
+fn rejects_top_level_template_control_actions() {
+    for template in [
+        "{{ else }}",
+        "{{ else if .method }}",
+        "{{ else with .method }}",
+        "{{ end }}",
+    ] {
+        check!(
+            LineFormat::new(template).is_err(),
+            "template should be rejected: {template}"
+        );
+    }
+}
+
+#[test]
+fn rejects_invalid_template_control_assignment_variables() {
+    for template in [
+        "{{ if $bad name := .method }}x{{ end }}",
+        "{{ if $bad|name := .method }}x{{ end }}",
+        "{{ with $bad.name := .method }}x{{ end }}",
+        "{{ range $ := fromJson \"[]\" }}x{{ end }}",
+        "{{ range $bad.name := fromJson \"[]\" }}x{{ end }}",
+        "{{ $bad.name := .method }}",
+    ] {
+        check!(
+            LineFormat::new(template).is_err(),
+            "template should be rejected: {template}"
+        );
+    }
 }
 
 #[test]
@@ -1291,6 +1470,43 @@ fn query_evaluator_logfmt_keep_empty_keeps_standalone_keys() {
 }
 
 #[test]
+fn query_evaluator_logfmt_skips_leading_whitespace() {
+    let query = parse_query(r#"{app="api"} | logfmt | status = "204""#).unwrap();
+    let labels = BTreeMap::from([("app".to_string(), "api".to_string())]);
+
+    let evaluation = query
+        .evaluate_with_fields(&labels, " \tstatus=204", &BTreeMap::new())
+        .unwrap();
+
+    check!(evaluation.fields.get("status") == Some(&"204".to_string()));
+}
+
+#[test]
+fn query_evaluator_logfmt_non_strict_skips_malformed_tokens() {
+    let query = parse_query(r#"{app="api"} | logfmt | status = "204" | __error__ = """#).unwrap();
+    let labels = BTreeMap::from([("app".to_string(), "api".to_string())]);
+
+    let evaluation = query
+        .evaluate_with_fields(&labels, r#"=broken status=204"#, &BTreeMap::new())
+        .unwrap();
+
+    check!(evaluation.fields.get("status") == Some(&"204".to_string()));
+    check!(!evaluation.fields.contains_key("__error__"));
+}
+
+#[test]
+fn query_evaluator_logfmt_decodes_quoted_value_escapes() {
+    let query = parse_query(r#"{app="api"} | logfmt | msg = "hello \"api\"""#).unwrap();
+    let labels = BTreeMap::from([("app".to_string(), "api".to_string())]);
+
+    let evaluation = query
+        .evaluate_with_fields(&labels, r#"msg="hello \"api\"""#, &BTreeMap::new())
+        .unwrap();
+
+    check!(evaluation.fields.get("msg") == Some(&r#"hello "api""#.to_string()));
+}
+
+#[test]
 fn query_evaluator_field_filter_matches_missing_string_label_as_empty() {
     let query = parse_query(r#"{app="api"} | logfmt | empty = """#).unwrap();
     let labels = BTreeMap::from([("app".to_string(), "api".to_string())]);
@@ -1361,6 +1577,26 @@ fn query_evaluator_logfmt_sanitizes_ansi_prefixed_field_names() {
 }
 
 #[test]
+fn query_evaluator_logfmt_sanitizes_field_names_without_losing_valid_characters() {
+    let query = parse_query(r#"{app="api"} | logfmt"#).unwrap();
+    let labels = BTreeMap::from([("app".to_string(), "api".to_string())]);
+
+    let evaluation = query
+        .evaluate_with_fields(
+            &labels,
+            "trace.id=abc span:id=def already_ok=ghi 9lives=cat a--b=two",
+            &BTreeMap::new(),
+        )
+        .unwrap();
+
+    check!(evaluation.fields.get("trace_id") == Some(&"abc".to_string()));
+    check!(evaluation.fields.get("span:id") == Some(&"def".to_string()));
+    check!(evaluation.fields.get("already_ok") == Some(&"ghi".to_string()));
+    check!(evaluation.fields.get("_9lives") == Some(&"cat".to_string()));
+    check!(evaluation.fields.get("a_b") == Some(&"two".to_string()));
+}
+
+#[test]
 fn query_evaluator_logfmt_strict_reports_loki_syntax_error_details() {
     let query =
         parse_query(r#"{app="api"} | logfmt --strict | __error__ = "LogfmtParserErr""#).unwrap();
@@ -1375,6 +1611,19 @@ fn query_evaluator_logfmt_strict_reports_loki_syntax_error_details() {
         evaluation.fields.get("__error_details__")
             == Some(&"logfmt syntax error at pos 29 : unterminated quoted value".to_string())
     );
+}
+
+#[test]
+fn query_evaluator_logfmt_non_strict_keep_empty_skips_malformed_quoted_values() {
+    let query = parse_query(r#"{app="api"} | logfmt --keep-empty | __error__ = """#).unwrap();
+    let labels = BTreeMap::from([("app".to_string(), "api".to_string())]);
+
+    let evaluation = query
+        .evaluate_with_fields(&labels, r#"status=500 msg="unterminated"#, &BTreeMap::new())
+        .unwrap();
+
+    check!(evaluation.fields.get("status") == Some(&"500".to_string()));
+    check!(!evaluation.fields.contains_key("__error__"));
 }
 
 #[test]
@@ -1454,13 +1703,40 @@ fn query_evaluator_accepts_signed_decimal_unwrap_samples() {
     let query = parse_query(r#"{app="api"} | logfmt | unwrap cost | __error__ = """#).unwrap();
     let labels = BTreeMap::from([("app".to_string(), "api".to_string())]);
 
+    let positive = query
+        .evaluate_with_fields(&labels, "cost=+1.5", &BTreeMap::new())
+        .unwrap();
     let evaluation = query
         .evaluate_with_fields(&labels, "cost=-1.5", &BTreeMap::new())
         .unwrap();
 
+    check!(positive.fields.get("__crabka_unwrap_sample_value__") == Some(&"1.5".to_string()));
+    check!(!positive.fields.contains_key("__error__"));
+    check!(!positive.fields.contains_key("__error_details__"));
     check!(evaluation.fields.get("__crabka_unwrap_sample_value__") == Some(&"-1.5".to_string()));
     check!(!evaluation.fields.contains_key("__error__"));
     check!(!evaluation.fields.contains_key("__error_details__"));
+}
+
+#[test]
+fn query_evaluator_rejects_repeated_sample_signs() {
+    let query = parse_query(r#"{app="api"} | logfmt | unwrap cost"#).unwrap();
+    let labels = BTreeMap::from([("app".to_string(), "api".to_string())]);
+
+    let evaluation = query
+        .evaluate_with_fields(&labels, "cost=++1.5", &BTreeMap::new())
+        .unwrap();
+
+    check!(evaluation.fields.get("__error__") == Some(&"SampleExtractionErr".to_string()));
+    check!(
+        evaluation.fields.get("__error_details__")
+            == Some(&"unwrap label `cost` cannot be converted".to_string())
+    );
+    check!(
+        !evaluation
+            .fields
+            .contains_key("__crabka_unwrap_sample_value__")
+    );
 }
 
 #[test]
@@ -1520,6 +1796,26 @@ fn query_evaluator_sanitizes_json_field_names_and_skips_arrays() {
 }
 
 #[test]
+fn query_evaluator_json_parser_exposes_sanitized_scalar_fields_only() {
+    let query = parse_query(r#"{app="api"} | json"#).unwrap();
+    let labels = BTreeMap::from([("app".to_string(), "api".to_string())]);
+
+    let evaluation = query
+        .evaluate_with_fields(
+            &labels,
+            r#"{"trace.id":"abc","span:id":"def","already_ok":"ghi","9lives":"cat","servers":["10.0.0.1"]}"#,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+
+    check!(evaluation.fields.get("trace_id") == Some(&"abc".to_string()));
+    check!(evaluation.fields.get("span:id") == Some(&"def".to_string()));
+    check!(evaluation.fields.get("already_ok") == Some(&"ghi".to_string()));
+    check!(evaluation.fields.get("_9lives") == Some(&"cat".to_string()));
+    check!(!evaluation.fields.contains_key("servers"));
+}
+
+#[test]
 fn parses_pattern_parser_stage_and_field_filter() {
     let query = parse_query(
         r#"{app="api"} | pattern `<method> <path> (<status>) <duration>` | status >= 500"#,
@@ -1542,6 +1838,22 @@ fn parses_pattern_parser_stage_and_field_filter() {
 }
 
 #[test]
+fn pattern_regexp_and_line_format_accessors_return_source_text() {
+    let pattern = PatternParser::new("prefix <method> suffix").unwrap();
+    let regexp = RegexpParser::new(r"(?P<method>\w+) (?P<status>\d+)").unwrap();
+    let format = LineFormat::new("{{.method}} {{.status}}").unwrap();
+    let fields = BTreeMap::from([
+        ("method".to_string(), "GET".to_string()),
+        ("status".to_string(), "500".to_string()),
+    ]);
+
+    check!(pattern.pattern() == "prefix <method> suffix");
+    check!(regexp.pattern() == r"(?P<method>\w+) (?P<status>\d+)");
+    check!(format.template() == "{{.method}} {{.status}}");
+    check!(format.render("raw", &fields) == "GET 500");
+}
+
+#[test]
 fn query_evaluator_applies_pattern_parser_stage_and_field_filter() {
     let query = parse_query(
         r#"{app="api"} | pattern `<method> <path> (<status>) <duration>` | method = "POST" | status >= 500"#,
@@ -1553,6 +1865,23 @@ fn query_evaluator_applies_pattern_parser_stage_and_field_filter() {
     check!(!query.matches(&labels, "GET /api/prom/query_range (500) 1.5s"));
     check!(!query.matches(&labels, "POST /api/prom/query_range (200) 1.5s"));
     check!(!query.matches(&labels, "not a matching line"));
+}
+
+#[test]
+fn query_evaluator_pattern_parser_captures_after_leading_literals() {
+    let query = parse_query(
+        r#"{app="api"} | pattern `prefix method=<method> status=<status>` | method = "POST" | status = "500""#,
+    )
+    .unwrap();
+    let labels = BTreeMap::from([("app".to_string(), "api".to_string())]);
+
+    let evaluation = query
+        .evaluate_with_fields(&labels, "prefix method=POST status=500", &BTreeMap::new())
+        .unwrap();
+
+    check!(evaluation.fields.get("method") == Some(&"POST".to_string()));
+    check!(evaluation.fields.get("status") == Some(&"500".to_string()));
+    check!(!query.matches(&labels, "prefix method=GET status=500"));
 }
 
 #[test]
@@ -1635,6 +1964,18 @@ fn query_evaluator_suffixes_regexp_captures_that_collide_with_original_labels() 
 
     check!(query.matches(&labels, "prefix method=POST status=500 suffix"));
     check!(!query.matches(&labels, "prefix method=POST status=200 suffix"));
+}
+
+#[test]
+fn regexp_parser_equality_requires_pattern_and_capture_names() {
+    let word = RegexpParser::new(r"(?P<value>\w+)").unwrap();
+    let word_again = RegexpParser::new(r"(?P<value>\w+)").unwrap();
+    let digits = RegexpParser::new(r"(?P<value>\d+)").unwrap();
+    let renamed = RegexpParser::new(r"(?P<other>\w+)").unwrap();
+
+    check!(word == word_again);
+    check!(word != digits);
+    check!(word != renamed);
 }
 
 #[test]
@@ -2032,6 +2373,75 @@ fn parses_parenthesized_metric_expression_operands() {
 }
 
 #[test]
+fn parses_parenthesized_metric_query_with_quoted_close_parenthesis() {
+    let query =
+        parse_metric_scalar_arithmetic_query(r#"(count_over_time({app="api"} |= ")" [30s])) * 2"#)
+            .unwrap();
+
+    check!(query.query.aggregation == RangeAggregation::CountOverTime);
+    check!(
+        query.query.stream.pipeline
+            == vec![PipelineStage::LineFilter(
+                LineFilter::new(LineFilterOp::Contains, ")").unwrap()
+            )]
+    );
+}
+
+#[test]
+fn rejects_parenthesized_metric_operands_with_trailing_text() {
+    check!(
+        parse_metric_scalar_comparison_query(
+            r#"2 > bool (count_over_time({app="api"}[30s])) trailing"#,
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn parses_metric_function_arguments_with_nested_commas_and_quotes() {
+    let label_replace = parse_metric_label_replace_query(
+        r#"label_replace(sum by (app) (count_over_time({app="api"} |= "contains,comma" [30s])), "service", "$1", "app", "api,(.*)")"#,
+    )
+    .unwrap();
+
+    check!(label_replace.query.vector_aggregation.is_some());
+    check!(label_replace.pattern == "api,(.*)");
+
+    let label_join = parse_metric_label_join_query(
+        r#"label_join(sum by (app) (count_over_time({app="api"}[30s])), "joined", ",", "app", "env")"#,
+    )
+    .unwrap();
+
+    check!(label_join.query.vector_aggregation.is_some());
+    check!(label_join.separator == ",");
+
+    let label_replace = parse_metric_label_replace_query(
+        r#"label_replace(sum by (app, env) (count_over_time({app="api"} |= ")" [30s])), "service", "$1", "app", "(.*)")"#,
+    )
+    .unwrap();
+
+    check!(
+        label_replace.query.vector_aggregation
+            == Some(VectorAggregation {
+                op: VectorAggregationOp::Sum,
+                grouping: Some(VectorGrouping::By(vec![
+                    "app".to_string(),
+                    "env".to_string()
+                ])),
+            })
+    );
+}
+
+#[test]
+fn rejects_empty_metric_function_arguments() {
+    check!(
+        parse_metric_label_replace_query(r#"label_replace(, "service", "$1", "app", "(.*)")"#)
+            .is_err()
+    );
+    check!(parse_metric_label_join_query(r#"label_join(, "joined", ",", "app")"#).is_err());
+}
+
+#[test]
 fn parses_metric_binary_arithmetic_query() {
     let query = parse_metric_binary_arithmetic_query(
         r#"count_over_time({app="api"}[30s]) / count_over_time({app="api"} |= "error" [30s])"#,
@@ -2043,6 +2453,21 @@ fn parses_metric_binary_arithmetic_query() {
     check!(query.left.range_ns == 30_000_000_000);
     check!(query.right.aggregation == RangeAggregation::CountOverTime);
     check!(query.right.range_ns == 30_000_000_000);
+}
+
+#[test]
+fn parses_metric_arithmetic_modulo_and_power_ops() {
+    let modulo = parse_metric_scalar_arithmetic_query(
+        r#"count_over_time({app="api"} |= "error" [30s]) % 2"#,
+    )
+    .unwrap();
+    check!(modulo.op == crabka_logql::MetricScalarArithmeticOp::Modulo);
+
+    let power = parse_metric_scalar_arithmetic_query(
+        r#"count_over_time({app="api"} |= "error" [30s]) ^ 2"#,
+    )
+    .unwrap();
+    check!(power.op == crabka_logql::MetricScalarArithmeticOp::Power);
 }
 
 #[test]
@@ -2062,6 +2487,60 @@ fn parses_metric_binary_arithmetic_matching_modifier() {
     check!(query.op == crabka_logql::MetricScalarArithmeticOp::Divide);
     check!(query.left.aggregation == RangeAggregation::CountOverTime);
     check!(query.right.aggregation == RangeAggregation::CountOverTime);
+}
+
+#[test]
+fn parses_metric_binary_arguments_with_nested_operator_characters() {
+    let comparison = parse_metric_binary_comparison_query(
+        r#"count_over_time({app="api"} | line_format `literal > inside` [30s]) > bool count_over_time({app="api"}[30s])"#,
+    )
+    .unwrap();
+    check!(comparison.op == ComparisonOp::Greater);
+    check!(comparison.left.range_ns == 30_000_000_000);
+
+    let arithmetic = parse_metric_binary_arithmetic_query(
+        r#"count_over_time({app="api"} |= "+" [30s]) + count_over_time({app="worker"}[15s])"#,
+    )
+    .unwrap();
+    check!(arithmetic.op == crabka_logql::MetricScalarArithmeticOp::Add);
+    check!(arithmetic.right.range_ns == 15_000_000_000);
+
+    let set = parse_metric_binary_set_query(
+        r#"count_over_time({app="origin"} |= "or" [30s]) or count_over_time({app="worker"}[15s])"#,
+    )
+    .unwrap();
+    check!(set.op == crabka_logql::MetricBinarySetOp::Or);
+    check!(set.left.range_ns == 30_000_000_000);
+}
+
+#[test]
+fn parses_metric_binary_arguments_with_quoted_parentheses_and_nested_keywords() {
+    let comparison = parse_metric_binary_comparison_query(
+        r#"count_over_time({app="api"} |= ")" [30s]) > bool count_over_time({app="worker"}[15s])"#,
+    )
+    .unwrap();
+    check!(comparison.left.range_ns == 30_000_000_000);
+    check!(comparison.right.range_ns == 15_000_000_000);
+
+    let arithmetic = parse_metric_binary_arithmetic_query(
+        r#"count_over_time({app="api"} |= ")" [30s] offset -5m) + count_over_time({app="worker"}[15s])"#,
+    )
+    .unwrap();
+    check!(arithmetic.op == crabka_logql::MetricScalarArithmeticOp::Add);
+    check!(arithmetic.left.offset_ns == -300_000_000_000);
+
+    let set = parse_metric_binary_set_query(
+        r#"sum by (or) (count_over_time({app="api"} |= ")" [30s])) and count_over_time({app="worker"}[15s])"#,
+    )
+    .unwrap();
+    check!(set.op == crabka_logql::MetricBinarySetOp::And);
+    check!(
+        set.left.vector_aggregation
+            == Some(VectorAggregation {
+                op: VectorAggregationOp::Sum,
+                grouping: Some(VectorGrouping::By(vec!["or".to_string()])),
+            })
+    );
 }
 
 #[test]
@@ -2112,6 +2591,16 @@ fn parses_metric_binary_set_query() {
     check!(query.left.range_ns == 30_000_000_000);
     check!(query.right.aggregation == RangeAggregation::CountOverTime);
     check!(query.right.range_ns == 30_000_000_000);
+}
+
+#[test]
+fn rejects_group_modifiers_on_metric_set_operators() {
+    check!(
+        parse_metric_binary_set_query(
+            r#"count_over_time({app="api"}[30s]) and on(app) group_left(status) count_over_time({app="worker"}[30s])"#,
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -2396,6 +2885,13 @@ fn parses_fraction_only_quantile_over_time_metric_query() {
 }
 
 #[test]
+fn rejects_invalid_quantile_scalars() {
+    check!(parse_metric_query(r#"quantile_over_time(1.01, {app="api"}[30s])"#).is_err());
+    check!(parse_metric_query(r#"quantile_over_time(., {app="api"}[30s])"#).is_err());
+    check!(parse_metric_query(r#"quantile_over_time(0., {app="api"}[30s])"#).is_err());
+}
+
+#[test]
 fn parses_absent_over_time_metric_query() {
     let query = parse_metric_query(r#"absent_over_time({app="api",env="prod"} [30s])"#).unwrap();
 
@@ -2522,6 +3018,41 @@ fn rejects_metric_query_with_offset_after_range_aggregation() {
 fn rejects_out_of_order_or_repeated_prometheus_duration_units() {
     check!(parse_metric_query(r#"count_over_time({app="api"} [30m1h])"#).is_err());
     check!(parse_metric_query(r#"count_over_time({app="api"} [1h30m15m])"#).is_err());
+}
+
+#[test]
+fn rejects_range_aggregations_that_do_not_support_grouping() {
+    check!(parse_metric_query(r#"count_over_time({app="api"}[30s]) by (app)"#).is_err());
+    check!(parse_metric_query(r#"rate({app="api"}[30s]) without (app)"#).is_err());
+}
+
+#[test]
+fn rejects_invalid_metric_scalar_literals() {
+    check!(
+        parse_metric_scalar_comparison_query(r#". > bool count_over_time({app="api"}[30s])"#)
+            .is_err()
+    );
+    check!(
+        parse_metric_scalar_comparison_query(r#"1e > bool count_over_time({app="api"}[30s])"#)
+            .is_err()
+    );
+    check!(
+        parse_metric_scalar_comparison_query(r#"+.5e+2 > bool count_over_time({app="api"}[30s])"#)
+            .is_ok()
+    );
+}
+
+#[test]
+fn parses_and_rejects_field_value_literal_boundaries() {
+    check!(parse_query(r#"{app="api"} | logfmt | status = -5"#).is_ok());
+    let error = parse_query(r#"{app="api"} | logfmt | status = -"#).unwrap_err();
+    check!(
+        error
+            .to_string()
+            .contains("expected field comparison value")
+    );
+    check!(parse_query(r#"{app="api"} | logfmt | size = 1.5MiB"#).is_ok());
+    check!(parse_query(r#"{app="api"} | logfmt | size = 1.5XYZ"#).is_err());
 }
 
 #[test]

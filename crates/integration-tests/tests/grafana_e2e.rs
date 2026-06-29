@@ -10,6 +10,7 @@
 //! `--include-ignored`); they are intentionally NOT `#[ignore]`d.
 
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use assert2::assert;
@@ -35,6 +36,8 @@ const CRABKA_UID: &str = "crabka-loki";
 const LOKI_UID: &str = "real-loki";
 const LOKI_IMAGE_TAG: &str = "3.4.2";
 const GRAFANA_IMAGE_TAG: &str = "12.3.7";
+const CONTAINER_START_ATTEMPTS: usize = 3;
+const CONTAINER_START_RETRY_DELAY: Duration = Duration::from_secs(3);
 
 // ---------------------------------------------------------------------------
 // Booted stack
@@ -228,6 +231,69 @@ async fn wait_for_http_ok(http: &reqwest::Client, url: &str, what: &str) {
     }
 }
 
+async fn retry_async<T, E, F, Fut>(what: &str, attempts: usize, delay: Duration, mut op: F) -> T
+where
+    E: std::fmt::Debug,
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, E>>,
+{
+    assert!(attempts > 0, "{what} retry attempts must be positive");
+
+    let mut last_error = String::new();
+    for attempt in 1..=attempts {
+        match op().await {
+            Ok(value) => return value,
+            Err(err) => {
+                last_error = format!("{err:?}");
+                if attempt < attempts {
+                    eprintln!("{what} attempt {attempt}/{attempts} failed; retrying: {last_error}");
+                    tokio::time::sleep(delay).await;
+                }
+            }
+        }
+    }
+
+    panic!("{what} failed after {attempts} attempts: {last_error}");
+}
+
+async fn start_container_with_retry<R, F>(
+    what: &str,
+    mut request: F,
+) -> ContainerAsync<GenericImage>
+where
+    F: FnMut() -> R,
+    R: AsyncRunner<GenericImage>,
+{
+    retry_async(
+        what,
+        CONTAINER_START_ATTEMPTS,
+        CONTAINER_START_RETRY_DELAY,
+        || request().start(),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn container_start_retry_retries_transient_errors_without_docker() {
+    let attempts = std::cell::Cell::new(0);
+
+    let value = retry_async("synthetic container start", 3, Duration::ZERO, || {
+        let attempt = attempts.get() + 1;
+        attempts.set(attempt);
+        async move {
+            if attempt < 3 {
+                Err("not ready")
+            } else {
+                Ok("started")
+            }
+        }
+    })
+    .await;
+
+    assert!(value == "started");
+    assert!(attempts.get() == 3);
+}
+
 async fn push_to_loki(http: &reqwest::Client, base: &str, payload: &Value) {
     let resp = http
         .post(format!("{base}/loki/api/v1/push"))
@@ -249,12 +315,12 @@ async fn boot_stack() -> Stack {
     let (payload, start_ns, end_ns) = dataset(base_ns);
 
     // ---- 1. Real Loki ----
-    let loki = GenericImage::new("grafana/loki", LOKI_IMAGE_TAG)
-        .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2))
-        .start()
-        .await
-        .expect("start Loki");
+    let loki = start_container_with_retry("start Loki", || {
+        GenericImage::new("grafana/loki", LOKI_IMAGE_TAG)
+            .with_exposed_port(LOKI_PORT.tcp())
+            .with_wait_for(WaitFor::seconds(2))
+    })
+    .await;
     let loki_host_port = loki
         .get_host_port_ipv4(LOKI_PORT.tcp())
         .await
@@ -347,23 +413,23 @@ async fn boot_stack() -> Stack {
          \x20\x20\x20\x20editable: false\n"
     );
 
-    let grafana = GenericImage::new("grafana/grafana", GRAFANA_IMAGE_TAG)
-        .with_exposed_port(GRAFANA_PORT.tcp())
-        // Container-level wait is just a short settle; real readiness is the
-        // `/api/health` == 200 poll below (robust across Grafana log-stream/text changes).
-        .with_wait_for(WaitFor::seconds(3))
-        .with_env_var("GF_AUTH_ANONYMOUS_ENABLED", "true")
-        .with_env_var("GF_AUTH_ANONYMOUS_ORG_ROLE", "Admin")
-        .with_env_var("GF_AUTH_ANONYMOUS_ORG_NAME", "Main Org.")
-        .with_env_var("GF_SECURITY_ADMIN_PASSWORD", "admin")
-        .with_host("host.docker.internal", Host::HostGateway)
-        .with_copy_to(
-            CopyTargetOptions::new("/etc/grafana/provisioning/datasources/datasources.yaml"),
-            datasources_yaml.into_bytes(),
-        )
-        .start()
-        .await
-        .expect("start Grafana");
+    let grafana = start_container_with_retry("start Grafana", || {
+        GenericImage::new("grafana/grafana", GRAFANA_IMAGE_TAG)
+            .with_exposed_port(GRAFANA_PORT.tcp())
+            // Container-level wait is just a short settle; real readiness is the
+            // `/api/health` == 200 poll below (robust across Grafana log-stream/text changes).
+            .with_wait_for(WaitFor::seconds(3))
+            .with_env_var("GF_AUTH_ANONYMOUS_ENABLED", "true")
+            .with_env_var("GF_AUTH_ANONYMOUS_ORG_ROLE", "Admin")
+            .with_env_var("GF_AUTH_ANONYMOUS_ORG_NAME", "Main Org.")
+            .with_env_var("GF_SECURITY_ADMIN_PASSWORD", "admin")
+            .with_host("host.docker.internal", Host::HostGateway)
+            .with_copy_to(
+                CopyTargetOptions::new("/etc/grafana/provisioning/datasources/datasources.yaml"),
+                datasources_yaml.clone().into_bytes(),
+            )
+    })
+    .await;
     let grafana_port = grafana
         .get_host_port_ipv4(GRAFANA_PORT.tcp())
         .await

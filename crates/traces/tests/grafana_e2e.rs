@@ -1435,7 +1435,7 @@ async fn grafana_e2e_full_surface() -> TestResult {
         .collect();
     assert!(plain.contains(&"checkout-frontend"), "{values}");
 
-    // E20 — TraceQL metrics query_range (poll until ingested points appear).
+    // E20 — TraceQL metrics query_range (poll until ingested samples appear).
     let mq = enc("{ resource.service.name = \"checkout-frontend\" } | rate()");
     let metrics = get_json_until_positive_metric_total(
         &client,
@@ -1491,7 +1491,7 @@ async fn grafana_e2e_full_surface() -> TestResult {
         "instant query must collapse each series to one sample: {metrics}"
     );
 
-    // E23 — instant metrics via start/end bounds (single point at `end`).
+    // E23 — instant metrics via start/end bounds (single sample at `end`).
     let metrics = get_json(
         &client,
         &proxy(&format!(
@@ -1499,19 +1499,20 @@ async fn grafana_e2e_full_surface() -> TestResult {
         )),
     )
     .await?;
-    let single_point_at_end = metrics["series"]
+    let expected_end_ms = (now_secs * 1_000).to_string();
+    let single_sample_at_end = metrics["series"]
         .as_array()
         .into_iter()
         .flatten()
         .all(|series| {
             series["samples"].as_array().is_some_and(|samples| {
                 samples.len() == 1
-                    && samples[0]["timestampMs"].as_str() == Some(&(now_secs * 1_000).to_string())
+                    && samples[0]["timestampMs"].as_str() == Some(expected_end_ms.as_str())
             })
         });
     assert!(
-        single_point_at_end,
-        "instant bounds point not at end: {metrics}"
+        single_sample_at_end,
+        "instant bounds sample not at end: {metrics}"
     );
 
     // E24 — q-derived tag discovery (matching_traces -> scoped_tags_from_traces),
@@ -1569,11 +1570,17 @@ async fn grafana_e2e_full_surface() -> TestResult {
     );
     assert!(metric_points_total(&metrics) > 0.0);
 
+    // E27-E28 — Grafana's Tempo datasource normalizes some malformed metric
+    // requests before proxying them, so validate these Crabka API contracts
+    // directly.
+    let direct_metrics_url =
+        |params: &str| format!("{}/api/metrics/query_range?{params}", crabka.local_base_url);
+
     // E27 — metrics query_range rejects a non-positive `step` -> 400.
     let (status, body) = get_text(
         &client,
-        &proxy(&format!(
-            "api/metrics/query_range?q={mq}&start={metric_start}&end={metric_end}&step=0"
+        &direct_metrics_url(&format!(
+            "q={mq}&start={metric_start}&end={metric_end}&step=0"
         )),
     )
     .await?;
@@ -1583,8 +1590,8 @@ async fn grafana_e2e_full_surface() -> TestResult {
     // E28 — metrics query_range rejects end < start -> 400.
     let (status, body) = get_text(
         &client,
-        &proxy(&format!(
-            "api/metrics/query_range?q={mq}&start={metric_end}&end={metric_start}&step=30s"
+        &direct_metrics_url(&format!(
+            "q={mq}&start={metric_end}&end={metric_start}&step=30s"
         )),
     )
     .await?;
