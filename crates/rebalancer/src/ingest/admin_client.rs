@@ -28,6 +28,8 @@ pub async fn fetch_describe_cluster(
     client.send(describe_cluster_request()).await
 }
 
+// cargo-mutants: this request's desired shape is exactly the generated default.
+#[cfg_attr(test, mutants::skip)]
 fn describe_cluster_request() -> DescribeClusterRequest {
     DescribeClusterRequest::default()
 }
@@ -38,6 +40,8 @@ pub async fn fetch_list_reassignments(
     client.send(list_reassignments_request()).await
 }
 
+// cargo-mutants: this request's desired shape is exactly the generated default.
+#[cfg_attr(test, mutants::skip)]
 fn list_reassignments_request() -> ListPartitionReassignmentsRequest {
     ListPartitionReassignmentsRequest::default()
 }

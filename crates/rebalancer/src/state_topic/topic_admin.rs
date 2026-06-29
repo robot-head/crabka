@@ -22,6 +22,8 @@ pub trait TopicAdminClient: Send {
 
 #[async_trait::async_trait]
 impl TopicAdminClient for AdminClient {
+    // cargo-mutants: live admin-client adapter; FakeAdmin tests cover callers.
+    #[cfg_attr(test, mutants::skip)]
     async fn create_topics(
         &mut self,
         specs: &[CreateTopicSpec],

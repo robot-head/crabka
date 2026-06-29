@@ -215,7 +215,6 @@ fn build_cancel_reassignments_request(
             .or_default()
             .push(ReassignablePartition {
                 partition_index: *partition,
-                replicas: None,
                 ..Default::default()
             });
     }
@@ -234,7 +233,6 @@ fn build_reassignments_request(
         })
         .collect();
     AlterPartitionReassignmentsRequest {
-        timeout_ms: 60_000,
         topics,
         ..Default::default()
     }
@@ -337,6 +335,7 @@ mod tests {
         OngoingPartitionReassignment, OngoingTopicReassignment,
     };
     use std::collections::{BTreeMap, BTreeSet};
+    use std::time::Duration;
 
     fn movement(topic: &str, partition: i32, old: Vec<i32>, new: Vec<i32>) -> Movement {
         Movement {
@@ -477,14 +476,19 @@ mod tests {
         ]);
 
         assert!(req.timeout_ms == 60_000);
-        assert!(req.topics.len() == 2);
-        assert!(req.topics.iter().all(|topic| {
-            !topic.name.is_empty()
-                && topic
-                    .partitions
-                    .iter()
-                    .all(|p| p.partition_index >= 0 && p.replicas.is_none())
-        }));
+        assert!(
+            req.topics
+                .iter()
+                .map(|topic| {
+                    (
+                        topic.name.as_str(),
+                        topic.partitions[0].partition_index,
+                        topic.partitions[0].replicas.as_ref(),
+                    )
+                })
+                .collect::<Vec<_>>()
+                == vec![("orders", 1, None), ("payments", 0, None)]
+        );
     }
 
     #[test]
@@ -521,5 +525,45 @@ mod tests {
             filter_in_flight_response(&resp, &[("orders".into(), 2), ("payments".into(), 9)]);
 
         assert!(filtered == vec![("orders".to_string(), 2)]);
+    }
+
+    async fn unreachable_live_client(suffix: &str) -> LiveClient {
+        let inner = Client::builder()
+            .bootstrap("127.0.0.1:1")
+            .client_id(format!("rebalancer-live-client-test-{suffix}"))
+            .connect_timeout(Duration::from_millis(50))
+            .request_timeout(Duration::from_millis(50))
+            .build()
+            .await
+            .expect("client build does not connect");
+        LiveClient::new(inner)
+    }
+
+    #[tokio::test]
+    async fn live_client_methods_propagate_send_errors() {
+        let client = unreachable_live_client("send-errors").await;
+
+        assert!(matches!(
+            client
+                .alter_throttle_configs(ConfigOp::Set, &targets(), 1234)
+                .await,
+            Err(PhaseError::Client(_))
+        ));
+        assert!(matches!(
+            client
+                .submit_reassignments(&[movement("orders", 0, vec![1], vec![2])])
+                .await,
+            Err(PhaseError::Client(_))
+        ));
+        assert!(matches!(
+            client
+                .cancel_reassignments(&[("orders".to_string(), 0)])
+                .await,
+            Err(PhaseError::Client(_))
+        ));
+        assert!(matches!(
+            client.list_in_flight(&[("orders".to_string(), 0)]).await,
+            Err(PhaseError::Client(_))
+        ));
     }
 }
