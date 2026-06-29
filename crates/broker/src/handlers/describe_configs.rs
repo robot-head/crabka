@@ -297,6 +297,81 @@ mod tests {
     }
 
     #[test]
+    fn make_entry_preserves_wire_metadata_fields() {
+        let entry = super::make_entry(
+            "leader.replication.throttled.rate",
+            "1024",
+            super::CONFIG_SOURCE_DYNAMIC_BROKER,
+        );
+
+        assert!(entry.name == "leader.replication.throttled.rate");
+        assert!(entry.value.as_deref() == Some("1024"));
+        assert!(!entry.read_only);
+        assert!(entry.config_source == super::CONFIG_SOURCE_DYNAMIC_BROKER);
+        assert!(!entry.is_sensitive);
+        assert!(entry.synonyms.is_empty());
+        assert!(entry.config_type == 0);
+        assert!(entry.documentation.is_none());
+    }
+
+    #[test]
+    fn topic_describe_one_preserves_result_and_filtered_config_fields() {
+        use crabka_metadata::TopicConfigRecord;
+
+        let mut img = MetadataImage::new(Uuid::nil());
+        let mut overrides = BTreeMap::new();
+        overrides.insert("cleanup.policy".to_string(), "compact".to_string());
+        overrides.insert("retention.ms".to_string(), "60000".to_string());
+        img.apply(&MetadataRecord::V1TopicConfig(TopicConfigRecord {
+            topic: "orders".into(),
+            overrides,
+        }));
+        let result = super::describe_one(
+            &img,
+            crabka_protocol::owned::describe_configs_request::DescribeConfigsResource {
+                resource_type: super::RESOURCE_TYPE_TOPIC,
+                resource_name: "orders".into(),
+                configuration_keys: Some(vec!["cleanup.policy".into()]),
+                ..Default::default()
+            },
+        );
+
+        assert!(result.error_code == crate::codes::NONE);
+        assert!(result.error_message.is_none());
+        assert!(result.resource_type == super::RESOURCE_TYPE_TOPIC);
+        assert!(result.resource_name == "orders");
+        assert!(result.configs.len() == 1);
+        assert!(result.configs[0].name == "cleanup.policy");
+        assert!(result.configs[0].value.as_deref() == Some("compact"));
+        assert!(result.configs[0].config_source == super::CONFIG_SOURCE_DYNAMIC_TOPIC);
+    }
+
+    #[test]
+    fn broker_describe_one_rejects_non_numeric_resource_name_with_fields() {
+        let img = MetadataImage::new(Uuid::nil());
+        let result = super::describe_one(
+            &img,
+            crabka_protocol::owned::describe_configs_request::DescribeConfigsResource {
+                resource_type: super::RESOURCE_TYPE_BROKER,
+                resource_name: "not-a-number".into(),
+                configuration_keys: None,
+                ..Default::default()
+            },
+        );
+
+        assert!(result.error_code == crate::codes::INVALID_REQUEST);
+        assert!(
+            result
+                .error_message
+                .as_deref()
+                .is_some_and(|msg| msg.contains("not-a-number"))
+        );
+        assert!(result.resource_type == super::RESOURCE_TYPE_BROKER);
+        assert!(result.resource_name == "not-a-number");
+        assert!(result.configs.is_empty());
+    }
+
+    #[test]
     fn broker_resource_key_filter_applied() {
         let mut img = MetadataImage::new(Uuid::nil());
         img.apply(&MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
@@ -397,6 +472,10 @@ mod tests {
             crate::codes::TOPIC_AUTHORIZATION_FAILED,
         );
         assert!(res.error_code == crate::codes::TOPIC_AUTHORIZATION_FAILED);
+        assert!(res.error_message.as_deref() == Some("authorization failed"));
+        assert!(res.resource_type == super::RESOURCE_TYPE_TOPIC);
+        assert!(res.resource_name == "t");
+        assert!(res.configs.is_empty());
     }
 
     #[test]

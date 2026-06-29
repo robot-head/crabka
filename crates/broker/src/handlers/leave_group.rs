@@ -155,5 +155,8 @@ mod tests {
         let decoded =
             LeaveGroupResponse::decode(&mut cur, leave_group_response::MAX_VERSION).unwrap();
         assert!(decoded.error_code == codes::GROUP_AUTHORIZATION_FAILED);
+        assert!(decoded.throttle_time_ms == 0);
+        assert!(decoded.members.is_empty());
+        assert!(cur.is_empty(), "response decoder consumed all bytes");
     }
 }

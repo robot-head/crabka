@@ -141,5 +141,7 @@ mod tests {
         let mut cur: &[u8] = &bytes;
         let resp = HeartbeatResponse::decode(&mut cur, heartbeat_response::MAX_VERSION).unwrap();
         assert!(resp.error_code == codes::GROUP_AUTHORIZATION_FAILED);
+        assert!(resp.throttle_time_ms == 0);
+        assert!(cur.is_empty(), "response decoder consumed all bytes");
     }
 }
