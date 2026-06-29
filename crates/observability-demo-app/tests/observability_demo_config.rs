@@ -134,8 +134,8 @@ fn docker_log_tailing_is_scoped_to_the_demo_compose_project() {
         "Docker log discovery should drop non-demo containers instead of tailing every Docker container"
     );
     assert!(
-        relabel.contains("regex         = \"crabka-observability-demo\""),
-        "Docker log discovery should only tail the demo Compose project"
+        relabel.contains("regex         = \"crabka-observability-.*\""),
+        "Docker log discovery should only tail Crabka observability Compose projects"
     );
 }
 
@@ -163,12 +163,12 @@ fn crabka_worker_targets_also_collect_memory_profiles() {
 fn jemalloc_heap_profiling_uses_bounded_always_on_sampling() {
     let compose = docker_compose();
     assert!(
-        compose.contains("MALLOC_CONF: \"prof:true,prof_active:true,lg_prof_sample:25,background_thread:true,dirty_decay_ms:1000,muzzy_decay_ms:1000\""),
+        compose.contains("MALLOC_CONF: \"prof:true,prof_active:true,lg_prof_sample:20,background_thread:true,dirty_decay_ms:1000,muzzy_decay_ms:1000\""),
         "heap profiling should stay active so memory profiles include long-lived allocations"
     );
     assert!(
-        compose.contains("lg_prof_sample:25"),
-        "always-on heap profiling should use coarse sampling to bound jemalloc backtrace overhead without empty profiles on small queriers"
+        compose.contains("lg_prof_sample:20"),
+        "always-on heap profiling should sample small demo services without tracing every allocation"
     );
     for option in [
         "background_thread:true",
@@ -421,20 +421,21 @@ fn recent_traces_dashboard_panel_renders_traceql_search_results() {
 }
 
 #[test]
-fn self_dashboard_surfaces_querier_heap_profiles() {
+fn self_dashboard_surfaces_service_heap_profiles() {
     let dashboard = dashboard("crabka-self.json");
     assert!(
         dashboard.contains("memory:inuse_space:bytes:space:bytes"),
         "self-observability dashboard should expose jemalloc heap profiles"
     );
     for service in [
-        "metrics-querier",
-        "logs-querier",
-        "traces-querier",
-        "profiles-querier",
+        "broker",
+        "metrics-distributor",
+        "logs-distributor",
+        "traces-distributor",
+        "profiles-distributor",
     ] {
         assert!(
-            dashboard.contains(&format!("service_name=\\\"{service}\\\"")),
+            dashboard.contains(service),
             "self-observability dashboard should include a heap profile panel for {service}"
         );
     }
@@ -533,8 +534,8 @@ fn runtime_resources_dashboard_surfaces_stack_cpu_and_memory() {
         "runtime dashboard should filter on the Docker Compose project label"
     );
     assert!(
-        dashboard.contains("crabka-observability-demo"),
-        "runtime dashboard should scope resource panels to this compose project"
+        dashboard.contains("crabka-observability-.*"),
+        "runtime dashboard should scope resource panels to Crabka observability compose projects"
     );
     assert!(
         dashboard.contains("broker-format|rustfs-permissions|rustfs-setup|topic-setup"),

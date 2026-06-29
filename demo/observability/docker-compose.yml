@@ -9,6 +9,7 @@ x-s3-env: &s3-env
   AWS_EC2_METADATA_DISABLED: "true"
 
 x-otlp-env: &otlp-env
+  RUST_LOG: "${CRABKA_RUST_LOG:-info,pprof::profiler=warn,object_store::client::retry=warn}"
   CRABKA_OTLP_ENDPOINT: http://alloy:4317
   # Head sampling ratio. Every Crabka service self-instruments at 100% by
   # default, and the traces pipeline (distributor/broker/block-builder) traces
@@ -20,12 +21,13 @@ x-otlp-env: &otlp-env
   CRABKA_OTLP_SAMPLE_RATIO: "0.05"
   CRABKA_ADMIN_LISTEN_ADDR: 0.0.0.0:9404
   # Enable jemalloc heap profiling support continuously so heap profiles include
-  # long-lived allocations, but sample coarsely (~every 32 MiB) to avoid the
-  # profiler's own backtrace bookkeeping dominating querier RSS. NOT
+  # long-lived allocations, but sample coarsely (~every 1 MiB) so small demo
+  # services still produce useful heap profiles without tracing every
+  # allocation. NOT
   # lg_prof_sample:0, which backtraces every allocation.
   # Short dirty/muzzy decay plus the jemalloc background thread keeps inactive
   # heap-profile and query allocations from sitting in RSS indefinitely.
-  MALLOC_CONF: "prof:true,prof_active:true,lg_prof_sample:25,background_thread:true,dirty_decay_ms:1000,muzzy_decay_ms:1000"
+  MALLOC_CONF: "prof:true,prof_active:true,lg_prof_sample:20,background_thread:true,dirty_decay_ms:1000,muzzy_decay_ms:1000"
 
 # Every Crabka service runs the same all-in-one demo image. By default this
 # PULLS the prebuilt image from GHCR (published by the publish-demo-image

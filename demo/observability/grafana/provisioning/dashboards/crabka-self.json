@@ -30,30 +30,30 @@
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
       "targets": [ { "refId": "A", "profileTypeId": "process_cpu:cpu:nanoseconds:cpu:nanoseconds", "labelSelector": "{service_name=\"broker\"}" } ]
     },
-    { "id": 10, "type": "row", "title": "Querier heap profiles", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 16 } },
+    { "id": 10, "type": "row", "title": "Service heap profiles", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 16 } },
     {
-      "id": 11, "type": "flamegraph", "title": "Metrics querier heap profile",
+      "id": 11, "type": "flamegraph", "title": "Broker heap profile",
       "datasource": { "type": "grafana-pyroscope-datasource", "uid": "crabka-pyroscope" },
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 17 },
-      "targets": [ { "refId": "A", "profileTypeId": "memory:inuse_space:bytes:space:bytes", "labelSelector": "{service_name=\"metrics-querier\"}" } ]
+      "targets": [ { "refId": "A", "profileTypeId": "memory:inuse_space:bytes:space:bytes", "labelSelector": "{service_name=\"broker\"}" } ]
     },
     {
-      "id": 12, "type": "flamegraph", "title": "Logs querier heap profile",
+      "id": 12, "type": "flamegraph", "title": "Metrics distributor heap profile",
       "datasource": { "type": "grafana-pyroscope-datasource", "uid": "crabka-pyroscope" },
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 17 },
-      "targets": [ { "refId": "A", "profileTypeId": "memory:inuse_space:bytes:space:bytes", "labelSelector": "{service_name=\"logs-querier\"}" } ]
+      "targets": [ { "refId": "A", "profileTypeId": "memory:inuse_space:bytes:space:bytes", "labelSelector": "{service_name=\"metrics-distributor\"}" } ]
     },
     {
-      "id": 13, "type": "flamegraph", "title": "Traces querier heap profile",
+      "id": 13, "type": "flamegraph", "title": "Logs distributor heap profile",
       "datasource": { "type": "grafana-pyroscope-datasource", "uid": "crabka-pyroscope" },
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 25 },
-      "targets": [ { "refId": "A", "profileTypeId": "memory:inuse_space:bytes:space:bytes", "labelSelector": "{service_name=\"traces-querier\"}" } ]
+      "targets": [ { "refId": "A", "profileTypeId": "memory:inuse_space:bytes:space:bytes", "labelSelector": "{service_name=\"logs-distributor\"}" } ]
     },
     {
-      "id": 14, "type": "flamegraph", "title": "Profiles querier heap profile",
+      "id": 14, "type": "flamegraph", "title": "Trace/profile distributor heap profile",
       "datasource": { "type": "grafana-pyroscope-datasource", "uid": "crabka-pyroscope" },
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 25 },
-      "targets": [ { "refId": "A", "profileTypeId": "memory:inuse_space:bytes:space:bytes", "labelSelector": "{service_name=\"profiles-querier\"}" } ]
+      "targets": [ { "refId": "A", "profileTypeId": "memory:inuse_space:bytes:space:bytes", "labelSelector": "{service_name=~\"traces-distributor|profiles-distributor\"}" } ]
     }
   ]
 }

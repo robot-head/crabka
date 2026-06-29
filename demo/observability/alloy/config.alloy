@@ -101,7 +101,7 @@ prometheus.relabel "container_resources" {
 	rule {
 		action        = "keep"
 		source_labels = ["container_label_com_docker_compose_project"]
-		regex         = "crabka-observability-demo"
+		regex         = "crabka-observability-.*"
 	}
 
 	rule {
@@ -129,7 +129,7 @@ discovery.relabel "containers" {
 
 	rule {
 		source_labels = ["__meta_docker_container_label_com_docker_compose_project"]
-		regex         = "crabka-observability-demo"
+		regex         = "crabka-observability-.*"
 		action        = "keep"
 	}
 

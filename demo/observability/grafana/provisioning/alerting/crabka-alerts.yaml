@@ -232,7 +232,7 @@ groups:
             model:
               datasource: { type: prometheus, uid: crabka-prom }
               editorMode: code
-              expr: 'changes(max by (container_label_com_docker_compose_service) (container_start_time_seconds{container_label_com_docker_compose_project="crabka-observability-demo", container_label_com_docker_compose_service=~"alloy|cadvisor|grafana|metrics-querier|logs-querier|traces-querier|profiles-querier", image!=""})[15m:15s])'
+              expr: 'changes(max by (container_label_com_docker_compose_service) (container_start_time_seconds{container_label_com_docker_compose_project=~"crabka-observability-.*", container_label_com_docker_compose_service=~"alloy|cadvisor|grafana|metrics-querier|logs-querier|traces-querier|profiles-querier", image!=""})[15m:15s])'
               instant: true
               range: false
               intervalMs: 1000

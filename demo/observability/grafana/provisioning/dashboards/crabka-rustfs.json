@@ -18,7 +18,7 @@
       "datasource": { "type": "prometheus", "uid": "${ds}" },
       "fieldConfig": { "defaults": { "unit": "bytes" } },
       "gridPos": { "h": 5, "w": 4, "x": 0, "y": 1 },
-      "targets": [ { "refId": "A", "expr": "max(container_memory_working_set_bytes{container_label_com_docker_compose_project=\"crabka-observability-demo\", container_label_com_docker_compose_service=\"rustfs\", image!=\"\"})", "instant": true } ]
+      "targets": [ { "refId": "A", "expr": "max(container_memory_working_set_bytes{container_label_com_docker_compose_project=~\"crabka-observability-.*\", container_label_com_docker_compose_service=\"rustfs\", image!=\"\"})", "instant": true } ]
     },
     {
       "id": 3, "type": "stat", "title": "Native process RSS",
@@ -26,35 +26,35 @@
       "fieldConfig": { "defaults": { "unit": "bytes" } },
       "description": "RustFS native process memory from OTLP metrics, falling back to cAdvisor if native metrics are not present.",
       "gridPos": { "h": 5, "w": 4, "x": 4, "y": 1 },
-      "targets": [ { "refId": "A", "expr": "max(rustfs_system_process_resident_memory_bytes) or max(rustfs_process_memory_bytes) or max(container_memory_working_set_bytes{container_label_com_docker_compose_project=\"crabka-observability-demo\", container_label_com_docker_compose_service=\"rustfs\", image!=\"\"})", "instant": true } ]
+      "targets": [ { "refId": "A", "expr": "max(rustfs_system_process_resident_memory_bytes) or max(rustfs_process_memory_bytes) or max(container_memory_working_set_bytes{container_label_com_docker_compose_project=~\"crabka-observability-.*\", container_label_com_docker_compose_service=\"rustfs\", image!=\"\"})", "instant": true } ]
     },
     {
       "id": 4, "type": "stat", "title": "Memory limit ratio",
       "datasource": { "type": "prometheus", "uid": "${ds}" },
       "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 } },
       "gridPos": { "h": 5, "w": 4, "x": 8, "y": 1 },
-      "targets": [ { "refId": "A", "expr": "max(container_memory_working_set_bytes{container_label_com_docker_compose_project=\"crabka-observability-demo\", container_label_com_docker_compose_service=\"rustfs\", image!=\"\"}) / clamp_min(max(container_spec_memory_limit_bytes{container_label_com_docker_compose_project=\"crabka-observability-demo\", container_label_com_docker_compose_service=\"rustfs\", image!=\"\"}), 1)", "instant": true } ]
+      "targets": [ { "refId": "A", "expr": "max(container_memory_working_set_bytes{container_label_com_docker_compose_project=~\"crabka-observability-.*\", container_label_com_docker_compose_service=\"rustfs\", image!=\"\"}) / clamp_min(max(container_spec_memory_limit_bytes{container_label_com_docker_compose_project=~\"crabka-observability-.*\", container_label_com_docker_compose_service=\"rustfs\", image!=\"\"}), 1)", "instant": true } ]
     },
     {
       "id": 5, "type": "stat", "title": "RustFS uptime",
       "datasource": { "type": "prometheus", "uid": "${ds}" },
       "fieldConfig": { "defaults": { "unit": "s" } },
       "gridPos": { "h": 5, "w": 4, "x": 12, "y": 1 },
-      "targets": [ { "refId": "A", "expr": "max(rustfs_system_process_uptime_seconds) or max(rustfs_process_uptime_seconds) or (time() - max(container_start_time_seconds{container_label_com_docker_compose_project=\"crabka-observability-demo\", container_label_com_docker_compose_service=\"rustfs\", image!=\"\"}))", "instant": true } ]
+      "targets": [ { "refId": "A", "expr": "max(rustfs_system_process_uptime_seconds) or max(rustfs_process_uptime_seconds) or (time() - max(container_start_time_seconds{container_label_com_docker_compose_project=~\"crabka-observability-.*\", container_label_com_docker_compose_service=\"rustfs\", image!=\"\"}))", "instant": true } ]
     },
     {
       "id": 6, "type": "stat", "title": "CPU cores",
       "datasource": { "type": "prometheus", "uid": "${ds}" },
       "fieldConfig": { "defaults": { "unit": "cores" } },
       "gridPos": { "h": 5, "w": 4, "x": 16, "y": 1 },
-      "targets": [ { "refId": "A", "expr": "sum(rate(rustfs_system_process_cpu_total_seconds[5m])) or (max(rustfs_process_cpu_percent) / 100) or sum(rate(container_cpu_usage_seconds_total{container_label_com_docker_compose_project=\"crabka-observability-demo\", container_label_com_docker_compose_service=\"rustfs\", image!=\"\"}[5m]))", "instant": true } ]
+      "targets": [ { "refId": "A", "expr": "sum(rate(rustfs_system_process_cpu_total_seconds[5m])) or (max(rustfs_process_cpu_percent) / 100) or sum(rate(container_cpu_usage_seconds_total{container_label_com_docker_compose_project=~\"crabka-observability-.*\", container_label_com_docker_compose_service=\"rustfs\", image!=\"\"}[5m]))", "instant": true } ]
     },
     {
       "id": 7, "type": "stat", "title": "Restarts (1h)",
       "datasource": { "type": "prometheus", "uid": "${ds}" },
       "fieldConfig": { "defaults": { "unit": "short" } },
       "gridPos": { "h": 5, "w": 4, "x": 20, "y": 1 },
-      "targets": [ { "refId": "A", "expr": "changes(max(container_start_time_seconds{container_label_com_docker_compose_project=\"crabka-observability-demo\", container_label_com_docker_compose_service=\"rustfs\", image!=\"\"})[1h:15s])", "instant": true } ]
+      "targets": [ { "refId": "A", "expr": "changes(max(container_start_time_seconds{container_label_com_docker_compose_project=~\"crabka-observability-.*\", container_label_com_docker_compose_service=\"rustfs\", image!=\"\"})[1h:15s])", "instant": true } ]
     },
     {
       "id": 8, "type": "timeseries", "title": "CPU usage",
@@ -62,7 +62,7 @@
       "fieldConfig": { "defaults": { "unit": "cores" } },
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
       "targets": [
-        { "refId": "A", "expr": "sum(rate(container_cpu_usage_seconds_total{container_label_com_docker_compose_project=\"crabka-observability-demo\", container_label_com_docker_compose_service=\"rustfs\", image!=\"\"}[$__rate_interval]))", "legendFormat": "container" },
+        { "refId": "A", "expr": "sum(rate(container_cpu_usage_seconds_total{container_label_com_docker_compose_project=~\"crabka-observability-.*\", container_label_com_docker_compose_service=\"rustfs\", image!=\"\"}[$__rate_interval]))", "legendFormat": "container" },
         { "refId": "B", "expr": "sum(rate(rustfs_system_process_cpu_total_seconds[$__rate_interval]))", "legendFormat": "native process" }
       ]
     },
@@ -72,7 +72,7 @@
       "fieldConfig": { "defaults": { "unit": "bytes" } },
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
       "targets": [
-        { "refId": "A", "expr": "max(container_memory_working_set_bytes{container_label_com_docker_compose_project=\"crabka-observability-demo\", container_label_com_docker_compose_service=\"rustfs\", image!=\"\"})", "legendFormat": "container working set" },
+        { "refId": "A", "expr": "max(container_memory_working_set_bytes{container_label_com_docker_compose_project=~\"crabka-observability-.*\", container_label_com_docker_compose_service=\"rustfs\", image!=\"\"})", "legendFormat": "container working set" },
         { "refId": "B", "expr": "max(rustfs_system_process_resident_memory_bytes) or max(rustfs_process_memory_bytes)", "legendFormat": "native process RSS" },
         { "refId": "C", "expr": "max(rustfs_system_memory_available)", "legendFormat": "native available" }
       ]
@@ -200,8 +200,8 @@
       "fieldConfig": { "defaults": { "unit": "Bps" } },
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 46 },
       "targets": [
-        { "refId": "A", "expr": "sum(rate(container_fs_reads_bytes_total{container_label_com_docker_compose_project=\"crabka-observability-demo\", container_label_com_docker_compose_service=\"rustfs\", image!=\"\"}[$__rate_interval]))", "legendFormat": "container read" },
-        { "refId": "B", "expr": "sum(rate(container_fs_writes_bytes_total{container_label_com_docker_compose_project=\"crabka-observability-demo\", container_label_com_docker_compose_service=\"rustfs\", image!=\"\"}[$__rate_interval]))", "legendFormat": "container write" },
+        { "refId": "A", "expr": "sum(rate(container_fs_reads_bytes_total{container_label_com_docker_compose_project=~\"crabka-observability-.*\", container_label_com_docker_compose_service=\"rustfs\", image!=\"\"}[$__rate_interval]))", "legendFormat": "container read" },
+        { "refId": "B", "expr": "sum(rate(container_fs_writes_bytes_total{container_label_com_docker_compose_project=~\"crabka-observability-.*\", container_label_com_docker_compose_service=\"rustfs\", image!=\"\"}[$__rate_interval]))", "legendFormat": "container write" },
         { "refId": "C", "expr": "sum(rate(rustfs_io_transfer_bytes_total[$__rate_interval]))", "legendFormat": "native transfer" },
         { "refId": "D", "expr": "sum(rate(rustfs_system_process_io_write_bytes[$__rate_interval]))", "legendFormat": "native write" }
       ]
@@ -260,8 +260,8 @@
       "fieldConfig": { "defaults": { "unit": "Bps" } },
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 68 },
       "targets": [
-        { "refId": "A", "expr": "sum(rate(container_network_receive_bytes_total{container_label_com_docker_compose_project=\"crabka-observability-demo\", container_label_com_docker_compose_service=\"rustfs\", image!=\"\"}[$__rate_interval]))", "legendFormat": "container receive" },
-        { "refId": "B", "expr": "sum(rate(container_network_transmit_bytes_total{container_label_com_docker_compose_project=\"crabka-observability-demo\", container_label_com_docker_compose_service=\"rustfs\", image!=\"\"}[$__rate_interval]))", "legendFormat": "container transmit" },
+        { "refId": "A", "expr": "sum(rate(container_network_receive_bytes_total{container_label_com_docker_compose_project=~\"crabka-observability-.*\", container_label_com_docker_compose_service=\"rustfs\", image!=\"\"}[$__rate_interval]))", "legendFormat": "container receive" },
+        { "refId": "B", "expr": "sum(rate(container_network_transmit_bytes_total{container_label_com_docker_compose_project=~\"crabka-observability-.*\", container_label_com_docker_compose_service=\"rustfs\", image!=\"\"}[$__rate_interval]))", "legendFormat": "container transmit" },
         { "refId": "C", "expr": "sum(rate(rustfs_system_network_internode_recv_bytes_total[$__rate_interval]))", "legendFormat": "native internode receive" },
         { "refId": "D", "expr": "sum(rate(rustfs_system_network_internode_sent_bytes_total[$__rate_interval]))", "legendFormat": "native internode sent" }
       ]
@@ -271,7 +271,7 @@
       "datasource": { "type": "prometheus", "uid": "${ds}" },
       "fieldConfig": { "defaults": { "unit": "Bps" } },
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 68 },
-      "targets": [ { "refId": "A", "expr": "topk(12, sum by (container_label_com_docker_compose_service) (rate(container_network_receive_bytes_total{container_label_com_docker_compose_project=\"crabka-observability-demo\", container_label_com_docker_compose_service=~\"rustfs|.*-querier|.*-compactor|.*-block-builder\", image!=\"\"}[$__rate_interval])) + sum by (container_label_com_docker_compose_service) (rate(container_network_transmit_bytes_total{container_label_com_docker_compose_project=\"crabka-observability-demo\", container_label_com_docker_compose_service=~\"rustfs|.*-querier|.*-compactor|.*-block-builder\", image!=\"\"}[$__rate_interval])))", "legendFormat": "{{container_label_com_docker_compose_service}}", "instant": true } ]
+      "targets": [ { "refId": "A", "expr": "topk(12, sum by (container_label_com_docker_compose_service) (rate(container_network_receive_bytes_total{container_label_com_docker_compose_project=~\"crabka-observability-.*\", container_label_com_docker_compose_service=~\"rustfs|.*-querier|.*-compactor|.*-block-builder\", image!=\"\"}[$__rate_interval])) + sum by (container_label_com_docker_compose_service) (rate(container_network_transmit_bytes_total{container_label_com_docker_compose_project=~\"crabka-observability-.*\", container_label_com_docker_compose_service=~\"rustfs|.*-querier|.*-compactor|.*-block-builder\", image!=\"\"}[$__rate_interval])))", "legendFormat": "{{container_label_com_docker_compose_service}}", "instant": true } ]
     },
     {
       "id": 33, "type": "logs", "title": "Recent RustFS warnings and errors",
