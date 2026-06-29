@@ -13,6 +13,7 @@ use crabka_protocol::owned::metadata_request::{MetadataRequest, MetadataRequestT
 use crabka_protocol::owned::produce_request::{
     PartitionProduceData, ProduceRequest, TopicProduceData,
 };
+use crabka_protocol::owned::produce_response::ProduceResponse;
 use crabka_protocol::primitives::uuid::Uuid;
 use crabka_protocol::records::{Record, RecordBatch};
 
@@ -64,9 +65,11 @@ pub(crate) async fn produce_state(
             }
             Err(e) => return Err(e),
         };
-        match send_once(client, topic, topic_id, &key_bytes, value.clone()).await {
-            Ok(()) => return Ok(()),
-            Err(StateTopicError::ProduceErrorCode { code }) if is_transient_produce_code(code) => {
+        match classify_send_result(
+            send_once(client, topic, topic_id, &key_bytes, value.clone()).await,
+        ) {
+            Ok(None) => return Ok(()),
+            Ok(Some(code)) => {
                 last_transient = Some(code);
                 debug!(
                     code,
@@ -111,6 +114,20 @@ async fn send_once(
     key: &Bytes,
     value: Option<Bytes>,
 ) -> Result<(), StateTopicError> {
+    let req = produce_request(topic, topic_id, key, value);
+    let resp = client.send(req).await?;
+    if let Some(code) = produce_response_error(&resp) {
+        return Err(StateTopicError::ProduceErrorCode { code });
+    }
+    Ok(())
+}
+
+fn produce_request(
+    topic: &str,
+    topic_id: Uuid,
+    key: &Bytes,
+    value: Option<Bytes>,
+) -> ProduceRequest {
     let record = Record {
         key: Some(key.clone()),
         value,
@@ -120,7 +137,7 @@ async fn send_once(
         records: vec![record],
         ..Default::default()
     };
-    let req = ProduceRequest {
+    ProduceRequest {
         transactional_id: None,
         acks: -1, // all
         timeout_ms: 10_000,
@@ -135,14 +152,133 @@ async fn send_once(
             ..Default::default()
         }],
         ..Default::default()
-    };
-    let resp = client.send(req).await?;
+    }
+}
+
+fn produce_response_error(resp: &ProduceResponse) -> Option<i16> {
     for t in &resp.responses {
         for p in &t.partition_responses {
             if p.error_code != 0 {
-                return Err(StateTopicError::ProduceErrorCode { code: p.error_code });
+                return Some(p.error_code);
             }
         }
     }
-    Ok(())
+    None
+}
+
+fn classify_send_result(
+    result: Result<(), StateTopicError>,
+) -> Result<Option<i16>, StateTopicError> {
+    match result {
+        Ok(()) => Ok(None),
+        Err(StateTopicError::ProduceErrorCode { code }) if is_transient_produce_code(code) => {
+            Ok(Some(code))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crabka_protocol::owned::produce_response::{
+        PartitionProduceResponse, ProduceResponse, TopicProduceResponse,
+    };
+    use crabka_protocol::records::RecordsPayload;
+
+    fn response_with_error(code: i16) -> ProduceResponse {
+        ProduceResponse {
+            responses: vec![TopicProduceResponse {
+                partition_responses: vec![PartitionProduceResponse {
+                    error_code: code,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn transient_produce_codes_are_exact() {
+        for code in [3, 5, 9] {
+            assert!(is_transient_produce_code(code));
+        }
+        for code in [0, 1, 42] {
+            assert!(!is_transient_produce_code(code));
+        }
+    }
+
+    #[test]
+    fn produce_request_writes_single_key_record_to_partition_zero() {
+        let topic_id = Uuid([7; 16]);
+        let key = Bytes::from_static(b"in_flight");
+        let value = Some(Bytes::from_static(b"{json}"));
+
+        let req = produce_request("state-topic", topic_id, &key, value.clone());
+
+        assert!(req.transactional_id.is_none());
+        assert!(req.acks == -1);
+        assert!(req.timeout_ms == 10_000);
+        assert!(req.topic_data.len() == 1);
+        assert!(req.topic_data[0].name == "state-topic");
+        assert!(req.topic_data[0].topic_id == topic_id);
+        assert!(req.topic_data[0].partition_data.len() == 1);
+        assert!(req.topic_data[0].partition_data[0].index == 0);
+        let records = req.topic_data[0].partition_data[0]
+            .records
+            .as_ref()
+            .expect("records");
+        let RecordsPayload::V2(batches) = records else {
+            panic!("produce request should use v2 record batches");
+        };
+        assert!(batches.len() == 1);
+        assert!(batches[0].records.len() == 1);
+        assert!(batches[0].records[0].key.as_ref() == Some(&key));
+        assert!(batches[0].records[0].value == value);
+    }
+
+    #[test]
+    fn produce_response_errors_are_classified_for_retry() {
+        assert!(classify_send_result(Ok(())).unwrap().is_none());
+        assert!(
+            classify_send_result(Err(StateTopicError::ProduceErrorCode { code: 5 })).unwrap()
+                == Some(5)
+        );
+        let err =
+            classify_send_result(Err(StateTopicError::ProduceErrorCode { code: 42 })).unwrap_err();
+        assert!(matches!(
+            err,
+            StateTopicError::ProduceErrorCode { code: 42 }
+        ));
+    }
+
+    #[test]
+    fn produce_response_error_scans_partition_responses() {
+        assert!(produce_response_error(&response_with_error(0)).is_none());
+        assert!(produce_response_error(&response_with_error(42)) == Some(42));
+    }
+
+    #[tokio::test]
+    async fn produce_state_propagates_initial_metadata_send_errors() {
+        let client = Client::builder()
+            .bootstrap("127.0.0.1:1")
+            .client_id("state-topic-producer-test")
+            .connect_timeout(Duration::from_millis(50))
+            .request_timeout(Duration::from_millis(50))
+            .build()
+            .await
+            .expect("client build does not connect");
+
+        assert!(
+            produce_state(
+                &client,
+                "__crabka_state",
+                "in_flight",
+                Some(Bytes::from_static(b"{}"))
+            )
+            .await
+            .is_err()
+        );
+    }
 }

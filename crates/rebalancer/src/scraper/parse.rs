@@ -25,7 +25,10 @@ pub fn parse(text: &str) -> Vec<ParsedSample> {
     let mut out = Vec::new();
     for line in text.lines() {
         let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.starts_with('#') {
             continue;
         }
         let Some(sample) = parse_line(trimmed) else {
@@ -85,6 +88,20 @@ mod tests {
     #[test]
     fn empty_input_returns_empty() {
         assert!(parse("").is_empty());
+    }
+
+    #[test]
+    fn skips_blank_and_comment_lines_before_parsing() {
+        let txt = r#"
+
+  # crabka_broker_partition_bytes_in_total{topic="ignored",partition="0"} 999
+crabka_broker_partition_bytes_in_total{topic="kept",partition="1"} 7
+"#;
+        let out = parse(txt);
+        assert!(out.len() == 1);
+        assert!(out[0].topic == "kept");
+        assert!(out[0].partition == 1);
+        assert!((out[0].value - 7.0).abs() < 1e-9);
     }
 
     #[test]
