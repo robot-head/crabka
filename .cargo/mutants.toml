@@ -342,6 +342,15 @@ exclude_re = [
     "broker/src/handlers/api_versions\\.rs:127:.*delete field throttle_time_ms from struct ApiVersionsResponse expression in handle",
     "broker/src/handlers/api_versions\\.rs:142:.*delete field error_code from struct ApiVersionsResponse expression in handle",
     "broker/src/handlers/api_versions\\.rs:144:.*delete field throttle_time_ms from struct ApiVersionsResponse expression in handle",
+    "broker/src/handlers/assign_replicas_to_dirs\\.rs.*delete field error_code from struct AssignReplicasToDirsResponse expression in handle",
+    "broker/src/handlers/assign_replicas_to_dirs\\.rs.*delete field error_code from struct RespPartData expression in build_echo_response",
+    "broker/src/handlers/assign_replicas_to_dirs\\.rs.*delete field error_code from struct AssignReplicasToDirsResponse expression in build_echo_response",
+    "broker/src/handlers/broker_heartbeat\\.rs.*delete field throttle_time_ms from struct BrokerHeartbeatResponse expression in (handle|not_controller_response|success_response|denied_response_body)",
+    "broker/src/handlers/broker_heartbeat\\.rs.*delete field is_caught_up from struct BrokerHeartbeatResponse expression in (handle|not_controller_response|denied_response_body)",
+    "broker/src/handlers/broker_heartbeat\\.rs.*delete field should_shut_down from struct BrokerHeartbeatResponse expression in (handle|not_controller_response|denied_response_body)",
+    "broker/src/handlers/broker_heartbeat\\.rs.*delete field error_code from struct BrokerHeartbeatResponse expression in (handle|success_response)",
+    "broker/src/handlers/broker_heartbeat\\.rs.*delete field is_fenced from struct BrokerHeartbeatResponse expression in (handle|success_response)",
+    "broker/src/handlers/consumer_group_describe\\.rs.*delete field error_code from struct DescribedGroup expression in (handle|ok_row)",
     # The offset is the human-facing VerifyBreak.offset diagnostic (standard Kafka
     # base_offset + offset_delta), not the tamper verdict.
     "audit/src/verify\\.rs.*replace \\+ with (-|\\*) in verify_partition_dir",

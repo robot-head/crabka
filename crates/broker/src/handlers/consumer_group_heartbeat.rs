@@ -52,15 +52,11 @@ pub(crate) async fn handle(
         // KIP-848 / KIP-584: the next-gen protocol is gated on a finalized
         // group.version >= 1. Below that — including UNFINALIZED, which means
         // disabled — reject so the client falls back to the classic protocol.
-        if !crate::features::feature_enabled(
-            &image,
-            crabka_metadata::group_version::GROUP_VERSION_FEATURE,
-            1,
-        ) {
+        if group_version_disabled(&image) {
             return encode(version, &error(codes::UNSUPPORTED_VERSION));
         }
 
-        if !coordinator.config.next_gen_enabled() {
+        if next_gen_config_disabled(coordinator.config.next_gen_enabled()) {
             return encode(version, &error(codes::GROUP_ID_NOT_FOUND));
         }
 
@@ -110,6 +106,18 @@ fn group_read_denied(
     ) == AuthorizationResult::Deny
 }
 
+fn group_version_disabled(image: &crabka_metadata::MetadataImage) -> bool {
+    !crate::features::feature_enabled(
+        image,
+        crabka_metadata::group_version::GROUP_VERSION_FEATURE,
+        1,
+    )
+}
+
+fn next_gen_config_disabled(next_gen_enabled: bool) -> bool {
+    !next_gen_enabled
+}
+
 fn error(code: i16) -> ConsumerGroupHeartbeatResponse {
     ConsumerGroupHeartbeatResponse {
         error_code: code,
@@ -127,6 +135,98 @@ fn encode(version: i16, resp: &ConsumerGroupHeartbeatResponse) -> Result<Bytes, 
 mod tests {
     use super::*;
     use assert2::assert;
+    use crabka_metadata::{FeatureLevelRecord, MetadataImage, MetadataRecord};
+    use std::sync::Arc;
+
+    const VERSION: i16 = crabka_protocol::owned::consumer_group_heartbeat_request::MAX_VERSION;
+
+    fn request(group_id: &str) -> Bytes {
+        let req = ConsumerGroupHeartbeatRequest {
+            group_id: group_id.into(),
+            member_epoch: 0,
+            rebalance_timeout_ms: 30_000,
+            subscribed_topic_names: Some(vec!["topic-a".into()]),
+            ..Default::default()
+        };
+        let mut buf = BytesMut::with_capacity(req.encoded_len(VERSION));
+        req.encode(&mut buf, VERSION)
+            .expect("encode ConsumerGroupHeartbeatRequest");
+        buf.freeze()
+    }
+
+    fn decode_response(bytes: Bytes) -> ConsumerGroupHeartbeatResponse {
+        let mut cur: &[u8] = bytes.as_ref();
+        let resp = ConsumerGroupHeartbeatResponse::decode(&mut cur, VERSION)
+            .expect("decode ConsumerGroupHeartbeatResponse");
+        assert!(cur.is_empty(), "response decoder consumed all bytes");
+        resp
+    }
+
+    fn test_context<'a>(
+        principal: &'a crabka_security::Principal,
+        peer: &'a std::net::SocketAddr,
+    ) -> crate::handlers::RequestContext<'a> {
+        crate::handlers::RequestContext {
+            principal,
+            peer,
+            client_id: "consumer-group-heartbeat-test",
+            sendfile_capable: false,
+            connection_listener_name: "PLAINTEXT",
+        }
+    }
+
+    async fn start_broker(
+        authorizer: Arc<dyn crate::authorizer::Authorizer>,
+    ) -> (crate::broker::BrokerHandle, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let mut cfg = crate::config::BrokerConfig::for_tests(dir.path().to_path_buf());
+        cfg.authorizer = authorizer;
+        let handle = crate::broker::Broker::start(cfg)
+            .await
+            .expect("start broker");
+        (handle, dir)
+    }
+
+    fn image_with_group_version(level: i16) -> MetadataImage {
+        let mut image = MetadataImage::new(uuid::Uuid::nil());
+        image.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+            name: crabka_metadata::group_version::GROUP_VERSION_FEATURE.into(),
+            level,
+        }));
+        image
+    }
+
+    fn anonymous_principal() -> crabka_security::Principal {
+        crabka_security::Principal {
+            name: "ANONYMOUS".into(),
+            auth_method: crabka_security::AuthMethod::Anonymous,
+            groups: vec![],
+        }
+    }
+
+    #[test]
+    fn group_version_gate_distinguishes_disabled_and_enabled_images() {
+        let fresh = MetadataImage::new(uuid::Uuid::nil());
+        assert!(group_version_disabled(&fresh));
+
+        let enabled = image_with_group_version(1);
+        assert!(!group_version_disabled(&enabled));
+
+        let disabled = image_with_group_version(0);
+        assert!(group_version_disabled(&disabled));
+    }
+
+    #[test]
+    fn next_gen_config_gate_inverts_enabled_flag() {
+        assert!(!next_gen_config_disabled(true));
+        assert!(next_gen_config_disabled(false));
+    }
+
+    #[test]
+    fn error_response_preserves_error_code() {
+        let resp = error(codes::GROUP_AUTHORIZATION_FAILED);
+        assert!(resp.error_code == codes::GROUP_AUTHORIZATION_FAILED);
+    }
 
     #[test]
     fn group_read_denied_yields_group_authorization_failed() {
@@ -164,5 +264,44 @@ mod tests {
         )
         .unwrap();
         assert!(resp.error_code == codes::GROUP_AUTHORIZATION_FAILED);
+    }
+
+    #[test]
+    fn group_read_denied_allows_allow_all_authorizer() {
+        let image = crabka_metadata::MetadataImage::new(uuid::Uuid::nil());
+        let principal = anonymous_principal();
+        let peer = std::net::SocketAddr::from(([127, 0, 0, 1], 9092));
+
+        assert!(!group_read_denied(
+            &crate::authorizer::AllowAllAuthorizer,
+            &image,
+            &principal,
+            &peer,
+            "g"
+        ));
+    }
+
+    #[tokio::test]
+    async fn handle_group_read_denied_preserves_error_response() {
+        let authorizer =
+            crate::authorizer::SimpleAclAuthorizer::new(std::collections::HashSet::new());
+        let (broker_handle, _dir) = start_broker(Arc::new(authorizer)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let principal = anonymous_principal();
+        let peer = std::net::SocketAddr::from(([127, 0, 0, 1], 9092));
+        let ctx = test_context(&principal, &peer);
+        let req = request("denied-group");
+
+        let bytes = handle(&broker, VERSION, 5, &req, &ctx)
+            .await
+            .expect("ConsumerGroupHeartbeat handler");
+        let resp = decode_response(bytes);
+
+        assert!(
+            resp.error_code == codes::GROUP_AUTHORIZATION_FAILED,
+            "{resp:?}"
+        );
+
+        broker_handle.shutdown().await;
     }
 }

@@ -44,7 +44,7 @@ pub(crate) async fn handle(
     let is_leader = controller
         .watch_leader()
         .borrow()
-        .is_some_and(|n| n == node_id);
+        .is_some_and(|n| is_controller_leader(Some(n), node_id));
     {
         let mut cur: &[u8] = req_bytes;
         let req = BrokerHeartbeatRequest::decode(&mut cur, version)?;
@@ -68,17 +68,7 @@ pub(crate) async fn handle(
         // Only the openraft leader handles heartbeats. NOT_CONTROLLER
         // tells the broker client to redirect.
         if !is_leader {
-            let resp = BrokerHeartbeatResponse {
-                throttle_time_ms: 0,
-                error_code: codes::NOT_CONTROLLER,
-                is_caught_up: false,
-                is_fenced: true,
-                should_shut_down: false,
-                ..Default::default()
-            };
-            let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-            resp.encode(&mut buf, version)?;
-            return Ok(buf.freeze());
+            return encode_response(version, &not_controller_response());
         }
 
         let broker_id_u64 = u64::try_from(req.broker_id).unwrap_or(0);
@@ -110,7 +100,7 @@ pub(crate) async fn handle(
         // Validate the reporting broker id independently of `broker_id_u64`
         // (which falls back to 0 for the liveness path): failing over the
         // wrong broker on a malformed negative id would be harmful.
-        if !req.offline_log_dirs.is_empty()
+        if has_offline_log_dirs(&req)
             && let Ok(reporting_broker) = u64::try_from(req.broker_id)
         {
             let offline: std::collections::HashSet<uuid::Uuid> = req
@@ -134,18 +124,55 @@ pub(crate) async fn handle(
             }
         }
 
-        let resp = BrokerHeartbeatResponse {
-            throttle_time_ms: 0,
-            error_code: codes::NONE,
-            is_caught_up: true,
-            is_fenced: false,
-            should_shut_down,
-            ..Default::default()
-        };
-        let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-        resp.encode(&mut buf, version)?;
-        Ok(buf.freeze())
+        encode_response(version, &success_response(should_shut_down))
     }
+}
+
+fn is_controller_leader(leader: Option<u64>, node_id: u64) -> bool {
+    leader == Some(node_id)
+}
+
+fn has_offline_log_dirs(req: &BrokerHeartbeatRequest) -> bool {
+    !req.offline_log_dirs.is_empty()
+}
+
+fn not_controller_response() -> BrokerHeartbeatResponse {
+    BrokerHeartbeatResponse {
+        throttle_time_ms: 0,
+        error_code: codes::NOT_CONTROLLER,
+        is_caught_up: false,
+        is_fenced: true,
+        should_shut_down: false,
+        ..Default::default()
+    }
+}
+
+fn success_response(should_shut_down: bool) -> BrokerHeartbeatResponse {
+    BrokerHeartbeatResponse {
+        throttle_time_ms: 0,
+        error_code: codes::NONE,
+        is_caught_up: true,
+        is_fenced: false,
+        should_shut_down,
+        ..Default::default()
+    }
+}
+
+fn denied_response_body() -> BrokerHeartbeatResponse {
+    BrokerHeartbeatResponse {
+        throttle_time_ms: 0,
+        error_code: codes::CLUSTER_AUTHORIZATION_FAILED,
+        is_caught_up: false,
+        is_fenced: true,
+        should_shut_down: false,
+        ..Default::default()
+    }
+}
+
+fn encode_response(version: i16, resp: &BrokerHeartbeatResponse) -> Result<Bytes, BrokerError> {
+    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
+    resp.encode(&mut buf, version)?;
+    Ok(buf.freeze())
 }
 
 /// `ClusterAction` on `Cluster("kafka-cluster")` gate. Returns `true`
@@ -170,17 +197,7 @@ fn cluster_action_denied(
 
 /// Whole-response `CLUSTER_AUTHORIZATION_FAILED (31)` response built on Deny.
 fn denied_response(version: i16) -> Result<Bytes, BrokerError> {
-    let resp = BrokerHeartbeatResponse {
-        throttle_time_ms: 0,
-        error_code: codes::CLUSTER_AUTHORIZATION_FAILED,
-        is_caught_up: false,
-        is_fenced: true,
-        should_shut_down: false,
-        ..Default::default()
-    };
-    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-    resp.encode(&mut buf, version)?;
-    Ok(buf.freeze())
+    encode_response(version, &denied_response_body())
 }
 
 /// Run the KIP-112 offline-dir failover for `broker`'s reported offline dirs:
@@ -279,6 +296,7 @@ mod tests {
     use super::*;
     use assert2::assert;
     use crabka_metadata::{MetadataRecord, PartitionRecord, TopicRecord};
+    use crabka_protocol::primitives::uuid::Uuid as ProtocolUuid;
     use crabka_raft::{
         AddVoter, Node, QuorumState, RaftError, ReconfigOutcome, RemoveVoter, SnapshotRange,
         UpdateVoter,
@@ -395,6 +413,126 @@ mod tests {
             l.record_heartbeat(n).await;
         }
         Arc::new(l)
+    }
+
+    fn decode_response(version: i16, bytes: Bytes) -> BrokerHeartbeatResponse {
+        let mut cur: &[u8] = bytes.as_ref();
+        let resp = BrokerHeartbeatResponse::decode(&mut cur, version)
+            .expect("decode BrokerHeartbeatResponse");
+        assert!(cur.is_empty(), "response decoder consumed all bytes");
+        resp
+    }
+
+    fn request(offline_log_dirs: Vec<uuid::Uuid>) -> Bytes {
+        let req = BrokerHeartbeatRequest {
+            broker_id: 1,
+            broker_epoch: -1,
+            current_metadata_offset: 0,
+            want_fence: false,
+            want_shut_down: false,
+            offline_log_dirs: offline_log_dirs
+                .into_iter()
+                .map(|u| ProtocolUuid(u.into_bytes()))
+                .collect(),
+            cordoned_log_dirs: None,
+            ..Default::default()
+        };
+        let mut buf = BytesMut::with_capacity(
+            req.encoded_len(crabka_protocol::owned::broker_heartbeat_request::MAX_VERSION),
+        );
+        req.encode(
+            &mut buf,
+            crabka_protocol::owned::broker_heartbeat_request::MAX_VERSION,
+        )
+        .expect("encode BrokerHeartbeatRequest");
+        buf.freeze()
+    }
+
+    fn test_context<'a>(
+        principal: &'a crabka_security::Principal,
+        peer: &'a SocketAddr,
+    ) -> crate::handlers::RequestContext<'a> {
+        crate::handlers::RequestContext {
+            principal,
+            peer,
+            client_id: "broker-heartbeat-test",
+            sendfile_capable: false,
+            connection_listener_name: "PLAINTEXT",
+        }
+    }
+
+    async fn start_broker(
+        authorizer: Arc<dyn crate::authorizer::Authorizer>,
+    ) -> (crate::broker::BrokerHandle, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let mut cfg = crate::config::BrokerConfig::for_tests(dir.path().to_path_buf());
+        cfg.authorizer = authorizer;
+        let handle = crate::broker::Broker::start(cfg)
+            .await
+            .expect("start broker");
+        (handle, dir)
+    }
+
+    async fn wait_for_leader(broker: &Broker) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if broker
+                .controller
+                .watch_leader()
+                .borrow()
+                .is_some_and(|n| n == broker.config.node_id)
+            {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() <= deadline,
+                "broker did not become controller leader"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    #[test]
+    fn leader_predicate_matches_current_node_only() {
+        assert!(is_controller_leader(Some(1), 1));
+        assert!(!is_controller_leader(Some(2), 1));
+        assert!(!is_controller_leader(None, 1));
+    }
+
+    #[test]
+    fn heartbeat_response_builders_preserve_non_default_fields() {
+        let not_controller = not_controller_response();
+        assert!(not_controller.error_code == codes::NOT_CONTROLLER);
+        assert!(!not_controller.is_caught_up);
+        assert!(not_controller.is_fenced);
+        assert!(!not_controller.should_shut_down);
+
+        let success = success_response(true);
+        assert!(success.error_code == codes::NONE);
+        assert!(success.is_caught_up);
+        assert!(!success.is_fenced);
+        assert!(success.should_shut_down);
+
+        let denied = denied_response_body();
+        assert!(denied.error_code == codes::CLUSTER_AUTHORIZATION_FAILED);
+        assert!(!denied.is_caught_up);
+        assert!(denied.is_fenced);
+        assert!(!denied.should_shut_down);
+    }
+
+    #[test]
+    fn offline_dir_gate_tracks_reported_directories() {
+        let empty = BrokerHeartbeatRequest {
+            offline_log_dirs: vec![],
+            ..Default::default()
+        };
+        assert!(!has_offline_log_dirs(&empty));
+
+        let reported = BrokerHeartbeatRequest {
+            offline_log_dirs: vec![ProtocolUuid(uuid::Uuid::from_u128(0xD1).into_bytes())],
+            ..Default::default()
+        };
+        assert!(has_offline_log_dirs(&reported));
     }
 
     #[tokio::test]
@@ -517,5 +655,53 @@ mod tests {
             BrokerHeartbeatResponse::decode(&mut cur, broker_heartbeat_response::MAX_VERSION)
                 .unwrap();
         assert!(resp.error_code == codes::CLUSTER_AUTHORIZATION_FAILED);
+        assert!(resp.is_fenced);
+    }
+
+    #[test]
+    fn cluster_action_allowed_by_allow_all_authorizer() {
+        let image = MetadataImage::new(uuid::Uuid::nil());
+        let principal = crabka_security::Principal {
+            name: "ANONYMOUS".into(),
+            auth_method: crabka_security::AuthMethod::Anonymous,
+            groups: vec![],
+        };
+        let peer = std::net::SocketAddr::from(([127, 0, 0, 1], 9092));
+
+        assert!(!cluster_action_denied(
+            &crate::authorizer::AllowAllAuthorizer,
+            &image,
+            &principal,
+            &peer
+        ));
+    }
+
+    #[tokio::test]
+    async fn handle_leader_success_preserves_response_shape() {
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        wait_for_leader(&broker).await;
+        let principal = crabka_security::Principal {
+            name: "ANONYMOUS".into(),
+            auth_method: crabka_security::AuthMethod::Anonymous,
+            groups: vec![],
+        };
+        let peer = std::net::SocketAddr::from(([127, 0, 0, 1], 9092));
+        let ctx = test_context(&principal, &peer);
+        let version = crabka_protocol::owned::broker_heartbeat_request::MAX_VERSION;
+        let req = request(vec![]);
+
+        let bytes = handle(&broker, version, 11, &req, &ctx)
+            .await
+            .expect("BrokerHeartbeat handler");
+        let resp = decode_response(version, bytes);
+
+        assert!(resp.error_code == codes::NONE, "{resp:?}");
+        assert!(resp.is_caught_up, "{resp:?}");
+        assert!(!resp.is_fenced, "{resp:?}");
+        assert!(!resp.should_shut_down, "{resp:?}");
+
+        broker_handle.shutdown().await;
     }
 }

@@ -278,6 +278,38 @@ mod tests {
         assert!(resp.directories.is_empty(), "{resp:?}");
     }
 
+    #[test]
+    fn encode_resp_preserves_encoded_body() {
+        let req = AssignReplicasToDirsRequest {
+            broker_id: 1,
+            broker_epoch: -1,
+            directories: vec![ReqDirData {
+                id: ProtocolUuid(uuid::Uuid::from_u128(0xAA).into_bytes()),
+                topics: vec![ReqTopicData {
+                    topic_id: ProtocolUuid(uuid::Uuid::from_u128(0xBB).into_bytes()),
+                    partitions: vec![ReqPartData {
+                        partition_index: 3,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let resp = build_echo_response(&req);
+
+        let bytes = encode_resp(VERSION, &resp).expect("encode response");
+        let decoded = decode_response(bytes);
+
+        assert!(decoded.error_code == codes::NONE, "{decoded:?}");
+        assert!(decoded.directories.len() == 1, "{decoded:?}");
+        assert!(decoded.directories[0].topics.len() == 1, "{decoded:?}");
+        let partition = &decoded.directories[0].topics[0].partitions[0];
+        assert!(partition.partition_index == 3, "{decoded:?}");
+        assert!(partition.error_code == codes::NONE, "{decoded:?}");
+    }
+
     #[tokio::test]
     async fn handle_leader_echoes_request_shape() {
         let (broker_handle, _dir) = start_broker().await;
