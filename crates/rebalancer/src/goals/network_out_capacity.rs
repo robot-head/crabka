@@ -269,6 +269,20 @@ mod tests {
         BrokerCapacities { by_broker: b }
     }
 
+    fn caps_many(entries: &[(i32, u64)]) -> BrokerCapacities {
+        let mut b = std::collections::HashMap::new();
+        for (broker, bps) in entries {
+            b.insert(
+                *broker,
+                BrokerCapacity {
+                    network_out_bytes_per_sec: Some(*bps),
+                    ..Default::default()
+                },
+            );
+        }
+        BrokerCapacities { by_broker: b }
+    }
+
     #[test]
     fn empty_usage_no_op() {
         let parts: Vec<_> = (0..3).map(|i| part("t", i, vec![1, 2], 1)).collect();
@@ -298,5 +312,110 @@ mod tests {
         let store = store_with_counter_pair(samples);
         let ctx = ctx_with(caps(1, 500_000), store);
         assert!(!NetworkOutCapacity.is_satisfied_with_ctx(&s, &ctx));
+    }
+
+    #[test]
+    fn exact_network_out_capacity_limit_is_satisfied() {
+        let parts: Vec<_> = (0..2).map(|i| part("t", i, vec![1], 1)).collect();
+        let s = state_with(parts, vec![1, 2]);
+        let samples: Vec<_> = (0..2).map(|i| (1, "t", i, 0.0, 250_000.0)).collect();
+        let store = store_with_counter_pair(samples);
+        let ctx = ctx_with(caps(1, 500_000), store);
+
+        assert!(NetworkOutCapacity.propose(&s, &ctx).is_empty());
+        assert!(NetworkOutCapacity.is_satisfied_with_ctx(&s, &ctx));
+    }
+
+    #[test]
+    fn network_out_capacity_picks_largest_absolute_excess() {
+        let parts = vec![
+            part("small_limit", 0, vec![1], 1),
+            part("large_limit", 0, vec![2], 2),
+        ];
+        let s = state_with(parts, vec![1, 2, 3]);
+        let store = store_with_counter_pair(vec![
+            (1, "small_limit", 0, 0.0, 1_000.0),
+            (2, "large_limit", 0, 0.0, 2_000.0),
+        ]);
+        let mut ctx = ctx_with(caps_many(&[(1, 100), (2, 1_000)]), store);
+        ctx.max_movements_per_proposal = 1;
+
+        let mvs = NetworkOutCapacity.propose(&s, &ctx);
+
+        assert!(mvs.len() == 1);
+        assert!(mvs[0].old_replicas == vec![2]);
+        assert!(mvs[0].new_replicas == vec![3]);
+    }
+
+    #[test]
+    fn network_out_capacity_does_not_rank_by_current_plus_limit() {
+        let parts = vec![
+            part("high_sum", 0, vec![1], 1),
+            part("high_excess", 0, vec![2], 2),
+        ];
+        let s = state_with(parts, vec![1, 2, 3]);
+        let store = store_with_counter_pair(vec![
+            (1, "high_sum", 0, 0.0, 1_000.0),
+            (2, "high_excess", 0, 0.0, 600.0),
+        ]);
+        let mut ctx = ctx_with(caps_many(&[(1, 900), (2, 100)]), store);
+        ctx.max_movements_per_proposal = 1;
+
+        let mvs = NetworkOutCapacity.propose(&s, &ctx);
+
+        assert!(mvs.len() == 1);
+        assert!(mvs[0].old_replicas == vec![2]);
+        assert!(mvs[0].new_replicas == vec![3]);
+    }
+
+    #[test]
+    fn network_out_capacity_skips_destinations_already_in_replica_set() {
+        let parts = vec![part("hot", 0, vec![1, 2], 1)];
+        let s = state_with(parts, vec![1, 2, 3]);
+        let store = store_with_counter_pair(vec![(1, "hot", 0, 0.0, 1_000.0)]);
+        let ctx = ctx_with(caps(1, 500), store);
+
+        let mvs = NetworkOutCapacity.propose(&s, &ctx);
+
+        assert!(mvs.len() == 1);
+        assert!(mvs[0].new_replicas == vec![3, 2]);
+    }
+
+    #[test]
+    fn network_out_capacity_stops_when_all_destinations_are_replicas() {
+        let parts = vec![part("hot", 0, vec![1, 2], 1)];
+        let s = state_with(parts, vec![1, 2]);
+        let store = store_with_counter_pair(vec![(1, "hot", 0, 0.0, 1_000.0)]);
+        let ctx = ctx_with(caps(1, 500), store);
+
+        assert!(NetworkOutCapacity.propose(&s, &ctx).is_empty());
+    }
+
+    #[test]
+    fn network_out_capacity_rehomes_hot_leader_to_replacement() {
+        let parts = vec![part("hot", 0, vec![1], 1)];
+        let s = state_with(parts, vec![1, 2]);
+        let store = store_with_counter_pair(vec![(1, "hot", 0, 0.0, 1_000.0)]);
+        let ctx = ctx_with(caps(1, 500), store);
+
+        let mvs = NetworkOutCapacity.propose(&s, &ctx);
+
+        assert!(mvs.len() == 1);
+        assert!(mvs[0].old_leader == 1);
+        assert!(mvs[0].new_leader == 2);
+    }
+
+    #[test]
+    fn movement_cap_limits_network_out_capacity_swaps() {
+        let parts: Vec<_> = (0..5).map(|i| part("hot", i, vec![1], 1)).collect();
+        let s = state_with(parts, vec![1, 2, 3]);
+        let samples: Vec<_> = (0..5).map(|i| (1, "hot", i, 0.0, 200_000.0)).collect();
+        let store = store_with_counter_pair(samples);
+        let mut ctx = ctx_with(caps(1, 500_000), store);
+        ctx.max_movements_per_proposal = 1;
+
+        let mvs = NetworkOutCapacity.propose(&s, &ctx);
+
+        assert!(mvs.len() == 1);
     }
 }

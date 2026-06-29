@@ -96,6 +96,16 @@ mod tests {
         }
     }
 
+    fn part(replicas: Vec<i32>, leader: i32, isr: Vec<i32>) -> PartitionView {
+        PartitionView {
+            topic: "foo".into(),
+            partition: 0,
+            replicas,
+            leader,
+            isr,
+        }
+    }
+
     #[test]
     fn preferred_already_leader_no_op() {
         let s = state(
@@ -109,6 +119,29 @@ mod tests {
             vec![1, 2, 3],
         );
         assert!(PreferredLeaderIdempotency.propose(&s, &ctx()).is_empty());
+    }
+
+    #[test]
+    fn is_satisfied_when_preferred_already_leads() {
+        let s = state(vec![part(vec![1, 2, 3], 1, vec![1, 2, 3])], vec![1, 2, 3]);
+
+        assert!(PreferredLeaderIdempotency.is_satisfied(&s));
+    }
+
+    #[test]
+    fn is_not_satisfied_when_alive_isr_preferred_is_not_leader() {
+        let s = state(vec![part(vec![1, 2, 3], 2, vec![1, 2, 3])], vec![1, 2, 3]);
+
+        assert!(!PreferredLeaderIdempotency.is_satisfied(&s));
+    }
+
+    #[test]
+    fn is_satisfied_when_preferred_is_dead_or_out_of_isr() {
+        let preferred_dead = state(vec![part(vec![1, 2, 3], 2, vec![2, 3])], vec![2, 3]);
+        let preferred_out_of_isr = state(vec![part(vec![1, 2, 3], 2, vec![2, 3])], vec![1, 2, 3]);
+
+        assert!(PreferredLeaderIdempotency.is_satisfied(&preferred_dead));
+        assert!(PreferredLeaderIdempotency.is_satisfied(&preferred_out_of_isr));
     }
 
     #[test]

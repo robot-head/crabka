@@ -274,4 +274,66 @@ mod tests {
         assert!(mvs[0].old_replicas == vec![1]);
         assert!(mvs[0].new_replicas == vec![2]);
     }
+
+    #[test]
+    fn partition_already_on_hot_and_cold_has_no_legal_network_in_usage_move() {
+        let parts = vec![part("t", 0, vec![1, 2], 1), part("warm", 0, vec![3], 3)];
+        let s = state_with(parts, vec![1, 2, 3]);
+        let store = store_with_counter_pair(vec![
+            (1, "t", 0, 0.0, 300_000.0),
+            (2, "t", 0, 0.0, 100_000.0),
+            (3, "warm", 0, 0.0, 200_000.0),
+        ]);
+        let ctx = ctx_with(store);
+
+        assert!(NetworkInUsage.propose(&s, &ctx).is_empty());
+    }
+
+    #[test]
+    fn replica_vector_at_broker_count_without_cold_is_not_expandable() {
+        let parts = vec![part("t", 0, vec![1, 99], 1)];
+        let s = state_with(parts, vec![1, 2]);
+        let store = store_with_counter_pair(vec![(1, "t", 0, 0.0, 300_000.0)]);
+        let ctx = ctx_with(store);
+
+        assert!(NetworkInUsage.propose(&s, &ctx).is_empty());
+    }
+
+    #[test]
+    fn network_in_usage_replaces_hot_replica_at_its_actual_position() {
+        let parts = vec![part("t", 0, vec![99, 1], 99), part("cold", 0, vec![2], 2)];
+        let s = state_with(parts, vec![1, 2, 99]);
+        let store = store_with_counter_pair(vec![
+            (1, "t", 0, 0.0, 300_000.0),
+            (99, "t", 0, 0.0, 200_000.0),
+            (2, "cold", 0, 0.0, 100_000.0),
+        ]);
+        let mut ctx = ctx_with(store);
+        ctx.max_movements_per_proposal = 1;
+
+        let mvs = NetworkInUsage.propose(&s, &ctx);
+
+        assert!(mvs.len() == 1);
+        assert!(mvs[0].old_replicas == vec![99, 1]);
+        assert!(mvs[0].new_replicas == vec![99, 2]);
+        assert!(mvs[0].new_leader == 99);
+    }
+
+    #[test]
+    fn movement_cap_limits_network_in_usage_swaps() {
+        let mut parts: Vec<_> = (0..5).map(|i| part("hot", i, vec![1], 1)).collect();
+        parts.push(part("cold", 0, vec![2], 2));
+        let s = state_with(parts, vec![1, 2, 3]);
+        let samples = (0..5)
+            .map(|i| (1, "hot", i, 0.0, 100_000.0))
+            .chain(std::iter::once((2, "cold", 0, 0.0, 1.0)))
+            .collect();
+        let store = store_with_counter_pair(samples);
+        let mut ctx = ctx_with(store);
+        ctx.max_movements_per_proposal = 1;
+
+        let mvs = NetworkInUsage.propose(&s, &ctx);
+
+        assert!(mvs.len() == 1);
+    }
 }
