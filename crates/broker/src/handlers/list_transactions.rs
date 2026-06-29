@@ -146,6 +146,13 @@ pub(crate) async fn handle(
 mod tests {
     use super::*;
     use assert2::assert;
+    use crabka_security::{AuthMethod, Principal};
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    use crate::authorizer::Authorizer;
+    use crate::broker::{Broker, BrokerHandle};
+    use crate::config::BrokerConfig;
 
     #[test]
     fn txn_state_str_matches_jvm_names() {
@@ -156,5 +163,82 @@ mod tests {
         assert!(txn_state_str(TxnState::CompleteCommit) == "CompleteCommit");
         assert!(txn_state_str(TxnState::CompleteAbort) == "CompleteAbort");
         assert!(txn_state_str(TxnState::Dead) == "Dead");
+    }
+
+    fn encode_request(req: &ListTransactionsRequest, version: i16) -> Bytes {
+        let mut buf = BytesMut::with_capacity(req.encoded_len(version));
+        req.encode(&mut buf, version).expect("encode request");
+        buf.freeze()
+    }
+
+    fn decode_response(bytes: &Bytes, version: i16) -> ListTransactionsResponse {
+        let mut cur: &[u8] = bytes.as_ref();
+        let resp = ListTransactionsResponse::decode(&mut cur, version).expect("decode response");
+        assert!(cur.is_empty(), "response decoder consumed all bytes");
+        resp
+    }
+
+    fn principal(name: &str) -> Principal {
+        Principal {
+            name: name.into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        }
+    }
+
+    fn peer() -> SocketAddr {
+        "127.0.0.1:9092".parse().unwrap()
+    }
+
+    fn test_context<'a>(
+        principal: &'a Principal,
+        peer: &'a SocketAddr,
+    ) -> crate::handlers::RequestContext<'a> {
+        crate::handlers::RequestContext {
+            principal,
+            peer,
+            client_id: "admin-client",
+            sendfile_capable: false,
+            connection_listener_name: "PLAINTEXT",
+        }
+    }
+
+    async fn start_broker(authorizer: Arc<dyn Authorizer>) -> (BrokerHandle, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
+        cfg.audit_enabled = false;
+        cfg.authorizer = authorizer;
+        let handle = Broker::start(cfg).await.expect("start broker");
+        (handle, dir)
+    }
+
+    #[tokio::test]
+    async fn handler_reports_unknown_state_filters_and_top_level_fields() {
+        let version = crabka_protocol::owned::list_transactions_response::MAX_VERSION;
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let p = principal("admin");
+        let peer = peer();
+        let ctx = test_context(&p, &peer);
+        let req = ListTransactionsRequest {
+            state_filters: vec!["Ongoing".into(), "MysteryState".into()],
+            producer_id_filters: vec![42],
+            duration_filter: -1,
+            transactional_id_pattern: Some("txn-*".into()),
+            ..Default::default()
+        };
+        let req = encode_request(&req, version);
+
+        let bytes = handle(&broker, version, 123, &req, &ctx)
+            .await
+            .expect("handle");
+        let resp = decode_response(&bytes, version);
+
+        assert!(resp.throttle_time_ms == 0);
+        assert!(resp.error_code == codes::NONE);
+        assert!(resp.unknown_state_filters == vec!["MysteryState"]);
+        assert!(resp.transaction_states.is_empty());
+        broker_handle.shutdown().await;
     }
 }

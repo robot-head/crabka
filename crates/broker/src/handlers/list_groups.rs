@@ -232,3 +232,178 @@ fn state_to_str(s: GroupState) -> &'static str {
         GroupState::Dead => "Dead",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert2::assert;
+    use crabka_security::{AuthMethod, Principal};
+    use std::collections::HashSet;
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    use crate::authorizer::Authorizer;
+    use crate::broker::{Broker, BrokerHandle};
+    use crate::config::BrokerConfig;
+
+    const VERSION: i16 = crabka_protocol::owned::list_groups_response::MAX_VERSION;
+
+    fn encode_request(req: &ListGroupsRequest) -> Bytes {
+        let mut buf = BytesMut::with_capacity(req.encoded_len(VERSION));
+        req.encode(&mut buf, VERSION).expect("encode request");
+        buf.freeze()
+    }
+
+    fn decode_response(bytes: &Bytes) -> ListGroupsResponse {
+        let mut cur: &[u8] = bytes.as_ref();
+        let resp = ListGroupsResponse::decode(&mut cur, VERSION).expect("decode response");
+        assert!(cur.is_empty(), "response decoder consumed all bytes");
+        resp
+    }
+
+    fn principal(name: &str) -> Principal {
+        Principal {
+            name: name.into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        }
+    }
+
+    fn peer() -> SocketAddr {
+        "127.0.0.1:9092".parse().unwrap()
+    }
+
+    fn test_context<'a>(
+        principal: &'a Principal,
+        peer: &'a SocketAddr,
+    ) -> crate::handlers::RequestContext<'a> {
+        crate::handlers::RequestContext {
+            principal,
+            peer,
+            client_id: "admin-client",
+            sendfile_capable: false,
+            connection_listener_name: "PLAINTEXT",
+        }
+    }
+
+    async fn start_broker(authorizer: Arc<dyn Authorizer>) -> (BrokerHandle, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
+        cfg.audit_enabled = false;
+        cfg.authorizer = authorizer;
+        let handle = Broker::start(cfg).await.expect("start broker");
+        (handle, dir)
+    }
+
+    #[tokio::test]
+    async fn handler_lists_classic_group_once_with_wire_fields() {
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let _ = broker.group_coordinator.get_or_create_classic("classic-a");
+        let p = principal("admin");
+        let peer = peer();
+        let ctx = test_context(&p, &peer);
+        let req = encode_request(&ListGroupsRequest::default());
+
+        let bytes = handle(&broker, VERSION, 123, &req, &ctx)
+            .await
+            .expect("handle");
+        let resp = decode_response(&bytes);
+
+        assert!(resp.error_code == codes::NONE);
+        assert!(resp.throttle_time_ms == 0);
+        assert!(resp.groups.len() == 1, "{:?}", resp.groups);
+        let group = &resp.groups[0];
+        assert!(group.group_id == "classic-a");
+        assert!(group.protocol_type == "consumer");
+        assert!(group.group_state == "Empty");
+        assert!(group.group_type == "classic");
+        broker_handle.shutdown().await;
+    }
+
+    #[test]
+    fn append_next_gen_filters_dedups_authorizes_and_preserves_share_fields() {
+        let req = ListGroupsRequest {
+            states_filter: vec!["Stable".into()],
+            types_filter: vec!["share".into()],
+            ..Default::default()
+        };
+        let mut groups = vec![ListedGroup {
+            group_id: "already".into(),
+            protocol_type: "consumer".into(),
+            group_state: "Stable".into(),
+            group_type: "classic".into(),
+            ..Default::default()
+        }];
+        let mut emitted = HashSet::from(["already".to_string()]);
+
+        append_next_gen(
+            &mut groups,
+            &mut emitted,
+            "share",
+            vec!["already".into(), "denied".into(), "share-a".into()],
+            &req,
+            true,
+            true,
+            &|gid| gid != "denied",
+        );
+
+        assert!(groups.len() == 2, "{groups:?}");
+        let group = &groups[1];
+        assert!(group.group_id == "share-a");
+        assert!(group.protocol_type.is_empty());
+        assert!(group.group_state == "Stable");
+        assert!(group.group_type == "share");
+        assert!(emitted.contains("share-a"));
+        assert!(!emitted.contains("denied"));
+    }
+
+    #[test]
+    fn append_next_gen_rejects_mismatched_type_filter_and_keeps_consumer_protocol() {
+        let mismatched = ListGroupsRequest {
+            types_filter: vec!["share".into()],
+            ..Default::default()
+        };
+        let mut groups = Vec::new();
+        let mut emitted = HashSet::new();
+        append_next_gen(
+            &mut groups,
+            &mut emitted,
+            "consumer",
+            vec!["consumer-a".into()],
+            &mismatched,
+            false,
+            true,
+            &|_| true,
+        );
+        assert!(groups.is_empty());
+
+        let matched = ListGroupsRequest {
+            types_filter: vec!["consumer".into()],
+            ..Default::default()
+        };
+        append_next_gen(
+            &mut groups,
+            &mut emitted,
+            "consumer",
+            vec!["consumer-a".into()],
+            &matched,
+            false,
+            true,
+            &|_| true,
+        );
+        assert!(groups.len() == 1, "{groups:?}");
+        assert!(groups[0].protocol_type == "consumer");
+        assert!(groups[0].group_type == "consumer");
+    }
+
+    #[test]
+    fn state_to_str_covers_all_classic_states() {
+        assert!(state_to_str(GroupState::Empty) == "Empty");
+        assert!(state_to_str(GroupState::PreparingRebalance) == "PreparingRebalance");
+        assert!(state_to_str(GroupState::CompletingRebalance) == "CompletingRebalance");
+        assert!(state_to_str(GroupState::Stable) == "Stable");
+        assert!(state_to_str(GroupState::Dead) == "Dead");
+    }
+}

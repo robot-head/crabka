@@ -239,6 +239,82 @@ fn topic_describe_denied(
 mod tests {
     use super::*;
     use assert2::assert;
+    use crabka_protocol::owned::list_offsets_request::{ListOffsetsPartition, ListOffsetsTopic};
+    use crabka_security::{AuthMethod, Principal};
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    use crate::authorizer::Authorizer;
+    use crate::broker::{Broker, BrokerHandle};
+    use crate::config::BrokerConfig;
+
+    #[derive(Debug)]
+    struct DenyAll;
+
+    impl Authorizer for DenyAll {
+        fn authorize(
+            &self,
+            _source: &dyn crabka_authz::AclSource,
+            _req: &AuthorizationRequest<'_>,
+        ) -> AuthorizationResult {
+            AuthorizationResult::Deny
+        }
+    }
+
+    fn encode_request(req: &ListOffsetsRequest, version: i16) -> Bytes {
+        let mut buf = BytesMut::with_capacity(req.encoded_len(version));
+        req.encode(&mut buf, version).expect("encode request");
+        buf.freeze()
+    }
+
+    fn decode_response(bytes: &Bytes, version: i16) -> ListOffsetsResponse {
+        let mut cur: &[u8] = bytes.as_ref();
+        let resp = ListOffsetsResponse::decode(&mut cur, version).expect("decode response");
+        assert!(cur.is_empty(), "response decoder consumed all bytes");
+        resp
+    }
+
+    fn principal(name: &str) -> Principal {
+        Principal {
+            name: name.into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        }
+    }
+
+    fn peer() -> SocketAddr {
+        "127.0.0.1:9092".parse().unwrap()
+    }
+
+    fn test_context<'a>(
+        principal: &'a Principal,
+        peer: &'a SocketAddr,
+    ) -> crate::handlers::RequestContext<'a> {
+        crate::handlers::RequestContext {
+            principal,
+            peer,
+            client_id: "admin-client",
+            sendfile_capable: false,
+            connection_listener_name: "PLAINTEXT",
+        }
+    }
+
+    async fn start_broker(authorizer: Arc<dyn Authorizer>) -> (BrokerHandle, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
+        cfg.audit_enabled = false;
+        cfg.authorizer = authorizer;
+        let handle = Broker::start(cfg).await.expect("start broker");
+        (handle, dir)
+    }
+
+    #[test]
+    fn sentinel_constants_match_kafka_wire_values() {
+        assert!(EARLIEST == -2);
+        assert!(LATEST == -1);
+        assert!(MAX_TIMESTAMP == -3);
+        assert!(EARLIEST_LOCAL == -4);
+    }
 
     #[test]
     fn topic_describe_denied_yields_topic_authorization_failed_rows() {
@@ -288,5 +364,58 @@ mod tests {
         let decoded =
             ListOffsetsResponse::decode(&mut cur, list_offsets_response::MAX_VERSION).unwrap();
         assert!(decoded.topics[0].partitions[0].error_code == codes::TOPIC_AUTHORIZATION_FAILED);
+    }
+
+    #[tokio::test]
+    async fn denied_handler_preserves_topic_and_partition_response_fields() {
+        let version = crabka_protocol::owned::list_offsets_response::MAX_VERSION;
+        let (broker_handle, _dir) = start_broker(Arc::new(DenyAll)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let p = principal("alice");
+        let peer = peer();
+        let ctx = test_context(&p, &peer);
+        let req = ListOffsetsRequest {
+            replica_id: -1,
+            isolation_level: 0,
+            topics: vec![ListOffsetsTopic {
+                name: "orders".into(),
+                partitions: vec![
+                    ListOffsetsPartition {
+                        partition_index: 0,
+                        current_leader_epoch: -1,
+                        timestamp: LATEST,
+                        ..Default::default()
+                    },
+                    ListOffsetsPartition {
+                        partition_index: 2,
+                        current_leader_epoch: -1,
+                        timestamp: EARLIEST,
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }],
+            timeout_ms: 30_000,
+            ..Default::default()
+        };
+        let req = encode_request(&req, version);
+
+        let bytes = handle(&broker, version, 123, &req, &ctx)
+            .await
+            .expect("handle");
+        let resp = decode_response(&bytes, version);
+
+        assert!(resp.throttle_time_ms == 0);
+        assert!(resp.topics.len() == 1, "{:?}", resp.topics);
+        let topic = &resp.topics[0];
+        assert!(topic.name == "orders");
+        assert!(topic.partitions.len() == 2, "{:?}", topic.partitions);
+        for (row, expected_partition) in topic.partitions.iter().zip([0, 2]) {
+            assert!(row.partition_index == expected_partition);
+            assert!(row.error_code == codes::TOPIC_AUTHORIZATION_FAILED);
+            assert!(row.timestamp == -1);
+            assert!(row.offset == -1);
+        }
+        broker_handle.shutdown().await;
     }
 }
