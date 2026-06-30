@@ -466,6 +466,33 @@ mod tests {
     }
 
     #[test]
+    fn render_topology_preserves_subtopology_and_topic_info_fields() {
+        let topology = render_topology(topology_value());
+
+        assert!(topology.epoch == 9);
+        let subtopologies = topology.subtopologies.as_ref().expect("subtopologies");
+        assert!(subtopologies.len() == 1, "{topology:?}");
+        let sub = &subtopologies[0];
+        assert!(sub.subtopology_id == "sub-a");
+        assert!(sub.source_topics == vec!["input-a", "input-b"]);
+        assert!(sub.repartition_sink_topics == vec!["sink-a"]);
+        assert!(sub.state_changelog_topics.len() == 1, "{sub:?}");
+        assert!(sub.state_changelog_topics[0].name == "store-a-changelog");
+        assert!(sub.state_changelog_topics[0].partitions == 3);
+        assert!(sub.state_changelog_topics[0].replication_factor == 2);
+        assert!(sub.state_changelog_topics[0].topic_configs.len() == 1);
+        assert!(sub.state_changelog_topics[0].topic_configs[0].key == "cleanup.policy");
+        assert!(sub.state_changelog_topics[0].topic_configs[0].value == "compact");
+        assert!(sub.repartition_source_topics.len() == 1, "{sub:?}");
+        assert!(sub.repartition_source_topics[0].name == "source-repartition");
+        assert!(sub.repartition_source_topics[0].partitions == 4);
+        assert!(sub.repartition_source_topics[0].replication_factor == 1);
+        assert!(sub.repartition_source_topics[0].topic_configs.len() == 1);
+        assert!(sub.repartition_source_topics[0].topic_configs[0].key == "retention.ms");
+        assert!(sub.repartition_source_topics[0].topic_configs[0].value == "1000");
+    }
+
+    #[test]
     fn task_map_to_ids_preserves_sorted_task_maps() {
         let tasks = task_map_to_ids(&task_map(&[("z", vec![9]), ("a", vec![1, 2])]));
 
