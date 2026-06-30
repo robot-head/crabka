@@ -208,6 +208,23 @@ fn jemalloc_heap_profiling_uses_bounded_always_on_sampling() {
 }
 
 #[test]
+fn metrics_compactor_bounds_cold_block_retention_for_demo() {
+    let compose = docker_compose();
+    let block = compose_service_block(&compose, "metrics-compactor");
+    assert!(
+        block
+            .contains("--compactor-retention-ms=${CRABKA_METRICS_COMPACTOR_RETENTION_MS:-3600000}"),
+        "metrics compactor should bound cold metric block/index growth by default"
+    );
+    assert!(
+        block.contains(
+            "--compactor-retention-sweep-ms=${CRABKA_METRICS_COMPACTOR_RETENTION_SWEEP_MS:-30000}"
+        ),
+        "metrics compactor should sweep retention often enough for the demo"
+    );
+}
+
+#[test]
 fn otlp_heartbeat_traces_use_per_component_service_names() {
     let compose = docker_compose();
     assert!(

@@ -5,7 +5,7 @@ static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -47,6 +47,12 @@ struct Cli {
     /// Flush the accumulated compaction buffer once its oldest record reaches this age.
     #[arg(long, default_value_t = crabka_metrics::DEFAULT_FLUSH_MAX_AGE.as_millis() as u64)]
     compactor_flush_max_age_ms: u64,
+    /// Delete compacted metric blocks older than this window. Zero disables retention.
+    #[arg(long, default_value_t = 0)]
+    compactor_retention_ms: u64,
+    /// How often the compactor sweeps object-store blocks/indexes for retention.
+    #[arg(long, default_value_t = 60_000)]
+    compactor_retention_sweep_ms: u64,
     #[arg(long, default_value = HA_TRACKER_TOPIC)]
     ha_tracker_topic: String,
     #[arg(long, default_value = "crabka-metrics-ha-tracker")]
@@ -305,9 +311,17 @@ async fn run_compactor(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     config.poll_timeout = Duration::from_millis(cli.compactor_poll_timeout_ms);
     config.flush_max_rows = cli.compactor_flush_max_rows;
     config.flush_max_age = Duration::from_millis(cli.compactor_flush_max_age_ms);
-    let runtime = config.build_runtime(store)?;
+    let runtime = config.build_runtime(store.clone())?;
     let mut consumer = config.build_consumer().await?;
     let stopping = Arc::new(AtomicBool::new(false));
+    if cli.compactor_retention_ms > 0 {
+        spawn_retention_sweeper(
+            store,
+            Duration::from_millis(cli.compactor_retention_ms),
+            Duration::from_millis(cli.compactor_retention_sweep_ms.max(1)),
+            Arc::clone(&stopping),
+        );
+    }
     let signal = Arc::clone(&stopping);
     tokio::spawn(async move {
         let _ = tokio::signal::ctrl_c().await;
@@ -329,6 +343,53 @@ async fn run_compactor(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         "metrics compactor stopped"
     );
     Ok(())
+}
+
+fn spawn_retention_sweeper(
+    store: Arc<dyn ObjectStore>,
+    retention: Duration,
+    sweep_interval: Duration,
+    stopping: Arc<AtomicBool>,
+) {
+    tokio::spawn(async move {
+        loop {
+            match crabka_metrics::enforce_compaction_retention(
+                store.clone(),
+                unix_time_ms(),
+                retention,
+            )
+            .await
+            {
+                Ok(stats) => {
+                    if stats.manifests_deleted > 0 || stats.blocks_deleted > 0 {
+                        tracing::info!(
+                            manifests_scanned = stats.manifests_scanned,
+                            manifests_deleted = stats.manifests_deleted,
+                            blocks_deleted = stats.blocks_deleted,
+                            "metrics compactor retention deleted old blocks"
+                        );
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "metrics compactor retention sweep failed");
+                }
+            }
+            if stopping.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(sweep_interval).await;
+            if stopping.load(Ordering::SeqCst) {
+                break;
+            }
+        }
+    });
+}
+
+fn unix_time_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -489,6 +550,10 @@ mod tests {
             "metrics-c",
             "--compactor-poll-timeout-ms",
             "250",
+            "--compactor-retention-ms",
+            "3600000",
+            "--compactor-retention-sweep-ms",
+            "30000",
         ])
         .unwrap();
 
@@ -496,6 +561,8 @@ mod tests {
         assert!(cli.bootstrap == "broker:9092");
         assert!(cli.compactor_group_id == "metrics-c");
         assert!(cli.compactor_poll_timeout_ms == 250);
+        assert!(cli.compactor_retention_ms == 3_600_000);
+        assert!(cli.compactor_retention_sweep_ms == 30_000);
     }
 
     #[test]

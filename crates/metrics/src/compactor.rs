@@ -12,6 +12,7 @@ use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
 use crabka_blockstore::{BlockMeta, BlockStoreError, BlockWriter};
 use crabka_client_consumer::{AutoOffsetReset, Consumer, ConsumerError, ConsumerRecord};
+use futures::TryStreamExt;
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 use serde::{Deserialize, Serialize};
@@ -182,11 +183,21 @@ pub struct CompactionLoopResult {
     pub committed_offsets: Vec<CompactionPartitionOffset>,
 }
 
+/// Counts of stale compacted objects removed by a retention sweep.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CompactionRetentionStats {
+    pub manifests_scanned: usize,
+    pub manifests_deleted: usize,
+    pub blocks_deleted: usize,
+}
+
 /// Default number of buffered WAL records that triggers a compaction flush.
 pub const DEFAULT_FLUSH_MAX_ROWS: usize = 50_000;
 
 /// Default maximum age the oldest buffered WAL record may reach before a flush.
 pub const DEFAULT_FLUSH_MAX_AGE: Duration = Duration::from_mins(1);
+
+const COMPACTION_OBJECT_PREFIX: &str = "metrics";
 
 /// Configuration for the metrics compactor role.
 #[derive(Clone, Debug)]
@@ -237,6 +248,19 @@ pub enum CompactionIndexError {
 
     #[error("compaction index object-store write failed: {0}")]
     ObjectStore(String),
+}
+
+/// Errors raised while deleting compacted metric objects outside retention.
+#[derive(Debug, thiserror::Error)]
+pub enum CompactionRetentionError {
+    #[error("compaction retention object-store operation failed: {0}")]
+    ObjectStore(String),
+
+    #[error("compaction retention manifest key mismatch: listed `{listed}`, manifest `{manifest}`")]
+    ManifestKeyMismatch { listed: String, manifest: String },
+
+    #[error(transparent)]
+    Index(#[from] CompactionIndexError),
 }
 
 /// Errors raised while configuring the metrics compactor role.
@@ -385,6 +409,75 @@ impl CompactionIndexSink for ObjectStoreCompactionIndexSink {
             .map_err(|error| CompactionIndexError::ObjectStore(error.to_string()))?;
         Ok(())
     }
+}
+
+/// Delete compacted metric blocks whose index manifest ends before the retention cutoff.
+pub async fn enforce_compaction_retention(
+    store: Arc<dyn ObjectStore>,
+    now_ms: i64,
+    retention: Duration,
+) -> Result<CompactionRetentionStats, CompactionRetentionError> {
+    if retention.is_zero() {
+        return Ok(CompactionRetentionStats::default());
+    }
+
+    let cutoff_ms = now_ms.saturating_sub(duration_millis(retention));
+    let mut objects = store
+        .list(Some(&Path::from(COMPACTION_OBJECT_PREFIX)))
+        .try_collect::<Vec<_>>()
+        .await
+        .map_err(|error| CompactionRetentionError::ObjectStore(error.to_string()))?;
+    objects.sort_by(|left, right| left.location.cmp(&right.location));
+
+    let mut stats = CompactionRetentionStats::default();
+    for object in objects {
+        let key = object.location.as_ref();
+        if !key.ends_with(".index") {
+            continue;
+        }
+        stats.manifests_scanned += 1;
+        let bytes = store
+            .get(&object.location)
+            .await
+            .map_err(|error| CompactionRetentionError::ObjectStore(error.to_string()))?
+            .bytes()
+            .await
+            .map_err(|error| CompactionRetentionError::ObjectStore(error.to_string()))?;
+        let manifest = CompactionIndexManifest::decode(&bytes)?;
+        if manifest.index_key != key {
+            return Err(CompactionRetentionError::ManifestKeyMismatch {
+                listed: key.to_string(),
+                manifest: manifest.index_key,
+            });
+        }
+        if manifest.max_ts >= cutoff_ms {
+            continue;
+        }
+
+        if delete_if_exists(&store, &Path::from(manifest.index_key.clone())).await? {
+            stats.manifests_deleted += 1;
+        }
+        if delete_if_exists(&store, &Path::from(manifest.block_key.clone())).await? {
+            stats.blocks_deleted += 1;
+        }
+    }
+
+    Ok(stats)
+}
+
+async fn delete_if_exists(
+    store: &Arc<dyn ObjectStore>,
+    location: &Path,
+) -> Result<bool, CompactionRetentionError> {
+    match store.delete(location).await {
+        Ok(()) => Ok(true),
+        Err(object_store::Error::NotFound { .. }) => Ok(false),
+        Err(error) => Err(CompactionRetentionError::ObjectStore(error.to_string())),
+    }
+}
+
+fn duration_millis(duration: Duration) -> i64 {
+    duration.as_millis().min(i64::MAX as u128) as i64
 }
 
 impl MetricsCompactorConfig {
@@ -2041,6 +2134,153 @@ mod tests {
             super::CompactionIndexManifest::decode(&bytes).expect("decode persisted manifest");
 
         assert!(decoded == manifest);
+    }
+
+    #[tokio::test]
+    async fn retention_deletes_blocks_and_indexes_older_than_cutoff() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let block_writer = crabka_blockstore::BlockWriter::new(object_store.clone());
+        let sink = super::ObjectStoreCompactionIndexSink::new(object_store.clone());
+
+        let old_plan = super::compaction_partition_object_plan(
+            "tenant-a",
+            super::MetricBlockKind::Float,
+            0,
+            1,
+            2,
+        );
+        let old_meta = block_writer
+            .write_block(
+                "tenant-a",
+                &old_plan.block_key,
+                crate::float_sample_schema(),
+                &[crate::encode_float_samples(&[(1, 1_000, 1.0)]).expect("encode old float")],
+            )
+            .await
+            .expect("write old block");
+        let old = super::CompactionIndexManifest::from_block_meta(
+            super::MetricBlockKind::Float,
+            &old_plan,
+            &old_meta,
+            vec![super::CompactionSeriesLabels {
+                fingerprint: 1,
+                labels: labels(&[("__name__", "up"), ("job", "old")]),
+            }],
+        );
+        super::CompactionIndexSink::write_manifest(&sink, &old)
+            .await
+            .expect("write old manifest");
+
+        let fresh_plan = super::compaction_partition_object_plan(
+            "tenant-a",
+            super::MetricBlockKind::Float,
+            0,
+            3,
+            4,
+        );
+        let fresh_meta = block_writer
+            .write_block(
+                "tenant-a",
+                &fresh_plan.block_key,
+                crate::float_sample_schema(),
+                &[crate::encode_float_samples(&[(2, 10_000, 1.0)]).expect("encode fresh float")],
+            )
+            .await
+            .expect("write fresh block");
+        let fresh = super::CompactionIndexManifest::from_block_meta(
+            super::MetricBlockKind::Float,
+            &fresh_plan,
+            &fresh_meta,
+            vec![super::CompactionSeriesLabels {
+                fingerprint: 2,
+                labels: labels(&[("__name__", "up"), ("job", "fresh")]),
+            }],
+        );
+        super::CompactionIndexSink::write_manifest(&sink, &fresh)
+            .await
+            .expect("write fresh manifest");
+
+        let stats = super::enforce_compaction_retention(
+            object_store.clone(),
+            10_000,
+            std::time::Duration::from_secs(5),
+        )
+        .await
+        .expect("enforce retention");
+
+        assert!(stats.manifests_deleted == 1);
+        assert!(stats.blocks_deleted == 1);
+        assert!(
+            object_store
+                .head(&object_store::path::Path::from(old.index_key.clone()))
+                .await
+                .is_err()
+        );
+        assert!(
+            object_store
+                .head(&object_store::path::Path::from(old.block_key.clone()))
+                .await
+                .is_err()
+        );
+        assert!(
+            object_store
+                .head(&object_store::path::Path::from(fresh.index_key.clone()))
+                .await
+                .is_ok()
+        );
+        assert!(
+            object_store
+                .head(&object_store::path::Path::from(fresh.block_key.clone()))
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn retention_rejects_manifest_with_mismatched_index_key() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let listed_index_key = "metrics/tenant-a/float/mismatch.index";
+        let manifest_index_key = "metrics/tenant-a/float/actual.index";
+        let manifest = super::CompactionIndexManifest {
+            tenant: "tenant-a".to_string(),
+            kind: super::MetricBlockKind::Float,
+            block_key: "metrics/tenant-a/float/block.parquet".to_string(),
+            index_key: manifest_index_key.to_string(),
+            first_offset: 0,
+            last_offset: 1,
+            row_count: 1,
+            min_ts: 1_000,
+            max_ts: 1_000,
+            fingerprints: vec![1],
+            series: Vec::new(),
+        };
+        object_store
+            .put(
+                &object_store::path::Path::from(listed_index_key),
+                object_store::PutPayload::from(manifest.encode().expect("encode manifest")),
+            )
+            .await
+            .expect("write mismatched manifest");
+
+        let error = super::enforce_compaction_retention(
+            object_store.clone(),
+            10_000,
+            std::time::Duration::from_secs(5),
+        )
+        .await
+        .expect_err("mismatched manifest should fail");
+
+        assert!(matches!(
+            error,
+            super::CompactionRetentionError::ManifestKeyMismatch { listed, manifest }
+                if listed == listed_index_key && manifest == manifest_index_key
+        ));
+        assert!(
+            object_store
+                .head(&object_store::path::Path::from(listed_index_key))
+                .await
+                .is_ok()
+        );
     }
 
     #[test]
