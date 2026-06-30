@@ -120,17 +120,43 @@ mod tests {
         resp
     }
 
+    fn encode_request(req: &ReadShareGroupStateRequest) -> Bytes {
+        let mut buf = BytesMut::with_capacity(req.encoded_len(super::super::test_support::VERSION));
+        req.encode(&mut buf, super::super::test_support::VERSION)
+            .expect("encode request");
+        buf.freeze()
+    }
+
+    fn request(group_id: &str, topic_id: ProtoUuid, partition: i32) -> ReadShareGroupStateRequest {
+        ReadShareGroupStateRequest {
+            group_id: group_id.into(),
+            topics: vec![ReadStateData {
+                topic_id,
+                partitions: vec![PartitionData {
+                    partition,
+                    leader_epoch: 3,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
     #[tokio::test]
     async fn returns_persisted_state_batches_for_led_partition() {
         let dir = tempfile::TempDir::new().expect("tempdir");
-        let coordinator = super::super::test_support::led_coordinator(dir.path()).await;
+        let (broker_handle, broker) =
+            super::super::test_support::broker_with_led_share_coordinator(dir.path()).await;
         let topic_id = uuid::Uuid::from_bytes([33; 16]);
         let wire_topic_id = ProtoUuid(*topic_id.as_bytes());
-        coordinator
+        broker
+            .share_coordinator
             .initialize("share-group", topic_id, 4, 17, 90)
             .await
             .expect("initialize state");
-        coordinator
+        broker
+            .share_coordinator
             .write(
                 "share-group",
                 topic_id,
@@ -143,23 +169,21 @@ mod tests {
             )
             .await
             .expect("write state");
-        let req = ReadShareGroupStateRequest {
-            group_id: "share-group".into(),
-            topics: vec![ReadStateData {
-                topic_id: wire_topic_id,
-                partitions: vec![PartitionData {
-                    partition: 4,
-                    leader_epoch: 3,
-                    ..Default::default()
-                }],
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
+        let req = request("share-group", wire_topic_id, 4);
+        let req_bytes = encode_request(&req);
 
-        let bytes = handle_request(coordinator, super::super::test_support::VERSION, req)
-            .await
-            .expect("handle request");
+        broker
+            .share_coordinator
+            .lead_all_partitions_for_test()
+            .await;
+        let bytes = super::handle(
+            &broker,
+            super::super::test_support::VERSION,
+            123,
+            &req_bytes,
+        )
+        .await
+        .expect("handle");
         let resp = decode(&bytes);
 
         assert!(resp.results.len() == 1);
@@ -177,5 +201,73 @@ mod tests {
         assert!(batch.last_offset == 105);
         assert!(batch.delivery_state == 2);
         assert!(batch.delivery_count == 3);
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn returns_initial_state_for_led_missing_partition() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let (broker_handle, broker) =
+            super::super::test_support::broker_with_led_share_coordinator(dir.path()).await;
+        let topic_id = ProtoUuid([34; 16]);
+        let req = request("share-group", topic_id, 6);
+        let req_bytes = encode_request(&req);
+
+        broker
+            .share_coordinator
+            .lead_all_partitions_for_test()
+            .await;
+        let bytes = super::handle(
+            &broker,
+            super::super::test_support::VERSION,
+            123,
+            &req_bytes,
+        )
+        .await
+        .expect("handle");
+        let resp = decode(&bytes);
+
+        assert!(resp.results.len() == 1);
+        assert!(resp.results[0].topic_id == topic_id);
+        assert!(resp.results[0].partitions.len() == 1);
+        let partition = &resp.results[0].partitions[0];
+        assert!(partition.partition == 6);
+        assert!(partition.error_code == codes::NONE);
+        assert!(partition.error_message.is_none());
+        assert!(partition.state_epoch == 0);
+        assert!(partition.start_offset == -1);
+        assert!(partition.state_batches.is_empty());
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn returns_not_coordinator_for_unled_partition() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let (broker_handle, broker) = super::super::test_support::broker(dir.path()).await;
+        let topic_id = ProtoUuid([35; 16]);
+        let req = request("share-group", topic_id, 8);
+        let req_bytes = encode_request(&req);
+
+        let bytes = super::handle(
+            &broker,
+            super::super::test_support::VERSION,
+            123,
+            &req_bytes,
+        )
+        .await
+        .expect("handle");
+        let resp = decode(&bytes);
+
+        assert!(resp.results.len() == 1);
+        assert!(resp.results[0].topic_id == topic_id);
+        assert!(resp.results[0].partitions.len() == 1);
+        let partition = &resp.results[0].partitions[0];
+        assert!(partition.partition == 8);
+        assert!(partition.error_code == codes::NOT_COORDINATOR);
+        assert!(partition.error_message.is_none());
+        assert!(partition.state_epoch == 0);
+        assert!(partition.start_offset == -1);
+        assert!(partition.state_batches.is_empty());
+        broker_handle.shutdown().await;
     }
 }

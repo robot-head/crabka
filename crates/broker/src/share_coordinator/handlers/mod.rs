@@ -22,6 +22,8 @@ pub(crate) mod test_support {
 
     use crabka_log::{Log, LogConfig};
 
+    use crate::broker::{Broker, BrokerHandle};
+    use crate::config::BrokerConfig;
     use crate::partition_registry::PartitionRegistry;
     use crate::share_coordinator::bootstrap;
     use crate::share_coordinator::config::ShareCoordinatorConfig;
@@ -54,11 +56,15 @@ pub(crate) mod test_support {
         registry.insert(bootstrap::TOPIC.to_string(), partition, part);
     }
 
+    pub(crate) fn open_all_state_partitions(registry: &PartitionRegistry, log_dir: &Path) {
+        for partition in 0..bootstrap::NUM_PARTITIONS {
+            open_state_partition(registry, log_dir, partition);
+        }
+    }
+
     pub(crate) fn coordinator(log_dir: &Path) -> Arc<ShareCoordinator> {
         let registry = Arc::new(PartitionRegistry::new());
-        for partition in 0..bootstrap::NUM_PARTITIONS {
-            open_state_partition(&registry, log_dir, partition);
-        }
+        open_all_state_partitions(&registry, log_dir);
         Arc::new(ShareCoordinator::new(
             1,
             registry,
@@ -66,9 +72,23 @@ pub(crate) mod test_support {
         ))
     }
 
-    pub(crate) async fn led_coordinator(log_dir: &Path) -> Arc<ShareCoordinator> {
-        let coordinator = coordinator(log_dir);
-        coordinator.lead_all_partitions_for_test().await;
-        coordinator
+    pub(crate) async fn broker(dir: &Path) -> (BrokerHandle, Arc<crate::broker::Broker>) {
+        let handle = Broker::start(BrokerConfig::for_tests(dir.to_path_buf()))
+            .await
+            .expect("start broker");
+        let broker = handle.broker_arc_for_test();
+        (handle, broker)
+    }
+
+    pub(crate) async fn broker_with_led_share_coordinator(
+        dir: &Path,
+    ) -> (BrokerHandle, Arc<crate::broker::Broker>) {
+        let (handle, broker) = broker(dir).await;
+        open_all_state_partitions(&broker.partitions, dir);
+        broker
+            .share_coordinator
+            .lead_all_partitions_for_test()
+            .await;
+        (handle, broker)
     }
 }
