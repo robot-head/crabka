@@ -1042,7 +1042,7 @@ fn unix_time_ms() -> i64 {
 }
 
 fn duration_ms(duration: Duration) -> i64 {
-    i64::try_from(duration.as_millis().min(i64::MAX as u128)).unwrap_or(i64::MAX)
+    i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
 }
 
 #[async_trait::async_trait]
