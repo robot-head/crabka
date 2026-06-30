@@ -839,11 +839,9 @@ fn resource_matches(
     matcher: &SpanMatcher,
 ) -> Result<bool, TraceqlError> {
     Ok(match matcher.key.as_str() {
-        "service.name" => string_matches(
-            &string_value(batch, COL_ROOT_SERVICE_NAME, row)?,
-            matcher.op,
-            &matcher.value,
-        ),
+        "service.name" => {
+            root_service_matches(&string_value(batch, COL_ROOT_SERVICE_NAME, row)?, matcher)
+        }
         _ => batch_attr_matches_with_resource(
             batch,
             row,
@@ -1066,6 +1064,11 @@ fn present_value_matches(op: MatchCmp, expected: &MatchValue) -> Option<bool> {
 
 fn nil_matches(op: MatchCmp, expected: &MatchValue) -> bool {
     matches!((op, expected), (MatchCmp::Eq, MatchValue::Nil))
+}
+
+fn root_service_matches(value: &str, matcher: &SpanMatcher) -> bool {
+    nested_presence_matches(!value.is_empty(), matcher.op, &matcher.value)
+        .unwrap_or_else(|| string_matches(value, matcher.op, &matcher.value))
 }
 
 fn string_matches(value: &str, op: MatchCmp, expected: &MatchValue) -> bool {
@@ -4453,6 +4456,85 @@ mod tests {
             .await
             .unwrap();
         assert!(span.traces.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cold_traceql_metrics_group_resource_service_name_after_nil_guard() {
+        let object_store = Arc::new(InMemory::new());
+        let blocks = Arc::new(BlockStore::new(
+            object_store.clone(),
+            Url::parse("memory:///").unwrap(),
+        ));
+        let writer = BlockWriter::new(object_store);
+        let mut checkout = span_with_nested_refs();
+        checkout.trace_id = [1; 16];
+        checkout.span_id = [1; 8];
+        checkout.start_ns = 1_000;
+        checkout.resource_attrs = vec![KeyValue {
+            key: "service.name".into(),
+            value: SpanAttrValue::Str("checkout".into()),
+        }];
+        let mut billing = span_with_nested_refs();
+        billing.trace_id = [2; 16];
+        billing.span_id = [2; 8];
+        billing.start_ns = 2_000;
+        billing.resource_attrs = vec![KeyValue {
+            key: "service.name".into(),
+            value: SpanAttrValue::Str("billing".into()),
+        }];
+        let meta = writer
+            .write_block_with_decl(
+                "tenant",
+                "blocks/metrics-resource-service-name.parquet",
+                span_block_schema(),
+                &[
+                    span_batch(std::slice::from_ref(&checkout)).unwrap(),
+                    span_batch(std::slice::from_ref(&billing)).unwrap(),
+                ],
+                &span_block_decl(),
+                SummaryColumns::new(SCOL_TRACE_ID, SCOL_START_NANO),
+            )
+            .await
+            .unwrap();
+        let mut bloom = ShardedTraceBloom::with_tempo_defaults(1);
+        bloom.insert(&checkout.trace_id);
+        bloom.insert(&billing.trace_id);
+        let mut index = TraceIndex::new();
+        index.add_trace_block(
+            "tenant",
+            TraceBlockStats {
+                object_key: meta.object_key,
+                min_ts: meta.min_ts,
+                max_ts: meta.max_ts,
+                bloom,
+                tag_names: BTreeSet::from(["service.name".to_string()]),
+                tag_values: BTreeMap::from([(
+                    "service.name".to_string(),
+                    BTreeSet::from(["billing".to_string(), "checkout".to_string()]),
+                )]),
+            },
+        );
+        let store = Arc::new(CrabkaSpanStore::new(blocks, shared(index), None));
+        let engine = TraceqlEngine::new(store, EngineOpts::default());
+
+        let mut series = engine
+            .query_range(
+                "tenant",
+                "{ resource.service.name != nil } | count_over_time() by(resource.service.name)",
+                0,
+                10_000,
+                10_000,
+            )
+            .await
+            .unwrap()
+            .series;
+
+        series.sort_by(|a, b| a.labels.cmp(&b.labels));
+        assert!(series.len() == 2);
+        assert!(series[0].labels == vec![("resource.service.name".into(), "billing".into())]);
+        assert!(series[0].points == vec![(0, 1.0), (10_000, 0.0)]);
+        assert!(series[1].labels == vec![("resource.service.name".into(), "checkout".into())]);
+        assert!(series[1].points == vec![(0, 1.0), (10_000, 0.0)]);
     }
 
     #[tokio::test]
