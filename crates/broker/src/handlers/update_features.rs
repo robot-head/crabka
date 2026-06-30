@@ -262,7 +262,6 @@ fn finalize(results: Vec<UpdatableFeatureResult>, version: i16) -> UpdateFeature
         (codes::NONE, None)
     };
     UpdateFeaturesResponse {
-        throttle_time_ms: 0,
         error_code: top_code,
         error_message: top_msg,
         results,
@@ -451,6 +450,7 @@ mod tests {
         let resp = apply_request_wide(
             vec![
                 row("metadata.version".into(), codes::NONE, ""),
+                row("eligible.feature".into(), codes::NONE, ""),
                 row(
                     "not.a.feature".into(),
                     codes::INVALID_REQUEST,
@@ -464,13 +464,16 @@ mod tests {
 
         assert!(resp.error_code == codes::FEATURE_UPDATE_FAILED);
         assert!(resp.error_message.as_deref() == Some("persist failed"));
-        assert!(resp.results.len() == 2);
+        assert!(resp.results.len() == 3);
         assert!(resp.results[0].feature == "metadata.version");
         assert!(resp.results[0].error_code == codes::FEATURE_UPDATE_FAILED);
         assert!(resp.results[0].error_message.as_deref() == Some("persist failed"));
-        assert!(resp.results[1].feature == "not.a.feature");
-        assert!(resp.results[1].error_code == codes::INVALID_REQUEST);
-        assert!(resp.results[1].error_message.as_deref() == Some("bad feature"));
+        assert!(resp.results[1].feature == "eligible.feature");
+        assert!(resp.results[1].error_code == codes::FEATURE_UPDATE_FAILED);
+        assert!(resp.results[1].error_message.as_deref() == Some("persist failed"));
+        assert!(resp.results[2].feature == "not.a.feature");
+        assert!(resp.results[2].error_code == codes::INVALID_REQUEST);
+        assert!(resp.results[2].error_message.as_deref() == Some("bad feature"));
     }
 
     #[test]
@@ -480,7 +483,12 @@ mod tests {
             row("b".into(), codes::INVALID_UPDATE_VERSION, "bad"),
         ];
         let resp = finalize(results, 2);
+        assert!(resp.throttle_time_ms == 0);
         assert!(resp.error_code == codes::INVALID_UPDATE_VERSION);
+        assert!(resp.error_message.as_deref() == Some("bad"));
+        assert!(resp.results.len() == 2);
+        assert!(resp.results[0].feature == "a");
+        assert!(resp.results[1].feature == "b");
     }
 
     #[test]
@@ -488,6 +496,10 @@ mod tests {
         let results = vec![row("b".into(), codes::INVALID_UPDATE_VERSION, "bad")];
         let resp = finalize(results, 1);
         assert!(resp.error_code == codes::NONE);
+        assert!(resp.error_message.is_none());
+        assert!(resp.results.len() == 1);
+        assert!(resp.results[0].feature == "b");
+        assert!(resp.results[0].error_message.as_deref() == Some("bad"));
     }
 
     #[test]

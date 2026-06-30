@@ -90,6 +90,15 @@ impl ShareCoordinator {
             .contains(&state_partition)
     }
 
+    #[cfg(test)]
+    pub(crate) async fn lead_all_partitions_for_test(&self) {
+        let mut set = HashSet::new();
+        for p in 0..bootstrap::NUM_PARTITIONS {
+            set.insert(p);
+        }
+        *self.leader_partitions.write().await = set;
+    }
+
     /// Returns the `__share_group_state` partition index responsible for the
     /// share key `(group, topic_id, partition)`.
     #[must_use]
