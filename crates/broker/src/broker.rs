@@ -4218,6 +4218,125 @@ mod tests {
         })
     }
 
+    fn streams_group_seed(member_id: &str) -> crate::coordinator::unified::StreamsGroupSeed {
+        let mut active = std::collections::BTreeMap::new();
+        active.insert("subtopology-0".to_string(), vec![0, 1]);
+
+        let mut members = std::collections::HashMap::new();
+        members.insert(
+            member_id.to_string(),
+            crate::coordinator::unified::streams::persistence::StreamsGroupMemberMetadataValue {
+                instance_id: None,
+                rack_id: None,
+                client_id: "streams-client".to_string(),
+                client_host: "127.0.0.1".to_string(),
+                process_id: "process-1".to_string(),
+                user_endpoint: None,
+                client_tags: Vec::new(),
+                rebalance_timeout_ms: 60_000,
+                topology_epoch: 0,
+            },
+        );
+
+        let mut target_per_member = std::collections::HashMap::new();
+        target_per_member.insert(
+            member_id.to_string(),
+            crate::coordinator::unified::streams::persistence::StreamsGroupTargetAssignmentMemberValue {
+                active: active.clone(),
+                standby: std::collections::BTreeMap::new(),
+                warmup: std::collections::BTreeMap::new(),
+            },
+        );
+
+        let mut current_per_member = std::collections::HashMap::new();
+        current_per_member.insert(
+            member_id.to_string(),
+            crate::coordinator::unified::streams::persistence::StreamsGroupCurrentMemberAssignmentValue {
+                member_epoch: 5,
+                previous_member_epoch: 4,
+                state: crate::coordinator::unified::streams::state::StreamsMemberAssignmentState::Stable
+                    .as_i8(),
+                active,
+                standby: std::collections::BTreeMap::new(),
+                warmup: std::collections::BTreeMap::new(),
+                active_pending_revocation: std::collections::BTreeMap::new(),
+            },
+        );
+
+        crate::coordinator::unified::StreamsGroupSeed {
+            group_epoch: 5,
+            assignment_epoch: 6,
+            topology: None,
+            partition_metadata: None,
+            members,
+            target_per_member,
+            current_per_member,
+        }
+    }
+
+    async fn assert_streams_group_helpers_observe_live_actor_view(
+        broker: &Arc<Broker>,
+        handle: &BrokerHandle,
+    ) {
+        let streams_group_id = "handle-streams-group-mutant";
+        let streams_member_id = "streams-member-1";
+        let streams_actor = broker
+            .group_coordinator
+            .get_or_create_streams(streams_group_id);
+        streams_actor
+            .tx
+            .send(
+                crate::coordinator::unified::streams::actor::StreamsGroupActorMessage::Seed(
+                    streams_group_seed(streams_member_id),
+                ),
+            )
+            .await
+            .expect("seed streams group");
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                handle.wait_until_streams_group_member_count(streams_group_id, 1),
+            )
+            .await
+            .is_ok()
+        );
+        let streams = handle
+            .streams_group_describe_for_test(streams_group_id)
+            .await
+            .expect("streams group describe");
+        assert!(streams.group_id == streams_group_id);
+        assert!(streams.members.len() == 1);
+        assert!(streams.members[0].member_id == streams_member_id);
+        assert!(
+            streams.members[0].active == {
+                let mut active = std::collections::BTreeMap::new();
+                active.insert("subtopology-0".to_string(), vec![0, 1]);
+                active
+            }
+        );
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(75),
+                handle.wait_until_streams_group_empty(streams_group_id),
+            )
+            .await
+            .is_err()
+        );
+
+        let empty_streams_group_id = "handle-empty-streams-group-mutant";
+        let _ = broker
+            .group_coordinator
+            .get_or_create_streams(empty_streams_group_id);
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                handle.wait_until_streams_group_empty(empty_streams_group_id),
+            )
+            .await
+            .is_ok()
+        );
+    }
+
     #[test]
     fn static_voter_set_keeps_peer_hostnames_for_per_dial_resolution() {
         // Peer endpoint hosts MUST be the configured DNS names, NOT resolved to
@@ -4550,6 +4669,46 @@ mod tests {
             .expect("truncate local partition");
         assert!(handle.local_log_end_offset(local_topic, 0).await == Some(0));
 
+        let helper_topic = "handle-partition-helper-mutant-topic";
+        let helper_part = local_partition_with_records(dir.path(), helper_topic, 0, &[]);
+        let helper_config = crabka_log::LogConfig {
+            retention_ms: Some(std::time::Duration::from_secs(123)),
+            segment_bytes: 4096,
+            ..Default::default()
+        };
+        helper_part
+            .log
+            .lock()
+            .expect("helper partition log lock")
+            .set_config(helper_config.clone());
+        broker
+            .partitions
+            .insert(helper_topic.to_string(), 0, Arc::clone(&helper_part));
+        handle
+            .test_advance_log_start(helper_topic, 0, 2)
+            .await
+            .expect("advance helper partition log start");
+        assert!(handle.partition_log_start_for_test(helper_topic, 0) == Some(2));
+        assert!(
+            handle.partition_retention_ms_for_test(helper_topic, 0)
+                == Some(Some(std::time::Duration::from_secs(123)))
+        );
+        let observed_config = handle
+            .partition_log_config_for_test(helper_topic, 0)
+            .expect("helper partition log config");
+        assert!(observed_config.retention_ms == helper_config.retention_ms);
+        assert!(observed_config.segment_bytes == helper_config.segment_bytes);
+        let last_offset = handle
+            .produce_records_for_test(helper_topic, 0, 3)
+            .await
+            .expect("produce helper partition records");
+        let log_end = handle
+            .local_log_end_offset(helper_topic, 0)
+            .await
+            .expect("helper partition log end offset");
+        assert!(last_offset >= 2);
+        assert!(last_offset + 1 == log_end);
+
         let share_group = "handle-share-summary-mutant-group";
         let share_topic_id = uuid::Uuid::from_u128(0xBEE5);
         let share_partition = 3;
@@ -4776,6 +4935,8 @@ mod tests {
         assert!(classic.group_id == classic_group_id);
         assert!(classic.members.len() == 1);
         assert!(classic.members[0].member_id == classic_member_id);
+
+        assert_streams_group_helpers_observe_live_actor_view(&broker, &handle).await;
 
         handle.shutdown().await;
     }
