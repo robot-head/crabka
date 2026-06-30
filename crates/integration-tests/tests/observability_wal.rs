@@ -877,7 +877,9 @@ async fn config_built_distributor_compactor_querier_loop_serves_compacted_logs()
     querier_config.object_store_url = Some(object_store_url);
     querier_config.index_prefix = Some(index_prefix.to_string());
     querier_config.tenant = Some("tenant-a".to_string());
-    querier_config.querier_index_source = QuerierIndexSource::TenantObjectStoreManifest;
+    querier_config.query_start_ns = Some(0);
+    querier_config.query_end_ns = Some(error_timestamp.parse::<i64>().unwrap() + 10_000_000);
+    querier_config.querier_index_source = QuerierIndexSource::TenantObjectStoreShards;
     querier_config.wal_group_id = "observability-wal-config-loop-querier".to_string();
     let querier = build_service_router(
         &querier_config,
@@ -1001,8 +1003,7 @@ async fn otlp_http_log_flows_through_configured_distributor_compactor_and_querie
     let mut querier_config = service_config(Role::Querier, &bootstrap, topic, &data_root);
     querier_config.object_store_url = Some(object_store_url);
     querier_config.index_prefix = Some(index_prefix.to_string());
-    querier_config.tenant = Some("tenant-a".to_string());
-    querier_config.querier_index_source = QuerierIndexSource::TenantObjectStoreManifest;
+    querier_config.querier_index_source = QuerierIndexSource::TenantObjectStoreShards;
     querier_config.wal_group_id = "observability-wal-otlp-loop-querier".to_string();
     let querier = build_service_router(
         &querier_config,
@@ -1086,7 +1087,7 @@ async fn configured_loop_isolates_tenants_sharing_one_wal_topic() {
     let mut querier_config = service_config(Role::Querier, &bootstrap, topic, &data_root);
     querier_config.object_store_url = Some(object_store_url);
     querier_config.index_prefix = Some(index_prefix.to_string());
-    querier_config.querier_index_source = QuerierIndexSource::TenantObjectStoreManifest;
+    querier_config.querier_index_source = QuerierIndexSource::TenantObjectStoreShards;
     querier_config.wal_group_id = "observability-wal-tenant-loop-querier".to_string();
     let querier = build_service_router(
         &querier_config,
@@ -1170,8 +1171,7 @@ async fn config_built_querier_merges_compacted_blocks_with_uncompacted_live_tail
     let mut querier_config = service_config(Role::Querier, &bootstrap, topic, &data_root);
     querier_config.object_store_url = Some(object_store_url);
     querier_config.index_prefix = Some(index_prefix.to_string());
-    querier_config.tenant = Some("tenant-a".to_string());
-    querier_config.querier_index_source = QuerierIndexSource::TenantObjectStoreManifest;
+    querier_config.querier_index_source = QuerierIndexSource::TenantObjectStoreShards;
     querier_config.wal_group_id = "observability-wal-hot-cold-querier".to_string();
     let querier = build_service_router(
         &querier_config,
@@ -1249,8 +1249,7 @@ async fn config_built_compactor_restart_resumes_from_committed_live_wal_offset()
     let mut querier_config = service_config(Role::Querier, &bootstrap, topic, &data_root);
     querier_config.object_store_url = Some(object_store_url);
     querier_config.index_prefix = Some(index_prefix.to_string());
-    querier_config.tenant = Some("tenant-a".to_string());
-    querier_config.querier_index_source = QuerierIndexSource::TenantObjectStoreManifest;
+    querier_config.querier_index_source = QuerierIndexSource::TenantObjectStoreShards;
     querier_config.wal_group_id = "observability-wal-compactor-restart-querier".to_string();
     let querier = build_service_router(
         &querier_config,
@@ -1309,8 +1308,7 @@ async fn native_kafka_produced_log_flows_through_configured_compactor_and_querie
     let mut querier_config = service_config(Role::Querier, &bootstrap, topic, &data_root);
     querier_config.object_store_url = Some(object_store_url);
     querier_config.index_prefix = Some(index_prefix.to_string());
-    querier_config.tenant = Some("tenant-a".to_string());
-    querier_config.querier_index_source = QuerierIndexSource::TenantObjectStoreManifest;
+    querier_config.querier_index_source = QuerierIndexSource::TenantObjectStoreShards;
     querier_config.wal_group_id = "observability-wal-native-loop-querier".to_string();
     let querier = build_service_router(
         &querier_config,
