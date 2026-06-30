@@ -1,6 +1,6 @@
 //! Golden `"sr"`-election capture harness for Crabka Schema Registry slice 5 (HA).
 //!
-//! Boots **two** real `confluentinc/cp-schema-registry:7.4.0` containers against
+//! Boots **two** real `mirror.gcr.io/confluentinc/cp-schema-registry:7.4.0` containers against
 //! an in-process Crabka broker (same networking as `capture_admin_fixtures.rs` /
 //! `capture_references_fixtures.rs`: the broker binds `0.0.0.0:9092` and
 //! advertises `host.docker.internal:9092`, while the host connects directly on
@@ -51,7 +51,7 @@ const LISTEN: &str = "0.0.0.0:9092";
 const CONTROLLER_LISTEN: &str = "0.0.0.0:9093";
 const ADVERTISED: &str = "host.docker.internal:9092";
 
-const SR_IMAGE: &str = "confluentinc/cp-schema-registry:7.4.0";
+const SR_IMAGE: &str = "mirror.gcr.io/confluentinc/cp-schema-registry:7.4.0";
 
 /// The shared `"sr"` election group id both cp nodes (and our DescribeGroups
 /// read) use.

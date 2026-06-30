@@ -3,4 +3,4 @@ version = 0
 direction = "request"
 source_kafka_version = "4.3.0"
 synthetic = false
-description = "ListPartitionReassignmentsRequest v0 captured from apache/kafka:4.3.0 client traffic"
+description = "ListPartitionReassignmentsRequest v0 captured from mirror.gcr.io/apache/kafka:4.3.0 client traffic"

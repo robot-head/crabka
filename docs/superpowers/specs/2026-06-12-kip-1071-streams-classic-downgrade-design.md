@@ -229,7 +229,7 @@ streams iff `group_type(group_id) == Some(GroupType::Streams)`" — and apply it
   `describe_group()`, `mod.rs:530`): consult the lock; for a `Streams`-locked
   group, report its streams identity rather than the classic-actor `InspectAny`
   projection. The exact api-15 response shape (`protocol_type`, `group_state`,
-  whether members are listed) is matched empirically against `apache/kafka:4.2`
+  whether members are listed) is matched empirically against `mirror.gcr.io/apache/kafka:4.2`
   (§7.4); the firm requirement is that a `Streams`-locked group is **no longer
   reported as `classic`**.
 
@@ -304,7 +304,7 @@ both directions live together and the streams actor stays focused.
    variant names (`NotClassic`) read awkwardly for the reverse direction; decide
    in the plan whether to generalize the names or add a sibling enum.
 3. **Downgrade trigger boundary & rejection code.** Confirm against
-   `apache/kafka:4.2` that a streams group converts on the first classic
+   `mirror.gcr.io/apache/kafka:4.2` that a streams group converts on the first classic
    `JoinGroup` for a drained `group_id` (vs. only after the streams
    `GroupMetadata` is compaction-removed — the same question as slice-1 §7.3), and
    confirm the live-members rejection code (default `GROUP_ID_NOT_FOUND`).

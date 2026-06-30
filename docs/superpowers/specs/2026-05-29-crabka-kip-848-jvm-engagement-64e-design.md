@@ -17,7 +17,7 @@ and commit — and land all four `jvm_kip848_*` acceptance tests in
 
 ## Root cause (diagnosed empirically, 2026-05-29)
 
-Driving `apache/kafka:4.0.0`'s `kafka-console-consumer.sh
+Driving `mirror.gcr.io/apache/kafka:4.0.0`'s `kafka-console-consumer.sh
 --consumer-property group.protocol=consumer` against an in-process broker and
 tracing every request shows the consumer issues `ApiVersions` →
 `FindCoordinator` → `GetTelemetrySubscriptions`, then **84,621
@@ -151,16 +151,16 @@ and asserts the response echoes it and carries an assignment.
 ### JVM acceptance (`jvm_consumer_group_next_gen.rs`)
 
 - Remove `#[ignore]` from all four `jvm_kip848_*` tests. All must pass against
-  `apache/kafka:4.0.0` with `group.protocol=consumer`.
+  `mirror.gcr.io/apache/kafka:4.0.0` with `group.protocol=consumer`.
 
 ### CI (`.github/workflows/ci.yml`, `broker-jvm-acceptance` job)
 
 - Add `--test jvm_consumer_group_next_gen` to the `cargo llvm-cov` invocation
   alongside `--test jvm_acceptance`.
-- **Image preload gap:** the job currently preloads `confluentinc/cp-kafka:7.4.0`
-  and `apache/kafka:4.0.0`. The next-gen test's `KAFKA_IMAGE_CLASSIC` is
-  `confluentinc/cp-kafka:7.5.0` (used for topic-create + the classic producer/
-  consumer). Either add `docker pull confluentinc/cp-kafka:7.5.0` to the preload
+- **Image preload gap:** the job currently preloads `mirror.gcr.io/confluentinc/cp-kafka:7.4.0`
+  and `mirror.gcr.io/apache/kafka:4.0.0`. The next-gen test's `KAFKA_IMAGE_CLASSIC` is
+  `mirror.gcr.io/confluentinc/cp-kafka:7.5.0` (used for topic-create + the classic producer/
+  consumer). Either add `docker pull mirror.gcr.io/confluentinc/cp-kafka:7.5.0` to the preload
   step, or align the next-gen test's `KAFKA_IMAGE_CLASSIC` to `7.4.0` to match
   the existing preload. Prefer aligning to `7.4.0` to avoid pulling a second
   large image in CI; confirm `7.4.0`'s `kafka-topics`/`kafka-console-producer`
@@ -170,7 +170,7 @@ and asserts the response echoes it and carries an assignment.
 
 1. `cargo test --workspace` green.
 2. `cargo test -p crabka-broker --test jvm_consumer_group_next_gen -- --ignored`
-   — all four pass against `apache/kafka:4.0.0`.
+   — all four pass against `mirror.gcr.io/apache/kafka:4.0.0`.
 3. `cargo clippy --workspace --all-targets -- -D warnings` clean.
 4. `cargo fmt --check` clean.
 5. CI `broker-jvm-acceptance` runs `jvm_consumer_group_next_gen` and is green.

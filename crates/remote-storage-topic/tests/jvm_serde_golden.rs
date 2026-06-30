@@ -2,7 +2,7 @@
 //! consumes the *same* bytes as the real JVM `RemoteLogMetadataSerde`.
 //!
 //! The golden vectors in `tests/fixtures/rlmm_golden.json` were captured from
-//! `apache/kafka:4.0.0`'s
+//! `mirror.gcr.io/apache/kafka:4.0.0`'s
 //! `org.apache.kafka.server.log.remote.metadata.storage.serialization.RemoteLogMetadataSerde`
 //! by `scripts/capture-rlmm-golden.sh` (which compiles + runs
 //! `scripts/capture-rlmm/Capture.java`). The fixture is the committed source of
@@ -119,7 +119,7 @@ fn add_no_custom_matches_jvm() {
 #[test]
 fn add_txn_empty_matches_jvm() {
     // JVM-captured via the RemoteLogSegmentMetadata(..., boolean) constructor
-    // present in apache/kafka:4.0.0; same as add_no_custom but txnIdxEmpty=true.
+    // present in mirror.gcr.io/apache/kafka:4.0.0; same as add_no_custom but txnIdxEmpty=true.
     let md = base_add().with_txn_index_empty(true);
     assert_byte_exact("add_txn_empty", &MetadataEvent::AddSegment(md));
 }

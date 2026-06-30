@@ -6,7 +6,7 @@ Status: Approved (brainstorming) — pending spec review
 ## Context
 
 Slice 2 of the KIP-595 → true-wire-compatibility program (mixed
-`apache/kafka:4.0.0` JVM + Crabka joint quorum). See
+`mirror.gcr.io/apache/kafka:4.0.0` JVM + Crabka joint quorum). See
 `2026-05-30-kip595-slice0-jvm-fetch-spike-design.md` for the program overview.
 
 **Surprise from exploration:** the KIP-595 RPC wire types are *already

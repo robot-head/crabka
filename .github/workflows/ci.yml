@@ -799,8 +799,8 @@ jobs:
       - uses: taiki-e/install-action@nextest
       - name: Preload Docker images
         run: |
-          docker pull confluentinc/cp-kafka:7.4.0
-          docker pull apache/kafka:4.0.0
+          docker pull mirror.gcr.io/confluentinc/cp-kafka:7.4.0
+          docker pull mirror.gcr.io/apache/kafka:4.0.0
       # The nextest `broker-jvm-acceptance` test group serializes these tests:
       # they bind the Rust broker to a fixed host port so the Dockerized Kafka
       # tools have a known bootstrap target. Parallel execution would hit `AddrInUse`.
@@ -1007,7 +1007,7 @@ jobs:
         with:
           key: metrics-differential-prometheus
       - name: Preload Docker image
-        run: docker pull prom/prometheus:v3.8.0
+        run: docker pull mirror.gcr.io/prom/prometheus:v3.8.0
       # `--ignored` opts the Docker-gated tests in (they're skipped everywhere
       # else). Only the Prometheus suite runs here; Mimir + Grafana stay nightly.
       - name: Prometheus differential suite (Docker, ignored)

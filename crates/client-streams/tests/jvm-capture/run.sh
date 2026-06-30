@@ -25,7 +25,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT_DIR="$HERE/../testdata/golden/dsl"
-JDK_IMAGE="eclipse-temurin:21-jdk"
+JDK_IMAGE="mirror.gcr.io/library/eclipse-temurin:21-jdk"
 KAFKA_VERSION="4.1.0"
 ROCKSDB_VERSION="9.7.3"
 MODE="${1:---gradle}"
@@ -303,7 +303,7 @@ case "$MODE" in
       -e KAFKA_GROUP_COORDINATOR_REBALANCE_PROTOCOLS=classic,consumer,streams \
       -e KAFKA_UNSTABLE_API_VERSIONS_ENABLE=true \
       -e KAFKA_UNSTABLE_FEATURE_VERSIONS_ENABLE=true \
-      "apache/kafka:${KAFKA_VERSION}" >/dev/null
+      "mirror.gcr.io/apache/kafka:${KAFKA_VERSION}" >/dev/null
     sleep 8
     docker exec crabka-broker bash -c '
       /opt/kafka/bin/kafka-features.sh --bootstrap-server localhost:9092 upgrade --feature streams.version=1
@@ -312,7 +312,7 @@ case "$MODE" in
     '
     # Build the broker classpath from the broker image's own libs (has jackson, rocksdb, etc.).
     rm -rf /tmp/kafka-libs && mkdir -p /tmp/kafka-libs
-    docker run --rm -v /tmp/kafka-libs:/out --entrypoint bash "apache/kafka:${KAFKA_VERSION}" \
+    docker run --rm -v /tmp/kafka-libs:/out --entrypoint bash "mirror.gcr.io/apache/kafka:${KAFKA_VERSION}" \
       -c 'cp /opt/kafka/libs/*.jar /out/'
     docker run --rm --network "$NET" \
       -v "$HERE":/work -w /work -v /tmp/kafka-libs:/klibs \

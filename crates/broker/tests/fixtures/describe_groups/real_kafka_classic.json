@@ -21,7 +21,7 @@
   },
   "provenance": {
     "api_key": 15,
-    "image": "confluentinc/cp-kafka:7.4.0",
+    "image": "mirror.gcr.io/confluentinc/cp-kafka:7.4.0",
     "note": "Real cp-kafka DescribeGroups. cp/JVM is the authority for protocol_type / protocol_data / member_metadata."
   },
   "typeless_group": {

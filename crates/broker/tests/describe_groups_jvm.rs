@@ -2,7 +2,7 @@
 
 //! cp/JVM cross-validation for `DescribeGroups` (`api_key=15`) metadata.
 //!
-//! Boots a single-node real Kafka (`confluentinc/cp-kafka:7.4.0`, `KRaft`) in
+//! Boots a single-node real Kafka (`mirror.gcr.io/confluentinc/cp-kafka:7.4.0`, `KRaft`) in
 //! Docker, forms a CLASSIC consumer group `g` with the `RangeAssignor`, then
 //! sends a `DescribeGroupsRequest` to the real broker FROM THE HOST via
 //! `crabka_client_core::Client` and captures the response. cp/JVM is the
@@ -46,7 +46,7 @@ use crabka_client_core::Client;
 use crabka_protocol::owned::describe_groups_request::DescribeGroupsRequest;
 use crabka_protocol::owned::describe_groups_response::DescribeGroupsResponse;
 
-const KAFKA_IMAGE: &str = "confluentinc/cp-kafka:7.4.0";
+const KAFKA_IMAGE: &str = "mirror.gcr.io/confluentinc/cp-kafka:7.4.0";
 const CONTAINER: &str = "crabka-describe-groups-jvm";
 /// Fixed host port the `EXTERNAL` listener is published on.
 const HOST_PORT: u16 = 19092;

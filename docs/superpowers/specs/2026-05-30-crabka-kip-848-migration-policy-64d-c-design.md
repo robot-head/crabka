@@ -26,7 +26,7 @@ conversion when the policy + predicate allow.
 
 ## Empirical default (per CLAUDE.md "check the image")
 
-Verified against `apache/kafka:4.0.0` (`kafka-configs --describe --entity-type
+Verified against `mirror.gcr.io/apache/kafka:4.0.0` (`kafka-configs --describe --entity-type
 brokers --entity-name 1 --all`):
 
 ```

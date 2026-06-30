@@ -55,9 +55,9 @@ jobs:
       - run: echo "127.0.0.1 host.docker.internal" | sudo tee -a /etc/hosts
       - name: Preload Docker images
         run: |
-          docker pull prom/prometheus:v3.8.0
-          docker pull grafana/mimir:2.16.1
-          docker pull grafana/grafana:11.6.1
+          docker pull mirror.gcr.io/prom/prometheus:v3.8.0
+          docker pull mirror.gcr.io/grafana/mimir:2.16.1
+          docker pull mirror.gcr.io/grafana/grafana:11.6.1
       # The three suites bind in-process Crabka servers to ephemeral ports, so
       # they're safe to run in one `cargo test` invocation. `--ignored` opts the
       # Docker-gated tests in (they're skipped everywhere else).

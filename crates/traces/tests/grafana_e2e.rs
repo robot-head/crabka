@@ -11,7 +11,7 @@
 //!     datasource proxy -> `PromQL` result).
 //!
 //! It is ignored by default because it pulls and runs upstream Docker images
-//! (`grafana/grafana`, `prom/prometheus`). Run explicitly with:
+//! (`mirror.gcr.io/grafana/grafana`, `mirror.gcr.io/prom/prometheus`). Run explicitly with:
 //!
 //! `cargo test -p crabka-traces --test grafana_e2e -- --ignored --nocapture`
 //!
@@ -886,33 +886,37 @@ async fn start_crabka_querier(records: &[SpanRecord]) -> TestResult<CrabkaPair> 
 
 async fn start_grafana() -> TestResult<ContainerAsync<GenericImage>> {
     let tag = std::env::var("CRABKA_GRAFANA_IMAGE_TAG").unwrap_or_else(|_| "latest".into());
-    Ok(GenericImage::new("grafana/grafana".to_string(), tag)
-        .with_exposed_port(3000.tcp())
-        .with_wait_for(WaitFor::seconds(5))
-        .with_env_var("GF_SECURITY_ADMIN_PASSWORD", "admin")
-        .with_host(DOCKER_HOST_ALIAS, Host::HostGateway)
-        .start()
-        .await?)
+    Ok(
+        GenericImage::new("mirror.gcr.io/grafana/grafana".to_string(), tag)
+            .with_exposed_port(3000.tcp())
+            .with_wait_for(WaitFor::seconds(5))
+            .with_env_var("GF_SECURITY_ADMIN_PASSWORD", "admin")
+            .with_host(DOCKER_HOST_ALIAS, Host::HostGateway)
+            .start()
+            .await?,
+    )
 }
 
 async fn start_prometheus() -> TestResult<ContainerAsync<GenericImage>> {
     let tag = std::env::var("CRABKA_PROM_IMAGE_TAG").unwrap_or_else(|_| "latest".into());
-    Ok(GenericImage::new("prom/prometheus".to_string(), tag)
-        .with_exposed_port(9090.tcp())
-        .with_wait_for(WaitFor::message_on_stderr(
-            "Server is ready to receive web requests",
-        ))
-        .with_copy_to(
-            CopyTargetOptions::new("/etc/prometheus/prometheus.yml").with_mode(0o644),
-            CopyDataSource::Data(PROM_CONFIG.as_bytes().to_vec()),
-        )
-        .with_cmd([
-            "--web.enable-remote-write-receiver",
-            "--config.file=/etc/prometheus/prometheus.yml",
-            "--storage.tsdb.retention.time=1h",
-        ])
-        .start()
-        .await?)
+    Ok(
+        GenericImage::new("mirror.gcr.io/prom/prometheus".to_string(), tag)
+            .with_exposed_port(9090.tcp())
+            .with_wait_for(WaitFor::message_on_stderr(
+                "Server is ready to receive web requests",
+            ))
+            .with_copy_to(
+                CopyTargetOptions::new("/etc/prometheus/prometheus.yml").with_mode(0o644),
+                CopyDataSource::Data(PROM_CONFIG.as_bytes().to_vec()),
+            )
+            .with_cmd([
+                "--web.enable-remote-write-receiver",
+                "--config.file=/etc/prometheus/prometheus.yml",
+                "--storage.tsdb.retention.time=1h",
+            ])
+            .start()
+            .await?,
+    )
 }
 
 async fn mapped_base_url(

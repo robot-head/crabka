@@ -235,7 +235,7 @@ Catches Crabka-client ↔ Crabka-broker interop regressions on every push.
 
 ### JVM acceptance (`tests/jvm_acceptance.rs`, `#[ignore]`-gated, Linux-only)
 
-testcontainers pulls `confluentinc/cp-kafka:6.1.1` solely for the bundled `kafka-console-producer` / `kafka-console-consumer` / `kafka-topics` binaries. The broker runs as a normal Rust process on the host; the JVM tools run inside the container and connect back to the broker via `host.docker.internal` (Mac/Windows) or `--network host` (Linux CI). Two scenarios:
+testcontainers pulls `mirror.gcr.io/confluentinc/cp-kafka:6.1.1` solely for the bundled `kafka-console-producer` / `kafka-console-consumer` / `kafka-topics` binaries. The broker runs as a normal Rust process on the host; the JVM tools run inside the container and connect back to the broker via `host.docker.internal` (Mac/Windows) or `--network host` (Linux CI). Two scenarios:
 
 1. `console_producer_round_trip` — `kafka-topics --create`, pipe stdin into `kafka-console-producer`, then `kafka-console-consumer --from-beginning --partition 0 --max-messages N`. Assert the consumer emits the same records.
 2. `kafka_topics_describe_smokes_metadata` — `kafka-topics --describe` after a create, parse stdout, assert topic + partition counts.

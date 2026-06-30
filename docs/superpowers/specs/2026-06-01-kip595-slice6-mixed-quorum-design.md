@@ -7,7 +7,7 @@ Status: Approved (brainstorming) — pending spec review
 
 The Slice 5 spike (`docs/superpowers/specs/2026-05-31-kip595-static-mixed-quorum-findings.md`)
 proved a **static (kraft.version=0) mixed quorum elects cross-impl** — a JVM
-`apache/kafka:4.0.0` controller attaches as a **Follower of a Crabka leader**
+`mirror.gcr.io/apache/kafka:4.0.0` controller attaches as a **Follower of a Crabka leader**
 over real `Vote(52 v2)`/`Fetch(1 v17)` — and that **full KIP-853 dynamic
 reconfiguration is NOT required**. Replication leader→JVM-follower was blocked by
 one remaining wire gap. Slice 6 closes that gap and turns the spike into a real,
@@ -20,7 +20,7 @@ voters; the `dynamic_voters.rs` / `isr_expand` tests remain `#[ignore]`d
 
 ## Goal & done bar
 
-**A JVM `apache/kafka:4.0.0` controller, joined to a static 3-voter quorum led by
+**A JVM `mirror.gcr.io/apache/kafka:4.0.0` controller, joined to a static 3-voter quorum led by
 a Crabka controller (Crabka holds 2/3), advances its high-watermark and applies
 the Crabka leader's committed metadata.** Verified by an un-ignored
 Docker-gated acceptance test asserting: (a) a single cross-impl leader (Crabka);

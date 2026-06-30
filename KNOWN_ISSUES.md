@@ -42,7 +42,7 @@ through the same `AbstractApiMessageSerde` value envelope (frameVersion=1 +
 apiKey + apiVersion, flexible message bodies) and the same
 `RemoteLogSegmentMetadataRecord` / `RemoteLogSegmentMetadataUpdateRecord` /
 `RemotePartitionDeleteMetadataRecord` schemas. This is verified byte-for-byte
-against `apache/kafka:4.0.0` golden vectors
+against `mirror.gcr.io/apache/kafka:4.0.0` golden vectors
 (`crates/remote-storage-topic/tests/jvm_serde_golden.rs`), so a mixed JVM +
 Crabka cluster can share the internal metadata topic.
 

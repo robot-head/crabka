@@ -13,7 +13,7 @@ and full `__consumer_offsets` persistence for the new record types. The
 next-gen coordinator runs alongside the existing classic coordinator on the
 same broker; `group_id`s lock to either classic or next-gen on first record
 persisted (no migration in this slice). Validated end-to-end against
-`apache/kafka:4.0.0` clients using `group.protocol=consumer`.
+`mirror.gcr.io/apache/kafka:4.0.0` clients using `group.protocol=consumer`.
 
 ## Non-goals
 
@@ -308,11 +308,11 @@ latest state. No torn transitions visible to clients.
 
 ### JVM acceptance (`crates/broker/tests/jvm_consumer_group_next_gen.rs`)
 
-New constant `KAFKA_IMAGE_NEXT_GEN = "apache/kafka:4.0.0"`. All consumer
+New constant `KAFKA_IMAGE_NEXT_GEN = "mirror.gcr.io/apache/kafka:4.0.0"`. All consumer
 invocations use `--consumer-property group.protocol=consumer`:
 
 1. **Single-consumer round-trip.** Produce via `cp-kafka:7.5.0`; consume via
-   `apache/kafka:4.0.0` with next-gen protocol; verify commit landed via
+   `mirror.gcr.io/apache/kafka:4.0.0` with next-gen protocol; verify commit landed via
    `kafka-consumer-groups --describe`.
 2. **Two-consumer rebalance.** Two consumers in same group; verify partitions
    split; kill one; verify survivor takes both.
@@ -326,7 +326,7 @@ invocations use `--consumer-property group.protocol=consumer`:
 
 ### CI infrastructure
 
-- Add `apache/kafka:4.0.0` to the JVM image preload list in
+- Add `mirror.gcr.io/apache/kafka:4.0.0` to the JVM image preload list in
   `.github/workflows/ci.yml`.
 - New test path `jvm_consumer_group_next_gen` runs in `broker-jvm-acceptance`
   via existing `--include-ignored` mechanism.

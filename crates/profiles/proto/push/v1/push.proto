@@ -1,6 +1,6 @@
 syntax = "proto3";
 package push.v1;
-// Minimal vendored subset from grafana/pyroscope api/push/v1/push.proto
+// Minimal vendored subset from mirror.gcr.io/grafana/pyroscope api/push/v1/push.proto
 // @ 506c6f3f00694163876a89a9d1fe91e857f04397.
 
 import "types/v1/types.proto";

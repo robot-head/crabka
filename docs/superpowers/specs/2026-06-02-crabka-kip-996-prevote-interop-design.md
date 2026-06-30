@@ -40,7 +40,7 @@ a Crabka candidate's pre-vote**, the JVM does not echo the private tag, so
 match, and **silently drops the grant**. A Crabka-led election therefore cannot
 gather pre-votes from JVM voters and stalls.
 
-The interop target is confirmed as `apache/kafka:4.0.0`
+The interop target is confirmed as `mirror.gcr.io/apache/kafka:4.0.0`
 ([`server.rs`](../../../crates/raft/src/server.rs)), which implements
 KIP-996, so this is a live bug, not a theoretical one. Slice 6's mixed-quorum
 acceptance test
@@ -118,7 +118,7 @@ request-side `PreVote` handling are intentionally untouched.
 
 Add an `#[ignore]`, Docker-gated test to the existing harness in
 [`jvm_static_quorum_spike.rs`](../../../crates/broker/tests/jvm_static_quorum_spike.rs)
-(2 Crabka voters + 1 `apache/kafka:4.0.0` voter, static 3-voter set):
+(2 Crabka voters + 1 `mirror.gcr.io/apache/kafka:4.0.0` voter, static 3-voter set):
 
 1. Boot the quorum; a Crabka node wins the initial election and the JVM follows
    (existing behaviour).

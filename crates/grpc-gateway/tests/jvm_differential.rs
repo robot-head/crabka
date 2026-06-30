@@ -15,7 +15,7 @@ use crabka_grpc_gateway::produce::ProduceCore;
 use crabka_grpc_gateway::types::GatewayRecord;
 
 const BOOTSTRAP: &str = "host.docker.internal:9092";
-const IMAGE: &str = "confluentinc/cp-kafka:7.5.0";
+const IMAGE: &str = "mirror.gcr.io/confluentinc/cp-kafka:7.5.0";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker"]

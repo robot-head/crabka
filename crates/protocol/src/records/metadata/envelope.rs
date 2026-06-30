@@ -7,7 +7,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use crate::primitives::varint::{get_uvarint, put_uvarint, uvarint_len};
 
 /// Current `KRaft` metadata frame version. Kafka writes 1 (verified against
-/// apache/kafka:4.0.0 `__cluster_metadata` record values — the leading byte is
+/// mirror.gcr.io/apache/kafka:4.0.0 `__cluster_metadata` record values — the leading byte is
 /// `0x01`).
 pub const FRAME_VERSION: u32 = 1;
 

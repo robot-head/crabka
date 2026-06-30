@@ -14,7 +14,7 @@ today form a quorum with, or fetch metadata from, a Crabka controller.
 
 The goal of the overall program is **true KIP-595 wire compatibility at the
 strictest bar: a mixed JVM + Crabka joint quorum** (a real
-`apache/kafka:4.0.0` controller and a Crabka controller in one quorum, voting,
+`mirror.gcr.io/apache/kafka:4.0.0` controller and a Crabka controller in one quorum, voting,
 replicating, and electing across implementations). Because a JVM node in a
 joint quorum applies the very log records a Crabka leader appends, this
 necessarily couples four layers that must all match the JVM byte-for-byte and
@@ -48,7 +48,7 @@ This document specifies **Slice 0 only**.
 
 ## Goal
 
-Prove, against a live `apache/kafka:4.0.0` JVM, that a single-node Crabka
+Prove, against a live `mirror.gcr.io/apache/kafka:4.0.0` JVM, that a single-node Crabka
 controller can speak enough real KRaft wire for a **JVM broker observer** to
 `Fetch` the `__cluster_metadata-0` log and decode it with zero format errors.
 
@@ -97,7 +97,7 @@ The code is disposable. The kept artifact is the findings doc.
 ## Components
 
 1. **Wire ground-truth capture** *(first task, before any Crabka code)* — stand
-   up a pure-JVM KRaft cluster (1 controller + 1 broker, `apache/kafka:4.0.0`)
+   up a pure-JVM KRaft cluster (1 controller + 1 broker, `mirror.gcr.io/apache/kafka:4.0.0`)
    and capture the real controller↔broker metadata `ApiVersions` + `Fetch`
    exchange on the wire (tcpdump/pcap or a transparent TCP tee on loopback).
    Yields ground-truth bytes for: Fetch request/response versions, the
@@ -147,7 +147,7 @@ One Docker-gated integration test mirroring the existing
 `crates/broker/tests/jvm_acceptance.rs` harness:
 
 - boot the spike controller,
-- boot a real `apache/kafka:4.0.0` broker pointed at it,
+- boot a real `mirror.gcr.io/apache/kafka:4.0.0` broker pointed at it,
 - assert from the broker container logs that it fetched and loaded the
   metadata with no format errors.
 
@@ -161,7 +161,7 @@ spike), recording:
 
 - exact `Fetch` request/response versions and field layouts,
 - the `__cluster_metadata` topic id,
-- the bootstrap record set for `apache/kafka:4.0.0`'s default
+- the bootstrap record set for `mirror.gcr.io/apache/kafka:4.0.0`'s default
   `metadata.version`,
 - `ApiVersions` requirements for the observer path,
 - any surprises / undocumented behavior.

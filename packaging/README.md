@@ -41,8 +41,8 @@ Kubernetes) automatically select the matching variant — on an Apple Silicon Ma
 that's the native `linux/arm64` image, no emulation:
 
 ```sh
-docker run --rm robothead/crabka-broker:latest --version
-docker image inspect robothead/crabka-broker:latest --format '{{.Architecture}}'  # arm64 on Apple Silicon
+docker run --rm mirror.gcr.io/robothead/crabka-broker:latest --version
+docker image inspect mirror.gcr.io/robothead/crabka-broker:latest --format '{{.Architecture}}'  # arm64 on Apple Silicon
 ```
 
 ## Attestations
@@ -73,7 +73,7 @@ gh attestation verify oci://ghcr.io/robot-head/crabka-broker:latest \
   --predicate-type https://spdx.dev/Document
 
 # Docker Hub mirror verifies the same way
-gh attestation verify oci://docker.io/robothead/crabka-broker:latest \
+gh attestation verify oci://mirror.gcr.io/robothead/crabka-broker:latest \
   --repo robot-head/crabka
 ```
 

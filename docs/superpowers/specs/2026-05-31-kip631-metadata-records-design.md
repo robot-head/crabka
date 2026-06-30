@@ -6,7 +6,7 @@ Status: Approved (brainstorming) — pending spec review
 ## Context
 
 This is Slice 1 of the KIP-595 → true-wire-compatibility program (target: a
-mixed `apache/kafka:4.0.0` JVM + Crabka joint metadata quorum). See
+mixed `mirror.gcr.io/apache/kafka:4.0.0` JVM + Crabka joint metadata quorum). See
 `2026-05-30-kip595-slice0-jvm-fetch-spike-design.md` for the program overview
 and `2026-05-30-kraft-wire-findings.md` for the captured wire facts.
 
@@ -25,7 +25,7 @@ already generates `VotersRecord`, `KRaftVersionRecord`, `SnapshotHeaderRecord`,
 ## Goal & scope
 
 Build a **byte-exact KIP-631 metadata-record layer + a bootstrap-checkpoint
-builder**, validated against `apache/kafka:4.0.0` JVM tools.
+builder**, validated against `mirror.gcr.io/apache/kafka:4.0.0` JVM tools.
 
 **In scope:**
 - Generate the KIP-631 record types from Kafka's `common/metadata/*.json`

@@ -206,7 +206,7 @@ prost = { workspace = true }            # decode proto response bodies in tests
 
 - [ ] **Step 2: Write the `querier.v1` proto**
 
-Create `crates/profiles/proto/querier/v1/querier.proto`. **Verify field numbers against the pinned Pyroscope tag** (`github.com/grafana/pyroscope/api/gen/proto/.../querier/v1/querier.proto`) — do not fabricate. The shape below is the Grafana-minimum surface + the spec §7.1 methods; pin the exact numbers from the upstream `.proto` before compiling.
+Create `crates/profiles/proto/querier/v1/querier.proto`. **Verify field numbers against the pinned Pyroscope tag** (`github.com/mirror.gcr.io/grafana/pyroscope/api/gen/proto/.../querier/v1/querier.proto`) — do not fabricate. The shape below is the Grafana-minimum surface + the spec §7.1 methods; pin the exact numbers from the upstream `.proto` before compiling.
 
 ```proto
 syntax = "proto3";

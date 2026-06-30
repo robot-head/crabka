@@ -448,7 +448,7 @@ mod tests {
                 "--rm",
                 "-v",
                 &format!("{}:/work", dir.path().display()),
-                "apache/kafka:4.0.0",
+                "mirror.gcr.io/apache/kafka:4.0.0",
                 "/opt/kafka/bin/kafka-dump-log.sh",
                 "--cluster-metadata-decoder",
                 "--files",

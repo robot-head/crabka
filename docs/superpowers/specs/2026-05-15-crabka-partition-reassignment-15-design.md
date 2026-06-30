@@ -296,7 +296,7 @@ Reuse 3-broker PLAINTEXT scaffolding from slice 14's `elect_leaders.rs`:
 1. Spin up 3-broker SASL/PLAINTEXT cluster (reuse slice 14's `start_three_broker_sasl_plaintext_jvm_cluster`).
 2. `kafka-topics --create --topic foo --partitions 1 --replication-factor 2`.
 3. Write a reassignment JSON file: `{"version":1, "partitions":[{"topic":"foo","partition":0,"replicas":[2,3]}]}` (move off broker 1).
-4. `docker run cp-kafka:7.5 kafka-reassign-partitions --execute --reassignment-json-file ...` — assert exit 0.
+4. `docker run mirror.gcr.io/confluentinc/cp-kafka:7.5 kafka-reassign-partitions --execute --reassignment-json-file ...` — assert exit 0.
 5. `kafka-reassign-partitions --verify` — assert "completed successfully" or poll until.
 6. Assert image shows `replicas=[2,3]` on the partition.
 

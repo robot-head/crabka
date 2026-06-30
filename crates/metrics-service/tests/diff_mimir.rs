@@ -3,7 +3,7 @@
 //! corpus equality over identical `remote_write` input is the strongest single
 //! correctness signal).
 //!
-//! Ignored by default because it pulls and runs `grafana/mimir` under Docker.
+//! Ignored by default because it pulls and runs `mirror.gcr.io/grafana/mimir` under Docker.
 //! Run with:
 //!
 //! `cargo test -p crabka-metrics-service --test diff_mimir -- --ignored --nocapture`
@@ -175,34 +175,36 @@ async fn mimir_compliance_corpus_matches_crabka() -> TestResult {
 async fn start_mimir() -> TestResult<testcontainers::ContainerAsync<GenericImage>> {
     let tag =
         std::env::var("CRABKA_MIMIR_IMAGE_TAG").unwrap_or_else(|_| MIMIR_IMAGE_TAG.to_string());
-    Ok(GenericImage::new("grafana/mimir".to_string(), tag)
-        .with_exposed_port(MIMIR_PORT.tcp())
-        // Mimir 2.16.x logs go-kit lines to stderr; the HTTP server announces
-        // itself with "server listening on addresses" once the port is up. (It
-        // never logs the literal "Starting Mimir" — its banner is "Starting
-        // application".) Readiness of the ingester ring is then polled via the
-        // /ready endpoint below, which can take ~30s in monolithic mode.
-        .with_wait_for(WaitFor::message_on_stderr("server listening on addresses"))
-        // Copy the config into the image rather than bind-mounting a host path,
-        // so the test has no host-filesystem prerequisites.
-        .with_copy_to("/etc/mimir/mimir.yaml", MIMIR_CONFIG.as_bytes().to_vec())
-        // host-gateway entry kept for symmetry with the other Docker suites; the
-        // differential path here is container->host-agnostic (we dial Mimir's
-        // mapped port), but it makes the container reachable both ways on Linux.
-        .with_host("host.docker.internal", Host::HostGateway)
-        .with_cmd([
-            "-target=all",
-            "-config.file=/etc/mimir/mimir.yaml",
-            // The corpus uses epoch-relative timestamps (t=0..45s, i.e. 1970),
-            // far older than Mimir's default 13h ingester-query window — without
-            // this the querier never looks in the (head-resident) ingester and
-            // every query returns empty. 0 = always query ingesters regardless
-            // of sample age. (CLI flag form: the YAML field lives under a
-            // different config path than `querier:`.)
-            "-querier.query-ingesters-within=0",
-        ])
-        .start()
-        .await?)
+    Ok(
+        GenericImage::new("mirror.gcr.io/grafana/mimir".to_string(), tag)
+            .with_exposed_port(MIMIR_PORT.tcp())
+            // Mimir 2.16.x logs go-kit lines to stderr; the HTTP server announces
+            // itself with "server listening on addresses" once the port is up. (It
+            // never logs the literal "Starting Mimir" — its banner is "Starting
+            // application".) Readiness of the ingester ring is then polled via the
+            // /ready endpoint below, which can take ~30s in monolithic mode.
+            .with_wait_for(WaitFor::message_on_stderr("server listening on addresses"))
+            // Copy the config into the image rather than bind-mounting a host path,
+            // so the test has no host-filesystem prerequisites.
+            .with_copy_to("/etc/mimir/mimir.yaml", MIMIR_CONFIG.as_bytes().to_vec())
+            // host-gateway entry kept for symmetry with the other Docker suites; the
+            // differential path here is container->host-agnostic (we dial Mimir's
+            // mapped port), but it makes the container reachable both ways on Linux.
+            .with_host("host.docker.internal", Host::HostGateway)
+            .with_cmd([
+                "-target=all",
+                "-config.file=/etc/mimir/mimir.yaml",
+                // The corpus uses epoch-relative timestamps (t=0..45s, i.e. 1970),
+                // far older than Mimir's default 13h ingester-query window — without
+                // this the querier never looks in the (head-resident) ingester and
+                // every query returns empty. 0 = always query ingesters regardless
+                // of sample age. (CLI flag form: the YAML field lives under a
+                // different config path than `querier:`.)
+                "-querier.query-ingesters-within=0",
+            ])
+            .start()
+            .await?,
+    )
 }
 
 async fn mapped_base_url(

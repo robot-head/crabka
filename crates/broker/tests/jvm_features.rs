@@ -1,6 +1,6 @@
 //! KIP-1022 "updating features" — JVM acceptance.
 //!
-//! Drives the real `apache/kafka:4.0.0` `kafka-features` admin tool against an
+//! Drives the real `mirror.gcr.io/apache/kafka:4.0.0` `kafka-features` admin tool against an
 //! in-process Crabka broker advertised at `host.docker.internal:9092`, proving
 //! the `UpdateFeatures` / `ApiVersions` feature surface round-trips end to end:
 //!
@@ -24,7 +24,7 @@ const BOOTSTRAP: &str = "host.docker.internal:9092";
 const LISTEN: &str = "0.0.0.0:9092";
 /// Kafka 4.0 is the first image whose `kafka-features` understands the
 /// `group.version` / `transaction.version` feature surface (KIP-1022).
-const KAFKA_IMAGE: &str = "apache/kafka:4.0.0";
+const KAFKA_IMAGE: &str = "mirror.gcr.io/apache/kafka:4.0.0";
 
 /// Boot an in-process Crabka broker listening on `LISTEN`, advertised as
 /// `host.docker.internal:9092`. A standalone self-bootstrap finalizes the
@@ -63,7 +63,7 @@ async fn start_host_broker() -> (BrokerHandle, tempfile::TempDir) {
     (handle, dir)
 }
 
-/// Run `kafka-features <args>` from an `apache/kafka:4.0.0` container that can
+/// Run `kafka-features <args>` from an `mirror.gcr.io/apache/kafka:4.0.0` container that can
 /// reach the host broker via `--add-host=host.docker.internal:host-gateway`.
 fn kafka_features(args: &[&str]) -> std::process::Output {
     let mut full: Vec<&str> = vec![

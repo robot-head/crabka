@@ -136,14 +136,14 @@ services:
       retries: 30
 
   rustfs-permissions:
-    image: busybox:1.38
+    image: mirror.gcr.io/library/busybox:1.38
     <<: *setup-res
     restart: "no"
     command: ["sh", "-c", "mkdir -p /data && chown -R 10001:10001 /data"]
     volumes: ["rustfs-data:/data"]
 
   rustfs:
-    image: rustfs/rustfs:latest
+    image: mirror.gcr.io/rustfs/rustfs:latest
     restart: unless-stopped
     # Resource caps (see x-rustfs-res / .env); the cap bounds object-store cache and query bursts.
     <<: *rustfs-res
@@ -189,7 +189,7 @@ services:
       retries: 30
 
   rustfs-setup:
-    image: amazon/aws-cli:latest
+    image: mirror.gcr.io/amazon/aws-cli:latest
     <<: *setup-res
     environment: { <<: *s3-env }
     depends_on:
@@ -202,7 +202,7 @@ services:
   # the demo's order topics, so distributors can write and block-builders /
   # compactors can consume.
   topic-setup:
-    image: apache/kafka:4.3.1
+    image: mirror.gcr.io/apache/kafka:4.3.1
     <<: *setup-res
     restart: "no"
     depends_on:
@@ -393,7 +393,7 @@ services:
 
   # ---- COLLECTOR + GRAFANA ----
   alloy:
-    image: grafana/alloy:v1.17.1
+    image: mirror.gcr.io/grafana/alloy:v1.17.1
     <<: *alloy-res
     command: ["run", "--server.http.listen-addr=0.0.0.0:12345", "/etc/alloy/config.alloy"]
     volumes:
@@ -418,7 +418,7 @@ services:
       - "/var/run/docker.sock:/var/run/docker.sock:ro"
 
   grafana:
-    image: grafana/grafana:13.0
+    image: mirror.gcr.io/grafana/grafana:13.0
     <<: *grafana-res
     environment:
       GF_AUTH_ANONYMOUS_ENABLED: "true"

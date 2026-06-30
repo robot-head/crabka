@@ -1,7 +1,7 @@
 # Kafka 4.0 feature-flag verification (group.version / transaction.version / metadata.version)
 
 **Date:** 2026-05-30
-**Image used:** `apache/kafka:4.0.0` (the task's first-choice `confluentinc/cp-kafka:7.9.0` was not cached and not pulled; `apache/kafka:4.0.0` is the upstream Apache release of the same Kafka 4.0.0 build, so feature levels / enums are identical to cp-kafka 4.0).
+**Image used:** `mirror.gcr.io/apache/kafka:4.0.0` (the task's first-choice `mirror.gcr.io/confluentinc/cp-kafka:7.9.0` was not cached and not pulled; `mirror.gcr.io/apache/kafka:4.0.0` is the upstream Apache release of the same Kafka 4.0.0 build, so feature levels / enums are identical to cp-kafka 4.0).
   - JRE: Eclipse Temurin 21.0.6+7. Kafka jars dated 2025-03-14, version 4.0.0.
 **Method:** Formatted scratch KRaft clusters with `kafka-storage.sh`, ran a single-node broker, queried `kafka-features.sh describe`, produced a real transaction and dumped `__transaction_state`, and decompiled feature-version / `Errors` class bytecode pulled straight out of the image jars. Web source (apache/kafka @ tag `4.0.0`) used only to corroborate values already observed empirically.
 

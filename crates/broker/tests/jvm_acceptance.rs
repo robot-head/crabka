@@ -1,5 +1,5 @@
 //! End-to-end tests that drive the official Apache Kafka command-line
-//! tools (running inside `confluentinc/cp-kafka:6.1.1` containers) against
+//! tools (running inside `mirror.gcr.io/confluentinc/cp-kafka:6.1.1` containers) against
 //! a Rust `crabka-broker` running on the host.
 //!
 //! Both tests are gated `#[ignore = "requires Docker"]` so `cargo test`
@@ -40,7 +40,7 @@ const BOOTSTRAP: &str = "host.docker.internal:9092";
 /// Bind to all interfaces so the Docker bridge can reach us via the host
 /// gateway IP.
 const LISTEN: &str = "0.0.0.0:9092";
-const KAFKA_IMAGE: &str = "confluentinc/cp-kafka:6.1.1";
+const KAFKA_IMAGE: &str = "mirror.gcr.io/confluentinc/cp-kafka:6.1.1";
 /// Newer Kafka image used for tests that require tools not bundled in
 /// [`KAFKA_IMAGE`]. Currently referenced by:
 ///
@@ -51,14 +51,14 @@ const KAFKA_IMAGE: &str = "confluentinc/cp-kafka:6.1.1";
 /// support `--transactional-id` despite shipping Kafka 3.5. The test that
 /// requires that flag is gated behind `CRABKA_RUN_TXN_JVM_TEST` and
 /// deferred pending a custom Java snippet harness.
-const KAFKA_IMAGE_TXN: &str = "confluentinc/cp-kafka:7.5.0";
+const KAFKA_IMAGE_TXN: &str = "mirror.gcr.io/confluentinc/cp-kafka:7.5.0";
 /// Kafka 0.10.1 console tools (Confluent Platform 3.1.2), used by the
 /// legacy-client acceptance tests (`jvm_legacy_010_*`). The
 /// 0.10.x-era producer emits v1 `MessageSet` (KIP-32 per-message
 /// timestamps) by default; the consumer negotiates Fetch v0–3. This
 /// exercises the broker's `kafka_3_6_2`-namespace handlers and the
 /// up/down-conversion paths landed in slices 2b+2c (#226).
-const KAFKA_IMAGE_LEGACY: &str = "confluentinc/cp-kafka:3.1.2";
+const KAFKA_IMAGE_LEGACY: &str = "mirror.gcr.io/confluentinc/cp-kafka:3.1.2";
 
 /// Spawn the broker, listening on `LISTEN`. The advertised listener is
 /// `host.docker.internal:9092`; inside the cp-kafka containers we add a
@@ -824,7 +824,7 @@ async fn three_node_jvm_round_trip() {
 // uses host loopback (`127.0.0.1`) — Docker reachability is irrelevant
 // for inter-broker.
 //
-// `kafka-dump-log` ships on the `confluentinc/cp-kafka:6.1.1` image
+// `kafka-dump-log` ships on the `mirror.gcr.io/confluentinc/cp-kafka:6.1.1` image
 // alongside `kafka-topics` / `kafka-console-producer` — it's a standard
 // Apache Kafka tool. We mount each broker's partition dir into a fresh
 // container as `-v <host>:/data:ro` and dump the first segment file.
@@ -7692,7 +7692,7 @@ async fn cooperative_sticky_kafka_console_consumer() {
 // ---------------------------------------------------------------------------
 // MinIO-backed tiered-storage acceptance test (KIP-405 S3 backend).
 //
-// Spins up a real `minio/minio` container, points the broker at it via the
+// Spins up a real `mirror.gcr.io/minio/minio` container, points the broker at it via the
 // S3-compatible `S3RemoteStorage` backend, then drives a JVM producer +
 // consumer against a topic with `remote.storage.enable=true` and aggressive
 // `segment.bytes` / `local.retention.bytes` overrides. We assert both that
@@ -7702,8 +7702,8 @@ async fn cooperative_sticky_kafka_console_consumer() {
 // from the remote tier through `RemoteReader`.
 // ---------------------------------------------------------------------------
 
-const MINIO_IMAGE: &str = "minio/minio:RELEASE.2025-09-07T16-13-09Z";
-const MINIO_CLIENT_IMAGE: &str = "minio/mc:RELEASE.2025-08-13T08-35-41Z";
+const MINIO_IMAGE: &str = "mirror.gcr.io/minio/minio:RELEASE.2025-09-07T16-13-09Z";
+const MINIO_CLIENT_IMAGE: &str = "mirror.gcr.io/minio/mc:RELEASE.2025-08-13T08-35-41Z";
 const MINIO_PORT: u16 = 9000;
 const MINIO_ACCESS_KEY: &str = "minioadmin";
 const MINIO_SECRET_KEY: &str = "minioadmin";
@@ -7711,13 +7711,14 @@ const MINIO_BUCKET: &str = "crabka-tiered";
 
 /// `KIP-405` topic configs (`remote.storage.enable`, `local.retention.bytes`)
 /// landed in Apache Kafka 3.6 / Confluent Platform 7.6. The default
-/// [`KAFKA_IMAGE`] (`cp-kafka:6.1.1` / Kafka 2.7) and [`KAFKA_IMAGE_TXN`]
-/// (`cp-kafka:7.5.0` / Kafka 3.5) both predate KIP-405 — their
+/// [`KAFKA_IMAGE`] (`mirror.gcr.io/confluentinc/cp-kafka:6.1.1` / Kafka 2.7)
+/// and [`KAFKA_IMAGE_TXN`] (`mirror.gcr.io/confluentinc/cp-kafka:7.5.0` /
+/// Kafka 3.5) both predate KIP-405 — their
 /// `TopicCommand` client validates `--config` keys against the local
 /// `LogConfig.configNames` set and rejects unknown ones before sending
 /// the `CreateTopics` request, so we can't reuse them for the tiered-
-/// storage test. `cp-kafka:7.8.8` ships Kafka 3.8 where KIP-405 is GA.
-const KAFKA_IMAGE_TIERED: &str = "confluentinc/cp-kafka:7.8.8";
+/// storage test. `mirror.gcr.io/confluentinc/cp-kafka:7.8.8` ships Kafka 3.8 where KIP-405 is GA.
+const KAFKA_IMAGE_TIERED: &str = "mirror.gcr.io/confluentinc/cp-kafka:7.8.8";
 
 /// Owns a `docker run -d` `MinIO` container; tears it down on drop.
 struct MinioContainer {

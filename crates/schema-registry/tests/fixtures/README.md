@@ -1,13 +1,13 @@
 # Schema Registry golden fixtures
 
 These files are **byte-exact golden fixtures** captured from a real
-[`confluentinc/cp-schema-registry`](https://hub.docker.com/r/confluentinc/cp-schema-registry)
+[`mirror.gcr.io/confluentinc/cp-schema-registry`](https://hub.docker.com/r/confluentinc/cp-schema-registry)
 running against an in-process Crabka broker. They are the oracle the Crabka
 Schema Registry implementation is validated against — do **not** hand-edit them.
 
 ## Provenance
 
-- **Image:** `confluentinc/cp-schema-registry:7.4.0`
+- **Image:** `mirror.gcr.io/confluentinc/cp-schema-registry:7.4.0`
 - **Broker:** in-process `crabka-broker`, listening on `0.0.0.0:9092`,
   advertising `host.docker.internal:9092` (container reaches it via
   `--add-host=host.docker.internal:host-gateway`).

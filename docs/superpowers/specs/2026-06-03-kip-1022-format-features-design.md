@@ -22,7 +22,7 @@ The README marks KIP-1022 ⚠️. This slice adds `crabka format --feature`,
 validates the whole feature surface against the real JVM `kafka-features` tool,
 and flips the row to ✅.
 
-## Empirically-pinned Kafka semantics (apache/kafka:4.0.0)
+## Empirically-pinned Kafka semantics (mirror.gcr.io/apache/kafka:4.0.0)
 
 Pinned by running `kafka-storage format …` then dumping `bootstrap.checkpoint`
 with `kafka-dump-log --cluster-metadata-decoder`, and by `kafka-features
@@ -124,7 +124,7 @@ the per-release defaults), except that level-0 records are no longer emitted.
   format-then-boot harness in `cli_smoke.rs` / `bootstrap_consumption.rs`.)
 - **JVM acceptance (`crates/broker/tests/jvm_features.rs`, `#[ignore]` / Docker):**
   against an in-process Crabka broker advertised at `host.docker.internal:9092`,
-  driving `apache/kafka:4.0.0`'s `kafka-features`:
+  driving `mirror.gcr.io/apache/kafka:4.0.0`'s `kafka-features`:
   1. `describe` lists `metadata.version=25`, `group.version=1`,
      `transaction.version=2` at the standalone self-bootstrap defaults.
   2. `downgrade --feature group.version=0` succeeds; a follow-up `describe`

@@ -8,7 +8,7 @@ use super::assignor::{Assignor, RangeAssignor, UniformAssignor};
 
 /// `group.consumer.migration.policy` — governs classic ↔ next-gen consumer
 /// group conversion. Default `Bidirectional`, matching Apache Kafka 4.0
-/// (verified empirically against `apache/kafka:4.0.0`).
+/// (verified empirically against `mirror.gcr.io/apache/kafka:4.0.0`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ConsumerGroupMigrationPolicy {
     /// No conversion in either direction.

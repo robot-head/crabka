@@ -5,7 +5,7 @@
 //!
 //! Drives the REAL Apache Kafka 4.1.0 `kafka-streams-groups.sh` admin tool
 //! (a `KafkaStreamsGroupsCommand` wrapping the JVM `AdminClient`) inside an
-//! `apache/kafka:4.1.0` container against an in-process Crabka broker running
+//! `mirror.gcr.io/apache/kafka:4.1.0` container against an in-process Crabka broker running
 //! on the host. The container has a JRE-only Kafka image (no `javac`/`jshell`),
 //! so we cannot compile a custom KafkaStreams app; instead we use the native
 //! `crabka-client-core` client to make a streams group EXIST on Crabka (finalize
@@ -54,7 +54,7 @@ const BOOTSTRAP: &str = "host.docker.internal:9092";
 const LISTEN: &str = "0.0.0.0:9092";
 /// Official Apache Kafka image. Ships KIP-1071 streams groups plus the
 /// `kafka-streams-groups.sh` admin tool (StreamsGroupDescribe / ListGroups).
-const KAFKA_IMAGE: &str = "apache/kafka:4.1.0";
+const KAFKA_IMAGE: &str = "mirror.gcr.io/apache/kafka:4.1.0";
 const STREAMS_GROUPS: &str = "/opt/kafka/bin/kafka-streams-groups.sh";
 
 /// Boot one broker bound to `0.0.0.0:9092`, advertising `host.docker.internal:

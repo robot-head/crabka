@@ -246,7 +246,7 @@ where
 
 /// `ApiVersionsResponse` advertising the controller-listener APIs.
 ///
-/// A real `apache/kafka:4.0.0` controller dials peers with `ApiVersions v4` over a
+/// A real `mirror.gcr.io/apache/kafka:4.0.0` controller dials peers with `ApiVersions v4` over a
 /// flexible (v2) request header, then consults the returned table to decide
 /// which version of `Vote`/`Fetch`/etc. to send. An EMPTY `api_keys` list made
 /// the JVM treat every raft RPC as `UNSUPPORTED_VERSION` and refuse to send

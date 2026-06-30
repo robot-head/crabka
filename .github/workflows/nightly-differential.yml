@@ -67,7 +67,7 @@ jobs:
 
   # crabka-traces differential-vs-Tempo + Grafana integration. These tests are
   # `#[ignore = "requires Docker..."]` (see crates/traces/tests/tempo_differential.rs)
-  # because they spin up grafana/tempo + grafana/grafana containers via
+  # because they spin up mirror.gcr.io/grafana/tempo + mirror.gcr.io/grafana/grafana containers via
   # testcontainers, so they never run in the default `cargo test --workspace`
   # path. This job runs them with `--ignored` on the nightly schedule, on manual
   # dispatch, and on any PR carrying the `traces-differential` label (opt-in, to
@@ -84,7 +84,7 @@ jobs:
       issues: write
     steps:
       - uses: actions/checkout@v7
-      # The grafana/tempo + grafana/grafana images plus the cargo target dir
+      # The mirror.gcr.io/grafana/tempo + mirror.gcr.io/grafana/grafana images plus the cargo target dir
       # exhaust the ~14 GB free on the default runner; reclaim the unused
       # preinstalled SDKs like the other Docker-heavy Linux jobs do.
       - uses: ./.github/actions/free-disk-space

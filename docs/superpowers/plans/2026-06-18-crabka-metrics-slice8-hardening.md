@@ -868,12 +868,12 @@ git commit -m "test(metrics): shared differential query corpus + Prometheus JSON
 - Create: `crates/metrics/tests/diff_prometheus.rs`
 
 **Interfaces:**
-- Consumes: Task 6's in-process Crabka server; Task 9's corpus + differ; `testcontainers` `prom/prometheus`.
+- Consumes: Task 6's in-process Crabka server; Task 9's corpus + differ; `testcontainers` `mirror.gcr.io/prom/prometheus`.
 - Produces (`#[ignore = "requires Docker"]`):
-  - A test that (1) boots Crabka in-process, (2) starts a `prom/prometheus:<pinned>` container configured with **remote_write receiver enabled** (`--web.enable-remote-write-receiver`) **and** a scrape config disabled (we push, not scrape), (3) remote_writes `seed_dataset()` to **both** Crabka (`/api/v1/push`) and the Prometheus container (`/api/v1/write`), (4) waits for ingestion, (5) runs `query_corpus()` against both `/api/v1/query`(`_range`) and `assert_query_equal` per case.
+  - A test that (1) boots Crabka in-process, (2) starts a `mirror.gcr.io/prom/prometheus:<pinned>` container configured with **remote_write receiver enabled** (`--web.enable-remote-write-receiver`) **and** a scrape config disabled (we push, not scrape), (3) remote_writes `seed_dataset()` to **both** Crabka (`/api/v1/push`) and the Prometheus container (`/api/v1/write`), (4) waits for ingestion, (5) runs `query_corpus()` against both `/api/v1/query`(`_range`) and `assert_query_equal` per case.
 
 > **Harness structure & data loading (explicit, since this is a Docker suite):**
-> - **Container:** `GenericImage::new("prom/prometheus", "<pinned tag>")` with cmd args `--web.enable-remote-write-receiver`, `--enable-feature=native-histograms` (so native-histogram cases match), a `WaitFor::message_on_stderr("Server is ready to receive web requests")`. Map `9090`.
+> - **Container:** `GenericImage::new("mirror.gcr.io/prom/prometheus", "<pinned tag>")` with cmd args `--web.enable-remote-write-receiver`, `--enable-feature=native-histograms` (so native-histogram cases match), a `WaitFor::message_on_stderr("Server is ready to receive web requests")`. Map `9090`.
 > - **Data load:** build remote_write `WriteRequest` protobuf from `seed_dataset()` (reuse the Slice 4 v1 encoder, or a tiny local encoder), snappy-block, POST to both targets with identical bytes (Prometheus URL `http://localhost:<mapped>/api/v1/write`; Crabka `…/api/v1/push`, `X-Scope-OrgID: compliance`). One write, two destinations — guarantees identical input.
 > - **Settle:** poll `/api/v1/query?query=up` style readiness, or sleep-with-retry on the first corpus query until both return non-empty (bounded, ~10s, mirroring the `client-core` bootstrap-retry pattern).
 > - **Assert:** for each `QueryCase`, fetch from both, `assert_query_equal(case.name, crabka_json, prom_json)`. Known divergences (if any: e.g. `@ end()` wall-clock, `time()`/`timestamp()` of "now") are pinned to fixed `@` timestamps in the corpus so results are deterministic.
@@ -905,12 +905,12 @@ git commit -m "test(metrics): prometheus/compliance black-box differential harne
 - Create: `crates/metrics/tests/diff_mimir.rs`
 
 **Interfaces:**
-- Consumes: Task 6 in-process Crabka; Task 9 corpus + differ; `testcontainers` `grafana/mimir`.
+- Consumes: Task 6 in-process Crabka; Task 9 corpus + differ; `testcontainers` `mirror.gcr.io/grafana/mimir`.
 - Produces (`#[ignore = "requires Docker"]`) — the headline external test:
-  - Boot Crabka in-process; start `grafana/mimir:<pinned>` in **monolithic single-binary mode** (`-target=all`, filesystem blocks backend, multitenancy disabled or a fixed `X-Scope-OrgID`) with a minimal config file mounted; remote_write `seed_dataset()` to **both**; run `query_corpus()` against both `/prometheus/api/v1/query`(`_range`); `assert_query_equal` per case.
+  - Boot Crabka in-process; start `mirror.gcr.io/grafana/mimir:<pinned>` in **monolithic single-binary mode** (`-target=all`, filesystem blocks backend, multitenancy disabled or a fixed `X-Scope-OrgID`) with a minimal config file mounted; remote_write `seed_dataset()` to **both**; run `query_corpus()` against both `/prometheus/api/v1/query`(`_range`); `assert_query_equal` per case.
 
 > **Harness structure & data loading (explicit):**
-> - **Container:** `grafana/mimir:<pinned tag>` started with `-target=all` and a mounted `mimir.yaml` (filesystem `blocks_storage`, `common.storage.backend: filesystem`, short `-blocks-storage.tsdb.head-compaction-interval`, multitenancy with a single `X-Scope-OrgID: diff`). `WaitFor` on Mimir's `/ready` (poll the mapped HTTP port until 200). Mimir's push endpoint is `POST /api/v1/push` with `X-Scope-OrgID`.
+> - **Container:** `mirror.gcr.io/grafana/mimir:<pinned tag>` started with `-target=all` and a mounted `mimir.yaml` (filesystem `blocks_storage`, `common.storage.backend: filesystem`, short `-blocks-storage.tsdb.head-compaction-interval`, multitenancy with a single `X-Scope-OrgID: diff`). `WaitFor` on Mimir's `/ready` (poll the mapped HTTP port until 200). Mimir's push endpoint is `POST /api/v1/push` with `X-Scope-OrgID`.
 > - **Data load:** identical remote_write bytes to Crabka and Mimir (same one-write-two-destinations approach as Task 10). Use a fixed wall-clock base for sample timestamps so `@`/`time()` cases are deterministic.
 > - **Compaction wait:** Mimir serves recent samples from its ingester head immediately; for cases that depend on block compaction, either keep the corpus within the head window or trigger/await Mimir's head compaction. Default: keep the corpus in the head window (simplest, deterministic).
 > - **Assert:** per `QueryCase`, `assert_query_equal(case.name, crabka_json, mimir_json)`. `MIMIR_KNOWN_DIVERGENCE` list (each entry justified) covers any Mimir-specific metadata (e.g. Mimir injects `__mimir__` internal labels or query-stats headers we strip in `normalize`).
@@ -942,9 +942,9 @@ git commit -m "test(metrics): headline differential vs real Mimir (ignored, test
 - Create: `crates/metrics/tests/grafana_integration.rs`
 
 **Interfaces:**
-- Consumes: Task 6 in-process Crabka; `testcontainers` `grafana/grafana`.
+- Consumes: Task 6 in-process Crabka; `testcontainers` `mirror.gcr.io/grafana/grafana`.
 - Produces (`#[ignore = "requires Docker"]`):
-  - Boot Crabka in-process (seed a known metric); start `grafana/grafana:<pinned>` with a **provisioned Prometheus datasource** whose `url` points at the Crabka base URL (Grafana must reach the host — use `host.docker.internal` or run Crabka bound to the container-visible address); drive Grafana's datasource **proxy/Explore query API** (`POST /api/ds/query` or the datasource proxy `/api/datasources/proxy/uid/<uid>/api/v1/query`) for a couple of corpus queries; assert the response renders (status `success`, non-empty frames).
+  - Boot Crabka in-process (seed a known metric); start `mirror.gcr.io/grafana/grafana:<pinned>` with a **provisioned Prometheus datasource** whose `url` points at the Crabka base URL (Grafana must reach the host — use `host.docker.internal` or run Crabka bound to the container-visible address); drive Grafana's datasource **proxy/Explore query API** (`POST /api/ds/query` or the datasource proxy `/api/datasources/proxy/uid/<uid>/api/v1/query`) for a couple of corpus queries; assert the response renders (status `success`, non-empty frames).
 
 > **Harness structure & data loading (explicit):**
 > - **Datasource provisioning:** mount a `datasources.yaml` (`apiVersion: 1`, a `prometheus` datasource, `url: http://host.docker.internal:<crabka_port>`, `isDefault: true`, a fixed `uid`, and `httpHeaderName1: X-Scope-OrgID` / `httpHeaderValue1: grafana` so Grafana sends the tenant header). Set `GF_AUTH_ANONYMOUS_ENABLED=true`, `GF_AUTH_ANONYMOUS_ORG_ROLE=Admin` so the test calls the API without login.

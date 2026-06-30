@@ -11,7 +11,7 @@ use std::process::Command;
 use assert2::assert;
 use crabka_protocol::records::metadata::checkpoint::build_bootstrap_checkpoint;
 
-const KAFKA_IMAGE: &str = "apache/kafka:4.0.0";
+const KAFKA_IMAGE: &str = "mirror.gcr.io/apache/kafka:4.0.0";
 
 #[test]
 #[ignore = "requires Docker"]

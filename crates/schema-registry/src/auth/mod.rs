@@ -149,7 +149,7 @@ pub async fn auth_layer(
 
 /// Build the cp-byte-exact `401` response.
 ///
-/// Calibrated against `confluentinc/cp-schema-registry:7.4.0`
+/// Calibrated against `mirror.gcr.io/confluentinc/cp-schema-registry:7.4.0`
 /// (`tests/fixtures/auth/basic.json`):
 ///
 /// - status `401`;
@@ -421,7 +421,7 @@ mod tests {
 
     /// cp-byte-exact pin: drive `auth_layer` (Basic configured) over a tiny
     /// router with NO credentials and assert the `401` matches
-    /// `confluentinc/cp-schema-registry:7.4.0` (`tests/fixtures/auth/basic.json`)
+    /// `mirror.gcr.io/confluentinc/cp-schema-registry:7.4.0` (`tests/fixtures/auth/basic.json`)
     /// byte-for-byte:
     ///
     ///   * status `401`,

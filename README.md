@@ -172,7 +172,7 @@ Release images are published to both GHCR and Docker Hub:
 
 ```bash
 docker pull ghcr.io/robot-head/crabka-broker:latest
-docker pull robothead/crabka-broker:latest
+docker pull mirror.gcr.io/robothead/crabka-broker:latest
 ```
 
 Image build, signing, SBOM, and attestation details are in

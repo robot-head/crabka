@@ -15,7 +15,7 @@ import org.apache.kafka.server.log.remote.storage.RemotePartitionDeleteState;
 
 /**
  * Captures golden byte vectors from the real JVM RemoteLogMetadataSerde
- * (apache/kafka:4.0.0) for the five RLMM event cases used in Crabka's
+ * (mirror.gcr.io/apache/kafka:4.0.0) for the five RLMM event cases used in Crabka's
  * byte-exactness proof. Prints one `name=<lowercase-hex>` line per case.
  *
  * FIXED constants (must match crates/remote-storage-topic/tests/jvm_serde_golden.rs):

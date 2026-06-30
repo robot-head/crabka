@@ -39,7 +39,7 @@ const KNOWN_METADATA: &[u8] = b"\x00\x01rangemeta\xde\xad";
 const ASSIGN: &[u8] = b"assign-bytes";
 
 /// The EXACT `ConsumerProtocolSubscription` bytes a real `RangeAssignor`
-/// console-consumer sent to `confluentinc/cp-kafka:7.4.0` (captured by the
+/// console-consumer sent to `mirror.gcr.io/confluentinc/cp-kafka:7.4.0` (captured by the
 /// `describe_groups_jvm` Docker harness into
 /// `tests/fixtures/describe_groups/real_kafka_classic.json`, member
 /// `member_metadata_hex`). Wire shape: version `i16=3`, then one subscribed
@@ -204,7 +204,7 @@ async fn describe_groups_reports_member_metadata_and_protocol_name() {
 
 /// cp/JVM cross-validation: drive the SAME classic flow but with the EXACT
 /// `ConsumerProtocolSubscription` / `ConsumerProtocolAssignment` bytes a real
-/// `RangeAssignor` console-consumer exchanged with `confluentinc/cp-kafka:7.4.0`
+/// `RangeAssignor` console-consumer exchanged with `mirror.gcr.io/confluentinc/cp-kafka:7.4.0`
 /// (captured by `describe_groups_jvm.rs` → `real_kafka_classic.json`). Crabka's
 /// `DescribeGroups` must reproduce real Kafka's authority semantics:
 /// `protocol_type == "consumer"`, `protocol_data == "range"`, and a byte-exact

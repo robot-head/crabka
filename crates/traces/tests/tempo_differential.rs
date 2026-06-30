@@ -147,7 +147,7 @@ fn differential_search_corpus_covers_selector_structural_and_pipeline_queries() 
 }
 
 #[tokio::test]
-#[ignore = "requires Docker and the grafana/tempo image"]
+#[ignore = "requires Docker and the mirror.gcr.io/grafana/tempo image"]
 async fn real_tempo_and_crabka_match_basic_by_id_and_search() -> TestResult {
     let client = reqwest::Client::new();
     let tempo = start_tempo().await?;
@@ -234,7 +234,7 @@ async fn real_tempo_and_crabka_match_basic_by_id_and_search() -> TestResult {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker and the grafana/tempo image"]
+#[ignore = "requires Docker and the mirror.gcr.io/grafana/tempo image"]
 async fn real_tempo_and_crabka_match_traceql_metrics_query_range() -> TestResult {
     let client = reqwest::Client::new();
     let tempo = start_tempo().await?;
@@ -284,7 +284,7 @@ async fn real_tempo_and_crabka_match_traceql_metrics_query_range() -> TestResult
 }
 
 #[tokio::test]
-#[ignore = "requires Docker and the grafana/tempo image"]
+#[ignore = "requires Docker and the mirror.gcr.io/grafana/tempo image"]
 async fn real_tempo_and_crabka_accept_query_param_alias() -> TestResult {
     // The Grafana Tempo datasource — and therefore the Traces Drilldown
     // breakdown — sends the TraceQL metrics query under `query=`, not `q=`.
@@ -343,7 +343,7 @@ async fn real_tempo_and_crabka_accept_query_param_alias() -> TestResult {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker and the grafana/tempo image"]
+#[ignore = "requires Docker and the mirror.gcr.io/grafana/tempo image"]
 async fn real_tempo_and_crabka_match_traceql_metrics_by_labels() -> TestResult {
     // Regression for the Grafana Traces Drilldown breakdown: its per-attribute
     // panels key on the FULL scoped attribute (e.g. `resource.service.name`), so
@@ -462,7 +462,7 @@ async fn crabka_tenant_b_cannot_see_tenant_a_traces_tags_or_values() -> TestResu
 }
 
 #[tokio::test]
-#[ignore = "requires Docker and the grafana/grafana image"]
+#[ignore = "requires Docker and the mirror.gcr.io/grafana/grafana image"]
 #[allow(
     clippy::too_many_lines,
     reason = "integration test drives all Grafana datasource legs end-to-end"
@@ -622,7 +622,7 @@ async fn grafana_accepts_tempo_datasource_pointing_at_crabka() -> TestResult {
 ///   therefore prove the two ends of the loop separately rather than asserting a
 ///   passing query against data the harness never produces.
 #[tokio::test]
-#[ignore = "requires Docker and the grafana/grafana image"]
+#[ignore = "requires Docker and the mirror.gcr.io/grafana/grafana image"]
 async fn grafana_service_graph_prometheus_datasource_and_series() -> TestResult {
     let client = reqwest::Client::new();
 
@@ -903,29 +903,33 @@ fn resource_attr<'a>(span: &'a Span, key: &str) -> Option<&'a str> {
 
 async fn start_tempo() -> TestResult<testcontainers::ContainerAsync<GenericImage>> {
     let tag = std::env::var("CRABKA_TEMPO_IMAGE_TAG").unwrap_or_else(|_| "latest".into());
-    Ok(GenericImage::new("grafana/tempo".to_string(), tag)
-        .with_exposed_port(3200.tcp())
-        .with_exposed_port(4318.tcp())
-        .with_wait_for(WaitFor::message_on_stderr("Tempo started"))
-        .with_copy_to(
-            CopyTargetOptions::new("/tmp/tempo.yaml").with_mode(0o644),
-            CopyDataSource::Data(TEMPO_CONFIG.as_bytes().to_vec()),
-        )
-        .with_cmd(["-target=all", "-config.file=/tmp/tempo.yaml"])
-        .with_user("root")
-        .start()
-        .await?)
+    Ok(
+        GenericImage::new("mirror.gcr.io/grafana/tempo".to_string(), tag)
+            .with_exposed_port(3200.tcp())
+            .with_exposed_port(4318.tcp())
+            .with_wait_for(WaitFor::message_on_stderr("Tempo started"))
+            .with_copy_to(
+                CopyTargetOptions::new("/tmp/tempo.yaml").with_mode(0o644),
+                CopyDataSource::Data(TEMPO_CONFIG.as_bytes().to_vec()),
+            )
+            .with_cmd(["-target=all", "-config.file=/tmp/tempo.yaml"])
+            .with_user("root")
+            .start()
+            .await?,
+    )
 }
 
 async fn start_grafana() -> TestResult<testcontainers::ContainerAsync<GenericImage>> {
     let tag = std::env::var("CRABKA_GRAFANA_IMAGE_TAG").unwrap_or_else(|_| "latest".into());
-    Ok(GenericImage::new("grafana/grafana".to_string(), tag)
-        .with_exposed_port(3000.tcp())
-        .with_wait_for(WaitFor::seconds(5))
-        .with_env_var("GF_SECURITY_ADMIN_PASSWORD", "admin")
-        .with_host(DOCKER_HOST_ALIAS, Host::HostGateway)
-        .start()
-        .await?)
+    Ok(
+        GenericImage::new("mirror.gcr.io/grafana/grafana".to_string(), tag)
+            .with_exposed_port(3000.tcp())
+            .with_wait_for(WaitFor::seconds(5))
+            .with_env_var("GF_SECURITY_ADMIN_PASSWORD", "admin")
+            .with_host(DOCKER_HOST_ALIAS, Host::HostGateway)
+            .start()
+            .await?,
+    )
 }
 
 async fn mapped_base_url(

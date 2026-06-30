@@ -1,6 +1,6 @@
 //! Golden compatibility-verdict capture harness for Crabka Schema Registry slice 2.
 //!
-//! Boots a real `confluentinc/cp-schema-registry:7.4.0` container against an
+//! Boots a real `mirror.gcr.io/confluentinc/cp-schema-registry:7.4.0` container against an
 //! in-process Crabka broker (same networking as `capture_fixtures.rs`), then
 //! drives the compatibility check API for 7 Avro cases × 3 compatibility
 //! levels = 21 entries. The verdicts are written to:
@@ -31,7 +31,7 @@ const LISTEN: &str = "0.0.0.0:9092";
 const CONTROLLER_LISTEN: &str = "0.0.0.0:9093";
 const ADVERTISED: &str = "host.docker.internal:9092";
 
-const SR_IMAGE: &str = "confluentinc/cp-schema-registry:7.4.0";
+const SR_IMAGE: &str = "mirror.gcr.io/confluentinc/cp-schema-registry:7.4.0";
 const SR_CONTENT_TYPE: &str = "application/vnd.schemaregistry.v1+json";
 
 // ── fixture paths ─────────────────────────────────────────────────────────────

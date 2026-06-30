@@ -12,8 +12,8 @@ use crabka_log::LogConfig;
 
 const BOOTSTRAP: &str = "host.docker.internal:9092";
 const LISTEN: &str = "0.0.0.0:9092";
-const KAFKA_IMAGE_NEXT_GEN: &str = "apache/kafka:4.0.0";
-const KAFKA_IMAGE_CLASSIC: &str = "confluentinc/cp-kafka:7.4.0";
+const KAFKA_IMAGE_NEXT_GEN: &str = "mirror.gcr.io/apache/kafka:4.0.0";
+const KAFKA_IMAGE_CLASSIC: &str = "mirror.gcr.io/confluentinc/cp-kafka:7.4.0";
 
 async fn start_host_broker() -> (crabka_broker::BrokerHandle, tempfile::TempDir) {
     let _ = tracing_subscriber::fmt()

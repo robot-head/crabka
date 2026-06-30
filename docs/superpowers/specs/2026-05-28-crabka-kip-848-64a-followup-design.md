@@ -249,7 +249,7 @@ The implementer verifies the exact codegen field names on
 ### JVM acceptance
 
 - `crates/broker/tests/jvm_consumer_group_next_gen.rs` — remove `#[ignore]`
-  from all 4 tests. All must pass against `apache/kafka:4.0.0`.
+  from all 4 tests. All must pass against `mirror.gcr.io/apache/kafka:4.0.0`.
 
 ### CI
 
@@ -261,7 +261,7 @@ The implementer verifies the exact codegen field names on
 1. `cargo test --workspace` green.
 2. `cargo test --workspace -- --include-ignored` adds the 6 previously-ignored
    tests; all green.
-3. JVM acceptance binary passes against `apache/kafka:4.0.0` with
+3. JVM acceptance binary passes against `mirror.gcr.io/apache/kafka:4.0.0` with
    `group.protocol=consumer`.
 4. `cargo clippy --workspace --all-targets -- -D warnings` clean.
 5. STATUS.md updated; the two follow-up bullets dropped from slice 64a's

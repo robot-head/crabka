@@ -132,7 +132,7 @@ kind-up:
     @if kind get clusters 2>/dev/null | grep -q '^crabka-bench$'; then \
       echo "kind cluster 'crabka-bench' already exists"; \
     else \
-      kind create cluster --name crabka-bench --image kindest/node:v1.30.0 --wait 60s; \
+      kind create cluster --name crabka-bench --image mirror.gcr.io/kindest/node:v1.30.0 --wait 60s; \
     fi
     @echo "loading bench-driver image into kind"
     docker load -i crabka-bench-driver.tar 2>&1 | tee /tmp/load.log

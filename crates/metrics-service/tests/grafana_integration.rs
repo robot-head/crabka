@@ -6,7 +6,7 @@
 //! proxy (`/api/datasources/uid/<uid>/resources/...`). Every assertion exercises
 //! the full Grafana -> Prometheus-datasource -> Crabka path.
 //!
-//! Ignored by default because it pulls and runs `grafana/grafana` under Docker.
+//! Ignored by default because it pulls and runs `mirror.gcr.io/grafana/grafana` under Docker.
 //! Run with:
 //!
 //! `cargo test -p crabka-metrics-service --test grafana_integration -- --ignored --nocapture`
@@ -1219,26 +1219,28 @@ async fn start_grafana(
 ) -> TestResult<testcontainers::ContainerAsync<GenericImage>> {
     let tag =
         std::env::var("CRABKA_GRAFANA_IMAGE_TAG").unwrap_or_else(|_| GRAFANA_IMAGE_TAG.to_string());
-    Ok(GenericImage::new("grafana/grafana".to_string(), tag)
-        .with_exposed_port(GRAFANA_PORT.tcp())
-        // Grafana writes its go logger to STDOUT (verified: the "HTTP Server
-        // Listen" line appears on stdout, not stderr). /api/health is polled for
-        // real readiness below.
-        .with_wait_for(WaitFor::message_on_stdout("HTTP Server Listen"))
-        // Provision the datasource so no UI/API setup is needed.
-        .with_copy_to(
-            "/etc/grafana/provisioning/datasources/crabka.yaml",
-            datasource_yaml.as_bytes().to_vec(),
-        )
-        // host.docker.internal -> host gateway lets the container reach the Crabka
-        // server running on the host.
-        .with_host("host.docker.internal", Host::HostGateway)
-        // Anonymous admin so the test drives the API without a login.
-        .with_env_var("GF_AUTH_ANONYMOUS_ENABLED", "true")
-        .with_env_var("GF_AUTH_ANONYMOUS_ORG_ROLE", "Admin")
-        .with_env_var("GF_AUTH_BASIC_ENABLED", "false")
-        .start()
-        .await?)
+    Ok(
+        GenericImage::new("mirror.gcr.io/grafana/grafana".to_string(), tag)
+            .with_exposed_port(GRAFANA_PORT.tcp())
+            // Grafana writes its go logger to STDOUT (verified: the "HTTP Server
+            // Listen" line appears on stdout, not stderr). /api/health is polled for
+            // real readiness below.
+            .with_wait_for(WaitFor::message_on_stdout("HTTP Server Listen"))
+            // Provision the datasource so no UI/API setup is needed.
+            .with_copy_to(
+                "/etc/grafana/provisioning/datasources/crabka.yaml",
+                datasource_yaml.as_bytes().to_vec(),
+            )
+            // host.docker.internal -> host gateway lets the container reach the Crabka
+            // server running on the host.
+            .with_host("host.docker.internal", Host::HostGateway)
+            // Anonymous admin so the test drives the API without a login.
+            .with_env_var("GF_AUTH_ANONYMOUS_ENABLED", "true")
+            .with_env_var("GF_AUTH_ANONYMOUS_ORG_ROLE", "Admin")
+            .with_env_var("GF_AUTH_BASIC_ENABLED", "false")
+            .start()
+            .await?,
+    )
 }
 
 async fn mapped_base_url(

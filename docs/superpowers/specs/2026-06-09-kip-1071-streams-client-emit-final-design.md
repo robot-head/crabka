@@ -169,7 +169,7 @@ Mirror the `window_aggregate.rs` / `suppress.rs` style (hand-built
 
 ### Behavioral goldens (the real gate)
 
-Capture from **apache/kafka:4.1.0** Streams under
+Capture from **mirror.gcr.io/apache/kafka:4.1.0** Streams under
 `crates/client-streams/tests/jvm-capture/`, one fixture per window type:
 
 1. `emit_final_time_window` — tumbling count, `EmitStrategy.ON_WINDOW_CLOSE`.
@@ -179,7 +179,7 @@ Capture from **apache/kafka:4.1.0** Streams under
 Each fixture pins the byte-exact output records (key layout, the `Change` old/new shape,
 ordering) **and** the wire topology — confirming emit-final adds **no** extra node/store vs
 the emit-on-update topology (the architecture anchor). Cross-validate against a live
-`apache/kafka:4.1.0` broker as the other fixtures do.
+`mirror.gcr.io/apache/kafka:4.1.0` broker as the other fixtures do.
 
 ### CI / coverage discipline
 

@@ -23,7 +23,7 @@ fn exec(container: &str, args: &[&str]) {
     }
 }
 
-/// Run the full battery. `apache/kafka:4.3.0` ships CLI tools under `/opt/kafka/bin`.
+/// Run the full battery. `mirror.gcr.io/apache/kafka:4.3.0` ships CLI tools under `/opt/kafka/bin`.
 #[allow(clippy::too_many_lines)]
 pub fn run(container: &str) {
     let bs = ["--bootstrap-server", BOOTSTRAP];

@@ -63,7 +63,7 @@ impl WalSink for CapturingSink {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker and the grafana/pyroscope image"]
+#[ignore = "requires Docker and the mirror.gcr.io/grafana/pyroscope image"]
 async fn real_pyroscope_render_matches_crabka_after_identical_ingest() -> TestResult {
     let client = reqwest::Client::new();
     let pyroscope = start_pyroscope().await?;
@@ -164,7 +164,7 @@ async fn real_pyroscope_render_matches_crabka_after_identical_ingest() -> TestRe
 /// extra/missing top-level fields. It always prints both raw bodies under
 /// `--nocapture` so the deviation (if any) is quotable.
 #[tokio::test]
-#[ignore = "requires Docker and the grafana/pyroscope image"]
+#[ignore = "requires Docker and the mirror.gcr.io/grafana/pyroscope image"]
 #[allow(clippy::too_many_lines)]
 async fn real_pyroscope_series_and_stats_match_crabka_after_identical_ingest() -> TestResult {
     let client = reqwest::Client::new();
@@ -655,7 +655,7 @@ fn json_number_repr(value: &Value) -> Option<&'static str> {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker and the grafana/grafana image"]
+#[ignore = "requires Docker and the mirror.gcr.io/grafana/grafana image"]
 async fn grafana_accepts_pyroscope_datasource_pointing_at_crabka() -> TestResult {
     let client = reqwest::Client::new();
     let sink = CapturingSink::default();
@@ -739,24 +739,28 @@ async fn grafana_accepts_pyroscope_datasource_pointing_at_crabka() -> TestResult
 
 async fn start_pyroscope() -> TestResult<testcontainers::ContainerAsync<GenericImage>> {
     let tag = std::env::var("CRABKA_PYROSCOPE_IMAGE_TAG").unwrap_or_else(|_| "latest".to_string());
-    Ok(GenericImage::new("grafana/pyroscope".to_string(), tag)
-        .with_exposed_port(4040.tcp())
-        .with_wait_for(WaitFor::seconds(3))
-        .start()
-        .await?)
+    Ok(
+        GenericImage::new("mirror.gcr.io/grafana/pyroscope".to_string(), tag)
+            .with_exposed_port(4040.tcp())
+            .with_wait_for(WaitFor::seconds(3))
+            .start()
+            .await?,
+    )
 }
 
 async fn start_grafana() -> TestResult<testcontainers::ContainerAsync<GenericImage>> {
     let tag = std::env::var("CRABKA_GRAFANA_IMAGE_TAG").unwrap_or_else(|_| "latest".to_string());
-    Ok(GenericImage::new("grafana/grafana".to_string(), tag)
-        .with_exposed_port(3000.tcp())
-        .with_wait_for(WaitFor::seconds(5))
-        .with_env_var("GF_SECURITY_ADMIN_PASSWORD", "admin")
-        // Let the container reach the in-process Crabka querier on the host via
-        // host.docker.internal (host-gateway mapping; works on Docker Desktop + Linux).
-        .with_host("host.docker.internal", Host::HostGateway)
-        .start()
-        .await?)
+    Ok(
+        GenericImage::new("mirror.gcr.io/grafana/grafana".to_string(), tag)
+            .with_exposed_port(3000.tcp())
+            .with_wait_for(WaitFor::seconds(5))
+            .with_env_var("GF_SECURITY_ADMIN_PASSWORD", "admin")
+            // Let the container reach the in-process Crabka querier on the host via
+            // host.docker.internal (host-gateway mapping; works on Docker Desktop + Linux).
+            .with_host("host.docker.internal", Host::HostGateway)
+            .start()
+            .await?,
+    )
 }
 
 async fn mapped_base_url(
@@ -2221,7 +2225,7 @@ async fn querier_echoes_proto_content_type_for_proto_requests() -> TestResult {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker and the grafana/grafana image"]
+#[ignore = "requires Docker and the mirror.gcr.io/grafana/grafana image"]
 async fn grafana_renders_crabka_profiles_end_to_end() -> TestResult {
     let client = reqwest::Client::new();
 
