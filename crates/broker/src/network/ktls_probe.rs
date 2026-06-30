@@ -109,3 +109,21 @@ async fn try_probe_ktls() -> Result<(), Box<dyn std::error::Error + Send + Sync>
     client.abort();
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn linux_probe_keeps_error_path_false() {
+        let source = include_str!("ktls_probe.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source prefix");
+
+        assert!(
+            source.contains(
+                "Err(e) => {\n            tracing::debug!(error = %e, \"kTLS startup probe failed; falling back to userspace TLS\");\n            false\n        }"
+            ),
+            "Linux kTLS probe must fall back to userspace TLS when the real probe fails"
+        );
+    }
+}
