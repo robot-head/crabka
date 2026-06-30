@@ -120,6 +120,9 @@ fn encode(version: i16, resp: &ShareGroupHeartbeatResponse) -> Result<Bytes, Bro
 mod tests {
     use super::*;
     use assert2::assert;
+    use crabka_protocol::owned::share_group_heartbeat_response;
+    use crabka_security::{AuthMethod, Principal};
+    use std::net::SocketAddr;
 
     #[test]
     fn disabled_feature_yields_unsupported_version() {
@@ -150,6 +153,13 @@ mod tests {
             &peer,
             "g"
         ));
+        assert!(!group_read_denied(
+            &crate::authorizer::AllowAllAuthorizer,
+            &image,
+            &principal,
+            &peer,
+            "g"
+        ));
 
         let bytes = encode(
             share_group_heartbeat_response::MAX_VERSION,
@@ -163,5 +173,69 @@ mod tests {
         )
         .unwrap();
         assert!(resp.error_code == codes::GROUP_AUTHORIZATION_FAILED);
+        assert!(cur.is_empty(), "response decoder consumed all bytes");
+    }
+
+    fn encode_request(req: &ShareGroupHeartbeatRequest) -> Bytes {
+        let version = share_group_heartbeat_response::MAX_VERSION;
+        let mut buf = BytesMut::with_capacity(req.encoded_len(version));
+        req.encode(&mut buf, version).expect("encode request");
+        buf.freeze()
+    }
+
+    fn decode_response(bytes: &Bytes) -> ShareGroupHeartbeatResponse {
+        let version = share_group_heartbeat_response::MAX_VERSION;
+        let mut cur: &[u8] = bytes.as_ref();
+        let resp = ShareGroupHeartbeatResponse::decode(&mut cur, version).expect("decode response");
+        assert!(cur.is_empty(), "response decoder consumed all bytes");
+        resp
+    }
+
+    fn test_context<'a>(
+        principal: &'a Principal,
+        peer: &'a SocketAddr,
+    ) -> crate::handlers::RequestContext<'a> {
+        crate::handlers::RequestContext {
+            principal,
+            peer,
+            client_id: "client-a",
+            sendfile_capable: false,
+            connection_listener_name: "PLAINTEXT",
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_disabled_feature_returns_unsupported_version() {
+        let version = share_group_heartbeat_response::MAX_VERSION;
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let mut cfg = crate::config::BrokerConfig::for_tests(dir.path().to_path_buf());
+        cfg.share_group.enable = false;
+        let broker_handle = Broker::start(cfg).await.expect("start broker");
+        let broker = broker_handle.broker_arc_for_test();
+        let principal = Principal {
+            name: "alice".into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        };
+        let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+        let ctx = test_context(&principal, &peer);
+        let req = ShareGroupHeartbeatRequest {
+            group_id: "g1".into(),
+            member_id: String::new(),
+            member_epoch: 0,
+            subscribed_topic_names: Some(vec!["t1".into()]),
+            ..Default::default()
+        };
+
+        let resp = handle(&broker, version, 1, &encode_request(&req), &ctx)
+            .await
+            .expect("handle");
+        let resp = decode_response(&resp);
+
+        assert!(resp.throttle_time_ms == 0);
+        assert!(resp.error_code == codes::UNSUPPORTED_VERSION);
+        assert!(resp.member_id.is_none());
+        assert!(resp.assignment.is_none());
+        broker_handle.shutdown().await;
     }
 }

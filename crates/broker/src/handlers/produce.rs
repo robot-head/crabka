@@ -1220,14 +1220,19 @@ fn build_produce_data(prepared: PreparedBatch, leader_epoch: i32) -> ProduceData
 mod tests {
     use super::{
         FramedPartition, FramedTopic, MIN_INSYNC_REPLICAS, PartitionPayload,
-        produce_bytes_by_qos_tier, topic_min_insync_replicas,
+        build_topic_error_response, decode_owned_batch, process_partition,
+        produce_bytes_by_qos_tier, resolve_topic_compression, topic_min_insync_replicas,
     };
     use assert2::assert;
-    use bytes::Bytes;
+    use bytes::{Bytes, BytesMut};
+    use crabka_compression::CompressionType;
     use crabka_metadata::{
         MetadataImage, MetadataRecord, PartitionRecord, TopicConfigRecord, TopicRecord,
     };
+    use crabka_protocol::records::{Record, RecordBatch, RecordsPayload};
     use std::collections::BTreeMap;
+    use std::sync::Arc;
+    use std::time::Duration;
     use uuid::Uuid;
 
     fn image_with_topic(topic: &str, isr: &[u64]) -> MetadataImage {
@@ -1284,6 +1289,12 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    fn encode_batch(batch: &RecordBatch) -> Bytes {
+        let mut buf = BytesMut::new();
+        batch.encode(&mut buf).expect("encode record batch");
+        buf.freeze()
     }
 
     #[test]
@@ -1359,6 +1370,174 @@ mod tests {
         assert!(grouped.get("gold") == Some(&30));
         assert!(grouped.get(crate::config_keys::DEFAULT_QOS_TIER) == Some(&7));
         assert!(grouped.len() == 2);
+    }
+
+    #[test]
+    fn build_topic_error_response_preserves_topic_and_partition_fields() {
+        let topic_id = crabka_protocol::primitives::uuid::Uuid([7; 16]);
+        let topic = FramedTopic {
+            name: "orders".into(),
+            topic_id,
+            partition_data: vec![
+                FramedPartition {
+                    index: 0,
+                    payload: PartitionPayload::Null,
+                },
+                FramedPartition {
+                    index: 4,
+                    payload: PartitionPayload::Slice(Bytes::from_static(b"not-a-batch")),
+                },
+            ],
+        };
+
+        let resp = build_topic_error_response(&topic, crate::codes::UNKNOWN_TOPIC_ID);
+
+        assert!(resp.name == "orders");
+        assert!(resp.topic_id == topic_id);
+        assert!(
+            resp.partition_responses.len() == 2,
+            "{:?}",
+            resp.partition_responses
+        );
+        assert!(resp.partition_responses[0].index == 0);
+        assert!(resp.partition_responses[0].error_code == crate::codes::UNKNOWN_TOPIC_ID);
+        assert!(resp.partition_responses[0].base_offset == -1);
+        assert!(resp.partition_responses[1].index == 4);
+        assert!(resp.partition_responses[1].error_code == crate::codes::UNKNOWN_TOPIC_ID);
+        assert!(resp.partition_responses[1].base_offset == -1);
+    }
+
+    #[test]
+    fn resolve_topic_compression_distinguishes_producer_and_forced_codecs() {
+        let mut producer = image_with_topic("producer-topic", &[1]);
+        let mut overrides = BTreeMap::new();
+        overrides.insert(
+            crate::config_keys::COMPRESSION_TYPE.into(),
+            "producer".into(),
+        );
+        producer.apply(&MetadataRecord::V1TopicConfig(TopicConfigRecord {
+            topic: "producer-topic".into(),
+            overrides,
+        }));
+        assert!(resolve_topic_compression(&producer, "producer-topic").is_none());
+
+        let mut forced = image_with_topic("forced-topic", &[1]);
+        let mut overrides = BTreeMap::new();
+        overrides.insert(crate::config_keys::COMPRESSION_TYPE.into(), "zstd".into());
+        forced.apply(&MetadataRecord::V1TopicConfig(TopicConfigRecord {
+            topic: "forced-topic".into(),
+            overrides,
+        }));
+        assert!(resolve_topic_compression(&forced, "forced-topic") == Some(CompressionType::Zstd));
+    }
+
+    #[test]
+    fn decode_owned_batch_preserves_non_default_header_and_record_fields() {
+        let batch = RecordBatch {
+            last_offset_delta: 1,
+            max_timestamp: 9876,
+            producer_id: 22,
+            producer_epoch: 3,
+            base_sequence: 11,
+            records: vec![
+                Record {
+                    value: Some(Bytes::from_static(b"a")),
+                    ..Default::default()
+                },
+                Record {
+                    value: Some(Bytes::from_static(b"b")),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let decoded = decode_owned_batch(
+            RecordsPayload::V2(vec![batch]),
+            "orders",
+            &crate::metrics::BrokerMetrics::new(),
+        )
+        .expect("decode owned batch");
+
+        assert!(decoded.last_offset_delta == 1);
+        assert!(decoded.max_timestamp == 9876);
+        assert!(decoded.producer_id == 22);
+        assert!(decoded.producer_epoch == 3);
+        assert!(decoded.base_sequence == 11);
+        assert!(decoded.records.len() == 2);
+        assert!(decoded.records[0].value.as_deref() == Some(&b"a"[..]));
+        assert!(decoded.records[1].value.as_deref() == Some(&b"b"[..]));
+    }
+
+    #[test]
+    fn decode_owned_batch_rejects_empty_v2_payload() {
+        let err = decode_owned_batch(
+            RecordsPayload::V2(Vec::new()),
+            "orders",
+            &crate::metrics::BrokerMetrics::new(),
+        )
+        .unwrap_err();
+        assert!(err == crate::codes::INVALID_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn process_partition_non_leader_preserves_current_leader_hint() {
+        let mut img = image_with_topic("orders", &[2, 3]);
+        img.apply(&MetadataRecord::V1Partition(PartitionRecord {
+            topic: "orders".into(),
+            partition: 0,
+            leader: 2,
+            replicas: vec![2, 3],
+            isr: vec![2, 3],
+            leader_epoch: 17,
+            adding_replicas: vec![],
+            removing_replicas: vec![],
+            directories: vec![],
+            partition_epoch: 1,
+        }));
+        let image = Arc::new(img);
+        let partitions = Arc::new(crate::partition_registry::PartitionRegistry::new());
+        let txn_coordinator = Arc::new(crate::txn::coordinator::TxnCoordinator::new(
+            1,
+            Arc::clone(&partitions),
+            Arc::new(crate::producer_id_manager::ProducerIdManager::new()),
+        ));
+        let producer_state = Arc::new(crate::producer_state::ProducerState::new());
+        let log_dir_status = crate::log_dir_status::LogDirRegistry::default();
+        let metrics = crate::metrics::BrokerMetrics::new();
+        let payload = encode_batch(&RecordBatch {
+            records: vec![Record {
+                value: Some(Bytes::from_static(b"hello")),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+
+        let resp = process_partition(
+            FramedPartition {
+                index: 0,
+                payload: PartitionPayload::Slice(payload),
+            },
+            None,
+            "orders",
+            false,
+            false,
+            1,
+            Duration::from_millis(1),
+            &partitions,
+            &txn_coordinator,
+            &producer_state,
+            &log_dir_status,
+            &image,
+            1,
+            &metrics,
+        )
+        .await
+        .expect("process partition");
+
+        assert!(resp.index == 0);
+        assert!(resp.error_code == crate::codes::NOT_LEADER_OR_FOLLOWER);
+        assert!(resp.current_leader.leader_id == 2);
+        assert!(resp.current_leader.leader_epoch == 17);
     }
 
     #[test]

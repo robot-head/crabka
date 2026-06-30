@@ -199,3 +199,221 @@ pub(crate) async fn group_is_empty(
         Err(_) => true,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert2::assert;
+    use crabka_protocol::owned::alter_share_group_offsets_request::{
+        AlterShareGroupOffsetsRequestPartition, AlterShareGroupOffsetsRequestTopic,
+    };
+    use crabka_protocol::owned::alter_share_group_offsets_response;
+    use crabka_security::{AuthMethod, Principal};
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    use crate::authorizer::{AuthorizationRequest, Authorizer};
+    use crate::config::BrokerConfig;
+
+    #[derive(Debug)]
+    struct DenyAll;
+
+    impl Authorizer for DenyAll {
+        fn authorize(
+            &self,
+            _source: &dyn crabka_authz::AclSource,
+            _req: &AuthorizationRequest<'_>,
+        ) -> AuthorizationResult {
+            AuthorizationResult::Deny
+        }
+    }
+
+    fn request(
+        group_id: &str,
+        topic_name: &str,
+        partitions: &[i32],
+    ) -> AlterShareGroupOffsetsRequest {
+        AlterShareGroupOffsetsRequest {
+            group_id: group_id.into(),
+            topics: vec![AlterShareGroupOffsetsRequestTopic {
+                topic_name: topic_name.into(),
+                partitions: partitions
+                    .iter()
+                    .map(|partition_index| AlterShareGroupOffsetsRequestPartition {
+                        partition_index: *partition_index,
+                        start_offset: 42,
+                        ..Default::default()
+                    })
+                    .collect(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn encode_request(req: &AlterShareGroupOffsetsRequest) -> Bytes {
+        let version = alter_share_group_offsets_response::MAX_VERSION;
+        let mut buf = BytesMut::with_capacity(req.encoded_len(version));
+        req.encode(&mut buf, version).expect("encode request");
+        buf.freeze()
+    }
+
+    fn decode_response(bytes: &Bytes) -> AlterShareGroupOffsetsResponse {
+        let version = alter_share_group_offsets_response::MAX_VERSION;
+        let mut cur: &[u8] = bytes.as_ref();
+        let resp =
+            AlterShareGroupOffsetsResponse::decode(&mut cur, version).expect("decode response");
+        assert!(cur.is_empty(), "response decoder consumed all bytes");
+        resp
+    }
+
+    fn test_context<'a>(
+        principal: &'a Principal,
+        peer: &'a SocketAddr,
+    ) -> crate::handlers::RequestContext<'a> {
+        crate::handlers::RequestContext {
+            principal,
+            peer,
+            client_id: "admin-client",
+            sendfile_capable: false,
+            connection_listener_name: "PLAINTEXT",
+        }
+    }
+
+    async fn start_broker(
+        authorizer: Arc<dyn Authorizer>,
+        share_enabled: bool,
+    ) -> (crate::broker::BrokerHandle, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
+        cfg.authorizer = authorizer;
+        cfg.share_group.enable = share_enabled;
+        let handle = Broker::start(cfg).await.expect("start broker");
+        (handle, dir)
+    }
+
+    fn principal() -> Principal {
+        Principal {
+            name: "alice".into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn encode_top_level_preserves_error_fields() {
+        let resp = encode_top_level(
+            alter_share_group_offsets_response::MAX_VERSION,
+            codes::UNSUPPORTED_VERSION,
+        )
+        .expect("encode");
+        let resp = decode_response(&resp);
+
+        assert!(resp.throttle_time_ms == 0);
+        assert!(resp.error_code == codes::UNSUPPORTED_VERSION);
+        assert!(resp.responses.is_empty());
+    }
+
+    #[tokio::test]
+    async fn handle_disabled_feature_returns_top_level_unsupported_version() {
+        let version = alter_share_group_offsets_response::MAX_VERSION;
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer), false).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let principal = principal();
+        let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+        let ctx = test_context(&principal, &peer);
+        let req_bytes = encode_request(&request("g1", "missing", &[0]));
+
+        let resp = handle(&broker, version, 1, &req_bytes, &ctx)
+            .await
+            .expect("handle");
+        let resp = decode_response(&resp);
+
+        assert!(resp.throttle_time_ms == 0);
+        assert!(resp.error_code == codes::UNSUPPORTED_VERSION);
+        assert!(resp.responses.is_empty());
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_denied_group_returns_top_level_authorization_failure() {
+        let version = alter_share_group_offsets_response::MAX_VERSION;
+        let (broker_handle, _dir) = start_broker(Arc::new(DenyAll), true).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let principal = principal();
+        let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+        let ctx = test_context(&principal, &peer);
+        let req_bytes = encode_request(&request("g1", "missing", &[0]));
+
+        let resp = handle(&broker, version, 1, &req_bytes, &ctx)
+            .await
+            .expect("handle");
+        let resp = decode_response(&resp);
+
+        assert!(resp.throttle_time_ms == 0);
+        assert!(resp.error_code == codes::GROUP_AUTHORIZATION_FAILED);
+        assert!(resp.responses.is_empty());
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_unknown_topic_preserves_topic_and_partition_fields() {
+        let version = alter_share_group_offsets_response::MAX_VERSION;
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer), true).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let principal = principal();
+        let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+        let ctx = test_context(&principal, &peer);
+        let req_bytes = encode_request(&request("g1", "missing-topic", &[3, 5]));
+
+        let resp = handle(&broker, version, 1, &req_bytes, &ctx)
+            .await
+            .expect("handle");
+        let resp = decode_response(&resp);
+
+        assert!(resp.throttle_time_ms == 0);
+        assert!(resp.error_code == codes::NONE);
+        assert!(resp.responses.len() == 1, "{resp:?}");
+        let topic = &resp.responses[0];
+        assert!(topic.topic_name == "missing-topic");
+        assert!(topic.topic_id == Uuid::default());
+        assert!(topic.partitions.len() == 2, "{topic:?}");
+        assert!(topic.partitions[0].partition_index == 3);
+        assert!(topic.partitions[0].error_code == codes::UNKNOWN_TOPIC_OR_PARTITION);
+        assert!(topic.partitions[1].partition_index == 5);
+        assert!(topic.partitions[1].error_code == codes::UNKNOWN_TOPIC_OR_PARTITION);
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn reset_partition_bumps_existing_state_epoch_and_start_offset() {
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer), true).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let persister = broker
+            .group_coordinator
+            .share_persister()
+            .cloned()
+            .expect("share persister");
+        let topic_id = uuid::Uuid::from_u128(0xABCD);
+
+        persister
+            .initialize("g-reset", topic_id, 0, 4, 10)
+            .await
+            .expect("seed share state");
+        reset_partition(&persister, "g-reset", topic_id, 0, 33)
+            .await
+            .expect("reset partition");
+        let state = persister
+            .read_state("g-reset", topic_id, 0)
+            .await
+            .expect("read state")
+            .expect("state present");
+
+        assert!(state.state_epoch == 5);
+        assert!(state.start_offset == 33);
+        broker_handle.shutdown().await;
+    }
+}
