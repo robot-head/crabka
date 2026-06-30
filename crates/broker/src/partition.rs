@@ -642,6 +642,46 @@ mod tests {
         (p, dir)
     }
 
+    fn test_partition_with_writer() -> (Partition, tempfile::TempDir) {
+        let dir = tempdir().expect("tempdir");
+        let log = Arc::new(Mutex::new(
+            Log::open(dir.path(), LogConfig::default()).expect("open log"),
+        ));
+        let log_dir = Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf()));
+        let (tx, rx) = mpsc::channel::<WriterMessage>(8);
+        let append_notify = Arc::new(Notify::new());
+        let replica_state = Arc::new(tokio::sync::Mutex::new(
+            crate::replica_state::ReplicaState::new(),
+        ));
+        let hw_advance_notify = Arc::new(Notify::new());
+        let writer = tokio::spawn(crate::partition_writer::run(
+            "t".to_string(),
+            0,
+            log.clone(),
+            log_dir.clone(),
+            rx,
+            append_notify.clone(),
+            replica_state.clone(),
+            hw_advance_notify.clone(),
+            crate::log_dir_status::LogDirRegistry::default(),
+            Arc::new(crate::producer_state::ProducerState::new()),
+        ));
+        let p = Partition {
+            topic: "t".into(),
+            partition_id: 0,
+            log_dir,
+            log,
+            writer_tx: tx,
+            append_notify,
+            replica_state,
+            hw_advance_notify,
+            current_leader: Arc::new(AtomicU64::new(0)),
+            current_leader_epoch: Arc::new(AtomicI32::new(0)),
+            _writer_handle: Arc::new(writer),
+        };
+        (p, dir)
+    }
+
     fn append_records(p: &Partition, count: i32) {
         use crabka_protocol::records::{Attributes, Record, RecordBatch};
 
@@ -813,6 +853,60 @@ mod tests {
             futures_util::poll!(&mut waiter).is_pending(),
             "unchanged HW must not wake waiters"
         );
+    }
+
+    #[tokio::test]
+    async fn install_leader_change_clears_followers_when_only_leader_changes() {
+        let (p, _td) = test_partition(Arc::new(Notify::new()));
+        p.install_isr(&[1, 2], &[1, 2], 1).await;
+        {
+            let mut st = p.replica_state.lock().await;
+            st.per_follower.get_mut(&2).expect("follower").leo = 11;
+        }
+
+        p.install_leader_change(2, 0).await;
+
+        assert!(p.current_leader.load(Ordering::Acquire) == 2);
+        assert!(p.current_leader_epoch.load(Ordering::Acquire) == 0);
+        let st = p.replica_state.lock().await;
+        assert!(st.per_follower.is_empty());
+        assert!(st.current_leader_epoch == 0);
+    }
+
+    #[tokio::test]
+    async fn install_leader_change_clears_followers_when_only_epoch_changes() {
+        let (p, _td) = test_partition(Arc::new(Notify::new()));
+        p.install_isr(&[1, 2], &[1, 2], 1).await;
+        {
+            let mut st = p.replica_state.lock().await;
+            st.per_follower.get_mut(&2).expect("follower").leo = 17;
+        }
+
+        p.install_leader_change(0, 9).await;
+
+        assert!(p.current_leader.load(Ordering::Acquire) == 0);
+        assert!(p.current_leader_epoch.load(Ordering::Acquire) == 9);
+        let st = p.replica_state.lock().await;
+        assert!(st.per_follower.is_empty());
+        assert!(st.current_leader_epoch == 9);
+    }
+
+    #[tokio::test]
+    async fn test_set_leader_epoch_updates_cached_epoch() {
+        let (p, _td) = test_partition(Arc::new(Notify::new()));
+
+        p.test_set_leader_epoch(6);
+
+        assert!(p.current_leader_epoch.load(Ordering::Acquire) == 6);
+    }
+
+    #[tokio::test]
+    async fn test_set_log_start_updates_log_start_through_writer() {
+        let (p, _td) = test_partition_with_writer();
+
+        p.test_set_log_start(5).await.expect("set log start");
+
+        assert!(p.log_start_offset() == 5);
     }
 
     #[tokio::test]
