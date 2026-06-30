@@ -112,11 +112,43 @@ fn encode_ok(version: i16) -> Result<Bytes, BrokerError> {
 
 fn encode_response(version: i16, error_code: i16) -> Result<Bytes, BrokerError> {
     let resp = AddOffsetsToTxnResponse {
-        throttle_time_ms: 0,
         error_code,
         ..Default::default()
     };
     let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
     resp.encode(&mut buf, version)?;
     Ok(buf.freeze())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert2::assert;
+
+    fn decode(bytes: &Bytes, version: i16) -> AddOffsetsToTxnResponse {
+        let mut cur: &[u8] = bytes.as_ref();
+        let resp = AddOffsetsToTxnResponse::decode(&mut cur, version).expect("decode response");
+        assert!(cur.is_empty(), "response decoder consumed all bytes");
+        resp
+    }
+
+    #[test]
+    fn encode_err_preserves_error_code_on_the_wire() {
+        let bytes = encode_err(4, codes::NOT_COORDINATOR).expect("encode error");
+        assert!(!bytes.is_empty());
+        let resp = decode(&bytes, 4);
+
+        assert!(resp.throttle_time_ms == 0);
+        assert!(resp.error_code == codes::NOT_COORDINATOR);
+    }
+
+    #[test]
+    fn encode_ok_preserves_success_code_on_the_wire() {
+        let bytes = encode_ok(4).expect("encode ok");
+        assert!(!bytes.is_empty());
+        let resp = decode(&bytes, 4);
+
+        assert!(resp.throttle_time_ms == 0);
+        assert!(resp.error_code == codes::NONE);
+    }
 }

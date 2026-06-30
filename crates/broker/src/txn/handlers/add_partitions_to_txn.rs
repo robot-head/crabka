@@ -145,7 +145,6 @@ async fn handle_v4(
     }
 
     let resp = AddPartitionsToTxnResponse {
-        throttle_time_ms: 0,
         results_by_transaction,
         ..Default::default()
     };
@@ -195,7 +194,6 @@ async fn handle_v3(
     };
 
     let resp = AddPartitionsToTxnResponse {
-        throttle_time_ms: 0,
         results_by_topic_v3_and_below: topic_results,
         ..Default::default()
     };
@@ -457,9 +455,18 @@ fn encode_response(resp: &AddPartitionsToTxnResponse, version: i16) -> Result<By
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
     use assert2::assert;
+    use crabka_protocol::owned::add_partitions_to_txn_request::AddPartitionsToTxnTransaction;
+    use crabka_security::{AuthMethod, Principal};
 
     use super::*;
+    use crate::authorizer::Authorizer;
+    use crate::broker::{Broker, BrokerHandle};
+    use crate::config::BrokerConfig;
     use crate::txn::state::TxnEntry;
 
     #[test]
@@ -476,5 +483,253 @@ mod tests {
         };
         assert!(verify_partition_code(&e, &present) == codes::NONE);
         assert!(verify_partition_code(&e, &absent) == codes::TRANSACTION_ABORTABLE);
+    }
+
+    fn topic(name: &str, partitions: &[i32]) -> AddPartitionsToTxnTopic {
+        AddPartitionsToTxnTopic {
+            name: name.into(),
+            partitions: partitions.to_vec(),
+            ..Default::default()
+        }
+    }
+
+    fn partition_code(row: &AddPartitionsToTxnTopicResult, index: usize) -> (i32, i16) {
+        let part = &row.results_by_partition[index];
+        (part.partition_index, part.partition_error_code)
+    }
+
+    #[test]
+    fn verify_partitions_preserves_topic_and_partition_rows() {
+        let mut e = TxnEntry::new_empty("t".into(), 1, 0, 30_000, 0);
+        e.partitions.insert(TopicPartition {
+            topic: "alpha".into(),
+            partition: 1,
+        });
+        let topics = vec![topic("alpha", &[1, 2]), topic("denied", &[3])];
+        let denied = HashSet::from(["denied".to_string()]);
+
+        let rows = verify_partitions(&e, &topics, &denied);
+
+        assert!(rows.len() == 2);
+        assert!(rows[0].name == "alpha");
+        assert!(rows[0].results_by_partition.len() == 2);
+        assert!(partition_code(&rows[0], 0) == (1, codes::NONE));
+        assert!(partition_code(&rows[0], 1) == (2, codes::TRANSACTION_ABORTABLE));
+        assert!(rows[1].name == "denied");
+        assert!(rows[1].results_by_partition.len() == 1);
+        assert!(partition_code(&rows[1], 0) == (3, codes::TOPIC_AUTHORIZATION_FAILED));
+    }
+
+    #[test]
+    fn per_topic_with_denied_preserves_rows_and_overrides_denied_topics() {
+        let topics = vec![topic("alpha", &[1, 2]), topic("denied", &[3])];
+        let denied = HashSet::from(["denied".to_string()]);
+
+        let rows = per_topic_with_denied(&topics, &denied, codes::NOT_COORDINATOR);
+
+        assert!(rows.len() == 2);
+        assert!(rows[0].name == "alpha");
+        assert!(partition_code(&rows[0], 0) == (1, codes::NOT_COORDINATOR));
+        assert!(partition_code(&rows[0], 1) == (2, codes::NOT_COORDINATOR));
+        assert!(rows[1].name == "denied");
+        assert!(partition_code(&rows[1], 0) == (3, codes::TOPIC_AUTHORIZATION_FAILED));
+    }
+
+    #[test]
+    fn topic_error_preserves_each_requested_partition() {
+        let topics = vec![topic("alpha", &[4, 5])];
+
+        let rows = topic_error(&topics, codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED);
+
+        assert!(rows.len() == 1);
+        assert!(rows[0].name == "alpha");
+        assert!(rows[0].results_by_partition.len() == 2);
+        assert!(partition_code(&rows[0], 0) == (4, codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED));
+        assert!(partition_code(&rows[0], 1) == (5, codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED));
+    }
+
+    fn encode_request(req: &AddPartitionsToTxnRequest, version: i16) -> Bytes {
+        let mut buf = BytesMut::with_capacity(req.encoded_len(version));
+        req.encode(&mut buf, version).expect("encode request");
+        buf.freeze()
+    }
+
+    fn decode_response(bytes: &Bytes, version: i16) -> AddPartitionsToTxnResponse {
+        let mut cur: &[u8] = bytes.as_ref();
+        let resp = AddPartitionsToTxnResponse::decode(&mut cur, version).expect("decode response");
+        assert!(cur.is_empty(), "response decoder consumed all bytes");
+        resp
+    }
+
+    #[test]
+    fn encode_response_round_trips_v4_transaction_results() {
+        let resp = AddPartitionsToTxnResponse {
+            results_by_transaction: vec![AddPartitionsToTxnResult {
+                transactional_id: "tid-4".into(),
+                topic_results: topic_error(&[topic("alpha", &[1])], codes::INVALID_TXN_STATE),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let bytes = encode_response(&resp, 4).expect("encode response");
+        assert!(!bytes.is_empty());
+        let decoded = decode_response(&bytes, 4);
+
+        assert!(decoded.throttle_time_ms == 0);
+        assert!(decoded.error_code == codes::NONE);
+        assert!(decoded.results_by_transaction.len() == 1);
+        assert!(decoded.results_by_transaction[0].transactional_id == "tid-4");
+        assert!(decoded.results_by_transaction[0].topic_results.len() == 1);
+        assert!(
+            partition_code(&decoded.results_by_transaction[0].topic_results[0], 0)
+                == (1, codes::INVALID_TXN_STATE)
+        );
+    }
+
+    #[test]
+    fn encode_response_round_trips_v3_topic_results() {
+        let resp = AddPartitionsToTxnResponse {
+            results_by_topic_v3_and_below: topic_error(&[topic("alpha", &[7])], codes::NONE),
+            ..Default::default()
+        };
+
+        let bytes = encode_response(&resp, 3).expect("encode response");
+        assert!(!bytes.is_empty());
+        let decoded = decode_response(&bytes, 3);
+
+        assert!(decoded.throttle_time_ms == 0);
+        assert!(decoded.results_by_topic_v3_and_below.len() == 1);
+        assert!(decoded.results_by_topic_v3_and_below[0].name == "alpha");
+        assert!(partition_code(&decoded.results_by_topic_v3_and_below[0], 0) == (7, codes::NONE));
+    }
+
+    #[derive(Debug)]
+    struct DenyAll;
+
+    impl Authorizer for DenyAll {
+        fn authorize(
+            &self,
+            _source: &dyn crabka_authz::AclSource,
+            _req: &AuthorizationRequest<'_>,
+        ) -> AuthorizationResult {
+            AuthorizationResult::Deny
+        }
+    }
+
+    fn principal() -> Principal {
+        Principal {
+            name: "ANONYMOUS".into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        }
+    }
+
+    fn peer() -> SocketAddr {
+        "127.0.0.1:9092".parse().unwrap()
+    }
+
+    fn test_context<'a>(
+        principal: &'a Principal,
+        peer: &'a SocketAddr,
+    ) -> crate::handlers::RequestContext<'a> {
+        crate::handlers::RequestContext {
+            principal,
+            peer,
+            client_id: "producer-client",
+            sendfile_capable: false,
+            connection_listener_name: "PLAINTEXT",
+        }
+    }
+
+    async fn start_broker(authorizer: Arc<dyn Authorizer>) -> (BrokerHandle, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
+        cfg.audit_enabled = false;
+        cfg.authorizer = authorizer;
+        let handle = Broker::start(cfg).await.expect("start broker");
+        (handle, dir)
+    }
+
+    #[tokio::test]
+    async fn handle_v4_transactional_id_deny_returns_transaction_rows() {
+        let (broker_handle, _dir) = start_broker(Arc::new(DenyAll)).await;
+        let principal = principal();
+        let peer = peer();
+        let ctx = test_context(&principal, &peer);
+        let req = AddPartitionsToTxnRequest {
+            transactions: vec![AddPartitionsToTxnTransaction {
+                transactional_id: "tid-4".into(),
+                producer_id: 11,
+                producer_epoch: 2,
+                verify_only: false,
+                topics: vec![topic("alpha", &[1, 2])],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let req_bytes = encode_request(&req, 4);
+
+        let bytes = handle(
+            &broker_handle.broker_arc_for_test(),
+            4,
+            123,
+            &req_bytes,
+            &ctx,
+        )
+        .await
+        .expect("handle");
+        let resp = decode_response(&bytes, 4);
+
+        assert!(resp.throttle_time_ms == 0);
+        assert!(resp.results_by_transaction.len() == 1);
+        let txn = &resp.results_by_transaction[0];
+        assert!(txn.transactional_id == "tid-4");
+        assert!(txn.topic_results.len() == 1);
+        assert!(txn.topic_results[0].name == "alpha");
+        assert!(
+            partition_code(&txn.topic_results[0], 0)
+                == (1, codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED)
+        );
+        assert!(
+            partition_code(&txn.topic_results[0], 1)
+                == (2, codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED)
+        );
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_v3_transactional_id_deny_returns_topic_rows() {
+        let (broker_handle, _dir) = start_broker(Arc::new(DenyAll)).await;
+        let principal = principal();
+        let peer = peer();
+        let ctx = test_context(&principal, &peer);
+        let req = AddPartitionsToTxnRequest {
+            v3_and_below_transactional_id: "tid-3".into(),
+            v3_and_below_producer_id: 11,
+            v3_and_below_producer_epoch: 2,
+            v3_and_below_topics: vec![topic("alpha", &[3, 4])],
+            ..Default::default()
+        };
+        let req_bytes = encode_request(&req, 3);
+
+        let bytes = handle(
+            &broker_handle.broker_arc_for_test(),
+            3,
+            123,
+            &req_bytes,
+            &ctx,
+        )
+        .await
+        .expect("handle");
+        let resp = decode_response(&bytes, 3);
+
+        assert!(resp.throttle_time_ms == 0);
+        assert!(resp.results_by_topic_v3_and_below.len() == 1);
+        let topic = &resp.results_by_topic_v3_and_below[0];
+        assert!(topic.name == "alpha");
+        assert!(partition_code(topic, 0) == (3, codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED));
+        assert!(partition_code(topic, 1) == (4, codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED));
+        broker_handle.shutdown().await;
     }
 }

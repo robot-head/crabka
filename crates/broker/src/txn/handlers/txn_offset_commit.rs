@@ -330,3 +330,141 @@ fn encode_err_all(
     let empty: std::collections::HashSet<String> = std::collections::HashSet::new();
     encode_resp(version, &build_response(req, code, &empty))
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use assert2::assert;
+    use crabka_log::{Log, LogConfig};
+    use crabka_protocol::owned::txn_offset_commit_request::{
+        TxnOffsetCommitRequestPartition, TxnOffsetCommitRequestTopic,
+    };
+
+    use super::*;
+    use crate::partition_registry::PartitionRegistry;
+
+    fn request() -> TxnOffsetCommitRequest {
+        TxnOffsetCommitRequest {
+            transactional_id: "tid".into(),
+            group_id: "group-a".into(),
+            producer_id: 47,
+            producer_epoch: 5,
+            topics: vec![TxnOffsetCommitRequestTopic {
+                name: "orders".into(),
+                partitions: vec![
+                    TxnOffsetCommitRequestPartition {
+                        partition_index: 2,
+                        committed_offset: 103,
+                        committed_leader_epoch: 7,
+                        committed_metadata: Some("first".into()),
+                        ..Default::default()
+                    },
+                    TxnOffsetCommitRequestPartition {
+                        partition_index: 3,
+                        committed_offset: 107,
+                        committed_leader_epoch: 8,
+                        committed_metadata: Some("second".into()),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn open_offsets_partition(registry: &PartitionRegistry, log_dir: &Path) {
+        let part_dir = crate::log_dir::partition_dir(log_dir, OFFSETS_TOPIC, OFFSETS_PARTITION);
+        std::fs::create_dir_all(&part_dir).expect("create offsets partition dir");
+        let log = Log::open(&part_dir, LogConfig::default()).expect("open offsets log");
+        let part = crate::broker::spawn_partition(
+            OFFSETS_TOPIC.to_string(),
+            OFFSETS_PARTITION,
+            log_dir.to_path_buf(),
+            log,
+            crate::log_dir_status::LogDirRegistry::default(),
+            Arc::new(crate::producer_state::ProducerState::new()),
+        );
+        registry.insert(OFFSETS_TOPIC.to_string(), OFFSETS_PARTITION, part);
+    }
+
+    #[tokio::test]
+    async fn append_txn_batch_writes_transactional_batch_and_buffers_entries() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let registry = Arc::new(PartitionRegistry::new());
+        open_offsets_partition(&registry, dir.path());
+        let req = request();
+
+        let entries = append_txn_batch(&req, &registry, 12_345, &HashSet::new())
+            .await
+            .expect("append batch");
+
+        assert!(entries.len() == 2);
+        assert!(entries[0].0 == ("orders".into(), 2));
+        assert!(entries[0].1.offset == 103);
+        assert!(entries[0].1.leader_epoch == 7);
+        assert!(entries[0].1.metadata == "first");
+        assert!(entries[0].1.commit_timestamp_ms == 12_345);
+        assert!(entries[1].0 == ("orders".into(), 3));
+        assert!(entries[1].1.offset == 107);
+        assert!(entries[1].1.leader_epoch == 8);
+        assert!(entries[1].1.metadata == "second");
+        assert!(entries[1].1.commit_timestamp_ms == 12_345);
+
+        let part = registry
+            .get(OFFSETS_TOPIC, OFFSETS_PARTITION)
+            .expect("offsets partition");
+        let log = part.log.lock().expect("lock offsets log");
+        let read = log.read(0, 1024 * 1024).expect("read offsets log");
+        assert!(read.batches.len() == 1);
+        let batch = &read.batches[0];
+        assert!(batch.attributes.is_transactional());
+        assert!(batch.max_timestamp == 12_345);
+        assert!(batch.producer_id == 47);
+        assert!(batch.producer_epoch == 5);
+        assert!(batch.last_offset_delta == 1);
+        assert!(batch.records.len() == 2);
+        assert!(batch.records[0].offset_delta == 0);
+        assert!(batch.records[0].timestamp_delta == 0);
+        assert!(batch.records[0].key.is_some());
+        assert!(batch.records[0].value.is_some());
+        assert!(batch.records[1].offset_delta == 1);
+        assert!(batch.records[1].timestamp_delta == 0);
+        assert!(batch.records[1].key.is_some());
+        assert!(batch.records[1].value.is_some());
+    }
+
+    #[tokio::test]
+    async fn append_txn_batch_skips_denied_topics_without_appending() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let registry = Arc::new(PartitionRegistry::new());
+        open_offsets_partition(&registry, dir.path());
+        let req = request();
+        let denied = HashSet::from(["orders".to_string()]);
+
+        let entries = append_txn_batch(&req, &registry, 12_345, &denied)
+            .await
+            .expect("all denied succeeds");
+
+        assert!(entries.is_empty());
+        let part = registry
+            .get(OFFSETS_TOPIC, OFFSETS_PARTITION)
+            .expect("offsets partition");
+        let log = part.log.lock().expect("lock offsets log");
+        let read = log.read(0, 1024 * 1024).expect("read offsets log");
+        assert!(read.batches.is_empty());
+    }
+
+    #[tokio::test]
+    async fn append_txn_batch_returns_not_coordinator_when_offsets_partition_missing() {
+        let registry = Arc::new(PartitionRegistry::new());
+        let err = append_txn_batch(&request(), &registry, 12_345, &HashSet::new())
+            .await
+            .expect_err("missing offsets partition");
+
+        assert!(err == codes::NOT_COORDINATOR);
+    }
+}

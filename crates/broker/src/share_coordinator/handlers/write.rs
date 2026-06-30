@@ -92,3 +92,115 @@ pub(crate) fn handle(
         Ok(buf.freeze())
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert2::assert;
+    use crabka_protocol::owned::write_share_group_state_request::{
+        PartitionData, StateBatch, WriteShareGroupStateRequest, WriteStateData,
+    };
+    use crabka_protocol::owned::write_share_group_state_response::WriteShareGroupStateResponse;
+    use crabka_protocol::primitives::uuid::Uuid as ProtoUuid;
+
+    const VERSION: i16 = 1;
+
+    fn decode(bytes: &Bytes) -> WriteShareGroupStateResponse {
+        let mut cur: &[u8] = bytes.as_ref();
+        let resp =
+            WriteShareGroupStateResponse::decode(&mut cur, VERSION).expect("decode response");
+        assert!(cur.is_empty(), "response decoder consumed all bytes");
+        resp
+    }
+
+    fn encode_request(req: &WriteShareGroupStateRequest) -> Bytes {
+        let mut buf = BytesMut::with_capacity(req.encoded_len(VERSION));
+        req.encode(&mut buf, VERSION).expect("encode request");
+        buf.freeze()
+    }
+
+    fn request(group_id: &str, topic_id: ProtoUuid, partition: i32) -> WriteShareGroupStateRequest {
+        WriteShareGroupStateRequest {
+            group_id: group_id.into(),
+            topics: vec![WriteStateData {
+                topic_id,
+                partitions: vec![PartitionData {
+                    partition,
+                    state_epoch: 17,
+                    leader_epoch: 3,
+                    start_offset: 101,
+                    delivery_complete_count: 9,
+                    state_batches: vec![StateBatch {
+                        first_offset: 101,
+                        last_offset: 105,
+                        delivery_state: 2,
+                        delivery_count: 3,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn returns_success_row_and_persists_state_for_led_partition() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let (broker_handle, broker) =
+            super::super::test_support::broker_with_led_share_coordinator(dir.path()).await;
+        let topic_id = uuid::Uuid::from_bytes([51; 16]);
+        let wire_topic_id = ProtoUuid(*topic_id.as_bytes());
+        let req = request("share-group", wire_topic_id, 4);
+        let req_bytes = encode_request(&req);
+
+        broker
+            .share_coordinator
+            .lead_all_partitions_for_test()
+            .await;
+        let bytes = super::handle(&broker, VERSION, 123, &req_bytes)
+            .await
+            .expect("handle");
+        let resp = decode(&bytes);
+
+        assert!(resp.results.len() == 1);
+        assert!(resp.results[0].topic_id == wire_topic_id);
+        assert!(resp.results[0].partitions.len() == 1);
+        let partition = &resp.results[0].partitions[0];
+        assert!(partition.partition == 4);
+        assert!(partition.error_code == codes::NONE);
+        assert!(partition.error_message.is_none());
+
+        let summary = broker
+            .share_coordinator
+            .read_summary("share-group", topic_id, 4)
+            .await
+            .expect("written state is readable");
+        assert!(summary == (17, 3, 101, 9));
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn returns_not_coordinator_row_for_unled_partition() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let (broker_handle, broker) = super::super::test_support::broker(dir.path()).await;
+        let topic_id = ProtoUuid([52; 16]);
+        let req = request("share-group", topic_id, 8);
+        let req_bytes = encode_request(&req);
+
+        let bytes = super::handle(&broker, VERSION, 123, &req_bytes)
+            .await
+            .expect("handle");
+        let resp = decode(&bytes);
+
+        assert!(resp.results.len() == 1);
+        assert!(resp.results[0].topic_id == topic_id);
+        assert!(resp.results[0].partitions.len() == 1);
+        let partition = &resp.results[0].partitions[0];
+        assert!(partition.partition == 8);
+        assert!(partition.error_code == codes::NOT_COORDINATOR);
+        assert!(partition.error_message.is_none());
+        broker_handle.shutdown().await;
+    }
+}

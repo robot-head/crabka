@@ -636,8 +636,40 @@ mod tests {
     use super::*;
     use assert2::assert;
     use crabka_metadata::{BrokerEndpoint, BrokerRegistrationRecord, MetadataRecord};
+    use crabka_protocol::owned::end_txn_response::EndTxnResponse;
+
+    fn decode_response(bytes: &Bytes, version: i16) -> EndTxnResponse {
+        let mut cur: &[u8] = bytes.as_ref();
+        let resp = EndTxnResponse::decode(&mut cur, version).expect("decode response");
+        assert!(cur.is_empty(), "response decoder consumed all bytes");
+        resp
+    }
 
     // ── KIP-890 TV_2 completion identity: next_producer_identity ────────────
+
+    #[test]
+    fn encode_err_leaves_producer_identity_at_error_sentinels() {
+        let bytes = encode_err(5, codes::NOT_COORDINATOR).expect("encode error");
+        assert!(!bytes.is_empty());
+        let resp = decode_response(&bytes, 5);
+
+        assert!(resp.throttle_time_ms == 0);
+        assert!(resp.error_code == codes::NOT_COORDINATOR);
+        assert!(resp.producer_id == -1);
+        assert!(resp.producer_epoch == -1);
+    }
+
+    #[test]
+    fn encode_ok_returns_v5_producer_identity() {
+        let bytes = encode_ok(5, 42, 7).expect("encode ok");
+        assert!(!bytes.is_empty());
+        let resp = decode_response(&bytes, 5);
+
+        assert!(resp.throttle_time_ms == 0);
+        assert!(resp.error_code == codes::NONE);
+        assert!(resp.producer_id == 42);
+        assert!(resp.producer_epoch == 7);
+    }
 
     #[test]
     fn epoch_bumps_only_at_tv2() {
