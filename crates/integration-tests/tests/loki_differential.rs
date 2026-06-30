@@ -668,8 +668,7 @@ async fn real_loki_and_crabka_return_same_stream_query_range_result() {
     let mut querier_config = service_config(Role::Querier, &bootstrap, topic, &data_root);
     querier_config.object_store_url = Some(object_store_url);
     querier_config.index_prefix = Some(index_prefix.to_string());
-    querier_config.tenant = Some("tenant-a".to_string());
-    querier_config.querier_index_source = QuerierIndexSource::TenantObjectStoreManifest;
+    querier_config.querier_index_source = QuerierIndexSource::TenantObjectStoreShards;
     querier_config.wal_group_id = "loki-differential-querier".to_string();
     let querier = build_service_router(
         &querier_config,
@@ -816,8 +815,7 @@ async fn real_loki_and_crabka_return_same_matcher_and_line_filter_results() {
     let mut querier_config = service_config(Role::Querier, &bootstrap, topic, &data_root);
     querier_config.object_store_url = Some(object_store_url);
     querier_config.index_prefix = Some(index_prefix.to_string());
-    querier_config.tenant = Some("tenant-a".to_string());
-    querier_config.querier_index_source = QuerierIndexSource::TenantObjectStoreManifest;
+    querier_config.querier_index_source = QuerierIndexSource::TenantObjectStoreShards;
     querier_config.wal_group_id = "loki-filter-differential-querier".to_string();
     let querier = build_service_router(
         &querier_config,
@@ -914,8 +912,7 @@ async fn real_loki_and_crabka_return_same_metric_query_range_result() {
     let mut querier_config = service_config(Role::Querier, &bootstrap, topic, &data_root);
     querier_config.object_store_url = Some(object_store_url);
     querier_config.index_prefix = Some(index_prefix.to_string());
-    querier_config.tenant = Some("tenant-a".to_string());
-    querier_config.querier_index_source = QuerierIndexSource::TenantObjectStoreManifest;
+    querier_config.querier_index_source = QuerierIndexSource::TenantObjectStoreShards;
     querier_config.wal_group_id = "loki-metric-differential-querier".to_string();
     let querier = build_service_router(
         &querier_config,
@@ -1104,8 +1101,7 @@ async fn real_loki_and_crabka_return_same_vector_aggregation_result() {
     let mut querier_config = service_config(Role::Querier, &bootstrap, topic, &data_root);
     querier_config.object_store_url = Some(object_store_url);
     querier_config.index_prefix = Some(index_prefix.to_string());
-    querier_config.tenant = Some("tenant-a".to_string());
-    querier_config.querier_index_source = QuerierIndexSource::TenantObjectStoreManifest;
+    querier_config.querier_index_source = QuerierIndexSource::TenantObjectStoreShards;
     querier_config.wal_group_id = "loki-vector-aggregation-differential-querier".to_string();
     let querier = build_service_router(
         &querier_config,
@@ -1212,8 +1208,7 @@ async fn real_loki_and_crabka_return_same_byte_metric_results() {
     let mut querier_config = service_config(Role::Querier, &bootstrap, topic, &data_root);
     querier_config.object_store_url = Some(object_store_url);
     querier_config.index_prefix = Some(index_prefix.to_string());
-    querier_config.tenant = Some("tenant-a".to_string());
-    querier_config.querier_index_source = QuerierIndexSource::TenantObjectStoreManifest;
+    querier_config.querier_index_source = QuerierIndexSource::TenantObjectStoreShards;
     querier_config.wal_group_id = "loki-byte-metric-differential-querier".to_string();
     let querier = build_service_router(
         &querier_config,
@@ -1320,8 +1315,7 @@ async fn real_loki_and_crabka_return_same_metadata_results() {
     let mut querier_config = service_config(Role::Querier, &bootstrap, topic, &data_root);
     querier_config.object_store_url = Some(object_store_url);
     querier_config.index_prefix = Some(index_prefix.to_string());
-    querier_config.tenant = Some("tenant-a".to_string());
-    querier_config.querier_index_source = QuerierIndexSource::TenantObjectStoreManifest;
+    querier_config.querier_index_source = QuerierIndexSource::TenantObjectStoreShards;
     querier_config.wal_group_id = "loki-metadata-differential-querier".to_string();
     let querier = build_service_router(
         &querier_config,
@@ -2097,8 +2091,7 @@ async fn real_loki_and_crabka_return_same_parser_filter_results() {
     let mut querier_config = service_config(Role::Querier, &bootstrap, topic, &data_root);
     querier_config.object_store_url = Some(object_store_url);
     querier_config.index_prefix = Some(index_prefix.to_string());
-    querier_config.tenant = Some("tenant-a".to_string());
-    querier_config.querier_index_source = QuerierIndexSource::TenantObjectStoreManifest;
+    querier_config.querier_index_source = QuerierIndexSource::TenantObjectStoreShards;
     querier_config.wal_group_id = "loki-parser-differential-querier".to_string();
     let querier = build_service_router(
         &querier_config,
@@ -2779,8 +2772,7 @@ async fn real_loki_and_crabka_return_same_parser_metric_results() {
     let mut querier_config = service_config(Role::Querier, &bootstrap, topic, &data_root);
     querier_config.object_store_url = Some(object_store_url);
     querier_config.index_prefix = Some(index_prefix.to_string());
-    querier_config.tenant = Some("tenant-a".to_string());
-    querier_config.querier_index_source = QuerierIndexSource::TenantObjectStoreManifest;
+    querier_config.querier_index_source = QuerierIndexSource::TenantObjectStoreShards;
     querier_config.wal_group_id = "loki-parser-metric-differential-querier".to_string();
     let querier = build_service_router(
         &querier_config,
@@ -2901,8 +2893,7 @@ async fn real_loki_and_crabka_return_same_instant_metric_query_result() {
     let mut querier_config = service_config(Role::Querier, &bootstrap, topic, &data_root);
     querier_config.object_store_url = Some(object_store_url);
     querier_config.index_prefix = Some(index_prefix.to_string());
-    querier_config.tenant = Some("tenant-a".to_string());
-    querier_config.querier_index_source = QuerierIndexSource::TenantObjectStoreManifest;
+    querier_config.querier_index_source = QuerierIndexSource::TenantObjectStoreShards;
     querier_config.wal_group_id = "loki-instant-metric-differential-querier".to_string();
     let querier = build_service_router(
         &querier_config,
@@ -3307,8 +3298,7 @@ async fn real_loki_and_crabka_return_same_parser_error_labels() {
     let mut querier_config = service_config(Role::Querier, &bootstrap, topic, &data_root);
     querier_config.object_store_url = Some(object_store_url);
     querier_config.index_prefix = Some(index_prefix.to_string());
-    querier_config.tenant = Some("tenant-a".to_string());
-    querier_config.querier_index_source = QuerierIndexSource::TenantObjectStoreManifest;
+    querier_config.querier_index_source = QuerierIndexSource::TenantObjectStoreShards;
     querier_config.wal_group_id = "loki-parser-error-differential-querier".to_string();
     let querier = build_service_router(
         &querier_config,
@@ -3412,8 +3402,7 @@ async fn real_loki_and_crabka_return_same_logfmt_malformed_field_results() {
     let mut querier_config = service_config(Role::Querier, &bootstrap, topic, &data_root);
     querier_config.object_store_url = Some(object_store_url);
     querier_config.index_prefix = Some(index_prefix.to_string());
-    querier_config.tenant = Some("tenant-a".to_string());
-    querier_config.querier_index_source = QuerierIndexSource::TenantObjectStoreManifest;
+    querier_config.querier_index_source = QuerierIndexSource::TenantObjectStoreShards;
     querier_config.wal_group_id = "loki-logfmt-parser-error-differential-querier".to_string();
     let querier = build_service_router(
         &querier_config,
@@ -5854,8 +5843,7 @@ async fn real_loki_and_crabka_return_same_protobuf_parsed_label_query_result() {
     let mut querier_config = service_config(Role::Querier, &bootstrap, topic, &data_root);
     querier_config.object_store_url = Some(object_store_url);
     querier_config.index_prefix = Some(index_prefix.to_string());
-    querier_config.tenant = Some("tenant-a".to_string());
-    querier_config.querier_index_source = QuerierIndexSource::TenantObjectStoreManifest;
+    querier_config.querier_index_source = QuerierIndexSource::TenantObjectStoreShards;
     querier_config.wal_group_id = "loki-protobuf-parsed-differential-querier".to_string();
     let querier = build_service_router(
         &querier_config,

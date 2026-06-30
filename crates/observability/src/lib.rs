@@ -7145,7 +7145,10 @@ async fn loki_rule_group(
         .and_then(|namespaces| namespaces.get(&namespace))
         .and_then(|groups| groups.get(&group_name))
     else {
-        return text_response(StatusCode::NOT_FOUND, "group does not exist\n");
+        return text_response(
+            StatusCode::BAD_REQUEST,
+            "GetRuleGroup unsupported in rule local store\n",
+        );
     };
     loki_yaml_response(StatusCode::OK, group)
 }
