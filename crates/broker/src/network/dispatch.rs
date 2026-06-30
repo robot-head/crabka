@@ -4389,6 +4389,33 @@ fn patch_leading_throttle(resp: Bytes, api_key: i16, version: i16, delay_ms: i32
 mod tests {
     use super::*;
     use assert2::assert;
+    use std::time::Duration;
+
+    fn request_frame(
+        api_key: i16,
+        api_version: i16,
+        correlation_id: i32,
+        client_id: Option<&[u8]>,
+        tagged: Option<u8>,
+        body: &[u8],
+    ) -> BytesMut {
+        let mut buf = BytesMut::new();
+        buf.put_i16(api_key);
+        buf.put_i16(api_version);
+        buf.put_i32(correlation_id);
+        match client_id {
+            Some(id) => {
+                buf.put_i16(i16::try_from(id.len()).expect("client id length"));
+                buf.put_slice(id);
+            }
+            None => buf.put_i16(-1),
+        }
+        if let Some(tagged) = tagged {
+            buf.put_u8(tagged);
+        }
+        buf.put_slice(body);
+        buf
+    }
 
     #[test]
     fn parse_header_v1_no_flexible() {
@@ -4406,15 +4433,152 @@ mod tests {
     #[test]
     fn parse_header_v2_with_tagged_byte() {
         // api_key=18 (ApiVersions), version=3 (flexible), corr_id=1, client_id="x"
-        let mut buf = BytesMut::new();
-        buf.put_i16(18);
-        buf.put_i16(3);
-        buf.put_i32(1);
-        buf.put_i16(1);
-        buf.put_slice(b"x");
-        buf.put_u8(0); // tagged-fields byte
+        let buf = request_frame(18, 3, 1, Some(b"x"), Some(0), b"body");
         let (k, v, c, body) = parse_request_header(&buf).unwrap();
-        assert!((k, v, c, body.len()) == (18, 3, 1, 0));
+        assert!((k, v, c, body) == (18, 3, 1, b"body".as_slice()));
+    }
+
+    #[test]
+    fn parse_header_rejects_missing_fixed_header_client_id_and_tags() {
+        assert!(parse_request_header(&[0; 7]).is_err());
+
+        let mut missing_client_id_len = BytesMut::new();
+        missing_client_id_len.put_i16(3);
+        missing_client_id_len.put_i16(8);
+        missing_client_id_len.put_i32(42);
+        assert!(parse_request_header(&missing_client_id_len).is_err());
+
+        let truncated_client_id = request_frame(3, 8, 42, Some(b"client"), None, b"");
+        assert!(
+            parse_request_header(&truncated_client_id[..truncated_client_id.len() - 1]).is_err()
+        );
+
+        let flexible_without_tags = request_frame(18, 3, 42, Some(b"client"), None, b"");
+        assert!(parse_request_header(&flexible_without_tags).is_err());
+    }
+
+    #[test]
+    fn peek_client_id_handles_present_null_empty_truncated_and_invalid_utf8() {
+        let present = request_frame(3, 8, 42, Some(b"client-a"), None, b"body");
+        assert!(peek_client_id(&present) == Some("client-a"));
+
+        let null = request_frame(3, 8, 42, None, None, b"body");
+        assert!(peek_client_id(&null).is_none());
+
+        let empty = request_frame(3, 8, 42, Some(b""), None, b"body");
+        assert!(peek_client_id(&empty).is_none());
+
+        let mut truncated = BytesMut::new();
+        truncated.put_i16(3);
+        truncated.put_i16(8);
+        truncated.put_i32(42);
+        truncated.put_i16(8);
+        truncated.put_slice(b"cli");
+        assert!(peek_client_id(&truncated).is_none());
+
+        let invalid_utf8 = request_frame(3, 8, 42, Some(&[0xFF, 0xFE]), None, b"body");
+        assert!(peek_client_id(&invalid_utf8).is_none());
+    }
+
+    #[test]
+    fn auth_principal_name_reads_authenticated_and_reauth_previous_only() {
+        let authenticated = crate::network::auth::ConnectionAuth::Authenticated {
+            principal: crabka_security::Principal {
+                name: "alice".to_string(),
+                auth_method: crabka_security::AuthMethod::SaslOAuthBearer,
+                groups: vec![],
+            },
+            mechanism: crabka_security::SaslMechanism::OAuthBearer,
+            expires_at_ms: Some(123),
+            authenticated_via_token: false,
+        };
+        assert!(auth_principal_name(&authenticated) == Some("alice"));
+
+        let reauth = crate::network::auth::ConnectionAuth::Reauthenticating {
+            previous: crate::network::auth::AuthenticatedSnapshot {
+                principal: crabka_security::Principal {
+                    name: "bob".to_string(),
+                    auth_method: crabka_security::AuthMethod::SaslOAuthBearer,
+                    groups: vec![],
+                },
+                mechanism: crabka_security::SaslMechanism::OAuthBearer,
+                expires_at_ms: Some(456),
+            },
+            exchange: crate::network::auth::SaslExchange::OAuthBearer,
+        };
+        assert!(auth_principal_name(&reauth) == Some("bob"));
+
+        let anonymous = crate::network::auth::ConnectionAuth::Anonymous;
+        assert!(auth_principal_name(&anonymous).is_none());
+    }
+
+    #[tokio::test]
+    async fn sleep_until_some_none_remains_pending() {
+        let result = tokio::time::timeout(Duration::from_millis(10), sleep_until_some(None)).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn sleep_until_some_some_waits_until_deadline() {
+        let before = tokio::time::Instant::now();
+        let deadline = before + Duration::from_millis(10);
+        tokio::time::timeout(Duration::from_secs(1), sleep_until_some(Some(deadline)))
+            .await
+            .expect("deadline should resolve");
+        assert!(tokio::time::Instant::now() >= deadline);
+    }
+
+    #[test]
+    fn instant_at_epoch_ms_maps_future_and_past_wall_clock_to_tokio_deadlines() {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0_i64, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
+
+        let before = tokio::time::Instant::now();
+        let future = instant_at_epoch_ms(now_ms + 250);
+        let delay = future.duration_since(before);
+        assert!(
+            delay >= Duration::from_millis(100) && delay <= Duration::from_secs(2),
+            "future epoch should become a near future tokio deadline, got {delay:?}"
+        );
+
+        let past = instant_at_epoch_ms(now_ms - 250);
+        assert!(
+            past <= tokio::time::Instant::now() + Duration::from_millis(50),
+            "past epoch should fire immediately"
+        );
+    }
+
+    #[test]
+    fn handler_body_flexible_matches_selected_schema_boundaries() {
+        use crabka_protocol::owned;
+
+        assert!(!handler_body_flexible(
+            0,
+            owned::produce_request::FLEXIBLE_MIN - 1
+        ));
+        assert!(handler_body_flexible(
+            0,
+            owned::produce_request::FLEXIBLE_MIN
+        ));
+
+        assert!(!handler_body_flexible(
+            1,
+            owned::fetch_request::FLEXIBLE_MIN - 1
+        ));
+        assert!(handler_body_flexible(1, owned::fetch_request::FLEXIBLE_MIN));
+
+        assert!(!handler_body_flexible(
+            36,
+            owned::sasl_authenticate_request::FLEXIBLE_MIN - 1
+        ));
+        assert!(handler_body_flexible(
+            36,
+            owned::sasl_authenticate_request::FLEXIBLE_MIN
+        ));
+
+        assert!(!handler_body_flexible(17, i16::MAX));
+        assert!(!handler_body_flexible(999, 0));
     }
 
     #[test]
