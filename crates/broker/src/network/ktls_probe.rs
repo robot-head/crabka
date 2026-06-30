@@ -24,13 +24,12 @@
 /// suite is installable into the socket's `crypto_info`.
 #[cfg(target_os = "linux")]
 pub(crate) async fn probe_ktls_support() -> bool {
-    match try_probe_ktls().await {
-        Ok(()) => true,
-        Err(e) => {
-            tracing::debug!(error = %e, "kTLS startup probe failed; falling back to userspace TLS");
-            false
-        }
+    #[cfg(test)]
+    if let Some(result) = take_test_probe_result() {
+        return ktls_probe_result_to_bool(result);
     }
+
+    ktls_probe_result_to_bool(try_probe_ktls().await)
 }
 
 /// On non-Linux targets kTLS does not exist; the probe is a constant `false`
@@ -110,20 +109,56 @@ async fn try_probe_ktls() -> Result<(), Box<dyn std::error::Error + Send + Sync>
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+fn ktls_probe_result_to_bool(result: Result<(), Box<dyn std::error::Error + Send + Sync>>) -> bool {
+    match result {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::debug!(error = %e, "kTLS startup probe failed; falling back to userspace TLS");
+            false
+        }
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+static TEST_PROBE_RESULT: std::sync::Mutex<Option<TestProbeResult>> = std::sync::Mutex::new(None);
+
+#[cfg(all(test, target_os = "linux"))]
+enum TestProbeResult {
+    Success,
+    Failure,
+}
+
+#[cfg(all(test, target_os = "linux"))]
+fn set_test_probe_result(result: TestProbeResult) {
+    *TEST_PROBE_RESULT.lock().expect("test probe mutex") = Some(result);
+}
+
+#[cfg(all(test, target_os = "linux"))]
+fn take_test_probe_result() -> Option<Result<(), Box<dyn std::error::Error + Send + Sync>>> {
+    TEST_PROBE_RESULT
+        .lock()
+        .expect("test probe mutex")
+        .take()
+        .map(|result| match result {
+            TestProbeResult::Success => Ok(()),
+            TestProbeResult::Failure => Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "kTLS unavailable",
+            ))
+                as Box<dyn std::error::Error + Send + Sync>),
+        })
+}
+
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn linux_probe_keeps_error_path_false() {
-        let source = include_str!("ktls_probe.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("production source prefix");
+    #[tokio::test]
+    #[cfg(target_os = "linux")]
+    async fn linux_probe_maps_injected_results() {
+        super::set_test_probe_result(super::TestProbeResult::Failure);
+        assert!(!super::probe_ktls_support().await);
 
-        assert!(
-            source.contains(
-                "Err(e) => {\n            tracing::debug!(error = %e, \"kTLS startup probe failed; falling back to userspace TLS\");\n            false\n        }"
-            ),
-            "Linux kTLS probe must fall back to userspace TLS when the real probe fails"
-        );
+        super::set_test_probe_result(super::TestProbeResult::Success);
+        assert!(super::probe_ktls_support().await);
     }
 }

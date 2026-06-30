@@ -26,6 +26,8 @@ When executing implementation plans, always use **subagent-driven development in
 
 A "conflict" between parallel implementers requires the same file being edited by both. Tasks like "add wire codes" (codes.rs) and "add metadata fields" (records.rs) don't conflict and should run together. When in doubt, list the file set each task touches before deciding.
 
+Tests must exercise behavior, not source text. Do not read source files in tests (for example with `include_str!`/`fs::read_to_string`) and assert against their contents. If a behavior is hard to test, introduce a narrow helper or seam and test that behavior directly.
+
 ## Release Process
 
 - Uses **release-plz** for automated semantic versioning
