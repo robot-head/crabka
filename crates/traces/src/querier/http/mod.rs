@@ -1022,8 +1022,8 @@ fn is_match_all_query(query: &str) -> bool {
 }
 
 fn q_filter_limit(uri: &Uri, max_traces: usize) -> Result<usize, String> {
-    Ok(optional_usize_param(uri, "limit")?
-        .map(|limit| {
+    Ok(
+        optional_usize_param(uri, "limit")?.map_or(usize::MAX, |limit| {
             if limit == 0 {
                 max_traces.min(TAG_QUERY_FILTER_AUTOCOMPLETE_LIMIT)
             } else {
@@ -1031,8 +1031,8 @@ fn q_filter_limit(uri: &Uri, max_traces: usize) -> Result<usize, String> {
                     .min(max_traces)
                     .min(TAG_QUERY_FILTER_AUTOCOMPLETE_LIMIT)
             }
-        })
-        .unwrap_or(usize::MAX))
+        }),
+    )
 }
 
 fn exact_tag_value_filter(query: &str, tag: &str) -> Result<Option<TypedValue>, TraceqlError> {

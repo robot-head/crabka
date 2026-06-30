@@ -633,7 +633,7 @@ mod tests {
 
     #[test]
     fn accumulator_flushes_on_record_threshold() {
-        let mut accumulator = ConsumerRecordAccumulator::new(2, Duration::from_secs(60));
+        let mut accumulator = ConsumerRecordAccumulator::new(2, Duration::from_mins(1));
         let start = Instant::now();
 
         accumulator.push(vec![consumer_record(0, 10, rec("cpu", 5))], start);
@@ -645,7 +645,7 @@ mod tests {
         );
         assert!(accumulator.should_flush(start + Duration::from_millis(1)));
         assert!(accumulator.take().len() == 2);
-        assert!(!accumulator.should_flush(start + Duration::from_secs(120)));
+        assert!(!accumulator.should_flush(start + Duration::from_mins(2)));
     }
 
     #[test]

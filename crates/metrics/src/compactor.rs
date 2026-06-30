@@ -432,7 +432,10 @@ pub async fn enforce_compaction_retention(
     let mut stats = CompactionRetentionStats::default();
     for object in objects {
         let key = object.location.as_ref();
-        if !key.ends_with(".index") {
+        if !std::path::Path::new(key)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("index"))
+        {
             continue;
         }
         stats.manifests_scanned += 1;
@@ -477,7 +480,7 @@ async fn delete_if_exists(
 }
 
 fn duration_millis(duration: Duration) -> i64 {
-    duration.as_millis().min(i64::MAX as u128) as i64
+    i64::try_from(duration.as_millis().min(i64::MAX as u128)).unwrap_or(i64::MAX)
 }
 
 impl MetricsCompactorConfig {

@@ -1506,9 +1506,8 @@ mod tests {
         let store = InMemoryMetricStore::new();
         let matchers = [LabelMatcher::new("__name__", MatchOp::Re, "[")];
 
-        let error = match store.scan("missing", &matchers, 0, 5000).await {
-            Ok(_) => panic!("expected invalid regex to fail before scanning rows"),
-            Err(error) => error,
+        let Err(error) = store.scan("missing", &matchers, 0, 5000).await else {
+            panic!("expected invalid regex to fail before scanning rows");
         };
 
         assert!(matches!(error, PromqlError::Plan(_)));

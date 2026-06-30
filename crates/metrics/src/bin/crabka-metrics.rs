@@ -388,8 +388,9 @@ fn spawn_retention_sweeper(
 fn unix_time_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
-        .unwrap_or(0)
+        .map_or(0, |duration| {
+            i64::try_from(duration.as_millis().min(i64::MAX as u128)).unwrap_or(i64::MAX)
+        })
 }
 
 #[cfg(test)]
