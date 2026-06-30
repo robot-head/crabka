@@ -223,10 +223,8 @@ fn row(feature: String, error_code: i16, msg: &str) -> UpdatableFeatureResult {
 fn top_level_error(code: i16, msg: &str, version: i16) -> UpdateFeaturesResponse {
     let _ = version;
     UpdateFeaturesResponse {
-        throttle_time_ms: 0,
         error_code: code,
         error_message: Some(msg.to_string()),
-        results: Vec::new(),
         ..Default::default()
     }
 }
@@ -276,6 +274,139 @@ fn finalize(results: Vec<UpdatableFeatureResult>, version: i16) -> UpdateFeature
 mod tests {
     use super::*;
     use assert2::assert;
+    use crabka_protocol::owned::update_features_request::FeatureUpdateKey;
+    use crabka_security::{AuthMethod, Principal};
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    use crate::authorizer::{AuthorizationRequest, Authorizer};
+    use crate::broker::{Broker, BrokerHandle};
+    use crate::config::BrokerConfig;
+
+    const VERSION: i16 = 1;
+
+    #[derive(Debug)]
+    struct DenyAll;
+
+    impl Authorizer for DenyAll {
+        fn authorize(
+            &self,
+            _source: &dyn crabka_authz::AclSource,
+            _req: &AuthorizationRequest<'_>,
+        ) -> AuthorizationResult {
+            AuthorizationResult::Deny
+        }
+    }
+
+    fn feature_update(name: &str, level: i16, upgrade_type: i8) -> FeatureUpdateKey {
+        FeatureUpdateKey {
+            feature: name.into(),
+            max_version_level: level,
+            upgrade_type,
+            ..Default::default()
+        }
+    }
+
+    fn metadata_update(level: i16, upgrade_type: i8) -> FeatureUpdateKey {
+        feature_update(crate::features::METADATA_VERSION, level, upgrade_type)
+    }
+
+    fn validate_only(updates: Vec<FeatureUpdateKey>) -> UpdateFeaturesRequest {
+        UpdateFeaturesRequest {
+            feature_updates: updates,
+            validate_only: true,
+            ..Default::default()
+        }
+    }
+
+    fn apply_request(updates: Vec<FeatureUpdateKey>) -> UpdateFeaturesRequest {
+        UpdateFeaturesRequest {
+            feature_updates: updates,
+            validate_only: false,
+            ..Default::default()
+        }
+    }
+
+    fn principal() -> Principal {
+        Principal {
+            name: "admin".into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        }
+    }
+
+    fn context<'a>(
+        principal: &'a Principal,
+        peer: &'a SocketAddr,
+    ) -> crate::handlers::RequestContext<'a> {
+        crate::handlers::RequestContext {
+            principal,
+            peer,
+            client_id: "update-features-client",
+            sendfile_capable: false,
+            connection_listener_name: "PLAINTEXT",
+        }
+    }
+
+    async fn start_broker(authorizer: Arc<dyn Authorizer>) -> (BrokerHandle, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
+        cfg.audit_enabled = false;
+        cfg.authorizer = authorizer;
+        let handle = Broker::start(cfg).await.expect("start broker");
+        (handle, dir)
+    }
+
+    async fn call_with(
+        authorizer: Arc<dyn Authorizer>,
+        req: UpdateFeaturesRequest,
+    ) -> (UpdateFeaturesResponse, BrokerHandle, tempfile::TempDir) {
+        let (broker_handle, dir) = start_broker(authorizer).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let principal = principal();
+        let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+        let ctx = context(&principal, &peer);
+        let resp = handle(&broker, req, VERSION, &ctx).await;
+        (resp, broker_handle, dir)
+    }
+
+    fn assert_ok_row(resp: &UpdateFeaturesResponse, feature: &str) {
+        let row = resp
+            .results
+            .iter()
+            .find(|row| row.feature == feature)
+            .expect("feature result row");
+        assert!(row.error_code == codes::NONE, "{resp:?}");
+        assert!(row.error_message.is_none(), "{resp:?}");
+    }
+
+    fn assert_row_error(resp: &UpdateFeaturesResponse, feature: &str, message: &str) {
+        let row = resp
+            .results
+            .iter()
+            .find(|row| row.feature == feature)
+            .expect("feature result row");
+        assert!(row.error_code == codes::INVALID_UPDATE_VERSION, "{resp:?}");
+        assert!(
+            row.error_message
+                .as_deref()
+                .is_some_and(|m| m.contains(message)),
+            "{resp:?}"
+        );
+    }
+
+    async fn wait_for_finalized_feature(broker: &Broker, feature: &str, level: i16) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if broker.controller.current_image().finalized_feature(feature) == Some(level) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("feature level visible");
+    }
 
     #[test]
     fn downgrade_flag_v0_uses_allow_downgrade() {
@@ -292,21 +423,54 @@ mod tests {
 
     #[test]
     fn row_sets_message_only_on_error() {
-        assert!(
-            row("metadata.version".into(), codes::NONE, "x")
-                .error_message
-                .is_none()
+        let ok = row("metadata.version".into(), codes::NONE, "x");
+        assert!(ok.feature == "metadata.version");
+        assert!(ok.error_message.is_none());
+
+        let err = row(
+            "metadata.version".into(),
+            codes::INVALID_UPDATE_VERSION,
+            "bad",
         );
-        assert!(
-            row(
-                "metadata.version".into(),
-                codes::INVALID_UPDATE_VERSION,
-                "bad"
-            )
-            .error_message
-            .as_deref()
-                == Some("bad")
+        assert!(err.feature == "metadata.version");
+        assert!(err.error_message.as_deref() == Some("bad"));
+    }
+
+    #[test]
+    fn top_level_error_preserves_wire_shape() {
+        let resp = top_level_error(codes::INVALID_REQUEST, "bad request", VERSION);
+
+        assert!(resp.throttle_time_ms == 0);
+        assert!(resp.error_code == codes::INVALID_REQUEST);
+        assert!(resp.error_message.as_deref() == Some("bad request"));
+        assert!(resp.results.is_empty());
+    }
+
+    #[test]
+    fn apply_request_wide_marks_only_successful_rows_and_sets_top_level() {
+        let resp = apply_request_wide(
+            vec![
+                row("metadata.version".into(), codes::NONE, ""),
+                row(
+                    "not.a.feature".into(),
+                    codes::INVALID_REQUEST,
+                    "bad feature",
+                ),
+            ],
+            codes::FEATURE_UPDATE_FAILED,
+            "persist failed",
+            VERSION,
         );
+
+        assert!(resp.error_code == codes::FEATURE_UPDATE_FAILED);
+        assert!(resp.error_message.as_deref() == Some("persist failed"));
+        assert!(resp.results.len() == 2);
+        assert!(resp.results[0].feature == "metadata.version");
+        assert!(resp.results[0].error_code == codes::FEATURE_UPDATE_FAILED);
+        assert!(resp.results[0].error_message.as_deref() == Some("persist failed"));
+        assert!(resp.results[1].feature == "not.a.feature");
+        assert!(resp.results[1].error_code == codes::INVALID_REQUEST);
+        assert!(resp.results[1].error_message.as_deref() == Some("bad feature"));
     }
 
     #[test]
@@ -350,5 +514,216 @@ mod tests {
         }));
         assert!(dependencies_met(&image, &[("metadata.version", 22)]));
         assert!(!dependencies_met(&image, &[("metadata.version", 26)]));
+    }
+
+    #[tokio::test]
+    async fn handle_denies_cluster_alter_with_top_level_error() {
+        let req = validate_only(vec![metadata_update(
+            crate::features::METADATA_VERSION_MAX,
+            1,
+        )]);
+
+        let (resp, broker_handle, _dir) = call_with(Arc::new(DenyAll), req).await;
+
+        assert!(
+            resp.error_code == codes::CLUSTER_AUTHORIZATION_FAILED,
+            "{resp:?}"
+        );
+        assert!(
+            resp.error_message
+                .as_deref()
+                .is_some_and(|m| m.contains("Cluster authorization failed")),
+            "{resp:?}"
+        );
+        assert!(resp.results.is_empty(), "{resp:?}");
+        assert!(resp.throttle_time_ms == 0);
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_rejects_empty_feature_updates() {
+        let (resp, broker_handle, _dir) = call_with(
+            Arc::new(crate::authorizer::AllowAllAuthorizer),
+            validate_only(Vec::new()),
+        )
+        .await;
+
+        assert!(resp.error_code == codes::INVALID_REQUEST, "{resp:?}");
+        assert!(
+            resp.error_message
+                .as_deref()
+                .is_some_and(|m| m.contains("empty feature updates")),
+            "{resp:?}"
+        );
+        assert!(resp.results.is_empty(), "{resp:?}");
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_accepts_validate_only_metadata_version_at_supported_max() {
+        let req = validate_only(vec![metadata_update(
+            crate::features::METADATA_VERSION_MAX,
+            1,
+        )]);
+
+        let (resp, broker_handle, _dir) =
+            call_with(Arc::new(crate::authorizer::AllowAllAuthorizer), req).await;
+
+        assert!(resp.error_code == codes::NONE, "{resp:?}");
+        assert!(resp.error_message.is_none(), "{resp:?}");
+        assert!(resp.results.len() == 1, "{resp:?}");
+        assert_ok_row(&resp, crate::features::METADATA_VERSION);
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_persists_non_validate_feature_update() {
+        let version = VERSION;
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let principal = principal();
+        let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+        let ctx = context(&principal, &peer);
+        let req = apply_request(vec![metadata_update(
+            crate::features::METADATA_VERSION_MAX - 1,
+            2,
+        )]);
+
+        let resp = handle(&broker, req, version, &ctx).await;
+
+        assert!(resp.error_code == codes::NONE, "{resp:?}");
+        assert_ok_row(&resp, crate::features::METADATA_VERSION);
+        wait_for_finalized_feature(
+            &broker,
+            crate::features::METADATA_VERSION,
+            crate::features::METADATA_VERSION_MAX - 1,
+        )
+        .await;
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_reports_duplicate_feature_on_second_row_only() {
+        let req = validate_only(vec![
+            metadata_update(crate::features::METADATA_VERSION_MAX, 1),
+            metadata_update(crate::features::METADATA_VERSION_MAX, 1),
+        ]);
+
+        let (resp, broker_handle, _dir) =
+            call_with(Arc::new(crate::authorizer::AllowAllAuthorizer), req).await;
+
+        assert!(resp.error_code == codes::NONE, "{resp:?}");
+        assert!(resp.results.len() == 2, "{resp:?}");
+        assert!(resp.results[0].feature == crate::features::METADATA_VERSION);
+        assert!(resp.results[0].error_code == codes::NONE, "{resp:?}");
+        assert!(resp.results[1].feature == crate::features::METADATA_VERSION);
+        assert!(
+            resp.results[1].error_code == codes::INVALID_REQUEST,
+            "{resp:?}"
+        );
+        assert!(
+            resp.results[1]
+                .error_message
+                .as_deref()
+                .is_some_and(|m| m.contains("more than once")),
+            "{resp:?}"
+        );
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_rejects_negative_level_with_supported_range_message() {
+        let req = validate_only(vec![metadata_update(-1, 1)]);
+
+        let (resp, broker_handle, _dir) =
+            call_with(Arc::new(crate::authorizer::AllowAllAuthorizer), req).await;
+
+        assert_row_error(&resp, crate::features::METADATA_VERSION, "supported range");
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_rejects_level_above_supported_max_with_range_message() {
+        let req = validate_only(vec![metadata_update(
+            crate::features::METADATA_VERSION_MAX + 1,
+            1,
+        )]);
+
+        let (resp, broker_handle, _dir) =
+            call_with(Arc::new(crate::authorizer::AllowAllAuthorizer), req).await;
+
+        assert_row_error(&resp, crate::features::METADATA_VERSION, "supported range");
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_accepts_floor_level_with_safe_downgrade() {
+        let req = validate_only(vec![metadata_update(
+            crate::features::METADATA_VERSION_MIN,
+            2,
+        )]);
+
+        let (resp, broker_handle, _dir) =
+            call_with(Arc::new(crate::authorizer::AllowAllAuthorizer), req).await;
+
+        assert!(resp.error_code == codes::NONE, "{resp:?}");
+        assert_ok_row(&resp, crate::features::METADATA_VERSION);
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_rejects_level_below_floor_with_floor_message() {
+        let req = validate_only(vec![metadata_update(
+            crate::features::METADATA_VERSION_MIN - 1,
+            2,
+        )]);
+
+        let (resp, broker_handle, _dir) =
+            call_with(Arc::new(crate::authorizer::AllowAllAuthorizer), req).await;
+
+        assert_row_error(
+            &resp,
+            crate::features::METADATA_VERSION,
+            "below the level required",
+        );
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_allows_delete_zero_when_downgrade_allowed() {
+        let req = validate_only(vec![metadata_update(0, 2)]);
+
+        let (resp, broker_handle, _dir) =
+            call_with(Arc::new(crate::authorizer::AllowAllAuthorizer), req).await;
+
+        assert!(resp.error_code == codes::NONE, "{resp:?}");
+        assert_ok_row(&resp, crate::features::METADATA_VERSION);
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_rejects_downgrade_without_downgrade_flag() {
+        let req = validate_only(vec![metadata_update(
+            crate::features::METADATA_VERSION_MAX - 1,
+            1,
+        )]);
+
+        let (resp, broker_handle, _dir) =
+            call_with(Arc::new(crate::authorizer::AllowAllAuthorizer), req).await;
+
+        assert_row_error(&resp, crate::features::METADATA_VERSION, "downgrade");
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_rejects_delete_zero_without_downgrade_flag() {
+        let req = validate_only(vec![metadata_update(0, 1)]);
+
+        let (resp, broker_handle, _dir) =
+            call_with(Arc::new(crate::authorizer::AllowAllAuthorizer), req).await;
+
+        assert_row_error(&resp, crate::features::METADATA_VERSION, "downgrade flag");
+        broker_handle.shutdown().await;
     }
 }
