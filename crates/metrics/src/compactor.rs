@@ -2211,6 +2211,7 @@ mod tests {
         .await
         .expect("enforce retention");
 
+        assert!(stats.manifests_scanned == 2);
         assert!(stats.manifests_deleted == 1);
         assert!(stats.blocks_deleted == 1);
         assert!(
@@ -2236,6 +2237,15 @@ mod tests {
                 .head(&object_store::path::Path::from(fresh.block_key.clone()))
                 .await
                 .is_ok()
+        );
+    }
+
+    #[test]
+    fn duration_millis_converts_and_saturates() {
+        assert!(super::duration_millis(std::time::Duration::from_millis(1_234)) == 1_234);
+        assert!(
+            super::duration_millis(std::time::Duration::from_millis(i64::MAX as u64 + 1))
+                == i64::MAX
         );
     }
 

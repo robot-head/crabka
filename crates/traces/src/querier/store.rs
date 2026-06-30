@@ -2740,6 +2740,88 @@ mod tests {
         RecordBatch::try_new(schema, columns).unwrap()
     }
 
+    fn resource_service_matcher(op: MatchCmp, value: MatchValue) -> SpanMatcher {
+        SpanMatcher {
+            scope: MatchScope::Resource,
+            key: "service.name".into(),
+            op,
+            value,
+            negated: false,
+        }
+    }
+
+    #[test]
+    fn resource_matches_service_name_uses_root_service_column() {
+        let batch = batch();
+
+        assert!(
+            resource_matches(
+                &batch,
+                0,
+                &resource_service_matcher(MatchCmp::Eq, MatchValue::Str("api".into()))
+            )
+            .unwrap()
+        );
+        assert!(
+            !resource_matches(
+                &batch,
+                0,
+                &resource_service_matcher(MatchCmp::Eq, MatchValue::Str("web".into()))
+            )
+            .unwrap()
+        );
+        assert!(
+            resource_matches(
+                &batch,
+                0,
+                &resource_service_matcher(MatchCmp::Neq, MatchValue::Nil)
+            )
+            .unwrap()
+        );
+        assert!(
+            !resource_matches(
+                &batch,
+                0,
+                &SpanMatcher {
+                    scope: MatchScope::Resource,
+                    key: "missing".into(),
+                    op: MatchCmp::Neq,
+                    value: MatchValue::Nil,
+                    negated: false,
+                },
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn root_service_matches_preserves_nil_and_string_semantics() {
+        assert!(root_service_matches(
+            "api",
+            &resource_service_matcher(MatchCmp::Eq, MatchValue::Str("api".into()))
+        ));
+        assert!(!root_service_matches(
+            "api",
+            &resource_service_matcher(MatchCmp::Eq, MatchValue::Str("web".into()))
+        ));
+        assert!(root_service_matches(
+            "api",
+            &resource_service_matcher(MatchCmp::Neq, MatchValue::Nil)
+        ));
+        assert!(!root_service_matches(
+            "api",
+            &resource_service_matcher(MatchCmp::Eq, MatchValue::Nil)
+        ));
+        assert!(root_service_matches(
+            "",
+            &resource_service_matcher(MatchCmp::Eq, MatchValue::Nil)
+        ));
+        assert!(!root_service_matches(
+            "",
+            &resource_service_matcher(MatchCmp::Neq, MatchValue::Nil)
+        ));
+    }
+
     #[test]
     fn reconstructs_trace_from_candidate_batches() {
         let got = trace_from_batches(&[7; 16], vec![batch()])

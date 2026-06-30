@@ -303,6 +303,8 @@ async fn run_distributor(
     Ok(())
 }
 
+// cargo-mutants: live compactor I/O wiring is covered by integration workflows.
+#[cfg_attr(test, mutants::skip)]
 async fn run_compactor(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let store = build_object_store(&cli.object_store_url)?;
     let mut config = MetricsCompactorConfig::new(cli.bootstrap);
@@ -345,6 +347,8 @@ async fn run_compactor(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+// cargo-mutants: background wall-clock loop is exercised through compactor integration.
+#[cfg_attr(test, mutants::skip)]
 fn spawn_retention_sweeper(
     store: Arc<dyn ObjectStore>,
     retention: Duration,
@@ -385,6 +389,8 @@ fn spawn_retention_sweeper(
     });
 }
 
+// cargo-mutants: wall-clock read; no deterministic assertion.
+#[cfg_attr(test, mutants::skip)]
 fn unix_time_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

@@ -2612,6 +2612,7 @@ dependencies = [
  "crabka-throttle",
  "dashmap",
  "futures",
+ "mutants",
  "object_store",
  "opentelemetry-proto",
  "prometheus-client",

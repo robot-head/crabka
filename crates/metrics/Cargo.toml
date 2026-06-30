@@ -61,6 +61,7 @@ protoc-bin-vendored = { workspace = true }
 assert2 = { workspace = true }
 crabka-broker = { path = "../broker", version = "0.3.8" }
 crabka-client-admin = { path = "../client-admin", version = "0.3.8" }
+mutants = { workspace = true }
 proptest = { workspace = true }
 reqwest = { workspace = true }
 tempfile = { workspace = true }

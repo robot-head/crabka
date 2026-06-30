@@ -2533,6 +2533,82 @@ mod tests {
         router_with_config(engine, cfg)
     }
 
+    #[test]
+    fn match_all_query_requires_only_empty_selector() {
+        assert!(is_match_all_query("{}"));
+        assert!(is_match_all_query("{ \n\t }"));
+        assert!(!is_match_all_query("{ .service.name = \"api\" }"));
+        assert!(!is_match_all_query("{ } | count()"));
+    }
+
+    #[test]
+    fn field_matches_tag_honors_scopes_and_intrinsics() {
+        let field = |scope, key: &str| Field {
+            scope,
+            key: key.into(),
+        };
+
+        assert!(field_matches_tag(
+            &field(Scope::Both, "service.name"),
+            "service.name"
+        ));
+        assert!(field_matches_tag(
+            &field(Scope::Both, "service.name"),
+            ".service.name"
+        ));
+        assert!(!field_matches_tag(
+            &field(Scope::Both, "service.name"),
+            "resource.service.name"
+        ));
+        assert!(field_matches_tag(
+            &field(Scope::Span, "service.name"),
+            "span.service.name"
+        ));
+        assert!(field_matches_tag(
+            &field(Scope::Resource, "service.name"),
+            "resource.service.name"
+        ));
+        assert!(field_matches_tag(&field(Scope::Parent, "id"), "parent.id"));
+        assert!(field_matches_tag(
+            &field(Scope::Event, "name"),
+            "event.name"
+        ));
+        assert!(field_matches_tag(
+            &field(Scope::Link, "span_id"),
+            "link.span_id"
+        ));
+        assert!(field_matches_tag(
+            &field(Scope::Instrumentation, "name"),
+            "instrumentation.name"
+        ));
+        assert!(field_matches_tag(
+            &field(Scope::Intrinsic(Intrinsic::Name), ""),
+            "span:name"
+        ));
+        assert!(field_matches_tag(
+            &field(Scope::Intrinsic(Intrinsic::TraceRootService), ""),
+            "trace:rootService"
+        ));
+        assert!(!field_matches_tag(
+            &field(Scope::Intrinsic(Intrinsic::TraceRootService), ""),
+            "span:name"
+        ));
+    }
+
+    #[test]
+    fn typed_traceql_value_keeps_only_supported_values() {
+        assert!(
+            typed_traceql_value(&TraceqlValue::Float(1.5))
+                == Some(TypedValue {
+                    type_: "float".into(),
+                    value: "1.5".into(),
+                })
+        );
+        assert!(typed_traceql_value(&TraceqlValue::Float(f64::NAN)).is_none());
+        assert!(typed_traceql_value(&TraceqlValue::Float(f64::INFINITY)).is_none());
+        assert!(typed_traceql_value(&TraceqlValue::Nil).is_none());
+    }
+
     async fn get_json(uri: &str) -> (StatusCode, Value) {
         let resp = app()
             .oneshot(
