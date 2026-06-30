@@ -192,3 +192,154 @@ fn encode_error_response(
     resp.encode(&mut buf, version)?;
     Ok(buf.freeze())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert2::assert;
+    use crabka_protocol::owned::share_acknowledge_request::{
+        AcknowledgePartition, AcknowledgeTopic,
+    };
+    use crabka_protocol::owned::share_acknowledge_response;
+    use crabka_protocol::primitives::uuid::Uuid as ProtoUuid;
+    use crabka_security::{AuthMethod, Principal};
+    use std::net::SocketAddr;
+
+    fn encode_request(req: &ShareAcknowledgeRequest) -> Bytes {
+        let version = share_acknowledge_response::MAX_VERSION;
+        let mut buf = BytesMut::with_capacity(req.encoded_len(version));
+        req.encode(&mut buf, version).expect("encode request");
+        buf.freeze()
+    }
+
+    fn decode_response(bytes: &Bytes) -> ShareAcknowledgeResponse {
+        let version = share_acknowledge_response::MAX_VERSION;
+        let mut cur: &[u8] = bytes.as_ref();
+        let resp = ShareAcknowledgeResponse::decode(&mut cur, version).expect("decode response");
+        assert!(cur.is_empty(), "response decoder consumed all bytes");
+        resp
+    }
+
+    fn request(topic_id: ProtoUuid, partitions: &[i32]) -> ShareAcknowledgeRequest {
+        ShareAcknowledgeRequest {
+            group_id: Some("g1".into()),
+            member_id: Some("member-1".into()),
+            share_session_epoch: 0,
+            topics: vec![AcknowledgeTopic {
+                topic_id,
+                partitions: partitions
+                    .iter()
+                    .map(|partition_index| AcknowledgePartition {
+                        partition_index: *partition_index,
+                        ..Default::default()
+                    })
+                    .collect(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn test_context<'a>(
+        principal: &'a Principal,
+        peer: &'a SocketAddr,
+    ) -> crate::handlers::RequestContext<'a> {
+        crate::handlers::RequestContext {
+            principal,
+            peer,
+            client_id: "client-a",
+            sendfile_capable: false,
+            connection_listener_name: "PLAINTEXT",
+        }
+    }
+
+    async fn start_broker(share_enabled: bool) -> (crate::broker::BrokerHandle, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let mut cfg = crate::config::BrokerConfig::for_tests(dir.path().to_path_buf());
+        cfg.share_group.enable = share_enabled;
+        let handle = Broker::start(cfg).await.expect("start broker");
+        (handle, dir)
+    }
+
+    fn principal() -> Principal {
+        Principal {
+            name: "alice".into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn encode_error_response_preserves_top_level_fields() {
+        let resp = encode_error_response(
+            share_acknowledge_response::MAX_VERSION,
+            codes::UNSUPPORTED_VERSION,
+            12_345,
+        )
+        .expect("encode");
+        let resp = decode_response(&resp);
+
+        assert!(resp.throttle_time_ms == 0);
+        assert!(resp.error_code == codes::UNSUPPORTED_VERSION);
+        assert!(resp.error_message.is_none());
+        assert!(resp.acquisition_lock_timeout_ms == 12_345);
+        assert!(resp.responses.is_empty());
+    }
+
+    #[tokio::test]
+    async fn handle_disabled_feature_returns_top_level_unsupported_version() {
+        let version = share_acknowledge_response::MAX_VERSION;
+        let (broker_handle, _dir) = start_broker(false).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let principal = principal();
+        let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+        let ctx = test_context(&principal, &peer);
+        let req_bytes = encode_request(&request(ProtoUuid([7; 16]), &[0]));
+
+        let resp = handle(&broker, version, 1, &req_bytes, &ctx)
+            .await
+            .expect("handle");
+        let resp = decode_response(&resp);
+
+        assert!(resp.throttle_time_ms == 0);
+        assert!(resp.error_code == codes::UNSUPPORTED_VERSION);
+        assert!(resp.acquisition_lock_timeout_ms == 30_000);
+        assert!(resp.responses.is_empty());
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_unknown_topic_preserves_topic_and_partition_rows() {
+        let version = share_acknowledge_response::MAX_VERSION;
+        let (broker_handle, _dir) = start_broker(true).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let principal = principal();
+        let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+        let ctx = test_context(&principal, &peer);
+        let topic_id = ProtoUuid([8; 16]);
+        let req_bytes = encode_request(&request(topic_id, &[3, 5]));
+
+        let resp = handle(&broker, version, 1, &req_bytes, &ctx)
+            .await
+            .expect("handle");
+        let resp = decode_response(&resp);
+
+        assert!(resp.throttle_time_ms == 0);
+        assert!(resp.error_code == codes::NONE);
+        assert!(resp.acquisition_lock_timeout_ms == 30_000);
+        assert!(resp.responses.len() == 1, "{resp:?}");
+        assert!(resp.responses[0].topic_id == topic_id);
+        assert!(
+            resp.responses[0].partitions.len() == 2,
+            "{:?}",
+            resp.responses[0]
+        );
+        assert!(resp.responses[0].partitions[0].partition_index == 3);
+        assert!(resp.responses[0].partitions[0].error_code == codes::UNKNOWN_TOPIC_OR_PARTITION);
+        assert!(resp.responses[0].partitions[0].current_leader.leader_id == 0);
+        assert!(resp.responses[0].partitions[0].current_leader.leader_epoch == 0);
+        assert!(resp.responses[0].partitions[1].partition_index == 5);
+        assert!(resp.responses[0].partitions[1].error_code == codes::UNKNOWN_TOPIC_OR_PARTITION);
+        broker_handle.shutdown().await;
+    }
+}

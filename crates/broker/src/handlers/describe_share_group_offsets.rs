@@ -235,3 +235,254 @@ async fn describe_partition(
         ..Default::default()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert2::assert;
+    use crabka_metadata::{MetadataImage, MetadataRecord, TopicRecord};
+    use crabka_protocol::owned::describe_share_group_offsets_request::{
+        DescribeShareGroupOffsetsRequestGroup, DescribeShareGroupOffsetsRequestTopic,
+    };
+    use crabka_protocol::owned::describe_share_group_offsets_response;
+    use crabka_security::{AuthMethod, Principal};
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    use crate::authorizer::{AuthorizationRequest, Authorizer};
+    use crate::config::BrokerConfig;
+
+    #[derive(Debug)]
+    struct DenyAll;
+
+    type RequestTopic<'a> = (&'a str, Vec<i32>);
+    type RequestGroup<'a> = (&'a str, Vec<RequestTopic<'a>>);
+
+    impl Authorizer for DenyAll {
+        fn authorize(
+            &self,
+            _source: &dyn crabka_authz::AclSource,
+            _req: &AuthorizationRequest<'_>,
+        ) -> AuthorizationResult {
+            AuthorizationResult::Deny
+        }
+    }
+
+    fn request(groups: &[RequestGroup<'_>]) -> DescribeShareGroupOffsetsRequest {
+        DescribeShareGroupOffsetsRequest {
+            groups: groups
+                .iter()
+                .map(|(group_id, topics)| DescribeShareGroupOffsetsRequestGroup {
+                    group_id: (*group_id).into(),
+                    topics: Some(
+                        topics
+                            .iter()
+                            .map(
+                                |(topic_name, partitions)| DescribeShareGroupOffsetsRequestTopic {
+                                    topic_name: (*topic_name).into(),
+                                    partitions: partitions.clone(),
+                                    ..Default::default()
+                                },
+                            )
+                            .collect(),
+                    ),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    fn encode_request(req: &DescribeShareGroupOffsetsRequest) -> Bytes {
+        let version = describe_share_group_offsets_response::MAX_VERSION;
+        let mut buf = BytesMut::with_capacity(req.encoded_len(version));
+        req.encode(&mut buf, version).expect("encode request");
+        buf.freeze()
+    }
+
+    fn decode_response(bytes: &Bytes) -> DescribeShareGroupOffsetsResponse {
+        let version = describe_share_group_offsets_response::MAX_VERSION;
+        let mut cur: &[u8] = bytes.as_ref();
+        let resp =
+            DescribeShareGroupOffsetsResponse::decode(&mut cur, version).expect("decode response");
+        assert!(cur.is_empty(), "response decoder consumed all bytes");
+        resp
+    }
+
+    fn test_context<'a>(
+        principal: &'a Principal,
+        peer: &'a SocketAddr,
+    ) -> crate::handlers::RequestContext<'a> {
+        crate::handlers::RequestContext {
+            principal,
+            peer,
+            client_id: "admin-client",
+            sendfile_capable: false,
+            connection_listener_name: "PLAINTEXT",
+        }
+    }
+
+    async fn start_broker(
+        authorizer: Arc<dyn Authorizer>,
+        share_enabled: bool,
+    ) -> (crate::broker::BrokerHandle, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
+        cfg.authorizer = authorizer;
+        cfg.share_group.enable = share_enabled;
+        let handle = Broker::start(cfg).await.expect("start broker");
+        (handle, dir)
+    }
+
+    fn principal() -> Principal {
+        Principal {
+            name: "alice".into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        }
+    }
+
+    fn image_with_topic(name: &str, topic_id: uuid::Uuid) -> MetadataImage {
+        let mut image = MetadataImage::new(uuid::Uuid::nil());
+        image.apply(&MetadataRecord::V1Topic(TopicRecord {
+            name: name.into(),
+            topic_id,
+            partitions: 1,
+            replication_factor: 1,
+        }));
+        image
+    }
+
+    #[tokio::test]
+    async fn handle_disabled_feature_preserves_group_error_rows() {
+        let version = describe_share_group_offsets_response::MAX_VERSION;
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer), false).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let principal = principal();
+        let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+        let ctx = test_context(&principal, &peer);
+        let req_bytes = encode_request(&request(&[
+            ("g1", vec![("t1", vec![0])]),
+            ("g2", vec![("t2", vec![1])]),
+        ]));
+
+        let resp = handle(&broker, version, 1, &req_bytes, &ctx)
+            .await
+            .expect("handle");
+        let resp = decode_response(&resp);
+
+        assert!(resp.throttle_time_ms == 0);
+        assert!(resp.groups.len() == 2, "{resp:?}");
+        assert!(resp.groups[0].group_id == "g1");
+        assert!(resp.groups[0].error_code == codes::UNSUPPORTED_VERSION);
+        assert!(resp.groups[1].group_id == "g2");
+        assert!(resp.groups[1].error_code == codes::UNSUPPORTED_VERSION);
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_denied_group_preserves_group_id_and_error_code() {
+        let version = describe_share_group_offsets_response::MAX_VERSION;
+        let (broker_handle, _dir) = start_broker(Arc::new(DenyAll), true).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let principal = principal();
+        let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+        let ctx = test_context(&principal, &peer);
+        let req_bytes = encode_request(&request(&[("g1", vec![("missing", vec![0])])]));
+
+        let resp = handle(&broker, version, 1, &req_bytes, &ctx)
+            .await
+            .expect("handle");
+        let resp = decode_response(&resp);
+
+        assert!(resp.throttle_time_ms == 0);
+        assert!(resp.groups.len() == 1, "{resp:?}");
+        assert!(resp.groups[0].group_id == "g1");
+        assert!(resp.groups[0].error_code == codes::GROUP_AUTHORIZATION_FAILED);
+        assert!(resp.groups[0].topics.is_empty());
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_unknown_topic_preserves_partition_error_rows() {
+        let version = describe_share_group_offsets_response::MAX_VERSION;
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer), true).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let principal = principal();
+        let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+        let ctx = test_context(&principal, &peer);
+        let req_bytes = encode_request(&request(&[("g1", vec![("missing-topic", vec![3, 5])])]));
+
+        let resp = handle(&broker, version, 1, &req_bytes, &ctx)
+            .await
+            .expect("handle");
+        let resp = decode_response(&resp);
+
+        assert!(resp.throttle_time_ms == 0);
+        assert!(resp.groups.len() == 1, "{resp:?}");
+        let group = &resp.groups[0];
+        assert!(group.group_id == "g1");
+        assert!(group.error_code == codes::NONE);
+        assert!(group.topics.len() == 1, "{group:?}");
+        let topic = &group.topics[0];
+        assert!(topic.topic_name == "missing-topic");
+        assert!(topic.topic_id == Uuid::default());
+        assert!(topic.partitions.len() == 2, "{topic:?}");
+        assert!(topic.partitions[0].partition_index == 3);
+        assert!(topic.partitions[0].start_offset == -1);
+        assert!(topic.partitions[0].leader_epoch == -1);
+        assert!(topic.partitions[0].lag == -1);
+        assert!(topic.partitions[0].error_code == codes::UNKNOWN_TOPIC_OR_PARTITION);
+        assert!(topic.partitions[1].partition_index == 5);
+        assert!(topic.partitions[1].start_offset == -1);
+        assert!(topic.partitions[1].leader_epoch == -1);
+        assert!(topic.partitions[1].lag == -1);
+        assert!(topic.partitions[1].error_code == codes::UNKNOWN_TOPIC_OR_PARTITION);
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn describe_topic_reads_persisted_partition_state() {
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer), true).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let persister = broker
+            .group_coordinator
+            .share_persister()
+            .cloned()
+            .expect("share persister");
+        let topic_id = uuid::Uuid::from_u128(0xD5C0);
+        let image = image_with_topic("orders", topic_id);
+        persister
+            .initialize("g-desc", topic_id, 0, 1, 33)
+            .await
+            .expect("seed state");
+
+        let topic = describe_topic(
+            &broker,
+            &persister,
+            &image,
+            None,
+            "g-desc",
+            DescribeShareGroupOffsetsRequestTopic {
+                topic_name: "orders".into(),
+                partitions: vec![0],
+                ..Default::default()
+            },
+        )
+        .await;
+
+        assert!(topic.topic_name == "orders");
+        assert!(topic.topic_id == Uuid(*topic_id.as_bytes()));
+        assert!(topic.partitions.len() == 1, "{topic:?}");
+        let part = &topic.partitions[0];
+        assert!(part.partition_index == 0);
+        assert!(part.start_offset == 33);
+        assert!(part.leader_epoch == -1);
+        assert!(part.lag == -1);
+        assert!(part.error_code == codes::NONE);
+        broker_handle.shutdown().await;
+    }
+}

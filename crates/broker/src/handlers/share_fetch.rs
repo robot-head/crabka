@@ -548,3 +548,149 @@ fn encode_error_response(
     resp.encode(&mut buf, version)?;
     Ok(buf.freeze())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert2::assert;
+    use crabka_protocol::owned::share_fetch_request::AcknowledgementBatch;
+    use crabka_protocol::owned::share_fetch_response;
+    use crabka_protocol::primitives::uuid::Uuid as ProtoUuid;
+
+    fn decode_response(bytes: &Bytes) -> ShareFetchResponse {
+        let version = share_fetch_response::MAX_VERSION;
+        let mut cur: &[u8] = bytes.as_ref();
+        let resp = ShareFetchResponse::decode(&mut cur, version).expect("decode response");
+        assert!(cur.is_empty(), "response decoder consumed all bytes");
+        resp
+    }
+
+    #[test]
+    fn encode_error_response_preserves_top_level_fields() {
+        let resp = encode_error_response(
+            share_fetch_response::MAX_VERSION,
+            codes::UNSUPPORTED_VERSION,
+            12_345,
+        )
+        .expect("encode");
+        let resp = decode_response(&resp);
+
+        assert!(resp.throttle_time_ms == 0);
+        assert!(resp.error_code == codes::UNSUPPORTED_VERSION);
+        assert!(resp.error_message.is_none());
+        assert!(resp.acquisition_lock_timeout_ms == 12_345);
+        assert!(resp.responses.is_empty());
+    }
+
+    #[test]
+    fn collect_ack_batches_preserves_offsets_and_ack_types() {
+        let partition = FetchPartition {
+            partition_index: 6,
+            acknowledgement_batches: vec![
+                AcknowledgementBatch {
+                    first_offset: 10,
+                    last_offset: 12,
+                    acknowledge_types: vec![0, 1, 1],
+                    ..Default::default()
+                },
+                AcknowledgementBatch {
+                    first_offset: 30,
+                    last_offset: 30,
+                    acknowledge_types: Vec::new(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        let batches = collect_ack_batches(&partition);
+
+        assert!(batches == vec![(10, 12, vec![0, 1, 1]), (30, 30, Vec::new())]);
+    }
+
+    #[test]
+    fn group_responses_preserves_topic_order_and_partition_fields() {
+        let first_topic = uuid::Uuid::from_u128(0xA1);
+        let second_topic = uuid::Uuid::from_u128(0xB2);
+        let pending = vec![
+            PendingPartition {
+                topic_id: first_topic,
+                topic_name: Some("first".into()),
+                partition_index: 0,
+                partition_max_bytes: 0,
+                leadable: false,
+                ack_batches: Vec::new(),
+                out: PartitionData {
+                    partition_index: 0,
+                    error_code: codes::UNKNOWN_TOPIC_OR_PARTITION,
+                    acknowledge_error_code: codes::NONE,
+                    current_leader: LeaderIdAndEpoch {
+                        leader_id: -1,
+                        leader_epoch: -1,
+                        ..Default::default()
+                    },
+                    acquired_records: vec![AcquiredRecords {
+                        first_offset: 4,
+                        last_offset: 7,
+                        delivery_count: 2,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            },
+            PendingPartition {
+                topic_id: second_topic,
+                topic_name: Some("second".into()),
+                partition_index: 3,
+                partition_max_bytes: 0,
+                leadable: false,
+                ack_batches: Vec::new(),
+                out: PartitionData {
+                    partition_index: 3,
+                    error_code: codes::NOT_LEADER_OR_FOLLOWER,
+                    current_leader: LeaderIdAndEpoch {
+                        leader_id: 2,
+                        leader_epoch: 9,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            },
+            PendingPartition {
+                topic_id: first_topic,
+                topic_name: Some("first".into()),
+                partition_index: 1,
+                partition_max_bytes: 0,
+                leadable: false,
+                ack_batches: Vec::new(),
+                out: PartitionData {
+                    partition_index: 1,
+                    error_code: codes::NONE,
+                    ..Default::default()
+                },
+            },
+        ];
+
+        let responses = group_responses(pending);
+
+        assert!(responses.len() == 2, "{responses:?}");
+        assert!(responses[0].topic_id == ProtoUuid(*first_topic.as_bytes()));
+        assert!(responses[0].partitions.len() == 2, "{:?}", responses[0]);
+        assert!(responses[0].partitions[0].partition_index == 0);
+        assert!(responses[0].partitions[0].error_code == codes::UNKNOWN_TOPIC_OR_PARTITION);
+        assert!(responses[0].partitions[0].current_leader.leader_id == -1);
+        assert!(responses[0].partitions[0].current_leader.leader_epoch == -1);
+        assert!(responses[0].partitions[0].acquired_records.len() == 1);
+        assert!(responses[0].partitions[0].acquired_records[0].first_offset == 4);
+        assert!(responses[0].partitions[0].acquired_records[0].last_offset == 7);
+        assert!(responses[0].partitions[0].acquired_records[0].delivery_count == 2);
+        assert!(responses[0].partitions[1].partition_index == 1);
+        assert!(responses[0].partitions[1].error_code == codes::NONE);
+        assert!(responses[1].topic_id == ProtoUuid(*second_topic.as_bytes()));
+        assert!(responses[1].partitions.len() == 1, "{:?}", responses[1]);
+        assert!(responses[1].partitions[0].partition_index == 3);
+        assert!(responses[1].partitions[0].error_code == codes::NOT_LEADER_OR_FOLLOWER);
+        assert!(responses[1].partitions[0].current_leader.leader_id == 2);
+        assert!(responses[1].partitions[0].current_leader.leader_epoch == 9);
+    }
+}

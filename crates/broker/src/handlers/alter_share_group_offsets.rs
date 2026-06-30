@@ -208,12 +208,14 @@ mod tests {
         AlterShareGroupOffsetsRequestPartition, AlterShareGroupOffsetsRequestTopic,
     };
     use crabka_protocol::owned::alter_share_group_offsets_response;
+    use crabka_protocol::owned::share_group_heartbeat_request::ShareGroupHeartbeatRequest;
     use crabka_security::{AuthMethod, Principal};
     use std::net::SocketAddr;
     use std::sync::Arc;
 
     use crate::authorizer::{AuthorizationRequest, Authorizer};
     use crate::config::BrokerConfig;
+    use crate::coordinator::unified::share::actor::ShareGroupActorMessage;
 
     #[derive(Debug)]
     struct DenyAll;
@@ -384,6 +386,40 @@ mod tests {
         assert!(topic.partitions[0].error_code == codes::UNKNOWN_TOPIC_OR_PARTITION);
         assert!(topic.partitions[1].partition_index == 5);
         assert!(topic.partitions[1].error_code == codes::UNKNOWN_TOPIC_OR_PARTITION);
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn group_is_empty_distinguishes_absent_and_live_share_groups() {
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer), true).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let coordinator = broker.group_coordinator.clone();
+
+        assert!(group_is_empty(Some(&coordinator), "absent").await);
+
+        coordinator.mark_share("busy");
+        let actor = coordinator.get_or_create_share("busy");
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        actor
+            .tx
+            .send(ShareGroupActorMessage::Heartbeat {
+                request: ShareGroupHeartbeatRequest {
+                    group_id: "busy".into(),
+                    member_id: "member-1".into(),
+                    member_epoch: 0,
+                    subscribed_topic_names: Some(Vec::new()),
+                    ..Default::default()
+                },
+                client_host: "127.0.0.1".into(),
+                reply: tx,
+            })
+            .await
+            .expect("send heartbeat");
+        let resp = rx.await.expect("heartbeat response");
+        assert!(resp.error_code == codes::NONE, "{resp:?}");
+
+        assert!(!group_is_empty(Some(&coordinator), "busy").await);
         broker_handle.shutdown().await;
     }
 
