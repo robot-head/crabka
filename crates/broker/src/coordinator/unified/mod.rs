@@ -1235,15 +1235,24 @@ mod tests {
     }
 
     fn make_coord() -> Arc<GroupCoordinator> {
+        make_coord_with_log().0
+    }
+
+    fn make_coord_with_log() -> (
+        Arc<GroupCoordinator>,
+        Arc<crate::coordinator::unified::offsets_log::fake::InMemoryOffsetsLog>,
+    ) {
         use crate::coordinator::unified::offsets_log::fake::InMemoryOffsetsLog;
         let metadata: Arc<dyn MetadataProvider> = Arc::new(ImageMetadatalessProvider);
-        Arc::new(GroupCoordinator::new(
+        let offsets_log = Arc::new(InMemoryOffsetsLog::default());
+        let coord = Arc::new(GroupCoordinator::new(
             NextGenConfig::default(),
             ShareGroupConfig::default(),
             metadata,
-            Arc::new(InMemoryOffsetsLog::default()),
+            offsets_log.clone(),
             StreamsGroupConfig::default(),
-        ))
+        ));
+        (coord, offsets_log)
     }
 
     #[derive(Debug)]
@@ -1251,6 +1260,203 @@ mod tests {
     impl MetadataProvider for ImageMetadatalessProvider {
         fn snapshot(&self) -> reconciler::ReconcileInput {
             reconciler::ReconcileInput::default()
+        }
+    }
+
+    #[derive(Debug)]
+    struct FixedMetadataSource {
+        image: Arc<crabka_metadata::MetadataImage>,
+        leader_tx: tokio::sync::watch::Sender<Option<crabka_raft::NodeId>>,
+    }
+
+    impl FixedMetadataSource {
+        fn new(image: crabka_metadata::MetadataImage) -> Self {
+            let (leader_tx, _) = tokio::sync::watch::channel(Some(1));
+            Self {
+                image: Arc::new(image),
+                leader_tx,
+            }
+        }
+    }
+
+    fn unsupported() -> crabka_raft::RaftError {
+        crabka_raft::RaftError::Unsupported("fixed metadata source")
+    }
+
+    #[async_trait::async_trait]
+    impl crate::metadata_source::MetadataSource for FixedMetadataSource {
+        fn current_image(&self) -> Arc<crabka_metadata::MetadataImage> {
+            self.image.clone()
+        }
+
+        fn watch_image(&self) -> tokio::sync::watch::Receiver<Arc<crabka_metadata::MetadataImage>> {
+            let (_, rx) = tokio::sync::watch::channel(self.image.clone());
+            rx
+        }
+
+        fn watch_leader(&self) -> tokio::sync::watch::Receiver<Option<crabka_raft::NodeId>> {
+            self.leader_tx.subscribe()
+        }
+
+        fn quorum_state(&self) -> crabka_raft::QuorumState {
+            crabka_raft::QuorumState {
+                current_term: 0,
+                last_applied_index: 0,
+                current_leader: *self.leader_tx.borrow(),
+                voters: Vec::new(),
+                voter_nodes: std::collections::BTreeMap::new(),
+                per_voter_matched_index: std::collections::BTreeMap::new(),
+            }
+        }
+
+        async fn submit_change(
+            &self,
+            _records: Vec<crabka_metadata::MetadataRecord>,
+        ) -> Result<(), crabka_raft::RaftError> {
+            Ok(())
+        }
+
+        async fn change_membership(
+            &self,
+            _new_voters: std::collections::BTreeSet<crabka_raft::NodeId>,
+        ) -> Result<(), crabka_raft::RaftError> {
+            Err(unsupported())
+        }
+
+        async fn add_learner(
+            &self,
+            _node_id: crabka_raft::NodeId,
+            _node: crabka_raft::Node,
+        ) -> Result<(), crabka_raft::RaftError> {
+            Err(unsupported())
+        }
+
+        fn controller_bound_addr(&self) -> std::net::SocketAddr {
+            std::net::SocketAddr::from(([0, 0, 0, 0], 0))
+        }
+
+        fn read_snapshot_range(
+            &self,
+            _position: i64,
+            _max_bytes: i32,
+        ) -> crabka_raft::SnapshotRange {
+            crabka_raft::SnapshotRange::NoSnapshot
+        }
+
+        async fn trigger_snapshot(&self) -> Result<(), crabka_raft::RaftError> {
+            Err(unsupported())
+        }
+
+        async fn add_voter(
+            &self,
+            _req: crabka_raft::AddVoter,
+        ) -> Result<crabka_raft::ReconfigOutcome, crabka_raft::RaftError> {
+            Err(unsupported())
+        }
+
+        async fn remove_voter(
+            &self,
+            _req: crabka_raft::RemoveVoter,
+        ) -> Result<crabka_raft::ReconfigOutcome, crabka_raft::RaftError> {
+            Err(unsupported())
+        }
+
+        async fn update_voter(
+            &self,
+            _req: crabka_raft::UpdateVoter,
+        ) -> Result<crabka_raft::ReconfigOutcome, crabka_raft::RaftError> {
+            Err(unsupported())
+        }
+
+        async fn cancel(&self) {}
+    }
+
+    fn fixed_source(
+        image: crabka_metadata::MetadataImage,
+    ) -> Arc<dyn crate::metadata_source::MetadataSource> {
+        Arc::new(FixedMetadataSource::new(image))
+    }
+
+    fn make_share_persister(
+        source: Arc<dyn crate::metadata_source::MetadataSource>,
+    ) -> Arc<crate::share_coordinator::persister_client::SharePersister> {
+        let share_coordinator = Arc::new(
+            crate::share_coordinator::coordinator::ShareCoordinator::new(
+                1,
+                Arc::new(crate::partition_registry::PartitionRegistry::new()),
+                crate::share_coordinator::config::ShareCoordinatorConfig::default(),
+            ),
+        );
+        Arc::new(
+            crate::share_coordinator::persister_client::SharePersister::new(
+                1,
+                share_coordinator,
+                source,
+                Arc::new(crate::network::client::InterBrokerClient::new(None, None)),
+                crabka_security::ListenerProtocol::Plaintext,
+                "PLAINTEXT".into(),
+            ),
+        )
+    }
+
+    fn proto_uuid(byte: u8) -> crabka_protocol::primitives::uuid::Uuid {
+        crabka_protocol::primitives::uuid::Uuid([byte; 16])
+    }
+
+    fn real_uuid(byte: u8) -> uuid::Uuid {
+        uuid::Uuid::from_bytes([byte; 16])
+    }
+
+    fn next_member(client_id: &str) -> persistence_next_gen::MemberMetadataValue {
+        persistence_next_gen::MemberMetadataValue {
+            instance_id: Some(format!("{client_id}-instance")),
+            rack_id: Some("rack-a".into()),
+            client_id: client_id.into(),
+            client_host: "host".into(),
+            subscribed_topic_names: vec!["topic-a".into()],
+            subscribed_topic_regex: Some("topic-.*".into()),
+            server_assignor: Some("range".into()),
+            rebalance_timeout_ms: 45_000,
+            classic: None,
+        }
+    }
+
+    fn next_current(epoch: i32) -> persistence_next_gen::CurrentMemberAssignmentValue {
+        persistence_next_gen::CurrentMemberAssignmentValue {
+            member_epoch: epoch,
+            previous_member_epoch: epoch - 1,
+            state: persistence_next_gen::MemberAssignmentState::Stable,
+            assigned_partitions: vec![persistence_next_gen::AssignedTopicPartitions {
+                topic_id: proto_uuid(1),
+                partitions: vec![0, 1],
+            }],
+            partitions_pending_revocation: vec![],
+        }
+    }
+
+    fn share_member(client_id: &str) -> share::persistence::ShareGroupMemberMetadataValue {
+        share::persistence::ShareGroupMemberMetadataValue {
+            rack_id: Some("rack-b".into()),
+            client_id: client_id.into(),
+            client_host: "host".into(),
+            subscribed_topic_names: vec!["share-topic".into()],
+        }
+    }
+
+    fn streams_member(client_id: &str) -> streams::persistence::StreamsGroupMemberMetadataValue {
+        streams::persistence::StreamsGroupMemberMetadataValue {
+            instance_id: Some(format!("{client_id}-instance")),
+            rack_id: Some("rack-c".into()),
+            client_id: client_id.into(),
+            client_host: "host".into(),
+            process_id: "process".into(),
+            user_endpoint: Some(streams::persistence::StreamsEndpoint {
+                host: "localhost".into(),
+                port: 8080,
+            }),
+            client_tags: vec![("app".into(), "streams".into())],
+            rebalance_timeout_ms: 30_000,
+            topology_epoch: 4,
         }
     }
 
@@ -1325,5 +1531,401 @@ mod tests {
         coord.replay_share_state_partition_metadata("sg", v.clone());
         // Some after a replay, with the same contents.
         assert!(coord.share_state_partition_metadata("sg") == Some(v));
+    }
+
+    #[test]
+    fn debug_wrappers_write_type_names() {
+        let source = fixed_source(crabka_metadata::MetadataImage::new(real_uuid(1)));
+        assert!(
+            format!("{:?}", MetadataSourceHandle(source.clone())).contains("MetadataSourceHandle")
+        );
+        assert!(
+            format!("{:?}", ImageMetadataProvider { controller: source })
+                .contains("ImageMetadataProvider")
+        );
+    }
+
+    #[test]
+    fn once_lock_getters_return_installed_first_values() {
+        let coord = make_coord();
+        assert!(coord.metadata_source().is_none());
+        assert!(coord.share_persister().is_none());
+
+        let first_source = fixed_source(crabka_metadata::MetadataImage::new(real_uuid(1)));
+        let second_source = fixed_source(crabka_metadata::MetadataImage::new(real_uuid(2)));
+        coord.set_metadata_source(first_source.clone());
+        coord.set_metadata_source(second_source);
+        let got_source = coord.metadata_source().unwrap();
+        assert!(Arc::ptr_eq(&got_source, &first_source));
+
+        let first_persister = make_share_persister(first_source.clone());
+        let second_persister = make_share_persister(first_source);
+        coord.set_share_persister(first_persister.clone());
+        coord.set_share_persister(second_persister);
+        let got_persister = coord.share_persister().unwrap();
+        assert!(Arc::ptr_eq(got_persister, &first_persister));
+    }
+
+    #[test]
+    fn cache_updates_and_forced_type_transitions_are_observable() {
+        let coord = make_coord();
+        assert!(coord.cached_seed("g").is_none());
+        assert!(coord.cached_share_seed("sg").is_none());
+        assert!(coord.cached_streams_seed("st").is_none());
+
+        coord.update_cache(
+            "g",
+            GroupSeed {
+                group_epoch: 7,
+                target_epoch: 8,
+                ..GroupSeed::default()
+            },
+        );
+        let cached = coord.cached_seed("g").unwrap();
+        assert!(cached.group_epoch == 7);
+        assert!(cached.target_epoch == 8);
+
+        coord.seeds.insert(
+            "g".into(),
+            GroupSeed {
+                group_epoch: 99,
+                ..GroupSeed::default()
+            },
+        );
+        coord.mark_next_gen("g");
+        assert!(coord.group_type("g") == Some(GroupType::NextGen));
+        coord.mark_classic_after_downgrade("g");
+        assert!(coord.group_type("g") == Some(GroupType::Classic));
+        assert!(coord.seeds.get("g").is_none());
+        assert!(coord.cached_seed("g").is_none());
+
+        coord.update_share_cache(
+            "sg",
+            ShareGroupSeed {
+                group_epoch: 17,
+                target_epoch: 18,
+                ..ShareGroupSeed::default()
+            },
+        );
+        let share_cached = coord.cached_share_seed("sg").unwrap();
+        assert!(share_cached.group_epoch == 17);
+        assert!(share_cached.target_epoch == 18);
+
+        coord.update_streams_cache(
+            "st",
+            StreamsGroupSeed {
+                group_epoch: 27,
+                assignment_epoch: 28,
+                ..StreamsGroupSeed::default()
+            },
+        );
+        let streams_cached = coord.cached_streams_seed("st").unwrap();
+        assert!(streams_cached.group_epoch == 27);
+        assert!(streams_cached.assignment_epoch == 28);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn share_and_streams_registries_report_live_ids() {
+        let coord = make_coord();
+        let share_a = coord.get_or_create_share("share-a");
+        let share_b = coord.get_or_create_share("share-b");
+        assert!(Arc::ptr_eq(&share_a, &coord.get_or_create_share("share-a")));
+        assert!(coord.find_share("share-b").is_some());
+        assert!(!Arc::ptr_eq(&share_a, &share_b));
+
+        let streams_a = coord.get_or_create_streams("streams-a");
+        assert!(Arc::ptr_eq(
+            &streams_a,
+            &coord.get_or_create_streams("streams-a")
+        ));
+        assert!(Arc::ptr_eq(
+            &streams_a,
+            &coord.find_streams("streams-a").unwrap()
+        ));
+
+        let mut share_ids = coord.share_group_ids();
+        share_ids.sort();
+        assert!(share_ids == vec!["share-a".to_string(), "share-b".to_string()]);
+
+        let mut streams_ids = coord.streams_group_ids();
+        streams_ids.sort();
+        assert!(streams_ids == vec!["streams-a".to_string()]);
+
+        coord.shutdown_all().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn conversion_paths_update_type_locks_and_report_missing_streams() {
+        let (coord, offsets_log) = make_coord_with_log();
+        assert!(
+            coord
+                .try_convert_classic_to_streams("fresh", 100)
+                .await
+                .unwrap()
+                == streams::migration::ConvertOutcome::NotClassic
+        );
+
+        coord.mark_classic("g");
+        assert!(
+            coord
+                .try_convert_classic_to_streams("g", 101)
+                .await
+                .unwrap()
+                == streams::migration::ConvertOutcome::Converted
+        );
+        assert!(coord.group_type("g") == Some(GroupType::Streams));
+        assert!(offsets_log.appended.lock().await.len() == 1);
+
+        assert!(
+            coord
+                .try_convert_streams_to_classic("fresh", 102)
+                .await
+                .unwrap()
+                == streams::migration::DowngradeOutcome::NotStreams
+        );
+        assert!(
+            coord
+                .try_convert_streams_to_classic("g", 103)
+                .await
+                .unwrap()
+                == streams::migration::DowngradeOutcome::Converted
+        );
+        assert!(coord.group_type("g") == Some(GroupType::Classic));
+        assert!(offsets_log.appended.lock().await.len() == 2);
+
+        coord.mark_streams("missing-streams-actor");
+        assert!(
+            coord.delete_group("missing-streams-actor").await == Err(DeleteGroupError::NotFound)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_all_closes_group_and_share_actors() {
+        let coord = make_coord();
+        let group = coord.get_or_create_classic("classic");
+        let share = coord.get_or_create_share("share");
+
+        coord.shutdown_all().await;
+
+        assert!(group.tx.is_closed());
+        assert!(share.tx.is_closed());
+    }
+
+    #[test]
+    fn next_gen_replay_populates_seed_and_cache() {
+        let coord = make_coord();
+        let member = next_member("member-a");
+        let target = persistence_next_gen::TargetAssignmentMemberValue {
+            topic_partitions: vec![persistence_next_gen::AssignedTopicPartitions {
+                topic_id: proto_uuid(3),
+                partitions: vec![1, 2],
+            }],
+        };
+        let current = next_current(5);
+
+        coord.replay_group_metadata("g", persistence_next_gen::GroupMetadataValue { epoch: 11 });
+        coord.replay_member_metadata("g", "member-a", member.clone());
+        coord.replay_target_assignment_metadata(
+            "g",
+            persistence_next_gen::TargetAssignmentMetadataValue {
+                assignment_epoch: 12,
+            },
+        );
+        coord.replay_target_assignment_member("g", "member-a", target.clone());
+        coord.replay_current_member_assignment("g", "member-a", current.clone());
+
+        let seed = coord.seeds.get("g").unwrap();
+        assert!(seed.group_epoch == 11);
+        assert!(seed.target_epoch == 12);
+        assert!(seed.members.get("member-a") == Some(&member));
+        assert!(seed.target_per_member.get("member-a") == Some(&target));
+        assert!(seed.current_per_member.get("member-a") == Some(&current));
+        drop(seed);
+
+        let cached = coord.cached_seed("g").unwrap();
+        assert!(cached.group_epoch == 11);
+        assert!(cached.target_epoch == 12);
+        assert!(cached.members.get("member-a") == Some(&member));
+        assert!(cached.target_per_member.get("member-a") == Some(&target));
+        assert!(cached.current_per_member.get("member-a") == Some(&current));
+    }
+
+    #[test]
+    fn share_replay_populates_seed_and_cache() {
+        let coord = make_coord();
+        let member = share_member("share-member");
+        let target = share::persistence::ShareGroupTargetAssignmentMemberValue {
+            topic_partitions: vec![(proto_uuid(4), vec![0, 3])],
+        };
+        let current = share::persistence::ShareGroupCurrentMemberAssignmentValue {
+            member_epoch: 6,
+            assigned_partitions: vec![(proto_uuid(4), vec![1])],
+        };
+
+        coord.replay_share_group_metadata(
+            "sg",
+            share::persistence::ShareGroupMetadataValue { epoch: 21 },
+        );
+        coord.replay_share_member_metadata("sg", "share-member", member.clone());
+        coord.replay_share_target_assignment_metadata(
+            "sg",
+            share::persistence::ShareGroupTargetAssignmentMetadataValue {
+                assignment_epoch: 22,
+            },
+        );
+        coord.replay_share_target_assignment_member("sg", "share-member", target.clone());
+        coord.replay_share_current_member_assignment("sg", "share-member", current.clone());
+
+        let seed = coord.share_seeds.get("sg").unwrap();
+        assert!(seed.group_epoch == 21);
+        assert!(seed.target_epoch == 22);
+        assert!(seed.members.get("share-member") == Some(&member));
+        assert!(seed.target_per_member.get("share-member") == Some(&target));
+        assert!(seed.current_per_member.get("share-member") == Some(&current));
+        drop(seed);
+
+        let cached = coord.cached_share_seed("sg").unwrap();
+        assert!(cached.group_epoch == 21);
+        assert!(cached.target_epoch == 22);
+        assert!(cached.members.get("share-member") == Some(&member));
+        assert!(cached.target_per_member.get("share-member") == Some(&target));
+        assert!(cached.current_per_member.get("share-member") == Some(&current));
+    }
+
+    #[test]
+    fn streams_replay_populates_seed_and_cache() {
+        let coord = make_coord();
+        let member = streams_member("streams-member");
+        let topology = streams::persistence::StreamsGroupTopologyValue {
+            epoch: 31,
+            subtopologies: vec![streams::persistence::StoredSubtopology {
+                subtopology_id: "subtopology-a".into(),
+                source_topics: vec!["input".into()],
+                source_topic_regex: vec!["input-.*".into()],
+                repartition_sink_topics: vec!["sink".into()],
+                state_changelog_topics: vec![streams::persistence::StoredTopicInfo {
+                    name: "store-changelog".into(),
+                    partitions: 2,
+                    replication_factor: 1,
+                    topic_configs: vec![("cleanup.policy".into(), "compact".into())],
+                }],
+                repartition_source_topics: vec![],
+                copartition_groups: vec![],
+            }],
+        };
+        let partition_metadata = streams::persistence::StreamsGroupPartitionMetadataValue {
+            topics: vec![streams::persistence::StreamsTopicMeta {
+                topic_name: "input".into(),
+                topic_id: real_uuid(5),
+                num_partitions: 2,
+            }],
+        };
+        let mut active = std::collections::BTreeMap::new();
+        active.insert("subtopology-a".into(), vec![0, 1]);
+        let target = streams::persistence::StreamsGroupTargetAssignmentMemberValue {
+            active: active.clone(),
+            ..Default::default()
+        };
+        let current = streams::persistence::StreamsGroupCurrentMemberAssignmentValue {
+            member_epoch: 7,
+            previous_member_epoch: 6,
+            state: 1,
+            active,
+            ..Default::default()
+        };
+
+        coord.replay_streams_group_metadata("st", 30);
+        coord.replay_streams_member_metadata("st", "streams-member", member.clone());
+        coord.replay_streams_topology("st", topology.clone());
+        coord.replay_streams_partition_metadata("st", partition_metadata.clone());
+        coord.replay_streams_target_assignment_metadata("st", 32);
+        coord.replay_streams_target_assignment_member("st", "streams-member", target.clone());
+        coord.replay_streams_current_member_assignment("st", "streams-member", current.clone());
+
+        let seed = coord.streams_seeds.get("st").unwrap();
+        assert!(seed.group_epoch == 30);
+        assert!(seed.assignment_epoch == 32);
+        assert!(seed.members.get("streams-member") == Some(&member));
+        assert!(seed.topology.as_ref() == Some(&topology));
+        assert!(seed.partition_metadata.as_ref() == Some(&partition_metadata));
+        assert!(seed.target_per_member.get("streams-member") == Some(&target));
+        assert!(seed.current_per_member.get("streams-member") == Some(&current));
+        drop(seed);
+
+        let cached = coord.cached_streams_seed("st").unwrap();
+        assert!(cached.group_epoch == 30);
+        assert!(cached.assignment_epoch == 32);
+        assert!(cached.members.get("streams-member") == Some(&member));
+        assert!(cached.topology.as_ref() == Some(&topology));
+        assert!(cached.partition_metadata.as_ref() == Some(&partition_metadata));
+        assert!(cached.target_per_member.get("streams-member") == Some(&target));
+        assert!(cached.current_per_member.get("streams-member") == Some(&current));
+    }
+
+    #[test]
+    fn image_metadata_provider_snapshot_projects_topics_partitions_and_racks() {
+        let mut image = crabka_metadata::MetadataImage::new(real_uuid(9));
+        let topic_id = real_uuid(8);
+        image.apply(&crabka_metadata::MetadataRecord::V1Topic(
+            crabka_metadata::TopicRecord {
+                name: "input".into(),
+                topic_id,
+                partitions: 3,
+                replication_factor: 2,
+            },
+        ));
+        for (node_id, rack) in [
+            (1, Some("rack-a".to_string())),
+            (2, Some("rack-b".to_string())),
+            (3, None),
+        ] {
+            image.apply(&crabka_metadata::MetadataRecord::V1BrokerRegistration(
+                crabka_metadata::BrokerRegistrationRecord {
+                    node_id,
+                    broker_epoch: i64::try_from(node_id).unwrap(),
+                    incarnation_id: real_uuid(u8::try_from(node_id).unwrap()),
+                    host: format!("broker-{node_id}"),
+                    port: 9092,
+                    rack,
+                    endpoints: vec![],
+                },
+            ));
+        }
+        image.apply(&crabka_metadata::MetadataRecord::V1Partition(
+            crabka_metadata::PartitionRecord {
+                topic: "input".into(),
+                partition: 0,
+                leader: 1,
+                replicas: vec![1, 2],
+                isr: vec![1, 2],
+                directories: vec![real_uuid(1), real_uuid(2)],
+                ..Default::default()
+            },
+        ));
+        image.apply(&crabka_metadata::MetadataRecord::V1Partition(
+            crabka_metadata::PartitionRecord {
+                topic: "input".into(),
+                partition: 1,
+                leader: 3,
+                replicas: vec![3],
+                isr: vec![3],
+                directories: vec![real_uuid(3)],
+                ..Default::default()
+            },
+        ));
+
+        let provider = ImageMetadataProvider {
+            controller: fixed_source(image),
+        };
+        let snapshot = provider.snapshot();
+        let proto_topic_id = crabka_protocol::primitives::uuid::Uuid(*topic_id.as_bytes());
+
+        assert!(snapshot.topic_id_by_name.get("input") == Some(&proto_topic_id));
+        assert!(snapshot.partitions_per_topic.get(&proto_topic_id) == Some(&2));
+        assert!(
+            snapshot.partition_racks.get(&(proto_topic_id, 0))
+                == Some(&vec!["rack-a".to_string(), "rack-b".to_string()])
+        );
+        assert!(!snapshot.partition_racks.contains_key(&(proto_topic_id, 1)));
     }
 }

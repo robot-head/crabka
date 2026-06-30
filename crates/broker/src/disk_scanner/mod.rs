@@ -117,4 +117,46 @@ mod tests {
         assert!(g0 == 1234);
         assert!(g1 == 5678);
     }
+
+    #[tokio::test]
+    async fn run_ticks_until_shutdown() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p0 = tmp.path().join("run-0");
+        std::fs::create_dir_all(&p0).unwrap();
+        {
+            let mut f0 = std::fs::File::create(p0.join("00.log")).unwrap();
+            f0.write_all(&[0u8; 321]).unwrap();
+        }
+
+        let metrics = BrokerMetrics::new();
+        let shutdown = CancellationToken::new();
+        let scanner = DiskScanner {
+            log_dirs: vec![tmp.path().to_path_buf()],
+            interval: Duration::from_millis(10),
+            metrics: metrics.clone(),
+            shutdown: shutdown.clone(),
+        };
+        let handle = tokio::spawn(scanner.run());
+        let label = PartitionLabel {
+            topic: "run".into(),
+            partition: 0,
+        };
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if metrics.partition_disk_bytes.get_or_create(&label).get() == 321 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .unwrap()
+            .unwrap();
+    }
 }
