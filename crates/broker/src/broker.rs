@@ -4149,24 +4149,26 @@ mod tests {
             crate::log_dir_status::LogDirRegistry::default(),
             Arc::new(crate::producer_state::ProducerState::new()),
         );
-        let mut batch = crabka_protocol::records::RecordBatch {
-            last_offset_delta: i32::try_from(values.len() - 1).expect("record count fits"),
-            records: values
-                .iter()
-                .enumerate()
-                .map(|(idx, value)| crabka_protocol::records::Record {
-                    offset_delta: i32::try_from(idx).expect("offset delta fits"),
-                    value: Some(bytes::Bytes::from_static(value)),
-                    ..Default::default()
-                })
-                .collect(),
-            ..Default::default()
-        };
-        part.log
-            .lock()
-            .expect("partition log lock")
-            .append(&mut batch)
-            .expect("append records");
+        if !values.is_empty() {
+            let mut batch = crabka_protocol::records::RecordBatch {
+                last_offset_delta: i32::try_from(values.len() - 1).expect("record count fits"),
+                records: values
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, value)| crabka_protocol::records::Record {
+                        offset_delta: i32::try_from(idx).expect("offset delta fits"),
+                        value: Some(bytes::Bytes::from_static(value)),
+                        ..Default::default()
+                    })
+                    .collect(),
+                ..Default::default()
+            };
+            part.log
+                .lock()
+                .expect("partition log lock")
+                .append(&mut batch)
+                .expect("append records");
+        }
         part
     }
 
@@ -4483,10 +4485,61 @@ mod tests {
 
         let local_topic = "handle-local-log-mutant-topic";
         let local_part = local_partition_with_records(dir.path(), local_topic, 0, &[b"a", b"b"]);
+        assert!(!handle.partition_exists_for_test(local_topic, 0));
         broker
             .partitions
-            .insert(local_topic.to_string(), 0, local_part);
+            .insert(local_topic.to_string(), 0, Arc::clone(&local_part));
+        assert!(handle.partition_exists_for_test(local_topic, 0));
         assert!(handle.local_log_end_offset(local_topic, 0).await == Some(2));
+        handle.test_set_leader_epoch(local_topic, 0, 7);
+        assert!(
+            local_part
+                .current_leader_epoch
+                .load(std::sync::atomic::Ordering::Acquire)
+                == 7
+        );
+        handle
+            .test_truncate_local_log(local_topic, 0, 1)
+            .await
+            .expect("truncate local partition");
+        assert!(handle.local_log_end_offset(local_topic, 0).await == Some(0));
+
+        let share_group = "handle-share-summary-mutant-group";
+        let share_topic_id = uuid::Uuid::from_u128(0xBEE5);
+        let share_partition = 3;
+        assert!(
+            handle
+                .share_state_summary_for_test(share_group, share_topic_id, share_partition)
+                .await
+                .is_none()
+        );
+        let share_state_partition = broker.share_coordinator.state_partition_for(
+            share_group,
+            &share_topic_id,
+            share_partition,
+        );
+        let share_state_part = local_partition_with_records(
+            dir.path(),
+            crate::share_coordinator::bootstrap::TOPIC,
+            share_state_partition,
+            &[],
+        );
+        broker.partitions.insert(
+            crate::share_coordinator::bootstrap::TOPIC.to_string(),
+            share_state_partition,
+            share_state_part,
+        );
+        broker
+            .share_coordinator
+            .initialize(share_group, share_topic_id, share_partition, 11, 90)
+            .await
+            .expect("initialize share state");
+        assert!(
+            handle
+                .share_state_summary_for_test(share_group, share_topic_id, share_partition)
+                .await
+                == Some((11, 0, 90, 0))
+        );
 
         let closed_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
