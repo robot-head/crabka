@@ -90,3 +90,58 @@ impl AuditSink for KafkaTopicAuditSink {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert2::assert;
+    use crabka_log::{Log, LogConfig};
+    use std::sync::Arc;
+
+    fn fixture_partition(
+        log_dir: &std::path::Path,
+        topic: &str,
+        partition: i32,
+    ) -> Arc<crate::partition::Partition> {
+        let part_dir = crate::log_dir::partition_dir(log_dir, topic, partition);
+        std::fs::create_dir_all(&part_dir).expect("create partition dir");
+        let log = Log::open(&part_dir, LogConfig::default()).expect("open log");
+        crate::broker::spawn_partition(
+            topic.to_string(),
+            partition,
+            log_dir.to_path_buf(),
+            log,
+            crate::log_dir_status::LogDirRegistry::default(),
+            Arc::new(crate::producer_state::ProducerState::new()),
+        )
+    }
+
+    #[tokio::test]
+    async fn write_appends_record_value_and_headers_to_local_partition() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let partitions = Arc::new(PartitionRegistry::new());
+        let partition = fixture_partition(dir.path(), "__audit", 0);
+        partitions.insert("__audit".to_string(), 0, Arc::clone(&partition));
+        let sink =
+            KafkaTopicAuditSink::new(partitions, "__audit".to_string(), 0, BrokerMetrics::new());
+
+        sink.write(AuditRecord {
+            class: crabka_audit::AuditEventClass::ApiActivity,
+            value: b"{\"ok\":true}".to_vec(),
+            headers: vec![("event_class".to_string(), b"admin".to_vec())],
+        })
+        .await
+        .expect("write audit record");
+
+        let out = partition
+            .read_log(0, 1 << 20)
+            .expect("read audit partition");
+        let records: Vec<_> = out.batches.iter().flat_map(|b| &b.records).collect();
+
+        assert!(records.len() == 1);
+        assert!(records[0].value.as_deref() == Some(&b"{\"ok\":true}"[..]));
+        assert!(records[0].headers.len() == 1);
+        assert!(records[0].headers[0].key == "event_class");
+        assert!(records[0].headers[0].value.as_deref() == Some(&b"admin"[..]));
+    }
+}

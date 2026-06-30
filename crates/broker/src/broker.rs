@@ -4131,6 +4131,45 @@ mod tests {
         async fn cancel(&self) {}
     }
 
+    fn local_partition_with_records(
+        log_dir: &std::path::Path,
+        topic: &str,
+        partition: i32,
+        values: &[&'static [u8]],
+    ) -> Arc<Partition> {
+        let part_dir = crate::log_dir::partition_dir(log_dir, topic, partition);
+        std::fs::create_dir_all(&part_dir).expect("create partition dir");
+        let log = crabka_log::Log::open(&part_dir, crabka_log::LogConfig::default())
+            .expect("open partition log");
+        let part = spawn_partition(
+            topic.to_string(),
+            partition,
+            log_dir.to_path_buf(),
+            log,
+            crate::log_dir_status::LogDirRegistry::default(),
+            Arc::new(crate::producer_state::ProducerState::new()),
+        );
+        let mut batch = crabka_protocol::records::RecordBatch {
+            last_offset_delta: i32::try_from(values.len() - 1).expect("record count fits"),
+            records: values
+                .iter()
+                .enumerate()
+                .map(|(idx, value)| crabka_protocol::records::Record {
+                    offset_delta: i32::try_from(idx).expect("offset delta fits"),
+                    value: Some(bytes::Bytes::from_static(value)),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+        part.log
+            .lock()
+            .expect("partition log lock")
+            .append(&mut batch)
+            .expect("append records");
+        part
+    }
+
     #[test]
     fn static_voter_set_keeps_peer_hostnames_for_per_dial_resolution() {
         // Peer endpoint hosts MUST be the configured DNS names, NOT resolved to
@@ -4346,12 +4385,23 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn single_broker_handle_helpers_observe_real_state_and_errors() {
         let dir = tempfile::tempdir().unwrap();
-        let config = BrokerConfig::for_tests(dir.path().to_path_buf());
+        let mut config = BrokerConfig::for_tests(dir.path().to_path_buf());
+        config.metrics_listen_addr = Some("127.0.0.1:0".parse().unwrap());
         let handle = Broker::start(config).await.expect("broker start");
+        let broker = handle.broker_arc_for_test();
 
+        assert!(broker.handlers().get(18).is_some());
+        assert!(handle.metrics_addr().is_some_and(|addr| addr.port() != 0));
         assert!(!handle.has_partition("missing-mutant-topic", 0).await);
+        assert!(
+            handle
+                .local_log_end_offset("missing-mutant-topic", 0)
+                .await
+                .is_none()
+        );
         assert!(
             handle
                 .test_advance_log_start("missing-mutant-topic", 0, 10)
@@ -4367,6 +4417,89 @@ mod tests {
 
         let leader = handle.wait_until_controller_leader().await;
         assert!(leader == handle.node_id());
+        assert!(handle.controller_leader_id().await == Some(handle.node_id()));
+
+        let mut endpoints = handle.self_registration_endpoints().await;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while endpoints.is_empty() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            endpoints = handle.self_registration_endpoints().await;
+        }
+        assert!(!endpoints.is_empty());
+
+        handle
+            .submit_metadata_record_for_test(crabka_metadata::MetadataRecord::V1BrokerRegistration(
+                crabka_metadata::BrokerRegistrationRecord {
+                    node_id: handle.node_id() + 1,
+                    broker_epoch: 0,
+                    incarnation_id: uuid::Uuid::from_u128(0xBEEF),
+                    host: "127.0.0.1".to_string(),
+                    port: 19_092,
+                    rack: None,
+                    endpoints: vec![crabka_metadata::BrokerEndpoint {
+                        name: "PLAINTEXT".to_string(),
+                        host: "127.0.0.1".to_string(),
+                        port: 19_092,
+                        protocol: crabka_security::ListenerProtocol::Plaintext,
+                    }],
+                },
+            ))
+            .await
+            .expect("submit peer broker registration");
+        handle.wait_until_brokers_registered(2).await;
+        assert!(handle.broker_count().await == 2);
+
+        let topic = "handle-mutant-topic";
+        handle
+            .submit_metadata_record_for_test(crabka_metadata::MetadataRecord::V1Topic(
+                crabka_metadata::TopicRecord {
+                    name: topic.to_string(),
+                    topic_id: uuid::Uuid::from_u128(0xCAFE),
+                    partitions: 1,
+                    replication_factor: 1,
+                },
+            ))
+            .await
+            .expect("submit topic record");
+        handle
+            .submit_metadata_record_for_test(crabka_metadata::MetadataRecord::V1Partition(
+                crabka_metadata::PartitionRecord {
+                    topic: topic.to_string(),
+                    partition: 0,
+                    leader: handle.node_id(),
+                    replicas: vec![handle.node_id()],
+                    isr: vec![handle.node_id()],
+                    leader_epoch: 1,
+                    adding_replicas: Vec::new(),
+                    removing_replicas: Vec::new(),
+                    directories: vec![uuid::Uuid::nil()],
+                    partition_epoch: 0,
+                },
+            ))
+            .await
+            .expect("submit partition record");
+        handle.wait_until_partition_present(topic, 0).await;
+        assert!(handle.has_partition(topic, 0).await);
+
+        let local_topic = "handle-local-log-mutant-topic";
+        let local_part = local_partition_with_records(dir.path(), local_topic, 0, &[b"a", b"b"]);
+        broker
+            .partitions
+            .insert(local_topic.to_string(), 0, local_part);
+        assert!(handle.local_log_end_offset(local_topic, 0).await == Some(2));
+
+        let closed_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind closed learner port");
+        let closed_addr = closed_listener.local_addr().expect("closed learner addr");
+        drop(closed_listener);
+        let add_learner = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            handle.add_learner(handle.node_id() + 10, closed_addr),
+        )
+        .await
+        .expect("add_learner returned before timeout");
+        assert!(add_learner.is_err());
 
         let own_directory = handle
             .voter_directory_id_for_test(handle.node_id())

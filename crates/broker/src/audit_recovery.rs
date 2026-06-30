@@ -164,6 +164,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recover_uses_next_sequence_from_last_chained_record() {
+        let (partition, _td) = test_partition();
+        let first = chained_record(3, &GENESIS_HEAD, b"first");
+        let first_head = chain_hash(&GENESIS_HEAD, 3, b"first");
+        let last = chained_record(9, &first_head, b"last");
+        let last_head = chain_hash(&first_head, 9, b"last");
+        append_records(&partition, vec![first, last]);
+
+        let recovered = recover_from_partition_tail(&partition).expect("last chained record");
+
+        assert!(recovered == (10, last_head));
+    }
+
+    #[tokio::test]
     async fn recover_skips_checkpoints_and_malformed_records() {
         let (partition, _td) = test_partition();
         let first = chained_record(0, &GENESIS_HEAD, b"first");
@@ -183,5 +197,34 @@ mod tests {
         let recovered = recover_from_partition_tail(&partition).expect("last chained record");
 
         assert!(recovered == (2, second_head));
+    }
+
+    #[test]
+    fn header_bytes_matches_requested_key_and_preserves_value() {
+        let rec = Record {
+            headers: vec![
+                header("other", Bytes::from_static(&[0])),
+                header("target", Bytes::from_static(&[0xCA, 0xFE])),
+            ],
+            ..Default::default()
+        };
+
+        assert!(header_bytes(&rec, "target") == Some(vec![0xCA, 0xFE]));
+        assert!(header_bytes(&rec, "missing").is_none());
+    }
+
+    #[test]
+    fn header_str_decodes_utf8_and_rejects_invalid_bytes() {
+        let rec = Record {
+            headers: vec![
+                header("text", "audit-seq"),
+                header("binary", Bytes::from_static(&[0xFF])),
+            ],
+            ..Default::default()
+        };
+
+        assert!(header_str(&rec, "text") == Some("audit-seq".to_string()));
+        assert!(header_str(&rec, "binary").is_none());
+        assert!(header_str(&rec, "missing").is_none());
     }
 }

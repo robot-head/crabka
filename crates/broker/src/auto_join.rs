@@ -149,7 +149,7 @@ fn build_add_raft_voter_request(
         voter_directory_id: directory_id,
         listeners: vec![listener],
         ack_when_committed: true,
-        ..Default::default()
+        unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
     }
 }
 
@@ -242,10 +242,7 @@ async fn send_add_raft_voter(
     req.encode(&mut body, version)
         .map_err(|e| format!("AddRaftVoter encode: {e}"))?;
 
-    let opts = crabka_client_core::ConnectionOptions {
-        client_id: "crabka-auto-join".to_string(),
-        ..crabka_client_core::ConnectionOptions::default()
-    };
+    let opts = auto_join_connection_options();
     let conn = client
         .connect_as_connection(
             &target.ip().to_string(),
@@ -268,9 +265,117 @@ async fn send_add_raft_voter(
     AddRaftVoterResponse::decode(&mut cur, version).map_err(|e| format!("AddRaftVoter decode: {e}"))
 }
 
+fn auto_join_connection_options() -> crabka_client_core::ConnectionOptions {
+    let default = crabka_client_core::ConnectionOptions::default();
+    crabka_client_core::ConnectionOptions {
+        client_id: "crabka-auto-join".to_string(),
+        connect_timeout: default.connect_timeout,
+        request_timeout: default.request_timeout,
+        security: default.security,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crabka_metadata::{KRaftVersionRange, MetadataImage, MetadataRecord};
+    use crabka_metadata::{Voter, VoterEndpoint, VoterSet, VotersRecord};
+    use crabka_raft::{
+        AddVoter, Node, NodeId, QuorumState, RaftError, ReconfigOutcome, RemoveVoter,
+        SnapshotRange, UpdateVoter,
+    };
+    use std::collections::BTreeSet;
+    use std::net::SocketAddr;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::watch;
+
+    struct MockSource {
+        image: Arc<MetadataImage>,
+        current_image_calls: AtomicUsize,
+        controller_bound_addr_calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::metadata_source::MetadataSource for MockSource {
+        fn current_image(&self) -> Arc<MetadataImage> {
+            self.current_image_calls.fetch_add(1, Ordering::Relaxed);
+            self.image.clone()
+        }
+
+        fn watch_image(&self) -> watch::Receiver<Arc<MetadataImage>> {
+            let (_tx, rx) = watch::channel(self.image.clone());
+            rx
+        }
+
+        fn watch_leader(&self) -> watch::Receiver<Option<NodeId>> {
+            let (_tx, rx) = watch::channel(None);
+            rx
+        }
+
+        fn quorum_state(&self) -> QuorumState {
+            panic!("not used by auto_join tests")
+        }
+
+        async fn submit_change(
+            &self,
+            _records: Vec<crabka_metadata::MetadataRecord>,
+        ) -> Result<(), RaftError> {
+            panic!("not used by auto_join tests")
+        }
+
+        async fn change_membership(&self, _new_voters: BTreeSet<NodeId>) -> Result<(), RaftError> {
+            panic!("not used by auto_join tests")
+        }
+
+        async fn add_learner(&self, _node_id: NodeId, _node: Node) -> Result<(), RaftError> {
+            panic!("not used by auto_join tests")
+        }
+
+        fn controller_bound_addr(&self) -> SocketAddr {
+            self.controller_bound_addr_calls
+                .fetch_add(1, Ordering::Relaxed);
+            "127.0.0.1:19093".parse().expect("bound controller addr")
+        }
+
+        fn read_snapshot_range(&self, _position: i64, _max_bytes: i32) -> SnapshotRange {
+            panic!("not used by auto_join tests")
+        }
+
+        async fn trigger_snapshot(&self) -> Result<(), RaftError> {
+            panic!("not used by auto_join tests")
+        }
+
+        async fn add_voter(&self, _req: AddVoter) -> Result<ReconfigOutcome, RaftError> {
+            panic!("not used by auto_join tests")
+        }
+
+        async fn remove_voter(&self, _req: RemoveVoter) -> Result<ReconfigOutcome, RaftError> {
+            panic!("not used by auto_join tests")
+        }
+
+        async fn update_voter(&self, _req: UpdateVoter) -> Result<ReconfigOutcome, RaftError> {
+            panic!("not used by auto_join tests")
+        }
+
+        async fn cancel(&self) {}
+    }
+
+    fn image_with_voter(node_id: NodeId) -> MetadataImage {
+        let mut image = MetadataImage::new(uuid::Uuid::nil());
+        image.apply(&MetadataRecord::V1Voters(VotersRecord {
+            voters: VoterSet::from_voters([Voter {
+                id: node_id,
+                directory_id: uuid::Uuid::from_u128(node_id.into()),
+                endpoints: vec![VoterEndpoint {
+                    name: "CONTROLLER".to_string(),
+                    host: "127.0.0.1".to_string(),
+                    port: 19093,
+                }],
+                kraft_version: KRaftVersionRange::default(),
+            }]),
+        }));
+        image
+    }
 
     #[test]
     fn controller_listener_uses_bound_controller_endpoint() {
@@ -316,6 +421,32 @@ mod tests {
         assert_eq!(req.listeners[0].host, "127.0.0.1");
         assert_eq!(req.listeners[0].port, 19093);
         assert!(req.ack_when_committed);
+    }
+
+    #[test]
+    fn build_add_raft_voter_request_encodes_ack_when_committed() {
+        let listener = controller_listener("127.0.0.1:19093".parse().unwrap());
+        let req = build_add_raft_voter_request(
+            None,
+            7,
+            crabka_protocol::primitives::uuid::Uuid(*uuid::Uuid::from_u128(7).as_bytes()),
+            listener,
+        );
+        let version = add_raft_voter_request::MAX_VERSION;
+        let mut bytes = BytesMut::new();
+
+        req.encode(&mut bytes, version).expect("encode request");
+        let decoded =
+            AddRaftVoterRequest::decode(&mut bytes.freeze(), version).expect("decode request");
+
+        assert!(decoded.ack_when_committed);
+    }
+
+    #[test]
+    fn auto_join_connection_options_uses_joiner_client_id() {
+        let opts = auto_join_connection_options();
+
+        assert!(opts.client_id == "crabka-auto-join");
     }
 
     #[test]
@@ -399,5 +530,33 @@ mod tests {
             .expect("run() returned immediately for auto_join=false");
 
         handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn run_with_auto_join_true_checks_current_voter_set_before_returning() {
+        let source = Arc::new(MockSource {
+            image: Arc::new(image_with_voter(7)),
+            current_image_calls: AtomicUsize::new(0),
+            controller_bound_addr_calls: AtomicUsize::new(0),
+        });
+        let params = AutoJoinParams {
+            auto_join: true,
+            node_id: 7,
+            directory_id: uuid::Uuid::from_u128(7),
+            cluster_id: None,
+            bootstrap_servers: vec!["127.0.0.1:1".parse().unwrap()],
+            listener_protocol: crabka_security::ListenerProtocol::Plaintext,
+            controller: source.clone(),
+            inter_broker_client: Arc::new(crate::network::client::InterBrokerClient::new(
+                None, None,
+            )),
+        };
+
+        tokio::time::timeout(Duration::from_secs(2), run(params))
+            .await
+            .expect("already-voter auto join returns without dialing");
+
+        assert!(source.controller_bound_addr_calls.load(Ordering::Relaxed) == 1);
+        assert!(source.current_image_calls.load(Ordering::Relaxed) == 1);
     }
 }
