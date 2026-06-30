@@ -116,3 +116,99 @@ pub(crate) fn handle(
         Ok(buf.freeze())
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use assert2::assert;
+    use bytes::Bytes;
+    use crabka_log::{Log, LogConfig};
+    use crabka_protocol::owned::write_txn_markers_request::{
+        WritableTxnMarker, WritableTxnMarkerTopic, WriteTxnMarkersRequest,
+    };
+    use crabka_protocol::owned::write_txn_markers_response::WriteTxnMarkersResponse;
+
+    use super::*;
+    use crate::broker::{Broker, BrokerHandle};
+    use crate::config::BrokerConfig;
+
+    const VERSION: i16 = 2;
+
+    fn open_partition(broker: &Broker, log_dir: &Path, topic: &str, partition: i32) {
+        let part_dir = crate::log_dir::partition_dir(log_dir, topic, partition);
+        std::fs::create_dir_all(&part_dir).expect("create partition dir");
+        let log = Log::open(&part_dir, LogConfig::default()).expect("open partition log");
+        let part = crate::broker::spawn_partition(
+            topic.to_string(),
+            partition,
+            log_dir.to_path_buf(),
+            log,
+            crate::log_dir_status::LogDirRegistry::default(),
+            Arc::new(crate::producer_state::ProducerState::new()),
+        );
+        broker.partitions.insert(topic.to_string(), partition, part);
+    }
+
+    async fn start_broker() -> (BrokerHandle, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
+        cfg.audit_enabled = false;
+        let handle = Broker::start(cfg).await.expect("start broker");
+        (handle, dir)
+    }
+
+    fn encode_request(req: &WriteTxnMarkersRequest) -> Bytes {
+        let mut buf = BytesMut::with_capacity(req.encoded_len(VERSION));
+        req.encode(&mut buf, VERSION).expect("encode request");
+        buf.freeze()
+    }
+
+    fn decode_response(bytes: &Bytes) -> WriteTxnMarkersResponse {
+        let mut cur: &[u8] = bytes.as_ref();
+        let resp = WriteTxnMarkersResponse::decode(&mut cur, VERSION).expect("decode response");
+        assert!(cur.is_empty(), "response decoder consumed all bytes");
+        resp
+    }
+
+    #[tokio::test]
+    async fn handle_returns_marker_topic_and_partition_result_rows() {
+        let (broker_handle, dir) = start_broker().await;
+        let broker = broker_handle.broker_arc_for_test();
+        open_partition(&broker, dir.path(), "orders", 1);
+        let req = WriteTxnMarkersRequest {
+            markers: vec![WritableTxnMarker {
+                producer_id: 91,
+                producer_epoch: 4,
+                transaction_result: true,
+                transaction_version: 1,
+                topics: vec![WritableTxnMarkerTopic {
+                    name: "orders".into(),
+                    partition_indexes: vec![1, 2],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let req_bytes = encode_request(&req);
+
+        let bytes = super::handle(&broker, VERSION, 123, &req_bytes)
+            .await
+            .expect("handle");
+        let resp = decode_response(&bytes);
+
+        assert!(resp.markers.len() == 1);
+        let marker = &resp.markers[0];
+        assert!(marker.producer_id == 91);
+        assert!(marker.topics.len() == 1);
+        assert!(marker.topics[0].name == "orders");
+        assert!(marker.topics[0].partitions.len() == 2);
+        assert!(marker.topics[0].partitions[0].partition_index == 1);
+        assert!(marker.topics[0].partitions[0].error_code == codes::NONE);
+        assert!(marker.topics[0].partitions[1].partition_index == 2);
+        assert!(marker.topics[0].partitions[1].error_code == codes::NOT_LEADER_OR_FOLLOWER);
+        broker_handle.shutdown().await;
+    }
+}

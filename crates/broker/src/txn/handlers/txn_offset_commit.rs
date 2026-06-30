@@ -342,6 +342,7 @@ mod tests {
     use crabka_protocol::owned::txn_offset_commit_request::{
         TxnOffsetCommitRequestPartition, TxnOffsetCommitRequestTopic,
     };
+    use crabka_protocol::owned::txn_offset_commit_response::TxnOffsetCommitResponse;
 
     use super::*;
     use crate::partition_registry::PartitionRegistry;
@@ -389,6 +390,66 @@ mod tests {
             Arc::new(crate::producer_state::ProducerState::new()),
         );
         registry.insert(OFFSETS_TOPIC.to_string(), OFFSETS_PARTITION, part);
+    }
+
+    fn decode_response(bytes: &Bytes, version: i16) -> TxnOffsetCommitResponse {
+        let mut cur: &[u8] = bytes.as_ref();
+        let resp = TxnOffsetCommitResponse::decode(&mut cur, version).expect("decode response");
+        assert!(cur.is_empty(), "response decoder consumed all bytes");
+        resp
+    }
+
+    fn assert_response_rows(resp: &TxnOffsetCommitResponse, code: i16) {
+        assert!(resp.throttle_time_ms == 0);
+        assert!(resp.topics.len() == 1);
+        assert!(resp.topics[0].name == "orders");
+        assert!(resp.topics[0].partitions.len() == 2);
+        assert!(resp.topics[0].partitions[0].partition_index == 2);
+        assert!(resp.topics[0].partitions[0].error_code == code);
+        assert!(resp.topics[0].partitions[1].partition_index == 3);
+        assert!(resp.topics[0].partitions[1].error_code == code);
+    }
+
+    #[test]
+    fn build_response_preserves_topic_partition_rows_and_error_codes() {
+        let req = request();
+        let resp = build_response(&req, codes::GROUP_AUTHORIZATION_FAILED, &HashSet::new());
+
+        assert_response_rows(&resp, codes::GROUP_AUTHORIZATION_FAILED);
+    }
+
+    #[test]
+    fn build_response_overrides_denied_topics_with_topic_authorization_error() {
+        let req = request();
+        let denied = HashSet::from(["orders".to_string()]);
+
+        let resp = build_response(&req, codes::NONE, &denied);
+
+        assert_response_rows(&resp, codes::TOPIC_AUTHORIZATION_FAILED);
+    }
+
+    #[test]
+    fn encode_resp_round_trips_non_empty_response() {
+        let req = request();
+        let resp = build_response(&req, codes::INVALID_TXN_STATE, &HashSet::new());
+
+        let bytes = encode_resp(5, &resp).expect("encode response");
+        assert!(!bytes.is_empty());
+        let decoded = decode_response(&bytes, 5);
+
+        assert_response_rows(&decoded, codes::INVALID_TXN_STATE);
+    }
+
+    #[test]
+    fn encode_err_all_round_trips_rows_for_whole_request_error() {
+        let req = request();
+
+        let bytes = encode_err_all(5, &req, codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED)
+            .expect("encode all-error response");
+        assert!(!bytes.is_empty());
+        let decoded = decode_response(&bytes, 5);
+
+        assert_response_rows(&decoded, codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED);
     }
 
     #[tokio::test]
