@@ -40,8 +40,11 @@ pub mod profiling;
 
 use std::time::Duration;
 
-use opentelemetry::KeyValue;
-use opentelemetry::trace::TracerProvider as _;
+use opentelemetry::trace::{
+    Span as _, SpanBuilder, SpanContext, SpanId, TraceContextExt as _, TraceFlags, TraceId,
+    TraceState, TracerProvider as _,
+};
+use opentelemetry::{Context, KeyValue};
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use opentelemetry_otlp::{LogExporter, Protocol, SpanExporter, WithExportConfig};
 use opentelemetry_sdk::Resource;
@@ -103,6 +106,7 @@ pub struct OtlpConfig {
     pub service_version: String,
     pub service_instance_id: String,
     pub timeout: Duration,
+    pub heartbeat_interval: Option<Duration>,
 }
 
 /// Truthy parse for `*_ENABLED` / `*_DISABLED` style env values.
@@ -169,6 +173,10 @@ impl OtlpConfig {
             .and_then(|s| s.trim().parse::<u64>().ok())
             .map_or(Duration::from_secs(10), Duration::from_secs);
 
+        let heartbeat_interval = get("CRABKA_OTLP_HEARTBEAT_INTERVAL_SECS")
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .and_then(|secs| (secs > 0).then(|| Duration::from_secs(secs)));
+
         Some(Self {
             endpoint,
             protocol,
@@ -177,6 +185,7 @@ impl OtlpConfig {
             service_version: service_version.to_owned(),
             service_instance_id: service_instance_id.to_owned(),
             timeout,
+            heartbeat_interval,
         })
     }
 
@@ -250,12 +259,16 @@ fn otel_filter(default: &str, get: impl Fn(&str) -> Option<String>) -> EnvFilter
 pub struct TelemetryGuard {
     provider: Option<SdkTracerProvider>,
     logger_provider: Option<SdkLoggerProvider>,
+    heartbeat_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl TelemetryGuard {
     /// Flush and shut down the OTLP exporters (traces + logs). No-op when OTLP
     /// is disabled.
     pub fn shutdown(self) {
+        if let Some(task) = self.heartbeat_task {
+            task.abort();
+        }
         if let Some(provider) = self.provider
             && let Err(e) = provider.shutdown()
         {
@@ -296,6 +309,7 @@ pub fn init(
         return Ok(TelemetryGuard {
             provider: None,
             logger_provider: None,
+            heartbeat_task: None,
         });
     };
 
@@ -336,17 +350,80 @@ pub fn init(
         .with(otel_logs_layer)
         .init();
 
+    let heartbeat_task = cfg.heartbeat_interval.map(|interval| {
+        spawn_heartbeat_task(
+            provider.clone(),
+            cfg.service_name.clone(),
+            cfg.service_instance_id.clone(),
+            interval,
+        )
+    });
+
     tracing::info!(
         endpoint = %cfg.endpoint,
         protocol = ?cfg.protocol,
         sample_ratio = cfg.sample_ratio,
+        heartbeat_interval_secs = cfg.heartbeat_interval.map(|d| d.as_secs()),
         "OTLP distributed tracing + logs enabled"
     );
 
     Ok(TelemetryGuard {
         provider: Some(provider),
         logger_provider: Some(logger_provider),
+        heartbeat_task,
     })
+}
+
+fn spawn_heartbeat_task(
+    provider: SdkTracerProvider,
+    service_name: String,
+    service_instance_id: String,
+    interval: Duration,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let tracer = provider.tracer("crabka-telemetry-heartbeat");
+        let mut sequence = 0_i64;
+        loop {
+            emit_heartbeat_span(&tracer, &service_name, &service_instance_id, sequence);
+            sequence = sequence.saturating_add(1);
+            tokio::time::sleep(interval).await;
+        }
+    })
+}
+
+fn heartbeat_parent_context(sequence: i64) -> Context {
+    let sequence = u128::try_from(sequence).unwrap_or(0);
+    let trace_id =
+        TraceId::from(0x6372_6162_6b61_5f68_6561_7274_0000_0001_u128.wrapping_add(sequence));
+    let span_id = SpanId::from(0x6865_6172_7400_0001_u64.wrapping_add(sequence as u64));
+    Context::new().with_remote_span_context(SpanContext::new(
+        trace_id,
+        span_id,
+        TraceFlags::SAMPLED,
+        true,
+        TraceState::default(),
+    ))
+}
+
+fn emit_heartbeat_span<T: opentelemetry::trace::Tracer>(
+    tracer: &T,
+    service_name: &str,
+    service_instance_id: &str,
+    sequence: i64,
+) {
+    let mut span = tracer.build_with_context(
+        SpanBuilder::from_name("crabka.telemetry.heartbeat").with_attributes([
+            KeyValue::new("crabka.telemetry.signal", "heartbeat"),
+            KeyValue::new("crabka.telemetry.service_name", service_name.to_owned()),
+            KeyValue::new(
+                "crabka.telemetry.service_instance_id",
+                service_instance_id.to_owned(),
+            ),
+            KeyValue::new("crabka.telemetry.sequence", sequence),
+        ]),
+        &heartbeat_parent_context(sequence),
+    );
+    span.end();
 }
 
 #[cfg(test)]
@@ -354,8 +431,8 @@ mod tests {
     use super::*;
     use assert2::assert;
     use opentelemetry_sdk::error::OTelSdkResult;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+    use std::sync::{Arc, Mutex};
 
     #[derive(Clone, Debug)]
     struct ShutdownCountingSpanExporter {
@@ -373,6 +450,30 @@ mod tests {
         fn shutdown_with_timeout(&self, _timeout: std::time::Duration) -> OTelSdkResult {
             self.calls.fetch_add(1, SeqCst);
             Ok(())
+        }
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct RecordingSpanExporter {
+        spans: Arc<Mutex<Vec<opentelemetry_sdk::trace::SpanData>>>,
+    }
+
+    impl RecordingSpanExporter {
+        fn spans(&self) -> Vec<opentelemetry_sdk::trace::SpanData> {
+            self.spans.lock().expect("recorded spans lock").clone()
+        }
+    }
+
+    impl opentelemetry_sdk::trace::SpanExporter for RecordingSpanExporter {
+        fn export(
+            &self,
+            batch: Vec<opentelemetry_sdk::trace::SpanData>,
+        ) -> impl std::future::Future<Output = OTelSdkResult> + Send {
+            self.spans
+                .lock()
+                .expect("recorded spans lock")
+                .extend(batch);
+            std::future::ready(Ok(()))
         }
     }
 
@@ -548,6 +649,76 @@ mod tests {
     }
 
     #[test]
+    fn heartbeat_interval_is_disabled_by_default_and_ignores_zero() {
+        let cfg = OtlpConfig::from_env(
+            env_from(&[("CRABKA_OTLP_ENDPOINT", "http://c:4317")]),
+            "1",
+            "0.1.1",
+            "crabka-broker",
+        )
+        .expect("enabled");
+        assert!(cfg.heartbeat_interval.is_none());
+
+        let cfg = OtlpConfig::from_env(
+            env_from(&[
+                ("CRABKA_OTLP_ENDPOINT", "http://c:4317"),
+                ("CRABKA_OTLP_HEARTBEAT_INTERVAL_SECS", "0"),
+            ]),
+            "1",
+            "0.1.1",
+            "crabka-broker",
+        )
+        .expect("enabled");
+        assert!(cfg.heartbeat_interval.is_none());
+    }
+
+    #[test]
+    fn heartbeat_interval_parses_from_env() {
+        let cfg = OtlpConfig::from_env(
+            env_from(&[
+                ("CRABKA_OTLP_ENDPOINT", "http://c:4317"),
+                ("CRABKA_OTLP_HEARTBEAT_INTERVAL_SECS", "15"),
+            ]),
+            "1",
+            "0.1.1",
+            "crabka-broker",
+        )
+        .expect("enabled");
+        assert!(cfg.heartbeat_interval == Some(Duration::from_secs(15)));
+    }
+
+    #[test]
+    fn heartbeat_span_is_sampled_when_ratio_sampler_would_drop_roots() {
+        use opentelemetry::trace::TraceFlags;
+        use opentelemetry_sdk::trace::SimpleSpanProcessor;
+
+        let exporter = RecordingSpanExporter::default();
+        let provider = SdkTracerProvider::builder()
+            .with_sampler(Sampler::ParentBased(Box::new(Sampler::TraceIdRatioBased(
+                0.0,
+            ))))
+            .with_span_processor(SimpleSpanProcessor::new(exporter.clone()))
+            .build();
+        let tracer = provider.tracer("crabka-telemetry-test");
+
+        emit_heartbeat_span(&tracer, "crabka-broker", "broker-1", 7);
+        provider.force_flush().expect("flush spans");
+
+        let spans = exporter.spans();
+        assert!(spans.len() == 1);
+        let span = &spans[0];
+        assert!(span.name == "crabka.telemetry.heartbeat");
+        assert!(span.parent_span_is_remote);
+        assert!(span.span_context.trace_flags() == TraceFlags::SAMPLED);
+        assert!(
+            span.attributes
+                .iter()
+                .any(|attr| attr.key.as_str() == "crabka.telemetry.sequence"
+                    && attr.value == opentelemetry::Value::I64(7))
+        );
+    }
+
+    #[test]
     fn service_name_and_timeout_overrides() {
         let cfg = OtlpConfig::from_env(
             env_from(&[
@@ -600,6 +771,7 @@ mod tests {
         TelemetryGuard {
             provider: Some(provider),
             logger_provider: None,
+            heartbeat_task: None,
         }
         .shutdown();
 

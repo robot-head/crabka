@@ -30,6 +30,7 @@ datasources:
     jsonData:
       httpHeaderName1: X-Scope-OrgID
       manageAlerts: false
+      maxLines: 100
     secureJsonData:
       httpHeaderValue1: demo
     editable: false

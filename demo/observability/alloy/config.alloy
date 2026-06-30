@@ -170,7 +170,6 @@ pyroscope.scrape "crabka_services" {
 	targets = [
 		{__address__ = "broker:9404", service_name = "broker"},
 		{__address__ = "metrics-distributor:9404", service_name = "metrics-distributor"},
-		{__address__ = "traces-distributor:9404", service_name = "traces-distributor"},
 		{__address__ = "logs-distributor:9404", service_name = "logs-distributor"},
 		{__address__ = "profiles-distributor:9404", service_name = "profiles-distributor"},
 		{__address__ = "schema-registry:9404", service_name = "schema-registry"},
@@ -209,7 +208,6 @@ pyroscope.scrape "demo_apps" {
 	targets = [
 		{__address__ = "demo-produce:9404", service_name = "demo-produce"},
 		{__address__ = "demo-stream:9404", service_name = "demo-stream"},
-		{__address__ = "demo-consume:9404", service_name = "demo-consume"},
 	]
 	scrape_interval          = "60s"
 	delta_profiling_duration = "5s"
@@ -238,18 +236,119 @@ pyroscope.scrape "demo_apps" {
 	forward_to = [pyroscope.write.crabka.receiver]
 }
 
+// demo-consume is intentionally light on CPU. A 5s CPU profile often contains
+// no samples, so scrape it less often with a longer window to keep fresh profile
+// coverage without making every demo app scrape heavier.
+pyroscope.scrape "demo_consume_cpu" {
+	targets = [
+		{__address__ = "demo-consume:9404", service_name = "demo-consume"},
+	]
+	scrape_interval          = "120s"
+	scrape_timeout           = "30s"
+	delta_profiling_duration = "20s"
+
+	profiling_config {
+		profile.process_cpu {
+			enabled = true
+		}
+
+		profile.memory {
+			enabled = false
+		}
+
+		profile.goroutine {
+			enabled = false
+		}
+
+		profile.block {
+			enabled = false
+		}
+
+		profile.mutex {
+			enabled = false
+		}
+	}
+	forward_to = [pyroscope.write.crabka.receiver]
+}
+
+// Trace roles expose CPU pprof but not jemalloc heap pprof. Their worker roles
+// can be idle enough that a 5s CPU window often captures no samples, so profile
+// them less often with a wider CPU window.
+pyroscope.scrape "trace_cpu" {
+	targets = [
+		{__address__ = "traces-distributor:9404", service_name = "traces-distributor"},
+		{__address__ = "traces-querier:9404", service_name = "traces-querier"},
+	]
+	scrape_interval          = "60s"
+	scrape_timeout           = "20s"
+	delta_profiling_duration = "15s"
+
+	profiling_config {
+		profile.process_cpu {
+			enabled = true
+		}
+
+		profile.memory {
+			enabled = false
+		}
+
+		profile.goroutine {
+			enabled = false
+		}
+
+		profile.block {
+			enabled = false
+		}
+
+		profile.mutex {
+			enabled = false
+		}
+	}
+	forward_to = [pyroscope.write.crabka.receiver]
+}
+
+pyroscope.scrape "trace_block_builder_cpu" {
+	targets = [
+		{__address__ = "traces-block-builder:9404", service_name = "traces-block-builder"},
+	]
+	scrape_interval          = "60s"
+	scrape_timeout           = "40s"
+	delta_profiling_duration = "30s"
+
+	profiling_config {
+		profile.process_cpu {
+			enabled = true
+		}
+
+		profile.memory {
+			enabled = false
+		}
+
+		profile.goroutine {
+			enabled = false
+		}
+
+		profile.block {
+			enabled = false
+		}
+
+		profile.mutex {
+			enabled = false
+		}
+	}
+	forward_to = [pyroscope.write.crabka.receiver]
+}
+
 // CPU + jemalloc heap profiling for the compaction / block-builder / querier
 // roles that the `crabka_services` block above (broker + distributors +
-// schema-registry) does not cover. These binaries are built with
-// `--features heap-profiling`, so /debug/pprof/heap exists. Worker CPU pprof
-// is intentionally less frequent than service/distributor pprof: profiling a
-// mostly-idle compactor for 5s every minute shows up as artificial steady CPU.
+// schema-registry) does not cover and that expose /debug/pprof/heap. Worker CPU
+// pprof is intentionally less frequent than service/distributor pprof:
+// profiling a mostly-idle compactor for 5s every minute shows up as artificial
+// steady CPU.
 pyroscope.scrape "crabka_workers" {
 	targets = [
 		{__address__ = "metrics-compactor:9404", service_name = "metrics-compactor"},
 		{__address__ = "metrics-querier:9404", service_name = "metrics-querier"},
-		{__address__ = "traces-block-builder:9404", service_name = "traces-block-builder"},
-		{__address__ = "traces-querier:9404", service_name = "traces-querier"},
 		{__address__ = "logs-compactor:9404", service_name = "logs-compactor"},
 		{__address__ = "logs-querier:9404", service_name = "logs-querier"},
 		{__address__ = "profiles-block-builder:9404", service_name = "profiles-block-builder"},
