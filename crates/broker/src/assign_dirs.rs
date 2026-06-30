@@ -73,7 +73,7 @@ pub(crate) fn build_request(
         broker_id,
         broker_epoch: -1,
         directories,
-        ..Default::default()
+        unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
     }
 }
 
@@ -130,7 +130,82 @@ fn validate_assign_response(error_code: i16) -> Result<(), String> {
 mod tests {
     use super::*;
     use assert2::assert;
+    use crabka_metadata::MetadataImage;
+    use crabka_protocol::{Decode, Encode};
+    use crabka_raft::{
+        AddVoter, Node, NodeId, QuorumState, RaftError, ReconfigOutcome, RemoveVoter,
+        SnapshotRange, UpdateVoter,
+    };
+    use std::{collections::BTreeSet, net::SocketAddr};
+    use tokio::sync::watch;
     use uuid::Uuid;
+
+    struct MockSource {
+        image: Arc<MetadataImage>,
+        leader: Option<NodeId>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::metadata_source::MetadataSource for MockSource {
+        fn current_image(&self) -> Arc<MetadataImage> {
+            self.image.clone()
+        }
+
+        fn watch_image(&self) -> watch::Receiver<Arc<MetadataImage>> {
+            let (_tx, rx) = watch::channel(self.image.clone());
+            rx
+        }
+
+        fn watch_leader(&self) -> watch::Receiver<Option<NodeId>> {
+            let (_tx, rx) = watch::channel(self.leader);
+            rx
+        }
+
+        fn quorum_state(&self) -> QuorumState {
+            panic!("not used by assign_dirs tests")
+        }
+
+        async fn submit_change(
+            &self,
+            _records: Vec<crabka_metadata::MetadataRecord>,
+        ) -> Result<(), RaftError> {
+            panic!("not used by assign_dirs tests")
+        }
+
+        async fn change_membership(&self, _new_voters: BTreeSet<NodeId>) -> Result<(), RaftError> {
+            panic!("not used by assign_dirs tests")
+        }
+
+        async fn add_learner(&self, _node_id: NodeId, _node: Node) -> Result<(), RaftError> {
+            panic!("not used by assign_dirs tests")
+        }
+
+        fn controller_bound_addr(&self) -> SocketAddr {
+            panic!("not used by assign_dirs tests")
+        }
+
+        fn read_snapshot_range(&self, _position: i64, _max_bytes: i32) -> SnapshotRange {
+            panic!("not used by assign_dirs tests")
+        }
+
+        async fn trigger_snapshot(&self) -> Result<(), RaftError> {
+            panic!("not used by assign_dirs tests")
+        }
+
+        async fn add_voter(&self, _req: AddVoter) -> Result<ReconfigOutcome, RaftError> {
+            panic!("not used by assign_dirs tests")
+        }
+
+        async fn remove_voter(&self, _req: RemoveVoter) -> Result<ReconfigOutcome, RaftError> {
+            panic!("not used by assign_dirs tests")
+        }
+
+        async fn update_voter(&self, _req: UpdateVoter) -> Result<ReconfigOutcome, RaftError> {
+            panic!("not used by assign_dirs tests")
+        }
+
+        async fn cancel(&self) {}
+    }
 
     #[test]
     fn build_request_groups_correctly() {
@@ -198,6 +273,47 @@ mod tests {
         assert!(req.broker_id == 1);
         assert!(req.broker_epoch == -1);
         assert!(req.directories.is_empty());
+    }
+
+    #[test]
+    fn build_request_encodes_unknown_broker_epoch() {
+        let req = build_request(3, &[]);
+        let mut bytes = bytes::BytesMut::new();
+
+        req.encode(&mut bytes, 0).expect("encode request");
+        let decoded =
+            AssignReplicasToDirsRequest::decode(&mut bytes.freeze(), 0).expect("decode request");
+
+        assert!(decoded.broker_id == 3);
+        assert!(decoded.broker_epoch == -1);
+    }
+
+    #[tokio::test]
+    async fn send_assignments_rejects_missing_controller_leader() {
+        let source: Arc<dyn crate::metadata_source::MetadataSource> = Arc::new(MockSource {
+            image: Arc::new(MetadataImage::new(uuid::Uuid::nil())),
+            leader: None,
+        });
+
+        let err = send_assignments(&source, "assign-test", build_request(1, &[]))
+            .await
+            .expect_err("missing leader must fail");
+
+        assert!(err == "no controller leader");
+    }
+
+    #[tokio::test]
+    async fn send_assignments_rejects_leader_missing_from_image() {
+        let source: Arc<dyn crate::metadata_source::MetadataSource> = Arc::new(MockSource {
+            image: Arc::new(MetadataImage::new(uuid::Uuid::nil())),
+            leader: Some(42),
+        });
+
+        let err = send_assignments(&source, "assign-test", build_request(1, &[]))
+            .await
+            .expect_err("missing leader broker record must fail");
+
+        assert!(err == "controller leader not in image");
     }
 
     #[test]
