@@ -392,10 +392,11 @@ fn spawn_heartbeat_task(
 }
 
 fn heartbeat_parent_context(sequence: i64) -> Context {
-    let sequence = u128::try_from(sequence).unwrap_or(0);
+    let trace_sequence = u128::try_from(sequence).unwrap_or(0);
+    let span_sequence = u64::try_from(sequence).unwrap_or(0);
     let trace_id =
-        TraceId::from(0x6372_6162_6b61_5f68_6561_7274_0000_0001_u128.wrapping_add(sequence));
-    let span_id = SpanId::from(0x6865_6172_7400_0001_u64.wrapping_add(sequence as u64));
+        TraceId::from(0x6372_6162_6b61_5f68_6561_7274_0000_0001_u128.wrapping_add(trace_sequence));
+    let span_id = SpanId::from(0x6865_6172_7400_0001_u64.wrapping_add(span_sequence));
     Context::new().with_remote_span_context(SpanContext::new(
         trace_id,
         span_id,

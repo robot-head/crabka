@@ -284,8 +284,7 @@ fn spawn_querier(
     let mut config = service_config(Role::Querier, bootstrap, topic, data_root);
     config.object_store_url = Some(object_store_url);
     config.index_prefix = Some(index_prefix.to_string());
-    config.tenant = Some("tenant-a".to_string());
-    config.querier_index_source = QuerierIndexSource::TenantObjectStoreManifest;
+    config.querier_index_source = QuerierIndexSource::TenantObjectStoreShards;
     config.wal_group_id = "grafana-loki-querier".to_string();
 
     tokio::spawn(async move {
