@@ -1208,6 +1208,32 @@ mod tests {
     }
 
     #[test]
+    fn record_client_software_accumulates_per_name_version() {
+        let m = BrokerMetrics::new();
+        let crabka_100 = ClientSoftwareLabel {
+            software_name: "crabka".to_string(),
+            software_version: "1.0.0".to_string(),
+        };
+        let crabka_101 = ClientSoftwareLabel {
+            software_name: "crabka".to_string(),
+            software_version: "1.0.1".to_string(),
+        };
+        let other = ClientSoftwareLabel {
+            software_name: "other-lib".to_string(),
+            software_version: "1.0.0".to_string(),
+        };
+
+        m.record_client_software("crabka", "1.0.0");
+        m.record_client_software("crabka", "1.0.0");
+        m.record_client_software("crabka", "1.0.1");
+        m.record_client_software("other-lib", "1.0.0");
+
+        assert!(m.client_software_versions.get_or_create(&crabka_100).get() == 2);
+        assert!(m.client_software_versions.get_or_create(&crabka_101).get() == 1);
+        assert!(m.client_software_versions.get_or_create(&other).get() == 1);
+    }
+
+    #[test]
     fn partition_helpers_increment_the_right_family() {
         let m = BrokerMetrics::new();
         m.record_partition_produce("t", 0, 1024);
