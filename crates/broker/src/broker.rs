@@ -4172,6 +4172,52 @@ mod tests {
         part
     }
 
+    fn consumer_group_seed(member_id: &str) -> crate::coordinator::unified::GroupSeed {
+        let mut seed = crate::coordinator::unified::GroupSeed {
+            group_epoch: 3,
+            target_epoch: 4,
+            ..Default::default()
+        };
+        seed.members.insert(
+            member_id.to_string(),
+            crate::coordinator::unified::persistence_next_gen::MemberMetadataValue {
+                instance_id: None,
+                rack_id: None,
+                client_id: "client".to_string(),
+                client_host: "127.0.0.1".to_string(),
+                subscribed_topic_names: vec!["orders".to_string()],
+                subscribed_topic_regex: None,
+                server_assignor: None,
+                rebalance_timeout_ms: 60_000,
+                classic: None,
+            },
+        );
+        seed
+    }
+
+    fn classic_group_with_member(
+        group_id: &str,
+        member_id: &str,
+    ) -> Box<crate::coordinator::unified::group::Group> {
+        let mut classic = crate::coordinator::unified::classic_state::Group::new(group_id);
+        classic.protocol_type = Some("consumer".to_string());
+        classic.generation_id = 1;
+        let member = crate::coordinator::unified::classic_state::Member::new(
+            member_id,
+            "client",
+            "127.0.0.1",
+            std::time::Duration::from_secs(30),
+            std::time::Duration::from_mins(1),
+            vec![("range".to_string(), bytes::Bytes::from_static(b"metadata"))],
+        );
+        let _ = classic.add_member(member);
+        Box::new(crate::coordinator::unified::group::Group {
+            group_id: group_id.to_string(),
+            kind: crate::coordinator::unified::group::GroupKind::Classic(classic),
+            committed_offsets: std::collections::HashMap::new(),
+        })
+    }
+
     #[test]
     fn static_voter_set_keeps_peer_hostnames_for_per_dial_resolution() {
         // Peer endpoint hosts MUST be the configured DNS names, NOT resolved to
@@ -4534,11 +4580,87 @@ mod tests {
             .initialize(share_group, share_topic_id, share_partition, 11, 90)
             .await
             .expect("initialize share state");
+        broker
+            .share_coordinator
+            .write(
+                share_group,
+                share_topic_id,
+                share_partition,
+                12,
+                2,
+                95,
+                7,
+                vec![crate::share_coordinator::persistence::StateBatch {
+                    first_offset: 95,
+                    last_offset: 99,
+                    delivery_state: 0,
+                    delivery_count: 1,
+                }],
+            )
+            .await
+            .expect("write share state summary");
         assert!(
             handle
                 .share_state_summary_for_test(share_group, share_topic_id, share_partition)
                 .await
-                == Some((11, 0, 90, 0))
+                == Some((12, 2, 95, 7))
+        );
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                handle.wait_until_share_spso(share_group, share_topic_id, share_partition, 95),
+            )
+            .await
+            .is_ok()
+        );
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                handle.wait_until_share_delivery_complete(
+                    share_group,
+                    share_topic_id,
+                    share_partition,
+                    7,
+                ),
+            )
+            .await
+            .is_ok()
+        );
+
+        let acquired_group = "handle-share-acquired-mutant-group";
+        let acquired_topic_id = uuid::Uuid::from_u128(0xACCD);
+        let acquired_cell = broker
+            .share_partition_leaders
+            .get_or_load(acquired_group, acquired_topic_id, 0)
+            .await;
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(75),
+                handle.wait_until_share_acquired_count(acquired_group, acquired_topic_id, 0, 1),
+            )
+            .await
+            .is_err()
+        );
+        {
+            let mut state = acquired_cell.lock().await;
+            state.materialize(3, 10);
+            let acquired = state.acquire(
+                "member-1",
+                3,
+                i32::MAX,
+                std::time::Instant::now(),
+                std::time::Duration::from_secs(30),
+                i16::MAX,
+            );
+            assert!(!acquired.is_empty());
+        }
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                handle.wait_until_share_acquired_count(acquired_group, acquired_topic_id, 0, 1),
+            )
+            .await
+            .is_ok()
         );
 
         let closed_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -4563,6 +4685,97 @@ mod tests {
                 .voter_directory_id_for_test(handle.node_id() + 10_000)
                 .is_none()
         );
+
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn group_handle_helpers_observe_live_actor_views() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = BrokerConfig::for_tests(dir.path().to_path_buf());
+        let handle = Broker::start(config).await.expect("broker start");
+        let broker = handle.broker_arc_for_test();
+
+        let group_id = "handle-next-gen-group-mutant";
+        let member_id = "member-1";
+        let actor = broker.group_coordinator.get_or_create_group(
+            group_id,
+            crate::coordinator::unified::actor::GroupKindTag::Consumer,
+        );
+        actor
+            .tx
+            .send(crate::coordinator::unified::actor::GroupActorMessage::Seed(
+                consumer_group_seed(member_id),
+            ))
+            .await
+            .expect("seed next-gen group");
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                handle.wait_until_group_member_count(group_id, 1),
+            )
+            .await
+            .is_ok()
+        );
+        let described = handle
+            .group_describe_for_test(group_id)
+            .await
+            .expect("next-gen group describe");
+        assert!(described.group_id == group_id);
+        assert!(described.members.len() == 1);
+        assert!(described.members[0].member_id == member_id);
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(75),
+                handle.wait_until_group_empty(group_id),
+            )
+            .await
+            .is_err()
+        );
+
+        let empty_group_id = "handle-empty-group-mutant";
+        let _ = broker.group_coordinator.get_or_create_group(
+            empty_group_id,
+            crate::coordinator::unified::actor::GroupKindTag::Consumer,
+        );
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                handle.wait_until_group_empty(empty_group_id),
+            )
+            .await
+            .is_ok()
+        );
+
+        let classic_group_id = "handle-classic-group-mutant";
+        let classic_member_id = "classic-member-1";
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(75),
+                handle.wait_until_classic_group_member_count(classic_group_id, 1),
+            )
+            .await
+            .is_err()
+        );
+        broker.group_coordinator.seed_classic(
+            classic_group_id,
+            classic_group_with_member(classic_group_id, classic_member_id),
+        );
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                handle.wait_until_classic_group_member_count(classic_group_id, 1),
+            )
+            .await
+            .is_ok()
+        );
+        let classic = handle
+            .classic_group_inspect_for_test(classic_group_id)
+            .await
+            .expect("classic group inspect");
+        assert!(classic.group_id == classic_group_id);
+        assert!(classic.members.len() == 1);
+        assert!(classic.members[0].member_id == classic_member_id);
 
         handle.shutdown().await;
     }
