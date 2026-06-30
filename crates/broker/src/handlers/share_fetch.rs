@@ -541,7 +541,6 @@ fn encode_error_response(
         error_code,
         error_message: None,
         acquisition_lock_timeout_ms: lock_timeout_ms,
-        responses: Vec::new(),
         ..Default::default()
     };
     let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
