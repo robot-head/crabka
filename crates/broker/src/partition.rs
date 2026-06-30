@@ -619,6 +619,60 @@ mod tests {
     use crabka_log::LogConfig;
     use tempfile::tempdir;
 
+    fn test_partition(hw_advance_notify: Arc<Notify>) -> (Partition, tempfile::TempDir) {
+        let dir = tempdir().expect("tempdir");
+        let log = Log::open(dir.path(), LogConfig::default()).expect("open log");
+        let (tx, _rx) = mpsc::channel::<WriterMessage>(1);
+        let writer = tokio::spawn(async {});
+        let p = Partition {
+            topic: "t".into(),
+            partition_id: 0,
+            log_dir: Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
+            log: Arc::new(Mutex::new(log)),
+            writer_tx: tx,
+            append_notify: Arc::new(Notify::new()),
+            replica_state: Arc::new(tokio::sync::Mutex::new(
+                crate::replica_state::ReplicaState::new(),
+            )),
+            hw_advance_notify,
+            current_leader: Arc::new(AtomicU64::new(0)),
+            current_leader_epoch: Arc::new(AtomicI32::new(0)),
+            _writer_handle: Arc::new(writer),
+        };
+        (p, dir)
+    }
+
+    fn append_records(p: &Partition, count: i32) {
+        use crabka_protocol::records::{Attributes, Record, RecordBatch};
+
+        let mut batch = RecordBatch {
+            base_offset: 0,
+            partition_leader_epoch: -1,
+            attributes: Attributes::default(),
+            last_offset_delta: count - 1,
+            base_timestamp: 1_700_000_000,
+            max_timestamp: 1_700_000_000,
+            producer_id: -1,
+            producer_epoch: -1,
+            base_sequence: -1,
+            records: (0..count)
+                .map(|i| Record {
+                    attributes: 0,
+                    offset_delta: i,
+                    timestamp_delta: 0,
+                    key: None,
+                    value: Some(bytes::Bytes::from_static(b"v")),
+                    headers: vec![],
+                })
+                .collect(),
+        };
+        p.log
+            .lock()
+            .expect("log mutex")
+            .append(&mut batch)
+            .expect("append");
+    }
+
     #[test]
     fn partition_is_clone_and_send() {
         // Compile-time check.
@@ -712,6 +766,53 @@ mod tests {
         assert!(st.isr.len() == 3);
         assert!(st.isr.contains(&1) && st.isr.contains(&2) && st.isr.contains(&3));
         assert!(st.per_follower.get(&2).map(|f| f.leo) == Some(0));
+    }
+
+    #[tokio::test]
+    async fn install_isr_notifies_when_high_watermark_advances() {
+        let hw_advance_notify = Arc::new(Notify::new());
+        let (p, _td) = test_partition(hw_advance_notify.clone());
+        append_records(&p, 3);
+        assert!(p.high_watermark().await == 0);
+
+        let waiter = hw_advance_notify.notified();
+        tokio::pin!(waiter);
+        assert!(
+            futures_util::poll!(&mut waiter).is_pending(),
+            "waiter registers on first poll"
+        );
+
+        p.install_isr(&[1], &[1], 1).await;
+
+        assert!(p.high_watermark().await == 3);
+        assert!(
+            futures_util::poll!(&mut waiter).is_ready(),
+            "notify should fire when ISR install advances HW"
+        );
+    }
+
+    #[tokio::test]
+    async fn install_isr_same_high_watermark_does_not_notify() {
+        let hw_advance_notify = Arc::new(Notify::new());
+        let (p, _td) = test_partition(hw_advance_notify.clone());
+        append_records(&p, 2);
+        p.install_isr(&[1], &[1], 1).await;
+        assert!(p.high_watermark().await == 2);
+
+        let waiter = hw_advance_notify.notified();
+        tokio::pin!(waiter);
+        assert!(
+            futures_util::poll!(&mut waiter).is_pending(),
+            "waiter registers on first poll"
+        );
+
+        p.install_isr(&[1], &[1], 1).await;
+
+        assert!(p.high_watermark().await == 2);
+        assert!(
+            futures_util::poll!(&mut waiter).is_pending(),
+            "unchanged HW must not wake waiters"
+        );
     }
 
     #[tokio::test]
@@ -848,6 +949,28 @@ mod tests {
         // reported_hw below current HW: no regression.
         p.set_follower_hw(1).await;
         assert!(p.high_watermark().await == 3);
+    }
+
+    #[tokio::test]
+    async fn set_follower_hw_same_high_watermark_does_not_notify() {
+        let hw_advance_notify = Arc::new(Notify::new());
+        let (p, _td) = test_partition(hw_advance_notify.clone());
+        assert!(p.high_watermark().await == 0);
+
+        let waiter = hw_advance_notify.notified();
+        tokio::pin!(waiter);
+        assert!(
+            futures_util::poll!(&mut waiter).is_pending(),
+            "waiter registers on first poll"
+        );
+
+        p.set_follower_hw(0).await;
+
+        assert!(p.high_watermark().await == 0);
+        assert!(
+            futures_util::poll!(&mut waiter).is_pending(),
+            "unchanged HW must not wake waiters"
+        );
     }
 
     #[tokio::test]
