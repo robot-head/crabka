@@ -4417,6 +4417,46 @@ mod tests {
         buf
     }
 
+    fn production_source() -> &'static str {
+        include_str!("dispatch.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source prefix")
+    }
+
+    #[test]
+    fn sasl_frame_gate_keeps_only_handshake_and_authenticate() {
+        let source = production_source();
+        assert!(
+            source.contains("if api_key != 17 && api_key != 36"),
+            "try_handle_sasl_frame must filter to SaslHandshake and SaslAuthenticate"
+        );
+        assert!(source.contains("17 => {"), "SaslHandshake arm missing");
+        assert!(source.contains("36 => {"), "SaslAuthenticate arm missing");
+        assert!(source.contains("error_code: codes::ILLEGAL_SASL_STATE"));
+        assert!(source.contains(
+            "error_message: Some(\"SaslAuthenticate without prior SaslHandshake\".into())"
+        ));
+        assert!(source.contains("auth_bytes: Bytes::new()"));
+        assert!(source.contains("session_lifetime_ms: 0"));
+    }
+
+    #[test]
+    fn inline_intercept_dispatch_table_keeps_all_connection_scoped_routes() {
+        let source = production_source();
+        for api_key in [
+            34, 51, 57, 0, 1, 3, 19, 20, 33, 44, 21, 37, 15, 16, 77, 78, 79, 90, 91, 92, 42, 11, 8,
+            9, 47, 60, 61, 65, 66, 64, 75, 74, 55, 80, 81, 82, 56, 63, 93, 12, 14, 13, 68, 76, 88,
+            10, 2, 23, 32, 35, 29, 30, 31, 43, 45, 46, 48, 49, 50, 38, 39, 40, 41, 22, 24, 26, 28,
+            71, 72,
+        ] {
+            assert!(
+                source.contains(&format!("Some({api_key}) =>")),
+                "inline intercept route for api_key {api_key} is missing"
+            );
+        }
+    }
+
     #[test]
     fn parse_header_v1_no_flexible() {
         // api_key=3, version=8 (non-flexible), corr_id=42, client_id="hi"
