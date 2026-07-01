@@ -215,6 +215,7 @@ mod tests {
     use super::*;
     use assert2::assert;
     use crabka_metadata::{FeatureLevelRecord, MetadataRecord};
+    use crabka_protocol::UnknownTaggedFields;
     use crabka_protocol::owned::streams_group_describe_response as response_mod;
     use std::time::Duration;
 
@@ -342,6 +343,69 @@ mod tests {
         }
     }
 
+    fn expected_task_ids(subtopology_id: &str, partitions: Vec<i32>) -> TaskIds {
+        TaskIds {
+            subtopology_id: subtopology_id.into(),
+            partitions,
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        }
+    }
+
+    fn expected_key_value(key: &str, value: &str) -> KeyValue {
+        KeyValue {
+            key: key.into(),
+            value: value.into(),
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        }
+    }
+
+    /// A fully-pinned error row as the handler renders it: only `group_id` and
+    /// `error_code` set, every other field at its wire default.
+    fn error_group(group_id: &str, error_code: i16) -> DescribedGroup {
+        DescribedGroup {
+            error_code,
+            error_message: None,
+            group_id: group_id.into(),
+            group_state: String::new(),
+            group_epoch: 0,
+            assignment_epoch: 0,
+            topology: None,
+            members: Vec::new(),
+            // Wire default (INT32_MIN sentinel = "not set").
+            authorized_operations: i32::MIN,
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        }
+    }
+
+    /// The wire `Topology` that [`render_topology`] must produce from
+    /// [`topology_value`] — every field pinned.
+    fn expected_rendered_topology() -> Topology {
+        Topology {
+            epoch: 9,
+            subtopologies: Some(vec![Subtopology {
+                subtopology_id: "sub-a".into(),
+                source_topics: vec!["input-a".into(), "input-b".into()],
+                repartition_sink_topics: vec!["sink-a".into()],
+                state_changelog_topics: vec![TopicInfo {
+                    name: "store-a-changelog".into(),
+                    partitions: 3,
+                    replication_factor: 2,
+                    topic_configs: vec![expected_key_value("cleanup.policy", "compact")],
+                    unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                }],
+                repartition_source_topics: vec![TopicInfo {
+                    name: "source-repartition".into(),
+                    partitions: 4,
+                    replication_factor: 1,
+                    topic_configs: vec![expected_key_value("retention.ms", "1000")],
+                    unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                }],
+                unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+            }]),
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        }
+    }
+
     #[tokio::test]
     async fn disabled_feature_returns_requested_group_error_rows() {
         let (broker_handle, _dir) = start_broker(true).await;
@@ -349,12 +413,15 @@ mod tests {
 
         let resp = describe(&broker, &["g-disabled-a", "g-disabled-b"]).await;
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.groups.len() == 2, "{resp:?}");
-        assert!(resp.groups[0].group_id == "g-disabled-a");
-        assert!(resp.groups[0].error_code == codes::UNSUPPORTED_VERSION);
-        assert!(resp.groups[1].group_id == "g-disabled-b");
-        assert!(resp.groups[1].error_code == codes::UNSUPPORTED_VERSION);
+        let expected = StreamsGroupDescribeResponse {
+            throttle_time_ms: 0,
+            groups: vec![
+                error_group("g-disabled-a", codes::UNSUPPORTED_VERSION),
+                error_group("g-disabled-b", codes::UNSUPPORTED_VERSION),
+            ],
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -366,12 +433,15 @@ mod tests {
 
         let resp = describe(&broker, &["missing-a", "missing-b"]).await;
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.groups.len() == 2, "{resp:?}");
-        assert!(resp.groups[0].group_id == "missing-a");
-        assert!(resp.groups[0].error_code == codes::GROUP_ID_NOT_FOUND);
-        assert!(resp.groups[1].group_id == "missing-b");
-        assert!(resp.groups[1].error_code == codes::GROUP_ID_NOT_FOUND);
+        let expected = StreamsGroupDescribeResponse {
+            throttle_time_ms: 0,
+            groups: vec![
+                error_group("missing-a", codes::GROUP_ID_NOT_FOUND),
+                error_group("missing-b", codes::GROUP_ID_NOT_FOUND),
+            ],
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -399,9 +469,12 @@ mod tests {
 
         let resp = describe(&broker, &["stopped"]).await;
 
-        assert!(resp.groups.len() == 1, "{resp:?}");
-        assert!(resp.groups[0].group_id == "stopped");
-        assert!(resp.groups[0].error_code == codes::COORDINATOR_LOAD_IN_PROGRESS);
+        let expected = StreamsGroupDescribeResponse {
+            throttle_time_ms: 0,
+            groups: vec![error_group("stopped", codes::COORDINATOR_LOAD_IN_PROGRESS)],
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -417,89 +490,67 @@ mod tests {
             members: vec![describe_member()],
         });
 
-        assert!(rendered.group_id == "streams-app");
-        assert!(rendered.error_code == codes::NONE);
-        assert!(rendered.error_message.is_none());
-        assert!(rendered.group_state == "Stable");
-        assert!(rendered.group_epoch == 11);
-        assert!(rendered.assignment_epoch == 10);
-        assert!(rendered.topology.is_some());
-        assert!(rendered.members.len() == 1, "{rendered:?}");
-
-        let member = &rendered.members[0];
-        assert!(member.member_id == "member-1");
-        assert!(member.member_epoch == 7);
-        assert!(member.instance_id.as_deref() == Some("instance-a"));
-        assert!(member.rack_id.as_deref() == Some("rack-a"));
-        assert!(member.client_id == "client-a");
-        assert!(member.client_host == "/127.0.0.1");
-        assert!(member.process_id == "process-a");
-        assert!(member.assignment.active_tasks.len() == 1, "{member:?}");
-        assert!(member.assignment.active_tasks[0].subtopology_id == "sub-a");
-        assert!(member.assignment.active_tasks[0].partitions == vec![0, 2]);
-        assert!(member.assignment.standby_tasks.len() == 1, "{member:?}");
-        assert!(member.assignment.standby_tasks[0].subtopology_id == "sub-a");
-        assert!(member.assignment.standby_tasks[0].partitions == vec![1]);
-        assert!(member.assignment.warmup_tasks.len() == 1, "{member:?}");
-        assert!(member.assignment.warmup_tasks[0].subtopology_id == "sub-b");
-        assert!(member.assignment.warmup_tasks[0].partitions == vec![3, 4]);
-
-        let topology = rendered.topology.as_ref().expect("topology");
-        assert!(topology.epoch == 9);
-        let subtopologies = topology.subtopologies.as_ref().expect("subtopologies");
-        assert!(subtopologies.len() == 1, "{topology:?}");
-        let sub = &subtopologies[0];
-        assert!(sub.subtopology_id == "sub-a");
-        assert!(sub.source_topics == vec!["input-a", "input-b"]);
-        assert!(sub.repartition_sink_topics == vec!["sink-a"]);
-        assert!(sub.state_changelog_topics.len() == 1, "{sub:?}");
-        assert!(sub.state_changelog_topics[0].name == "store-a-changelog");
-        assert!(sub.state_changelog_topics[0].partitions == 3);
-        assert!(sub.state_changelog_topics[0].replication_factor == 2);
-        assert!(sub.state_changelog_topics[0].topic_configs.len() == 1);
-        assert!(sub.state_changelog_topics[0].topic_configs[0].key == "cleanup.policy");
-        assert!(sub.state_changelog_topics[0].topic_configs[0].value == "compact");
-        assert!(sub.repartition_source_topics.len() == 1, "{sub:?}");
-        assert!(sub.repartition_source_topics[0].name == "source-repartition");
-        assert!(sub.repartition_source_topics[0].partitions == 4);
-        assert!(sub.repartition_source_topics[0].replication_factor == 1);
+        let empty_assignment = Assignment {
+            active_tasks: Vec::new(),
+            standby_tasks: Vec::new(),
+            warmup_tasks: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        };
+        let expected = DescribedGroup {
+            error_code: codes::NONE,
+            error_message: None,
+            group_id: "streams-app".into(),
+            group_state: "Stable".into(),
+            group_epoch: 11,
+            assignment_epoch: 10,
+            topology: Some(expected_rendered_topology()),
+            members: vec![Member {
+                member_id: "member-1".into(),
+                member_epoch: 7,
+                instance_id: Some("instance-a".into()),
+                rack_id: Some("rack-a".into()),
+                client_id: "client-a".into(),
+                client_host: "/127.0.0.1".into(),
+                // Not projected by the describe view — wire default.
+                topology_epoch: 0,
+                process_id: "process-a".into(),
+                user_endpoint: None,
+                client_tags: Vec::new(),
+                task_offsets: Vec::new(),
+                task_end_offsets: Vec::new(),
+                assignment: Assignment {
+                    active_tasks: vec![expected_task_ids("sub-a", vec![0, 2])],
+                    standby_tasks: vec![expected_task_ids("sub-a", vec![1])],
+                    warmup_tasks: vec![expected_task_ids("sub-b", vec![3, 4])],
+                    unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                },
+                // The view does not project the target (next) assignment.
+                target_assignment: empty_assignment,
+                is_classic: false,
+                unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+            }],
+            // Not computed here — wire default (INT32_MIN sentinel = "not set").
+            authorized_operations: i32::MIN,
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        };
+        assert!(rendered == expected);
     }
 
     #[test]
     fn render_topology_preserves_subtopology_and_topic_info_fields() {
         let topology = render_topology(topology_value());
 
-        assert!(topology.epoch == 9);
-        let subtopologies = topology.subtopologies.as_ref().expect("subtopologies");
-        assert!(subtopologies.len() == 1, "{topology:?}");
-        let sub = &subtopologies[0];
-        assert!(sub.subtopology_id == "sub-a");
-        assert!(sub.source_topics == vec!["input-a", "input-b"]);
-        assert!(sub.repartition_sink_topics == vec!["sink-a"]);
-        assert!(sub.state_changelog_topics.len() == 1, "{sub:?}");
-        assert!(sub.state_changelog_topics[0].name == "store-a-changelog");
-        assert!(sub.state_changelog_topics[0].partitions == 3);
-        assert!(sub.state_changelog_topics[0].replication_factor == 2);
-        assert!(sub.state_changelog_topics[0].topic_configs.len() == 1);
-        assert!(sub.state_changelog_topics[0].topic_configs[0].key == "cleanup.policy");
-        assert!(sub.state_changelog_topics[0].topic_configs[0].value == "compact");
-        assert!(sub.repartition_source_topics.len() == 1, "{sub:?}");
-        assert!(sub.repartition_source_topics[0].name == "source-repartition");
-        assert!(sub.repartition_source_topics[0].partitions == 4);
-        assert!(sub.repartition_source_topics[0].replication_factor == 1);
-        assert!(sub.repartition_source_topics[0].topic_configs.len() == 1);
-        assert!(sub.repartition_source_topics[0].topic_configs[0].key == "retention.ms");
-        assert!(sub.repartition_source_topics[0].topic_configs[0].value == "1000");
+        assert!(topology == expected_rendered_topology());
     }
 
     #[test]
     fn task_map_to_ids_preserves_sorted_task_maps() {
         let tasks = task_map_to_ids(&task_map(&[("z", vec![9]), ("a", vec![1, 2])]));
 
-        assert!(tasks.len() == 2, "{tasks:?}");
-        assert!(tasks[0].subtopology_id == "a");
-        assert!(tasks[0].partitions == vec![1, 2]);
-        assert!(tasks[1].subtopology_id == "z");
-        assert!(tasks[1].partitions == vec![9]);
+        let expected = vec![
+            expected_task_ids("a", vec![1, 2]),
+            expected_task_ids("z", vec![9]),
+        ];
+        assert!(tasks == expected);
     }
 }

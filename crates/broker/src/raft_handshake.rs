@@ -641,21 +641,28 @@ mod tests {
 
     #[test]
     fn header_flexibility_table_matches_outbound_encoder() {
-        // SaslHandshake — never flexible (v0/v1).
-        assert!(!is_request_header_flexible(API_KEY_SASL_HANDSHAKE, 0));
-        assert!(!is_request_header_flexible(API_KEY_SASL_HANDSHAKE, 1));
-        assert!(!is_response_header_flexible(API_KEY_SASL_HANDSHAKE, 0));
-        assert!(!is_response_header_flexible(API_KEY_SASL_HANDSHAKE, 1));
+        // SaslHandshake — never flexible (v0/v1). SaslAuthenticate —
+        // flexible from v2.
+        let request_flex = (
+            is_request_header_flexible(API_KEY_SASL_HANDSHAKE, 0),
+            is_request_header_flexible(API_KEY_SASL_HANDSHAKE, 1),
+            is_request_header_flexible(API_KEY_SASL_AUTHENTICATE, 1),
+            is_request_header_flexible(API_KEY_SASL_AUTHENTICATE, 2),
+        );
+        assert!(request_flex == (false, false, false, true));
 
-        // SaslAuthenticate — flexible from v2.
-        assert!(!is_request_header_flexible(API_KEY_SASL_AUTHENTICATE, 1));
-        assert!(is_request_header_flexible(API_KEY_SASL_AUTHENTICATE, 2));
-        assert!(!is_response_header_flexible(API_KEY_SASL_AUTHENTICATE, 1));
-        assert!(is_response_header_flexible(API_KEY_SASL_AUTHENTICATE, 2));
-
-        // ApiVersions — response header always v0 per Kafka spec.
-        assert!(!is_response_header_flexible(API_KEY_API_VERSIONS, 0));
-        assert!(!is_response_header_flexible(API_KEY_API_VERSIONS, 3));
+        // Response headers mirror the request rules for SaslHandshake /
+        // SaslAuthenticate; ApiVersions — response header always v0 per
+        // Kafka spec.
+        let response_flex = (
+            is_response_header_flexible(API_KEY_SASL_HANDSHAKE, 0),
+            is_response_header_flexible(API_KEY_SASL_HANDSHAKE, 1),
+            is_response_header_flexible(API_KEY_SASL_AUTHENTICATE, 1),
+            is_response_header_flexible(API_KEY_SASL_AUTHENTICATE, 2),
+            is_response_header_flexible(API_KEY_API_VERSIONS, 0),
+            is_response_header_flexible(API_KEY_API_VERSIONS, 3),
+        );
+        assert!(response_flex == (false, false, false, true, false, false));
     }
 
     #[tokio::test]
@@ -723,9 +730,9 @@ mod tests {
         });
         let frame = read_response_frame(&mut client).await;
         writer.await.expect("writer");
-        assert!(&frame[0..4] == &77i32.to_be_bytes());
-        assert!(frame[4] == 0);
-        assert!(&frame[5..] == &[0xaa, 0xbb]);
+        // corr_id 77 BE + empty tagged-fields byte (flexible header) + body.
+        let expected: Vec<u8> = [77i32.to_be_bytes().as_slice(), &[0x00], &[0xaa, 0xbb]].concat();
+        assert!(frame == expected);
 
         let (mut client, mut server) = tokio::io::duplex(128);
         let writer = tokio::spawn(async move {
@@ -748,25 +755,27 @@ mod tests {
     #[test]
     fn api_versions_response_has_expected_frame_shape() {
         let bytes = build_api_versions_response(99);
-        let size = u32::from_be_bytes(bytes[0..4].try_into().unwrap()) as usize;
-        assert!(size == bytes.len() - 4);
-        assert!(&bytes[4..8] == &99i32.to_be_bytes());
-        assert!(&bytes[8..10] == &0i16.to_be_bytes());
-        assert!(&bytes[10..14] == &3i32.to_be_bytes());
-
-        let mut keys = Vec::new();
-        let mut offset = 14;
-        for _ in 0..3 {
-            keys.push(i16::from_be_bytes(
-                bytes[offset..offset + 2].try_into().unwrap(),
-            ));
-            assert!(&bytes[offset + 2..offset + 4] == &0i16.to_be_bytes());
-            assert!(&bytes[offset + 4..offset + 6] == &2i16.to_be_bytes());
-            offset += 6;
-        }
-        assert!(keys == vec![17, 36, 18]);
-        assert!(&bytes[offset..offset + 4] == &0i32.to_be_bytes());
-        assert!(offset + 4 == bytes.len());
+        // Byte-exact v0 frame: size(32) | corr_id(99) | error_code(0) |
+        // array len(3) | {api_key, min 0, max 2} × [17, 36, 18] |
+        // throttle_time_ms(0).
+        let expected: Vec<u8> = [
+            &32u32.to_be_bytes()[..],
+            &99i32.to_be_bytes(),
+            &0i16.to_be_bytes(),
+            &3i32.to_be_bytes(),
+            &17i16.to_be_bytes(),
+            &0i16.to_be_bytes(),
+            &2i16.to_be_bytes(),
+            &36i16.to_be_bytes(),
+            &0i16.to_be_bytes(),
+            &2i16.to_be_bytes(),
+            &18i16.to_be_bytes(),
+            &0i16.to_be_bytes(),
+            &2i16.to_be_bytes(),
+            &0i32.to_be_bytes(),
+        ]
+        .concat();
+        assert!(bytes == expected);
     }
 
     #[tokio::test]
@@ -818,9 +827,9 @@ mod tests {
             .await
             .expect("write authenticate");
         let authenticate = read_response_frame(&mut client).await;
-        assert!(&authenticate[0..4] == &3i32.to_be_bytes());
-        assert!(authenticate[4] == 0);
-        assert!(&authenticate[5..7] == &0i16.to_be_bytes());
+        // corr_id 3 BE + empty tagged-fields byte (flexible header) +
+        // error_code 0.
+        assert!(authenticate[0..7] == [0, 0, 0, 3, 0, 0, 0]);
 
         let principal = server.await.expect("server task").expect("authenticated");
         assert!(principal.name == "broker");

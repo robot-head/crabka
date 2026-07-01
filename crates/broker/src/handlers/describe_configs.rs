@@ -264,6 +264,9 @@ mod tests {
     use std::collections::BTreeMap;
 
     use crabka_metadata::{BrokerConfigRecord, MetadataImage, MetadataRecord};
+    use crabka_protocol::owned::describe_configs_response::{
+        DescribeConfigsResourceResult, DescribeConfigsResult,
+    };
     use uuid::Uuid;
 
     /// Build a minimal `MetadataImage` with one broker config entry.
@@ -304,14 +307,18 @@ mod tests {
             super::CONFIG_SOURCE_DYNAMIC_BROKER,
         );
 
-        assert!(entry.name == "leader.replication.throttled.rate");
-        assert!(entry.value.as_deref() == Some("1024"));
-        assert!(!entry.read_only);
-        assert!(entry.config_source == super::CONFIG_SOURCE_DYNAMIC_BROKER);
-        assert!(!entry.is_sensitive);
-        assert!(entry.synonyms.is_empty());
-        assert!(entry.config_type == 0);
-        assert!(entry.documentation.is_none());
+        let expected = DescribeConfigsResourceResult {
+            name: "leader.replication.throttled.rate".to_string(),
+            value: Some("1024".to_string()),
+            read_only: false,
+            config_source: super::CONFIG_SOURCE_DYNAMIC_BROKER,
+            is_sensitive: false,
+            synonyms: Vec::new(),
+            config_type: 0,
+            documentation: None,
+            unknown_tagged_fields: Default::default(),
+        };
+        assert!(entry == expected);
     }
 
     #[test]
@@ -336,14 +343,25 @@ mod tests {
             },
         );
 
-        assert!(result.error_code == crate::codes::NONE);
-        assert!(result.error_message.is_none());
-        assert!(result.resource_type == super::RESOURCE_TYPE_TOPIC);
-        assert!(result.resource_name == "orders");
-        assert!(result.configs.len() == 1);
-        assert!(result.configs[0].name == "cleanup.policy");
-        assert!(result.configs[0].value.as_deref() == Some("compact"));
-        assert!(result.configs[0].config_source == super::CONFIG_SOURCE_DYNAMIC_TOPIC);
+        let expected = DescribeConfigsResult {
+            error_code: crate::codes::NONE,
+            error_message: None,
+            resource_type: super::RESOURCE_TYPE_TOPIC,
+            resource_name: "orders".to_string(),
+            configs: vec![DescribeConfigsResourceResult {
+                name: "cleanup.policy".to_string(),
+                value: Some("compact".to_string()),
+                read_only: false,
+                config_source: super::CONFIG_SOURCE_DYNAMIC_TOPIC,
+                is_sensitive: false,
+                synonyms: Vec::new(),
+                config_type: 0,
+                documentation: None,
+                unknown_tagged_fields: Default::default(),
+            }],
+            unknown_tagged_fields: Default::default(),
+        };
+        assert!(result == expected);
     }
 
     #[test]
@@ -359,16 +377,17 @@ mod tests {
             },
         );
 
-        assert!(result.error_code == crate::codes::INVALID_REQUEST);
-        assert!(
-            result
-                .error_message
-                .as_deref()
-                .is_some_and(|msg| msg.contains("not-a-number"))
-        );
-        assert!(result.resource_type == super::RESOURCE_TYPE_BROKER);
-        assert!(result.resource_name == "not-a-number");
-        assert!(result.configs.is_empty());
+        let expected = DescribeConfigsResult {
+            error_code: crate::codes::INVALID_REQUEST,
+            error_message: Some(
+                "resource_name `not-a-number` is not a valid broker id".to_string(),
+            ),
+            resource_type: super::RESOURCE_TYPE_BROKER,
+            resource_name: "not-a-number".to_string(),
+            configs: Vec::new(),
+            unknown_tagged_fields: Default::default(),
+        };
+        assert!(result == expected);
     }
 
     #[test]
@@ -392,9 +411,13 @@ mod tests {
             .filter(|(k, _)| key_filter.iter().any(|f| f == k))
             .collect();
 
-        assert!(filtered.len() == 1);
-        assert!(filtered.contains_key("leader.replication.throttled.rate"));
-        assert!(!filtered.contains_key("follower.replication.throttled.rate"));
+        let expected: BTreeMap<String, String> = [(
+            "leader.replication.throttled.rate".to_string(),
+            "512".to_string(),
+        )]
+        .into_iter()
+        .collect();
+        assert!(filtered == expected);
     }
 
     #[test]
@@ -471,11 +494,15 @@ mod tests {
             "t".into(),
             crate::codes::TOPIC_AUTHORIZATION_FAILED,
         );
-        assert!(res.error_code == crate::codes::TOPIC_AUTHORIZATION_FAILED);
-        assert!(res.error_message.as_deref() == Some("authorization failed"));
-        assert!(res.resource_type == super::RESOURCE_TYPE_TOPIC);
-        assert!(res.resource_name == "t");
-        assert!(res.configs.is_empty());
+        let expected = DescribeConfigsResult {
+            error_code: crate::codes::TOPIC_AUTHORIZATION_FAILED,
+            error_message: Some("authorization failed".to_string()),
+            resource_type: super::RESOURCE_TYPE_TOPIC,
+            resource_name: "t".to_string(),
+            configs: Vec::new(),
+            unknown_tagged_fields: Default::default(),
+        };
+        assert!(res == expected);
     }
 
     #[test]

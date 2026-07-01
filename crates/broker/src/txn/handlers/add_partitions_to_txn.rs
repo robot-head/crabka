@@ -493,9 +493,23 @@ mod tests {
         }
     }
 
-    fn partition_code(row: &AddPartitionsToTxnTopicResult, index: usize) -> (i32, i16) {
-        let part = &row.results_by_partition[index];
-        (part.partition_index, part.partition_error_code)
+    /// Build a fully-pinned expected topic-result row: every field spelled
+    /// out explicitly so whole-value comparisons kill field-drop mutants.
+    fn topic_result(name: &str, rows: &[(i32, i16)]) -> AddPartitionsToTxnTopicResult {
+        AddPartitionsToTxnTopicResult {
+            name: name.into(),
+            results_by_partition: rows
+                .iter()
+                .map(
+                    |&(partition_index, partition_error_code)| AddPartitionsToTxnPartitionResult {
+                        partition_index,
+                        partition_error_code,
+                        unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+                    },
+                )
+                .collect(),
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+        }
     }
 
     #[test]
@@ -510,14 +524,14 @@ mod tests {
 
         let rows = verify_partitions(&e, &topics, &denied);
 
-        assert!(rows.len() == 2);
-        assert!(rows[0].name == "alpha");
-        assert!(rows[0].results_by_partition.len() == 2);
-        assert!(partition_code(&rows[0], 0) == (1, codes::NONE));
-        assert!(partition_code(&rows[0], 1) == (2, codes::TRANSACTION_ABORTABLE));
-        assert!(rows[1].name == "denied");
-        assert!(rows[1].results_by_partition.len() == 1);
-        assert!(partition_code(&rows[1], 0) == (3, codes::TOPIC_AUTHORIZATION_FAILED));
+        let expected = vec![
+            topic_result(
+                "alpha",
+                &[(1, codes::NONE), (2, codes::TRANSACTION_ABORTABLE)],
+            ),
+            topic_result("denied", &[(3, codes::TOPIC_AUTHORIZATION_FAILED)]),
+        ];
+        assert!(rows == expected);
     }
 
     #[test]
@@ -527,12 +541,14 @@ mod tests {
 
         let rows = per_topic_with_denied(&topics, &denied, codes::NOT_COORDINATOR);
 
-        assert!(rows.len() == 2);
-        assert!(rows[0].name == "alpha");
-        assert!(partition_code(&rows[0], 0) == (1, codes::NOT_COORDINATOR));
-        assert!(partition_code(&rows[0], 1) == (2, codes::NOT_COORDINATOR));
-        assert!(rows[1].name == "denied");
-        assert!(partition_code(&rows[1], 0) == (3, codes::TOPIC_AUTHORIZATION_FAILED));
+        let expected = vec![
+            topic_result(
+                "alpha",
+                &[(1, codes::NOT_COORDINATOR), (2, codes::NOT_COORDINATOR)],
+            ),
+            topic_result("denied", &[(3, codes::TOPIC_AUTHORIZATION_FAILED)]),
+        ];
+        assert!(rows == expected);
     }
 
     #[test]
@@ -541,11 +557,14 @@ mod tests {
 
         let rows = topic_error(&topics, codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED);
 
-        assert!(rows.len() == 1);
-        assert!(rows[0].name == "alpha");
-        assert!(rows[0].results_by_partition.len() == 2);
-        assert!(partition_code(&rows[0], 0) == (4, codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED));
-        assert!(partition_code(&rows[0], 1) == (5, codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED));
+        let expected = vec![topic_result(
+            "alpha",
+            &[
+                (4, codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED),
+                (5, codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED),
+            ],
+        )];
+        assert!(rows == expected);
     }
 
     fn encode_request(req: &AddPartitionsToTxnRequest, version: i16) -> Bytes {
@@ -576,15 +595,18 @@ mod tests {
         assert!(!bytes.is_empty());
         let decoded = decode_response(&bytes, 4);
 
-        assert!(decoded.throttle_time_ms == 0);
-        assert!(decoded.error_code == codes::NONE);
-        assert!(decoded.results_by_transaction.len() == 1);
-        assert!(decoded.results_by_transaction[0].transactional_id == "tid-4");
-        assert!(decoded.results_by_transaction[0].topic_results.len() == 1);
-        assert!(
-            partition_code(&decoded.results_by_transaction[0].topic_results[0], 0)
-                == (1, codes::INVALID_TXN_STATE)
-        );
+        let expected = AddPartitionsToTxnResponse {
+            throttle_time_ms: 0,
+            error_code: codes::NONE,
+            results_by_transaction: vec![AddPartitionsToTxnResult {
+                transactional_id: "tid-4".into(),
+                topic_results: vec![topic_result("alpha", &[(1, codes::INVALID_TXN_STATE)])],
+                unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+            }],
+            results_by_topic_v3_and_below: vec![],
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+        };
+        assert!(decoded == expected);
     }
 
     #[test]
@@ -598,10 +620,14 @@ mod tests {
         assert!(!bytes.is_empty());
         let decoded = decode_response(&bytes, 3);
 
-        assert!(decoded.throttle_time_ms == 0);
-        assert!(decoded.results_by_topic_v3_and_below.len() == 1);
-        assert!(decoded.results_by_topic_v3_and_below[0].name == "alpha");
-        assert!(partition_code(&decoded.results_by_topic_v3_and_below[0], 0) == (7, codes::NONE));
+        let expected = AddPartitionsToTxnResponse {
+            throttle_time_ms: 0,
+            error_code: codes::NONE,
+            results_by_transaction: vec![],
+            results_by_topic_v3_and_below: vec![topic_result("alpha", &[(7, codes::NONE)])],
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+        };
+        assert!(decoded == expected);
     }
 
     #[derive(Debug)]
@@ -681,20 +707,24 @@ mod tests {
         .expect("handle");
         let resp = decode_response(&bytes, 4);
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.results_by_transaction.len() == 1);
-        let txn = &resp.results_by_transaction[0];
-        assert!(txn.transactional_id == "tid-4");
-        assert!(txn.topic_results.len() == 1);
-        assert!(txn.topic_results[0].name == "alpha");
-        assert!(
-            partition_code(&txn.topic_results[0], 0)
-                == (1, codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED)
-        );
-        assert!(
-            partition_code(&txn.topic_results[0], 1)
-                == (2, codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED)
-        );
+        let expected = AddPartitionsToTxnResponse {
+            throttle_time_ms: 0,
+            error_code: codes::NONE,
+            results_by_transaction: vec![AddPartitionsToTxnResult {
+                transactional_id: "tid-4".into(),
+                topic_results: vec![topic_result(
+                    "alpha",
+                    &[
+                        (1, codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED),
+                        (2, codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED),
+                    ],
+                )],
+                unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+            }],
+            results_by_topic_v3_and_below: vec![],
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+        };
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -724,12 +754,20 @@ mod tests {
         .expect("handle");
         let resp = decode_response(&bytes, 3);
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.results_by_topic_v3_and_below.len() == 1);
-        let topic = &resp.results_by_topic_v3_and_below[0];
-        assert!(topic.name == "alpha");
-        assert!(partition_code(topic, 0) == (3, codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED));
-        assert!(partition_code(topic, 1) == (4, codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED));
+        let expected = AddPartitionsToTxnResponse {
+            throttle_time_ms: 0,
+            error_code: codes::NONE,
+            results_by_transaction: vec![],
+            results_by_topic_v3_and_below: vec![topic_result(
+                "alpha",
+                &[
+                    (3, codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED),
+                    (4, codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED),
+                ],
+            )],
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+        };
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 }

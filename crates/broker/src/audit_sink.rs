@@ -138,10 +138,20 @@ mod tests {
             .expect("read audit partition");
         let records: Vec<_> = out.batches.iter().flat_map(|b| &b.records).collect();
 
-        assert!(records.len() == 1);
-        assert!(records[0].value.as_deref() == Some(&b"{\"ok\":true}"[..]));
-        assert!(records[0].headers.len() == 1);
-        assert!(records[0].headers[0].key == "event_class");
-        assert!(records[0].headers[0].value.as_deref() == Some(&b"admin"[..]));
+        assert!(
+            (
+                records.len(),
+                records[0].value.as_deref(),
+                records[0].headers.len(),
+                records[0].headers[0].key.as_str(),
+                records[0].headers[0].value.as_deref(),
+            ) == (
+                1,
+                Some(&b"{\"ok\":true}"[..]),
+                1,
+                "event_class",
+                Some(&b"admin"[..]),
+            )
+        );
     }
 }

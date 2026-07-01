@@ -923,22 +923,42 @@ mod tests {
 
         let req = build_fetch_request(&cfg, 123, 456);
 
-        assert!(req.replica_id == i32::try_from(NODE_ID).unwrap());
-        assert!(req.replica_state.replica_id == i32::try_from(NODE_ID).unwrap());
-        assert!(req.max_wait_ms == FETCH_MAX_WAIT_MS);
-        assert!(req.min_bytes == FETCH_MIN_BYTES);
-        assert!(req.max_bytes == FETCH_MAX_BYTES);
-        assert!(req.topics.len() == 1);
-        let topic = &req.topics[0];
-        assert!(topic.topic == TOPIC);
-        assert!(topic.topic_id == WIRE_TOPIC_ID);
-        assert!(topic.partitions.len() == 1);
-        let partition = &topic.partitions[0];
-        assert!(partition.partition == PARTITION);
-        assert!(partition.fetch_offset == 123);
-        assert!(partition.current_leader_epoch == -1);
-        assert!(partition.last_fetched_epoch == -1);
-        assert!(partition.partition_max_bytes == 456);
+        let rid = i32::try_from(NODE_ID).unwrap();
+        let expected = FetchRequest {
+            replica_id: rid,
+            max_wait_ms: FETCH_MAX_WAIT_MS,
+            min_bytes: FETCH_MIN_BYTES,
+            max_bytes: FETCH_MAX_BYTES,
+            isolation_level: 0,
+            session_id: 0,
+            session_epoch: -1,
+            topics: vec![FetchTopic {
+                topic: TOPIC.into(),
+                topic_id: WIRE_TOPIC_ID,
+                partitions: vec![FetchPartition {
+                    partition: PARTITION,
+                    current_leader_epoch: -1,
+                    fetch_offset: 123,
+                    last_fetched_epoch: -1,
+                    log_start_offset: -1,
+                    partition_max_bytes: 456,
+                    replica_directory_id: WireUuid::ZERO,
+                    high_watermark: i64::MAX,
+                    unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+                }],
+                unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+            }],
+            forgotten_topics_data: Vec::new(),
+            rack_id: String::new(),
+            cluster_id: None,
+            replica_state: ReplicaState {
+                replica_id: rid,
+                replica_epoch: -1,
+                unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+            },
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+        };
+        assert!(req == expected);
     }
 
     #[test]
@@ -959,14 +979,21 @@ mod tests {
         assert!(opts.client_id == "replica-test");
 
         let req = build_offset_for_leader_epoch_request(&cfg, 7);
-        assert!(req.replica_id == i32::try_from(NODE_ID).unwrap());
-        assert!(req.topics.len() == 1);
-        assert!(req.topics[0].topic == TOPIC);
-        assert!(req.topics[0].partitions.len() == 1);
-        let partition = &req.topics[0].partitions[0];
-        assert!(partition.partition == PARTITION);
-        assert!(partition.current_leader_epoch == 7);
-        assert!(partition.leader_epoch == 7);
+        let expected = OffsetForLeaderEpochRequest {
+            replica_id: i32::try_from(NODE_ID).unwrap(),
+            topics: vec![OffsetForLeaderTopic {
+                topic: TOPIC.into(),
+                partitions: vec![OffsetForLeaderPartition {
+                    partition: PARTITION,
+                    current_leader_epoch: 7,
+                    leader_epoch: 7,
+                    unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+                }],
+                unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+            }],
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+        };
+        assert!(req == expected);
     }
 
     #[test]

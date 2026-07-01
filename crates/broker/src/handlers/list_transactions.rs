@@ -156,13 +156,25 @@ mod tests {
 
     #[test]
     fn txn_state_str_matches_jvm_names() {
-        assert!(txn_state_str(TxnState::Empty) == "Empty");
-        assert!(txn_state_str(TxnState::Ongoing) == "Ongoing");
-        assert!(txn_state_str(TxnState::PrepareCommit) == "PrepareCommit");
-        assert!(txn_state_str(TxnState::PrepareAbort) == "PrepareAbort");
-        assert!(txn_state_str(TxnState::CompleteCommit) == "CompleteCommit");
-        assert!(txn_state_str(TxnState::CompleteAbort) == "CompleteAbort");
-        assert!(txn_state_str(TxnState::Dead) == "Dead");
+        let actual = (
+            txn_state_str(TxnState::Empty),
+            txn_state_str(TxnState::Ongoing),
+            txn_state_str(TxnState::PrepareCommit),
+            txn_state_str(TxnState::PrepareAbort),
+            txn_state_str(TxnState::CompleteCommit),
+            txn_state_str(TxnState::CompleteAbort),
+            txn_state_str(TxnState::Dead),
+        );
+        let expected = (
+            "Empty",
+            "Ongoing",
+            "PrepareCommit",
+            "PrepareAbort",
+            "CompleteCommit",
+            "CompleteAbort",
+            "Dead",
+        );
+        assert!(actual == expected);
     }
 
     fn encode_request(req: &ListTransactionsRequest, version: i16) -> Bytes {
@@ -235,10 +247,14 @@ mod tests {
             .expect("handle");
         let resp = decode_response(&bytes, version);
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.error_code == codes::NONE);
-        assert!(resp.unknown_state_filters == vec!["MysteryState"]);
-        assert!(resp.transaction_states.is_empty());
+        let expected = ListTransactionsResponse {
+            throttle_time_ms: 0,
+            error_code: codes::NONE,
+            unknown_state_filters: vec!["MysteryState".to_string()],
+            transaction_states: vec![],
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+        };
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 }

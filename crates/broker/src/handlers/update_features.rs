@@ -415,9 +415,14 @@ mod tests {
 
     #[test]
     fn downgrade_flag_v1_uses_upgrade_type() {
-        assert!(!downgrade_allowed(1, true, 1)); // UPGRADE
-        assert!(downgrade_allowed(1, false, 2)); // SAFE_DOWNGRADE
-        assert!(downgrade_allowed(1, false, 3)); // UNSAFE_DOWNGRADE
+        // upgrade_type: 1 = UPGRADE, 2 = SAFE_DOWNGRADE, 3 = UNSAFE_DOWNGRADE.
+        assert!(
+            (
+                downgrade_allowed(1, true, 1),
+                downgrade_allowed(1, false, 2),
+                downgrade_allowed(1, false, 3),
+            ) == (false, true, true)
+        );
     }
 
     #[test]
@@ -439,10 +444,14 @@ mod tests {
     fn top_level_error_preserves_wire_shape() {
         let resp = top_level_error(codes::INVALID_REQUEST, "bad request", VERSION);
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.error_code == codes::INVALID_REQUEST);
-        assert!(resp.error_message.as_deref() == Some("bad request"));
-        assert!(resp.results.is_empty());
+        let expected = UpdateFeaturesResponse {
+            throttle_time_ms: 0,
+            error_code: codes::INVALID_REQUEST,
+            error_message: Some("bad request".to_string()),
+            results: vec![],
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
     }
 
     #[test]
@@ -462,18 +471,33 @@ mod tests {
             VERSION,
         );
 
-        assert!(resp.error_code == codes::FEATURE_UPDATE_FAILED);
-        assert!(resp.error_message.as_deref() == Some("persist failed"));
-        assert!(resp.results.len() == 3);
-        assert!(resp.results[0].feature == "metadata.version");
-        assert!(resp.results[0].error_code == codes::FEATURE_UPDATE_FAILED);
-        assert!(resp.results[0].error_message.as_deref() == Some("persist failed"));
-        assert!(resp.results[1].feature == "eligible.feature");
-        assert!(resp.results[1].error_code == codes::FEATURE_UPDATE_FAILED);
-        assert!(resp.results[1].error_message.as_deref() == Some("persist failed"));
-        assert!(resp.results[2].feature == "not.a.feature");
-        assert!(resp.results[2].error_code == codes::INVALID_REQUEST);
-        assert!(resp.results[2].error_message.as_deref() == Some("bad feature"));
+        let expected = UpdateFeaturesResponse {
+            throttle_time_ms: 0,
+            error_code: codes::FEATURE_UPDATE_FAILED,
+            error_message: Some("persist failed".to_string()),
+            results: vec![
+                UpdatableFeatureResult {
+                    feature: "metadata.version".to_string(),
+                    error_code: codes::FEATURE_UPDATE_FAILED,
+                    error_message: Some("persist failed".to_string()),
+                    unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+                },
+                UpdatableFeatureResult {
+                    feature: "eligible.feature".to_string(),
+                    error_code: codes::FEATURE_UPDATE_FAILED,
+                    error_message: Some("persist failed".to_string()),
+                    unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+                },
+                UpdatableFeatureResult {
+                    feature: "not.a.feature".to_string(),
+                    error_code: codes::INVALID_REQUEST,
+                    error_message: Some("bad feature".to_string()),
+                    unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+                },
+            ],
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
     }
 
     #[test]
@@ -483,23 +507,46 @@ mod tests {
             row("b".into(), codes::INVALID_UPDATE_VERSION, "bad"),
         ];
         let resp = finalize(results, 2);
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.error_code == codes::INVALID_UPDATE_VERSION);
-        assert!(resp.error_message.as_deref() == Some("bad"));
-        assert!(resp.results.len() == 2);
-        assert!(resp.results[0].feature == "a");
-        assert!(resp.results[1].feature == "b");
+        let expected = UpdateFeaturesResponse {
+            throttle_time_ms: 0,
+            error_code: codes::INVALID_UPDATE_VERSION,
+            error_message: Some("bad".to_string()),
+            results: vec![
+                UpdatableFeatureResult {
+                    feature: "a".to_string(),
+                    error_code: codes::NONE,
+                    error_message: None,
+                    unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+                },
+                UpdatableFeatureResult {
+                    feature: "b".to_string(),
+                    error_code: codes::INVALID_UPDATE_VERSION,
+                    error_message: Some("bad".to_string()),
+                    unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+                },
+            ],
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
     }
 
     #[test]
     fn finalize_v1_keeps_top_level_none() {
         let results = vec![row("b".into(), codes::INVALID_UPDATE_VERSION, "bad")];
         let resp = finalize(results, 1);
-        assert!(resp.error_code == codes::NONE);
-        assert!(resp.error_message.is_none());
-        assert!(resp.results.len() == 1);
-        assert!(resp.results[0].feature == "b");
-        assert!(resp.results[0].error_message.as_deref() == Some("bad"));
+        let expected = UpdateFeaturesResponse {
+            throttle_time_ms: 0,
+            error_code: codes::NONE,
+            error_message: None,
+            results: vec![UpdatableFeatureResult {
+                feature: "b".to_string(),
+                error_code: codes::INVALID_UPDATE_VERSION,
+                error_message: Some("bad".to_string()),
+                unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+            }],
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
     }
 
     #[test]
@@ -537,18 +584,14 @@ mod tests {
 
         let (resp, broker_handle, _dir) = call_with(Arc::new(DenyAll), req).await;
 
-        assert!(
-            resp.error_code == codes::CLUSTER_AUTHORIZATION_FAILED,
-            "{resp:?}"
-        );
-        assert!(
-            resp.error_message
-                .as_deref()
-                .is_some_and(|m| m.contains("Cluster authorization failed")),
-            "{resp:?}"
-        );
-        assert!(resp.results.is_empty(), "{resp:?}");
-        assert!(resp.throttle_time_ms == 0);
+        let expected = UpdateFeaturesResponse {
+            throttle_time_ms: 0,
+            error_code: codes::CLUSTER_AUTHORIZATION_FAILED,
+            error_message: Some("Cluster authorization failed.".to_string()),
+            results: vec![],
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -560,14 +603,16 @@ mod tests {
         )
         .await;
 
-        assert!(resp.error_code == codes::INVALID_REQUEST, "{resp:?}");
-        assert!(
-            resp.error_message
-                .as_deref()
-                .is_some_and(|m| m.contains("empty feature updates")),
-            "{resp:?}"
-        );
-        assert!(resp.results.is_empty(), "{resp:?}");
+        let expected = UpdateFeaturesResponse {
+            throttle_time_ms: 0,
+            error_code: codes::INVALID_REQUEST,
+            error_message: Some(
+                "Can not provide empty feature updates in the request.".to_string(),
+            ),
+            results: vec![],
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -581,10 +626,19 @@ mod tests {
         let (resp, broker_handle, _dir) =
             call_with(Arc::new(crate::authorizer::AllowAllAuthorizer), req).await;
 
-        assert!(resp.error_code == codes::NONE, "{resp:?}");
-        assert!(resp.error_message.is_none(), "{resp:?}");
-        assert!(resp.results.len() == 1, "{resp:?}");
-        assert_ok_row(&resp, crate::features::METADATA_VERSION);
+        let expected = UpdateFeaturesResponse {
+            throttle_time_ms: 0,
+            error_code: codes::NONE,
+            error_message: None,
+            results: vec![UpdatableFeatureResult {
+                feature: crate::features::METADATA_VERSION.to_string(),
+                error_code: codes::NONE,
+                error_message: None,
+                unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+            }],
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -625,22 +679,30 @@ mod tests {
         let (resp, broker_handle, _dir) =
             call_with(Arc::new(crate::authorizer::AllowAllAuthorizer), req).await;
 
-        assert!(resp.error_code == codes::NONE, "{resp:?}");
-        assert!(resp.results.len() == 2, "{resp:?}");
-        assert!(resp.results[0].feature == crate::features::METADATA_VERSION);
-        assert!(resp.results[0].error_code == codes::NONE, "{resp:?}");
-        assert!(resp.results[1].feature == crate::features::METADATA_VERSION);
-        assert!(
-            resp.results[1].error_code == codes::INVALID_REQUEST,
-            "{resp:?}"
-        );
-        assert!(
-            resp.results[1]
-                .error_message
-                .as_deref()
-                .is_some_and(|m| m.contains("more than once")),
-            "{resp:?}"
-        );
+        let expected = UpdateFeaturesResponse {
+            throttle_time_ms: 0,
+            error_code: codes::NONE,
+            error_message: None,
+            results: vec![
+                UpdatableFeatureResult {
+                    feature: crate::features::METADATA_VERSION.to_string(),
+                    error_code: codes::NONE,
+                    error_message: None,
+                    unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+                },
+                UpdatableFeatureResult {
+                    feature: crate::features::METADATA_VERSION.to_string(),
+                    error_code: codes::INVALID_REQUEST,
+                    error_message: Some(
+                        "Provided feature can not be updated more than once in the request."
+                            .to_string(),
+                    ),
+                    unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+                },
+            ],
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 

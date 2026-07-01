@@ -369,17 +369,23 @@ mod tests {
         );
 
         let records = process_one_entry(&e).expect("boundary values are valid");
-        assert!(records.len() == 2);
-        let MetadataRecord::V1ClientQuota(producer) = &records[0] else {
-            panic!("wrong variant")
-        };
-        let MetadataRecord::V1ClientQuota(request_percentage) = &records[1] else {
-            panic!("wrong variant")
-        };
-        assert!(producer.config_key == "producer_byte_rate");
-        assert!(producer.config_value == Some(0.0));
-        assert!(request_percentage.config_key == "request_percentage");
-        assert!(request_percentage.config_value == Some(100.0));
+        let alice_entity = vec![QuotaEntity {
+            entity_type: "user".into(),
+            entity_name: Some("alice".into()),
+        }];
+        let expected = vec![
+            MetadataRecord::V1ClientQuota(ClientQuotaRecord {
+                entity: alice_entity.clone(),
+                config_key: "producer_byte_rate".into(),
+                config_value: Some(0.0),
+            }),
+            MetadataRecord::V1ClientQuota(ClientQuotaRecord {
+                entity: alice_entity,
+                config_key: "request_percentage".into(),
+                config_value: Some(100.0),
+            }),
+        ];
+        assert!(records == expected);
     }
 
     #[test]
@@ -475,18 +481,30 @@ mod tests {
         }];
 
         let ok = ok_entry(&entity);
-        assert!(ok.error_code == 0);
-        assert!(ok.error_message.is_none());
-        assert!(ok.entity.len() == 1);
-        assert!(ok.entity[0].entity_type == "user");
-        assert!(ok.entity[0].entity_name.as_deref() == Some("alice"));
+        let expected_ok = RespEntry {
+            error_code: 0,
+            error_message: None,
+            entity: vec![RespEntity {
+                entity_type: "user".into(),
+                entity_name: Some("alice".into()),
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            }],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(ok == expected_ok);
 
         let err = err_entry(&entity, INVALID_CONFIG, "bad quota".into());
-        assert!(err.error_code == INVALID_CONFIG);
-        assert!(err.error_message.as_deref() == Some("bad quota"));
-        assert!(err.entity.len() == 1);
-        assert!(err.entity[0].entity_type == "user");
-        assert!(err.entity[0].entity_name.as_deref() == Some("alice"));
+        let expected_err = RespEntry {
+            error_code: INVALID_CONFIG,
+            error_message: Some("bad quota".into()),
+            entity: vec![RespEntity {
+                entity_type: "user".into(),
+                entity_name: Some("alice".into()),
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            }],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(err == expected_err);
     }
 
     #[test]
@@ -510,10 +528,29 @@ mod tests {
 
         apply_submit_error(&mut results, "raft unavailable");
 
-        assert!(results[0].error_code == COORDINATOR_NOT_AVAILABLE);
-        assert!(results[0].error_message.as_deref() == Some("submit failed: raft unavailable"));
-        assert!(results[1].error_code == INVALID_REQUEST);
-        assert!(results[1].error_message.as_deref() == Some("invalid bob quota"));
+        let expected = vec![
+            RespEntry {
+                error_code: COORDINATOR_NOT_AVAILABLE,
+                error_message: Some("submit failed: raft unavailable".into()),
+                entity: vec![RespEntity {
+                    entity_type: "user".into(),
+                    entity_name: Some("alice".into()),
+                    unknown_tagged_fields: UnknownTaggedFields::default(),
+                }],
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            },
+            RespEntry {
+                error_code: INVALID_REQUEST,
+                error_message: Some("invalid bob quota".into()),
+                entity: vec![RespEntity {
+                    entity_type: "user".into(),
+                    entity_name: Some("bob".into()),
+                    unknown_tagged_fields: UnknownTaggedFields::default(),
+                }],
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            },
+        ];
+        assert!(results == expected);
     }
 
     #[test]
@@ -532,16 +569,33 @@ mod tests {
                 .expect("encode");
         let resp = decode_response(version, &bytes);
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.entries.len() == 2);
-        assert!(resp.entries[0].error_code == CLUSTER_AUTHORIZATION_FAILED);
-        assert!(resp.entries[0].error_message.as_deref() == Some("denied"));
-        assert!(resp.entries[0].entity[0].entity_type == "user");
-        assert!(resp.entries[0].entity[0].entity_name.as_deref() == Some("alice"));
-        assert!(resp.entries[1].error_code == CLUSTER_AUTHORIZATION_FAILED);
-        assert!(resp.entries[1].error_message.as_deref() == Some("denied"));
-        assert!(resp.entries[1].entity[0].entity_type == "client-id");
-        assert!(resp.entries[1].entity[0].entity_name.as_deref() == Some("app"));
+        let expected = AlterClientQuotasResponse {
+            throttle_time_ms: 0,
+            entries: vec![
+                RespEntry {
+                    error_code: CLUSTER_AUTHORIZATION_FAILED,
+                    error_message: Some("denied".into()),
+                    entity: vec![RespEntity {
+                        entity_type: "user".into(),
+                        entity_name: Some("alice".into()),
+                        unknown_tagged_fields: UnknownTaggedFields::default(),
+                    }],
+                    unknown_tagged_fields: UnknownTaggedFields::default(),
+                },
+                RespEntry {
+                    error_code: CLUSTER_AUTHORIZATION_FAILED,
+                    error_message: Some("denied".into()),
+                    entity: vec![RespEntity {
+                        entity_type: "client-id".into(),
+                        entity_name: Some("app".into()),
+                        unknown_tagged_fields: UnknownTaggedFields::default(),
+                    }],
+                    unknown_tagged_fields: UnknownTaggedFields::default(),
+                },
+            ],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
     }
 
     #[test]
@@ -564,12 +618,21 @@ mod tests {
         let bytes = encode_response(&resp, version).expect("encode");
         let decoded = decode_response(version, &bytes);
 
-        assert!(decoded.throttle_time_ms == 123);
-        assert!(decoded.entries.len() == 1);
-        assert!(decoded.entries[0].error_code == INVALID_REQUEST);
-        assert!(decoded.entries[0].error_message.as_deref() == Some("bad request"));
-        assert!(decoded.entries[0].entity[0].entity_type == "user");
-        assert!(decoded.entries[0].entity[0].entity_name.as_deref() == Some("alice"));
+        let expected = AlterClientQuotasResponse {
+            throttle_time_ms: 123,
+            entries: vec![RespEntry {
+                error_code: INVALID_REQUEST,
+                error_message: Some("bad request".into()),
+                entity: vec![RespEntity {
+                    entity_type: "user".into(),
+                    entity_name: Some("alice".into()),
+                    unknown_tagged_fields: UnknownTaggedFields::default(),
+                }],
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            }],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(decoded == expected);
     }
 
     #[tokio::test]
@@ -595,13 +658,22 @@ mod tests {
         let resp = handle(&broker, req, &ctx, version).await.expect("handle");
         let resp = decode_response(version, &resp);
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.entries.len() == 1);
-        assert!(resp.entries[0].error_code == CLUSTER_AUTHORIZATION_FAILED);
-        assert!(resp.entries[0].error_message.as_deref() == Some("alter-client-quotas denied"));
-        assert!(resp.entries[0].entity[0].entity_type == "user");
-        assert!(resp.entries[0].entity[0].entity_name.as_deref() == Some("alice"));
-        assert!(quota_value(&broker_handle, "alice", "producer_byte_rate").is_none());
+        let expected = AlterClientQuotasResponse {
+            throttle_time_ms: 0,
+            entries: vec![RespEntry {
+                error_code: CLUSTER_AUTHORIZATION_FAILED,
+                error_message: Some("alter-client-quotas denied".into()),
+                entity: vec![RespEntity {
+                    entity_type: "user".into(),
+                    entity_name: Some("alice".into()),
+                    unknown_tagged_fields: UnknownTaggedFields::default(),
+                }],
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            }],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
+        assert!(quota_value(&broker_handle, "alice", "producer_byte_rate") == None);
         broker_handle.shutdown().await;
     }
 
@@ -635,20 +707,39 @@ mod tests {
         let resp = handle(&broker, req, &ctx, version).await.expect("handle");
         let resp = decode_response(version, &resp);
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.entries.len() == 2);
-        assert!(resp.entries[0].error_code == 0);
-        assert!(resp.entries[0].error_message.is_none());
-        assert!(resp.entries[0].entity[0].entity_name.as_deref() == Some("alice"));
-        assert!(resp.entries[1].error_code == INVALID_CONFIG);
+        let expected = AlterClientQuotasResponse {
+            throttle_time_ms: 0,
+            entries: vec![
+                RespEntry {
+                    error_code: 0,
+                    error_message: None,
+                    entity: vec![RespEntity {
+                        entity_type: "user".into(),
+                        entity_name: Some("alice".into()),
+                        unknown_tagged_fields: UnknownTaggedFields::default(),
+                    }],
+                    unknown_tagged_fields: UnknownTaggedFields::default(),
+                },
+                RespEntry {
+                    error_code: INVALID_CONFIG,
+                    error_message: Some("unknown quota key \"unknown_quota_key\"".into()),
+                    entity: vec![RespEntity {
+                        entity_type: "user".into(),
+                        entity_name: Some("bob".into()),
+                        unknown_tagged_fields: UnknownTaggedFields::default(),
+                    }],
+                    unknown_tagged_fields: UnknownTaggedFields::default(),
+                },
+            ],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
         assert!(
-            resp.entries[1]
-                .error_message
-                .as_deref()
-                .is_some_and(|m| m.contains("unknown quota key"))
+            (
+                quota_value(&broker_handle, "alice", "producer_byte_rate"),
+                quota_value(&broker_handle, "bob", "unknown_quota_key"),
+            ) == (Some(1024.0), None)
         );
-        assert!(quota_value(&broker_handle, "alice", "producer_byte_rate") == Some(1024.0));
-        assert!(quota_value(&broker_handle, "bob", "unknown_quota_key").is_none());
         broker_handle.shutdown().await;
     }
 
@@ -676,11 +767,22 @@ mod tests {
         let resp = handle(&broker, req, &ctx, version).await.expect("handle");
         let resp = decode_response(version, &resp);
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.entries.len() == 1);
-        assert!(resp.entries[0].error_code == 0);
-        assert!(resp.entries[0].error_message.is_none());
-        assert!(quota_value(&broker_handle, "carol", "producer_byte_rate").is_none());
+        let expected = AlterClientQuotasResponse {
+            throttle_time_ms: 0,
+            entries: vec![RespEntry {
+                error_code: 0,
+                error_message: None,
+                entity: vec![RespEntity {
+                    entity_type: "user".into(),
+                    entity_name: Some("carol".into()),
+                    unknown_tagged_fields: UnknownTaggedFields::default(),
+                }],
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            }],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
+        assert!(quota_value(&broker_handle, "carol", "producer_byte_rate") == None);
         broker_handle.shutdown().await;
     }
 }

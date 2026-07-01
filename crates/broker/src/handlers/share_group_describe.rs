@@ -120,6 +120,7 @@ pub(crate) async fn handle(
 mod tests {
     use super::*;
     use assert2::assert;
+    use crabka_protocol::UnknownTaggedFields;
     use crabka_protocol::owned::share_group_describe_response;
     use crabka_security::{AuthMethod, Principal};
     use std::net::SocketAddr;
@@ -212,12 +213,37 @@ mod tests {
             .expect("handle");
         let resp = decode_response(&resp);
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.groups.len() == 2, "{resp:?}");
-        assert!(resp.groups[0].group_id == "g1");
-        assert!(resp.groups[0].error_code == codes::GROUP_AUTHORIZATION_FAILED);
-        assert!(resp.groups[1].group_id == "g2");
-        assert!(resp.groups[1].error_code == codes::GROUP_AUTHORIZATION_FAILED);
+        let expected = ShareGroupDescribeResponse {
+            throttle_time_ms: 0,
+            groups: vec![
+                DescribedGroup {
+                    error_code: codes::GROUP_AUTHORIZATION_FAILED,
+                    error_message: None,
+                    group_id: "g1".into(),
+                    group_state: String::new(),
+                    group_epoch: 0,
+                    assignment_epoch: 0,
+                    assignor_name: String::new(),
+                    members: Vec::new(),
+                    authorized_operations: i32::MIN,
+                    unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                },
+                DescribedGroup {
+                    error_code: codes::GROUP_AUTHORIZATION_FAILED,
+                    error_message: None,
+                    group_id: "g2".into(),
+                    group_state: String::new(),
+                    group_epoch: 0,
+                    assignment_epoch: 0,
+                    assignor_name: String::new(),
+                    members: Vec::new(),
+                    authorized_operations: i32::MIN,
+                    unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                },
+            ],
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -239,11 +265,23 @@ mod tests {
             .expect("handle");
         let resp = decode_response(&resp);
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.groups.len() == 1, "{resp:?}");
-        assert!(resp.groups[0].group_id == "g1");
-        assert!(resp.groups[0].error_code == codes::GROUP_ID_NOT_FOUND);
-        assert!(resp.groups[0].members.is_empty());
+        let expected = ShareGroupDescribeResponse {
+            throttle_time_ms: 0,
+            groups: vec![DescribedGroup {
+                error_code: codes::GROUP_ID_NOT_FOUND,
+                error_message: None,
+                group_id: "g1".into(),
+                group_state: String::new(),
+                group_epoch: 0,
+                assignment_epoch: 0,
+                assignor_name: String::new(),
+                members: Vec::new(),
+                authorized_operations: i32::MIN,
+                unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+            }],
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 }

@@ -339,6 +339,7 @@ mod tests {
     use assert2::assert;
     use crabka_metadata::{BrokerRegistrationRecord, MetadataRecord, PartitionRecord, TopicRecord};
     use crabka_protocol::Decode;
+    use crabka_protocol::UnknownTaggedFields;
     use crabka_protocol::owned::alter_partition_reassignments_request::{
         AlterPartitionReassignmentsRequest, ReassignablePartition, ReassignableTopic,
     };
@@ -550,25 +551,40 @@ mod tests {
         let res = process_one_partition(&img, "foo", 0, Some(&[1, 4]), true)
             .expect("ok")
             .expect("Some");
-        assert!(res.replicas == vec![1, 2, 3, 4]);
-        assert!(res.adding_replicas == vec![4]);
-        assert!(res.removing_replicas == vec![2, 3]);
-        assert!(res.leader == 1);
-        assert!(res.leader_epoch == 5); // unchanged on start
-        assert!(res.partition_epoch == 12);
+        let expected = PartitionRecord {
+            topic: "foo".into(),
+            partition: 0,
+            leader: 1,
+            replicas: vec![1, 2, 3, 4],
+            isr: vec![1, 2, 3],
+            leader_epoch: 5, // unchanged on start
+            adding_replicas: vec![4],
+            removing_replicas: vec![2, 3],
+            directories: vec![Uuid::nil(); 4],
+            partition_epoch: 12,
+        };
+        assert!(res == expected);
     }
 
     #[test]
     fn row_builders_preserve_non_default_fields() {
         let ok = ok_row(7);
-        assert!(ok.partition_index == 7);
-        assert!(ok.error_code == 0);
-        assert!(ok.error_message.is_none());
+        let expected_ok = ReassignablePartitionResponse {
+            partition_index: 7,
+            error_code: 0,
+            error_message: None,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(ok == expected_ok);
 
         let err = err_row(8, UNKNOWN_TOPIC_OR_PARTITION, "missing partition".into());
-        assert!(err.partition_index == 8);
-        assert!(err.error_code == UNKNOWN_TOPIC_OR_PARTITION);
-        assert!(err.error_message.as_deref() == Some("missing partition"));
+        let expected_err = ReassignablePartitionResponse {
+            partition_index: 8,
+            error_code: UNKNOWN_TOPIC_OR_PARTITION,
+            error_message: Some("missing partition".into()),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(err == expected_err);
     }
 
     #[test]
@@ -581,16 +597,24 @@ mod tests {
                 .expect("encode whole request error");
         let resp = decode_response(version, &bytes);
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(!resp.allow_replication_factor_change);
-        assert!(resp.error_code == 0);
-        assert!(resp.error_message.is_none());
-        assert!(resp.responses.len() == 1);
-        assert!(resp.responses[0].name == "payments");
-        assert!(resp.responses[0].partitions.len() == 1);
-        assert!(resp.responses[0].partitions[0].partition_index == 8);
-        assert!(resp.responses[0].partitions[0].error_code == CLUSTER_AUTHORIZATION_FAILED);
-        assert!(resp.responses[0].partitions[0].error_message.as_deref() == Some("denied"));
+        let expected = AlterPartitionReassignmentsResponse {
+            throttle_time_ms: 0,
+            allow_replication_factor_change: false,
+            error_code: 0,
+            error_message: None,
+            responses: vec![ReassignableTopicResponse {
+                name: "payments".into(),
+                partitions: vec![ReassignablePartitionResponse {
+                    partition_index: 8,
+                    error_code: CLUSTER_AUTHORIZATION_FAILED,
+                    error_message: Some("denied".into()),
+                    unknown_tagged_fields: UnknownTaggedFields::default(),
+                }],
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            }],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
     }
 
     #[test]
@@ -606,12 +630,21 @@ mod tests {
         mark_submit_failed(&mut by_topic, "submit failed: not controller");
         let rows = by_topic.get("orders").expect("topic rows");
 
-        assert!(rows[0].partition_index == 7);
-        assert!(rows[0].error_code == COORDINATOR_NOT_AVAILABLE);
-        assert!(rows[0].error_message.as_deref() == Some("submit failed: not controller"));
-        assert!(rows[1].partition_index == 8);
-        assert!(rows[1].error_code == UNKNOWN_TOPIC_OR_PARTITION);
-        assert!(rows[1].error_message.as_deref() == Some("unknown partition"));
+        let expected = vec![
+            ReassignablePartitionResponse {
+                partition_index: 7,
+                error_code: COORDINATOR_NOT_AVAILABLE,
+                error_message: Some("submit failed: not controller".into()),
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            },
+            ReassignablePartitionResponse {
+                partition_index: 8,
+                error_code: UNKNOWN_TOPIC_OR_PARTITION,
+                error_message: Some("unknown partition".into()),
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            },
+        ];
+        assert!(*rows == expected);
     }
 
     #[tokio::test]
@@ -638,21 +671,24 @@ mod tests {
         .expect("handle");
         let resp = decode_response(version, &bytes);
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(!resp.allow_replication_factor_change);
-        assert!(resp.error_code == 0);
-        assert!(resp.error_message.is_none());
-        assert!(resp.responses.len() == 1);
-        assert!(resp.responses[0].name == "payments");
-        assert!(resp.responses[0].partitions.len() == 1);
-        assert!(resp.responses[0].partitions[0].partition_index == 8);
-        assert!(resp.responses[0].partitions[0].error_code == UNKNOWN_TOPIC_OR_PARTITION);
-        assert!(
-            resp.responses[0].partitions[0]
-                .error_message
-                .as_deref()
-                .is_some_and(|m| m.contains("unknown partition"))
-        );
+        let expected = AlterPartitionReassignmentsResponse {
+            throttle_time_ms: 0,
+            allow_replication_factor_change: false,
+            error_code: 0,
+            error_message: None,
+            responses: vec![ReassignableTopicResponse {
+                name: "payments".into(),
+                partitions: vec![ReassignablePartitionResponse {
+                    partition_index: 8,
+                    error_code: UNKNOWN_TOPIC_OR_PARTITION,
+                    error_message: Some("unknown partition".into()),
+                    unknown_tagged_fields: UnknownTaggedFields::default(),
+                }],
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            }],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -679,18 +715,24 @@ mod tests {
         .expect("handle");
         let resp = decode_response(version, &bytes);
 
-        assert!(!resp.allow_replication_factor_change);
-        assert!(resp.responses.len() == 1);
-        assert!(resp.responses[0].name == "payments");
-        assert!(resp.responses[0].partitions.len() == 1);
-        assert!(resp.responses[0].partitions[0].partition_index == 8);
-        assert!(resp.responses[0].partitions[0].error_code == CLUSTER_AUTHORIZATION_FAILED);
-        assert!(
-            resp.responses[0].partitions[0]
-                .error_message
-                .as_deref()
-                .is_some_and(|m| m.contains("denied"))
-        );
+        let expected = AlterPartitionReassignmentsResponse {
+            throttle_time_ms: 0,
+            allow_replication_factor_change: false,
+            error_code: 0,
+            error_message: None,
+            responses: vec![ReassignableTopicResponse {
+                name: "payments".into(),
+                partitions: vec![ReassignablePartitionResponse {
+                    partition_index: 8,
+                    error_code: CLUSTER_AUTHORIZATION_FAILED,
+                    error_message: Some("alter-reassignment denied".into()),
+                    unknown_tagged_fields: UnknownTaggedFields::default(),
+                }],
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            }],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -720,12 +762,24 @@ mod tests {
         .expect("handle");
         let resp = decode_response(version, &bytes);
 
-        assert!(resp.responses.len() == 1);
-        assert!(resp.responses[0].name == "orders");
-        assert!(resp.responses[0].partitions.len() == 1);
-        assert!(resp.responses[0].partitions[0].partition_index == 7);
-        assert!(resp.responses[0].partitions[0].error_code == 0);
-        assert!(resp.responses[0].partitions[0].error_message.is_none());
+        let expected = AlterPartitionReassignmentsResponse {
+            throttle_time_ms: 0,
+            allow_replication_factor_change: true,
+            error_code: 0,
+            error_message: None,
+            responses: vec![ReassignableTopicResponse {
+                name: "orders".into(),
+                partitions: vec![ReassignablePartitionResponse {
+                    partition_index: 7,
+                    error_code: 0,
+                    error_message: None,
+                    unknown_tagged_fields: UnknownTaggedFields::default(),
+                }],
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            }],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
 
         let image = broker.controller.current_image();
         let partition = image.partition("orders", 7).expect("partition committed");
@@ -743,9 +797,19 @@ mod tests {
         let res = process_one_partition(&img, "foo", 0, Some(&[5, 6]), true)
             .expect("ok")
             .expect("Some");
-        assert!(res.replicas == vec![1, 4, 5, 6]);
-        assert!(res.adding_replicas == vec![5, 6]);
-        assert!(res.removing_replicas == vec![1, 4]);
+        let expected = PartitionRecord {
+            topic: "foo".into(),
+            partition: 0,
+            leader: 1,
+            replicas: vec![1, 4, 5, 6],
+            isr: vec![1, 2, 3],
+            leader_epoch: 5,
+            adding_replicas: vec![5, 6],
+            removing_replicas: vec![1, 4],
+            directories: vec![Uuid::nil(); 4],
+            partition_epoch: 1,
+        };
+        assert!(res == expected);
     }
 
     #[test]
@@ -781,12 +845,19 @@ mod tests {
         let res = process_one_partition(&img, "foo", 0, None, true)
             .expect("ok")
             .expect("Some");
-        assert!(res.replicas == vec![1, 2, 3]);
-        assert!(res.adding_replicas == Vec::<NodeId>::new());
-        assert!(res.removing_replicas == Vec::<NodeId>::new());
-        assert!(res.leader == 1); // reverted replicas ∩ isr = [1]
-        assert!(res.leader_epoch == 6); // bumped
-        assert!(res.partition_epoch == 12);
+        let expected = PartitionRecord {
+            topic: "foo".into(),
+            partition: 0,
+            leader: 1, // reverted replicas ∩ isr = [1]
+            replicas: vec![1, 2, 3],
+            isr: vec![1],
+            leader_epoch: 6, // bumped
+            adding_replicas: vec![],
+            removing_replicas: vec![],
+            directories: vec![Uuid::nil(); 3],
+            partition_epoch: 12,
+        };
+        assert!(res == expected);
     }
 
     #[test]
@@ -796,13 +867,19 @@ mod tests {
             .expect("ok")
             .expect("Some");
 
-        assert!(res.replicas == vec![1, 2, 3]);
-        assert!(res.isr == vec![1, 2, 3]);
-        assert!(res.adding_replicas == Vec::<NodeId>::new());
-        assert!(res.removing_replicas == Vec::<NodeId>::new());
-        assert!(res.leader == 1);
-        assert!(res.leader_epoch == 5);
-        assert!(res.partition_epoch == 12);
+        let expected = PartitionRecord {
+            topic: "foo".into(),
+            partition: 0,
+            leader: 1,
+            replicas: vec![1, 2, 3],
+            isr: vec![1, 2, 3],
+            leader_epoch: 5,
+            adding_replicas: vec![],
+            removing_replicas: vec![],
+            directories: vec![Uuid::nil(); 3],
+            partition_epoch: 12,
+        };
+        assert!(res == expected);
     }
 
     #[test]

@@ -81,6 +81,7 @@ async fn handle_request(
 mod tests {
     use super::*;
     use assert2::assert;
+    use crabka_protocol::UnknownTaggedFields;
     use crabka_protocol::owned::delete_share_group_state_request::{
         DeleteStateData, PartitionData,
     };
@@ -119,12 +120,19 @@ mod tests {
             .expect("handle request");
         let resp = decode(&bytes);
 
-        assert!(resp.results.len() == 1);
-        assert!(resp.results[0].topic_id == topic_id);
-        assert!(resp.results[0].partitions.len() == 1);
-        let partition = &resp.results[0].partitions[0];
-        assert!(partition.partition == 7);
-        assert!(partition.error_code == codes::NOT_COORDINATOR);
-        assert!(partition.error_message.is_none());
+        let expected = DeleteShareGroupStateResponse {
+            results: vec![DeleteStateResult {
+                topic_id,
+                partitions: vec![PartitionResult {
+                    partition: 7,
+                    error_code: codes::NOT_COORDINATOR,
+                    error_message: None,
+                    unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                }],
+                unknown_tagged_fields: UnknownTaggedFields(vec![]),
+            }],
+            unknown_tagged_fields: UnknownTaggedFields(vec![]),
+        };
+        assert!(resp == expected);
     }
 }

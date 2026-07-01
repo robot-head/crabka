@@ -587,9 +587,13 @@ mod tests {
             .expect("handle");
         let resp = decode_response(version, &resp);
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.error_code == codes::CLUSTER_AUTHORIZATION_FAILED);
-        assert!(resp.topics.is_empty());
+        let expected = AlterPartitionResponse {
+            throttle_time_ms: 0,
+            error_code: codes::CLUSTER_AUTHORIZATION_FAILED,
+            topics: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -614,9 +618,13 @@ mod tests {
             .expect("handle");
         let resp = decode_response(version, &resp);
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.error_code == codes::NONE);
-        assert!(resp.topics.is_empty());
+        let expected = AlterPartitionResponse {
+            throttle_time_ms: 0,
+            error_code: codes::NONE,
+            topics: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -653,18 +661,26 @@ mod tests {
             .expect("handle");
         let resp = decode_response(version, &resp);
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.error_code == codes::NONE);
-        assert!(resp.topics.len() == 1);
-        assert!(resp.topics[0].topic_id == wire_topic_id());
-        assert!(resp.topics[0].partitions.len() == 1);
-        let part = &resp.topics[0].partitions[0];
-        assert!(part.partition_index == 0);
-        assert!(part.error_code == codes::NONE);
-        assert!(part.leader_id == 1);
-        assert!(part.leader_epoch == 5);
-        assert!(part.isr == vec![1]);
-        assert!(part.partition_epoch == 1);
+        let expected = AlterPartitionResponse {
+            throttle_time_ms: 0,
+            error_code: codes::NONE,
+            topics: vec![RespTopicData {
+                topic_id: wire_topic_id(),
+                partitions: vec![RespPartitionData {
+                    partition_index: 0,
+                    error_code: codes::NONE,
+                    leader_id: 1,
+                    leader_epoch: 5,
+                    isr: vec![1],
+                    leader_recovery_state: 0,
+                    partition_epoch: 1,
+                    unknown_tagged_fields: UnknownTaggedFields::default(),
+                }],
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            }],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
 
         let image = broker.controller.current_image();
         let committed = image.partition("t", 0).expect("partition committed");
@@ -698,13 +714,17 @@ mod tests {
         let mut changes = Vec::new();
         let resp = handle_partition(&image, Some("t"), 7, 9, &[2, 4], &[], &mut changes);
 
-        assert!(resp.partition_index == 7);
-        assert!(resp.error_code == codes::NONE);
-        assert!(resp.leader_id == 2);
-        assert!(resp.leader_epoch == 9);
-        assert!(resp.isr == vec![2, 4]);
-        assert!(resp.leader_recovery_state == 0);
-        assert!(resp.partition_epoch == 12);
+        let expected = RespPartitionData {
+            partition_index: 7,
+            error_code: codes::NONE,
+            leader_id: 2,
+            leader_epoch: 9,
+            isr: vec![2, 4],
+            leader_recovery_state: 0,
+            partition_epoch: 12,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
         assert!(changes.len() == 1);
         let MetadataRecord::V1Partition(record) = &changes[0] else {
             panic!("wrong change variant");
@@ -729,13 +749,17 @@ mod tests {
         let mut changes = Vec::new();
         let resp = handle_partition(&image, Some("t"), 7, 8, &[2, 4], &[], &mut changes);
 
-        assert!(resp.partition_index == 7);
-        assert!(resp.error_code == codes::FENCED_LEADER_EPOCH);
-        assert!(resp.leader_id == 2);
-        assert!(resp.leader_epoch == 9);
-        assert!(resp.isr == vec![2, 4]);
-        assert!(resp.leader_recovery_state == 0);
-        assert!(resp.partition_epoch == 0);
+        let expected = RespPartitionData {
+            partition_index: 7,
+            error_code: codes::FENCED_LEADER_EPOCH,
+            leader_id: 2,
+            leader_epoch: 9,
+            isr: vec![2, 4],
+            leader_recovery_state: 0,
+            partition_epoch: 0,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
         assert!(changes.is_empty());
     }
 
@@ -744,8 +768,17 @@ mod tests {
         let image = image_with(&[(1, 10), (2, 20), (3, 30)]);
         let mut changes = Vec::new();
         let resp = handle_partition(&image, Some("t"), 0, 5, &[1, 2], &[bs(3, 30)], &mut changes);
-        assert!(resp.error_code == codes::NONE, "got {}", resp.error_code);
-        assert!(resp.isr == vec![1, 2]);
+        let expected = RespPartitionData {
+            partition_index: 0,
+            error_code: codes::NONE,
+            leader_id: 1,
+            leader_epoch: 5,
+            isr: vec![1, 2],
+            leader_recovery_state: 0,
+            partition_epoch: 1,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
         assert!(changes.len() == 1);
         let MetadataRecord::V1Partition(record) = &changes[0] else {
             panic!("wrong change variant");

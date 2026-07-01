@@ -168,12 +168,20 @@ mod tests {
             .expect("handle");
         let resp = decode_response(version, &bytes);
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.results.len() == 1);
-        assert!(resp.results[0].topic_name == "orders");
-        assert!(resp.results[0].partitions.len() == 1);
-        assert!(resp.results[0].partitions[0].partition_index == 7);
-        assert!(resp.results[0].partitions[0].error_code == codes::LOG_DIR_NOT_FOUND);
+        let expected = AlterReplicaLogDirsResponse {
+            throttle_time_ms: 0,
+            results: vec![AlterReplicaLogDirTopicResult {
+                topic_name: "orders".to_string(),
+                partitions: vec![AlterReplicaLogDirPartitionResult {
+                    partition_index: 7,
+                    error_code: codes::LOG_DIR_NOT_FOUND,
+                    unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+                }],
+                unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+            }],
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+        };
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 }

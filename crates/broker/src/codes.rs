@@ -316,11 +316,15 @@ mod tests {
 
     #[test]
     fn share_group_error_codes_match_kafka() {
-        assert!(INVALID_RECORD_STATE == 121);
-        assert!(SHARE_SESSION_NOT_FOUND == 122);
-        assert!(INVALID_SHARE_SESSION_EPOCH == 123);
-        assert!(FENCED_STATE_EPOCH == 124);
-        assert!(SHARE_SESSION_LIMIT_REACHED == 133);
+        assert!(
+            (
+                INVALID_RECORD_STATE,
+                SHARE_SESSION_NOT_FOUND,
+                INVALID_SHARE_SESSION_EPOCH,
+                FENCED_STATE_EPOCH,
+                SHARE_SESSION_LIMIT_REACHED
+            ) == (121, 122, 123, 124, 133)
+        );
     }
 
     #[test]
@@ -415,8 +419,12 @@ mod tests {
 
     #[test]
     fn kip516_error_code_numbers_match_kafka() {
-        assert!(super::UNKNOWN_TOPIC_ID == 100);
-        assert!(super::INCONSISTENT_TOPIC_ID == 103);
-        assert!(super::FETCH_SESSION_TOPIC_ID_ERROR == 106);
+        assert!(
+            (
+                super::UNKNOWN_TOPIC_ID,
+                super::INCONSISTENT_TOPIC_ID,
+                super::FETCH_SESSION_TOPIC_ID_ERROR
+            ) == (100, 103, 106)
+        );
     }
 }

@@ -124,25 +124,20 @@ fn differential_search_corpus() -> Vec<QueryCase> {
 fn differential_search_corpus_covers_selector_structural_and_pipeline_queries() {
     let corpus = differential_search_corpus();
 
+    let kinds: Vec<QueryCaseKind> = corpus.iter().map(|case| case.kind).collect();
+    let has_child_span_expectation = corpus
+        .iter()
+        .any(|case| case.expected_span_id == Some(CHILD_SPAN_ID_HEX));
     assert!(
-        corpus
-            .iter()
-            .any(|case| case.kind == QueryCaseKind::Selector)
-    );
-    assert!(
-        corpus
-            .iter()
-            .any(|case| case.kind == QueryCaseKind::Structural)
-    );
-    assert!(
-        corpus
-            .iter()
-            .any(|case| case.kind == QueryCaseKind::Pipeline)
-    );
-    assert!(
-        corpus
-            .iter()
-            .any(|case| case.expected_span_id == Some(CHILD_SPAN_ID_HEX))
+        (kinds, has_child_span_expectation)
+            == (
+                vec![
+                    QueryCaseKind::Selector,
+                    QueryCaseKind::Structural,
+                    QueryCaseKind::Pipeline,
+                ],
+                true,
+            )
     );
 }
 
@@ -685,24 +680,19 @@ async fn grafana_service_graph_prometheus_datasource_and_series() -> TestResult 
     let SeriesSample::Counter(count) = request_total.sample else {
         panic!("traces_service_graph_request_total must be a counter")
     };
-    assert!(
-        (count - 1.0).abs() < 1e-9,
-        "expected one paired request for the seed edge, got {count}"
-    );
-    assert!(
+    let has_edge_label = |key: &str, value: &str| {
         request_total
             .labels
             .iter()
-            .any(|(k, v)| k == "client" && v == "checkout-frontend"),
-        "service-graph edge missing client label: {:?}",
-        request_total.labels
-    );
+            .any(|(k, v)| k == key && v == value)
+    };
     assert!(
-        request_total
-            .labels
-            .iter()
-            .any(|(k, v)| k == "server" && v == "cart-backend"),
-        "service-graph edge missing server label: {:?}",
+        (
+            (count - 1.0).abs() < 1e-9,
+            has_edge_label("client", "checkout-frontend"),
+            has_edge_label("server", "cart-backend"),
+        ) == (true, true, true),
+        "expected one paired request for the seed edge with client=checkout-frontend and server=cart-backend labels, got count={count}, labels={:?}",
         request_total.labels
     );
 
@@ -1118,18 +1108,17 @@ fn assert_trace_shape_matches(tempo: &JsonValue, crabka: &JsonValue) {
 
 fn assert_search_shape_matches(tempo: &JsonValue, crabka: &JsonValue) {
     assert!(
-        tempo["traces"]
-            .as_array()
-            .is_some_and(|traces| !traces.is_empty()),
-        "Tempo search response: {tempo}"
+        (
+            tempo["traces"]
+                .as_array()
+                .is_some_and(|traces| !traces.is_empty()),
+            crabka["traces"]
+                .as_array()
+                .is_some_and(|traces| !traces.is_empty()),
+            crabka["traces"][0]["traceID"].as_str(),
+        ) == (true, true, Some(TRACE_ID_HEX)),
+        "search shape mismatch; Tempo search response: {tempo}; Crabka search response: {crabka}"
     );
-    assert!(
-        crabka["traces"]
-            .as_array()
-            .is_some_and(|traces| !traces.is_empty()),
-        "Crabka search response: {crabka}"
-    );
-    assert!(crabka["traces"][0]["traceID"] == TRACE_ID_HEX);
 }
 
 fn assert_search_contains_span_id(search: &JsonValue, span_id: &str) {

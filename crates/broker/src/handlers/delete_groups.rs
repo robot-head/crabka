@@ -183,12 +183,23 @@ mod tests {
 
         let resp = drive(&broker, &req, &p, &peer).await;
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.results.len() == 2);
-        assert!(resp.results[0].group_id == "group-a");
-        assert!(resp.results[0].error_code == codes::GROUP_AUTHORIZATION_FAILED);
-        assert!(resp.results[1].group_id == "group-b");
-        assert!(resp.results[1].error_code == codes::GROUP_AUTHORIZATION_FAILED);
+        let expected = DeleteGroupsResponse {
+            throttle_time_ms: 0,
+            results: vec![
+                DeletableGroupResult {
+                    group_id: "group-a".to_string(),
+                    error_code: codes::GROUP_AUTHORIZATION_FAILED,
+                    unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+                },
+                DeletableGroupResult {
+                    group_id: "group-b".to_string(),
+                    error_code: codes::GROUP_AUTHORIZATION_FAILED,
+                    unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+                },
+            ],
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+        };
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -203,10 +214,16 @@ mod tests {
 
         let resp = drive(&broker, &req, &p, &peer).await;
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.results.len() == 1);
-        assert!(resp.results[0].group_id == "missing");
-        assert!(resp.results[0].error_code == codes::GROUP_ID_NOT_FOUND);
+        let expected = DeleteGroupsResponse {
+            throttle_time_ms: 0,
+            results: vec![DeletableGroupResult {
+                group_id: "missing".to_string(),
+                error_code: codes::GROUP_ID_NOT_FOUND,
+                unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+            }],
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+        };
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 }

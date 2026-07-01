@@ -946,10 +946,8 @@ mod tests {
             }),
         ]);
         let d = desired_follower_set(2, &img);
-        assert!(d.contains(&("a".into(), 0)));
-        assert!(d.contains(&("b".into(), 0)));
-        assert!(!d.contains(&("b".into(), 1))); // self is leader for b/1
-        assert!(d.len() == 2);
+        // b/1 is excluded: self is leader for it.
+        assert!(d == HashSet::from_iter([("a".to_string(), 0), ("b".to_string(), 0)]));
     }
 
     #[test]
@@ -1011,9 +1009,13 @@ mod tests {
 
         supervisor.reconcile(&img).await;
 
-        assert!(token.is_cancelled());
-        assert!(supervisor.tasks.is_empty());
-        assert!(supervisor.task_targets.is_empty());
+        assert!(
+            (
+                token.is_cancelled(),
+                supervisor.tasks.len(),
+                supervisor.task_targets.len(),
+            ) == (true, 0, 0)
+        );
     }
 
     #[tokio::test]
@@ -1029,9 +1031,13 @@ mod tests {
 
         supervisor.reconcile(&img).await;
 
-        assert!(token.is_cancelled());
-        assert!(supervisor.tasks.is_empty());
-        assert!(supervisor.task_targets.is_empty());
+        assert!(
+            (
+                token.is_cancelled(),
+                supervisor.tasks.len(),
+                supervisor.task_targets.len(),
+            ) == (true, 0, 0)
+        );
     }
 
     #[tokio::test]
@@ -1275,16 +1281,8 @@ mod tests {
             &img,
             &reported_dirs,
         );
-        assert!(wire.len() == 1);
-        assert!(updates.len() == 1);
-        let (w_topic_id, w_partition, w_dir_uuid) = wire[0];
-        assert!(w_topic_id == topic_id);
-        assert!(w_partition == 0);
-        assert!(w_dir_uuid == dir_uuid);
-        let (u_topic, u_partition, u_dir_uuid) = &updates[0];
-        assert!(u_topic == "t");
-        assert!(*u_partition == 0);
-        assert!(*u_dir_uuid == dir_uuid);
+        assert!(wire == vec![(topic_id, 0, dir_uuid)]);
+        assert!(updates == vec![("t".to_string(), 0, dir_uuid)]);
 
         // Simulate a successful send: insert the tracker update.
         for (topic, partition, uuid) in updates {

@@ -4553,32 +4553,18 @@ mod tests {
     fn handler_body_flexible_matches_selected_schema_boundaries() {
         use crabka_protocol::owned;
 
-        assert!(!handler_body_flexible(
-            0,
-            owned::produce_request::FLEXIBLE_MIN - 1
-        ));
-        assert!(handler_body_flexible(
-            0,
-            owned::produce_request::FLEXIBLE_MIN
-        ));
-
-        assert!(!handler_body_flexible(
-            1,
-            owned::fetch_request::FLEXIBLE_MIN - 1
-        ));
-        assert!(handler_body_flexible(1, owned::fetch_request::FLEXIBLE_MIN));
-
-        assert!(!handler_body_flexible(
-            36,
-            owned::sasl_authenticate_request::FLEXIBLE_MIN - 1
-        ));
-        assert!(handler_body_flexible(
-            36,
-            owned::sasl_authenticate_request::FLEXIBLE_MIN
-        ));
-
-        assert!(!handler_body_flexible(17, i16::MAX));
-        assert!(!handler_body_flexible(999, 0));
+        assert!(
+            (
+                handler_body_flexible(0, owned::produce_request::FLEXIBLE_MIN - 1),
+                handler_body_flexible(0, owned::produce_request::FLEXIBLE_MIN),
+                handler_body_flexible(1, owned::fetch_request::FLEXIBLE_MIN - 1),
+                handler_body_flexible(1, owned::fetch_request::FLEXIBLE_MIN),
+                handler_body_flexible(36, owned::sasl_authenticate_request::FLEXIBLE_MIN - 1),
+                handler_body_flexible(36, owned::sasl_authenticate_request::FLEXIBLE_MIN),
+                handler_body_flexible(17, i16::MAX),
+                handler_body_flexible(999, 0)
+            ) == (false, true, false, true, false, true, false, false)
+        );
     }
 
     #[test]
@@ -4594,18 +4580,24 @@ mod tests {
     #[test]
     fn throttle_leading_field_table_matches_schemas() {
         // Present-and-leading version boundaries (verified vs 4.x schemas).
-        assert!(!throttle_is_leading_field(11, 1)); // JoinGroup v1: no throttle
-        assert!(throttle_is_leading_field(11, 2)); // JoinGroup v2+: leading
-        assert!(!throttle_is_leading_field(3, 2)); // Metadata v2: no throttle
-        assert!(throttle_is_leading_field(3, 3)); // Metadata v3+
-        assert!(throttle_is_leading_field(12, 1)); // Heartbeat v1+
-        assert!(throttle_is_leading_field(68, 0)); // ConsumerGroupHeartbeat v0+
         // OffsetDelete (47) leads with ErrorCode — must never be patched.
-        assert!(!throttle_is_leading_field(47, 0));
         // Produce/Fetch self-account; ApiVersions is not in the table.
-        assert!(!throttle_is_leading_field(0, 9));
-        assert!(!throttle_is_leading_field(1, 13));
-        assert!(!throttle_is_leading_field(18, 3));
+        assert!(
+            (
+                throttle_is_leading_field(11, 1), // JoinGroup v1: no throttle
+                throttle_is_leading_field(11, 2), // JoinGroup v2+: leading
+                throttle_is_leading_field(3, 2),  // Metadata v2: no throttle
+                throttle_is_leading_field(3, 3),  // Metadata v3+
+                throttle_is_leading_field(12, 1), // Heartbeat v1+
+                throttle_is_leading_field(68, 0), // ConsumerGroupHeartbeat v0+
+                throttle_is_leading_field(47, 0), // OffsetDelete
+                throttle_is_leading_field(0, 9),  // Produce
+                throttle_is_leading_field(1, 13), // Fetch
+                throttle_is_leading_field(18, 3)  // ApiVersions
+            ) == (
+                false, true, false, true, true, true, false, false, false, false
+            )
+        );
     }
 
     #[test]

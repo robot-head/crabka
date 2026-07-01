@@ -120,6 +120,7 @@ fn encode(version: i16, resp: &ShareGroupHeartbeatResponse) -> Result<Bytes, Bro
 mod tests {
     use super::*;
     use assert2::assert;
+    use crabka_protocol::UnknownTaggedFields;
     use crabka_protocol::owned::share_group_heartbeat_response;
     use crabka_security::{AuthMethod, Principal};
     use std::net::SocketAddr;
@@ -232,10 +233,17 @@ mod tests {
             .expect("handle");
         let resp = decode_response(&resp);
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.error_code == codes::UNSUPPORTED_VERSION);
-        assert!(resp.member_id.is_none());
-        assert!(resp.assignment.is_none());
+        let expected = ShareGroupHeartbeatResponse {
+            throttle_time_ms: 0,
+            error_code: codes::UNSUPPORTED_VERSION,
+            error_message: None,
+            member_id: None,
+            member_epoch: 0,
+            heartbeat_interval_ms: 0,
+            assignment: None,
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 }

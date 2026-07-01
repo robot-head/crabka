@@ -193,9 +193,17 @@ mod tests {
 
     #[test]
     fn group_state_reflects_member_count() {
-        assert!(group_state_for_member_count(0) == "EMPTY");
-        assert!(group_state_for_member_count(1) == "STABLE");
-        assert!(group_state_for_member_count(3) == "STABLE");
+        let actual = (
+            group_state_for_member_count(0),
+            group_state_for_member_count(1),
+            group_state_for_member_count(3),
+        );
+        let expected = (
+            "EMPTY".to_string(),
+            "STABLE".to_string(),
+            "STABLE".to_string(),
+        );
+        assert!(actual == expected);
     }
 
     #[test]
@@ -207,11 +215,37 @@ mod tests {
 
         let resp = response(vec![first, second]);
 
-        assert!(resp.groups.len() == 2, "{resp:?}");
-        assert!(resp.groups[0].group_id == "a", "{resp:?}");
-        assert!(resp.groups[0].error_code == codes::GROUP_ID_NOT_FOUND);
-        assert!(resp.groups[1].group_id == "b", "{resp:?}");
-        assert!(resp.groups[1].error_code == codes::UNSUPPORTED_VERSION);
+        let expected = ConsumerGroupDescribeResponse {
+            throttle_time_ms: 0,
+            groups: vec![
+                DescribedGroup {
+                    error_code: codes::GROUP_ID_NOT_FOUND,
+                    error_message: None,
+                    group_id: "a".to_string(),
+                    group_state: String::new(),
+                    group_epoch: 0,
+                    assignment_epoch: 0,
+                    assignor_name: String::new(),
+                    members: vec![],
+                    authorized_operations: -2_147_483_648,
+                    unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+                },
+                DescribedGroup {
+                    error_code: codes::UNSUPPORTED_VERSION,
+                    error_message: None,
+                    group_id: "b".to_string(),
+                    group_state: String::new(),
+                    group_epoch: 0,
+                    assignment_epoch: 0,
+                    assignor_name: String::new(),
+                    members: vec![],
+                    authorized_operations: -2_147_483_648,
+                    unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+                },
+            ],
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+        };
+        assert!(resp == expected, "{resp:?}");
     }
 
     #[tokio::test]
@@ -225,9 +259,23 @@ mod tests {
             .expect("ConsumerGroupDescribe handler");
         let resp = decode_response(&bytes);
 
-        assert!(resp.groups.len() == 1, "{resp:?}");
-        assert!(resp.groups[0].group_id == "missing-group", "{resp:?}");
-        assert!(resp.groups[0].error_code == codes::GROUP_ID_NOT_FOUND);
+        let expected = ConsumerGroupDescribeResponse {
+            throttle_time_ms: 0,
+            groups: vec![DescribedGroup {
+                error_code: codes::GROUP_ID_NOT_FOUND,
+                error_message: None,
+                group_id: "missing-group".to_string(),
+                group_state: String::new(),
+                group_epoch: 0,
+                assignment_epoch: 0,
+                assignor_name: String::new(),
+                members: vec![],
+                authorized_operations: -2_147_483_648,
+                unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+            }],
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+        };
+        assert!(resp == expected, "{resp:?}");
 
         broker_handle.shutdown().await;
     }

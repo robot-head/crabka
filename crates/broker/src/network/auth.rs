@@ -939,32 +939,48 @@ mod tests {
         expected_auth_bytes: &[u8],
         expected_session_lifetime_ms: i64,
     ) {
-        assert!(resp.error_code == 0);
-        assert!(resp.error_message.is_none());
-        assert!(resp.auth_bytes.as_ref() == expected_auth_bytes);
-        assert!(resp.session_lifetime_ms == expected_session_lifetime_ms);
+        let expected = SaslAuthenticateResponse {
+            error_code: 0,
+            error_message: None,
+            auth_bytes: bytes::Bytes::copy_from_slice(expected_auth_bytes),
+            session_lifetime_ms: expected_session_lifetime_ms,
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+        };
+        assert!(*resp == expected);
     }
 
     fn assert_failed_authenticate_response(resp: &SaslAuthenticateResponse) {
-        assert!(resp.error_code == SASL_AUTHENTICATION_FAILED);
-        assert!(resp.error_message.as_deref() == Some("authentication failed"));
-        assert!(resp.auth_bytes.is_empty());
-        assert!(resp.session_lifetime_ms == 0);
+        let expected = SaslAuthenticateResponse {
+            error_code: SASL_AUTHENTICATION_FAILED,
+            error_message: Some("authentication failed".to_string()),
+            auth_bytes: bytes::Bytes::new(),
+            session_lifetime_ms: 0,
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+        };
+        assert!(*resp == expected);
     }
 
     #[test]
     fn pre_auth_allowlist_accepts_handshake_authenticate_apiversions() {
-        assert!(is_pre_auth_allowed(17), "SaslHandshake");
-        assert!(is_pre_auth_allowed(36), "SaslAuthenticate");
-        assert!(is_pre_auth_allowed(18), "ApiVersions");
+        assert!(
+            (
+                is_pre_auth_allowed(17), // SaslHandshake
+                is_pre_auth_allowed(36), // SaslAuthenticate
+                is_pre_auth_allowed(18), // ApiVersions
+            ) == (true, true, true)
+        );
     }
 
     #[test]
     fn pre_auth_allowlist_rejects_data_plane_apis() {
-        assert!(!is_pre_auth_allowed(0), "Produce");
-        assert!(!is_pre_auth_allowed(1), "Fetch");
-        assert!(!is_pre_auth_allowed(3), "Metadata");
-        assert!(!is_pre_auth_allowed(19), "CreateTopics");
+        assert!(
+            (
+                is_pre_auth_allowed(0),  // Produce
+                is_pre_auth_allowed(1),  // Fetch
+                is_pre_auth_allowed(3),  // Metadata
+                is_pre_auth_allowed(19), // CreateTopics
+            ) == (false, false, false, false)
+        );
     }
 
     #[test]
@@ -1094,10 +1110,14 @@ mod tests {
             None,
         )
         .await;
-        assert!(resp.error_code == 0);
-        assert!(resp.error_message.is_none());
-        assert!(&resp.auth_bytes[..] == br#"{"status":"invalid_token"}"#);
-        assert!(resp.session_lifetime_ms == 0);
+        let expected = SaslAuthenticateResponse {
+            error_code: 0,
+            error_message: None,
+            auth_bytes: bytes::Bytes::from_static(br#"{"status":"invalid_token"}"#),
+            session_lifetime_ms: 0,
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
         assert!(matches!(
             auth,
             ConnectionAuth::Negotiating {
@@ -1131,10 +1151,14 @@ mod tests {
         let resp =
             handle_authenticate_oauthbearer(&req, &mut auth, &validator, 1_000_000_000_000, None)
                 .await;
-        assert!(resp.error_code == 0);
-        assert!(resp.error_message.is_none());
-        assert!(&resp.auth_bytes[..] == br#"{"status":"invalid_token"}"#);
-        assert!(resp.session_lifetime_ms == 0);
+        let expected = SaslAuthenticateResponse {
+            error_code: 0,
+            error_message: None,
+            auth_bytes: bytes::Bytes::from_static(br#"{"status":"invalid_token"}"#),
+            session_lifetime_ms: 0,
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
     }
 
     #[tokio::test]
@@ -1155,10 +1179,14 @@ mod tests {
             ..Default::default()
         };
         let resp = handle_authenticate_oauthbearer(&req, &mut auth, &validator, now_ms, None).await;
-        assert!(resp.error_code == 0);
-        assert!(resp.error_message.is_none());
-        assert!(&resp.auth_bytes[..] == br#"{"status":"invalid_token"}"#);
-        assert!(resp.session_lifetime_ms == 0);
+        let expected = SaslAuthenticateResponse {
+            error_code: 0,
+            error_message: None,
+            auth_bytes: bytes::Bytes::from_static(br#"{"status":"invalid_token"}"#),
+            session_lifetime_ms: 0,
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
         assert!(!auth.is_authenticated());
     }
 
@@ -1198,11 +1226,21 @@ mod tests {
                 expires_at_ms,
                 authenticated_via_token,
             } => {
-                assert!(principal.name == "alice");
-                assert!(principal.auth_method == crabka_security::AuthMethod::SaslGssapi);
-                assert!(mechanism == SaslMechanism::Gssapi);
-                assert!(expires_at_ms.is_none());
-                assert!(!authenticated_via_token);
+                assert!(
+                    (
+                        principal.name.as_str(),
+                        principal.auth_method,
+                        mechanism,
+                        expires_at_ms,
+                        authenticated_via_token,
+                    ) == (
+                        "alice",
+                        crabka_security::AuthMethod::SaslGssapi,
+                        SaslMechanism::Gssapi,
+                        None,
+                        false,
+                    )
+                );
             }
             _ => panic!("expected GSSAPI authenticated state"),
         }
@@ -1294,9 +1332,10 @@ mod tests {
                 expires_at_ms,
                 authenticated_via_token: _,
             } => {
-                assert!(principal.name == "alice");
-                assert!(mechanism == SaslMechanism::OAuthBearer);
-                assert!(expires_at_ms == Some(2_000_000));
+                assert!(
+                    (principal.name.as_str(), mechanism, expires_at_ms)
+                        == ("alice", SaslMechanism::OAuthBearer, Some(2_000_000))
+                );
             }
             _ => panic!("expected Authenticated"),
         }
@@ -1435,16 +1474,19 @@ mod tests {
             None,
         )
         .await;
-        // SASL_AUTHENTICATION_FAILED = 58 per Apache Kafka protocol.
-        assert!(resp.error_code == SASL_AUTHENTICATION_FAILED);
+        // SASL_AUTHENTICATION_FAILED = 58 per Apache Kafka protocol; the
+        // error message must name the principal mismatch.
         assert!(
-            resp.error_message
-                .as_deref()
-                .unwrap_or("")
-                .contains("principal")
+            (
+                resp.error_code,
+                resp.error_message
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("principal"),
+                resp.auth_bytes.as_ref(),
+                resp.session_lifetime_ms,
+            ) == (SASL_AUTHENTICATION_FAILED, true, b"".as_slice(), 0)
         );
-        assert!(resp.auth_bytes.is_empty());
-        assert!(resp.session_lifetime_ms == 0);
         // Connection remained in Reauthenticating (dispatch will close).
         assert!(matches!(auth, ConnectionAuth::Reauthenticating { .. }));
     }
@@ -1463,20 +1505,28 @@ mod tests {
             },
             exchange: SaslExchange::OAuthBearer,
         };
-        assert!(auth.allows_request(36)); // SaslAuthenticate
-        assert!(!auth.allows_request(17)); // SaslHandshake
-        assert!(!auth.allows_request(18)); // ApiVersions
-        assert!(!auth.allows_request(3)); // Metadata
+        assert!(
+            (
+                auth.allows_request(36), // SaslAuthenticate
+                auth.allows_request(17), // SaslHandshake
+                auth.allows_request(18), // ApiVersions
+                auth.allows_request(3),  // Metadata
+            ) == (true, false, false, false)
+        );
     }
 
     #[test]
     fn allows_request_anonymous_uses_pre_auth_allowlist() {
         let auth = ConnectionAuth::Anonymous;
-        assert!(auth.allows_request(17));
-        assert!(auth.allows_request(36));
-        assert!(auth.allows_request(18));
-        assert!(!auth.allows_request(0));
-        assert!(!auth.allows_request(3));
+        assert!(
+            (
+                auth.allows_request(17),
+                auth.allows_request(36),
+                auth.allows_request(18),
+                auth.allows_request(0),
+                auth.allows_request(3),
+            ) == (true, true, true, false, false)
+        );
     }
 
     #[test]
@@ -1491,10 +1541,14 @@ mod tests {
             expires_at_ms: None,
             authenticated_via_token: false,
         };
-        assert!(auth.allows_request(0));
-        assert!(auth.allows_request(3));
-        assert!(auth.allows_request(17));
-        assert!(auth.allows_request(36));
+        assert!(
+            (
+                auth.allows_request(0),
+                auth.allows_request(3),
+                auth.allows_request(17),
+                auth.allows_request(36),
+            ) == (true, true, true, true)
+        );
     }
 
     // KIP-368 ceiling: the server-side
@@ -1750,13 +1804,17 @@ mod tests {
                 &mut auth,
                 &*controller,
             );
+            // The server-first message is nonce-dependent, so pin
+            // non-emptiness rather than exact bytes.
             assert!(
-                resp1.error_code == 0,
+                (
+                    resp1.error_code,
+                    resp1.error_message.as_deref(),
+                    resp1.auth_bytes.is_empty(),
+                    resp1.session_lifetime_ms,
+                ) == (0, None, false, 0),
                 "round 1 must succeed: token-fallback synthesizes the credential"
             );
-            assert!(resp1.error_message.is_none());
-            assert!(!resp1.auth_bytes.is_empty());
-            assert!(resp1.session_lifetime_ms == 0);
             // Negotiating state now carries pending_token_expiry_ms.
             match &auth {
                 ConnectionAuth::Negotiating {
@@ -1797,12 +1855,16 @@ mod tests {
                 SaslMechanism::ScramSha256,
             );
 
-            assert!(resp2.error_code == 0, "round 2 must succeed");
-            assert!(resp2.error_message.is_none());
-            assert!(!resp2.auth_bytes.is_empty());
+            // The server-final message is nonce-dependent (non-empty), and
+            // token SCRAM reports the remaining token lifetime (0, 60s].
             assert!(
-                resp2.session_lifetime_ms > 0 && resp2.session_lifetime_ms <= 60_000,
-                "token SCRAM reports the remaining token lifetime"
+                (
+                    resp2.error_code,
+                    resp2.error_message.as_deref(),
+                    resp2.auth_bytes.is_empty(),
+                    resp2.session_lifetime_ms > 0 && resp2.session_lifetime_ms <= 60_000,
+                ) == (0, None, false, true),
+                "round 2 must succeed"
             );
             match auth {
                 ConnectionAuth::Authenticated {
@@ -1811,18 +1873,16 @@ mod tests {
                     expires_at_ms,
                     authenticated_via_token,
                 } => {
+                    // principal is the token OWNER, not the tokenId;
+                    // expires_at_ms = token expiry (KIP-368 ceiling);
+                    // token-fallback must mark the session as token-authed.
                     assert!(
-                        principal.name == "alice",
-                        "principal is the token OWNER, not the tokenId"
-                    );
-                    assert!(mechanism == SaslMechanism::ScramSha256);
-                    assert!(
-                        expires_at_ms == Some(expiry_ms),
-                        "expires_at_ms = token expiry (KIP-368 ceiling)"
-                    );
-                    assert!(
-                        authenticated_via_token,
-                        "token-fallback path must mark the session as token-authed"
+                        (
+                            principal.name.as_str(),
+                            mechanism,
+                            expires_at_ms,
+                            authenticated_via_token,
+                        ) == ("alice", SaslMechanism::ScramSha256, Some(expiry_ms), true)
                     );
                 }
                 other => panic!("expected Authenticated, got {other:?}"),
@@ -1950,10 +2010,12 @@ mod tests {
                     authenticated_via_token,
                     ..
                 } => {
-                    assert!(principal.name == "alice");
-                    assert!(expires_at_ms == None);
                     assert!(
-                        !authenticated_via_token,
+                        (
+                            principal.name.as_str(),
+                            expires_at_ms,
+                            authenticated_via_token
+                        ) == ("alice", None, false),
                         "regular SCRAM is NOT a token-authed session"
                     );
                 }

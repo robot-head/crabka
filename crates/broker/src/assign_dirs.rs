@@ -222,12 +222,8 @@ mod tests {
 
         let req = build_request(7, &assignments);
 
-        // broker_id and epoch
-        assert!(req.broker_id == 7);
-        assert!(req.broker_epoch == -1);
-
-        // Two directories
-        assert!(req.directories.len() == 2);
+        // broker_id, epoch, and two directories.
+        assert!((req.broker_id, req.broker_epoch, req.directories.len()) == (7, -1, 2));
 
         // Find dir dX and dY by their UUID bytes.
         let dir_x = req
@@ -270,9 +266,7 @@ mod tests {
     #[test]
     fn build_request_empty_assignments() {
         let req = build_request(1, &[]);
-        assert!(req.broker_id == 1);
-        assert!(req.broker_epoch == -1);
-        assert!(req.directories.is_empty());
+        assert!((req.broker_id, req.broker_epoch, req.directories.len()) == (1, -1, 0));
     }
 
     #[test]

@@ -740,10 +740,10 @@ mod tests {
         let (api_key, api_version, correlation_id, body) =
             super::read_one_request(&mut server).await.expect("decode");
 
-        assert!(api_key == 52);
-        assert!(api_version == 2);
-        assert!(correlation_id == 123);
-        assert!(body.as_ref() == b"payload");
+        assert!(
+            (api_key, api_version, correlation_id, body.as_ref())
+                == (52, 2, 123, b"payload".as_slice())
+        );
         writer.await.unwrap();
     }
 
@@ -800,10 +800,9 @@ mod tests {
         let (api_key, api_version, correlation_id, body) =
             super::read_one_request(&mut server).await.expect("decode");
 
-        assert!(api_key == 52);
-        assert!(api_version == 2);
-        assert!(correlation_id == 123);
-        assert!(body.is_empty());
+        assert!(
+            (api_key, api_version, correlation_id, body.as_ref()) == (52, 2, 123, b"".as_slice())
+        );
         writer.await.unwrap();
     }
 
@@ -994,10 +993,14 @@ mod tests {
             .expect("metadata fetch dispatch");
 
         let resp = decode_metadata_fetch_response(&body);
-        assert!(resp.error_code == 0);
-        assert!(resp.leader_hint == -1);
-        assert!(resp.high_watermark == 0);
-        assert!(resp.records.is_empty());
+        assert!(
+            (
+                resp.error_code,
+                resp.leader_hint,
+                resp.high_watermark,
+                resp.records.is_empty()
+            ) == (0, -1, 0, true)
+        );
     }
 
     #[tokio::test]
@@ -1018,10 +1021,14 @@ mod tests {
         .expect("metadata fetch dispatch");
 
         let resp = decode_metadata_fetch_response(&body);
-        assert!(resp.error_code == 0);
-        assert!(resp.leader_hint == 1);
-        assert!(resp.high_watermark >= 1);
-        assert!(!resp.records.is_empty());
+        assert!(
+            (
+                resp.error_code,
+                resp.leader_hint,
+                resp.high_watermark >= 1,
+                resp.records.is_empty()
+            ) == (0, 1, true, false)
+        );
     }
 
     #[tokio::test]
@@ -1035,12 +1042,16 @@ mod tests {
 
         let mut cur = &body[..];
         let resp = DescribeClusterResponse::decode(&mut cur, 1).expect("describe response");
-        assert!(cur.is_empty());
-        assert!(resp.controller_id == -1);
-        assert!(resp.brokers.len() == 1);
-        assert!(resp.brokers[0].broker_id == -1);
-        assert!(resp.brokers[0].host.is_empty());
-        assert!(resp.brokers[0].port == -1);
+        assert!(
+            (
+                cur.is_empty(),
+                resp.controller_id,
+                resp.brokers.len(),
+                resp.brokers[0].broker_id,
+                resp.brokers[0].host.as_str(),
+                resp.brokers[0].port
+            ) == (true, -1, 1, -1, "", -1)
+        );
     }
 
     #[test]
@@ -1098,14 +1109,16 @@ mod tests {
             let mut cur = &body[..];
             let resp = DescribeClusterResponse::decode(&mut cur, version).unwrap();
             assert!(cur.is_empty(), "no trailing bytes (v={version})");
-            assert!(resp.endpoint_type == 2);
-            assert!(resp.cluster_id == "clusterX");
-            assert!(resp.controller_id == 1);
-            assert!(resp.brokers.len() == 2);
             assert!(
-                resp.brokers[0].broker_id == 1
-                    && resp.brokers[0].host == "c1"
-                    && resp.brokers[0].port == 9093
+                (
+                    resp.endpoint_type,
+                    resp.cluster_id.as_str(),
+                    resp.controller_id,
+                    resp.brokers.len(),
+                    resp.brokers[0].broker_id,
+                    resp.brokers[0].host.as_str(),
+                    resp.brokers[0].port
+                ) == (2, "clusterX", 1, 2, 1, "c1", 9093)
             );
 
             // endpoint_type = BROKERS (1) → broker projection (rack preserved).
@@ -1114,14 +1127,16 @@ mod tests {
                     .unwrap();
             let mut cur = &body[..];
             let resp = DescribeClusterResponse::decode(&mut cur, version).unwrap();
-            assert!(resp.endpoint_type == 1);
-            assert!(resp.brokers.len() == 1);
             assert!(
-                resp.brokers[0].broker_id == 10
-                    && resp.brokers[0].host == "b10"
-                    && resp.brokers[0].port == 9092
+                (
+                    resp.endpoint_type,
+                    resp.brokers.len(),
+                    resp.brokers[0].broker_id,
+                    resp.brokers[0].host.as_str(),
+                    resp.brokers[0].port,
+                    resp.brokers[0].rack.as_deref()
+                ) == (1, 1, 10, "b10", 9092, Some("rack-a"))
             );
-            assert!(resp.brokers[0].rack.as_deref() == Some("rack-a"));
         }
     }
 }

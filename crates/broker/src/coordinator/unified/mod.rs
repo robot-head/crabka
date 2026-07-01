@@ -1165,7 +1165,7 @@ impl MetadataProvider for ImageMetadataProvider {
 /// Hydration seed passed from the bootstrap replayer into a freshly-spawned
 /// [`actor::GroupActorHandle`]. All fields come directly from records
 /// decoded out of `__consumer_offsets`.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct GroupSeed {
     pub group_epoch: i32,
     pub target_epoch: i32,
@@ -1178,7 +1178,7 @@ pub struct GroupSeed {
 
 /// Hydration seed for a [`share::actor::ShareGroupActorHandle`]. All fields
 /// come from share-group records decoded out of `__consumer_offsets`.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct ShareGroupSeed {
     pub group_epoch: i32,
     pub target_epoch: i32,
@@ -1202,7 +1202,7 @@ pub struct ShareGroupSeed {
 /// Hydration seed for a [`streams::actor::StreamsGroupActorHandle`] (KIP-1071).
 /// All fields come from streams-group records decoded out of
 /// `__consumer_offsets`.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct StreamsGroupSeed {
     pub group_epoch: i32,
     pub assignment_epoch: i32,
@@ -1229,9 +1229,9 @@ mod tests {
     fn group_type_has_share_variant() {
         // KIP-932: a third locked group type alongside Classic and NextGen.
         let t = GroupType::Share;
-        assert!(t == GroupType::Share);
-        assert!(t != GroupType::Classic);
-        assert!(t != GroupType::NextGen);
+        assert!(
+            (t, t != GroupType::Classic, t != GroupType::NextGen) == (GroupType::Share, true, true)
+        );
     }
 
     fn make_coord() -> Arc<GroupCoordinator> {
@@ -1569,9 +1569,13 @@ mod tests {
     #[test]
     fn cache_updates_and_forced_type_transitions_are_observable() {
         let coord = make_coord();
-        assert!(coord.cached_seed("g").is_none());
-        assert!(coord.cached_share_seed("sg").is_none());
-        assert!(coord.cached_streams_seed("st").is_none());
+        assert!(
+            (
+                coord.cached_seed("g"),
+                coord.cached_share_seed("sg"),
+                coord.cached_streams_seed("st"),
+            ) == (None, None, None)
+        );
 
         coord.update_cache(
             "g",
@@ -1595,9 +1599,13 @@ mod tests {
         coord.mark_next_gen("g");
         assert!(coord.group_type("g") == Some(GroupType::NextGen));
         coord.mark_classic_after_downgrade("g");
-        assert!(coord.group_type("g") == Some(GroupType::Classic));
-        assert!(coord.seeds.get("g").is_none());
-        assert!(coord.cached_seed("g").is_none());
+        assert!(
+            (
+                coord.group_type("g"),
+                coord.seeds.get("g").is_none(),
+                coord.cached_seed("g"),
+            ) == (Some(GroupType::Classic), true, None)
+        );
 
         coord.update_share_cache(
             "sg",
@@ -1629,9 +1637,13 @@ mod tests {
         let coord = make_coord();
         let share_a = coord.get_or_create_share("share-a");
         let share_b = coord.get_or_create_share("share-b");
-        assert!(Arc::ptr_eq(&share_a, &coord.get_or_create_share("share-a")));
-        assert!(coord.find_share("share-b").is_some());
-        assert!(!Arc::ptr_eq(&share_a, &share_b));
+        assert!(
+            (
+                Arc::ptr_eq(&share_a, &coord.get_or_create_share("share-a")),
+                coord.find_share("share-b").is_some(),
+                Arc::ptr_eq(&share_a, &share_b),
+            ) == (true, true, false)
+        );
 
         let streams_a = coord.get_or_create_streams("streams-a");
         assert!(Arc::ptr_eq(
@@ -1667,31 +1679,39 @@ mod tests {
 
         coord.mark_classic("g");
         assert!(
-            coord
-                .try_convert_classic_to_streams("g", 101)
-                .await
-                .unwrap()
-                == streams::migration::ConvertOutcome::Converted
+            (
+                coord
+                    .try_convert_classic_to_streams("g", 101)
+                    .await
+                    .unwrap(),
+                coord.group_type("g"),
+                offsets_log.appended.lock().await.len(),
+            ) == (
+                streams::migration::ConvertOutcome::Converted,
+                Some(GroupType::Streams),
+                1
+            )
         );
-        assert!(coord.group_type("g") == Some(GroupType::Streams));
-        assert!(offsets_log.appended.lock().await.len() == 1);
 
         assert!(
-            coord
-                .try_convert_streams_to_classic("fresh", 102)
-                .await
-                .unwrap()
-                == streams::migration::DowngradeOutcome::NotStreams
+            (
+                coord
+                    .try_convert_streams_to_classic("fresh", 102)
+                    .await
+                    .unwrap(),
+                coord
+                    .try_convert_streams_to_classic("g", 103)
+                    .await
+                    .unwrap(),
+                coord.group_type("g"),
+                offsets_log.appended.lock().await.len(),
+            ) == (
+                streams::migration::DowngradeOutcome::NotStreams,
+                streams::migration::DowngradeOutcome::Converted,
+                Some(GroupType::Classic),
+                2
+            )
         );
-        assert!(
-            coord
-                .try_convert_streams_to_classic("g", 103)
-                .await
-                .unwrap()
-                == streams::migration::DowngradeOutcome::Converted
-        );
-        assert!(coord.group_type("g") == Some(GroupType::Classic));
-        assert!(offsets_log.appended.lock().await.len() == 2);
 
         coord.mark_streams("missing-streams-actor");
         assert!(
@@ -1734,20 +1754,18 @@ mod tests {
         coord.replay_target_assignment_member("g", "member-a", target.clone());
         coord.replay_current_member_assignment("g", "member-a", current.clone());
 
-        let seed = coord.seeds.get("g").unwrap();
-        assert!(seed.group_epoch == 11);
-        assert!(seed.target_epoch == 12);
-        assert!(seed.members.get("member-a") == Some(&member));
-        assert!(seed.target_per_member.get("member-a") == Some(&target));
-        assert!(seed.current_per_member.get("member-a") == Some(&current));
-        drop(seed);
-
-        let cached = coord.cached_seed("g").unwrap();
-        assert!(cached.group_epoch == 11);
-        assert!(cached.target_epoch == 12);
-        assert!(cached.members.get("member-a") == Some(&member));
-        assert!(cached.target_per_member.get("member-a") == Some(&target));
-        assert!(cached.current_per_member.get("member-a") == Some(&current));
+        let expected = GroupSeed {
+            group_epoch: 11,
+            target_epoch: 12,
+            members: std::collections::HashMap::from([("member-a".to_string(), member)]),
+            target_per_member: std::collections::HashMap::from([("member-a".to_string(), target)]),
+            current_per_member: std::collections::HashMap::from([(
+                "member-a".to_string(),
+                current,
+            )]),
+        };
+        assert!(*coord.seeds.get("g").unwrap() == expected);
+        assert!(coord.cached_seed("g") == Some(expected));
     }
 
     #[test]
@@ -1776,20 +1794,25 @@ mod tests {
         coord.replay_share_target_assignment_member("sg", "share-member", target.clone());
         coord.replay_share_current_member_assignment("sg", "share-member", current.clone());
 
-        let seed = coord.share_seeds.get("sg").unwrap();
-        assert!(seed.group_epoch == 21);
-        assert!(seed.target_epoch == 22);
-        assert!(seed.members.get("share-member") == Some(&member));
-        assert!(seed.target_per_member.get("share-member") == Some(&target));
-        assert!(seed.current_per_member.get("share-member") == Some(&current));
-        drop(seed);
-
-        let cached = coord.cached_share_seed("sg").unwrap();
-        assert!(cached.group_epoch == 21);
-        assert!(cached.target_epoch == 22);
-        assert!(cached.members.get("share-member") == Some(&member));
-        assert!(cached.target_per_member.get("share-member") == Some(&target));
-        assert!(cached.current_per_member.get("share-member") == Some(&current));
+        let expected = ShareGroupSeed {
+            group_epoch: 21,
+            target_epoch: 22,
+            members: std::collections::HashMap::from([("share-member".to_string(), member)]),
+            target_per_member: std::collections::HashMap::from([(
+                "share-member".to_string(),
+                target,
+            )]),
+            current_per_member: std::collections::HashMap::from([(
+                "share-member".to_string(),
+                current,
+            )]),
+            state_partition_metadata: share::persistence::ShareGroupStatePartitionMetadataValue {
+                initialized: vec![],
+                deleting: vec![],
+            },
+        };
+        assert!(*coord.share_seeds.get("sg").unwrap() == expected);
+        assert!(coord.cached_share_seed("sg") == Some(expected));
     }
 
     #[test]
@@ -1842,24 +1865,23 @@ mod tests {
         coord.replay_streams_target_assignment_member("st", "streams-member", target.clone());
         coord.replay_streams_current_member_assignment("st", "streams-member", current.clone());
 
-        let seed = coord.streams_seeds.get("st").unwrap();
-        assert!(seed.group_epoch == 30);
-        assert!(seed.assignment_epoch == 32);
-        assert!(seed.members.get("streams-member") == Some(&member));
-        assert!(seed.topology.as_ref() == Some(&topology));
-        assert!(seed.partition_metadata.as_ref() == Some(&partition_metadata));
-        assert!(seed.target_per_member.get("streams-member") == Some(&target));
-        assert!(seed.current_per_member.get("streams-member") == Some(&current));
-        drop(seed);
-
-        let cached = coord.cached_streams_seed("st").unwrap();
-        assert!(cached.group_epoch == 30);
-        assert!(cached.assignment_epoch == 32);
-        assert!(cached.members.get("streams-member") == Some(&member));
-        assert!(cached.topology.as_ref() == Some(&topology));
-        assert!(cached.partition_metadata.as_ref() == Some(&partition_metadata));
-        assert!(cached.target_per_member.get("streams-member") == Some(&target));
-        assert!(cached.current_per_member.get("streams-member") == Some(&current));
+        let expected = StreamsGroupSeed {
+            group_epoch: 30,
+            assignment_epoch: 32,
+            topology: Some(topology),
+            partition_metadata: Some(partition_metadata),
+            members: std::collections::HashMap::from([("streams-member".to_string(), member)]),
+            target_per_member: std::collections::HashMap::from([(
+                "streams-member".to_string(),
+                target,
+            )]),
+            current_per_member: std::collections::HashMap::from([(
+                "streams-member".to_string(),
+                current,
+            )]),
+        };
+        assert!(*coord.streams_seeds.get("st").unwrap() == expected);
+        assert!(coord.cached_streams_seed("st") == Some(expected));
     }
 
     #[test]
@@ -1920,12 +1942,18 @@ mod tests {
         let snapshot = provider.snapshot();
         let proto_topic_id = crabka_protocol::primitives::uuid::Uuid(*topic_id.as_bytes());
 
-        assert!(snapshot.topic_id_by_name.get("input") == Some(&proto_topic_id));
-        assert!(snapshot.partitions_per_topic.get(&proto_topic_id) == Some(&2));
         assert!(
-            snapshot.partition_racks.get(&(proto_topic_id, 0))
-                == Some(&vec!["rack-a".to_string(), "rack-b".to_string()])
+            (
+                snapshot.topic_id_by_name.get("input"),
+                snapshot.partitions_per_topic.get(&proto_topic_id),
+                snapshot.partition_racks.get(&(proto_topic_id, 0)),
+                snapshot.partition_racks.get(&(proto_topic_id, 1)),
+            ) == (
+                Some(&proto_topic_id),
+                Some(&2),
+                Some(&vec!["rack-a".to_string(), "rack-b".to_string()]),
+                None
+            )
         );
-        assert!(!snapshot.partition_racks.contains_key(&(proto_topic_id, 1)));
     }
 }

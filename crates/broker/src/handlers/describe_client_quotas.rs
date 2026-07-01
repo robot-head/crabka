@@ -298,13 +298,14 @@ mod tests {
         .expect("handle");
         let resp = decode_response(&bytes);
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.error_code == CLUSTER_AUTHORIZATION_FAILED);
-        assert!(
-            resp.error_message.as_deref() == Some("describe-client-quotas denied"),
-            "{resp:?}"
-        );
-        assert!(resp.entries.is_none(), "{resp:?}");
+        let expected = DescribeClientQuotasResponse {
+            throttle_time_ms: 0,
+            error_code: CLUSTER_AUTHORIZATION_FAILED,
+            error_message: Some("describe-client-quotas denied".into()),
+            entries: None,
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+        };
+        assert!(resp == expected, "{resp:?}");
         broker_handle.shutdown().await;
     }
 
@@ -341,9 +342,14 @@ mod tests {
         .expect("handle");
         let resp = decode_response(&bytes);
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.error_code == 0);
-        assert!(resp.error_message.is_none(), "{resp:?}");
+        assert!(
+            (
+                resp.throttle_time_ms,
+                resp.error_code,
+                resp.error_message.clone()
+            ) == (0, 0, None),
+            "{resp:?}"
+        );
         let entries = resp.entries.expect("entries");
         assert!(entries.len() == 1, "{entries:?}");
         let entry = &entries[0];
@@ -353,11 +359,22 @@ mod tests {
             .iter()
             .map(|e| (e.entity_type.as_str(), e.entity_name.as_deref()))
             .collect();
-        assert!(by_type.get("client-id") == Some(&Some("app-1")));
-        assert!(by_type.get("user") == Some(&Some("alice")));
-        assert!(entry.values.len() == 1, "{entry:?}");
-        assert!(entry.values[0].key == "producer_byte_rate");
-        assert!((entry.values[0].value - 2048.0).abs() < f64::EPSILON);
+        assert!(
+            (
+                by_type.get("client-id"),
+                by_type.get("user"),
+                entry.values.len(),
+                entry.values[0].key.as_str(),
+                (entry.values[0].value - 2048.0).abs() < f64::EPSILON
+            ) == (
+                Some(&Some("app-1")),
+                Some(&Some("alice")),
+                1,
+                "producer_byte_rate",
+                true
+            ),
+            "{entry:?}"
+        );
         broker_handle.shutdown().await;
     }
 
@@ -380,10 +397,14 @@ mod tests {
         .expect("handle");
         let resp = decode_response(&bytes);
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.error_code == 0);
-        assert!(resp.error_message.is_none());
-        assert!(resp.entries == Some(Vec::new()));
+        let expected = DescribeClientQuotasResponse {
+            throttle_time_ms: 0,
+            error_code: 0,
+            error_message: None,
+            entries: Some(Vec::new()),
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+        };
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 }

@@ -50,25 +50,17 @@ fn jvm_dump_log_parses_crabka_bootstrap_checkpoint() {
         String::from_utf8_lossy(&out.stderr)
     );
     eprintln!("{text}");
-    assert!(out.status.success(), "kafka-dump-log failed: {text}");
     assert!(
-        text.contains("SnapshotHeader"),
-        "missing SnapshotHeader: {text}"
-    );
-    assert!(
-        text.contains("FEATURE_LEVEL_RECORD"),
-        "missing feature records: {text}"
-    );
-    assert!(
-        text.contains("metadata.version"),
-        "missing metadata.version feature: {text}"
-    );
-    assert!(
-        text.contains("SnapshotFooter"),
-        "missing SnapshotFooter: {text}"
-    );
-    assert!(
-        !text.contains("isvalid: false"),
-        "a batch failed CRC validation: {text}"
+        (
+            out.status.success(),
+            text.contains("SnapshotHeader"),
+            text.contains("FEATURE_LEVEL_RECORD"),
+            text.contains("metadata.version"),
+            text.contains("SnapshotFooter"),
+            // `isvalid: false` would mean a batch failed CRC validation.
+            text.contains("isvalid: false"),
+        ) == (true, true, true, true, true, false),
+        "kafka-dump-log must succeed with SnapshotHeader, FEATURE_LEVEL_RECORD, \
+         metadata.version, SnapshotFooter, and no CRC failures: {text}"
     );
 }

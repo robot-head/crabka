@@ -400,14 +400,27 @@ mod tests {
     }
 
     fn assert_response_rows(resp: &TxnOffsetCommitResponse, code: i16) {
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.topics.len() == 1);
-        assert!(resp.topics[0].name == "orders");
-        assert!(resp.topics[0].partitions.len() == 2);
-        assert!(resp.topics[0].partitions[0].partition_index == 2);
-        assert!(resp.topics[0].partitions[0].error_code == code);
-        assert!(resp.topics[0].partitions[1].partition_index == 3);
-        assert!(resp.topics[0].partitions[1].error_code == code);
+        let expected = TxnOffsetCommitResponse {
+            throttle_time_ms: 0,
+            topics: vec![TxnOffsetCommitResponseTopic {
+                name: "orders".into(),
+                partitions: vec![
+                    TxnOffsetCommitResponsePartition {
+                        partition_index: 2,
+                        error_code: code,
+                        unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+                    },
+                    TxnOffsetCommitResponsePartition {
+                        partition_index: 3,
+                        error_code: code,
+                        unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+                    },
+                ],
+                unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+            }],
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+        };
+        assert!(*resp == expected);
     }
 
     #[test]
@@ -463,17 +476,27 @@ mod tests {
             .await
             .expect("append batch");
 
-        assert!(entries.len() == 2);
-        assert!(entries[0].0 == ("orders".into(), 2));
-        assert!(entries[0].1.offset == 103);
-        assert!(entries[0].1.leader_epoch == 7);
-        assert!(entries[0].1.metadata == "first");
-        assert!(entries[0].1.commit_timestamp_ms == 12_345);
-        assert!(entries[1].0 == ("orders".into(), 3));
-        assert!(entries[1].1.offset == 107);
-        assert!(entries[1].1.leader_epoch == 8);
-        assert!(entries[1].1.metadata == "second");
-        assert!(entries[1].1.commit_timestamp_ms == 12_345);
+        // `OffsetEntry` has no `PartialEq`, so project each row into a tuple
+        // covering the key plus every `OffsetEntry` field.
+        let rows: Vec<(&str, i32, i64, i32, &str, i64)> = entries
+            .iter()
+            .map(|((topic, partition), e)| {
+                (
+                    topic.as_str(),
+                    *partition,
+                    e.offset,
+                    e.leader_epoch,
+                    e.metadata.as_str(),
+                    e.commit_timestamp_ms,
+                )
+            })
+            .collect();
+        assert!(
+            rows == vec![
+                ("orders", 2, 103, 7, "first", 12_345),
+                ("orders", 3, 107, 8, "second", 12_345),
+            ]
+        );
 
         let part = registry
             .get(OFFSETS_TOPIC, OFFSETS_PARTITION)
@@ -482,20 +505,28 @@ mod tests {
         let read = log.read(0, 1024 * 1024).expect("read offsets log");
         assert!(read.batches.len() == 1);
         let batch = &read.batches[0];
-        assert!(batch.attributes.is_transactional());
-        assert!(batch.max_timestamp == 12_345);
-        assert!(batch.producer_id == 47);
-        assert!(batch.producer_epoch == 5);
-        assert!(batch.last_offset_delta == 1);
-        assert!(batch.records.len() == 2);
-        assert!(batch.records[0].offset_delta == 0);
-        assert!(batch.records[0].timestamp_delta == 0);
-        assert!(batch.records[0].key.is_some());
-        assert!(batch.records[0].value.is_some());
-        assert!(batch.records[1].offset_delta == 1);
-        assert!(batch.records[1].timestamp_delta == 0);
-        assert!(batch.records[1].key.is_some());
-        assert!(batch.records[1].value.is_some());
+        assert!(
+            (
+                batch.attributes.is_transactional(),
+                batch.max_timestamp,
+                batch.producer_id,
+                batch.producer_epoch,
+                batch.last_offset_delta
+            ) == (true, 12_345, 47, 5, 1)
+        );
+        let record_rows: Vec<_> = batch
+            .records
+            .iter()
+            .map(|r| {
+                (
+                    r.offset_delta,
+                    r.timestamp_delta,
+                    r.key.is_some(),
+                    r.value.is_some(),
+                )
+            })
+            .collect();
+        assert!(record_rows == vec![(0, 0, true, true), (1, 0, true, true)]);
     }
 
     #[tokio::test]

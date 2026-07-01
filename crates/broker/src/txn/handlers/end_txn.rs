@@ -653,10 +653,14 @@ mod tests {
         assert!(!bytes.is_empty());
         let resp = decode_response(&bytes, 5);
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.error_code == codes::NOT_COORDINATOR);
-        assert!(resp.producer_id == -1);
-        assert!(resp.producer_epoch == -1);
+        let expected = EndTxnResponse {
+            throttle_time_ms: 0,
+            error_code: codes::NOT_COORDINATOR,
+            producer_id: -1,
+            producer_epoch: -1,
+            unknown_tagged_fields: Default::default(),
+        };
+        assert!(resp == expected);
     }
 
     #[test]
@@ -665,21 +669,29 @@ mod tests {
         assert!(!bytes.is_empty());
         let resp = decode_response(&bytes, 5);
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.error_code == codes::NONE);
-        assert!(resp.producer_id == 42);
-        assert!(resp.producer_epoch == 7);
+        let expected = EndTxnResponse {
+            throttle_time_ms: 0,
+            error_code: codes::NONE,
+            producer_id: 42,
+            producer_epoch: 7,
+            unknown_tagged_fields: Default::default(),
+        };
+        assert!(resp == expected);
     }
 
     #[test]
     fn epoch_bumps_only_at_tv2() {
         use crate::txn::version::TxnVersion;
         let ids = crate::producer_id_manager::ProducerIdManager::new();
-        // Below TV_2: pid + epoch unchanged.
-        assert!(next_producer_identity(TxnVersion::Classic, 7, 3, &ids) == (7, 3));
-        assert!(next_producer_identity(TxnVersion::Flexible, 7, 3, &ids) == (7, 3));
-        // TV_2 non-overflow: same pid, epoch + 1.
-        assert!(next_producer_identity(TxnVersion::Verified, 7, 3, &ids) == (7, 4));
+        // Below TV_2 (Classic, Flexible): pid + epoch unchanged.
+        // TV_2 (Verified) non-overflow: same pid, epoch + 1.
+        assert!(
+            (
+                next_producer_identity(TxnVersion::Classic, 7, 3, &ids),
+                next_producer_identity(TxnVersion::Flexible, 7, 3, &ids),
+                next_producer_identity(TxnVersion::Verified, 7, 3, &ids)
+            ) == ((7, 3), (7, 3), (7, 4))
+        );
     }
 
     #[test]

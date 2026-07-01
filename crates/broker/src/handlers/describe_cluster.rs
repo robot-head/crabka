@@ -284,10 +284,18 @@ mod tests {
             .expect("handle");
         let resp = decode_response(&bytes);
 
-        assert!(resp.error_code == codes::CLUSTER_AUTHORIZATION_FAILED);
-        assert!(resp.error_message.as_deref() == Some("describe-cluster denied"));
-        assert!(resp.brokers.is_empty());
-        assert!(resp.throttle_time_ms == 0);
+        let expected = DescribeClusterResponse {
+            throttle_time_ms: 0,
+            error_code: codes::CLUSTER_AUTHORIZATION_FAILED,
+            error_message: Some("describe-cluster denied".into()),
+            endpoint_type: 1,
+            cluster_id: String::new(),
+            controller_id: -1,
+            brokers: vec![],
+            cluster_authorized_operations: i32::MIN,
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+        };
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -307,20 +315,37 @@ mod tests {
             .expect("handle");
         let resp = decode_response(&bytes);
 
-        assert!(resp.error_code == codes::NONE);
-        assert!(resp.error_message.is_none());
-        assert!(resp.endpoint_type == 1);
-        assert!(resp.cluster_id == broker.controller.current_image().cluster_id().to_string());
-        assert!(resp.cluster_authorized_operations == i32::MIN);
-        assert!(resp.throttle_time_ms == 0);
+        assert!(
+            (
+                resp.error_code,
+                resp.error_message.clone(),
+                resp.endpoint_type,
+                resp.cluster_id.clone(),
+                resp.cluster_authorized_operations,
+                resp.throttle_time_ms
+            ) == (
+                codes::NONE,
+                None,
+                1,
+                broker.controller.current_image().cluster_id().to_string(),
+                i32::MIN,
+                0
+            )
+        );
         let broker_row = resp
             .brokers
             .iter()
             .find(|b| b.broker_id == 42)
             .expect("seeded broker row");
-        assert!(broker_row.host == "broker-a");
-        assert!(broker_row.port == 29092);
-        assert!(broker_row.rack.as_deref() == Some("rack-a"));
+        let expected_row = DescribeClusterBroker {
+            broker_id: 42,
+            host: "broker-a".into(),
+            port: 29092,
+            rack: Some("rack-a".into()),
+            is_fenced: false,
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+        };
+        assert!(*broker_row == expected_row);
         broker_handle.shutdown().await;
     }
 }

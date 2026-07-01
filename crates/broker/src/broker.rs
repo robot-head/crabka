@@ -4331,15 +4331,18 @@ mod tests {
             .streams_group_describe_for_test(streams_group_id)
             .await
             .expect("streams group describe");
-        assert!(streams.group_id == streams_group_id);
-        assert!(streams.members.len() == 1);
-        assert!(streams.members[0].member_id == streams_member_id);
+        let expected_active = {
+            let mut active = std::collections::BTreeMap::new();
+            active.insert("subtopology-0".to_string(), vec![0, 1]);
+            active
+        };
         assert!(
-            streams.members[0].active == {
-                let mut active = std::collections::BTreeMap::new();
-                active.insert("subtopology-0".to_string(), vec![0, 1]);
-                active
-            }
+            (
+                streams.group_id.as_str(),
+                streams.members.len(),
+                streams.members[0].member_id.as_str(),
+                &streams.members[0].active,
+            ) == (streams_group_id, 1, streams_member_id, &expected_active)
         );
         assert!(
             tokio::time::timeout(
@@ -4479,10 +4482,15 @@ mod tests {
             .iter()
             .find(|e| e.name == "CONTROLLER")
             .expect("controller endpoint");
-        assert!(ep0.host == "demo-broker-0-0.demo-broker-headless.default.svc.cluster.local");
-        assert!(ep0.port == 9093);
         // Self keeps its real directory id; peers get the nil placeholder.
-        assert!(v0.directory_id == self_dir);
+        assert!(
+            (ep0.host.as_str(), ep0.port, v0.directory_id)
+                == (
+                    "demo-broker-0-0.demo-broker-headless.default.svc.cluster.local",
+                    9093,
+                    self_dir,
+                )
+        );
 
         let v1 = set.get(1).expect("voter 1 present");
         let ep1 = v1
@@ -4512,12 +4520,18 @@ mod tests {
     #[test]
     fn advertised_listener_parser_preserves_valid_host_ports_and_uses_fallback() {
         assert!(
-            parse_advertised_host_port("broker-1.example:19092")
-                == ("broker-1.example".into(), 19092)
+            (
+                parse_advertised_host_port("broker-1.example:19092"),
+                parse_advertised_host_port("[2001:db8::7]:9094"),
+                parse_advertised_host_port("missing-port"),
+                parse_advertised_host_port("broker:not-a-port"),
+            ) == (
+                ("broker-1.example".into(), 19092),
+                ("[2001:db8::7]".into(), 9094),
+                ("localhost".into(), 9092),
+                ("localhost".into(), 9092),
+            )
         );
-        assert!(parse_advertised_host_port("[2001:db8::7]:9094") == ("[2001:db8::7]".into(), 9094));
-        assert!(parse_advertised_host_port("missing-port") == ("localhost".into(), 9092));
-        assert!(parse_advertised_host_port("broker:not-a-port") == ("localhost".into(), 9092));
     }
 
     #[test]
@@ -4543,9 +4557,13 @@ mod tests {
 
         drop(g2);
         // Per-IP entry must be removed (not left at 0) when it hits zero.
-        assert!(limiter.total() == 0);
-        assert!(limiter.per_ip_count(ip) == 0);
-        assert!(limiter.per_ip.get(&ip).is_none());
+        assert!(
+            (
+                limiter.total(),
+                limiter.per_ip_count(ip),
+                limiter.per_ip.get(&ip).is_none(),
+            ) == (0, 0, true)
+        );
     }
 
     #[test]
@@ -4556,10 +4574,14 @@ mod tests {
         let _g = limiter.try_acquire(a).expect("first connection accepted");
         // Global ceiling of 1 reached — a different IP is still rejected,
         // and the rejection reserves nothing (per-IP entry not created).
-        assert!(limiter.try_acquire(b).is_none());
-        assert!(limiter.total() == 1);
-        assert!(limiter.per_ip_count(b) == 0);
-        assert!(limiter.per_ip.get(&b).is_none());
+        assert!(
+            (
+                limiter.try_acquire(b).is_none(),
+                limiter.total(),
+                limiter.per_ip_count(b),
+                limiter.per_ip.get(&b).is_none(),
+            ) == (true, 1, 0, true)
+        );
     }
 
     #[test]
@@ -4570,9 +4592,13 @@ mod tests {
         let _g1 = limiter.try_acquire(a).expect("first from a");
         // Second from the same IP rejected; global must be rolled back so
         // the count reflects only the one live connection.
-        assert!(limiter.try_acquire(a).is_none());
-        assert!(limiter.total() == 1);
-        assert!(limiter.per_ip_count(a) == 1);
+        assert!(
+            (
+                limiter.try_acquire(a).is_none(),
+                limiter.total(),
+                limiter.per_ip_count(a),
+            ) == (true, 1, 1)
+        );
         // A different IP is still under its own per-IP ceiling.
         let _g2 = limiter.try_acquire(b).expect("first from b allowed");
         assert!(limiter.total() == 2);
@@ -4609,9 +4635,13 @@ mod tests {
 
         tune_accepted_socket(&server);
 
-        assert!(server.nodelay().expect("read TCP_NODELAY"));
-        assert!(sock.send_buffer_size().expect("read send buffer") >= 512 * 1024);
-        assert!(sock.recv_buffer_size().expect("read recv buffer") >= 512 * 1024);
+        assert!(
+            (
+                server.nodelay().expect("read TCP_NODELAY"),
+                sock.send_buffer_size().expect("read send buffer") >= 512 * 1024,
+                sock.recv_buffer_size().expect("read recv buffer") >= 512 * 1024,
+            ) == (true, true, true)
+        );
         drop(client);
     }
 
@@ -4619,16 +4649,17 @@ mod tests {
     fn loopback_bootstrap_maps_wildcard_to_loopback() {
         use std::net::SocketAddr;
         assert!(
-            loopback_bootstrap("0.0.0.0:9092".parse::<SocketAddr>().unwrap()) == "127.0.0.1:9092"
-        );
-        assert!(
-            loopback_bootstrap("192.168.1.5:9094".parse::<SocketAddr>().unwrap())
-                == "192.168.1.5:9094"
-        );
-        assert!(loopback_bootstrap("[::]:9092".parse::<SocketAddr>().unwrap()) == "[::1]:9092");
-        assert!(
-            loopback_bootstrap("[2001:db8::5]:9092".parse::<SocketAddr>().unwrap())
-                == "[2001:db8::5]:9092"
+            (
+                loopback_bootstrap("0.0.0.0:9092".parse::<SocketAddr>().unwrap()),
+                loopback_bootstrap("192.168.1.5:9094".parse::<SocketAddr>().unwrap()),
+                loopback_bootstrap("[::]:9092".parse::<SocketAddr>().unwrap()),
+                loopback_bootstrap("[2001:db8::5]:9092".parse::<SocketAddr>().unwrap()),
+            ) == (
+                "127.0.0.1:9092".to_string(),
+                "192.168.1.5:9094".to_string(),
+                "[::1]:9092".to_string(),
+                "[2001:db8::5]:9092".to_string(),
+            )
         );
     }
 
@@ -4880,9 +4911,13 @@ mod tests {
         let handle = Broker::start(config).await.expect("broker start");
         let broker = handle.broker_arc_for_test();
 
-        assert!(broker.handlers().get(18).is_some());
-        assert!(handle.metrics_addr().is_some_and(|addr| addr.port() != 0));
-        assert!(handle.offset_for_leader_epoch_count_for_test() == 0);
+        assert!(
+            (
+                broker.handlers().get(18).is_some(),
+                handle.metrics_addr().is_some_and(|addr| addr.port() != 0),
+                handle.offset_for_leader_epoch_count_for_test(),
+            ) == (true, true, 0)
+        );
         broker
             .offset_for_leader_epoch_requests
             .store(2, std::sync::atomic::Ordering::Release);
@@ -4891,26 +4926,21 @@ mod tests {
         broker.metrics.tiered_storage_rlmm_topic_backed.set(1);
         assert!(handle.rlmm_topic_backed_active_for_test());
         broker.metrics.tiered_storage_rlmm_topic_backed.set(2);
-        assert!(!handle.rlmm_topic_backed_active_for_test());
-        assert!(handle.reload_tls().is_err());
-        assert!(!handle.has_partition("missing-mutant-topic", 0).await);
         assert!(
-            handle
-                .local_log_end_offset("missing-mutant-topic", 0)
-                .await
-                .is_none()
-        );
-        assert!(
-            handle
-                .test_advance_log_start("missing-mutant-topic", 0, 10)
-                .await
-                .is_err()
-        );
-        assert!(
-            handle
-                .change_membership([1_u64].into_iter().collect())
-                .await
-                .is_err()
+            (
+                handle.rlmm_topic_backed_active_for_test(),
+                handle.reload_tls().is_err(),
+                handle.has_partition("missing-mutant-topic", 0).await,
+                handle.local_log_end_offset("missing-mutant-topic", 0).await,
+                handle
+                    .test_advance_log_start("missing-mutant-topic", 0, 10)
+                    .await
+                    .is_err(),
+                handle
+                    .change_membership([1_u64].into_iter().collect())
+                    .await
+                    .is_err(),
+            ) == (false, true, false, None, true, true)
         );
 
         let leader = handle.wait_until_controller_leader().await;
@@ -4968,39 +4998,41 @@ mod tests {
         )
         .await;
         handle.wait_until_partition_present(topic, 0).await;
-        assert!(handle.has_partition(topic, 0).await);
-        assert!(handle.partition_leader_for_test(topic, 0) == Some(partition_leader));
-        assert!(handle.partition_isr_for_test(topic, 0) == Some(partition_isr.to_vec()));
+        assert!(
+            (
+                handle.has_partition(topic, 0).await,
+                handle.partition_leader_for_test(topic, 0),
+                handle.partition_isr_for_test(topic, 0),
+            ) == (true, Some(partition_leader), Some(partition_isr.to_vec()))
+        );
         let observed_partition = handle
             .partition_record_for_test(topic, 0)
             .expect("partition record");
-        assert!(observed_partition.topic == topic);
-        assert!(observed_partition.partition == 0);
-        assert!(observed_partition.leader == partition_leader);
-        assert!(observed_partition.isr == partition_isr.to_vec());
-        assert!(observed_partition.leader_epoch == 3);
+        let expected_partition = crabka_metadata::PartitionRecord {
+            topic: topic.to_string(),
+            partition: 0,
+            leader: partition_leader,
+            replicas: partition_isr.to_vec(),
+            isr: partition_isr.to_vec(),
+            leader_epoch: 3,
+            adding_replicas: Vec::new(),
+            removing_replicas: Vec::new(),
+            directories: vec![uuid::Uuid::nil(); partition_isr.len()],
+            partition_epoch: 0,
+        };
+        assert!(observed_partition == expected_partition);
         assert!(
-            handle
-                .partition_leader_for_test("missing-mutant-topic", 0)
-                .is_none()
-        );
-        assert!(
-            handle
-                .partition_isr_for_test("missing-mutant-topic", 0)
-                .is_none()
-        );
-        assert!(
-            handle
-                .partition_record_for_test("missing-mutant-topic", 0)
-                .is_none()
-        );
-        assert!(
-            tokio::time::timeout(
-                std::time::Duration::from_secs(1),
-                handle.wait_until_partition_leader_changed(topic, 0, handle.node_id()),
-            )
-            .await
-            .is_ok()
+            (
+                handle.partition_leader_for_test("missing-mutant-topic", 0),
+                handle.partition_isr_for_test("missing-mutant-topic", 0),
+                handle.partition_record_for_test("missing-mutant-topic", 0),
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(1),
+                    handle.wait_until_partition_leader_changed(topic, 0, handle.node_id()),
+                )
+                .await
+                .is_ok(),
+            ) == (None, None, None, true)
         );
 
         assert!(
@@ -5095,43 +5127,42 @@ mod tests {
             .iter()
             .flat_map(|batch| batch.records.iter())
             .collect();
-        assert!(records.len() == 1);
-        assert!(records[0].offset_delta == 0);
         assert!(
-            records[0].value.as_ref().map(bytes::Bytes::as_ref)
-                == Some(b"test-record-2".as_slice())
+            (
+                records.len(),
+                records[0].offset_delta,
+                records[0].value.as_ref().map(bytes::Bytes::as_ref),
+            ) == (1, 0, Some(b"test-record-2".as_slice()))
         );
+        // Waiting for log_end + 1 must stay pending; waiting for the reached
+        // log_end must resolve (both the >= and == variants).
         assert!(
-            tokio::time::timeout(
-                std::time::Duration::from_millis(75),
-                handle.wait_until_local_log_end_offset(helper_topic, 0, log_end + 1),
-            )
-            .await
-            .is_err()
-        );
-        assert!(
-            tokio::time::timeout(
-                std::time::Duration::from_millis(75),
-                handle.wait_until_local_log_end_offset_eq(helper_topic, 0, log_end + 1),
-            )
-            .await
-            .is_err()
-        );
-        assert!(
-            tokio::time::timeout(
-                std::time::Duration::from_secs(1),
-                handle.wait_until_local_log_end_offset(helper_topic, 0, log_end),
-            )
-            .await
-            .is_ok()
-        );
-        assert!(
-            tokio::time::timeout(
-                std::time::Duration::from_secs(1),
-                handle.wait_until_local_log_end_offset_eq(helper_topic, 0, log_end),
-            )
-            .await
-            .is_ok()
+            (
+                tokio::time::timeout(
+                    std::time::Duration::from_millis(75),
+                    handle.wait_until_local_log_end_offset(helper_topic, 0, log_end + 1),
+                )
+                .await
+                .is_err(),
+                tokio::time::timeout(
+                    std::time::Duration::from_millis(75),
+                    handle.wait_until_local_log_end_offset_eq(helper_topic, 0, log_end + 1),
+                )
+                .await
+                .is_err(),
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(1),
+                    handle.wait_until_local_log_end_offset(helper_topic, 0, log_end),
+                )
+                .await
+                .is_ok(),
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(1),
+                    handle.wait_until_local_log_end_offset_eq(helper_topic, 0, log_end),
+                )
+                .await
+                .is_ok(),
+            ) == (true, true, true, true)
         );
 
         let share_group = "handle-share-summary-mutant-group";
@@ -5184,31 +5215,28 @@ mod tests {
             .await
             .expect("write share state summary");
         assert!(
-            handle
-                .share_state_summary_for_test(share_group, share_topic_id, share_partition)
+            (
+                handle
+                    .share_state_summary_for_test(share_group, share_topic_id, share_partition)
+                    .await,
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(1),
+                    handle.wait_until_share_spso(share_group, share_topic_id, share_partition, 95),
+                )
                 .await
-                == Some((12, 2, 95, 7))
-        );
-        assert!(
-            tokio::time::timeout(
-                std::time::Duration::from_secs(1),
-                handle.wait_until_share_spso(share_group, share_topic_id, share_partition, 95),
-            )
-            .await
-            .is_ok()
-        );
-        assert!(
-            tokio::time::timeout(
-                std::time::Duration::from_secs(1),
-                handle.wait_until_share_delivery_complete(
-                    share_group,
-                    share_topic_id,
-                    share_partition,
-                    7,
-                ),
-            )
-            .await
-            .is_ok()
+                .is_ok(),
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(1),
+                    handle.wait_until_share_delivery_complete(
+                        share_group,
+                        share_topic_id,
+                        share_partition,
+                        7,
+                    ),
+                )
+                .await
+                .is_ok(),
+            ) == (Some((12, 2, 95, 7)), true, true)
         );
 
         let acquired_group = "handle-share-acquired-mutant-group";
@@ -5263,15 +5291,21 @@ mod tests {
         let own_directory = handle
             .voter_directory_id_for_test(handle.node_id())
             .expect("own voter directory id");
-        assert!(own_directory != uuid::Uuid::nil());
         assert!(
-            handle
-                .voter_directory_id_for_test(handle.node_id() + 10_000)
-                .is_none()
+            (
+                own_directory != uuid::Uuid::nil(),
+                handle.voter_directory_id_for_test(handle.node_id() + 10_000),
+            ) == (true, None)
         );
 
-        assert!(handle.test_mark_log_dir_offline(dir.path()));
-        assert!(!handle.test_mark_log_dir_offline(dir.path()));
+        // Marking the same log dir offline twice: first succeeds, second is a
+        // no-op.
+        assert!(
+            (
+                handle.test_mark_log_dir_offline(dir.path()),
+                handle.test_mark_log_dir_offline(dir.path()),
+            ) == (true, false)
+        );
         handle.shutdown().await;
     }
 
@@ -5308,9 +5342,13 @@ mod tests {
             .group_describe_for_test(group_id)
             .await
             .expect("next-gen group describe");
-        assert!(described.group_id == group_id);
-        assert!(described.members.len() == 1);
-        assert!(described.members[0].member_id == member_id);
+        assert!(
+            (
+                described.group_id.as_str(),
+                described.members.len(),
+                described.members[0].member_id.as_str(),
+            ) == (group_id, 1, member_id)
+        );
         assert!(
             tokio::time::timeout(
                 std::time::Duration::from_millis(75),
@@ -5360,9 +5398,13 @@ mod tests {
             .classic_group_inspect_for_test(classic_group_id)
             .await
             .expect("classic group inspect");
-        assert!(classic.group_id == classic_group_id);
-        assert!(classic.members.len() == 1);
-        assert!(classic.members[0].member_id == classic_member_id);
+        assert!(
+            (
+                classic.group_id.as_str(),
+                classic.members.len(),
+                classic.members[0].member_id.as_str(),
+            ) == (classic_group_id, 1, classic_member_id)
+        );
 
         let created_classic_group_id = "handle-create-classic-group-mutant";
         assert!(
@@ -5435,24 +5477,29 @@ mod tests {
         handle7.wait_for_image(|img| img.voters().len() == 2).await;
         handle8.wait_for_image(|img| img.voters().len() == 2).await;
 
-        assert!(handle7.node_id() == 7);
-        assert!(handle8.node_id() == 8);
-        assert!(handle7.controller_leader_id().await == Some(leader));
         assert!(
-            handle7
-                .quorum_voters_for_test()
-                .into_iter()
-                .collect::<std::collections::BTreeSet<_>>()
-                == [7, 8]
+            (
+                handle7.node_id(),
+                handle8.node_id(),
+                handle7.controller_leader_id().await,
+                handle7
+                    .quorum_voters_for_test()
                     .into_iter()
-                    .collect::<std::collections::BTreeSet<_>>()
-        );
-        assert!(handle7.voter_count_for_test() == 2);
-        assert!(
-            handle7.voter_ids_for_test()
-                == [7, 8]
+                    .collect::<std::collections::BTreeSet<_>>(),
+                handle7.voter_count_for_test(),
+                handle7.voter_ids_for_test(),
+            ) == (
+                7,
+                8,
+                Some(leader),
+                [7, 8]
                     .into_iter()
-                    .collect::<std::collections::BTreeSet<_>>()
+                    .collect::<std::collections::BTreeSet<_>>(),
+                2,
+                [7, 8]
+                    .into_iter()
+                    .collect::<std::collections::BTreeSet<_>>(),
+            )
         );
 
         // The multi-thread test runtime aborts remaining tasks on exit if raft
@@ -5472,74 +5519,67 @@ mod tests {
         let timeout = std::time::Duration::from_millis(75);
         let topic_id = uuid::Uuid::from_u128(0xFEED);
 
+        // Every wait helper must still be pending (time out) while its
+        // condition is unmet.
         assert!(
-            tokio::time::timeout(
-                timeout,
-                handle.wait_for_share_state_summary("missing-mutant-group", topic_id, 0),
-            )
-            .await
-            .is_err()
-        );
-        assert!(
-            tokio::time::timeout(
-                timeout,
-                handle.wait_until_share_spso("missing-mutant-group", topic_id, 0, 1),
-            )
-            .await
-            .is_err()
-        );
-        assert!(
-            tokio::time::timeout(
-                timeout,
-                handle.wait_until_share_delivery_complete("missing-mutant-group", topic_id, 0, 1),
-            )
-            .await
-            .is_err()
-        );
-        assert!(
-            tokio::time::timeout(
-                timeout,
-                handle.wait_until_group_member_count("missing-mutant-group", 1),
-            )
-            .await
-            .is_err()
-        );
-        assert!(
-            tokio::time::timeout(
-                timeout,
-                handle.wait_until_streams_group_member_count("missing-mutant-streams", 1),
-            )
-            .await
-            .is_err()
-        );
-        assert!(
-            tokio::time::timeout(timeout, handle.wait_until_brokers_registered(2))
+            (
+                tokio::time::timeout(
+                    timeout,
+                    handle.wait_for_share_state_summary("missing-mutant-group", topic_id, 0),
+                )
                 .await
-                .is_err()
-        );
-        assert!(
-            tokio::time::timeout(
-                timeout,
-                handle.wait_until_partition_present("missing-mutant-topic", 0),
-            )
-            .await
-            .is_err()
-        );
-        assert!(
-            tokio::time::timeout(
-                timeout,
-                handle.wait_until_partition_leader_changed("missing-mutant-topic", 0, 1),
-            )
-            .await
-            .is_err()
-        );
-        assert!(
-            tokio::time::timeout(
-                timeout,
-                handle.wait_until_isr_len("missing-mutant-topic", 0, 1)
-            )
-            .await
-            .is_err()
+                .is_err(),
+                tokio::time::timeout(
+                    timeout,
+                    handle.wait_until_share_spso("missing-mutant-group", topic_id, 0, 1),
+                )
+                .await
+                .is_err(),
+                tokio::time::timeout(
+                    timeout,
+                    handle.wait_until_share_delivery_complete(
+                        "missing-mutant-group",
+                        topic_id,
+                        0,
+                        1,
+                    ),
+                )
+                .await
+                .is_err(),
+                tokio::time::timeout(
+                    timeout,
+                    handle.wait_until_group_member_count("missing-mutant-group", 1),
+                )
+                .await
+                .is_err(),
+                tokio::time::timeout(
+                    timeout,
+                    handle.wait_until_streams_group_member_count("missing-mutant-streams", 1),
+                )
+                .await
+                .is_err(),
+                tokio::time::timeout(timeout, handle.wait_until_brokers_registered(2))
+                    .await
+                    .is_err(),
+                tokio::time::timeout(
+                    timeout,
+                    handle.wait_until_partition_present("missing-mutant-topic", 0),
+                )
+                .await
+                .is_err(),
+                tokio::time::timeout(
+                    timeout,
+                    handle.wait_until_partition_leader_changed("missing-mutant-topic", 0, 1),
+                )
+                .await
+                .is_err(),
+                tokio::time::timeout(
+                    timeout,
+                    handle.wait_until_isr_len("missing-mutant-topic", 0, 1)
+                )
+                .await
+                .is_err(),
+            ) == (true, true, true, true, true, true, true, true, true)
         );
 
         submit_metadata_topic_partition(
@@ -5739,9 +5779,13 @@ mod tests {
     fn rlmm_backoff_doubles_then_caps() {
         use std::time::Duration;
         let max = Duration::from_secs(10);
-        assert!(next_rlmm_backoff(Duration::from_millis(250), max) == Duration::from_millis(500));
-        assert!(next_rlmm_backoff(Duration::from_secs(8), max) == max); // 16s capped to 10s
-        assert!(next_rlmm_backoff(max, max) == max);
+        assert!(
+            (
+                next_rlmm_backoff(Duration::from_millis(250), max),
+                next_rlmm_backoff(Duration::from_secs(8), max), // 16s capped to 10s
+                next_rlmm_backoff(max, max),
+            ) == (Duration::from_millis(500), max, max)
+        );
     }
 
     #[tokio::test]

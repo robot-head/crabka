@@ -192,9 +192,13 @@ mod tests {
 
         tick_all(&registry, 7).await;
 
-        assert!(record_count(&local_compact) < local_compact_before);
-        assert!(record_count(&follower_compact) == follower_compact_before);
-        assert!(record_count(&local_delete) == local_delete_before);
+        assert!(
+            (
+                record_count(&local_compact) < local_compact_before,
+                record_count(&follower_compact),
+                record_count(&local_delete),
+            ) == (true, follower_compact_before, local_delete_before)
+        );
     }
 
     #[tokio::test]

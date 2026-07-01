@@ -417,33 +417,50 @@ mod tests {
         let empty = String::new();
         let named = String::from("orders");
 
-        assert!(requested_by_topic_id(None, id));
-        assert!(requested_by_topic_id(Some(&empty), id));
-        assert!(!requested_by_topic_id(Some(&named), id));
-        assert!(!requested_by_topic_id(None, WireUuid::ZERO));
+        assert!(
+            (
+                requested_by_topic_id(None, id),
+                requested_by_topic_id(Some(&empty), id),
+                requested_by_topic_id(Some(&named), id),
+                requested_by_topic_id(None, WireUuid::ZERO)
+            ) == (true, true, false, false)
+        );
     }
 
     #[test]
     fn response_helpers_preserve_topic_identity_error_and_throttle_fields() {
         let id = WireUuid([9; 16]);
         let unknown_id = delete_topic_result(None, id, codes::UNKNOWN_TOPIC_ID);
-        assert!(unknown_id.name.is_none());
-        assert!(unknown_id.topic_id == id);
-        assert!(unknown_id.error_code == codes::UNKNOWN_TOPIC_ID);
+        let expected_unknown = DeletableTopicResult {
+            name: None,
+            topic_id: id,
+            error_code: codes::UNKNOWN_TOPIC_ID,
+            error_message: None,
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
+        };
+        assert!(unknown_id == expected_unknown);
 
         let denied = delete_topic_result(
             Some("secret".into()),
             WireUuid::ZERO,
             codes::TOPIC_AUTHORIZATION_FAILED,
         );
-        assert!(denied.name.as_deref() == Some("secret"));
-        assert!(denied.topic_id == WireUuid::ZERO);
-        assert!(denied.error_code == codes::TOPIC_AUTHORIZATION_FAILED);
+        let expected_denied = DeletableTopicResult {
+            name: Some("secret".into()),
+            topic_id: WireUuid::ZERO,
+            error_code: codes::TOPIC_AUTHORIZATION_FAILED,
+            error_message: None,
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
+        };
+        assert!(denied == expected_denied);
 
         let resp = delete_topics_response(vec![denied], 123);
-        assert!(resp.throttle_time_ms == 123);
-        assert!(resp.responses.len() == 1);
-        assert!(resp.responses[0].name.as_deref() == Some("secret"));
+        let expected_resp = DeleteTopicsResponse {
+            throttle_time_ms: 123,
+            responses: vec![expected_denied],
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected_resp);
     }
 
     #[test]
@@ -460,9 +477,11 @@ mod tests {
 
         let resources = deleted_topic_resources(&results);
 
-        assert!(resources.len() == 1);
-        assert!(resources[0].resource_type == "Topic");
-        assert!(resources[0].name == "ok");
+        let expected = vec![crabka_audit::AuditResource {
+            resource_type: "Topic".into(),
+            name: "ok".into(),
+        }];
+        assert!(resources == expected);
     }
 
     #[test]
@@ -498,12 +517,23 @@ mod tests {
         else {
             panic!("expected AdminOperation");
         };
-        assert!(outcome == crabka_audit::AuditOutcome::Success);
-        assert!(principal.name == "admin");
-        assert!(operation == "DeleteTopics");
-        assert!(resources.len() == 1);
-        assert!(resources[0].resource_type == "Topic");
-        assert!(resources[0].name == "orders");
+        let expected_resources = vec![crabka_audit::AuditResource {
+            resource_type: "Topic".into(),
+            name: "orders".into(),
+        }];
+        assert!(
+            (
+                outcome,
+                principal.name.as_str(),
+                operation.as_str(),
+                resources
+            ) == (
+                crabka_audit::AuditOutcome::Success,
+                "admin",
+                "DeleteTopics",
+                expected_resources
+            )
+        );
     }
 
     #[test]
@@ -522,11 +552,18 @@ mod tests {
 
         let resp = drive(&broker, &req, &p, &peer).await;
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.responses.len() == 1);
-        assert!(resp.responses[0].name.as_deref() == Some("secret"));
-        assert!(resp.responses[0].topic_id == WireUuid::ZERO);
-        assert!(resp.responses[0].error_code == codes::TOPIC_AUTHORIZATION_FAILED);
+        let expected = DeleteTopicsResponse {
+            throttle_time_ms: 0,
+            responses: vec![DeletableTopicResult {
+                name: Some("secret".into()),
+                topic_id: WireUuid::ZERO,
+                error_code: codes::TOPIC_AUTHORIZATION_FAILED,
+                error_message: None,
+                unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
+            }],
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -542,14 +579,27 @@ mod tests {
 
         let resp = drive(&broker, &req, &p, &peer).await;
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.responses.len() == 2);
-        assert!(resp.responses[0].name.as_deref() == Some("missing"));
-        assert!(resp.responses[0].topic_id == WireUuid::ZERO);
-        assert!(resp.responses[0].error_code == codes::UNKNOWN_TOPIC_OR_PARTITION);
-        assert!(resp.responses[1].name.is_none());
-        assert!(resp.responses[1].topic_id == bogus_id);
-        assert!(resp.responses[1].error_code == codes::UNKNOWN_TOPIC_ID);
+        let expected = DeleteTopicsResponse {
+            throttle_time_ms: 0,
+            responses: vec![
+                DeletableTopicResult {
+                    name: Some("missing".into()),
+                    topic_id: WireUuid::ZERO,
+                    error_code: codes::UNKNOWN_TOPIC_OR_PARTITION,
+                    error_message: None,
+                    unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
+                },
+                DeletableTopicResult {
+                    name: None,
+                    topic_id: bogus_id,
+                    error_code: codes::UNKNOWN_TOPIC_ID,
+                    error_message: None,
+                    unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
+                },
+            ],
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 }

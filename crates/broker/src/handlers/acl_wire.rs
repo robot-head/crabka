@@ -189,17 +189,30 @@ mod tests {
 
     #[test]
     fn resource_type_concrete_rejects_any() {
-        assert!(resource_type_concrete(1) == Err(WireAclError::AnyRequiresFilter));
-        assert!(resource_type_concrete(2) == Ok(ResourceType::Topic));
-        assert!(resource_type_concrete(3) == Ok(ResourceType::Group));
-        assert!(resource_type_concrete(4) == Ok(ResourceType::Cluster));
+        assert!(
+            (
+                resource_type_concrete(1),
+                resource_type_concrete(2),
+                resource_type_concrete(3),
+                resource_type_concrete(4),
+            ) == (
+                Err(WireAclError::AnyRequiresFilter),
+                Ok(ResourceType::Topic),
+                Ok(ResourceType::Group),
+                Ok(ResourceType::Cluster),
+            )
+        );
     }
 
     #[test]
     fn pattern_type_filter_any_and_match_collapse_to_none() {
-        assert!(pattern_type_filter(1) == Ok(None));
-        assert!(pattern_type_filter(2) == Ok(None));
-        assert!(pattern_type_filter(3) == Ok(Some(PatternType::Literal)));
+        assert!(
+            (
+                pattern_type_filter(1),
+                pattern_type_filter(2),
+                pattern_type_filter(3),
+            ) == (Ok(None), Ok(None), Ok(Some(PatternType::Literal)))
+        );
     }
 
     #[test]
@@ -222,9 +235,17 @@ mod tests {
     /// `DescribeAcls` can carry the 2PC grant on a `TransactionalId`.
     #[test]
     fn two_phase_commit_operation_is_byte_15() {
-        assert!(operation_to_wire(AclOperation::TwoPhaseCommit) == 15);
-        assert!(operation_concrete(15) == Ok(AclOperation::TwoPhaseCommit));
-        assert!(operation_filter(15) == Ok(Some(AclOperation::TwoPhaseCommit)));
+        assert!(
+            (
+                operation_to_wire(AclOperation::TwoPhaseCommit),
+                operation_concrete(15),
+                operation_filter(15),
+            ) == (
+                15,
+                Ok(AclOperation::TwoPhaseCommit),
+                Ok(Some(AclOperation::TwoPhaseCommit)),
+            )
+        );
     }
 
     /// The KIP-48 `TOKEN` (a.k.a. `DELEGATION_TOKEN`)
@@ -235,12 +256,18 @@ mod tests {
     fn delegation_token_resource_type_now_accepted() {
         use crabka_metadata::AclEntry;
 
-        // Concrete (CreateAcls).
-        assert!(resource_type_concrete(6) == Ok(ResourceType::DelegationToken));
-        // Filter (Delete/DescribeAcls).
-        assert!(resource_type_filter(6) == Ok(Some(ResourceType::DelegationToken)));
-        // Encoder.
-        assert!(resource_type_to_wire(ResourceType::DelegationToken) == 6);
+        // Concrete (CreateAcls), filter (Delete/DescribeAcls), encoder.
+        assert!(
+            (
+                resource_type_concrete(6),
+                resource_type_filter(6),
+                resource_type_to_wire(ResourceType::DelegationToken),
+            ) == (
+                Ok(ResourceType::DelegationToken),
+                Ok(Some(ResourceType::DelegationToken)),
+                6,
+            )
+        );
 
         // Build a concrete AclEntry at the canonical (Describe, Allow)
         // shape KIP-48 token ACLs use; verify the wire bytes line up.
@@ -254,7 +281,15 @@ mod tests {
             permission_type: permission_concrete(3).unwrap(),
         };
         assert!(resource_type_to_wire(entry.resource_type) == 6);
-        assert!(entry.operation == AclOperation::Describe);
-        assert!(entry.permission_type == PermissionType::Allow);
+        let expected = AclEntry {
+            resource_type: ResourceType::DelegationToken,
+            resource_name: "User:alice".into(),
+            pattern_type: PatternType::Literal,
+            principal: "User:bob".into(),
+            host: "*".into(),
+            operation: AclOperation::Describe,
+            permission_type: PermissionType::Allow,
+        };
+        assert!(entry == expected);
     }
 }

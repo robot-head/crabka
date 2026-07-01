@@ -123,16 +123,12 @@ async fn describe_groups_reports_member_metadata_and_protocol_name() {
     .expect("second JoinGroup timed out")
     .expect("second JoinGroup must round-trip");
     assert!(
-        r2.error_code == ERR_NONE,
-        "second JoinGroup must succeed, got {r2:?}"
-    );
-    assert!(
-        r2.protocol_name.as_deref() == Some("range"),
-        "single member must land on 'range', got {r2:?}"
-    );
-    assert!(
-        r2.leader == member_id,
-        "lone member must be the leader, got {r2:?}"
+        (
+            r2.error_code,
+            r2.protocol_name.as_deref(),
+            r2.leader.as_str(),
+        ) == (ERR_NONE, Some("range"), member_id.as_str()),
+        "second JoinGroup must succeed with protocol 'range' and the lone member as leader, got {r2:?}"
     );
     let generation_id = r2.generation_id;
 
@@ -177,18 +173,16 @@ async fn describe_groups_reports_member_metadata_and_protocol_name() {
         "exactly one described group, got {resp:?}"
     );
     let g = &resp.groups[0];
-    assert!(g.error_code == ERR_NONE, "DescribeGroups error: {g:?}");
     assert!(
-        g.protocol_type == "consumer",
-        "protocol_type must be 'consumer', got {:?}",
-        g.protocol_type
+        (
+            g.error_code,
+            g.protocol_type.as_str(),
+            g.protocol_data.as_str(),
+            g.members.len(),
+        ) == (ERR_NONE, "consumer", "range", 1),
+        "described group must be error-free with protocol_type 'consumer', \
+         protocol_data 'range' (the selected protocol name), and exactly one member: {g:?}"
     );
-    assert!(
-        g.protocol_data == "range",
-        "protocol_data must be the selected protocol name 'range', got {:?}",
-        g.protocol_data
-    );
-    assert!(g.members.len() == 1, "exactly one member, got {g:?}");
     let m = &g.members[0];
     assert!(
         m.member_metadata.as_ref() == KNOWN_METADATA,
@@ -281,17 +275,15 @@ async fn describe_groups_matches_real_kafka_range_subscription() {
     handle.shutdown().await;
 
     let g = &resp.groups[0];
-    assert!(g.error_code == ERR_NONE, "DescribeGroups error: {g:?}");
     // Real-Kafka authority (from real_kafka_classic.json).
     assert!(
-        g.protocol_type == "consumer",
-        "protocol_type must match real Kafka 'consumer', got {:?}",
-        g.protocol_type
-    );
-    assert!(
-        g.protocol_data == "range",
-        "protocol_data must match real Kafka's selected assignor 'range', got {:?}",
-        g.protocol_data
+        (
+            g.error_code,
+            g.protocol_type.as_str(),
+            g.protocol_data.as_str()
+        ) == (ERR_NONE, "consumer", "range"),
+        "DescribeGroups must match real Kafka's authority (protocol_type 'consumer', \
+         selected assignor 'range'), got {g:?}"
     );
     let m = &g.members[0];
     assert!(

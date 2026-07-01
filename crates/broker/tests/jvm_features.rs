@@ -112,24 +112,15 @@ async fn kafka_features_describe_and_round_trip() {
     assert!(desc.status.success(), "describe failed");
     let out = String::from_utf8_lossy(&desc.stdout);
     assert!(
-        out.contains("metadata.version"),
-        "describe missing metadata.version:\n{out}"
-    );
-    assert!(
-        out.contains("group.version"),
-        "describe missing group.version:\n{out}"
-    );
-    assert!(
-        out.contains("transaction.version"),
-        "describe missing transaction.version:\n{out}"
-    );
-    assert!(
-        finalized_level(&out, "transaction.version") == Some(2),
-        "transaction.version should start finalized at 2:\n{out}"
-    );
-    assert!(
-        finalized_level(&out, "group.version") == Some(1),
-        "group.version should be finalized at 1:\n{out}"
+        (
+            out.contains("metadata.version"),
+            out.contains("group.version"),
+            out.contains("transaction.version"),
+            finalized_level(&out, "transaction.version"),
+            finalized_level(&out, "group.version"),
+        ) == (true, true, true, Some(2), Some(1)),
+        "describe must list metadata.version/group.version/transaction.version, with \
+         transaction.version starting finalized at 2 and group.version finalized at 1:\n{out}"
     );
 
     // 2. downgrade transaction.version 2 -> 1 (within the advertised range).

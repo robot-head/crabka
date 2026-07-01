@@ -529,10 +529,14 @@ mod tests {
 
     #[test]
     fn next_epoch_wraps_skipping_sentinels() {
-        assert!(next_epoch(0) == 1);
-        assert!(next_epoch(1) == 2);
-        assert!(next_epoch(i32::MAX) == 1);
-        assert!(next_epoch(-1) == 1);
+        assert!(
+            (
+                next_epoch(0),
+                next_epoch(1),
+                next_epoch(i32::MAX),
+                next_epoch(-1)
+            ) == (1, 2, 1, 1)
+        );
     }
 
     #[test]
@@ -554,10 +558,8 @@ mod tests {
         let cache = FetchSessionCache::new(10);
         let a = cache.try_allocate(false, "alice".into(), vec![]);
         let b = cache.try_allocate(false, "alice".into(), vec![]);
-        assert!(a > 0);
-        assert!(b > 0);
-        assert!(a != b);
-        assert!(cache.len() == 2);
+        // Id allocation starts at 1 and increments monotonically.
+        assert!((a, b, cache.len()) == (1, 2, 2));
     }
 
     #[test]
@@ -574,9 +576,13 @@ mod tests {
 
     #[test]
     fn session_id_reserved_predicate_matches_wire_sentinels() {
-        assert!(session_id_is_reserved(INVALID_SESSION_ID));
-        assert!(session_id_is_reserved(FINAL_EPOCH));
-        assert!(!session_id_is_reserved(1));
+        assert!(
+            (
+                session_id_is_reserved(INVALID_SESSION_ID),
+                session_id_is_reserved(FINAL_EPOCH),
+                session_id_is_reserved(1)
+            ) == (true, true, false)
+        );
     }
 
     #[test]
@@ -691,9 +697,7 @@ mod tests {
                 new_epoch,
                 partitions,
             } => {
-                assert!(session_id == id);
-                assert!(new_epoch == 2);
-                assert!(partitions.len() == 2);
+                assert!((session_id, new_epoch, partitions.len()) == (id, 2, 2));
             }
             other => panic!("expected Incremental, got {other:?}"),
         }
@@ -756,12 +760,29 @@ mod tests {
         let SessionDecision::Incremental { partitions, .. } = cache.classify(&r) else {
             panic!("expected Incremental");
         };
-        assert!(partitions.len() == 1, "no duplicate entry created");
-        let (k, s) = &partitions[0];
-        assert!(k.topic_name == "t", "cached name preserved");
-        assert!(k.topic_id == tid);
-        assert!(s.fetch_offset == 42, "fetch_offset updated");
-        assert!(s.max_bytes == 2048, "max_bytes updated");
+        // No duplicate entry created; the cached (fully-resolved) key is
+        // preserved and its desired state updated in place.
+        let expected = vec![(
+            FetchSessionKey {
+                topic_name: "t".into(),
+                topic_id: tid,
+                partition: 0,
+            },
+            CachedPartitionState {
+                fetch_offset: 42,
+                last_fetched_epoch: -1,
+                current_leader_epoch: -1,
+                max_bytes: 2048,
+                log_start_offset: -1,
+                last_high_watermark: 0,
+                last_last_stable_offset: 0,
+                last_log_start_offset: 0,
+                last_preferred_read_replica: 0,
+                last_aborted_txns_hash: 0,
+                last_error_code: 0,
+            },
+        )];
+        assert!(partitions == expected);
     }
 
     #[test]
@@ -807,10 +828,27 @@ mod tests {
         let SessionDecision::Incremental { partitions, .. } = cache.classify(&r) else {
             panic!("expected Incremental");
         };
-        assert!(partitions.len() == 1);
-        let (_, s) = &partitions[0];
-        assert!(s.fetch_offset == 99);
-        assert!(s.max_bytes == 4096);
+        let expected = vec![(
+            FetchSessionKey {
+                topic_name: "t".into(),
+                topic_id: tid,
+                partition: 0,
+            },
+            CachedPartitionState {
+                fetch_offset: 99,
+                last_fetched_epoch: -1,
+                current_leader_epoch: -1,
+                max_bytes: 4096,
+                log_start_offset: -1,
+                last_high_watermark: 0,
+                last_last_stable_offset: 0,
+                last_log_start_offset: 0,
+                last_preferred_read_replica: 0,
+                last_aborted_txns_hash: 0,
+                last_error_code: 0,
+            },
+        )];
+        assert!(partitions == expected);
     }
 
     #[test]
@@ -853,11 +891,9 @@ mod tests {
         let r = req(id, 1, vec![], forgotten);
         match cache.classify(&r) {
             SessionDecision::Incremental { partitions, .. } => {
-                assert!(partitions.len() == 2);
-                let parts: Vec<i32> = partitions.iter().map(|(k, _)| k.partition).collect();
-                assert!(parts.contains(&0));
-                assert!(parts.contains(&2));
-                assert!(!parts.contains(&1));
+                let mut parts: Vec<i32> = partitions.iter().map(|(k, _)| k.partition).collect();
+                parts.sort_unstable();
+                assert!(parts == vec![0, 2]);
             }
             other => panic!("expected Incremental, got {other:?}"),
         }
@@ -959,9 +995,9 @@ mod tests {
         assert!(cache.evictions_total() == 1);
         // `a` (oldest) was evicted; `b` and `c` remain.
         let g = cache.inner.lock().unwrap();
-        assert!(!g.sessions.contains_key(&a));
-        assert!(g.sessions.contains_key(&b));
-        assert!(g.sessions.contains_key(&c));
+        let mut ids: Vec<i32> = g.sessions.keys().copied().collect();
+        ids.sort_unstable();
+        assert!(!ids.contains(&a) && ids == vec![b, c]);
     }
 
     #[test]
@@ -971,9 +1007,7 @@ mod tests {
         assert!(p > 0);
         // Cache full, only session is privileged. Consumer alloc refused.
         let c = cache.try_allocate(false, "consumer".into(), vec![]);
-        assert!(c == INVALID_SESSION_ID);
-        assert!(cache.evictions_total() == 0);
-        assert!(cache.len() == 1);
+        assert!((c, cache.evictions_total(), cache.len()) == (INVALID_SESSION_ID, 0, 1));
     }
 
     #[test]
@@ -982,9 +1016,8 @@ mod tests {
         let p1 = cache.try_allocate(true, "f1".into(), vec![]);
         std::thread::sleep(std::time::Duration::from_millis(2));
         let p2 = cache.try_allocate(true, "f2".into(), vec![]);
-        assert!(p2 > 0);
-        assert!(cache.len() == 1);
-        assert!(cache.evictions_total() == 1);
+        // p2 gets the next monotonic id (p1 + 1) after evicting p1.
+        assert!((p2, cache.len(), cache.evictions_total()) == (p1 + 1, 1, 1));
         let g = cache.inner.lock().unwrap();
         assert!(!g.sessions.contains_key(&p1));
         assert!(g.sessions.contains_key(&p2));

@@ -316,43 +316,65 @@ mod tests {
 
         let denied = denied_topic_names(&acl_results);
 
-        assert!(denied.len() == 1);
-        assert!(denied.contains("denied"));
-        assert!(!denied.contains("allowed"));
+        let expected = std::collections::HashSet::from(["denied".to_string()]);
+        assert!(denied == expected);
     }
 
     #[test]
     fn offset_helpers_cover_delete_records_boundaries() {
-        assert!(target_offset(-1, 42) == 42);
-        assert!(target_offset(-2, 42) == -2);
-        assert!(target_offset(7, 42) == 7);
+        assert!(
+            (
+                target_offset(-1, 42),
+                target_offset(-2, 42),
+                target_offset(7, 42)
+            ) == (42, -2, 7)
+        );
 
-        assert!(!offset_out_of_range(0, 10));
-        assert!(!offset_out_of_range(10, 10));
-        assert!(offset_out_of_range(-1, 10));
-        assert!(offset_out_of_range(11, 10));
+        assert!(
+            (
+                offset_out_of_range(0, 10),
+                offset_out_of_range(10, 10),
+                offset_out_of_range(-1, 10),
+                offset_out_of_range(11, 10)
+            ) == (false, false, true, true)
+        );
     }
 
     #[test]
     fn response_helpers_preserve_topic_and_partition_fields() {
         let denied = error_partition_result(7, codes::TOPIC_AUTHORIZATION_FAILED);
-        assert!(denied.partition_index == 7);
-        assert!(denied.low_watermark == -1);
-        assert!(denied.error_code == codes::TOPIC_AUTHORIZATION_FAILED);
+        let expected_denied = DeleteRecordsPartitionResult {
+            partition_index: 7,
+            low_watermark: -1,
+            error_code: codes::TOPIC_AUTHORIZATION_FAILED,
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
+        };
+        assert!(denied == expected_denied);
 
         let ok = partition_result(3, 44, codes::NONE);
-        assert!(ok.partition_index == 3);
-        assert!(ok.low_watermark == 44);
-        assert!(ok.error_code == codes::NONE);
+        let expected_ok = DeleteRecordsPartitionResult {
+            partition_index: 3,
+            low_watermark: 44,
+            error_code: codes::NONE,
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
+        };
+        assert!(ok == expected_ok);
 
         let topic = topic_result("orders".into(), vec![denied]);
-        assert!(topic.name == "orders");
-        assert!(topic.partitions.len() == 1);
+        let expected_topic = DeleteRecordsTopicResult {
+            name: "orders".into(),
+            partitions: vec![expected_denied],
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
+        };
+        assert!(topic == expected_topic);
 
         let resp = delete_records_response(vec![topic]);
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.topics.len() == 1);
-        assert!(resp.topics[0].name == "orders");
+        let expected_resp = DeleteRecordsResponse {
+            throttle_time_ms: 0,
+            topics: vec![expected_topic],
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected_resp);
     }
 
     #[tokio::test]
@@ -365,16 +387,29 @@ mod tests {
 
         let resp = drive(&broker, &req, &p, &peer).await;
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.topics.len() == 1);
-        assert!(resp.topics[0].name == "secret");
-        assert!(resp.topics[0].partitions.len() == 2);
-        assert!(resp.topics[0].partitions[0].partition_index == 0);
-        assert!(resp.topics[0].partitions[0].low_watermark == -1);
-        assert!(resp.topics[0].partitions[0].error_code == codes::TOPIC_AUTHORIZATION_FAILED);
-        assert!(resp.topics[0].partitions[1].partition_index == 2);
-        assert!(resp.topics[0].partitions[1].low_watermark == -1);
-        assert!(resp.topics[0].partitions[1].error_code == codes::TOPIC_AUTHORIZATION_FAILED);
+        let expected = DeleteRecordsResponse {
+            throttle_time_ms: 0,
+            topics: vec![DeleteRecordsTopicResult {
+                name: "secret".into(),
+                partitions: vec![
+                    DeleteRecordsPartitionResult {
+                        partition_index: 0,
+                        low_watermark: -1,
+                        error_code: codes::TOPIC_AUTHORIZATION_FAILED,
+                        unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
+                    },
+                    DeleteRecordsPartitionResult {
+                        partition_index: 2,
+                        low_watermark: -1,
+                        error_code: codes::TOPIC_AUTHORIZATION_FAILED,
+                        unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
+                    },
+                ],
+                unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
+            }],
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -389,13 +424,21 @@ mod tests {
 
         let resp = drive(&broker, &req, &p, &peer).await;
 
-        assert!(resp.topics.len() == 1);
-        assert!(resp.topics[0].name == "missing");
-        assert!(resp.topics[0].partitions.len() == 1);
-        let row = &resp.topics[0].partitions[0];
-        assert!(row.partition_index == 4);
-        assert!(row.low_watermark == -1);
-        assert!(row.error_code == codes::UNKNOWN_TOPIC_OR_PARTITION);
+        let expected = DeleteRecordsResponse {
+            throttle_time_ms: 0,
+            topics: vec![DeleteRecordsTopicResult {
+                name: "missing".into(),
+                partitions: vec![DeleteRecordsPartitionResult {
+                    partition_index: 4,
+                    low_watermark: -1,
+                    error_code: codes::UNKNOWN_TOPIC_OR_PARTITION,
+                    unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
+                }],
+                unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
+            }],
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 }

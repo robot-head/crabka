@@ -351,10 +351,15 @@ mod tests {
 
         let points = flatten_for_prometheus(&md, "instance-1", "client-a");
 
-        assert!(points.len() == 4, "{points:?}");
-        assert!(points[0].metric == "cpu.utilization");
-        assert!(points[0].client_instance_id == "instance-1");
-        assert!(points[0].client_id == "client-a");
+        assert!(
+            (
+                points.len(),
+                points[0].metric.as_str(),
+                points[0].client_instance_id.as_str(),
+                points[0].client_id.as_str(),
+            ) == (4, "cpu.utilization", "instance-1", "client-a"),
+            "{points:?}"
+        );
         assert_close(points[0].value, 0.75);
         assert!(points[1].metric == "requests.total");
         assert_close(points[1].value, 42.0);

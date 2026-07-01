@@ -199,16 +199,30 @@ mod tests {
             .expect("handle");
         let resp = decode_response(&bytes);
 
-        assert!(resp.markers.len() == 1);
-        let marker = &resp.markers[0];
-        assert!(marker.producer_id == 91);
-        assert!(marker.topics.len() == 1);
-        assert!(marker.topics[0].name == "orders");
-        assert!(marker.topics[0].partitions.len() == 2);
-        assert!(marker.topics[0].partitions[0].partition_index == 1);
-        assert!(marker.topics[0].partitions[0].error_code == codes::NONE);
-        assert!(marker.topics[0].partitions[1].partition_index == 2);
-        assert!(marker.topics[0].partitions[1].error_code == codes::NOT_LEADER_OR_FOLLOWER);
+        let expected = WriteTxnMarkersResponse {
+            markers: vec![WritableTxnMarkerResult {
+                producer_id: 91,
+                topics: vec![WritableTxnMarkerTopicResult {
+                    name: "orders".into(),
+                    partitions: vec![
+                        WritableTxnMarkerPartitionResult {
+                            partition_index: 1,
+                            error_code: codes::NONE,
+                            unknown_tagged_fields: Default::default(),
+                        },
+                        WritableTxnMarkerPartitionResult {
+                            partition_index: 2,
+                            error_code: codes::NOT_LEADER_OR_FOLLOWER,
+                            unknown_tagged_fields: Default::default(),
+                        },
+                    ],
+                    unknown_tagged_fields: Default::default(),
+                }],
+                unknown_tagged_fields: Default::default(),
+            }],
+            unknown_tagged_fields: Default::default(),
+        };
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 }

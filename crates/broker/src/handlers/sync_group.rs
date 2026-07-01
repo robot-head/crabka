@@ -261,9 +261,14 @@ mod tests {
         .await
         .expect("JoinGroup rejoin");
         let r2 = decode_join(&r2);
-        assert!(r2.error_code == codes::NONE, "{r2:?}");
-        assert!(r2.protocol_type.as_deref() == Some(PROTOCOL_TYPE), "{r2:?}");
-        assert!(r2.protocol_name.as_deref() == Some(PROTOCOL_NAME), "{r2:?}");
+        assert!(
+            (
+                r2.error_code,
+                r2.protocol_type.as_deref(),
+                r2.protocol_name.as_deref()
+            ) == (codes::NONE, Some(PROTOCOL_TYPE), Some(PROTOCOL_NAME)),
+            "{r2:?}"
+        );
         (r2.member_id, r2.generation_id)
     }
 
@@ -310,11 +315,15 @@ mod tests {
         .expect("encode error");
         let resp = decode_sync(&bytes);
 
-        assert!(resp.error_code == codes::UNKNOWN_MEMBER_ID);
-        assert!(resp.assignment.is_empty());
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.protocol_type.as_deref() == Some(PROTOCOL_TYPE));
-        assert!(resp.protocol_name.as_deref() == Some(PROTOCOL_NAME));
+        let expected = SyncGroupResponse {
+            throttle_time_ms: 0,
+            error_code: codes::UNKNOWN_MEMBER_ID,
+            protocol_type: Some(PROTOCOL_TYPE.into()),
+            protocol_name: Some(PROTOCOL_NAME.into()),
+            assignment: Bytes::new(),
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+        };
+        assert!(resp == expected);
     }
 
     #[tokio::test]
@@ -339,14 +348,15 @@ mod tests {
             .expect("SyncGroup");
         let resp = decode_sync(&resp);
 
-        assert!(
-            resp.error_code == codes::GROUP_AUTHORIZATION_FAILED,
-            "{resp:?}"
-        );
-        assert!(resp.assignment.is_empty());
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.protocol_type.is_none());
-        assert!(resp.protocol_name.is_none());
+        let expected = SyncGroupResponse {
+            throttle_time_ms: 0,
+            error_code: codes::GROUP_AUTHORIZATION_FAILED,
+            protocol_type: None,
+            protocol_name: None,
+            assignment: Bytes::new(),
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+        };
+        assert!(resp == expected, "{resp:?}");
         broker_handle.shutdown().await;
     }
 
@@ -380,17 +390,15 @@ mod tests {
             .expect("SyncGroup");
         let resp = decode_sync(&resp);
 
-        assert!(resp.error_code == codes::NONE, "{resp:?}");
-        assert!(resp.assignment == assignment, "{resp:?}");
-        assert!(resp.throttle_time_ms == 0);
-        assert!(
-            resp.protocol_type.as_deref() == Some(PROTOCOL_TYPE),
-            "{resp:?}"
-        );
-        assert!(
-            resp.protocol_name.as_deref() == Some(PROTOCOL_NAME),
-            "{resp:?}"
-        );
+        let expected = SyncGroupResponse {
+            throttle_time_ms: 0,
+            error_code: codes::NONE,
+            protocol_type: Some(PROTOCOL_TYPE.into()),
+            protocol_name: Some(PROTOCOL_NAME.into()),
+            assignment,
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+        };
+        assert!(resp == expected, "{resp:?}");
         broker_handle.shutdown().await;
     }
 }

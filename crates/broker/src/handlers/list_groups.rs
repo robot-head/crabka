@@ -311,14 +311,19 @@ mod tests {
             .expect("handle");
         let resp = decode_response(&bytes);
 
-        assert!(resp.error_code == codes::NONE);
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.groups.len() == 1, "{:?}", resp.groups);
-        let group = &resp.groups[0];
-        assert!(group.group_id == "classic-a");
-        assert!(group.protocol_type == "consumer");
-        assert!(group.group_state == "Empty");
-        assert!(group.group_type == "classic");
+        let expected = ListGroupsResponse {
+            throttle_time_ms: 0,
+            error_code: codes::NONE,
+            groups: vec![ListedGroup {
+                group_id: "classic-a".into(),
+                protocol_type: "consumer".into(),
+                group_state: "Empty".into(),
+                group_type: "classic".into(),
+                unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+            }],
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected, "{resp:?}");
         broker_handle.shutdown().await;
     }
 
@@ -349,14 +354,25 @@ mod tests {
             &|gid| gid != "denied",
         );
 
-        assert!(groups.len() == 2, "{groups:?}");
-        let group = &groups[1];
-        assert!(group.group_id == "share-a");
-        assert!(group.protocol_type.is_empty());
-        assert!(group.group_state == "Stable");
-        assert!(group.group_type == "share");
-        assert!(emitted.contains("share-a"));
-        assert!(!emitted.contains("denied"));
+        let expected_groups = vec![
+            ListedGroup {
+                group_id: "already".into(),
+                protocol_type: "consumer".into(),
+                group_state: "Stable".into(),
+                group_type: "classic".into(),
+                unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+            },
+            ListedGroup {
+                group_id: "share-a".into(),
+                protocol_type: String::new(),
+                group_state: "Stable".into(),
+                group_type: "share".into(),
+                unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+            },
+        ];
+        assert!(groups == expected_groups, "{groups:?}");
+        // "denied" was rejected by the authorizer; only "share-a" was added.
+        assert!(emitted == HashSet::from(["already".to_string(), "share-a".to_string()]));
     }
 
     #[test]
@@ -393,17 +409,32 @@ mod tests {
             true,
             &|_| true,
         );
-        assert!(groups.len() == 1, "{groups:?}");
-        assert!(groups[0].protocol_type == "consumer");
-        assert!(groups[0].group_type == "consumer");
+        let expected = vec![ListedGroup {
+            group_id: "consumer-a".into(),
+            protocol_type: "consumer".into(),
+            group_state: "Stable".into(),
+            group_type: "consumer".into(),
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+        }];
+        assert!(groups == expected, "{groups:?}");
     }
 
     #[test]
     fn state_to_str_covers_all_classic_states() {
-        assert!(state_to_str(GroupState::Empty) == "Empty");
-        assert!(state_to_str(GroupState::PreparingRebalance) == "PreparingRebalance");
-        assert!(state_to_str(GroupState::CompletingRebalance) == "CompletingRebalance");
-        assert!(state_to_str(GroupState::Stable) == "Stable");
-        assert!(state_to_str(GroupState::Dead) == "Dead");
+        assert!(
+            (
+                state_to_str(GroupState::Empty),
+                state_to_str(GroupState::PreparingRebalance),
+                state_to_str(GroupState::CompletingRebalance),
+                state_to_str(GroupState::Stable),
+                state_to_str(GroupState::Dead),
+            ) == (
+                "Empty",
+                "PreparingRebalance",
+                "CompletingRebalance",
+                "Stable",
+                "Dead",
+            )
+        );
     }
 }

@@ -175,7 +175,7 @@ mod tests {
     use crabka_metadata::{
         AclOperation, MetadataRecord, PatternType, PermissionType, ResourceType,
     };
-    use crabka_protocol::Decode;
+    use crabka_protocol::{Decode, UnknownTaggedFields};
     use crabka_security::{AuthMethod, Principal};
     use std::net::SocketAddr;
     use std::sync::Arc;
@@ -306,13 +306,16 @@ mod tests {
 
         let built = build_filter(&req).expect("filter");
 
-        assert!(built.resource_type == Some(ResourceType::Topic));
-        assert!(built.resource_name.is_none());
-        assert!(built.pattern_type.is_none());
-        assert!(built.principal.is_none());
-        assert!(built.host.is_none());
-        assert!(built.operation.is_none());
-        assert!(built.permission_type.is_none());
+        let expected = AclEntryFilter {
+            resource_type: Some(ResourceType::Topic),
+            resource_name: None,
+            pattern_type: None,
+            principal: None,
+            host: None,
+            operation: None,
+            permission_type: None,
+        };
+        assert!(built == expected);
     }
 
     #[test]
@@ -333,33 +336,49 @@ mod tests {
     #[test]
     fn response_helpers_preserve_error_resource_and_acl_fields() {
         let err = describe_acls_error_response(codes::INVALID_REQUEST, "malformed filter axis");
-        assert!(err.throttle_time_ms == 0);
-        assert!(err.error_code == codes::INVALID_REQUEST);
-        assert!(err.error_message.as_deref() == Some("malformed filter axis"));
-        assert!(err.resources.is_empty());
+        let expected_err = DescribeAclsResponse {
+            throttle_time_ms: 0,
+            error_code: codes::INVALID_REQUEST,
+            error_message: Some("malformed filter axis".into()),
+            resources: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(err == expected_err);
 
         let desc = acl_description(&acl("orders", "User:alice", AclOperation::Read));
-        assert!(desc.principal == "User:alice");
-        assert!(desc.host == "*");
-        assert!(desc.operation == OPERATION_READ);
-        assert!(desc.permission_type == PERMISSION_ALLOW);
+        let expected_desc = AclDescription {
+            principal: "User:alice".into(),
+            host: "*".into(),
+            operation: OPERATION_READ,
+            permission_type: PERMISSION_ALLOW,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(desc == expected_desc);
 
         let resource = describe_acls_resource(
             RESOURCE_TYPE_TOPIC,
             "orders".into(),
             PATTERN_TYPE_LITERAL,
-            vec![desc],
+            vec![desc.clone()],
         );
-        assert!(resource.resource_type == RESOURCE_TYPE_TOPIC);
-        assert!(resource.resource_name == "orders");
-        assert!(resource.pattern_type == PATTERN_TYPE_LITERAL);
-        assert!(resource.acls.len() == 1);
+        let expected_resource = DescribeAclsResource {
+            resource_type: RESOURCE_TYPE_TOPIC,
+            resource_name: "orders".into(),
+            pattern_type: PATTERN_TYPE_LITERAL,
+            acls: vec![desc],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(resource == expected_resource);
 
-        let resp = describe_acls_response(vec![resource]);
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.error_code == codes::NONE);
-        assert!(resp.error_message.is_none());
-        assert!(resp.resources.len() == 1);
+        let resp = describe_acls_response(vec![resource.clone()]);
+        let expected_resp = DescribeAclsResponse {
+            throttle_time_ms: 0,
+            error_code: codes::NONE,
+            error_message: None,
+            resources: vec![resource],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected_resp);
     }
 
     #[tokio::test]
@@ -380,10 +399,14 @@ mod tests {
         .expect("handle");
         let resp = decode_response(&resp);
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.error_code == codes::CLUSTER_AUTHORIZATION_FAILED);
-        assert!(resp.error_message.as_deref() == Some("describe-acls denied"));
-        assert!(resp.resources.is_empty());
+        let expected = DescribeAclsResponse {
+            throttle_time_ms: 0,
+            error_code: codes::CLUSTER_AUTHORIZATION_FAILED,
+            error_message: Some("describe-acls denied".into()),
+            resources: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -401,10 +424,14 @@ mod tests {
         let resp = handle(&broker, req, &ctx, VERSION).await.expect("handle");
         let resp = decode_response(&resp);
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.error_code == codes::INVALID_REQUEST);
-        assert!(resp.error_message.as_deref() == Some("malformed filter axis"));
-        assert!(resp.resources.is_empty());
+        let expected = DescribeAclsResponse {
+            throttle_time_ms: 0,
+            error_code: codes::INVALID_REQUEST,
+            error_message: Some("malformed filter axis".into()),
+            resources: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -435,20 +462,26 @@ mod tests {
         .expect("handle");
         let resp = decode_response(&resp);
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.error_code == codes::NONE);
-        assert!(resp.error_message.is_none());
-        assert!(resp.resources.len() == 1);
-        let resource = &resp.resources[0];
-        assert!(resource.resource_type == RESOURCE_TYPE_TOPIC);
-        assert!(resource.resource_name == "orders");
-        assert!(resource.pattern_type == PATTERN_TYPE_LITERAL);
-        assert!(resource.acls.len() == 1);
-        let acl = &resource.acls[0];
-        assert!(acl.principal == "User:alice");
-        assert!(acl.host == "*");
-        assert!(acl.operation == OPERATION_READ);
-        assert!(acl.permission_type == PERMISSION_ALLOW);
+        let expected = DescribeAclsResponse {
+            throttle_time_ms: 0,
+            error_code: codes::NONE,
+            error_message: None,
+            resources: vec![DescribeAclsResource {
+                resource_type: RESOURCE_TYPE_TOPIC,
+                resource_name: "orders".into(),
+                pattern_type: PATTERN_TYPE_LITERAL,
+                acls: vec![AclDescription {
+                    principal: "User:alice".into(),
+                    host: "*".into(),
+                    operation: OPERATION_READ,
+                    permission_type: PERMISSION_ALLOW,
+                    unknown_tagged_fields: UnknownTaggedFields::default(),
+                }],
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            }],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 

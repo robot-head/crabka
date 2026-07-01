@@ -430,9 +430,7 @@ mod replica_assignment_tests {
     fn offset_per_partition_means_distinct_leaders() {
         let bs = vec![1u64, 2, 3];
         let out = round_robin_replicas(&bs, 3, 1);
-        assert!(out[0] == vec![1]);
-        assert!(out[1] == vec![2]);
-        assert!(out[2] == vec![3]);
+        assert!(out == vec![vec![1u64], vec![2], vec![3]]);
     }
 
     #[test]
@@ -489,6 +487,7 @@ mod handler_tests {
     use super::*;
     use assert2::assert;
     use crabka_protocol::Decode;
+    use crabka_protocol::UnknownTaggedFields;
     use crabka_protocol::owned::create_topics_request::{
         CreatableTopic, CreatableTopicConfig, CreateTopicsRequest,
     };
@@ -645,9 +644,11 @@ mod handler_tests {
 
         let resources = created_topic_resources(&results);
 
-        assert!(resources.len() == 1);
-        assert!(resources[0].resource_type == "Topic");
-        assert!(resources[0].name == "ok");
+        let expected = vec![crabka_audit::AuditResource {
+            resource_type: "Topic".into(),
+            name: "ok".into(),
+        }];
+        assert!(resources == expected);
     }
 
     #[test]
@@ -683,21 +684,28 @@ mod handler_tests {
         else {
             panic!("expected AdminOperation");
         };
-        assert!(outcome == crabka_audit::AuditOutcome::Success);
-        assert!(principal.name == "admin");
-        assert!(operation == "CreateTopics");
-        assert!(resources.len() == 1);
-        assert!(resources[0].resource_type == "Topic");
-        assert!(resources[0].name == "orders");
+        assert!(
+            (outcome, principal.name.as_str(), operation.as_str())
+                == (crabka_audit::AuditOutcome::Success, "admin", "CreateTopics")
+        );
+        let expected_resources = vec![crabka_audit::AuditResource {
+            resource_type: "Topic".into(),
+            name: "orders".into(),
+        }];
+        assert!(resources == expected_resources);
     }
 
     #[test]
     fn local_materialization_predicates_track_replica_membership_and_leader() {
-        assert!(should_materialize_locally(&[1, 2], 1));
-        assert!(should_materialize_locally(&[1, 2], 2));
-        assert!(!should_materialize_locally(&[1, 2], 3));
-        assert!(is_local_leader(1, 1));
-        assert!(!is_local_leader(2, 1));
+        assert!(
+            (
+                should_materialize_locally(&[1, 2], 1),
+                should_materialize_locally(&[1, 2], 2),
+                should_materialize_locally(&[1, 2], 3),
+                is_local_leader(1, 1),
+                is_local_leader(2, 1),
+            ) == (true, true, false, true, false)
+        );
     }
 
     #[tokio::test]
@@ -710,14 +718,35 @@ mod handler_tests {
 
         let resp = drive(&broker, &req, &p, &peer).await;
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.topics.len() == 2);
-        assert!(resp.topics[0].name == "orders");
-        assert!(resp.topics[0].error_code == codes::CLUSTER_AUTHORIZATION_FAILED);
-        assert!(resp.topics[0].error_message.as_deref() == Some("create-topics denied"));
-        assert!(resp.topics[1].name == "payments");
-        assert!(resp.topics[1].error_code == codes::CLUSTER_AUTHORIZATION_FAILED);
-        assert!(resp.topics[1].error_message.as_deref() == Some("create-topics denied"));
+        let expected = CreateTopicsResponse {
+            throttle_time_ms: 0,
+            topics: vec![
+                CreatableTopicResult {
+                    name: "orders".into(),
+                    topic_id: ProtoUuid([0; 16]),
+                    error_code: codes::CLUSTER_AUTHORIZATION_FAILED,
+                    error_message: Some("create-topics denied".into()),
+                    num_partitions: -1,
+                    replication_factor: -1,
+                    configs: None,
+                    topic_config_error_code: 0,
+                    unknown_tagged_fields: UnknownTaggedFields::default(),
+                },
+                CreatableTopicResult {
+                    name: "payments".into(),
+                    topic_id: ProtoUuid([0; 16]),
+                    error_code: codes::CLUSTER_AUTHORIZATION_FAILED,
+                    error_message: Some("create-topics denied".into()),
+                    num_partitions: -1,
+                    replication_factor: -1,
+                    configs: None,
+                    topic_config_error_code: 0,
+                    unknown_tagged_fields: UnknownTaggedFields::default(),
+                },
+            ],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
         assert!(
             broker_handle
                 .controller_image_for_test()
@@ -738,24 +767,46 @@ mod handler_tests {
 
         let resp = drive(&broker, &req, &p, &peer).await;
 
-        assert!(resp.topics.len() == 2);
-        assert!(resp.topics[0].name == "bad-count");
-        assert!(resp.topics[0].error_code == codes::INVALID_PARTITIONS);
-        assert!(resp.topics[0].error_message.is_none());
-        assert!(resp.topics[1].name == "bad-rf");
-        assert!(resp.topics[1].error_code == codes::INVALID_REPLICATION_FACTOR);
-        assert!(resp.topics[1].error_message.is_none());
+        let expected = CreateTopicsResponse {
+            throttle_time_ms: 0,
+            topics: vec![
+                CreatableTopicResult {
+                    name: "bad-count".into(),
+                    topic_id: ProtoUuid([0; 16]),
+                    error_code: codes::INVALID_PARTITIONS,
+                    error_message: None,
+                    num_partitions: -1,
+                    replication_factor: -1,
+                    configs: None,
+                    topic_config_error_code: 0,
+                    unknown_tagged_fields: UnknownTaggedFields::default(),
+                },
+                CreatableTopicResult {
+                    name: "bad-rf".into(),
+                    topic_id: ProtoUuid([0; 16]),
+                    error_code: codes::INVALID_REPLICATION_FACTOR,
+                    error_message: None,
+                    num_partitions: -1,
+                    replication_factor: -1,
+                    configs: None,
+                    topic_config_error_code: 0,
+                    unknown_tagged_fields: UnknownTaggedFields::default(),
+                },
+            ],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
         assert!(
-            broker_handle
-                .controller_image_for_test()
-                .topic("bad-count")
-                .is_none()
-        );
-        assert!(
-            broker_handle
-                .controller_image_for_test()
-                .topic("bad-rf")
-                .is_none()
+            (
+                broker_handle
+                    .controller_image_for_test()
+                    .topic("bad-count")
+                    .is_none(),
+                broker_handle
+                    .controller_image_for_test()
+                    .topic("bad-rf")
+                    .is_none(),
+            ) == (true, true)
         );
         broker_handle.shutdown().await;
     }
@@ -771,16 +822,26 @@ mod handler_tests {
 
         let resp = drive(&broker, &req, &p, &peer).await;
 
-        assert!(resp.throttle_time_ms == 0);
         assert!(resp.topics.len() == 1);
-        let row = &resp.topics[0];
-        assert!(row.name == "configured");
-        assert!(row.error_code == codes::NONE);
-        assert!(row.error_message.is_none());
-        assert!(row.topic_id != ProtoUuid([0; 16]));
-        assert!(row.num_partitions == 2);
-        assert!(row.replication_factor == 1);
-        assert!(row.configs.as_ref().is_some_and(Vec::is_empty));
+        assert!(resp.topics[0].topic_id != ProtoUuid([0; 16]));
+        let expected = CreateTopicsResponse {
+            throttle_time_ms: 0,
+            topics: vec![CreatableTopicResult {
+                name: "configured".into(),
+                // Randomly generated per create; copied from the actual
+                // response (the != nil assert above pins non-default).
+                topic_id: resp.topics[0].topic_id,
+                error_code: codes::NONE,
+                error_message: None,
+                num_partitions: 2,
+                replication_factor: 1,
+                configs: Some(Vec::new()),
+                topic_config_error_code: 0,
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            }],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
 
         let image = broker_handle.controller_image_for_test();
         let topic = image.topic("configured").expect("topic in image");
@@ -804,12 +865,24 @@ mod handler_tests {
         let second = drive(&broker, &req, &p, &peer).await;
 
         assert!(second.topics.len() == 1);
-        assert!(second.topics[0].name == "dupe");
-        assert!(second.topics[0].error_code == codes::TOPIC_ALREADY_EXISTS);
-        assert!(second.topics[0].error_message.is_none());
-        assert!(second.topics[0].num_partitions == -1);
-        assert!(second.topics[0].replication_factor == -1);
-        assert!(second.topics[0].configs.is_none());
+        let expected = CreateTopicsResponse {
+            throttle_time_ms: 0,
+            topics: vec![CreatableTopicResult {
+                name: "dupe".into(),
+                // A fresh topic_id is generated before submit_change even on
+                // the error path; copied from the actual response.
+                topic_id: second.topics[0].topic_id,
+                error_code: codes::TOPIC_ALREADY_EXISTS,
+                error_message: None,
+                num_partitions: -1,
+                replication_factor: -1,
+                configs: None,
+                topic_config_error_code: 0,
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            }],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(second == expected);
         broker_handle.shutdown().await;
     }
 
@@ -828,8 +901,23 @@ mod handler_tests {
         let elapsed = started.elapsed();
 
         assert!(resp.topics.len() == 1);
-        assert!(resp.topics[0].error_code == codes::NONE);
-        assert!(resp.throttle_time_ms == 1_000);
+        let expected = CreateTopicsResponse {
+            throttle_time_ms: 1_000,
+            topics: vec![CreatableTopicResult {
+                name: "throttled".into(),
+                // Randomly generated per create; copied from the actual response.
+                topic_id: resp.topics[0].topic_id,
+                error_code: codes::NONE,
+                error_message: None,
+                num_partitions: 5,
+                replication_factor: 1,
+                configs: Some(Vec::new()),
+                topic_config_error_code: 0,
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            }],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
         assert!(
             elapsed >= Duration::from_millis(900),
             "handler must wait for the advertised throttle, elapsed={elapsed:?}"

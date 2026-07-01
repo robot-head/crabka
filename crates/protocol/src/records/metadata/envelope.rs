@@ -68,9 +68,12 @@ mod tests {
         assert!(value.len() == 3 + body.len());
         let mut cur: &[u8] = &value;
         let hdr = decode_value_header(&mut cur).expect("decode header");
-        assert!(hdr.frame_version == 1);
-        assert!(hdr.api_key == 12);
-        assert!(hdr.api_version == 0);
+        let expected = ValueHeader {
+            frame_version: 1,
+            api_key: 12,
+            api_version: 0,
+        };
+        assert!(hdr == expected);
         assert!(cur == body);
     }
 

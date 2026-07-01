@@ -258,9 +258,13 @@ mod tests {
 
     #[test]
     fn leader_predicate_matches_current_node_only() {
-        assert!(is_controller_leader(Some(1), 1));
-        assert!(!is_controller_leader(Some(2), 1));
-        assert!(!is_controller_leader(None, 1));
+        assert!(
+            (
+                is_controller_leader(Some(1), 1),
+                is_controller_leader(Some(2), 1),
+                is_controller_leader(None, 1)
+            ) == (true, false, false)
+        );
     }
 
     #[test]
@@ -294,12 +298,25 @@ mod tests {
         let bytes = encode_resp(VERSION, &resp).expect("encode response");
         let decoded = decode_response(&bytes);
 
-        assert!(decoded.error_code == codes::NONE, "{decoded:?}");
-        assert!(decoded.directories.len() == 1, "{decoded:?}");
-        assert!(decoded.directories[0].topics.len() == 1, "{decoded:?}");
-        let partition = &decoded.directories[0].topics[0].partitions[0];
-        assert!(partition.partition_index == 3, "{decoded:?}");
-        assert!(partition.error_code == codes::NONE, "{decoded:?}");
+        let expected = AssignReplicasToDirsResponse {
+            throttle_time_ms: 0,
+            error_code: codes::NONE,
+            directories: vec![RespDirData {
+                id: ProtocolUuid(uuid::Uuid::from_u128(0xAA).into_bytes()),
+                topics: vec![RespTopicData {
+                    topic_id: ProtocolUuid(uuid::Uuid::from_u128(0xBB).into_bytes()),
+                    partitions: vec![RespPartData {
+                        partition_index: 3,
+                        error_code: codes::NONE,
+                        unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+                    }],
+                    unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+                }],
+                unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+            }],
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+        };
+        assert!(decoded == expected, "{decoded:?}");
     }
 
     #[tokio::test]
@@ -316,17 +333,25 @@ mod tests {
             .expect("AssignReplicasToDirs handler");
         let resp = decode_response(&bytes);
 
-        assert!(resp.error_code == codes::NONE, "{resp:?}");
-        assert!(resp.directories.len() == 1, "{resp:?}");
-        let dir = &resp.directories[0];
-        assert!(dir.id.0 == dir_uuid.into_bytes(), "{resp:?}");
-        assert!(dir.topics.len() == 1, "{resp:?}");
-        let topic = &dir.topics[0];
-        assert!(topic.topic_id.0 == topic_uuid.into_bytes(), "{resp:?}");
-        assert!(topic.partitions.len() == 1, "{resp:?}");
-        let partition = &topic.partitions[0];
-        assert!(partition.partition_index == 7, "{resp:?}");
-        assert!(partition.error_code == codes::NONE, "{resp:?}");
+        let expected = AssignReplicasToDirsResponse {
+            throttle_time_ms: 0,
+            error_code: codes::NONE,
+            directories: vec![RespDirData {
+                id: ProtocolUuid(dir_uuid.into_bytes()),
+                topics: vec![RespTopicData {
+                    topic_id: ProtocolUuid(topic_uuid.into_bytes()),
+                    partitions: vec![RespPartData {
+                        partition_index: 7,
+                        error_code: codes::NONE,
+                        unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+                    }],
+                    unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+                }],
+                unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+            }],
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+        };
+        assert!(resp == expected, "{resp:?}");
 
         broker_handle.shutdown().await;
     }
@@ -404,10 +429,7 @@ mod tests {
         let MetadataRecord::V1PartitionDirAssignment(r) = &changes[0] else {
             panic!("expected V1PartitionDirAssignment")
         };
-        assert!(r.topic == "t");
-        assert!(r.partition == 0);
-        assert!(r.replica == 2);
-        assert!(r.directory == dir);
+        assert!((r.topic.as_str(), r.partition, r.replica, r.directory) == ("t", 0, 2, dir));
     }
 
     #[test]
@@ -526,10 +548,7 @@ mod tests {
         };
         // The delta names broker 2's replica of (t, 0) on dir_uuid; on apply it
         // merges only slot 1, leaving slot 0 (broker 1) untouched.
-        assert!(r.topic == "t");
-        assert!(r.partition == 0);
-        assert!(r.replica == 2);
-        assert!(r.directory == dir_uuid);
+        assert!((r.topic.as_str(), r.partition, r.replica, r.directory) == ("t", 0, 2, dir_uuid));
     }
 
     #[test]
@@ -596,31 +615,33 @@ mod tests {
 
         let resp = build_echo_response(&req);
 
-        assert!(
-            resp.error_code == 0,
-            "top-level error_code must be NONE (0)"
-        );
-        assert!(resp.directories.len() == 1, "must echo one directory");
-
-        let dir = &resp.directories[0];
-        assert!(dir.id.0 == dir_id_bytes, "directory id must be echoed");
-        assert!(dir.topics.len() == 1, "must echo one topic");
-
-        let topic = &dir.topics[0];
-        assert!(
-            topic.topic_id.0 == topic_id_bytes,
-            "topic id must be echoed"
-        );
-        assert!(topic.partitions.len() == 2, "must echo both partitions");
-
-        for (i, p) in topic.partitions.iter().enumerate() {
-            assert!(
-                p.error_code == 0,
-                "partition {i} error_code must be NONE (0), got {}",
-                p.error_code
-            );
-        }
-        assert!(topic.partitions[0].partition_index == 0);
-        assert!(topic.partitions[1].partition_index == 1);
+        // Mirrors the request directory/topic/partition structure with every
+        // error_code filled with NONE (0).
+        let expected = AssignReplicasToDirsResponse {
+            throttle_time_ms: 0,
+            error_code: 0,
+            directories: vec![RespDirData {
+                id: ProtocolUuid(dir_id_bytes),
+                topics: vec![RespTopicData {
+                    topic_id: ProtocolUuid(topic_id_bytes),
+                    partitions: vec![
+                        RespPartData {
+                            partition_index: 0,
+                            error_code: 0,
+                            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+                        },
+                        RespPartData {
+                            partition_index: 1,
+                            error_code: 0,
+                            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+                        },
+                    ],
+                    unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+                }],
+                unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+            }],
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+        };
+        assert!(resp == expected, "{resp:?}");
     }
 }

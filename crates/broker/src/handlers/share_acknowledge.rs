@@ -197,6 +197,7 @@ fn encode_error_response(
 mod tests {
     use super::*;
     use assert2::assert;
+    use crabka_protocol::UnknownTaggedFields;
     use crabka_protocol::owned::share_acknowledge_request::{
         AcknowledgePartition, AcknowledgeTopic,
     };
@@ -279,11 +280,16 @@ mod tests {
         .expect("encode");
         let resp = decode_response(&resp);
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.error_code == codes::UNSUPPORTED_VERSION);
-        assert!(resp.error_message.is_none());
-        assert!(resp.acquisition_lock_timeout_ms == 12_345);
-        assert!(resp.responses.is_empty());
+        let expected = ShareAcknowledgeResponse {
+            throttle_time_ms: 0,
+            error_code: codes::UNSUPPORTED_VERSION,
+            error_message: None,
+            acquisition_lock_timeout_ms: 12_345,
+            responses: Vec::new(),
+            node_endpoints: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
     }
 
     #[tokio::test]
@@ -301,10 +307,16 @@ mod tests {
             .expect("handle");
         let resp = decode_response(&resp);
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.error_code == codes::UNSUPPORTED_VERSION);
-        assert!(resp.acquisition_lock_timeout_ms == 30_000);
-        assert!(resp.responses.is_empty());
+        let expected = ShareAcknowledgeResponse {
+            throttle_time_ms: 0,
+            error_code: codes::UNSUPPORTED_VERSION,
+            error_message: None,
+            acquisition_lock_timeout_ms: 30_000,
+            responses: Vec::new(),
+            node_endpoints: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -324,22 +336,43 @@ mod tests {
             .expect("handle");
         let resp = decode_response(&resp);
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.error_code == codes::NONE);
-        assert!(resp.acquisition_lock_timeout_ms == 30_000);
-        assert!(resp.responses.len() == 1, "{resp:?}");
-        assert!(resp.responses[0].topic_id == topic_id);
-        assert!(
-            resp.responses[0].partitions.len() == 2,
-            "{:?}",
-            resp.responses[0]
-        );
-        assert!(resp.responses[0].partitions[0].partition_index == 3);
-        assert!(resp.responses[0].partitions[0].error_code == codes::UNKNOWN_TOPIC_OR_PARTITION);
-        assert!(resp.responses[0].partitions[0].current_leader.leader_id == 0);
-        assert!(resp.responses[0].partitions[0].current_leader.leader_epoch == 0);
-        assert!(resp.responses[0].partitions[1].partition_index == 5);
-        assert!(resp.responses[0].partitions[1].error_code == codes::UNKNOWN_TOPIC_OR_PARTITION);
+        let expected = ShareAcknowledgeResponse {
+            throttle_time_ms: 0,
+            error_code: codes::NONE,
+            error_message: None,
+            acquisition_lock_timeout_ms: 30_000,
+            responses: vec![ShareAcknowledgeTopicResponse {
+                topic_id,
+                partitions: vec![
+                    PartitionData {
+                        partition_index: 3,
+                        error_code: codes::UNKNOWN_TOPIC_OR_PARTITION,
+                        error_message: None,
+                        current_leader: LeaderIdAndEpoch {
+                            leader_id: 0,
+                            leader_epoch: 0,
+                            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                        },
+                        unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                    },
+                    PartitionData {
+                        partition_index: 5,
+                        error_code: codes::UNKNOWN_TOPIC_OR_PARTITION,
+                        error_message: None,
+                        current_leader: LeaderIdAndEpoch {
+                            leader_id: 0,
+                            leader_epoch: 0,
+                            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                        },
+                        unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                    },
+                ],
+                unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+            }],
+            node_endpoints: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 }

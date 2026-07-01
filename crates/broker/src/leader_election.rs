@@ -693,10 +693,19 @@ mod tests {
         let new_pr = select_new_leader_for_partition(&img, &l, "foo", 0, ElectionType::Preferred)
             .await
             .expect("should elect");
-        assert!(new_pr.leader == 1);
-        assert!(new_pr.isr == vec![1, 2, 3]);
-        assert!(new_pr.leader_epoch == 6);
-        assert!(new_pr.partition_epoch == 1);
+        let expected = PartitionRecord {
+            topic: "foo".into(),
+            partition: 0,
+            leader: 1,
+            replicas: vec![1, 2, 3],
+            isr: vec![1, 2, 3],
+            leader_epoch: 6,
+            adding_replicas: vec![],
+            removing_replicas: vec![],
+            directories: vec![],
+            partition_epoch: 1,
+        };
+        assert!(new_pr == expected);
     }
 
     #[tokio::test]
@@ -737,10 +746,19 @@ mod tests {
         let new_pr = select_new_leader_for_partition(&img, &l, "foo", 0, ElectionType::Unclean)
             .await
             .expect("unclean should elect");
-        assert!(new_pr.leader == 2);
-        assert!(new_pr.isr == vec![2]);
-        assert!(new_pr.leader_epoch == 6);
-        assert!(new_pr.partition_epoch == 1);
+        let expected = PartitionRecord {
+            topic: "foo".into(),
+            partition: 0,
+            leader: 2,
+            replicas: vec![1, 2, 3],
+            isr: vec![2],
+            leader_epoch: 6,
+            adding_replicas: vec![],
+            removing_replicas: vec![],
+            directories: vec![],
+            partition_epoch: 1,
+        };
+        assert!(new_pr == expected);
     }
 
     #[tokio::test]
@@ -772,11 +790,20 @@ mod tests {
             select_replacement_leader_for_shutdown(&img, &l, "foo", 0, /*shutting_down*/ 1)
                 .await
                 .expect("should pick replacement");
-        assert!(new_pr.leader == 2);
         // ISR untouched — shutting-down broker stays in ISR until dead.
-        assert!(new_pr.isr == vec![1, 2, 3]);
-        assert!(new_pr.leader_epoch == 6);
-        assert!(new_pr.partition_epoch == 1);
+        let expected = PartitionRecord {
+            topic: "foo".into(),
+            partition: 0,
+            leader: 2,
+            replicas: vec![1, 2, 3],
+            isr: vec![1, 2, 3],
+            leader_epoch: 6,
+            adding_replicas: vec![],
+            removing_replicas: vec![],
+            directories: vec![],
+            partition_epoch: 1,
+        };
+        assert!(new_pr == expected);
     }
 
     #[tokio::test]
@@ -896,13 +923,20 @@ mod tests {
         .await;
         assert!(plan.recoveries.is_empty());
         let pr = one_partition_change(&plan.changes);
-        assert!(pr.leader == 2);
-        assert!(pr.isr == vec![2, 3]);
-        assert!(pr.leader_epoch == 6, "leader_epoch must bump on election");
-        assert!(
-            pr.partition_epoch == 1,
-            "partition_epoch must bump on election"
-        );
+        // leader_epoch and partition_epoch must both bump on election.
+        let expected = PartitionRecord {
+            topic: "t".into(),
+            partition: 0,
+            leader: 2,
+            replicas: vec![1, 2, 3],
+            isr: vec![2, 3],
+            leader_epoch: 6,
+            adding_replicas: vec![],
+            removing_replicas: vec![],
+            directories: vec![],
+            partition_epoch: 1,
+        };
+        assert!(*pr == expected);
     }
 
     #[tokio::test]
@@ -990,12 +1024,21 @@ mod tests {
         let plan = compute_failover_changes(&img, /*dead=*/ 1, &l, &metrics).await;
         assert!(plan.recoveries.is_empty());
         let pr = one_partition_change(&plan.changes);
-        assert!(pr.leader == 2, "must elect first alive replica (broker 2)");
-        assert!(
-            pr.isr == vec![2],
-            "unclean election installs singleton ISR (KIP-841)"
-        );
-        assert!(pr.leader_epoch == 6);
+        // Must elect the first alive replica (broker 2) with a singleton
+        // ISR (KIP-841) and a bumped leader_epoch.
+        let expected = PartitionRecord {
+            topic: "t".into(),
+            partition: 0,
+            leader: 2,
+            replicas: vec![1, 2, 3],
+            isr: vec![2],
+            leader_epoch: 6,
+            adding_replicas: vec![],
+            removing_replicas: vec![],
+            directories: vec![],
+            partition_epoch: 1,
+        };
+        assert!(*pr == expected);
         // Each unclean election bumps the counter exactly once.
         assert!(metrics.unclean_leader_elections_total.get() == 1);
     }
@@ -1128,13 +1171,21 @@ mod tests {
         .await;
         assert!(plan.recoveries.is_empty());
         let pr = one_partition_change(&plan.changes);
-        assert!(pr.leader == 1, "leader unchanged");
-        assert!(pr.isr == vec![1, 3]);
-        assert!(
-            pr.leader_epoch == 5,
-            "non-leader-change must NOT bump leader_epoch"
-        );
-        assert!(pr.partition_epoch == 1);
+        // Leader unchanged; a non-leader-change must NOT bump leader_epoch
+        // (stays 5) but does bump partition_epoch.
+        let expected = PartitionRecord {
+            topic: "t".into(),
+            partition: 0,
+            leader: 1,
+            replicas: vec![1, 2, 3],
+            isr: vec![1, 3],
+            leader_epoch: 5,
+            adding_replicas: vec![],
+            removing_replicas: vec![],
+            directories: vec![],
+            partition_epoch: 1,
+        };
+        assert!(*pr == expected);
     }
 
     #[tokio::test]
@@ -1215,10 +1266,19 @@ mod tests {
         let MetadataRecord::V1Partition(pr) = &plan.changes[0] else {
             panic!()
         };
-        assert!(pr.leader == 2);
-        assert!(pr.isr == vec![2, 3]);
-        assert!(pr.leader_epoch == 6);
-        assert!(pr.partition_epoch == 1);
+        let expected = PartitionRecord {
+            topic: "t".into(),
+            partition: 0,
+            leader: 2,
+            replicas: vec![1, 2, 3],
+            isr: vec![2, 3],
+            leader_epoch: 6,
+            adding_replicas: vec![],
+            removing_replicas: vec![],
+            directories: vec![bad, good, good],
+            partition_epoch: 1,
+        };
+        assert!(*pr == expected);
     }
 
     #[tokio::test]
@@ -1263,10 +1323,19 @@ mod tests {
         let MetadataRecord::V1Partition(pr) = &plan.changes[0] else {
             panic!()
         };
-        assert!(pr.leader == 1);
-        assert!(pr.isr == vec![1, 3]);
-        assert!(pr.leader_epoch == 5);
-        assert!(pr.partition_epoch == 1);
+        let expected = PartitionRecord {
+            topic: "t".into(),
+            partition: 0,
+            leader: 1,
+            replicas: vec![1, 2, 3],
+            isr: vec![1, 3],
+            leader_epoch: 5,
+            adding_replicas: vec![],
+            removing_replicas: vec![],
+            directories: vec![good, bad, good],
+            partition_epoch: 1,
+        };
+        assert!(*pr == expected);
     }
 
     #[tokio::test]
@@ -1375,12 +1444,21 @@ mod tests {
         let plan = compute_offline_dir_failover_changes(&img, 1, &offline, &l, &metrics).await;
         assert!(plan.recoveries.is_empty());
         let pr = one_partition_change(&plan.changes);
-        assert!(
-            pr.leader == 3,
-            "must elect broker 3 (only alive out-of-ISR)"
-        );
-        assert!(pr.isr == vec![3], "unclean election installs singleton ISR");
-        assert!(pr.leader_epoch == 6, "epoch must bump");
+        // Must elect broker 3 (only alive out-of-ISR) with a singleton
+        // ISR (unclean election) and a bumped leader_epoch.
+        let expected = PartitionRecord {
+            topic: "t".into(),
+            partition: 0,
+            leader: 3,
+            replicas: vec![1, 2, 3],
+            isr: vec![3],
+            leader_epoch: 6,
+            adding_replicas: vec![],
+            removing_replicas: vec![],
+            directories: vec![bad, good, good],
+            partition_epoch: 1,
+        };
+        assert!(*pr == expected);
         assert!(
             metrics.unclean_leader_elections_total.get() == 1,
             "unclean counter must be bumped exactly once"

@@ -366,17 +366,30 @@ mod tests {
             .expect("ApiVersions handler");
         let resp = decode_response(API_VERSIONS_V3, &bytes);
 
-        assert!(resp.error_code == codes::NONE, "{resp:?}");
-        assert!(resp.api_keys == crate::api_catalog::supported_apis());
-        assert!(!resp.supported_features.is_empty(), "{resp:?}");
+        assert!(
+            (
+                resp.error_code,
+                &resp.api_keys,
+                resp.supported_features.is_empty()
+            ) == (codes::NONE, &crate::api_catalog::supported_apis(), false),
+            "{resp:?}"
+        );
         let mv = resp
             .supported_features
             .iter()
             .find(|f| f.name == "metadata.version")
             .expect("metadata.version supported");
-        assert!(mv.min_version == crate::features::METADATA_VERSION_MIN);
-        assert!(mv.max_version == crate::features::METADATA_VERSION_MAX);
-        assert!(resp.finalized_features_epoch == image.finalized_features_epoch());
+        assert!(
+            (
+                mv.min_version,
+                mv.max_version,
+                resp.finalized_features_epoch
+            ) == (
+                crate::features::METADATA_VERSION_MIN,
+                crate::features::METADATA_VERSION_MAX,
+                image.finalized_features_epoch()
+            )
+        );
         let finalized_mv = resp
             .finalized_features
             .iter()

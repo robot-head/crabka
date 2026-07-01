@@ -1491,12 +1491,14 @@ tls_config = { cert_path = "/tls/broker.crt", key_path = "/tls/broker.key", clie
         assert!(cfg.listeners.len() == 2);
         assert!(cfg.listeners[0].tls_config.is_none());
         let data_tls = cfg.listeners[1].tls_config.as_ref().unwrap();
-        assert!(data_tls.cert_path == std::path::PathBuf::from("/tls/broker.crt"));
-        assert!(data_tls.key_path == std::path::PathBuf::from("/tls/broker.key"));
-        assert!(
-            data_tls.client_ca_path.as_deref() == Some(std::path::Path::new("/tls/clients-ca.crt"))
-        );
-        assert!(data_tls.client_auth == FileClientAuthMode::Required);
+        let expected = FileTlsConfig {
+            cert_path: std::path::PathBuf::from("/tls/broker.crt"),
+            key_path: std::path::PathBuf::from("/tls/broker.key"),
+            trust_roots_path: None,
+            client_ca_path: Some(std::path::PathBuf::from("/tls/clients-ca.crt")),
+            client_auth: FileClientAuthMode::Required,
+        };
+        assert!(*data_tls == expected);
     }
 
     #[test]
@@ -1573,12 +1575,17 @@ mod tests {
             multipart_chunk_size: None,
         };
         let dbg = format!("{cfg:?}");
-        assert!(!dbg.contains("super-secret-key-value"));
-        assert!(!dbg.contains("AKIAEXAMPLEKEYID"));
-        assert!(dbg.contains("***"));
-        // Non-secret fields are still printed.
-        assert!(dbg.contains("logs"));
-        assert!(dbg.contains("us-east-1"));
+        // Secrets are redacted; non-secret fields are still printed.
+        assert!(
+            (
+                dbg.contains("super-secret-key-value"),
+                dbg.contains("AKIAEXAMPLEKEYID"),
+                dbg.contains("***"),
+                dbg.contains("logs"),
+                dbg.contains("us-east-1"),
+            ) == (false, false, true, true, true),
+            "{dbg}"
+        );
     }
 
     #[test]
@@ -1610,18 +1617,57 @@ protocol = "Plaintext"
 "log.retention.hours" = "24"
 "#;
         let cfg: FileConfig = toml::from_str(src).unwrap();
-        assert!(cfg.broker_id == Some(0));
-        assert!(cfg.log_dir.as_deref() == Some("/var/lib/crabka/data"));
-        assert!(cfg.inter_broker_listener_name.as_deref() == Some("PLAIN"));
-        assert!(cfg.listeners.len() == 2);
-        assert!(cfg.listeners[0].name == "PLAIN");
-        assert!(cfg.listeners[0].protocol == ListenerProtocol::Plaintext);
-        assert!(
-            cfg.server_properties
-                .get("log.retention.hours")
-                .map(String::as_str)
-                == Some("24")
-        );
+        let expected = FileConfig {
+            broker_id: Some(0),
+            log_dir: Some("/var/lib/crabka/data".to_string()),
+            extra_log_dirs: vec![],
+            rack: None,
+            replica_selector: None,
+            heartbeat_interval_ms: None,
+            heartbeat_timeout_ms: None,
+            replica_lag_time_max_ms: None,
+            controller_election_timeout_ms: None,
+            controller_heartbeat_interval_ms: None,
+            inter_broker_listener_name: Some("PLAIN".to_string()),
+            max_connections: None,
+            max_connections_per_ip: None,
+            controller_quorum_voters: vec![],
+            controller_server_name: None,
+            listeners: vec![
+                FileListener {
+                    name: "PLAIN".to_string(),
+                    bind_addr: "0.0.0.0:9092".parse().unwrap(),
+                    advertised: "demo-0:9092".to_string(),
+                    protocol: ListenerProtocol::Plaintext,
+                    tls_config: None,
+                    sasl_config: None,
+                },
+                FileListener {
+                    name: "EXTERNAL".to_string(),
+                    bind_addr: "0.0.0.0:9094".parse().unwrap(),
+                    advertised: "10.0.1.5:32100".to_string(),
+                    protocol: ListenerProtocol::Plaintext,
+                    tls_config: None,
+                    sasl_config: None,
+                },
+            ],
+            server_properties: std::collections::BTreeMap::from([(
+                "log.retention.hours".to_string(),
+                "24".to_string(),
+            )]),
+            controller_listener_protocol: None,
+            tls_config: None,
+            oauthbearer: None,
+            delegation_token: None,
+            super_users: None,
+            remote_storage: None,
+            authorization: None,
+            process: None,
+            gssapi: None,
+            inter_broker_credentials: None,
+            audit: None,
+        };
+        assert!(cfg == expected);
     }
 
     #[test]
@@ -1675,9 +1721,23 @@ protocol = "Plaintext"
             sasl_config: None,
         };
         let spec = fl.into_spec();
-        assert!(spec.name == "X");
-        assert!(spec.advertised == "h:9094");
-        assert!(spec.protocol == ListenerProtocol::Plaintext);
+        assert!(
+            (
+                spec.name,
+                spec.bind_addr,
+                spec.advertised,
+                spec.protocol,
+                spec.tls_config.is_none(),
+                spec.sasl_mechanisms,
+            ) == (
+                "X".to_string(),
+                "0.0.0.0:9094".parse::<SocketAddr>().unwrap(),
+                "h:9094".to_string(),
+                ListenerProtocol::Plaintext,
+                true,
+                None,
+            )
+        );
     }
 
     #[test]
@@ -1697,10 +1757,14 @@ protocol = "Plaintext"
         let mut cfg = BrokerConfig::default();
         file.apply_to(&mut cfg).unwrap();
 
-        assert!(cfg.listeners.len() == 1);
-        assert!(cfg.listeners[0].name == "PLAIN");
-        assert!(cfg.listeners[0].advertised == "demo-0:9092");
-        assert!(cfg.inter_broker_listener_name == "PLAIN");
+        assert!(
+            (
+                cfg.listeners.len(),
+                cfg.listeners[0].name.as_str(),
+                cfg.listeners[0].advertised.as_str(),
+                cfg.inter_broker_listener_name.as_str(),
+            ) == (1, "PLAIN", "demo-0:9092", "PLAIN")
+        );
     }
 
     #[test]
@@ -1973,11 +2037,21 @@ controller_heartbeat_interval_ms = 100
 
         file.apply_to(&mut cfg).unwrap();
 
-        assert!(cfg.heartbeat_interval_ms == 500);
-        assert!(cfg.heartbeat_timeout_ms == 1500);
-        assert!(cfg.replica_lag_time_max_ms == 2000);
-        assert!(cfg.controller_election_timeout == std::time::Duration::from_millis(500));
-        assert!(cfg.controller_heartbeat_interval == std::time::Duration::from_millis(100));
+        assert!(
+            (
+                cfg.heartbeat_interval_ms,
+                cfg.heartbeat_timeout_ms,
+                cfg.replica_lag_time_max_ms,
+                cfg.controller_election_timeout,
+                cfg.controller_heartbeat_interval,
+            ) == (
+                500,
+                1500,
+                2000,
+                std::time::Duration::from_millis(500),
+                std::time::Duration::from_millis(100),
+            )
+        );
     }
 
     #[test]
@@ -2093,10 +2167,19 @@ jwks_expiry_seconds = 360
         assert!(cfg.oauthbearer_jwks_refresh_interval == std::time::Duration::from_mins(1));
         match cfg.oauthbearer_validator {
             crabka_security::OAuthBearerValidator::Signed(v) => {
-                assert!(v.valid_issuer.as_deref() == Some("https://idp.example"));
-                assert!(v.expected_audience.as_deref() == Some("kafka"));
-                assert!(v.principal_claim_name == "client_id");
-                assert!(v.expiry_ms == Some(360_000));
+                assert!(
+                    (
+                        v.valid_issuer.as_deref(),
+                        v.expected_audience.as_deref(),
+                        v.principal_claim_name.as_str(),
+                        v.expiry_ms,
+                    ) == (
+                        Some("https://idp.example"),
+                        Some("kafka"),
+                        "client_id",
+                        Some(360_000),
+                    )
+                );
             }
             other => panic!("jwks_endpoint_uri must select the Signed validator; got {other:?}"),
         }
@@ -2378,9 +2461,9 @@ bootstrap = "127.0.0.1:9092"
             crate::config::RlmmKind::TopicBacked(k) => k.clone(),
             crate::config::RlmmKind::InMemory => panic!("expected TopicBacked"),
         };
-        assert!(km.bootstrap == "127.0.0.1:9092");
-        assert!(km.num_partitions == 50);
-        assert!(km.replication == 3);
+        assert!(
+            (km.bootstrap.as_str(), km.num_partitions, km.replication) == ("127.0.0.1:9092", 50, 3)
+        );
     }
 
     #[test]
@@ -2401,9 +2484,9 @@ replication = 1
             crate::config::RlmmKind::TopicBacked(k) => k.clone(),
             crate::config::RlmmKind::InMemory => panic!("expected TopicBacked"),
         };
-        assert!(km.bootstrap == "broker-0:9094");
-        assert!(km.num_partitions == 8);
-        assert!(km.replication == 1);
+        assert!(
+            (km.bootstrap.as_str(), km.num_partitions, km.replication) == ("broker-0:9094", 8, 1)
+        );
     }
 
     #[test]
@@ -2421,18 +2504,30 @@ allow_http = true
         file.apply_to(&mut cfg).unwrap();
         match cfg.remote_storage_backend {
             Some(crate::config::RemoteStorageBackend::S3(s3)) => {
-                assert!(s3.bucket == "crabka-prod");
-                assert!(s3.region == "us-east-1");
-                assert!(s3.prefix.as_deref() == Some("cluster-a"));
-                assert!(s3.endpoint.as_deref() == Some("http://minio:9000"));
-                assert!(s3.allow_http);
-                assert!(s3.access_key_id.is_none());
-                // Multipart knobs default when the TOML omits them.
+                // Credentials default to None and the multipart knobs default
+                // when the TOML omits them.
                 assert!(
-                    s3.multipart_threshold == crabka_remote_storage::DEFAULT_MULTIPART_THRESHOLD
-                );
-                assert!(
-                    s3.multipart_chunk_size == crabka_remote_storage::DEFAULT_MULTIPART_CHUNK_SIZE
+                    (
+                        s3.bucket.as_str(),
+                        s3.region.as_str(),
+                        s3.prefix.as_deref(),
+                        s3.endpoint.as_deref(),
+                        s3.allow_http,
+                        s3.access_key_id.as_deref(),
+                        s3.secret_access_key.as_deref(),
+                        s3.multipart_threshold,
+                        s3.multipart_chunk_size,
+                    ) == (
+                        "crabka-prod",
+                        "us-east-1",
+                        Some("cluster-a"),
+                        Some("http://minio:9000"),
+                        true,
+                        None,
+                        None,
+                        crabka_remote_storage::DEFAULT_MULTIPART_THRESHOLD,
+                        crabka_remote_storage::DEFAULT_MULTIPART_CHUNK_SIZE,
+                    )
                 );
             }
             other => panic!("expected S3 backend, got {other:?}"),
@@ -2494,21 +2589,31 @@ allow_http = true
         file.apply_to(&mut cfg).unwrap();
         match cfg.remote_storage_backend {
             Some(crate::config::RemoteStorageBackend::Gcs(g)) => {
-                assert!(g.bucket == "crabka-prod");
-                assert!(g.prefix.as_deref() == Some("cluster-a"));
-                assert!(g.endpoint.as_deref() == Some("http://fake-gcs:4443"));
-                assert!(g.allow_http);
                 // Leaving all credential fields unset selects Workload
-                // Identity / ADC.
-                assert!(g.service_account_path.is_none());
-                assert!(g.service_account_key.is_none());
-                assert!(g.application_credentials_path.is_none());
-                // Multipart knobs default when the TOML omits them.
+                // Identity / ADC; multipart knobs default when the TOML
+                // omits them.
                 assert!(
-                    g.multipart_threshold == crabka_remote_storage::DEFAULT_MULTIPART_THRESHOLD
-                );
-                assert!(
-                    g.multipart_chunk_size == crabka_remote_storage::DEFAULT_MULTIPART_CHUNK_SIZE
+                    (
+                        g.bucket.as_str(),
+                        g.prefix.as_deref(),
+                        g.endpoint.as_deref(),
+                        g.allow_http,
+                        g.service_account_path.as_deref(),
+                        g.service_account_key.as_deref(),
+                        g.application_credentials_path.as_deref(),
+                        g.multipart_threshold,
+                        g.multipart_chunk_size,
+                    ) == (
+                        "crabka-prod",
+                        Some("cluster-a"),
+                        Some("http://fake-gcs:4443"),
+                        true,
+                        None,
+                        None,
+                        None,
+                        crabka_remote_storage::DEFAULT_MULTIPART_THRESHOLD,
+                        crabka_remote_storage::DEFAULT_MULTIPART_CHUNK_SIZE,
+                    )
                 );
             }
             other => panic!("expected Gcs backend, got {other:?}"),
@@ -2548,11 +2653,18 @@ service_account_path = "/etc/gcs/key.json"
             multipart_chunk_size: None,
         };
         let rendered = format!("{gcs:?}");
-        assert!(!rendered.contains("/etc/gcs/sa-path.json"), "{rendered}");
-        assert!(!rendered.contains("super-secret-inline-key"), "{rendered}");
-        assert!(!rendered.contains("/etc/gcs/adc.json"), "{rendered}");
-        assert!(rendered.contains("***"), "{rendered}");
-        assert!(rendered.contains("crabka-prod"), "{rendered}");
+        // All three credential fields are redacted; non-secret fields are
+        // still printed.
+        assert!(
+            (
+                rendered.contains("/etc/gcs/sa-path.json"),
+                rendered.contains("super-secret-inline-key"),
+                rendered.contains("/etc/gcs/adc.json"),
+                rendered.contains("***"),
+                rendered.contains("crabka-prod"),
+            ) == (false, false, false, true, true),
+            "{rendered}"
+        );
     }
 
     #[test]
@@ -2611,17 +2723,23 @@ secret_key = "abcdef"
             let mut cfg = crate::config::BrokerConfig::default();
             file.apply_to(&mut cfg).unwrap();
 
-            assert!(
-                cfg.delegation_token_secret_key
-                    .as_ref()
-                    .map(|s| s.as_bytes().to_vec())
-                    == Some(b"abcdef".to_vec())
-            );
             // KIP-48 defaults: 7 days max lifetime, 1 hour sweep cadence,
             // 24 hour default renew period.
-            assert!(cfg.delegation_token_max_lifetime_ms == 7 * 24 * 60 * 60 * 1_000);
-            assert!(cfg.delegation_token_expiry_check_interval_ms == 60 * 60 * 1_000);
-            assert!(cfg.delegation_token_default_renew_period_ms == 24 * 60 * 60 * 1_000);
+            assert!(
+                (
+                    cfg.delegation_token_secret_key
+                        .as_ref()
+                        .map(|s| s.as_bytes().to_vec()),
+                    cfg.delegation_token_max_lifetime_ms,
+                    cfg.delegation_token_expiry_check_interval_ms,
+                    cfg.delegation_token_default_renew_period_ms,
+                ) == (
+                    Some(b"abcdef".to_vec()),
+                    7 * 24 * 60 * 60 * 1_000,
+                    60 * 60 * 1_000,
+                    24 * 60 * 60 * 1_000,
+                )
+            );
         });
     }
 
@@ -2692,11 +2810,21 @@ secret_key = "toml-loses"
             let mut cfg = crate::config::BrokerConfig::default();
             file.apply_to(&mut cfg).unwrap();
 
-            assert!(cfg.delegation_token_secret_key.is_none());
-            // Lifetime knobs stay at their defaults when no section is present.
-            assert!(cfg.delegation_token_max_lifetime_ms == 7 * 24 * 60 * 60 * 1_000);
-            assert!(cfg.delegation_token_expiry_check_interval_ms == 60 * 60 * 1_000);
-            assert!(cfg.delegation_token_default_renew_period_ms == 24 * 60 * 60 * 1_000);
+            // No secret key anywhere; lifetime knobs stay at their defaults
+            // when no section is present.
+            assert!(
+                (
+                    cfg.delegation_token_secret_key.is_none(),
+                    cfg.delegation_token_max_lifetime_ms,
+                    cfg.delegation_token_expiry_check_interval_ms,
+                    cfg.delegation_token_default_renew_period_ms,
+                ) == (
+                    true,
+                    7 * 24 * 60 * 60 * 1_000,
+                    60 * 60 * 1_000,
+                    24 * 60 * 60 * 1_000,
+                )
+            );
         });
     }
 
@@ -2709,9 +2837,9 @@ super_users = ["ANONYMOUS", "admin"]
         let mut cfg = crate::config::BrokerConfig::default();
         file.apply_to(&mut cfg).unwrap();
 
-        assert!(cfg.super_users.contains("ANONYMOUS"));
-        assert!(cfg.super_users.contains("admin"));
-        assert!(cfg.super_users.len() == 2);
+        let expected: std::collections::HashSet<String> =
+            ["ANONYMOUS".to_string(), "admin".to_string()].into();
+        assert!(cfg.super_users == expected);
     }
 
     // `[authorization]` TOML section → `Arc<dyn Authorizer>`.
@@ -2999,16 +3127,27 @@ kdc = "tcp://kdc:88"
         let mut cfg = crate::config::BrokerConfig::default();
         file.apply_to(&mut cfg).expect("apply [gssapi]");
         let g = cfg.gssapi.expect("gssapi config present");
-        assert!(g.keytab_path == std::path::PathBuf::from("/etc/crabka/gssapi-keytab/keytab"));
-        assert!(g.service_name == "kafka");
-        assert!(g.principal_to_local_rules.len() == 2);
         // Second rule in the fixture is the bare DEFAULT rule.
-        assert!(matches!(
-            g.principal_to_local_rules[1],
-            crabka_security::gssapi::name::Rule::Default
-        ));
-        assert!(g.realm.as_deref() == Some("EXAMPLE.COM"));
-        assert!(g.kdc.as_deref() == Some("tcp://kdc:88"));
+        assert!(
+            (
+                g.keytab_path,
+                g.service_name.as_str(),
+                g.principal_to_local_rules.len(),
+                matches!(
+                    g.principal_to_local_rules[1],
+                    crabka_security::gssapi::name::Rule::Default
+                ),
+                g.realm.as_deref(),
+                g.kdc.as_deref(),
+            ) == (
+                std::path::PathBuf::from("/etc/crabka/gssapi-keytab/keytab"),
+                "kafka",
+                2,
+                true,
+                Some("EXAMPLE.COM"),
+                Some("tcp://kdc:88"),
+            )
+        );
     }
 
     #[test]
@@ -3058,11 +3197,14 @@ kdc_url = "tcp://kdc:88"
                 kdc_url,
             } => {
                 assert!(
-                    keytab_path == std::path::PathBuf::from("/etc/crabka/gssapi-keytab/keytab")
+                    (keytab_path, client_principal, service_name, kdc_url)
+                        == (
+                            std::path::PathBuf::from("/etc/crabka/gssapi-keytab/keytab"),
+                            "kafka@EXAMPLE.COM".to_string(),
+                            "kafka".to_string(),
+                            "tcp://kdc:88".to_string(),
+                        )
                 );
-                assert!(client_principal == "kafka@EXAMPLE.COM");
-                assert!(service_name == "kafka");
-                assert!(kdc_url == "tcp://kdc:88");
             }
             other => panic!("expected Gssapi, got {other:?}"),
         }

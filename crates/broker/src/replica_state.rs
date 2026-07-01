@@ -13,14 +13,14 @@ use std::time::Instant;
 
 use crabka_raft::NodeId;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct FollowerStats {
     pub(crate) leo: i64,
     pub(crate) last_fetch: Instant,
     pub(crate) last_caught_up: Instant,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ReplicaState {
     pub(crate) isr: HashSet<NodeId>,
     pub(crate) per_follower: HashMap<NodeId, FollowerStats>,
@@ -128,19 +128,34 @@ mod tests {
     #[test]
     fn new_state_has_zero_hw_and_empty_membership() {
         let s = fresh();
-        assert!(s.hw == 0);
-        assert!(s.isr.is_empty());
-        assert!(s.per_follower.is_empty());
+        let expected = ReplicaState {
+            isr: HashSet::new(),
+            per_follower: HashMap::new(),
+            hw: 0,
+            current_leader_epoch: 0,
+        };
+        assert!(s == expected);
     }
 
     #[test]
     fn install_isr_seeds_non_leader_followers_at_zero() {
         let mut s = fresh();
-        s.install_isr(&[1, 2, 3], &[1, 2, 3], 1, now());
-        assert!(s.isr == [1, 2, 3].into_iter().collect());
-        assert!(s.per_follower.get(&2).map(|f| f.leo) == Some(0));
-        assert!(s.per_follower.get(&3).map(|f| f.leo) == Some(0));
-        assert!(!s.per_follower.contains_key(&1));
+        let t = now();
+        s.install_isr(&[1, 2, 3], &[1, 2, 3], 1, t);
+        let seeded = FollowerStats {
+            leo: 0,
+            last_fetch: t,
+            last_caught_up: t,
+        };
+        // Only the non-leader followers (2 and 3) are seeded; the leader (1)
+        // gets no per_follower entry.
+        let expected = ReplicaState {
+            isr: [1, 2, 3].into_iter().collect(),
+            per_follower: [(2, seeded), (3, seeded)].into_iter().collect(),
+            hw: 0,
+            current_leader_epoch: 0,
+        };
+        assert!(s == expected);
     }
 
     #[test]

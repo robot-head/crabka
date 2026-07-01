@@ -204,6 +204,7 @@ pub(crate) async fn group_is_empty(
 mod tests {
     use super::*;
     use assert2::assert;
+    use crabka_protocol::UnknownTaggedFields;
     use crabka_protocol::owned::alter_share_group_offsets_request::{
         AlterShareGroupOffsetsRequestPartition, AlterShareGroupOffsetsRequestTopic,
     };
@@ -311,9 +312,14 @@ mod tests {
         .expect("encode");
         let resp = decode_response(&resp);
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.error_code == codes::UNSUPPORTED_VERSION);
-        assert!(resp.responses.is_empty());
+        let expected = AlterShareGroupOffsetsResponse {
+            throttle_time_ms: 0,
+            error_code: codes::UNSUPPORTED_VERSION,
+            error_message: None,
+            responses: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
     }
 
     #[tokio::test]
@@ -332,9 +338,14 @@ mod tests {
             .expect("handle");
         let resp = decode_response(&resp);
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.error_code == codes::UNSUPPORTED_VERSION);
-        assert!(resp.responses.is_empty());
+        let expected = AlterShareGroupOffsetsResponse {
+            throttle_time_ms: 0,
+            error_code: codes::UNSUPPORTED_VERSION,
+            error_message: None,
+            responses: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -353,9 +364,14 @@ mod tests {
             .expect("handle");
         let resp = decode_response(&resp);
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.error_code == codes::GROUP_AUTHORIZATION_FAILED);
-        assert!(resp.responses.is_empty());
+        let expected = AlterShareGroupOffsetsResponse {
+            throttle_time_ms: 0,
+            error_code: codes::GROUP_AUTHORIZATION_FAILED,
+            error_message: None,
+            responses: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -375,17 +391,32 @@ mod tests {
             .expect("handle");
         let resp = decode_response(&resp);
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.error_code == codes::NONE);
-        assert!(resp.responses.len() == 1, "{resp:?}");
-        let topic = &resp.responses[0];
-        assert!(topic.topic_name == "missing-topic");
-        assert!(topic.topic_id == Uuid::default());
-        assert!(topic.partitions.len() == 2, "{topic:?}");
-        assert!(topic.partitions[0].partition_index == 3);
-        assert!(topic.partitions[0].error_code == codes::UNKNOWN_TOPIC_OR_PARTITION);
-        assert!(topic.partitions[1].partition_index == 5);
-        assert!(topic.partitions[1].error_code == codes::UNKNOWN_TOPIC_OR_PARTITION);
+        let expected = AlterShareGroupOffsetsResponse {
+            throttle_time_ms: 0,
+            error_code: codes::NONE,
+            error_message: None,
+            responses: vec![AlterShareGroupOffsetsResponseTopic {
+                topic_name: "missing-topic".into(),
+                topic_id: Uuid::default(),
+                partitions: vec![
+                    AlterShareGroupOffsetsResponsePartition {
+                        partition_index: 3,
+                        error_code: codes::UNKNOWN_TOPIC_OR_PARTITION,
+                        error_message: None,
+                        unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                    },
+                    AlterShareGroupOffsetsResponsePartition {
+                        partition_index: 5,
+                        error_code: codes::UNKNOWN_TOPIC_OR_PARTITION,
+                        error_message: None,
+                        unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                    },
+                ],
+                unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+            }],
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 

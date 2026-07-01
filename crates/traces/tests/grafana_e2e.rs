@@ -690,11 +690,16 @@ fn assert_all_doors_present(records: &[SpanRecord]) {
     // D3 (Zipkin): serviceName -> resource, error tag -> ERROR status,
     // µs -> ns conversion, trace-id pass-through.
     let zipkin = by_name("zipkin op");
-    assert!(zipkin.span.trace_id == [0x33; 16]);
-    assert!(zipkin.span.start_ns == 1_000_000);
-    assert!(zipkin.span.duration_ns == 2_000_000);
-    assert!(zipkin.span.status.as_i32() == 2, "zipkin error -> ERROR");
-    assert!(resource_attr(&zipkin.span, "service.name") == Some("zipkin-svc"));
+    assert!(
+        (
+            zipkin.span.trace_id,
+            zipkin.span.start_ns,
+            zipkin.span.duration_ns,
+            zipkin.span.status.as_i32(),
+            resource_attr(&zipkin.span, "service.name"),
+        ) == ([0x33; 16], 1_000_000, 2_000_000, 2, Some("zipkin-svc")),
+        "zipkin decode fidelity (error tag -> ERROR status)"
+    );
 
     // D4 (Jaeger binary thrift): process.service_name -> resource service.name,
     // error tag -> ERROR status (binary decode path).
@@ -1145,13 +1150,13 @@ async fn grafana_e2e_full_surface() -> TestResult {
         &proxy(&format!("api/v2/traces/{TRACE_A_HEX}?{range}")),
     )
     .await?;
-    assert!(trace_a["status"].as_str() == Some("COMPLETE"));
-    assert!(trace_a["message"].as_str() == Some(""));
     assert!(
-        trace_a["trace"]["resourceSpans"]
-            .as_array()
-            .is_some_and(|spans| spans.len() == 1),
-        "expected one resourceSpan (root service): {trace_a}"
+        (
+            trace_a["status"].as_str(),
+            trace_a["message"].as_str(),
+            trace_a["trace"]["resourceSpans"].as_array().map(Vec::len),
+        ) == (Some("COMPLETE"), Some(""), Some(1)),
+        "expected a COMPLETE trace with one resourceSpan (root service): {trace_a}"
     );
     let trace_a_spans = trace_a["trace"]["resourceSpans"]
         .as_array()
@@ -1682,16 +1687,12 @@ async fn grafana_e2e_full_surface() -> TestResult {
     .await?;
     let edge = &result["data"]["result"][0];
     assert!(
-        edge["value"][1].as_str() == Some("1"),
-        "edge request total: {result}"
-    );
-    assert!(
-        edge["metric"]["client"].as_str() == Some("checkout-frontend"),
-        "edge client label: {result}"
-    );
-    assert!(
-        edge["metric"]["server"].as_str() == Some("cart-backend"),
-        "edge server label: {result}"
+        (
+            edge["value"][1].as_str(),
+            edge["metric"]["client"].as_str(),
+            edge["metric"]["server"].as_str(),
+        ) == (Some("1"), Some("checkout-frontend"), Some("cart-backend")),
+        "service-graph request_total edge (total + client/server labels): {result}"
     );
 
     // The server-side latency histogram fan-out also reached Prometheus.

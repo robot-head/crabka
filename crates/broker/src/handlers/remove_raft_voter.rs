@@ -188,9 +188,18 @@ mod tests {
             let bytes = encode_resp(version, &resp).expect("encode");
             let mut cur: &[u8] = &bytes;
             let decoded = RemoveRaftVoterResponse::decode(&mut cur, version).expect("decode");
-            assert!(decoded.error_code == codes::INVALID_REQUEST);
-            assert!(decoded.error_message.as_deref() == Some("cannot remove the last voter"));
-            assert!(cur.is_empty(), "all bytes consumed at v{version}");
+            assert!(
+                (
+                    decoded.error_code,
+                    decoded.error_message.as_deref(),
+                    cur.is_empty(),
+                ) == (
+                    codes::INVALID_REQUEST,
+                    Some("cannot remove the last voter"),
+                    true,
+                ),
+                "all bytes consumed at v{version}"
+            );
         }
     }
 

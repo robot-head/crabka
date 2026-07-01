@@ -172,6 +172,7 @@ fn encode_top_level(version: i16, error_code: i16) -> Result<Bytes, BrokerError>
 mod tests {
     use super::*;
     use assert2::assert;
+    use crabka_protocol::UnknownTaggedFields;
     use crabka_protocol::owned::delete_share_group_offsets_request::DeleteShareGroupOffsetsRequestTopic;
     use crabka_protocol::owned::delete_share_group_offsets_response;
     use crabka_security::{AuthMethod, Principal};
@@ -266,9 +267,14 @@ mod tests {
         .expect("encode");
         let resp = decode_response(&resp);
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.error_code == codes::UNSUPPORTED_VERSION);
-        assert!(resp.responses.is_empty());
+        let expected = DeleteShareGroupOffsetsResponse {
+            throttle_time_ms: 0,
+            error_code: codes::UNSUPPORTED_VERSION,
+            error_message: None,
+            responses: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
     }
 
     #[tokio::test]
@@ -287,9 +293,14 @@ mod tests {
             .expect("handle");
         let resp = decode_response(&resp);
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.error_code == codes::UNSUPPORTED_VERSION);
-        assert!(resp.responses.is_empty());
+        let expected = DeleteShareGroupOffsetsResponse {
+            throttle_time_ms: 0,
+            error_code: codes::UNSUPPORTED_VERSION,
+            error_message: None,
+            responses: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -308,9 +319,14 @@ mod tests {
             .expect("handle");
         let resp = decode_response(&resp);
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.error_code == codes::GROUP_AUTHORIZATION_FAILED);
-        assert!(resp.responses.is_empty());
+        let expected = DeleteShareGroupOffsetsResponse {
+            throttle_time_ms: 0,
+            error_code: codes::GROUP_AUTHORIZATION_FAILED,
+            error_message: None,
+            responses: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -330,12 +346,20 @@ mod tests {
             .expect("handle");
         let resp = decode_response(&resp);
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.error_code == codes::NONE);
-        assert!(resp.responses.len() == 1, "{resp:?}");
-        assert!(resp.responses[0].topic_name == "missing-topic");
-        assert!(resp.responses[0].topic_id == Uuid::default());
-        assert!(resp.responses[0].error_code == codes::UNKNOWN_TOPIC_OR_PARTITION);
+        let expected = DeleteShareGroupOffsetsResponse {
+            throttle_time_ms: 0,
+            error_code: codes::NONE,
+            error_message: None,
+            responses: vec![DeleteShareGroupOffsetsResponseTopic {
+                topic_name: "missing-topic".into(),
+                topic_id: Uuid::default(),
+                error_code: codes::UNKNOWN_TOPIC_OR_PARTITION,
+                error_message: None,
+                unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+            }],
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 }

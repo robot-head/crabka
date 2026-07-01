@@ -2495,197 +2495,117 @@ async fn real_loki_and_crabka_return_same_parser_filter_results() {
         crabka_query_range_result(querier, metadata_query, base_ns, end_ns).await;
     assert!(crabka_metadata_result == loki_metadata_result);
 
-    assert!(json_contains_string(&loki_json_result, json_error_line));
-    assert!(json_contains_string(
-        &loki_selected_json_result,
-        json_error_line
-    ));
-    assert!(json_contains_string(
-        &loki_selected_json_result,
-        r#""method":"GET""#
-    ));
-    assert!(!json_contains_string(
-        &loki_selected_json_result,
-        r#""request_method":"GET""#
-    ));
-    assert!(json_contains_string(&loki_logfmt_result, logfmt_error_line));
-    assert!(json_contains_string(
-        &loki_parameterized_logfmt_result,
-        logfmt_error_line
-    ));
-    assert!(json_contains_string(
-        &loki_logfmt_or_result,
-        logfmt_error_line
-    ));
-    assert!(json_contains_string(
-        &loki_logfmt_or_result,
-        r#"status=200 msg="api parser ok""#
-    ));
-    assert!(json_contains_string(
-        &loki_logfmt_comma_and_result,
-        logfmt_error_line
-    ));
-    assert!(!json_contains_string(
-        &loki_logfmt_comma_and_result,
-        r#"status=200 msg="api parser ok""#
-    ));
-    assert!(json_contains_string(
-        &loki_logfmt_adjacent_and_result,
-        logfmt_error_line
-    ));
-    assert!(!json_contains_string(
-        &loki_logfmt_adjacent_and_result,
-        r#"status=200 msg="api parser ok""#
-    ));
-    assert!(json_contains_string(
-        &loki_backtick_field_filter_result,
-        logfmt_error_line
-    ));
-    assert!(json_contains_string(
-        &loki_line_format_result,
-        "api parser error 500"
-    ));
-    assert!(!json_contains_string(
-        &loki_line_format_result,
-        logfmt_error_line
-    ));
-    assert!(json_contains_string(
-        &loki_line_format_pipeline_result,
-        "API_PARSER_ERROR 500"
-    ));
-    assert!(!json_contains_string(
-        &loki_line_format_pipeline_result,
-        logfmt_error_line
-    ));
-    assert!(json_contains_string(
-        &loki_label_format_result,
-        logfmt_error_line
-    ));
-    assert!(json_contains_string(
-        &loki_label_format_pipeline_result,
-        logfmt_error_line
-    ));
-    assert!(json_contains_string(
-        &loki_line_format_string_helper_result,
-        "Checkout checkout api/items items /api"
-    ));
-    assert!(!json_contains_string(
-        &loki_line_format_string_helper_result,
-        logfmt_template_line
-    ));
-    assert!(json_contains_string(
-        &loki_line_format_logical_helper_result,
-        "true true true true"
-    ));
-    assert!(!json_contains_string(
-        &loki_line_format_logical_helper_result,
-        logfmt_template_line
-    ));
-    assert!(json_contains_string(
-        &loki_line_format_ne_helper_result,
-        "true true"
-    ));
-    assert!(!json_contains_string(
-        &loki_line_format_ne_helper_result,
-        logfmt_template_line
-    ));
-    assert!(json_contains_string(
-        &loki_line_format_len_helper_result,
-        "len=15"
-    ));
-    assert!(!json_contains_string(
-        &loki_line_format_len_helper_result,
-        logfmt_template_line
-    ));
-    assert!(json_contains_string(
-        &loki_line_format_spacing_helper_result,
-        "hi   |hello|   hi|world|xxx"
-    ));
-    assert!(!json_contains_string(
-        &loki_line_format_spacing_helper_result,
-        logfmt_spacing_template_line
-    ));
-    assert!(json_contains_string(
-        &loki_line_format_regex_helper_result,
-        "4|helper-template|${2}-${1}"
-    ));
-    assert!(!json_contains_string(
-        &loki_line_format_regex_helper_result,
-        logfmt_template_line
-    ));
-    assert!(json_contains_string(
-        &loki_drop_keep_result,
-        logfmt_error_line
-    ));
-    assert!(json_contains_string(
-        &loki_decolorize_result,
-        decolored_logfmt_error_line
-    ));
-    assert!(!json_contains_string(
-        &loki_decolorize_result,
-        colored_logfmt_error_line
-    ));
-    assert!(json_contains_string(
-        &loki_pattern_result,
-        logfmt_error_line
-    ));
-    assert!(json_contains_string(
-        &loki_pattern_parser_result,
-        logfmt_error_line
-    ));
-    assert!(json_contains_string(
-        &loki_regexp_parser_result,
-        logfmt_error_line
-    ));
-    assert!(json_contains_string(
-        &loki_unpack_parser_result,
-        "original log message"
-    ));
-    assert!(!json_contains_string(
-        &loki_unpack_parser_result,
-        packed_error_line
-    ));
-    assert!(json_contains_string(
-        &loki_commented_result,
-        logfmt_error_line
-    ));
-    assert!(json_contains_string(
-        &loki_logfmt_typed_result,
-        logfmt_typed_filter_line
-    ));
-    assert!(json_contains_string(&loki_ip_filter_result, logfmt_ip_line));
-    assert!(!json_contains_string(
-        &loki_ip_filter_result,
-        logfmt_ip_miss_line
-    ));
-    assert!(json_contains_string(
-        &loki_ip_single_filter_result,
-        logfmt_ip_line
-    ));
-    assert!(!json_contains_string(
-        &loki_ip_single_filter_result,
-        logfmt_ip_miss_line
-    ));
-    assert!(json_contains_string(
-        &loki_ip_range_filter_result,
-        logfmt_ip_line
-    ));
-    assert!(!json_contains_string(
-        &loki_ip_range_filter_result,
-        logfmt_ip_miss_line
-    ));
-    assert!(json_contains_string(
-        &loki_not_ip_filter_result,
-        logfmt_ip_line
-    ));
-    assert!(!json_contains_string(
-        &loki_not_ip_filter_result,
-        logfmt_ip_miss_line
-    ));
-    assert!(json_contains_string(
-        &loki_metadata_result,
-        "api metadata ok"
-    ));
+    // Sanity-check the Loki-side payloads so the differential comparisons above
+    // cannot pass vacuously. Each tuple pairs the contains-checks (in the same
+    // order the queries ran) with the expected containment outcomes.
+    assert!(
+        (
+            json_contains_string(&loki_json_result, json_error_line),
+            json_contains_string(&loki_selected_json_result, json_error_line),
+            json_contains_string(&loki_selected_json_result, r#""method":"GET""#),
+            json_contains_string(&loki_selected_json_result, r#""request_method":"GET""#),
+        ) == (true, true, true, false)
+    );
+    assert!(
+        (
+            json_contains_string(&loki_logfmt_result, logfmt_error_line),
+            json_contains_string(&loki_parameterized_logfmt_result, logfmt_error_line),
+            json_contains_string(&loki_logfmt_or_result, logfmt_error_line),
+            json_contains_string(&loki_logfmt_or_result, r#"status=200 msg="api parser ok""#),
+            json_contains_string(&loki_logfmt_comma_and_result, logfmt_error_line),
+            json_contains_string(
+                &loki_logfmt_comma_and_result,
+                r#"status=200 msg="api parser ok""#
+            ),
+            json_contains_string(&loki_logfmt_adjacent_and_result, logfmt_error_line),
+            json_contains_string(
+                &loki_logfmt_adjacent_and_result,
+                r#"status=200 msg="api parser ok""#
+            ),
+            json_contains_string(&loki_backtick_field_filter_result, logfmt_error_line),
+        ) == (true, true, true, true, true, false, true, false, true)
+    );
+    assert!(
+        (
+            json_contains_string(&loki_line_format_result, "api parser error 500"),
+            json_contains_string(&loki_line_format_result, logfmt_error_line),
+            json_contains_string(&loki_line_format_pipeline_result, "API_PARSER_ERROR 500"),
+            json_contains_string(&loki_line_format_pipeline_result, logfmt_error_line),
+        ) == (true, false, true, false)
+    );
+    assert!(
+        (
+            json_contains_string(&loki_label_format_result, logfmt_error_line),
+            json_contains_string(&loki_label_format_pipeline_result, logfmt_error_line),
+            json_contains_string(
+                &loki_line_format_string_helper_result,
+                "Checkout checkout api/items items /api"
+            ),
+            json_contains_string(&loki_line_format_string_helper_result, logfmt_template_line),
+        ) == (true, true, true, false)
+    );
+    assert!(
+        (
+            json_contains_string(
+                &loki_line_format_logical_helper_result,
+                "true true true true"
+            ),
+            json_contains_string(
+                &loki_line_format_logical_helper_result,
+                logfmt_template_line
+            ),
+            json_contains_string(&loki_line_format_ne_helper_result, "true true"),
+            json_contains_string(&loki_line_format_ne_helper_result, logfmt_template_line),
+            json_contains_string(&loki_line_format_len_helper_result, "len=15"),
+            json_contains_string(&loki_line_format_len_helper_result, logfmt_template_line),
+            json_contains_string(
+                &loki_line_format_spacing_helper_result,
+                "hi   |hello|   hi|world|xxx"
+            ),
+            json_contains_string(
+                &loki_line_format_spacing_helper_result,
+                logfmt_spacing_template_line
+            ),
+            json_contains_string(
+                &loki_line_format_regex_helper_result,
+                "4|helper-template|${2}-${1}"
+            ),
+            json_contains_string(&loki_line_format_regex_helper_result, logfmt_template_line),
+        ) == (
+            true, false, true, false, true, false, true, false, true, false
+        )
+    );
+    assert!(
+        (
+            json_contains_string(&loki_drop_keep_result, logfmt_error_line),
+            json_contains_string(&loki_decolorize_result, decolored_logfmt_error_line),
+            json_contains_string(&loki_decolorize_result, colored_logfmt_error_line),
+            json_contains_string(&loki_pattern_result, logfmt_error_line),
+            json_contains_string(&loki_pattern_parser_result, logfmt_error_line),
+            json_contains_string(&loki_regexp_parser_result, logfmt_error_line),
+        ) == (true, true, false, true, true, true)
+    );
+    assert!(
+        (
+            json_contains_string(&loki_unpack_parser_result, "original log message"),
+            json_contains_string(&loki_unpack_parser_result, packed_error_line),
+            json_contains_string(&loki_commented_result, logfmt_error_line),
+            json_contains_string(&loki_logfmt_typed_result, logfmt_typed_filter_line),
+        ) == (true, false, true, true)
+    );
+    assert!(
+        (
+            json_contains_string(&loki_ip_filter_result, logfmt_ip_line),
+            json_contains_string(&loki_ip_filter_result, logfmt_ip_miss_line),
+            json_contains_string(&loki_ip_single_filter_result, logfmt_ip_line),
+            json_contains_string(&loki_ip_single_filter_result, logfmt_ip_miss_line),
+            json_contains_string(&loki_ip_range_filter_result, logfmt_ip_line),
+            json_contains_string(&loki_ip_range_filter_result, logfmt_ip_miss_line),
+            json_contains_string(&loki_not_ip_filter_result, logfmt_ip_line),
+            json_contains_string(&loki_not_ip_filter_result, logfmt_ip_miss_line),
+            json_contains_string(&loki_metadata_result, "api metadata ok"),
+        ) == (true, false, true, false, true, false, true, false, true)
+    );
     broker.shutdown().await;
 }
 
@@ -3314,16 +3234,24 @@ async fn real_loki_and_crabka_return_same_parser_error_labels() {
     let crabka_result = crabka_query_range_result(querier.clone(), query, base_ns, end_ns).await;
 
     assert!(crabka_result == loki_result);
-    assert!(json_contains_string(&loki_result, invalid_line));
-    assert!(json_contains_string(&loki_result, valid_line));
+    assert!(
+        (
+            json_contains_string(&loki_result, invalid_line),
+            json_contains_string(&loki_result, valid_line),
+        ) == (true, true)
+    );
 
     let query = r#"{app="api",format="json"} | json | __error__ = """#;
     let loki_result = loki_query_range_result(&http, &loki_base, query, base_ns, end_ns).await;
     let crabka_result = crabka_query_range_result(querier, query, base_ns, end_ns).await;
 
     assert!(crabka_result == loki_result);
-    assert!(!json_contains_string(&loki_result, invalid_line));
-    assert!(json_contains_string(&loki_result, valid_line));
+    assert!(
+        (
+            json_contains_string(&loki_result, invalid_line),
+            json_contains_string(&loki_result, valid_line),
+        ) == (false, true)
+    );
     broker.shutdown().await;
 }
 
@@ -3418,9 +3346,13 @@ async fn real_loki_and_crabka_return_same_logfmt_malformed_field_results() {
     let crabka_result = crabka_query_range_result(querier.clone(), query, base_ns, end_ns).await;
 
     assert!(crabka_result == loki_result);
-    assert!(json_contains_string(&loki_result, invalid_line));
-    assert!(json_contains_string(&loki_result, valid_line));
-    assert!(json_contains_string(&loki_result, standalone_key_line));
+    assert!(
+        (
+            json_contains_string(&loki_result, invalid_line),
+            json_contains_string(&loki_result, valid_line),
+            json_contains_string(&loki_result, standalone_key_line),
+        ) == (true, true, true)
+    );
 
     let keep_empty_query = r#"{app="api",format="logfmt"} | logfmt --keep-empty | empty = """#;
     let loki_keep_empty_result =
@@ -3440,8 +3372,12 @@ async fn real_loki_and_crabka_return_same_logfmt_malformed_field_results() {
     let crabka_strict_result =
         crabka_query_range_result(querier.clone(), strict_query, base_ns, end_ns).await;
     assert!(crabka_strict_result == loki_strict_result);
-    assert!(json_contains_string(&loki_strict_result, invalid_line));
-    assert!(!json_contains_string(&loki_strict_result, valid_line));
+    assert!(
+        (
+            json_contains_string(&loki_strict_result, invalid_line),
+            json_contains_string(&loki_strict_result, valid_line),
+        ) == (true, false)
+    );
 
     let strict_clean_query = r#"{app="api",format="logfmt"} | logfmt --strict | __error__ = """#;
     let loki_strict_clean_result =
@@ -3449,11 +3385,12 @@ async fn real_loki_and_crabka_return_same_logfmt_malformed_field_results() {
     let crabka_strict_clean_result =
         crabka_query_range_result(querier, strict_clean_query, base_ns, end_ns).await;
     assert!(crabka_strict_clean_result == loki_strict_clean_result);
-    assert!(!json_contains_string(
-        &loki_strict_clean_result,
-        invalid_line
-    ));
-    assert!(json_contains_string(&loki_strict_clean_result, valid_line));
+    assert!(
+        (
+            json_contains_string(&loki_strict_clean_result, invalid_line),
+            json_contains_string(&loki_strict_clean_result, valid_line),
+        ) == (false, true)
+    );
     broker.shutdown().await;
 }
 

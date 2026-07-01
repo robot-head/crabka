@@ -241,6 +241,7 @@ mod tests {
     use super::*;
     use assert2::assert;
     use crabka_metadata::{MetadataImage, MetadataRecord, TopicRecord};
+    use crabka_protocol::UnknownTaggedFields;
     use crabka_protocol::owned::describe_share_group_offsets_request::{
         DescribeShareGroupOffsetsRequestGroup, DescribeShareGroupOffsetsRequestTopic,
     };
@@ -372,12 +373,27 @@ mod tests {
             .expect("handle");
         let resp = decode_response(&resp);
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.groups.len() == 2, "{resp:?}");
-        assert!(resp.groups[0].group_id == "g1");
-        assert!(resp.groups[0].error_code == codes::UNSUPPORTED_VERSION);
-        assert!(resp.groups[1].group_id == "g2");
-        assert!(resp.groups[1].error_code == codes::UNSUPPORTED_VERSION);
+        let expected = DescribeShareGroupOffsetsResponse {
+            throttle_time_ms: 0,
+            groups: vec![
+                DescribeShareGroupOffsetsResponseGroup {
+                    group_id: "g1".into(),
+                    topics: Vec::new(),
+                    error_code: codes::UNSUPPORTED_VERSION,
+                    error_message: None,
+                    unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                },
+                DescribeShareGroupOffsetsResponseGroup {
+                    group_id: "g2".into(),
+                    topics: Vec::new(),
+                    error_code: codes::UNSUPPORTED_VERSION,
+                    error_message: None,
+                    unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                },
+            ],
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -396,11 +412,18 @@ mod tests {
             .expect("handle");
         let resp = decode_response(&resp);
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.groups.len() == 1, "{resp:?}");
-        assert!(resp.groups[0].group_id == "g1");
-        assert!(resp.groups[0].error_code == codes::GROUP_AUTHORIZATION_FAILED);
-        assert!(resp.groups[0].topics.is_empty());
+        let expected = DescribeShareGroupOffsetsResponse {
+            throttle_time_ms: 0,
+            groups: vec![DescribeShareGroupOffsetsResponseGroup {
+                group_id: "g1".into(),
+                topics: Vec::new(),
+                error_code: codes::GROUP_AUTHORIZATION_FAILED,
+                error_message: None,
+                unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+            }],
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -420,26 +443,42 @@ mod tests {
             .expect("handle");
         let resp = decode_response(&resp);
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.groups.len() == 1, "{resp:?}");
-        let group = &resp.groups[0];
-        assert!(group.group_id == "g1");
-        assert!(group.error_code == codes::NONE);
-        assert!(group.topics.len() == 1, "{group:?}");
-        let topic = &group.topics[0];
-        assert!(topic.topic_name == "missing-topic");
-        assert!(topic.topic_id == Uuid::default());
-        assert!(topic.partitions.len() == 2, "{topic:?}");
-        assert!(topic.partitions[0].partition_index == 3);
-        assert!(topic.partitions[0].start_offset == -1);
-        assert!(topic.partitions[0].leader_epoch == -1);
-        assert!(topic.partitions[0].lag == -1);
-        assert!(topic.partitions[0].error_code == codes::UNKNOWN_TOPIC_OR_PARTITION);
-        assert!(topic.partitions[1].partition_index == 5);
-        assert!(topic.partitions[1].start_offset == -1);
-        assert!(topic.partitions[1].leader_epoch == -1);
-        assert!(topic.partitions[1].lag == -1);
-        assert!(topic.partitions[1].error_code == codes::UNKNOWN_TOPIC_OR_PARTITION);
+        let expected = DescribeShareGroupOffsetsResponse {
+            throttle_time_ms: 0,
+            groups: vec![DescribeShareGroupOffsetsResponseGroup {
+                group_id: "g1".into(),
+                topics: vec![DescribeShareGroupOffsetsResponseTopic {
+                    topic_name: "missing-topic".into(),
+                    topic_id: Uuid::default(),
+                    partitions: vec![
+                        DescribeShareGroupOffsetsResponsePartition {
+                            partition_index: 3,
+                            start_offset: -1,
+                            leader_epoch: -1,
+                            lag: -1,
+                            error_code: codes::UNKNOWN_TOPIC_OR_PARTITION,
+                            error_message: None,
+                            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                        },
+                        DescribeShareGroupOffsetsResponsePartition {
+                            partition_index: 5,
+                            start_offset: -1,
+                            leader_epoch: -1,
+                            lag: -1,
+                            error_code: codes::UNKNOWN_TOPIC_OR_PARTITION,
+                            error_message: None,
+                            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                        },
+                    ],
+                    unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                }],
+                error_code: codes::NONE,
+                error_message: None,
+                unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+            }],
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -474,15 +513,21 @@ mod tests {
         )
         .await;
 
-        assert!(topic.topic_name == "orders");
-        assert!(topic.topic_id == Uuid(*topic_id.as_bytes()));
-        assert!(topic.partitions.len() == 1, "{topic:?}");
-        let part = &topic.partitions[0];
-        assert!(part.partition_index == 0);
-        assert!(part.start_offset == 33);
-        assert!(part.leader_epoch == -1);
-        assert!(part.lag == -1);
-        assert!(part.error_code == codes::NONE);
+        let expected = DescribeShareGroupOffsetsResponseTopic {
+            topic_name: "orders".into(),
+            topic_id: Uuid(*topic_id.as_bytes()),
+            partitions: vec![DescribeShareGroupOffsetsResponsePartition {
+                partition_index: 0,
+                start_offset: 33,
+                leader_epoch: -1,
+                lag: -1,
+                error_code: codes::NONE,
+                error_message: None,
+                unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+            }],
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        };
+        assert!(topic == expected);
         broker_handle.shutdown().await;
     }
 }

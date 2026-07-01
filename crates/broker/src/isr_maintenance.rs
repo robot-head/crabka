@@ -90,6 +90,7 @@ pub(crate) async fn run(cfg: Config) {
 /// `compute_proposal`'s single `replica_state` lock scope so the caller
 /// can classify shrink/expand and submit the proposal without re-locking
 /// (and without a TOCTOU window where the ISR shifts between locks).
+#[derive(Debug, PartialEq)]
 struct Proposal {
     /// The pre-proposal ISR (sorted), used by the caller for shrink/expand
     /// metric classification.
@@ -531,9 +532,12 @@ mod tests {
             .await
             .expect("lagging ISR member should produce a shrink proposal");
 
-        assert!(proposal.prev_isr == vec![1, 2, 3]);
-        assert!(proposal.new_isr == vec![1, 2]);
-        assert!(proposal.leader_epoch == 7);
+        let expected = Proposal {
+            prev_isr: vec![1, 2, 3],
+            new_isr: vec![1, 2],
+            leader_epoch: 7,
+        };
+        assert_eq!(proposal, expected);
     }
 
     #[tokio::test]
@@ -557,9 +561,12 @@ mod tests {
             .await
             .expect("caught-up replica should produce an expand proposal");
 
-        assert!(proposal.prev_isr == vec![1, 2]);
-        assert!(proposal.new_isr == vec![1, 2, 3]);
-        assert!(proposal.leader_epoch == 8);
+        let expected = Proposal {
+            prev_isr: vec![1, 2],
+            new_isr: vec![1, 2, 3],
+            leader_epoch: 8,
+        };
+        assert_eq!(proposal, expected);
     }
 
     #[tokio::test]
@@ -641,21 +648,39 @@ mod tests {
 
         let req = build_alter_partition_request(&image, 4, "orders", 6, &[1, 9], 12);
 
-        assert!(req.broker_id == 4);
-        assert!(req.broker_epoch == -1);
-        assert!(req.topics.len() == 1);
-        let topic = &req.topics[0];
-        assert!(topic.topic_id == crabka_protocol::primitives::uuid::Uuid(*topic_id.as_bytes()));
-        assert!(topic.partitions.len() == 1);
-        let partition = &topic.partitions[0];
-        assert!(partition.partition_index == 6);
-        assert!(partition.leader_epoch == 12);
-        assert!(partition.new_isr == vec![1, 9]);
-        assert!(partition.new_isr_with_epochs.len() == 2);
-        assert!(partition.new_isr_with_epochs[0].broker_id == 1);
-        assert!(partition.new_isr_with_epochs[0].broker_epoch == 1);
-        assert!(partition.new_isr_with_epochs[1].broker_id == 9);
-        assert!(partition.new_isr_with_epochs[1].broker_epoch == -1);
+        use crabka_protocol::owned::alter_partition_request::{
+            BrokerState, PartitionData, TopicData,
+        };
+        let expected = AlterPartitionRequest {
+            broker_id: 4,
+            broker_epoch: -1,
+            topics: vec![TopicData {
+                topic_id: crabka_protocol::primitives::uuid::Uuid(*topic_id.as_bytes()),
+                partitions: vec![PartitionData {
+                    partition_index: 6,
+                    leader_epoch: 12,
+                    new_isr: vec![1, 9],
+                    new_isr_with_epochs: vec![
+                        BrokerState {
+                            broker_id: 1,
+                            broker_epoch: 1,
+                            unknown_tagged_fields: Default::default(),
+                        },
+                        BrokerState {
+                            broker_id: 9,
+                            broker_epoch: -1,
+                            unknown_tagged_fields: Default::default(),
+                        },
+                    ],
+                    leader_recovery_state: 0,
+                    partition_epoch: 0,
+                    unknown_tagged_fields: Default::default(),
+                }],
+                unknown_tagged_fields: Default::default(),
+            }],
+            unknown_tagged_fields: Default::default(),
+        };
+        assert_eq!(req, expected);
     }
 
     #[tokio::test]
@@ -716,48 +741,48 @@ mod tests {
 
     #[test]
     fn not_controller_classification_covers_global_and_partition_codes() {
-        assert!(is_not_controller_response(crate::codes::NOT_CONTROLLER, 0));
-        assert!(is_not_controller_response(0, crate::codes::NOT_CONTROLLER));
-        assert!(!is_not_controller_response(0, 0));
-        assert!(!is_not_controller_response(
-            crate::codes::UNKNOWN_SERVER_ERROR,
-            0
-        ));
+        assert_eq!(
+            (
+                is_not_controller_response(crate::codes::NOT_CONTROLLER, 0),
+                is_not_controller_response(0, crate::codes::NOT_CONTROLLER),
+                is_not_controller_response(0, 0),
+                is_not_controller_response(crate::codes::UNKNOWN_SERVER_ERROR, 0),
+            ),
+            (true, true, false, false)
+        );
     }
 
     #[test]
     fn alter_partition_response_classifies_all_error_surfaces() {
-        assert!(classify_alter_partition_response(0, 0).is_ok());
-        assert!(
-            classify_alter_partition_response(crate::codes::NOT_CONTROLLER, 0)
-                == Err(AlterPartitionSendError::NotController)
-        );
-        assert!(
-            classify_alter_partition_response(0, crate::codes::NOT_CONTROLLER)
-                == Err(AlterPartitionSendError::NotController)
-        );
-        assert!(
-            classify_alter_partition_response(crate::codes::UNKNOWN_SERVER_ERROR, 0)
-                == Err(AlterPartitionSendError::Rejected {
+        assert_eq!(
+            (
+                classify_alter_partition_response(0, 0),
+                classify_alter_partition_response(crate::codes::NOT_CONTROLLER, 0),
+                classify_alter_partition_response(0, crate::codes::NOT_CONTROLLER),
+                classify_alter_partition_response(crate::codes::UNKNOWN_SERVER_ERROR, 0),
+                classify_alter_partition_response(0, crate::codes::UNKNOWN_SERVER_ERROR),
+                classify_alter_partition_response(
+                    crate::codes::UNKNOWN_SERVER_ERROR,
+                    crate::codes::UNKNOWN_TOPIC_OR_PARTITION,
+                ),
+            ),
+            (
+                Ok(()),
+                Err(AlterPartitionSendError::NotController),
+                Err(AlterPartitionSendError::NotController),
+                Err(AlterPartitionSendError::Rejected {
                     global_err: crate::codes::UNKNOWN_SERVER_ERROR,
                     part_err: 0,
-                })
-        );
-        assert!(
-            classify_alter_partition_response(0, crate::codes::UNKNOWN_SERVER_ERROR)
-                == Err(AlterPartitionSendError::Rejected {
+                }),
+                Err(AlterPartitionSendError::Rejected {
                     global_err: 0,
                     part_err: crate::codes::UNKNOWN_SERVER_ERROR,
-                })
-        );
-        assert!(
-            classify_alter_partition_response(
-                crate::codes::UNKNOWN_SERVER_ERROR,
-                crate::codes::UNKNOWN_TOPIC_OR_PARTITION,
-            ) == Err(AlterPartitionSendError::Rejected {
-                global_err: crate::codes::UNKNOWN_SERVER_ERROR,
-                part_err: crate::codes::UNKNOWN_TOPIC_OR_PARTITION,
-            })
+                }),
+                Err(AlterPartitionSendError::Rejected {
+                    global_err: crate::codes::UNKNOWN_SERVER_ERROR,
+                    part_err: crate::codes::UNKNOWN_TOPIC_OR_PARTITION,
+                }),
+            )
         );
     }
 }

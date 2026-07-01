@@ -154,10 +154,13 @@ mod tests {
 
         let snapshot = snapshot_mtimes(&cfg);
 
+        let expected = PathMtimes {
+            cert: read_mtime(&cert),
+            key: read_mtime(&key),
+            client_ca: read_mtime(&ca),
+        };
         assert!(snapshot != PathMtimes::default());
-        assert!(snapshot.cert == read_mtime(&cert));
-        assert!(snapshot.key == read_mtime(&key));
-        assert!(snapshot.client_ca == read_mtime(&ca));
+        assert!(snapshot == expected);
     }
 
     #[tokio::test(start_paused = true)]

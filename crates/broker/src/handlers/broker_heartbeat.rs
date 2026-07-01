@@ -484,30 +484,46 @@ mod tests {
 
     #[test]
     fn leader_predicate_matches_current_node_only() {
-        assert!(is_controller_leader(Some(1), 1));
-        assert!(!is_controller_leader(Some(2), 1));
-        assert!(!is_controller_leader(None, 1));
+        assert!(
+            (
+                is_controller_leader(Some(1), 1),
+                is_controller_leader(Some(2), 1),
+                is_controller_leader(None, 1),
+            ) == (true, false, false)
+        );
     }
 
     #[test]
     fn heartbeat_response_builders_preserve_non_default_fields() {
-        let not_controller = not_controller_response();
-        assert!(not_controller.error_code == codes::NOT_CONTROLLER);
-        assert!(!not_controller.is_caught_up);
-        assert!(not_controller.is_fenced);
-        assert!(!not_controller.should_shut_down);
+        let expected_not_controller = BrokerHeartbeatResponse {
+            throttle_time_ms: 0,
+            error_code: codes::NOT_CONTROLLER,
+            is_caught_up: false,
+            is_fenced: true,
+            should_shut_down: false,
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+        };
+        assert!(not_controller_response() == expected_not_controller);
 
-        let success = success_response(true);
-        assert!(success.error_code == codes::NONE);
-        assert!(success.is_caught_up);
-        assert!(!success.is_fenced);
-        assert!(success.should_shut_down);
+        let expected_success = BrokerHeartbeatResponse {
+            throttle_time_ms: 0,
+            error_code: codes::NONE,
+            is_caught_up: true,
+            is_fenced: false,
+            should_shut_down: true,
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+        };
+        assert!(success_response(true) == expected_success);
 
-        let denied = denied_response_body();
-        assert!(denied.error_code == codes::CLUSTER_AUTHORIZATION_FAILED);
-        assert!(!denied.is_caught_up);
-        assert!(denied.is_fenced);
-        assert!(!denied.should_shut_down);
+        let expected_denied = BrokerHeartbeatResponse {
+            throttle_time_ms: 0,
+            error_code: codes::CLUSTER_AUTHORIZATION_FAILED,
+            is_caught_up: false,
+            is_fenced: true,
+            should_shut_down: false,
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+        };
+        assert!(denied_response_body() == expected_denied);
     }
 
     #[test]
@@ -539,17 +555,25 @@ mod tests {
 
         let recoveries = failover_offline_dirs(&controller, 1, &offline, &liveness, &metrics).await;
 
-        // Exactly one change must have been submitted (the new leader record).
+        // Exactly one change must have been submitted (the new leader record):
+        // broker 2 is elected (broker 1's dir is offline), the offline replica
+        // is dropped from the ISR, and both epochs are bumped.
         let changes = captured.lock().unwrap();
-        assert!(changes.len() == 1);
-        let MetadataRecord::V1Partition(pr) = &changes[0] else {
-            panic!("expected V1Partition change")
-        };
-        // Broker 2 should be elected (broker 1's dir is offline).
-        assert!(pr.leader == 2);
-        assert!(pr.isr == vec![2]);
+        let expected_changes = vec![MetadataRecord::V1Partition(PartitionRecord {
+            topic: "t".into(),
+            partition: 0,
+            leader: 2,
+            replicas: vec![1, 2],
+            isr: vec![2],
+            leader_epoch: 6,
+            adding_replicas: vec![],
+            removing_replicas: vec![],
+            directories: vec![bad, good],
+            partition_epoch: 1,
+        })];
+        assert!(*changes == expected_changes);
         // No unclean recovery needed (broker 2 is alive and in ISR).
-        assert!(recoveries.is_empty());
+        assert!(recoveries == vec![]);
     }
 
     #[tokio::test]
@@ -687,10 +711,15 @@ mod tests {
             .expect("BrokerHeartbeat handler");
         let resp = decode_response(version, &bytes);
 
-        assert!(resp.error_code == codes::NONE, "{resp:?}");
-        assert!(resp.is_caught_up, "{resp:?}");
-        assert!(!resp.is_fenced, "{resp:?}");
-        assert!(!resp.should_shut_down, "{resp:?}");
+        let expected = BrokerHeartbeatResponse {
+            throttle_time_ms: 0,
+            error_code: codes::NONE,
+            is_caught_up: true,
+            is_fenced: false,
+            should_shut_down: false,
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected, "{resp:?}");
 
         broker_handle.shutdown().await;
     }

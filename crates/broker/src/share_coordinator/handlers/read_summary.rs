@@ -97,6 +97,7 @@ pub(crate) fn handle(
 mod tests {
     use super::*;
     use assert2::assert;
+    use crabka_protocol::UnknownTaggedFields;
     use crabka_protocol::owned::read_share_group_state_summary_request::{
         PartitionData, ReadShareGroupStateSummaryRequest, ReadStateSummaryData,
     };
@@ -177,17 +178,24 @@ mod tests {
             .expect("handle");
         let resp = decode(&bytes);
 
-        assert!(resp.results.len() == 1);
-        assert!(resp.results[0].topic_id == wire_topic_id);
-        assert!(resp.results[0].partitions.len() == 1);
-        let partition = &resp.results[0].partitions[0];
-        assert!(partition.partition == 4);
-        assert!(partition.error_code == codes::NONE);
-        assert!(partition.error_message.is_none());
-        assert!(partition.state_epoch == 17);
-        assert!(partition.leader_epoch == 3);
-        assert!(partition.start_offset == 101);
-        assert!(partition.delivery_complete_count == 9);
+        let expected = ReadShareGroupStateSummaryResponse {
+            results: vec![ReadStateSummaryResult {
+                topic_id: wire_topic_id,
+                partitions: vec![PartitionResult {
+                    partition: 4,
+                    error_code: codes::NONE,
+                    error_message: None,
+                    state_epoch: 17,
+                    leader_epoch: 3,
+                    start_offset: 101,
+                    delivery_complete_count: 9,
+                    unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                }],
+                unknown_tagged_fields: UnknownTaggedFields(vec![]),
+            }],
+            unknown_tagged_fields: UnknownTaggedFields(vec![]),
+        };
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -209,17 +217,24 @@ mod tests {
             .expect("handle");
         let resp = decode(&bytes);
 
-        assert!(resp.results.len() == 1);
-        assert!(resp.results[0].topic_id == topic_id);
-        assert!(resp.results[0].partitions.len() == 1);
-        let partition = &resp.results[0].partitions[0];
-        assert!(partition.partition == 6);
-        assert!(partition.error_code == codes::NONE);
-        assert!(partition.error_message.is_none());
-        assert!(partition.state_epoch == 0);
-        assert!(partition.leader_epoch == 0);
-        assert!(partition.start_offset == -1);
-        assert!(partition.delivery_complete_count == 0);
+        let expected = ReadShareGroupStateSummaryResponse {
+            results: vec![ReadStateSummaryResult {
+                topic_id,
+                partitions: vec![PartitionResult {
+                    partition: 6,
+                    error_code: codes::NONE,
+                    error_message: None,
+                    state_epoch: 0,
+                    leader_epoch: 0,
+                    start_offset: -1,
+                    delivery_complete_count: 0,
+                    unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                }],
+                unknown_tagged_fields: UnknownTaggedFields(vec![]),
+            }],
+            unknown_tagged_fields: UnknownTaggedFields(vec![]),
+        };
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -236,17 +251,24 @@ mod tests {
             .expect("handle");
         let resp = decode(&bytes);
 
-        assert!(resp.results.len() == 1);
-        assert!(resp.results[0].topic_id == topic_id);
-        assert!(resp.results[0].partitions.len() == 1);
-        let partition = &resp.results[0].partitions[0];
-        assert!(partition.partition == 8);
-        assert!(partition.error_code == codes::NOT_COORDINATOR);
-        assert!(partition.error_message.is_none());
-        assert!(partition.state_epoch == 0);
-        assert!(partition.leader_epoch == 0);
-        assert!(partition.start_offset == -1);
-        assert!(partition.delivery_complete_count == 0);
+        let expected = ReadShareGroupStateSummaryResponse {
+            results: vec![ReadStateSummaryResult {
+                topic_id,
+                partitions: vec![PartitionResult {
+                    partition: 8,
+                    error_code: codes::NOT_COORDINATOR,
+                    error_message: None,
+                    state_epoch: 0,
+                    leader_epoch: 0,
+                    start_offset: -1,
+                    delivery_complete_count: 0,
+                    unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                }],
+                unknown_tagged_fields: UnknownTaggedFields(vec![]),
+            }],
+            unknown_tagged_fields: UnknownTaggedFields(vec![]),
+        };
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 }

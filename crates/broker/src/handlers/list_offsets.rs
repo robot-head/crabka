@@ -310,10 +310,7 @@ mod tests {
 
     #[test]
     fn sentinel_constants_match_kafka_wire_values() {
-        assert!(EARLIEST == -2);
-        assert!(LATEST == -1);
-        assert!(MAX_TIMESTAMP == -3);
-        assert!(EARLIEST_LOCAL == -4);
+        assert!((EARLIEST, LATEST, MAX_TIMESTAMP, EARLIEST_LOCAL) == (-2, -1, -3, -4));
     }
 
     #[test]
@@ -405,17 +402,24 @@ mod tests {
             .expect("handle");
         let resp = decode_response(&bytes, version);
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.topics.len() == 1, "{:?}", resp.topics);
-        let topic = &resp.topics[0];
-        assert!(topic.name == "orders");
-        assert!(topic.partitions.len() == 2, "{:?}", topic.partitions);
-        for (row, expected_partition) in topic.partitions.iter().zip([0, 2]) {
-            assert!(row.partition_index == expected_partition);
-            assert!(row.error_code == codes::TOPIC_AUTHORIZATION_FAILED);
-            assert!(row.timestamp == -1);
-            assert!(row.offset == -1);
-        }
+        let denied_row = |partition_index: i32| ListOffsetsPartitionResponse {
+            partition_index,
+            error_code: codes::TOPIC_AUTHORIZATION_FAILED,
+            timestamp: -1,
+            offset: -1,
+            leader_epoch: -1,
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+        };
+        let expected = ListOffsetsResponse {
+            throttle_time_ms: 0,
+            topics: vec![ListOffsetsTopicResponse {
+                name: "orders".to_string(),
+                partitions: vec![denied_row(0), denied_row(2)],
+                unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+            }],
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+        };
+        assert!(resp == expected, "{resp:?}");
         broker_handle.shutdown().await;
     }
 }

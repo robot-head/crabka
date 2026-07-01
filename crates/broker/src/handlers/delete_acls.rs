@@ -205,7 +205,7 @@ mod tests {
     use super::*;
     use assert2::assert;
     use crabka_metadata::{AclOperation, PatternType, PermissionType, ResourceType};
-    use crabka_protocol::Decode;
+    use crabka_protocol::{Decode, UnknownTaggedFields};
     use crabka_security::{AuthMethod, Principal};
     use std::net::SocketAddr;
     use std::sync::Arc;
@@ -348,13 +348,16 @@ mod tests {
 
         let built = build_filter(&f).expect("filter");
 
-        assert!(built.resource_type == Some(ResourceType::Topic));
-        assert!(built.resource_name.is_none());
-        assert!(built.pattern_type.is_none());
-        assert!(built.principal.is_none());
-        assert!(built.host.is_none());
-        assert!(built.operation.is_none());
-        assert!(built.permission_type.is_none());
+        let expected = AclEntryFilter {
+            resource_type: Some(ResourceType::Topic),
+            resource_name: None,
+            pattern_type: None,
+            principal: None,
+            host: None,
+            operation: None,
+            permission_type: None,
+        };
+        assert!(built == expected);
     }
 
     #[test]
@@ -375,15 +378,19 @@ mod tests {
     #[test]
     fn helpers_preserve_matching_acl_and_submit_error_fields() {
         let matched = matching_acl_result(&acl("orders", "User:alice", AclOperation::Read));
-        assert!(matched.error_code == codes::NONE);
-        assert!(matched.error_message.is_none());
-        assert!(matched.resource_type == RESOURCE_TYPE_TOPIC);
-        assert!(matched.resource_name == "orders");
-        assert!(matched.pattern_type == PATTERN_TYPE_LITERAL);
-        assert!(matched.principal == "User:alice");
-        assert!(matched.host == "*");
-        assert!(matched.operation == OPERATION_READ);
-        assert!(matched.permission_type == PERMISSION_ALLOW);
+        let expected_matched = DeleteAclsMatchingAcl {
+            error_code: codes::NONE,
+            error_message: None,
+            resource_type: RESOURCE_TYPE_TOPIC,
+            resource_name: "orders".into(),
+            pattern_type: PATTERN_TYPE_LITERAL,
+            principal: "User:alice".into(),
+            host: "*".into(),
+            operation: OPERATION_READ,
+            permission_type: PERMISSION_ALLOW,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(matched == expected_matched);
 
         let mut prefixed_acl = acl("orders-", "User:bob", AclOperation::Write);
         prefixed_acl.pattern_type = PatternType::Prefixed;
@@ -392,7 +399,7 @@ mod tests {
         assert!(matched.operation == OPERATION_WRITE);
 
         let mut results = vec![
-            filter_result(codes::NONE, None, vec![matched]),
+            filter_result(codes::NONE, None, vec![matched.clone()]),
             filter_result(
                 codes::INVALID_REQUEST,
                 Some("malformed filter axis".into()),
@@ -401,10 +408,21 @@ mod tests {
         ];
         apply_submit_error(&mut results, "not controller");
 
-        assert!(results[0].error_code == codes::COORDINATOR_NOT_AVAILABLE);
-        assert!(results[0].error_message.as_deref() == Some("submit failed: not controller"));
-        assert!(results[1].error_code == codes::INVALID_REQUEST);
-        assert!(results[1].error_message.as_deref() == Some("malformed filter axis"));
+        let expected_results = vec![
+            DeleteAclsFilterResult {
+                error_code: codes::COORDINATOR_NOT_AVAILABLE,
+                error_message: Some("submit failed: not controller".into()),
+                matching_acls: vec![matched],
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            },
+            DeleteAclsFilterResult {
+                error_code: codes::INVALID_REQUEST,
+                error_message: Some("malformed filter axis".into()),
+                matching_acls: Vec::new(),
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            },
+        ];
+        assert!(results == expected_results);
     }
 
     #[test]
@@ -430,9 +448,11 @@ mod tests {
 
         let resources = deleted_acl_resources(&[ok, failed]);
 
-        assert!(resources.len() == 1);
-        assert!(resources[0].resource_type == "Acl");
-        assert!(resources[0].name == "orders");
+        let expected = vec![crabka_audit::AuditResource {
+            resource_type: "Acl".into(),
+            name: "orders".into(),
+        }];
+        assert!(resources == expected);
     }
 
     #[test]
@@ -468,12 +488,22 @@ mod tests {
         else {
             panic!("expected AdminOperation");
         };
-        assert!(outcome == crabka_audit::AuditOutcome::Success);
-        assert!(principal.name == "admin");
-        assert!(operation == "DeleteAcls");
-        assert!(resources.len() == 1);
-        assert!(resources[0].resource_type == "Acl");
-        assert!(resources[0].name == "orders");
+        assert!(
+            (
+                outcome,
+                principal.name.as_str(),
+                operation.as_str(),
+                resources
+            ) == (
+                crabka_audit::AuditOutcome::Success,
+                "admin",
+                "DeleteAcls",
+                vec![crabka_audit::AuditResource {
+                    resource_type: "Acl".into(),
+                    name: "orders".into(),
+                }],
+            )
+        );
     }
 
     #[test]
@@ -489,11 +519,17 @@ mod tests {
         .expect("encode");
         let resp = decode_response(&bytes);
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.filter_results.len() == 1);
-        assert!(resp.filter_results[0].error_code == codes::INVALID_REQUEST);
-        assert!(resp.filter_results[0].error_message.as_deref() == Some("malformed filter axis"));
-        assert!(resp.filter_results[0].matching_acls.is_empty());
+        let expected = DeleteAclsResponse {
+            throttle_time_ms: 0,
+            filter_results: vec![DeleteAclsFilterResult {
+                error_code: codes::INVALID_REQUEST,
+                error_message: Some("malformed filter axis".into()),
+                matching_acls: Vec::new(),
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            }],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
     }
 
     #[tokio::test]
@@ -516,13 +552,18 @@ mod tests {
         let resp = handle(&broker, req, &ctx, VERSION).await.expect("handle");
         let resp = decode_response(&resp);
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.filter_results.len() == 2);
-        for result in &resp.filter_results {
-            assert!(result.error_code == codes::CLUSTER_AUTHORIZATION_FAILED);
-            assert!(result.error_message.as_deref() == Some("delete-acls denied"));
-            assert!(result.matching_acls.is_empty());
-        }
+        let denied = DeleteAclsFilterResult {
+            error_code: codes::CLUSTER_AUTHORIZATION_FAILED,
+            error_message: Some("delete-acls denied".into()),
+            matching_acls: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        let expected = DeleteAclsResponse {
+            throttle_time_ms: 0,
+            filter_results: vec![denied.clone(), denied],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
         assert!(all_acls(&broker_handle).len() == 1);
         broker_handle.shutdown().await;
     }
@@ -548,24 +589,31 @@ mod tests {
         let resp = handle(&broker, req, &ctx, VERSION).await.expect("handle");
         let resp = decode_response(&resp);
 
-        assert!(resp.filter_results.len() == 1);
-        let result = &resp.filter_results[0];
-        assert!(result.error_code == codes::NONE);
-        assert!(result.error_message.is_none());
-        assert!(result.matching_acls.len() == 1);
-        let matched = &result.matching_acls[0];
-        assert!(matched.resource_type == RESOURCE_TYPE_TOPIC);
-        assert!(matched.resource_name == "orders");
-        assert!(matched.pattern_type == PATTERN_TYPE_LITERAL);
-        assert!(matched.principal == "User:alice");
-        assert!(matched.host == "*");
-        assert!(matched.operation == OPERATION_READ);
-        assert!(matched.permission_type == PERMISSION_ALLOW);
+        let expected = DeleteAclsResponse {
+            throttle_time_ms: 0,
+            filter_results: vec![DeleteAclsFilterResult {
+                error_code: codes::NONE,
+                error_message: None,
+                matching_acls: vec![DeleteAclsMatchingAcl {
+                    error_code: codes::NONE,
+                    error_message: None,
+                    resource_type: RESOURCE_TYPE_TOPIC,
+                    resource_name: "orders".into(),
+                    pattern_type: PATTERN_TYPE_LITERAL,
+                    principal: "User:alice".into(),
+                    host: "*".into(),
+                    operation: OPERATION_READ,
+                    permission_type: PERMISSION_ALLOW,
+                    unknown_tagged_fields: UnknownTaggedFields::default(),
+                }],
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            }],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
 
         let remaining = all_acls(&broker_handle);
-        assert!(remaining.len() == 1);
-        assert!(remaining[0].resource_name == "payments");
-        assert!(remaining[0].principal == "User:bob");
+        assert!(remaining == vec![acl("payments", "User:bob", AclOperation::Write)]);
         broker_handle.shutdown().await;
     }
 }

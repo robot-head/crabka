@@ -76,9 +76,7 @@ mod tests {
         bytes.resize(4 + payload_len, 0xA5);
 
         let decoded = codec().decode(&mut bytes).expect("decode").expect("frame");
-        assert!(decoded.len() == payload_len);
-        assert!(decoded[0] == 0xA5);
-        assert!(decoded[payload_len - 1] == 0xA5);
+        assert!((decoded.len(), decoded[0], decoded[payload_len - 1]) == (payload_len, 0xA5, 0xA5));
     }
 
     #[test]

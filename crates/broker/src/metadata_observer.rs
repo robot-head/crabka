@@ -409,13 +409,17 @@ mod tests {
         // In-range picks each distinct voter. `idx / len` (the `%`→`/` mutant)
         // would collapse 1 and 2 to index 0 ("a"), so distinguishing 0/1/2 here
         // proves the modulo, not integer division, indexes the list.
-        assert!(voter_at(&voters, 0).0 == 1);
-        assert!(voter_at(&voters, 1).0 == 2);
-        assert!(voter_at(&voters, 2).0 == 3);
         // Wrap-around: index 3 must rotate back to the first voter (3 % 3 == 0);
         // `3 / 3 == 1` would return the second voter instead.
-        assert!(voter_at(&voters, 3).0 == 1);
-        assert!(voter_at(&voters, 4).0 == 2);
+        assert!(
+            (
+                voter_at(&voters, 0).0,
+                voter_at(&voters, 1).0,
+                voter_at(&voters, 2).0,
+                voter_at(&voters, 3).0,
+                voter_at(&voters, 4).0,
+            ) == (1, 2, 3, 1, 2)
+        );
     }
 
     #[test]

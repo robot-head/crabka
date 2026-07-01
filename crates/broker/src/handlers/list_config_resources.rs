@@ -323,35 +323,60 @@ mod tests {
         let out = collect_resources(&img, 1, &[]);
         // 2 topics + 2 brokers + 0 client_metrics = 4 entries, sorted by
         // (type, name): topics (type 2) before brokers (type 4).
-        assert!(out.len() == 4);
-        assert!(out[0].resource_type == RESOURCE_TYPE_TOPIC);
-        assert!(out[0].resource_name == "t-a");
-        assert!(out[1].resource_type == RESOURCE_TYPE_TOPIC);
-        assert!(out[1].resource_name == "t-b");
-        assert!(out[2].resource_type == RESOURCE_TYPE_BROKER);
-        assert!(out[2].resource_name == "1");
-        assert!(out[3].resource_type == RESOURCE_TYPE_BROKER);
-        assert!(out[3].resource_name == "2");
+        let expected = vec![
+            ConfigResource {
+                resource_name: "t-a".to_string(),
+                resource_type: RESOURCE_TYPE_TOPIC,
+                unknown_tagged_fields: Default::default(),
+            },
+            ConfigResource {
+                resource_name: "t-b".to_string(),
+                resource_type: RESOURCE_TYPE_TOPIC,
+                unknown_tagged_fields: Default::default(),
+            },
+            ConfigResource {
+                resource_name: "1".to_string(),
+                resource_type: RESOURCE_TYPE_BROKER,
+                unknown_tagged_fields: Default::default(),
+            },
+            ConfigResource {
+                resource_name: "2".to_string(),
+                resource_type: RESOURCE_TYPE_BROKER,
+                unknown_tagged_fields: Default::default(),
+            },
+        ];
+        assert!(out == expected);
     }
 
     #[test]
     fn v1_explicit_topic_only_filter_skips_brokers() {
         let img = image_with_topics_and_brokers(&["t-a"], &[1, 2]);
         let out = collect_resources(&img, 1, &[RESOURCE_TYPE_TOPIC]);
-        assert!(out.len() == 1);
-        assert!(out[0].resource_type == RESOURCE_TYPE_TOPIC);
-        assert!(out[0].resource_name == "t-a");
+        let expected = vec![ConfigResource {
+            resource_name: "t-a".to_string(),
+            resource_type: RESOURCE_TYPE_TOPIC,
+            unknown_tagged_fields: Default::default(),
+        }];
+        assert!(out == expected);
     }
 
     #[test]
     fn v1_explicit_broker_only_filter_skips_topics() {
         let img = image_with_topics_and_brokers(&["t-a", "t-b"], &[5, 7]);
         let out = collect_resources(&img, 1, &[RESOURCE_TYPE_BROKER]);
-        assert!(out.len() == 2);
-        assert!(out[0].resource_type == RESOURCE_TYPE_BROKER);
-        assert!(out[0].resource_name == "5");
-        assert!(out[1].resource_type == RESOURCE_TYPE_BROKER);
-        assert!(out[1].resource_name == "7");
+        let expected = vec![
+            ConfigResource {
+                resource_name: "5".to_string(),
+                resource_type: RESOURCE_TYPE_BROKER,
+                unknown_tagged_fields: Default::default(),
+            },
+            ConfigResource {
+                resource_name: "7".to_string(),
+                resource_type: RESOURCE_TYPE_BROKER,
+                unknown_tagged_fields: Default::default(),
+            },
+        ];
+        assert!(out == expected);
     }
 
     #[test]
@@ -377,9 +402,19 @@ mod tests {
                 RESOURCE_TYPE_BROKER,
             ],
         );
-        assert!(out.len() == 2);
-        assert!(out[0].resource_type == RESOURCE_TYPE_TOPIC);
-        assert!(out[1].resource_type == RESOURCE_TYPE_BROKER);
+        let expected = vec![
+            ConfigResource {
+                resource_name: "t-a".to_string(),
+                resource_type: RESOURCE_TYPE_TOPIC,
+                unknown_tagged_fields: Default::default(),
+            },
+            ConfigResource {
+                resource_name: "1".to_string(),
+                resource_type: RESOURCE_TYPE_BROKER,
+                unknown_tagged_fields: Default::default(),
+            },
+        ];
+        assert!(out == expected);
     }
 
     #[test]
@@ -409,9 +444,13 @@ mod tests {
             .expect("handle");
         let resp = decode_response(&bytes);
 
-        assert!(resp.error_code == codes::CLUSTER_AUTHORIZATION_FAILED);
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.config_resources.is_empty());
+        let expected = ListConfigResourcesResponse {
+            throttle_time_ms: 0,
+            error_code: codes::CLUSTER_AUTHORIZATION_FAILED,
+            config_resources: vec![],
+            unknown_tagged_fields: Default::default(),
+        };
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 

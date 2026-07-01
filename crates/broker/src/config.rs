@@ -1043,10 +1043,23 @@ mod tests {
     #[test]
     fn kafka_rlmm_config_default_has_sane_topic_settings() {
         let c = KafkaRlmmConfig::default();
-        assert!(c.num_partitions == 50);
-        assert!(c.replication == 3);
-        assert!(c.bootstrap.is_empty());
-        assert!(c.snapshot_dir.as_os_str().is_empty());
+        assert!(
+            (
+                c.num_partitions,
+                c.replication,
+                c.bootstrap,
+                c.snapshot_dir,
+                c.snapshot_interval,
+                c.security.is_none(),
+            ) == (
+                50,
+                3,
+                String::new(),
+                std::path::PathBuf::new(),
+                DEFAULT_RLMM_SNAPSHOT_INTERVAL,
+                true,
+            )
+        );
     }
 
     #[test]
@@ -1206,11 +1219,10 @@ mod tests {
     #[test]
     fn defaults_to_combined_roles() {
         let d = BrokerConfig::default();
-        assert!(d.is_controller(), "default node is a controller");
-        assert!(d.is_broker(), "default node is a broker");
         assert!(
-            d.roles == vec![NodeRole::Controller, NodeRole::Broker],
-            "default roles are the combined set"
+            (d.is_controller(), d.is_broker(), d.roles)
+                == (true, true, vec![NodeRole::Controller, NodeRole::Broker]),
+            "default node is a combined controller+broker with the combined role set"
         );
 
         let t = BrokerConfig::for_tests(std::path::PathBuf::from("/tmp"));
@@ -1365,9 +1377,13 @@ mod tests {
     #[test]
     fn auto_leader_rebalance_defaults_to_true_in_default() {
         let c = BrokerConfig::default();
-        assert!(c.auto_leader_rebalance_enable);
-        assert!(c.leader_imbalance_check_interval_secs == 300);
-        assert!(c.leader_imbalance_per_broker_percentage == 10);
+        assert!(
+            (
+                c.auto_leader_rebalance_enable,
+                c.leader_imbalance_check_interval_secs,
+                c.leader_imbalance_per_broker_percentage,
+            ) == (true, 300, 10)
+        );
     }
 
     #[test]

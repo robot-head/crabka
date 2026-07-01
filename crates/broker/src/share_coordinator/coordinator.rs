@@ -608,10 +608,8 @@ mod tests {
         let st = coord.read("g", tid, 0).await.expect("present");
         assert!(st.state_epoch == 5);
         assert!(st.start_offset == 100);
-        let (se, _le, so, dcc) = coord.read_summary("g", tid, 0).await.expect("present");
-        assert!(se == 5);
-        assert!(so == 100);
-        assert!(dcc == 0);
+        let summary = coord.read_summary("g", tid, 0).await.expect("present");
+        assert!(summary == (5, 0, 100, 0));
     }
 
     #[tokio::test]
@@ -640,16 +638,18 @@ mod tests {
             .unwrap();
 
         let st = coord.read("g", tid, 0).await.expect("present");
-        assert!(st.start_offset == 50);
-        assert!(st.leader_epoch == 2);
-        assert!(st.delivery_complete_count == 7);
-        assert!(st.state_batches == vec![batch(50, 59)]);
+        assert!(
+            (
+                st.state_epoch,
+                st.leader_epoch,
+                st.start_offset,
+                st.delivery_complete_count,
+                st.state_batches.clone(),
+            ) == (1, 2, 50, 7, vec![batch(50, 59)])
+        );
 
-        let (se, le, so, dcc) = coord.read_summary("g", tid, 0).await.expect("present");
-        assert!(se == 1);
-        assert!(le == 2);
-        assert!(so == 50);
-        assert!(dcc == 7);
+        let summary = coord.read_summary("g", tid, 0).await.expect("present");
+        assert!(summary == (1, 2, 50, 7));
     }
 
     #[tokio::test]
@@ -755,10 +755,14 @@ mod tests {
         recovered.replay_led_partitions().await;
 
         let st = recovered.read("g", tid, 0).await.expect("recovered");
-        assert!(st.state_epoch == 2);
-        assert!(st.leader_epoch == 3);
-        assert!(st.start_offset == 20);
-        assert!(st.delivery_complete_count == 4);
-        assert!(st.state_batches == vec![batch(20, 29)]);
+        assert!(
+            (
+                st.state_epoch,
+                st.leader_epoch,
+                st.start_offset,
+                st.delivery_complete_count,
+                st.state_batches.clone(),
+            ) == (2, 3, 20, 4, vec![batch(20, 29)])
+        );
     }
 }

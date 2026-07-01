@@ -366,13 +366,17 @@ mod tests {
     fn build_table_registers_required_plain_handlers() {
         let table = build_table();
 
-        assert!(std::ptr::fn_addr_eq(
-            table.get(18).expect("ApiVersions is registered"),
-            api_versions::handle as HandlerFn
-        ));
-        assert!(table.get(59).is_some());
-        assert!(table.get(69).is_some());
-        assert!(table.get(89).is_some());
+        assert!(
+            (
+                std::ptr::fn_addr_eq(
+                    table.get(18).expect("ApiVersions is registered"),
+                    api_versions::handle as HandlerFn
+                ),
+                table.get(59).is_some(),
+                table.get(69).is_some(),
+                table.get(89).is_some()
+            ) == (true, true, true, true)
+        );
     }
 
     #[test]
@@ -464,15 +468,29 @@ mod tests {
                 resources,
                 ..
             } => {
-                assert!(outcome == crabka_audit::AuditOutcome::Success);
-                assert!(principal.name == "admin");
-                assert!(principal.auth_method == "SaslPlain");
-                assert!(source.ip == "192.0.2.10");
-                assert!(source.port == 9092);
-                assert!(operation == "CreateTopics");
-                assert!(resources.len() == 1);
-                assert!(resources[0].resource_type == "Topic");
-                assert!(resources[0].name == "orders");
+                assert!(
+                    (
+                        outcome,
+                        principal.name.as_str(),
+                        principal.auth_method.as_str(),
+                        source.ip.as_str(),
+                        source.port,
+                        operation.as_str(),
+                        resources.len(),
+                        resources[0].resource_type.as_str(),
+                        resources[0].name.as_str()
+                    ) == (
+                        crabka_audit::AuditOutcome::Success,
+                        "admin",
+                        "SaslPlain",
+                        "192.0.2.10",
+                        9092,
+                        "CreateTopics",
+                        1,
+                        "Topic",
+                        "orders"
+                    )
+                );
             }
             other => panic!("expected admin operation event, got {other:?}"),
         }

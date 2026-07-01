@@ -1130,11 +1130,16 @@ mod tests {
         ] {
             assert!(buf.contains(needle), "missing {needle} in:\n{buf}");
         }
-        assert!(buf.contains("topic=\"topic-a\""), "topic label missing");
-        // Values made it through.
-        assert!(buf.contains("100"), "bytes_in=100 missing");
-        assert!(buf.contains("50"), "bytes_out=50 missing");
-        assert!(buf.contains('7'), "partitions_led=7 missing");
+        // Topic label and values made it through.
+        assert!(
+            (
+                buf.contains("topic=\"topic-a\""),
+                buf.contains("100"),
+                buf.contains("50"),
+                buf.contains('7'),
+            ) == (true, true, true, true),
+            "expected topic label, bytes_in=100, bytes_out=50, partitions_led=7 in:\n{buf}"
+        );
     }
 
     #[test]
@@ -1195,16 +1200,20 @@ mod tests {
         m.record_authentication("PLAIN", false);
         m.record_authentication("SCRAM-SHA-256", true);
         m.record_authentication("Unknown", false);
-        // PLAIN: 2 successes, 1 failure.
-        assert!(m.successful_authentication.get_or_create(&plain).get() == 2);
-        assert!(m.failed_authentication.get_or_create(&plain).get() == 1);
-        // SCRAM-SHA-256: 1 success, 0 failures (must not lazily
-        // allocate a failure entry from the success bump).
-        assert!(m.successful_authentication.get_or_create(&scram).get() == 1);
-        // ILLEGAL_SASL_STATE: 0 successes, 1 failure under the
-        // `Unknown` sentinel.
-        assert!(m.failed_authentication.get_or_create(&unknown).get() == 1);
-        assert!(m.successful_authentication.get_or_create(&unknown).get() == 0);
+        // PLAIN: 2 successes, 1 failure. SCRAM-SHA-256: 1 success, 0
+        // failures (must not lazily allocate a failure entry from the
+        // success bump). ILLEGAL_SASL_STATE: 0 successes, 1 failure
+        // under the `Unknown` sentinel.
+        // Each read is its own statement: `get_or_create` returns a
+        // read guard, and a first-materialization on the same family
+        // takes the write lock — holding several guards in one
+        // expression self-deadlocks.
+        let plain_ok = m.successful_authentication.get_or_create(&plain).get();
+        let plain_fail = m.failed_authentication.get_or_create(&plain).get();
+        let scram_ok = m.successful_authentication.get_or_create(&scram).get();
+        let unknown_fail = m.failed_authentication.get_or_create(&unknown).get();
+        let unknown_ok = m.successful_authentication.get_or_create(&unknown).get();
+        assert!((plain_ok, plain_fail, scram_ok, unknown_fail, unknown_ok) == (2, 1, 1, 1, 0));
     }
 
     #[test]
@@ -1228,9 +1237,10 @@ mod tests {
         m.record_client_software("crabka", "1.0.1");
         m.record_client_software("other-lib", "1.0.0");
 
-        assert!(m.client_software_versions.get_or_create(&crabka_100).get() == 2);
-        assert!(m.client_software_versions.get_or_create(&crabka_101).get() == 1);
-        assert!(m.client_software_versions.get_or_create(&other).get() == 1);
+        let v100 = m.client_software_versions.get_or_create(&crabka_100).get();
+        let v101 = m.client_software_versions.get_or_create(&crabka_101).get();
+        let vother = m.client_software_versions.get_or_create(&other).get();
+        assert!((v100, v101, vother) == (2, 1, 1));
     }
 
     #[tokio::test]
@@ -1269,11 +1279,15 @@ mod tests {
             topic: "t".into(),
             partition: 1,
         };
-        assert!(m.partition_bytes_in.get_or_create(&lbl_p0).get() == 1024);
-        assert!(m.partition_bytes_in.get_or_create(&lbl_p1).get() == 512);
-        assert!(m.partition_bytes_out.get_or_create(&lbl_p0).get() == 2048);
-        assert!(m.partition_cpu_micros.get_or_create(&lbl_p0).get() == 500);
-        assert!(m.partition_disk_bytes.get_or_create(&lbl_p0).get() == 1_000_000);
+        let bytes_in_p0 = m.partition_bytes_in.get_or_create(&lbl_p0).get();
+        let bytes_in_p1 = m.partition_bytes_in.get_or_create(&lbl_p1).get();
+        let bytes_out_p0 = m.partition_bytes_out.get_or_create(&lbl_p0).get();
+        let cpu_p0 = m.partition_cpu_micros.get_or_create(&lbl_p0).get();
+        let disk_p0 = m.partition_disk_bytes.get_or_create(&lbl_p0).get();
+        assert!(
+            (bytes_in_p0, bytes_in_p1, bytes_out_p0, cpu_p0, disk_p0)
+                == (1024, 512, 2048, 500, 1_000_000)
+        );
     }
 
     #[test]
@@ -1294,13 +1308,14 @@ mod tests {
         let bad = TopicLabel {
             topic: "t-bad".into(),
         };
-        assert!(m.topic_failed_produce_requests.get_or_create(&good).get() == 2);
-        assert!(m.topic_failed_produce_requests.get_or_create(&bad).get() == 1);
-        assert!(m.topic_failed_fetch_requests.get_or_create(&good).get() == 1);
         // t-bad never saw a failed fetch — series is materialized by
         // `get_or_create` at read time but its value is 0, which is
         // what `rate(failed_fetch{topic="t-bad"}[1m])` should compute.
-        assert!(m.topic_failed_fetch_requests.get_or_create(&bad).get() == 0);
+        let produce_good = m.topic_failed_produce_requests.get_or_create(&good).get();
+        let produce_bad = m.topic_failed_produce_requests.get_or_create(&bad).get();
+        let fetch_good = m.topic_failed_fetch_requests.get_or_create(&good).get();
+        let fetch_bad = m.topic_failed_fetch_requests.get_or_create(&bad).get();
+        assert!((produce_good, produce_bad, fetch_good, fetch_bad) == (2, 1, 1, 0));
     }
 
     #[test]
@@ -1366,10 +1381,18 @@ mod tests {
         let payments = TopicLabel {
             topic: "payments".into(),
         };
-        assert!(m.produce_message_conversions.get_or_create(&orders).get() == 2);
-        assert!(m.produce_message_conversions.get_or_create(&payments).get() == 1);
-        assert!(m.fetch_message_conversions.get_or_create(&orders).get() == 1);
-        assert!(m.fetch_message_conversions.get_or_create(&payments).get() == 2);
+        let produce_orders = m.produce_message_conversions.get_or_create(&orders).get();
+        let produce_payments = m.produce_message_conversions.get_or_create(&payments).get();
+        let fetch_orders = m.fetch_message_conversions.get_or_create(&orders).get();
+        let fetch_payments = m.fetch_message_conversions.get_or_create(&payments).get();
+        assert!(
+            (
+                produce_orders,
+                produce_payments,
+                fetch_orders,
+                fetch_payments
+            ) == (2, 1, 1, 2)
+        );
     }
 
     #[test]
@@ -1389,13 +1412,21 @@ mod tests {
         let unknown = ApiKeyLabel {
             api_key: "Unknown".into(),
         };
-        assert!(m.unsupported_api_requests.get_or_create(&produce).get() == 1);
-        assert!(m.unsupported_api_requests.get_or_create(&unknown).get() == 1);
         // `record_unsupported_api_request` does NOT also bump
         // `api_requests`; the dispatcher already did that for the
         // request in question via `record_api_request`.
-        assert!(m.api_requests.get_or_create(&produce).get() == 0);
-        assert!(m.api_requests.get_or_create(&unknown).get() == 0);
+        let unsupported_produce = m.unsupported_api_requests.get_or_create(&produce).get();
+        let unsupported_unknown = m.unsupported_api_requests.get_or_create(&unknown).get();
+        let api_produce = m.api_requests.get_or_create(&produce).get();
+        let api_unknown = m.api_requests.get_or_create(&unknown).get();
+        assert!(
+            (
+                unsupported_produce,
+                unsupported_unknown,
+                api_produce,
+                api_unknown
+            ) == (1, 1, 0, 0)
+        );
     }
 
     #[test]
@@ -1416,9 +1447,10 @@ mod tests {
         let unknown = ApiKeyLabel {
             api_key: "Unknown".into(),
         };
-        assert!(m.api_requests.get_or_create(&produce).get() == 2);
-        assert!(m.api_requests.get_or_create(&fetch).get() == 1);
-        assert!(m.api_requests.get_or_create(&unknown).get() == 1);
+        let produce_count = m.api_requests.get_or_create(&produce).get();
+        let fetch_count = m.api_requests.get_or_create(&fetch).get();
+        let unknown_count = m.api_requests.get_or_create(&unknown).get();
+        assert!((produce_count, fetch_count, unknown_count) == (2, 1, 1));
     }
 
     #[test]
@@ -1450,10 +1482,11 @@ mod tests {
             topic: "orders".into(),
             partition: 4,
         };
-        assert!(m.replication_bytes_in.get_or_create(&lbl3).get() == 4_000);
-        assert!(m.replication_bytes_in.get_or_create(&lbl4).get() == 100);
-        assert!(m.replication_bytes_out.get_or_create(&lbl3).get() == 4_000);
-        assert!(m.replication_bytes_out.get_or_create(&lbl4).get() == 0);
+        let in_p3 = m.replication_bytes_in.get_or_create(&lbl3).get();
+        let in_p4 = m.replication_bytes_in.get_or_create(&lbl4).get();
+        let out_p3 = m.replication_bytes_out.get_or_create(&lbl3).get();
+        let out_p4 = m.replication_bytes_out.get_or_create(&lbl4).get();
+        assert!((in_p3, in_p4, out_p3, out_p4) == (4_000, 100, 4_000, 0));
     }
 
     #[tokio::test]

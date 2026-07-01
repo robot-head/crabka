@@ -368,20 +368,23 @@ async fn drained_streams_group_downgrades_and_preserves_offsets() {
     // ── Phase 1: form a streams group, commit offset 42, then leave. ──
     let (member_id, resp) =
         streams_join_and_converge(&streams_client, "g", topology("in"), 1, 15).await;
-    assert!(resp.error_code == ERR_NONE, "streams converge: {resp:?}");
+    let group_type = broker.group_type_for_test("g");
+    let empty_waiter_timed_out = tokio::time::timeout(
+        std::time::Duration::from_millis(75),
+        broker.wait_until_streams_group_empty("g"),
+    )
+    .await
+    .is_err();
     assert!(
-        broker.group_type_for_test("g")
-            == Some(crabka_broker::coordinator::unified::GroupType::Streams),
-        "precondition: group must be Streams before downgrade"
-    );
-    assert!(
-        tokio::time::timeout(
-            std::time::Duration::from_millis(75),
-            broker.wait_until_streams_group_empty("g"),
-        )
-        .await
-        .is_err(),
-        "streams-group-empty waiter must not complete while a member is live"
+        (resp.error_code, group_type, empty_waiter_timed_out)
+            == (
+                ERR_NONE,
+                Some(crabka_broker::coordinator::unified::GroupType::Streams),
+                true,
+            ),
+        "streams member must converge on a Streams-typed group (precondition for the \
+         downgrade) whose streams-group-empty waiter does not complete while a member \
+         is live: {resp:?}"
     );
 
     // Commit offset 42 via the simple-consumer path (empty member_id, epoch

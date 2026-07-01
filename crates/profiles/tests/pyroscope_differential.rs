@@ -112,10 +112,16 @@ async fn real_pyroscope_render_matches_crabka_after_identical_ingest() -> TestRe
     )
     .await?;
 
-    assert!(flame_ticks(&pyroscope_render).is_some_and(|ticks| ticks > 0));
-    assert!(flame_ticks(&crabka_render).is_some_and(|ticks| ticks > 0));
-    assert!(flame_names(&pyroscope_render).contains("runtime/pprof.profileWriter"));
-    assert!(flame_names(&crabka_render).contains("runtime/pprof.profileWriter"));
+    assert_eq!(
+        (
+            flame_ticks(&pyroscope_render).is_some_and(|ticks| ticks > 0),
+            flame_ticks(&crabka_render).is_some_and(|ticks| ticks > 0),
+            flame_names(&pyroscope_render).contains("runtime/pprof.profileWriter"),
+            flame_names(&crabka_render).contains("runtime/pprof.profileWriter"),
+        ),
+        (true, true, true, true),
+        "both renders must report positive ticks and contain runtime/pprof.profileWriter"
+    );
     assert_flamebearer_equal(&pyroscope_render, &crabka_render)?;
 
     assert_profile_types_match(&client, &pyroscope_base, &crabka.querier_base).await?;
@@ -2297,17 +2303,14 @@ async fn grafana_renders_crabka_profiles_end_to_end() -> TestResult {
             positive && names.contains(FUNC_WORK)
         })
         .await?;
-    assert!(
-        names_a.contains(FUNC_WORK),
-        "Grafana query did not return {FUNC_WORK}: {names_a:?}"
-    );
-    assert!(
-        names_a.contains(FUNC_HOT),
-        "Grafana query did not return {FUNC_HOT}: {names_a:?}"
-    );
-    assert!(
-        positive_a,
-        "Grafana query returned no positive sample value"
+    assert_eq!(
+        (
+            names_a.contains(FUNC_WORK),
+            names_a.contains(FUNC_HOT),
+            positive_a,
+        ),
+        (true, true, true),
+        "Grafana query must return {FUNC_WORK} and {FUNC_HOT} with a positive sample value: {names_a:?}"
     );
 
     // 5. Multi-tenant isolation THROUGH Grafana: tenant-b's datasource must not see any of

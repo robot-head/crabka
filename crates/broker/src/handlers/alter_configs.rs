@@ -288,39 +288,54 @@ mod tests {
         )
         .await;
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.responses.len() == 1);
-        assert!(resp.responses[0].error_code == codes::INVALID_RESOURCE_TYPE);
-        assert!(
-            resp.responses[0]
-                .error_message
-                .as_deref()
-                .is_some_and(|m| { m.contains("resource_type=77") && m.contains("not supported") })
-        );
-        assert!(resp.responses[0].resource_type == 77);
-        assert!(resp.responses[0].resource_name == "mystery");
+        let expected = AlterConfigsResponse {
+            throttle_time_ms: 0,
+            responses: vec![AlterConfigsResourceResponse {
+                error_code: codes::INVALID_RESOURCE_TYPE,
+                error_message: Some("resource_type=77 not supported".to_string()),
+                resource_type: 77,
+                resource_name: "mystery".to_string(),
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            }],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
     }
 
     #[tokio::test]
     async fn topic_resource_denial_uses_topic_authorization_error() {
         let resp = drive_one(Arc::new(DenyAll), resource(RESOURCE_TYPE_TOPIC, "orders")).await;
 
-        assert!(resp.responses.len() == 1);
-        assert!(resp.responses[0].error_code == codes::TOPIC_AUTHORIZATION_FAILED);
-        assert!(resp.responses[0].error_message.is_none());
-        assert!(resp.responses[0].resource_type == RESOURCE_TYPE_TOPIC);
-        assert!(resp.responses[0].resource_name == "orders");
+        let expected = AlterConfigsResponse {
+            throttle_time_ms: 0,
+            responses: vec![AlterConfigsResourceResponse {
+                error_code: codes::TOPIC_AUTHORIZATION_FAILED,
+                error_message: None,
+                resource_type: RESOURCE_TYPE_TOPIC,
+                resource_name: "orders".to_string(),
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            }],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
     }
 
     #[tokio::test]
     async fn broker_resource_denial_uses_cluster_authorization_error() {
         let resp = drive_one(Arc::new(DenyAll), resource(RESOURCE_TYPE_BROKER, "1")).await;
 
-        assert!(resp.responses.len() == 1);
-        assert!(resp.responses[0].error_code == codes::CLUSTER_AUTHORIZATION_FAILED);
-        assert!(resp.responses[0].error_message.is_none());
-        assert!(resp.responses[0].resource_type == RESOURCE_TYPE_BROKER);
-        assert!(resp.responses[0].resource_name == "1");
+        let expected = AlterConfigsResponse {
+            throttle_time_ms: 0,
+            responses: vec![AlterConfigsResourceResponse {
+                error_code: codes::CLUSTER_AUTHORIZATION_FAILED,
+                error_message: None,
+                resource_type: RESOURCE_TYPE_BROKER,
+                resource_name: "1".to_string(),
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            }],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
     }
 
     #[tokio::test]
@@ -331,15 +346,17 @@ mod tests {
         )
         .await;
 
-        assert!(resp.responses.len() == 1);
-        assert!(resp.responses[0].error_code == codes::INVALID_RESOURCE_TYPE);
-        assert!(
-            resp.responses[0]
-                .error_message
-                .as_deref()
-                .is_some_and(|m| { m.contains("resource_type=4") && m.contains("not supported") })
-        );
-        assert!(resp.responses[0].resource_type == RESOURCE_TYPE_BROKER);
-        assert!(resp.responses[0].resource_name == "1");
+        let expected = AlterConfigsResponse {
+            throttle_time_ms: 0,
+            responses: vec![AlterConfigsResourceResponse {
+                error_code: codes::INVALID_RESOURCE_TYPE,
+                error_message: Some("resource_type=4 not supported".to_string()),
+                resource_type: RESOURCE_TYPE_BROKER,
+                resource_name: "1".to_string(),
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            }],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
     }
 }

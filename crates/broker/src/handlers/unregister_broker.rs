@@ -194,9 +194,13 @@ mod tests {
     fn response_preserves_error_fields_and_throttle() {
         let resp = response(codes::UNKNOWN_SERVER_ERROR, Some("submit failed".into()));
 
-        assert!(resp.error_code == codes::UNKNOWN_SERVER_ERROR);
-        assert!(resp.error_message.as_deref() == Some("submit failed"));
-        assert!(resp.throttle_time_ms == 0);
+        let expected = UnregisterBrokerResponse {
+            throttle_time_ms: 0,
+            error_code: codes::UNKNOWN_SERVER_ERROR,
+            error_message: Some("submit failed".into()),
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
     }
 
     #[tokio::test]
@@ -217,12 +221,13 @@ mod tests {
             .expect("handle");
         let resp = decode_response(&resp);
 
-        assert!(
-            resp.error_code == codes::CLUSTER_AUTHORIZATION_FAILED,
-            "{resp:?}"
-        );
-        assert!(resp.error_message.as_deref() == Some("unregister-broker denied"));
-        assert!(resp.throttle_time_ms == 0);
+        let expected = UnregisterBrokerResponse {
+            throttle_time_ms: 0,
+            error_code: codes::CLUSTER_AUTHORIZATION_FAILED,
+            error_message: Some("unregister-broker denied".into()),
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected, "{resp:?}");
         broker_handle.shutdown().await;
     }
 
@@ -245,14 +250,13 @@ mod tests {
             .expect("handle");
         let resp = decode_response(&resp);
 
-        assert!(resp.error_code == codes::INVALID_REQUEST, "{resp:?}");
-        assert!(
-            resp.error_message
-                .as_deref()
-                .is_some_and(|m| m.contains("non-negative") && m.contains("-1")),
-            "{resp:?}"
-        );
-        assert!(resp.throttle_time_ms == 0);
+        let expected = UnregisterBrokerResponse {
+            throttle_time_ms: 0,
+            error_code: codes::INVALID_REQUEST,
+            error_message: Some("broker_id must be non-negative, got -1".into()),
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected, "{resp:?}");
         broker_handle.shutdown().await;
     }
 
@@ -275,14 +279,13 @@ mod tests {
             .expect("handle");
         let resp = decode_response(&resp);
 
-        assert!(resp.error_code == codes::INVALID_REQUEST, "{resp:?}");
-        assert!(
-            resp.error_message
-                .as_deref()
-                .is_some_and(|m| m.contains("broker 0") && m.contains("not registered")),
-            "{resp:?}"
-        );
-        assert!(resp.throttle_time_ms == 0);
+        let expected = UnregisterBrokerResponse {
+            throttle_time_ms: 0,
+            error_code: codes::INVALID_REQUEST,
+            error_message: Some("broker 0 is not registered".into()),
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected, "{resp:?}");
         broker_handle.shutdown().await;
     }
 
@@ -305,9 +308,13 @@ mod tests {
             .expect("handle");
         let resp = decode_response(&resp);
 
-        assert!(resp.error_code == codes::NONE, "{resp:?}");
-        assert!(resp.error_message.is_none(), "{resp:?}");
-        assert!(resp.throttle_time_ms == 0);
+        let expected = UnregisterBrokerResponse {
+            throttle_time_ms: 0,
+            error_code: codes::NONE,
+            error_message: None,
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected, "{resp:?}");
         broker_handle.shutdown().await;
     }
 }

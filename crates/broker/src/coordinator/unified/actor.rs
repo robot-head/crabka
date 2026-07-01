@@ -1983,10 +1983,19 @@ mod tests {
 
         drain_removed_classic_waiters(&["m1".to_string()], &mut joiners, &mut followers);
 
-        assert!(joiners.is_empty());
-        assert!(followers.is_empty());
-        assert!(join_rx.await.unwrap().error_code == codes::UNKNOWN_MEMBER_ID);
-        assert!(sync_rx.await.unwrap().error_code == codes::UNKNOWN_MEMBER_ID);
+        assert!(
+            (
+                joiners.is_empty(),
+                followers.is_empty(),
+                join_rx.await.unwrap().error_code,
+                sync_rx.await.unwrap().error_code,
+            ) == (
+                true,
+                true,
+                codes::UNKNOWN_MEMBER_ID,
+                codes::UNKNOWN_MEMBER_ID
+            )
+        );
     }
 
     /// A coordinator whose metadata image holds one topic `t` with `partitions`
@@ -2088,17 +2097,16 @@ mod tests {
             .await
             .unwrap();
         let resp = rx.await.unwrap();
-        assert!(resp.error_code == 0, "client-id first-join must succeed");
+        // The join must succeed, echo the client-supplied member id, and
+        // advance the epoch off 0. The client-id first-join takes the same
+        // flush path as the empty-id case and persists exactly one batch.
         assert!(
-            resp.member_id.as_deref() == Some("client-uuid-1"),
-            "response must echo the client-supplied member id"
-        );
-        assert!(resp.member_epoch >= 1, "epoch must advance off 0 on join");
-        // The client-id first-join takes the same flush path as the empty-id case
-        // and persists exactly one batch.
-        assert!(
-            log.batches().await.len() == 1,
-            "client-id first join writes exactly one batch"
+            (
+                resp.error_code,
+                resp.member_id.as_deref(),
+                resp.member_epoch >= 1,
+                log.batches().await.len(),
+            ) == (0, Some("client-uuid-1"), true, 1)
         );
     }
 
@@ -2515,10 +2523,14 @@ mod tests {
 
         // Admin surface lists/describes the classic group, then deletes it (empty).
         let listed = coord.list_groups().await;
-        assert!(listed.iter().any(|s| s.group_id == "g"));
-        assert!(coord.describe_group("g").await.is_some());
-        assert!(coord.delete_group("g").await.is_ok());
-        assert!(coord.describe_group("g").await.is_none());
+        assert!(
+            (
+                listed.iter().any(|s| s.group_id == "g"),
+                coord.describe_group("g").await.is_some(),
+                coord.delete_group("g").await == Ok(()),
+                coord.describe_group("g").await.is_none(),
+            ) == (true, true, true, true)
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2754,18 +2766,17 @@ mod tests {
             .await
             .unwrap();
         let describe = rx.await.unwrap();
-        assert!(describe.members.len() == 2);
+        // The hosted classic member must survive the upgrade, the new native
+        // consumer member must be present, and the upgrade batch tombstoned
+        // the classic k2 GroupMetadata record.
         assert!(
-            describe.members.iter().any(|m| m.is_classic),
-            "the hosted classic member must survive the upgrade"
+            (
+                describe.members.len(),
+                describe.members.iter().any(|m| m.is_classic),
+                describe.members.iter().any(|m| !m.is_classic),
+                log.has_classic_group_metadata_tombstone("g").await,
+            ) == (2, true, true, true)
         );
-        assert!(
-            describe.members.iter().any(|m| !m.is_classic),
-            "the new native consumer member must be present"
-        );
-
-        // The upgrade batch tombstoned the classic k2 GroupMetadata record.
-        assert!(log.has_classic_group_metadata_tombstone("g").await);
     }
 
     // ── KIP-848: serving hosted classic members off the reconciler ─────
@@ -2961,9 +2972,13 @@ mod tests {
         // 2. JoinGroup (rejoin of the existing member, unchanged subscription):
         //    success, server-assigned single-member view at group_epoch, self leader.
         let join = classic_join(&handle, "m-classic", "t").await;
-        assert!(join.error_code == codes::NONE);
-        assert!(join.leader == "m-classic");
-        assert!(join.member_id == "m-classic");
+        assert!(
+            (
+                join.error_code,
+                join.leader.as_str(),
+                join.member_id.as_str()
+            ) == (codes::NONE, "m-classic", "m-classic")
+        );
         // Generation equals the group epoch (read it back from Describe).
         let (tx, rx) = tokio::sync::oneshot::channel();
         handle
@@ -3140,24 +3155,21 @@ mod tests {
             .describe_group("g")
             .await
             .expect("group downgraded to classic");
-        // Only the hosted classic member remains; the departed native member
-        // is gone.
+        // Exactly the hosted classic member remains (the departed native
+        // member is gone), and the downgrade batch tombstoned the next-gen k3
+        // GroupMetadata record AND the group-level k6 TargetAssignmentMetadata
+        // record (which would otherwise survive log compaction and resurrect
+        // the group as next-gen), and wrote a classic k2 GroupMetadata
+        // (non-tombstone) for "g".
         assert!(
-            snap.members.len() == 1,
-            "exactly the hosted classic member must remain after downgrade"
+            (
+                snap.members.len(),
+                snap.members.iter().any(|m| m.member_id == "m-classic"),
+                log.has_next_gen_group_metadata_tombstone("g").await,
+                log.has_next_gen_target_metadata_tombstone("g").await,
+                log_has_classic_group_metadata_write(&log, "g").await,
+            ) == (1, true, true, true, true)
         );
-        assert!(
-            snap.members.iter().any(|m| m.member_id == "m-classic"),
-            "the hosted classic member must survive the downgrade"
-        );
-
-        // The downgrade batch tombstoned the next-gen k3 GroupMetadata record.
-        assert!(log.has_next_gen_group_metadata_tombstone("g").await);
-        // ...and the group-level k6 TargetAssignmentMetadata record, which would
-        // otherwise survive log compaction and resurrect the group as next-gen.
-        assert!(log.has_next_gen_target_metadata_tombstone("g").await);
-        // ...and wrote a classic k2 GroupMetadata (non-tombstone) for "g".
-        assert!(log_has_classic_group_metadata_write(&log, "g").await);
     }
 
     /// KIP-848 admin coherence: after an in-place UPGRADE the group is
@@ -3184,31 +3196,23 @@ mod tests {
             .describe_group("g")
             .await
             .expect("describe must surface an upgraded consumer group");
-        assert!(snap.group_id == "g");
         // The hosted classic member survives the upgrade and is reported.
-        assert!(
-            !snap.members.is_empty(),
-            "an upgraded consumer group must report its members"
-        );
-        assert!(
-            snap.members.iter().any(|m| m.member_id == "m-classic"),
-            "the hosted classic member must appear in the describe snapshot"
-        );
         // KIP-848 next-gen consumer groups report protocol_type "consumer".
-        assert!(snap.protocol_type.as_deref() == Some("consumer"));
-        // The assignment is projected from the member's reconciler target, so an
-        // assigned hosted-classic member has non-empty assignment bytes.
-        assert!(
-            snap.members
-                .iter()
-                .any(|m| m.member_id == "m-classic" && !m.assignment.is_empty()),
-            "the assigned hosted classic member must carry a translated assignment"
-        );
+        // The assignment is projected from the member's reconciler target, so
+        // an assigned hosted-classic member has non-empty assignment bytes.
         // generation_id mirrors the group epoch (the next-gen analogue of a
-        // classic group's generation).
+        // classic group's generation) and must have advanced off 0.
         assert!(
-            snap.generation_id >= 1,
-            "an upgraded group's generation must have advanced off 0"
+            (
+                snap.group_id.as_str(),
+                snap.members.is_empty(),
+                snap.members.iter().any(|m| m.member_id == "m-classic"),
+                snap.protocol_type.as_deref(),
+                snap.members
+                    .iter()
+                    .any(|m| m.member_id == "m-classic" && !m.assignment.is_empty()),
+                snap.generation_id >= 1,
+            ) == ("g", false, true, Some("consumer"), true, true)
         );
 
         // `list_groups` produces the wire `group_type="classic"` rows; an
@@ -3800,12 +3804,15 @@ mod tests {
             ..Default::default()
         };
         let step = step_heartbeat(&mut group, &config, &metadata, &req, "", Instant::now());
-        assert!(step.response.error_code == 0);
+        // First join succeeds, advances to group epoch 1, targets all
+        // partitions of "t", and must persist records.
         assert!(
-            step.response.member_epoch == 1,
-            "first join advances to group epoch 1"
+            (
+                step.response.error_code,
+                step.response.member_epoch,
+                group.target.per_member["m1"][&topic_id].clone(),
+                step.pending.is_empty(),
+            ) == (0, 1, vec![0, 1], false)
         );
-        assert!(group.target.per_member["m1"][&topic_id] == vec![0, 1]);
-        assert!(!step.pending.is_empty(), "first join must persist records");
     }
 }

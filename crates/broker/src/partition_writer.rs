@@ -581,11 +581,11 @@ mod tests {
         assert!(flag_storage_failure(&err, &log_dir, &status));
 
         assert!(status.is_offline(dir.path()));
-        let offline = status.offline();
-        assert!(offline.len() == 1);
-        assert!(offline[0].0 == dir.path());
-        assert!(offline[0].1.contains("partition write/fsync failed"));
-        assert!(offline[0].1.contains("synthetic EIO"));
+        let expected_offline = vec![(
+            dir.path().to_path_buf(),
+            "partition write/fsync failed: append failed: synthetic EIO".to_string(),
+        )];
+        assert!(status.offline() == expected_offline);
     }
 
     #[test]
@@ -598,10 +598,13 @@ mod tests {
             version: 0,
         };
 
-        assert!(!flag_storage_failure(&err, &log_dir, &status));
-
-        assert!(!status.is_offline(dir.path()));
-        assert!(status.offline().is_empty());
+        assert!(
+            (
+                flag_storage_failure(&err, &log_dir, &status),
+                status.is_offline(dir.path()),
+                status.offline(),
+            ) == (false, false, vec![])
+        );
     }
 
     #[tokio::test]
@@ -836,9 +839,13 @@ mod tests {
         assert!(leo == 2);
 
         let read = log.lock().unwrap().read(0, 10 * 1024 * 1024).unwrap();
-        assert!(read.batches.len() == 1);
-        assert!(read.batches[0].attributes.compression() == CompressionType::Lz4);
-        assert!(read.batches[0].records.len() == 2);
+        assert!(
+            (
+                read.batches.len(),
+                read.batches[0].attributes.compression(),
+                read.batches[0].records.len(),
+            ) == (1, CompressionType::Lz4, 2)
+        );
     }
 
     #[tokio::test]
@@ -1273,12 +1280,29 @@ mod tests {
         )
         .expect("swap");
 
-        assert!(result == SwapOutcome::Swapped);
-        assert!(log.lock().unwrap().log_end_offset() == 2);
-        assert!(log.lock().unwrap().dir() == target_partition_path);
-        assert!(log_dir.load().as_ref() == &target_dir);
-        assert!(!source_partition.exists());
-        assert!(target_partition_path.exists());
+        // Pull both log observations under one lock acquisition — two
+        // `lock()` temporaries in a single assert statement would deadlock.
+        let (leo, log_dir_now) = {
+            let guard = log.lock().unwrap();
+            (guard.log_end_offset(), guard.dir().to_path_buf())
+        };
+        assert!(
+            (
+                result,
+                leo,
+                log_dir_now,
+                log_dir.load().as_ref().clone(),
+                source_partition.exists(),
+                target_partition_path.exists(),
+            ) == (
+                SwapOutcome::Swapped,
+                2,
+                target_partition_path.clone(),
+                target_dir,
+                false,
+                true,
+            )
+        );
     }
 
     #[test]
@@ -1304,12 +1328,30 @@ mod tests {
         )
         .expect("not caught up response");
 
-        assert!(result == SwapOutcome::NotCaughtUp);
-        assert!(log.lock().unwrap().log_end_offset() == 2);
-        assert!(log.lock().unwrap().dir() == source_partition);
-        assert!(log_dir.load().as_ref() == &source_dir);
-        assert!(source_partition.exists());
-        assert!(future_path.exists());
-        assert!(!target_partition_path.exists());
+        // Pull both log observations under one lock acquisition — two
+        // `lock()` temporaries in a single assert statement would deadlock.
+        let (leo, log_dir_now) = {
+            let guard = log.lock().unwrap();
+            (guard.log_end_offset(), guard.dir().to_path_buf())
+        };
+        assert!(
+            (
+                result,
+                leo,
+                log_dir_now,
+                log_dir.load().as_ref().clone(),
+                source_partition.exists(),
+                future_path.exists(),
+                target_partition_path.exists(),
+            ) == (
+                SwapOutcome::NotCaughtUp,
+                2,
+                source_partition.clone(),
+                source_dir,
+                true,
+                true,
+                false,
+            )
+        );
     }
 }

@@ -583,11 +583,21 @@ mod tests {
     #[test]
     fn parse_compression_type_maps_codecs() {
         use crabka_compression::CompressionType;
-        assert!(parse_compression_type("gzip") == Ok(Some(CompressionType::Gzip)));
-        assert!(parse_compression_type("snappy") == Ok(Some(CompressionType::Snappy)));
-        assert!(parse_compression_type("lz4") == Ok(Some(CompressionType::Lz4)));
-        assert!(parse_compression_type("zstd") == Ok(Some(CompressionType::Zstd)));
-        assert!(parse_compression_type("uncompressed") == Ok(Some(CompressionType::None)));
+        assert!(
+            (
+                parse_compression_type("gzip"),
+                parse_compression_type("snappy"),
+                parse_compression_type("lz4"),
+                parse_compression_type("zstd"),
+                parse_compression_type("uncompressed"),
+            ) == (
+                Ok(Some(CompressionType::Gzip)),
+                Ok(Some(CompressionType::Snappy)),
+                Ok(Some(CompressionType::Lz4)),
+                Ok(Some(CompressionType::Zstd)),
+                Ok(Some(CompressionType::None)),
+            )
+        );
     }
 
     #[test]
@@ -679,12 +689,16 @@ mod tests {
 
     #[test]
     fn is_recognized_returns_true_for_whitelisted_keys() {
-        assert!(is_recognized(RETENTION_MS));
-        assert!(is_recognized(RETENTION_BYTES));
-        assert!(is_recognized(SEGMENT_BYTES));
-        assert!(is_recognized(CLEANUP_POLICY));
-        assert!(is_recognized(COMPRESSION_TYPE));
-        assert!(is_recognized(MIN_INSYNC_REPLICAS));
+        assert!(
+            (
+                is_recognized(RETENTION_MS),
+                is_recognized(RETENTION_BYTES),
+                is_recognized(SEGMENT_BYTES),
+                is_recognized(CLEANUP_POLICY),
+                is_recognized(COMPRESSION_TYPE),
+                is_recognized(MIN_INSYNC_REPLICAS),
+            ) == (true, true, true, true, true, true)
+        );
     }
 
     #[test]
@@ -799,9 +813,13 @@ mod tests {
 
     #[test]
     fn validate_local_retention_ms_accepts_minus_one_minus_two_and_positive() {
-        assert!(validate_topic_config(LOCAL_RETENTION_MS, "-2").is_ok());
-        assert!(validate_topic_config(LOCAL_RETENTION_MS, "-1").is_ok());
-        assert!(validate_topic_config(LOCAL_RETENTION_MS, "60000").is_ok());
+        assert!(
+            (
+                validate_topic_config(LOCAL_RETENTION_MS, "-2"),
+                validate_topic_config(LOCAL_RETENTION_MS, "-1"),
+                validate_topic_config(LOCAL_RETENTION_MS, "60000"),
+            ) == (Ok(()), Ok(()), Ok(()))
+        );
     }
 
     #[test]
@@ -870,9 +888,13 @@ mod tests {
 
     #[test]
     fn validate_delete_retention_ms_accepts_nonneg_rejects_negative() {
-        assert!(validate_topic_config(DELETE_RETENTION_MS, "0").is_ok());
-        assert!(validate_topic_config(DELETE_RETENTION_MS, "86400000").is_ok());
-        assert!(validate_topic_config(DELETE_RETENTION_MS, "-1").is_err());
+        assert!(
+            (
+                validate_topic_config(DELETE_RETENTION_MS, "0"),
+                validate_topic_config(DELETE_RETENTION_MS, "86400000"),
+                validate_topic_config(DELETE_RETENTION_MS, "-1").is_err(),
+            ) == (Ok(()), Ok(()), true)
+        );
     }
 
     #[test]
@@ -910,10 +932,19 @@ mod tests {
 
     #[test]
     fn parse_recovery_strategy_maps_values() {
-        assert!(RecoveryStrategy::parse("None") == Some(RecoveryStrategy::None));
-        assert!(RecoveryStrategy::parse("Balanced") == Some(RecoveryStrategy::Balanced));
-        assert!(RecoveryStrategy::parse("Aggressive") == Some(RecoveryStrategy::Aggressive));
-        assert!(RecoveryStrategy::parse("bogus") == None);
+        assert!(
+            (
+                RecoveryStrategy::parse("None"),
+                RecoveryStrategy::parse("Balanced"),
+                RecoveryStrategy::parse("Aggressive"),
+                RecoveryStrategy::parse("bogus"),
+            ) == (
+                Some(RecoveryStrategy::None),
+                Some(RecoveryStrategy::Balanced),
+                Some(RecoveryStrategy::Aggressive),
+                None,
+            )
+        );
     }
 
     #[test]

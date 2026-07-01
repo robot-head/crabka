@@ -137,10 +137,13 @@ mod tests {
 
     #[test]
     fn tail_window_start_keeps_only_last_4096_offsets() {
-        assert!(tail_window_start(0) == 0);
-        assert!(tail_window_start(4096) == 0);
-        assert!(tail_window_start(4097) == 1);
-        assert!(tail_window_start(8192) == 4096);
+        let actual = (
+            tail_window_start(0),
+            tail_window_start(4096),
+            tail_window_start(4097),
+            tail_window_start(8192),
+        );
+        assert!(actual == (0, 0, 1, 4096));
     }
 
     #[tokio::test]
@@ -223,8 +226,11 @@ mod tests {
             ..Default::default()
         };
 
-        assert!(header_str(&rec, "text") == Some("audit-seq".to_string()));
-        assert!(header_str(&rec, "binary").is_none());
-        assert!(header_str(&rec, "missing").is_none());
+        let actual = (
+            header_str(&rec, "text"),
+            header_str(&rec, "binary"),
+            header_str(&rec, "missing"),
+        );
+        assert!(actual == (Some("audit-seq".to_string()), None, None));
     }
 }

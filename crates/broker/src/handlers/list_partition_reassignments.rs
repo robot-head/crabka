@@ -230,10 +230,14 @@ mod tests {
         .expect("handle");
         let resp = decode_response(&bytes);
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.error_code == CLUSTER_AUTHORIZATION_FAILED);
-        assert!(resp.error_message.as_deref() == Some("list-reassignment denied"));
-        assert!(resp.topics.is_empty());
+        let expected = ListPartitionReassignmentsResponse {
+            throttle_time_ms: 0,
+            error_code: CLUSTER_AUTHORIZATION_FAILED,
+            error_message: Some("list-reassignment denied".to_string()),
+            topics: vec![],
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+        };
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -264,22 +268,24 @@ mod tests {
         .expect("handle");
         let resp = decode_response(&bytes);
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.error_code == 0);
-        assert!(resp.error_message.is_none());
-        assert!(resp.topics.len() == 1, "{:?}", resp.topics);
-        let add_topic = &resp.topics[0];
-        assert!(add_topic.name == "orders-add");
-        assert!(
-            add_topic.partitions.len() == 1,
-            "{:?}",
-            add_topic.partitions
-        );
-        let add_part = &add_topic.partitions[0];
-        assert!(add_part.partition_index == 0);
-        assert!(add_part.replicas == vec![1, 2, 3]);
-        assert!(add_part.adding_replicas == vec![3]);
-        assert!(add_part.removing_replicas.is_empty());
+        let expected = ListPartitionReassignmentsResponse {
+            throttle_time_ms: 0,
+            error_code: 0,
+            error_message: None,
+            topics: vec![OngoingTopicReassignment {
+                name: "orders-add".to_string(),
+                partitions: vec![OngoingPartitionReassignment {
+                    partition_index: 0,
+                    replicas: vec![1, 2, 3],
+                    adding_replicas: vec![3],
+                    removing_replicas: vec![],
+                    unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+                }],
+                unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+            }],
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+        };
+        assert!(resp == expected, "{resp:?}");
         broker_handle.shutdown().await;
     }
 }

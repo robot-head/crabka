@@ -276,6 +276,7 @@ mod tests {
     use assert2::assert;
     use bytes::Bytes;
     use crabka_metadata::FeatureLevelRecord;
+    use crabka_protocol::UnknownTaggedFields;
     use crabka_security::{AuthMethod, Principal};
     use std::net::SocketAddr;
     use std::sync::Arc;
@@ -318,6 +319,20 @@ mod tests {
             name: name.into(),
             mechanism: 1,
             ..Default::default()
+        }
+    }
+
+    /// A fully-pinned per-user result row as the handler renders it.
+    fn expected_result(
+        user: &str,
+        error_code: i16,
+        error_message: Option<&str>,
+    ) -> AlterUserScramCredentialsResult {
+        AlterUserScramCredentialsResult {
+            user: user.into(),
+            error_code,
+            error_message: error_message.map(Into::into),
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
         }
     }
 
@@ -365,26 +380,31 @@ mod tests {
 
     #[test]
     fn wire_to_mech_maps_both_scram_variants() {
-        assert!(wire_to_mech(1) == Some(SaslMechanism::ScramSha256));
-        assert!(wire_to_mech(2) == Some(SaslMechanism::ScramSha512));
-        assert!(wire_to_mech(0).is_none());
-        assert!(wire_to_mech(99).is_none());
+        assert!(
+            (
+                wire_to_mech(1),
+                wire_to_mech(2),
+                wire_to_mech(0),
+                wire_to_mech(99)
+            ) == (
+                Some(SaslMechanism::ScramSha256),
+                Some(SaslMechanism::ScramSha512),
+                None,
+                None
+            )
+        );
     }
 
     #[test]
     fn err_result_carries_code_and_message() {
         let r = err_result("alice".into(), codes::UNACCEPTABLE_CREDENTIAL, "bad");
-        assert!(r.user == "alice");
-        assert!(r.error_code == codes::UNACCEPTABLE_CREDENTIAL);
-        assert!(r.error_message.as_deref() == Some("bad"));
+        assert!(r == expected_result("alice", codes::UNACCEPTABLE_CREDENTIAL, Some("bad")));
     }
 
     #[test]
     fn ok_result_has_zero_error_code() {
         let r = ok_result("alice".into());
-        assert!(r.user == "alice");
-        assert!(r.error_code == 0);
-        assert!(r.error_message.is_none());
+        assert!(r == expected_result("alice", 0, None));
     }
 
     #[test]
@@ -400,12 +420,15 @@ mod tests {
 
         apply_submit_error(&mut results, "submit failed: not controller");
 
-        assert!(results[0].user == "alice");
-        assert!(results[0].error_code == codes::UNKNOWN_SERVER_ERROR);
-        assert!(results[0].error_message.as_deref() == Some("submit failed: not controller"));
-        assert!(results[1].user == "bob");
-        assert!(results[1].error_code == codes::DUPLICATE_RESOURCE);
-        assert!(results[1].error_message.as_deref() == Some("duplicate resource"));
+        let expected = vec![
+            expected_result(
+                "alice",
+                codes::UNKNOWN_SERVER_ERROR,
+                Some("submit failed: not controller"),
+            ),
+            expected_result("bob", codes::DUPLICATE_RESOURCE, Some("duplicate resource")),
+        ];
+        assert!(results == expected);
     }
 
     #[test]
@@ -429,9 +452,7 @@ mod tests {
             .is_err()
         };
 
-        assert!(!gate(None));
-        assert!(gate(Some(10)));
-        assert!(!gate(Some(11)));
+        assert!((gate(None), gate(Some(10)), gate(Some(11))) == (false, true, false));
     }
 
     #[test]
@@ -442,51 +463,51 @@ mod tests {
         let mut too_few_iterations = valid_upsertion("too-few");
         too_few_iterations.iterations = MIN_ITERATIONS - 1;
         let r = process_upsertion(too_few_iterations, true, &mut seen, &mut records);
-        assert!(r.user == "too-few");
-        assert!(r.error_code == codes::UNACCEPTABLE_CREDENTIAL);
-        assert!(
-            r.error_message
-                .as_deref()
-                .is_some_and(|m| m.contains("iterations"))
+        let expected = expected_result(
+            "too-few",
+            codes::UNACCEPTABLE_CREDENTIAL,
+            Some("iterations < 4096"),
         );
+        assert!(r == expected);
         assert!(records.is_empty());
 
         let mut empty_salt = valid_upsertion("empty-salt");
         empty_salt.salt = Bytes::new();
         let r = process_upsertion(empty_salt, true, &mut seen, &mut records);
-        assert!(r.user == "empty-salt");
-        assert!(r.error_code == codes::UNACCEPTABLE_CREDENTIAL);
-        assert!(
-            r.error_message
-                .as_deref()
-                .is_some_and(|m| m.contains("salt"))
+        let expected = expected_result(
+            "empty-salt",
+            codes::UNACCEPTABLE_CREDENTIAL,
+            Some("empty salt"),
         );
+        assert!(r == expected);
         assert!(records.is_empty());
 
         let mut wrong_len = valid_upsertion("wrong-len");
         wrong_len.salted_password = Bytes::from(vec![7; 31]);
         let r = process_upsertion(wrong_len, true, &mut seen, &mut records);
-        assert!(r.user == "wrong-len");
-        assert!(r.error_code == codes::UNACCEPTABLE_CREDENTIAL);
-        assert!(
-            r.error_message
-                .as_deref()
-                .is_some_and(|m| m.contains("salted_password"))
+        let expected = expected_result(
+            "wrong-len",
+            codes::UNACCEPTABLE_CREDENTIAL,
+            Some("wrong salted_password length"),
         );
+        assert!(r == expected);
         assert!(records.is_empty());
 
         let r = process_upsertion(valid_upsertion("alice"), true, &mut seen, &mut records);
-        assert!(r.user == "alice");
-        assert!(r.error_code == 0);
-        assert!(r.error_message.is_none());
-        assert!(records.len() == 1);
-        let MetadataRecord::V1ScramCredential(record) = &records[0] else {
-            panic!("wrong record variant");
-        };
-        assert!(record.user == "alice");
-        assert!(record.mechanism == SaslMechanism::ScramSha256);
-        assert!(record.salt == b"salt");
-        assert!(record.iterations == u32::try_from(MIN_ITERATIONS).expect("min fits"));
+        assert!(r == expected_result("alice", 0, None));
+        let (stored_key, server_key) = crabka_security::derive_keys_from_salted(
+            SaslMechanism::ScramSha256,
+            &valid_upsertion("alice").salted_password,
+        );
+        let expected_records = vec![MetadataRecord::V1ScramCredential(ScramCredentialRecord {
+            user: "alice".into(),
+            mechanism: SaslMechanism::ScramSha256,
+            salt: b"salt".to_vec(),
+            stored_key,
+            server_key,
+            iterations: u32::try_from(MIN_ITERATIONS).expect("min fits"),
+        })];
+        assert!(records == expected_records);
     }
 
     #[test]
@@ -497,25 +518,23 @@ mod tests {
         let r = process_upsertion(valid_upsertion("alice"), true, &mut seen, &mut records);
         assert!(r.error_code == 0);
         let r = process_upsertion(valid_upsertion("alice"), true, &mut seen, &mut records);
-        assert!(r.user == "alice");
-        assert!(r.error_code == codes::DUPLICATE_RESOURCE);
-        assert!(
-            r.error_message
-                .as_deref()
-                .is_some_and(|m| m.contains("duplicate"))
+        let expected = expected_result(
+            "alice",
+            codes::DUPLICATE_RESOURCE,
+            Some("duplicate resource"),
         );
+        assert!(r == expected);
         assert!(records.len() == 1);
 
         let mut seen = HashSet::new();
         let mut records = Vec::new();
         let r = process_upsertion(valid_upsertion("bob"), false, &mut seen, &mut records);
-        assert!(r.user == "bob");
-        assert!(r.error_code == codes::CLUSTER_AUTHORIZATION_FAILED);
-        assert!(
-            r.error_message
-                .as_deref()
-                .is_some_and(|m| m.contains("not super-user"))
+        let expected = expected_result(
+            "bob",
+            codes::CLUSTER_AUTHORIZATION_FAILED,
+            Some("not super-user"),
         );
+        assert!(r == expected);
         assert!(records.is_empty());
     }
 
@@ -528,23 +547,21 @@ mod tests {
         let mut records = Vec::new();
 
         let r = process_deletion(&broker, deletion("alice"), true, &mut seen, &mut records);
-        assert!(r.user == "alice");
-        assert!(r.error_code == codes::RESOURCE_NOT_FOUND);
-        assert!(
-            r.error_message
-                .as_deref()
-                .is_some_and(|m| m.contains("credential not found"))
+        let expected = expected_result(
+            "alice",
+            codes::RESOURCE_NOT_FOUND,
+            Some("credential not found"),
         );
+        assert!(r == expected);
         assert!(records.is_empty());
 
         let r = process_deletion(&broker, deletion("alice"), true, &mut seen, &mut records);
-        assert!(r.user == "alice");
-        assert!(r.error_code == codes::DUPLICATE_RESOURCE);
-        assert!(
-            r.error_message
-                .as_deref()
-                .is_some_and(|m| m.contains("duplicate"))
+        let expected = expected_result(
+            "alice",
+            codes::DUPLICATE_RESOURCE,
+            Some("duplicate resource"),
         );
+        assert!(r == expected);
         assert!(records.is_empty());
         broker_handle.shutdown().await;
     }
@@ -558,13 +575,12 @@ mod tests {
         let mut records = Vec::new();
 
         let r = process_deletion(&broker, deletion("alice"), false, &mut seen, &mut records);
-        assert!(r.user == "alice");
-        assert!(r.error_code == codes::CLUSTER_AUTHORIZATION_FAILED);
-        assert!(
-            r.error_message
-                .as_deref()
-                .is_some_and(|m| m.contains("not super-user"))
+        let expected = expected_result(
+            "alice",
+            codes::CLUSTER_AUTHORIZATION_FAILED,
+            Some("not super-user"),
         );
+        assert!(r == expected);
         assert!(records.is_empty());
         broker_handle.shutdown().await;
     }
@@ -589,11 +605,12 @@ mod tests {
 
         let resp = handle(&broker, req, &ctx).await;
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.results.len() == 1);
-        assert!(resp.results[0].user == "alice");
-        assert!(resp.results[0].error_code == 0);
-        assert!(resp.results[0].error_message.is_none());
+        let expected = AlterUserScramCredentialsResponse {
+            throttle_time_ms: 0,
+            results: vec![expected_result("alice", 0, None)],
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
         let image = broker.controller.current_image();
         assert!(
             image
@@ -621,16 +638,16 @@ mod tests {
 
         let resp = handle(&broker, req, &ctx).await;
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.results.len() == 1);
-        assert!(resp.results[0].user == "alice");
-        assert!(resp.results[0].error_code == codes::CLUSTER_AUTHORIZATION_FAILED);
-        assert!(
-            resp.results[0]
-                .error_message
-                .as_deref()
-                .is_some_and(|m| m.contains("not super-user"))
-        );
+        let expected = AlterUserScramCredentialsResponse {
+            throttle_time_ms: 0,
+            results: vec![expected_result(
+                "alice",
+                codes::CLUSTER_AUTHORIZATION_FAILED,
+                Some("not super-user"),
+            )],
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
         let image = broker.controller.current_image();
         assert!(
             image
@@ -669,18 +686,16 @@ mod tests {
 
         let resp = handle(&broker, req, &ctx).await;
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.results.len() == 2);
-        assert!(resp.results[0].user == "alice");
-        assert!(resp.results[0].error_code == codes::UNSUPPORTED_VERSION);
-        assert!(
-            resp.results[0]
-                .error_message
-                .as_deref()
-                .is_some_and(|m| m.contains("SCRAM is not enabled"))
-        );
-        assert!(resp.results[1].user == "bob");
-        assert!(resp.results[1].error_code == codes::UNSUPPORTED_VERSION);
+        let msg = "SCRAM is not enabled at the cluster's metadata.version.";
+        let expected = AlterUserScramCredentialsResponse {
+            throttle_time_ms: 0,
+            results: vec![
+                expected_result("alice", codes::UNSUPPORTED_VERSION, Some(msg)),
+                expected_result("bob", codes::UNSUPPORTED_VERSION, Some(msg)),
+            ],
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 }

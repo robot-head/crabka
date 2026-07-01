@@ -580,9 +580,11 @@ mod tests {
         let provided = vec![assn(&[0, 1]), assn(&[1, 2])];
         let err = resolve_new_partition_assignments(Some(&provided), &brokers, 0, 3, 2)
             .expect_err("2 assignments for 3 new partitions must fail");
-        assert!(err.0 == codes::INVALID_REPLICA_ASSIGNMENT);
-        assert!(err.1.contains("assignments.len()=2"));
-        assert!(err.1.contains("new partition count=3"));
+        let expected = (
+            codes::INVALID_REPLICA_ASSIGNMENT,
+            "assignments.len()=2 does not match new partition count=3".to_string(),
+        );
+        assert!(err == expected);
     }
 
     #[test]
@@ -652,20 +654,30 @@ mod tests {
         .expect("encode");
         let resp = decode_response(&bytes);
 
-        assert!(resp.throttle_time_ms == 321);
-        assert!(resp.results.len() == 1);
-        assert!(resp.results[0].name == "orders");
-        assert!(resp.results[0].error_code == codes::INVALID_PARTITIONS);
-        assert!(resp.results[0].error_message.as_deref() == Some("bad count"));
+        let expected = CreatePartitionsResponse {
+            throttle_time_ms: 321,
+            results: vec![CreatePartitionsTopicResult {
+                name: "orders".into(),
+                error_code: codes::INVALID_PARTITIONS,
+                error_message: Some("bad count".into()),
+                unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
+            }],
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
     }
 
     #[test]
     fn local_materialization_predicates_track_replica_membership_and_leader() {
-        assert!(should_materialize_locally(&[1, 2], 1));
-        assert!(should_materialize_locally(&[1, 2], 2));
-        assert!(!should_materialize_locally(&[1, 2], 3));
-        assert!(is_local_leader(1, 1));
-        assert!(!is_local_leader(2, 1));
+        assert!(
+            (
+                should_materialize_locally(&[1, 2], 1),
+                should_materialize_locally(&[1, 2], 2),
+                should_materialize_locally(&[1, 2], 3),
+                is_local_leader(1, 1),
+                is_local_leader(2, 1)
+            ) == (true, true, false, true, false)
+        );
     }
 
     #[tokio::test]
@@ -681,14 +693,25 @@ mod tests {
 
         let resp = drive(&broker, &req, &p, &peer).await;
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.results.len() == 2);
-        assert!(resp.results[0].name == "orders");
-        assert!(resp.results[0].error_code == codes::TOPIC_AUTHORIZATION_FAILED);
-        assert!(resp.results[0].error_message.is_none());
-        assert!(resp.results[1].name == "payments");
-        assert!(resp.results[1].error_code == codes::TOPIC_AUTHORIZATION_FAILED);
-        assert!(resp.results[1].error_message.is_none());
+        let expected = CreatePartitionsResponse {
+            throttle_time_ms: 0,
+            results: vec![
+                CreatePartitionsTopicResult {
+                    name: "orders".into(),
+                    error_code: codes::TOPIC_AUTHORIZATION_FAILED,
+                    error_message: None,
+                    unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
+                },
+                CreatePartitionsTopicResult {
+                    name: "payments".into(),
+                    error_code: codes::TOPIC_AUTHORIZATION_FAILED,
+                    error_message: None,
+                    unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
+                },
+            ],
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -707,18 +730,27 @@ mod tests {
 
         let resp = drive(&broker, &req, &p, &peer).await;
 
-        assert!(resp.results.len() == 2);
-        assert!(resp.results[0].name == "missing");
-        assert!(resp.results[0].error_code == codes::UNKNOWN_TOPIC_OR_PARTITION);
-        assert!(resp.results[0].error_message.as_deref() == Some("unknown topic `missing`"));
-        assert!(resp.results[1].name == "stable");
-        assert!(resp.results[1].error_code == codes::INVALID_PARTITIONS);
-        assert!(
-            resp.results[1]
-                .error_message
-                .as_deref()
-                .is_some_and(|m| m.contains("already has 2 partitions"))
-        );
+        let expected = CreatePartitionsResponse {
+            throttle_time_ms: 0,
+            results: vec![
+                CreatePartitionsTopicResult {
+                    name: "missing".into(),
+                    error_code: codes::UNKNOWN_TOPIC_OR_PARTITION,
+                    error_message: Some("unknown topic `missing`".into()),
+                    unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
+                },
+                CreatePartitionsTopicResult {
+                    name: "stable".into(),
+                    error_code: codes::INVALID_PARTITIONS,
+                    error_message: Some(
+                        "topic `stable` already has 2 partitions; cannot decrease to 2".into(),
+                    ),
+                    unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
+                },
+            ],
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
         assert!(
             broker_handle
                 .controller_image_for_test()
@@ -741,10 +773,17 @@ mod tests {
 
         let resp = drive(&broker, &req, &p, &peer).await;
 
-        assert!(resp.results.len() == 1);
-        assert!(resp.results[0].name == "dry-run");
-        assert!(resp.results[0].error_code == codes::NONE);
-        assert!(resp.results[0].error_message.is_none());
+        let expected = CreatePartitionsResponse {
+            throttle_time_ms: 0,
+            results: vec![CreatePartitionsTopicResult {
+                name: "dry-run".into(),
+                error_code: codes::NONE,
+                error_message: None,
+                unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
+            }],
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
         assert!(
             broker_handle
                 .controller_image_for_test()
@@ -770,11 +809,17 @@ mod tests {
 
         let resp = drive(&broker, &req, &p, &peer).await;
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.results.len() == 1);
-        assert!(resp.results[0].name == "grow");
-        assert!(resp.results[0].error_code == codes::NONE);
-        assert!(resp.results[0].error_message.is_none());
+        let expected = CreatePartitionsResponse {
+            throttle_time_ms: 0,
+            results: vec![CreatePartitionsTopicResult {
+                name: "grow".into(),
+                error_code: codes::NONE,
+                error_message: None,
+                unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
+            }],
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
         assert!(
             broker_handle
                 .controller_image_for_test()
@@ -800,19 +845,26 @@ mod tests {
         let resp = drive(&broker, &req, &p, &peer).await;
         let elapsed = started.elapsed();
 
-        assert!(resp.results.len() == 1);
-        assert!(resp.results[0].error_code == codes::NONE);
-        assert!(resp.throttle_time_ms == 500);
+        let expected = CreatePartitionsResponse {
+            throttle_time_ms: 500,
+            results: vec![CreatePartitionsTopicResult {
+                name: "metered".into(),
+                error_code: codes::NONE,
+                error_message: None,
+                unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
+            }],
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
         assert!(
-            elapsed >= std::time::Duration::from_millis(450),
+            (
+                elapsed >= std::time::Duration::from_millis(450),
+                broker_handle
+                    .controller_image_for_test()
+                    .partitions_of("metered")
+                    .count(),
+            ) == (true, 5),
             "handler must wait for the advertised throttle, elapsed={elapsed:?}"
-        );
-        assert!(
-            broker_handle
-                .controller_image_for_test()
-                .partitions_of("metered")
-                .count()
-                == 5
         );
         broker_handle.shutdown().await;
     }

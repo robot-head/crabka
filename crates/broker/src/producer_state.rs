@@ -8,7 +8,7 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use tokio::sync::Mutex;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProducerEntry {
     pub epoch: i16,
     pub last_sequence: i32,
@@ -477,12 +477,22 @@ mod tests {
         let s = ProducerState::new();
         s.commit("t", 3, 1000, 0, 0, 4, 7, 1).await;
         let snap = s.snapshot("t", 3).await;
-        assert!(snap.len() == 1);
-        assert!(snap[0].0 == 1000);
-        assert!(snap[0].1.base_offset == 7);
+        // `last_activity_ms` is wall-clock; copy it from the actual entry so
+        // the comparison stays deterministic.
+        let expected = vec![(
+            1000,
+            ProducerEntry {
+                epoch: 0,
+                last_sequence: 4,
+                last_offset: 11,
+                base_offset: 7,
+                last_timestamp: 1,
+                last_activity_ms: snap[0].1.last_activity_ms,
+            },
+        )];
+        assert!(snap == expected);
         // Untouched partition / topic report empty without panicking.
-        assert!(s.snapshot("t", 0).await.is_empty());
-        assert!(s.snapshot("other", 3).await.is_empty());
+        assert!((s.snapshot("t", 0).await, s.snapshot("other", 3).await) == (vec![], vec![]));
     }
 
     #[tokio::test]
@@ -537,12 +547,15 @@ mod tests {
         // now = 10_000, expiration = 5_000 → pid 1 (age 9_000 > 5_000)
         // excluded; pid 2 (age 500 <= 5_000) included with its base_offset.
         let snap = s.active_snapshot("t", 0, 10_000, 5_000).await;
-        assert!(snap.len() == 1);
-        assert!(snap.get(&2) == Some(&20));
-        assert!(snap.get(&1) == None);
+        let expected: HashMap<i64, i64> = [(2, 20)].into_iter().collect();
+        assert!(snap == expected);
         // Unknown partition / topic → empty without panicking.
-        assert!(s.active_snapshot("t", 99, 10_000, 5_000).await.is_empty());
-        assert!(s.active_snapshot("nope", 0, 10_000, 5_000).await.is_empty());
+        assert!(
+            (
+                s.active_snapshot("t", 99, 10_000, 5_000).await,
+                s.active_snapshot("nope", 0, 10_000, 5_000).await,
+            ) == (HashMap::new(), HashMap::new())
+        );
     }
 
     #[tokio::test]
@@ -554,14 +567,15 @@ mod tests {
             h.lock().await.entries.get_mut(&1).unwrap().last_activity_ms = 0;
         }
         let evicted = s.expire_older_than(1_000_000, 1).await;
-        assert!(evicted == 1);
-        // The empty partition and topic maps are pruned.
+        // The empty partition and topic maps are pruned (the empty topic slot
+        // must be removed), and a subsequent produce still works after pruning.
         assert!(
-            s.by_topic.get("t").is_none(),
-            "empty topic slot must be removed"
+            (
+                evicted,
+                s.by_topic.get("t").is_none(),
+                s.check("t", 0, 1, 0, 0, 0).await,
+            ) == (1, true, Decision::Append)
         );
-        // A subsequent produce still works after pruning.
-        assert!(s.check("t", 0, 1, 0, 0, 0).await == Decision::Append);
     }
 }
 

@@ -744,11 +744,16 @@ mod tests {
             _writer_handle: Arc::new(writer),
         };
         let s = format!("{p:?}");
-        assert!(s.contains("topic"));
-        assert!(s.contains("partition_id"));
-        // The mutex/log internals must NOT appear in Debug output.
-        assert!(!s.contains("Mutex"));
-        assert!(!s.contains("segments"));
+        // topic/partition_id appear; the mutex/log internals must NOT appear
+        // in Debug output.
+        assert!(
+            (
+                s.contains("topic"),
+                s.contains("partition_id"),
+                s.contains("Mutex"),
+                s.contains("segments"),
+            ) == (true, true, false, false)
+        );
     }
 
     #[tokio::test]
@@ -803,9 +808,10 @@ mod tests {
         };
         p.install_isr(&[1, 2, 3], &[1, 2, 3], 1).await;
         let st = p.replica_state.lock().await;
-        assert!(st.isr.len() == 3);
-        assert!(st.isr.contains(&1) && st.isr.contains(&2) && st.isr.contains(&3));
-        assert!(st.per_follower.get(&2).map(|f| f.leo) == Some(0));
+        assert!(
+            (st.isr.clone(), st.per_follower.get(&2).map(|f| f.leo))
+                == ([1, 2, 3].into_iter().collect(), Some(0))
+        );
     }
 
     #[tokio::test]

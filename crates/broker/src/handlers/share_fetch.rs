@@ -552,6 +552,7 @@ fn encode_error_response(
 mod tests {
     use super::*;
     use assert2::assert;
+    use crabka_protocol::UnknownTaggedFields;
     use crabka_protocol::owned::share_fetch_request::AcknowledgementBatch;
     use crabka_protocol::owned::share_fetch_response;
     use crabka_protocol::primitives::uuid::Uuid as ProtoUuid;
@@ -574,11 +575,16 @@ mod tests {
         .expect("encode");
         let resp = decode_response(&resp);
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.error_code == codes::UNSUPPORTED_VERSION);
-        assert!(resp.error_message.is_none());
-        assert!(resp.acquisition_lock_timeout_ms == 12_345);
-        assert!(resp.responses.is_empty());
+        let expected = ShareFetchResponse {
+            throttle_time_ms: 0,
+            error_code: codes::UNSUPPORTED_VERSION,
+            error_message: None,
+            acquisition_lock_timeout_ms: 12_345,
+            responses: Vec::new(),
+            node_endpoints: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
     }
 
     #[test]
@@ -672,24 +678,68 @@ mod tests {
 
         let responses = group_responses(pending);
 
-        assert!(responses.len() == 2, "{responses:?}");
-        assert!(responses[0].topic_id == ProtoUuid(*first_topic.as_bytes()));
-        assert!(responses[0].partitions.len() == 2, "{:?}", responses[0]);
-        assert!(responses[0].partitions[0].partition_index == 0);
-        assert!(responses[0].partitions[0].error_code == codes::UNKNOWN_TOPIC_OR_PARTITION);
-        assert!(responses[0].partitions[0].current_leader.leader_id == -1);
-        assert!(responses[0].partitions[0].current_leader.leader_epoch == -1);
-        assert!(responses[0].partitions[0].acquired_records.len() == 1);
-        assert!(responses[0].partitions[0].acquired_records[0].first_offset == 4);
-        assert!(responses[0].partitions[0].acquired_records[0].last_offset == 7);
-        assert!(responses[0].partitions[0].acquired_records[0].delivery_count == 2);
-        assert!(responses[0].partitions[1].partition_index == 1);
-        assert!(responses[0].partitions[1].error_code == codes::NONE);
-        assert!(responses[1].topic_id == ProtoUuid(*second_topic.as_bytes()));
-        assert!(responses[1].partitions.len() == 1, "{:?}", responses[1]);
-        assert!(responses[1].partitions[0].partition_index == 3);
-        assert!(responses[1].partitions[0].error_code == codes::NOT_LEADER_OR_FOLLOWER);
-        assert!(responses[1].partitions[0].current_leader.leader_id == 2);
-        assert!(responses[1].partitions[0].current_leader.leader_epoch == 9);
+        let expected = vec![
+            ShareFetchableTopicResponse {
+                topic_id: ProtoUuid(*first_topic.as_bytes()),
+                partitions: vec![
+                    PartitionData {
+                        partition_index: 0,
+                        error_code: codes::UNKNOWN_TOPIC_OR_PARTITION,
+                        error_message: None,
+                        acknowledge_error_code: codes::NONE,
+                        acknowledge_error_message: None,
+                        current_leader: LeaderIdAndEpoch {
+                            leader_id: -1,
+                            leader_epoch: -1,
+                            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                        },
+                        records: None,
+                        acquired_records: vec![AcquiredRecords {
+                            first_offset: 4,
+                            last_offset: 7,
+                            delivery_count: 2,
+                            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                        }],
+                        unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                    },
+                    PartitionData {
+                        partition_index: 1,
+                        error_code: codes::NONE,
+                        error_message: None,
+                        acknowledge_error_code: codes::NONE,
+                        acknowledge_error_message: None,
+                        current_leader: LeaderIdAndEpoch {
+                            leader_id: 0,
+                            leader_epoch: 0,
+                            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                        },
+                        records: None,
+                        acquired_records: Vec::new(),
+                        unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                    },
+                ],
+                unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+            },
+            ShareFetchableTopicResponse {
+                topic_id: ProtoUuid(*second_topic.as_bytes()),
+                partitions: vec![PartitionData {
+                    partition_index: 3,
+                    error_code: codes::NOT_LEADER_OR_FOLLOWER,
+                    error_message: None,
+                    acknowledge_error_code: codes::NONE,
+                    acknowledge_error_message: None,
+                    current_leader: LeaderIdAndEpoch {
+                        leader_id: 2,
+                        leader_epoch: 9,
+                        unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                    },
+                    records: None,
+                    acquired_records: Vec::new(),
+                    unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                }],
+                unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+            },
+        ];
+        assert!(responses == expected);
     }
 }

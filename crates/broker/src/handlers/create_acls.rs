@@ -204,8 +204,8 @@ mod tests {
     use super::*;
     use assert2::assert;
     use crabka_metadata::{AclOperation, PatternType, PermissionType, ResourceType};
-    use crabka_protocol::Decode;
     use crabka_protocol::owned::create_acls_request::AclCreation;
+    use crabka_protocol::{Decode, UnknownTaggedFields};
     use crabka_security::{AuthMethod, Principal};
     use std::net::SocketAddr;
     use std::sync::Arc;
@@ -331,10 +331,16 @@ mod tests {
     fn validate_rejects_malformed_resource_principal_and_host() {
         let valid = creation("topic-a", "User:alice", OPERATION_READ);
         let entry = validate(&valid).expect("valid ACL creation");
-        assert!(entry.resource_type == ResourceType::Topic);
-        assert!(entry.pattern_type == PatternType::Literal);
-        assert!(entry.operation == AclOperation::Read);
-        assert!(entry.permission_type == PermissionType::Allow);
+        let expected = AclEntry {
+            resource_type: ResourceType::Topic,
+            resource_name: "topic-a".into(),
+            pattern_type: PatternType::Literal,
+            principal: "User:alice".into(),
+            host: "*".into(),
+            operation: AclOperation::Read,
+            permission_type: PermissionType::Allow,
+        };
+        assert!(entry == expected);
 
         let mut empty_name = valid.clone();
         empty_name.resource_name.clear();
@@ -373,10 +379,19 @@ mod tests {
 
         apply_submit_error(&mut results, &submitted, "not controller");
 
-        assert!(results[0].error_code == codes::COORDINATOR_NOT_AVAILABLE);
-        assert!(results[0].error_message.as_deref() == Some("submit failed: not controller"));
-        assert!(results[1].error_code == codes::INVALID_REQUEST);
-        assert!(results[1].error_message.as_deref() == Some("already invalid"));
+        let expected = vec![
+            AclCreationResult {
+                error_code: codes::COORDINATOR_NOT_AVAILABLE,
+                error_message: Some("submit failed: not controller".into()),
+                unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+            },
+            AclCreationResult {
+                error_code: codes::INVALID_REQUEST,
+                error_message: Some("already invalid".into()),
+                unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+            },
+        ];
+        assert!(results == expected);
     }
 
     #[test]
@@ -402,9 +417,11 @@ mod tests {
 
         let resources = created_acl_resources(&req, &results, &submitted);
 
-        assert!(resources.len() == 1);
-        assert!(resources[0].resource_type == "Acl");
-        assert!(resources[0].name == "topic-ok");
+        let expected = vec![crabka_audit::AuditResource {
+            resource_type: "Acl".to_string(),
+            name: "topic-ok".to_string(),
+        }];
+        assert!(resources == expected);
     }
 
     #[test]
@@ -440,12 +457,22 @@ mod tests {
         else {
             panic!("expected AdminOperation");
         };
-        assert!(outcome == crabka_audit::AuditOutcome::Success);
-        assert!(principal.name == "admin");
-        assert!(operation == "CreateAcls");
-        assert!(resources.len() == 1);
-        assert!(resources[0].resource_type == "Acl");
-        assert!(resources[0].name == "topic-ok");
+        assert!(
+            (
+                outcome,
+                principal.name.as_str(),
+                operation.as_str(),
+                resources,
+            ) == (
+                crabka_audit::AuditOutcome::Success,
+                "admin",
+                "CreateAcls",
+                vec![crabka_audit::AuditResource {
+                    resource_type: "Acl".to_string(),
+                    name: "topic-ok".to_string(),
+                }],
+            )
+        );
     }
 
     #[test]
@@ -457,10 +484,16 @@ mod tests {
         .expect("encode");
         let decoded = decode_response(&bytes);
 
-        assert!(decoded.throttle_time_ms == 0);
-        assert!(decoded.results.len() == 1);
-        assert!(decoded.results[0].error_code == codes::INVALID_REQUEST);
-        assert!(decoded.results[0].error_message.as_deref() == Some("bad acl"));
+        let expected = CreateAclsResponse {
+            throttle_time_ms: 0,
+            results: vec![AclCreationResult {
+                error_code: codes::INVALID_REQUEST,
+                error_message: Some("bad acl".into()),
+                unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+            }],
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        };
+        assert!(decoded == expected);
     }
 
     #[tokio::test]
@@ -478,12 +511,17 @@ mod tests {
         let resp = handle(&broker, req, &ctx, VERSION).await.expect("handle");
         let resp = decode_response(&resp);
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.results.len() == 2);
-        for result in &resp.results {
-            assert!(result.error_code == codes::CLUSTER_AUTHORIZATION_FAILED);
-            assert!(result.error_message.as_deref() == Some("create-acls denied"));
-        }
+        let denied = AclCreationResult {
+            error_code: codes::CLUSTER_AUTHORIZATION_FAILED,
+            error_message: Some("create-acls denied".into()),
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        };
+        let expected = CreateAclsResponse {
+            throttle_time_ms: 0,
+            results: vec![denied.clone(), denied],
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
         assert!(all_acls(&broker_handle).is_empty());
         broker_handle.shutdown().await;
     }
@@ -506,19 +544,35 @@ mod tests {
         let resp = handle(&broker, req, &ctx, VERSION).await.expect("handle");
         let resp = decode_response(&resp);
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.results.len() == 2);
-        assert!(resp.results[0].error_code == 0);
-        assert!(resp.results[0].error_message.is_none());
-        assert!(resp.results[1].error_code == codes::INVALID_REQUEST);
-        assert!(resp.results[1].error_message.as_deref() == Some("empty resource_name"));
+        let expected = CreateAclsResponse {
+            throttle_time_ms: 0,
+            results: vec![
+                AclCreationResult {
+                    error_code: 0,
+                    error_message: None,
+                    unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                },
+                AclCreationResult {
+                    error_code: codes::INVALID_REQUEST,
+                    error_message: Some("empty resource_name".into()),
+                    unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                },
+            ],
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
 
         let acls = all_acls(&broker_handle);
-        assert!(acls.len() == 1);
-        assert!(acls[0].resource_type == ResourceType::Topic);
-        assert!(acls[0].resource_name == "topic-a");
-        assert!(acls[0].principal == "User:alice");
-        assert!(acls[0].operation == AclOperation::Read);
+        let expected_acls = vec![AclEntry {
+            resource_type: ResourceType::Topic,
+            resource_name: "topic-a".into(),
+            pattern_type: PatternType::Literal,
+            principal: "User:alice".into(),
+            host: "*".into(),
+            operation: AclOperation::Read,
+            permission_type: PermissionType::Allow,
+        }];
+        assert!(acls == expected_acls);
         broker_handle.shutdown().await;
     }
 }

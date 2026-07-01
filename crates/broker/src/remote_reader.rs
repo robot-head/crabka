@@ -459,17 +459,14 @@ mod tests {
     #[test]
     fn position_for_relative_offset_returns_floor() {
         let entries = offset_entries(&[(0, 0), (10, 256), (20, 512), (30, 1024)]);
-        assert!(position_for_relative_offset(&entries, 10) == 256, "exact");
-        assert!(position_for_relative_offset(&entries, 15) == 256, "between");
-        assert!(
-            position_for_relative_offset(&entries, 0) == 0,
-            "first entry exact"
+        let got = (
+            position_for_relative_offset(&entries, 10),  // exact
+            position_for_relative_offset(&entries, 15),  // between
+            position_for_relative_offset(&entries, 0),   // first entry exact
+            position_for_relative_offset(&entries, 100), // after last
+            position_for_relative_offset(&[], 50),       // empty
         );
-        assert!(
-            position_for_relative_offset(&entries, 100) == 1024,
-            "after last"
-        );
-        assert!(position_for_relative_offset(&[], 50) == 0, "empty");
+        assert!(got == (256, 256, 0, 1024, 0));
     }
 
     #[test]
@@ -497,32 +494,29 @@ mod tests {
     #[test]
     fn relative_offset_for_timestamp_returns_first_ge() {
         let entries = time_entries(&[(1_000, 0), (2_000, 10), (3_000, 20)]);
-        assert!(
-            relative_offset_for_timestamp(&entries, 1_000) == Some(0),
-            "exact match"
+        let got = (
+            relative_offset_for_timestamp(&entries, 1_000), // exact match
+            relative_offset_for_timestamp(&entries, 1_500), // between → next
+            relative_offset_for_timestamp(&entries, 4_000), // after last
+            relative_offset_for_timestamp(&[], 1_000),      // empty
         );
-        assert!(
-            relative_offset_for_timestamp(&entries, 1_500) == Some(10),
-            "between → next"
-        );
-        assert!(
-            relative_offset_for_timestamp(&entries, 4_000) == None,
-            "after last"
-        );
-        assert!(relative_offset_for_timestamp(&[], 1_000) == None, "empty");
+        assert!(got == (Some(0), Some(10), None, None));
     }
 
     #[test]
     fn end_position_for_caps_with_max_bytes() {
-        // start=0, segment=1024, max_bytes=256 → exclusive_end=256 →
-        // inclusive=255.
-        assert!(end_position_for(0, 1024, 256) == Some(255));
-        // max_bytes >= remaining → read to end.
-        assert!(end_position_for(512, 1024, 999_999) == None);
-        // max_bytes=0 → read to end (zero is a no-cap sentinel).
-        assert!(end_position_for(0, 1024, 0) == None);
-        // start past the segment-end cap still safe via saturating add.
-        assert!(end_position_for(u32::MAX, 1024, 100) == None);
+        let got = (
+            // start=0, segment=1024, max_bytes=256 → exclusive_end=256 →
+            // inclusive=255.
+            end_position_for(0, 1024, 256),
+            // max_bytes >= remaining → read to end.
+            end_position_for(512, 1024, 999_999),
+            // max_bytes=0 → read to end (zero is a no-cap sentinel).
+            end_position_for(0, 1024, 0),
+            // start past the segment-end cap still safe via saturating add.
+            end_position_for(u32::MAX, 1024, 100),
+        );
+        assert!(got == (Some(255), None, None, None));
     }
 
     #[test]
@@ -599,13 +593,17 @@ mod tests {
             buf.extend_from_slice(&pid.to_be_bytes());
         }
         let entries = parse_txn_index(&buf).expect("valid txn index");
-        assert!(entries.len() == 2);
-        assert!(entries[0].start_offset.get() == 0);
-        assert!(entries[0].last_offset.get() == 4);
-        assert!(entries[0].producer_id.get() == 1000);
-        assert!(entries[1].start_offset.get() == 10);
-        assert!(entries[1].last_offset.get() == 14);
-        assert!(entries[1].producer_id.get() == 2000);
+        let decoded: Vec<(i64, i64, i64)> = entries
+            .iter()
+            .map(|e| {
+                (
+                    e.start_offset.get(),
+                    e.last_offset.get(),
+                    e.producer_id.get(),
+                )
+            })
+            .collect();
+        assert!(decoded == vec![(0, 4, 1000), (10, 14, 2000)]);
     }
 
     #[test]
@@ -633,18 +631,21 @@ mod tests {
             last_offset: I64::new(14),
             producer_id: I64::new(1),
         };
-        // Range fully before the entry → excluded.
-        assert!(!txn_overlaps(&e, 0, 9), "range ends just before entry");
-        // Range touching the entry's first offset → included.
-        assert!(txn_overlaps(&e, 0, 10), "range ends on entry start");
-        // Range fully inside the entry → included.
-        assert!(txn_overlaps(&e, 11, 13), "range inside entry");
-        // Range touching the entry's last offset → included.
-        assert!(txn_overlaps(&e, 14, 100), "range starts on entry last");
-        // Range fully after the entry → excluded.
-        assert!(!txn_overlaps(&e, 15, 100), "range starts just after entry");
-        // Range fully covering the entry → included.
-        assert!(txn_overlaps(&e, 0, 100), "range covers entry");
+        let got = (
+            // Range fully before the entry → excluded.
+            txn_overlaps(&e, 0, 9),
+            // Range touching the entry's first offset → included.
+            txn_overlaps(&e, 0, 10),
+            // Range fully inside the entry → included.
+            txn_overlaps(&e, 11, 13),
+            // Range touching the entry's last offset → included.
+            txn_overlaps(&e, 14, 100),
+            // Range fully after the entry → excluded.
+            txn_overlaps(&e, 15, 100),
+            // Range fully covering the entry → included.
+            txn_overlaps(&e, 0, 100),
+        );
+        assert!(got == (false, true, true, true, false, true));
     }
 
     // ── Integration tests against `LocalTieredStorage` +
@@ -981,10 +982,12 @@ mod tests {
             .aborted_transactions(&tp(), 0, start, last)
             .await
             .expect("ok");
-        assert!(got.len() == 1, "the copied abort is returned");
-        assert!(got[0].start_offset == start);
-        assert!(got[0].last_offset == last);
-        assert!(got[0].producer_id == pid);
+        let expected = vec![AbortedTxnEntry {
+            start_offset: start,
+            last_offset: last,
+            producer_id: pid,
+        }];
+        assert!(got == expected, "the copied abort is returned");
     }
 
     #[tokio::test]
