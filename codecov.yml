@@ -51,6 +51,12 @@ ignore:
   # Same rationale as the binary entrypoints above; the controllers' own
   # reconcile logic stays measured (it's in controller/*.rs, not here).
   - "crates/operator/src/run.rs"
+  # The observability demo app is a runnable producer/consumer demo — order
+  # generation, produce/consume serve loops, and self-telemetry (traces/metrics)
+  # emission. It exists to drive the `demo/observability` stack and is exercised
+  # by running that stack end-to-end, not by the unit suite. Same "binary glue,
+  # no unit-testable production logic" rationale as the entrypoints above.
+  - "crates/observability-demo-app/**"
 
 flags:
   unit:
