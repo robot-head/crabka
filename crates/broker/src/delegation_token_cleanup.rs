@@ -188,4 +188,41 @@ mod tests {
         assert!(mock.submitted.lock().unwrap().is_empty());
         assert!(mock.current_image().all_delegation_tokens().count() == 1);
     }
+
+    #[tokio::test]
+    async fn run_sweeps_expired_tokens_and_waits_for_shutdown() {
+        let mut img = MetadataImage::new(Uuid::nil());
+        img.apply(&dt_record("expired", 1_000));
+
+        let mock = Arc::new(MockController {
+            image: Mutex::new(Arc::new(img)),
+            submitted: Mutex::new(Vec::new()),
+        });
+        let shutdown = CancellationToken::new();
+        let mut task = tokio::spawn(run(mock.clone(), Duration::from_hours(1), shutdown.clone()));
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if !mock.submitted.lock().unwrap().is_empty() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("cleanup run loop should sweep on its first tick");
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), &mut task)
+                .await
+                .is_err(),
+            "cleanup run loop exited before shutdown"
+        );
+
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("cleanup task should observe shutdown")
+            .expect("cleanup task should not panic");
+    }
 }

@@ -823,6 +823,90 @@ mod tests {
     }
 
     #[test]
+    fn forgotten_topic_name_drops_only_matching_topic_partition() {
+        let mut partitions = HashMap::from([
+            (
+                FetchSessionKey {
+                    topic_name: "t".into(),
+                    topic_id: WireUuid::ZERO,
+                    partition: 0,
+                },
+                CachedPartitionState::default(),
+            ),
+            (
+                FetchSessionKey {
+                    topic_name: "u".into(),
+                    topic_id: WireUuid::ZERO,
+                    partition: 0,
+                },
+                CachedPartitionState::default(),
+            ),
+        ]);
+        let forgotten = vec![ForgottenTopic {
+            topic: "t".into(),
+            topic_id: WireUuid::ZERO,
+            partitions: vec![0],
+            ..Default::default()
+        }];
+
+        apply_incremental(&mut partitions, &forgotten, &[]);
+
+        assert!(!partitions.contains_key(&FetchSessionKey {
+            topic_name: "t".into(),
+            topic_id: WireUuid::ZERO,
+            partition: 0,
+        }));
+        assert!(partitions.contains_key(&FetchSessionKey {
+            topic_name: "u".into(),
+            topic_id: WireUuid::ZERO,
+            partition: 0,
+        }));
+    }
+
+    #[test]
+    fn forgotten_topic_id_drops_only_matching_topic_partition() {
+        let tid = WireUuid([1u8; 16]);
+        let other_tid = WireUuid([2u8; 16]);
+        let mut partitions = HashMap::from([
+            (
+                FetchSessionKey {
+                    topic_name: "t".into(),
+                    topic_id: tid,
+                    partition: 0,
+                },
+                CachedPartitionState::default(),
+            ),
+            (
+                FetchSessionKey {
+                    topic_name: "u".into(),
+                    topic_id: other_tid,
+                    partition: 0,
+                },
+                CachedPartitionState::default(),
+            ),
+        ]);
+        let forgotten = vec![ForgottenTopic {
+            topic: String::new(),
+            topic_id: tid,
+            partitions: vec![0],
+            ..Default::default()
+        }];
+
+        apply_incremental(&mut partitions, &forgotten, &[]);
+
+        assert!(!partitions.contains_key(&FetchSessionKey {
+            topic_name: "t".into(),
+            topic_id: tid,
+            partition: 0,
+        }));
+        assert!(partitions.contains_key(&FetchSessionKey {
+            topic_name: "u".into(),
+            topic_id: other_tid,
+            partition: 0,
+        }));
+    }
+
+    #[test]
     fn lru_eviction_drops_oldest_non_privileged() {
         let cache = FetchSessionCache::new(2);
         let a = cache.try_allocate(false, "a".into(), vec![]);

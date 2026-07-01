@@ -535,6 +535,11 @@ mod tests {
     }
 
     #[test]
+    fn validate_segment_bytes_accepts_minimum_one() {
+        assert!(validate_topic_config(SEGMENT_BYTES, "1").is_ok());
+    }
+
+    #[test]
     fn validate_cleanup_policy_accepts_delete_and_compact() {
         assert!(validate_topic_config(CLEANUP_POLICY, "delete").is_ok());
         assert!(validate_topic_config(CLEANUP_POLICY, "compact").is_ok());
@@ -723,6 +728,14 @@ mod tests {
     }
 
     #[test]
+    fn apply_retention_ms_zero_is_retained() {
+        let mut o = BTreeMap::new();
+        o.insert(RETENTION_MS.into(), "0".into());
+        let out = apply_to_log_config(&o, &LogConfig::default());
+        assert!(out.retention_ms == Some(Duration::from_millis(0)));
+    }
+
+    #[test]
     fn apply_retention_bytes_propagates() {
         let mut o = BTreeMap::new();
         o.insert(RETENTION_BYTES.into(), "1048576".into());
@@ -736,6 +749,14 @@ mod tests {
         o.insert(RETENTION_BYTES.into(), "-1".into());
         let out = apply_to_log_config(&o, &LogConfig::default());
         assert!(out.retention_bytes == None);
+    }
+
+    #[test]
+    fn apply_retention_bytes_zero_is_retained() {
+        let mut o = BTreeMap::new();
+        o.insert(RETENTION_BYTES.into(), "0".into());
+        let out = apply_to_log_config(&o, &LogConfig::default());
+        assert!(out.retention_bytes == Some(0));
     }
 
     #[test]
@@ -808,6 +829,14 @@ mod tests {
     }
 
     #[test]
+    fn apply_local_retention_ms_zero_is_retained() {
+        let mut o = BTreeMap::new();
+        o.insert(LOCAL_RETENTION_MS.into(), "0".into());
+        let out = apply_to_log_config(&o, &LogConfig::default());
+        assert!(out.local_retention_ms == Some(Duration::from_millis(0)));
+    }
+
+    #[test]
     fn apply_local_retention_ms_positive_propagates() {
         let mut o = BTreeMap::new();
         o.insert(LOCAL_RETENTION_MS.into(), "60000".into());
@@ -829,6 +858,14 @@ mod tests {
         o.insert(LOCAL_RETENTION_BYTES.into(), "-2".into());
         let out = apply_to_log_config(&o, &LogConfig::default());
         assert!(out.local_retention_bytes == None);
+    }
+
+    #[test]
+    fn apply_local_retention_bytes_zero_is_retained() {
+        let mut o = BTreeMap::new();
+        o.insert(LOCAL_RETENTION_BYTES.into(), "0".into());
+        let out = apply_to_log_config(&o, &LogConfig::default());
+        assert!(out.local_retention_bytes == Some(0));
     }
 
     #[test]

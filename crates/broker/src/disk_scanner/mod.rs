@@ -159,4 +159,31 @@ mod tests {
             .unwrap()
             .unwrap();
     }
+
+    #[tokio::test]
+    async fn run_waits_for_shutdown_between_ticks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let metrics = BrokerMetrics::new();
+        let shutdown = CancellationToken::new();
+        let scanner = DiskScanner {
+            log_dirs: vec![tmp.path().to_path_buf()],
+            interval: Duration::from_hours(1),
+            metrics,
+            shutdown: shutdown.clone(),
+        };
+        let mut handle = tokio::spawn(scanner.run());
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), &mut handle)
+                .await
+                .is_err(),
+            "disk scanner run loop exited before shutdown"
+        );
+
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .expect("disk scanner should observe shutdown")
+            .expect("disk scanner should not panic");
+    }
 }
