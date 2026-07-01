@@ -324,6 +324,12 @@ mod tests {
     }
 
     #[test]
+    fn unknown_server_error_is_negative_one() {
+        assert!(UNKNOWN_SERVER_ERROR == -1);
+        assert!(UNKNOWN_SERVER_ERROR < NONE);
+    }
+
+    #[test]
     fn maps_unsupported_to_35() {
         let e = BrokerError::UnsupportedApi {
             api_key: 0,

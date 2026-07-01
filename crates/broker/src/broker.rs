@@ -4147,6 +4147,17 @@ mod tests {
         }
     }
 
+    async fn wait_for_connection_count(broker: &Broker, expected: usize, message: &'static str) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if broker.connections.total() == expected {
+                return;
+            }
+            assert!(std::time::Instant::now() < deadline, "{message}");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
     fn local_partition_with_records(
         log_dir: &std::path::Path,
         topic: &str,
@@ -4576,6 +4587,32 @@ mod tests {
         assert!(limiter.per_ip_count(ip) == 1);
         drop(g);
         assert!(limiter.per_ip_count(ip) == 0);
+    }
+
+    #[tokio::test]
+    async fn accepted_socket_tuning_sets_nodelay_and_large_buffers() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let client_task = tokio::spawn(tokio::net::TcpStream::connect(addr));
+        let (server, _) = listener.accept().await.expect("accept loopback client");
+        let client = client_task
+            .await
+            .expect("connect task")
+            .expect("connect loopback client");
+
+        let sock = socket2::SockRef::from(&server);
+        server.set_nodelay(false).expect("clear TCP_NODELAY");
+        sock.set_send_buffer_size(4096).expect("shrink send buffer");
+        sock.set_recv_buffer_size(4096).expect("shrink recv buffer");
+
+        tune_accepted_socket(&server);
+
+        assert!(server.nodelay().expect("read TCP_NODELAY"));
+        assert!(sock.send_buffer_size().expect("read send buffer") >= 512 * 1024);
+        assert!(sock.recv_buffer_size().expect("read recv buffer") >= 512 * 1024);
+        drop(client);
     }
 
     #[test]
@@ -5671,12 +5708,15 @@ mod tests {
         let dir = tempdir().unwrap();
         let config = BrokerConfig::for_tests(dir.path().to_path_buf());
         let handle = Broker::start(config).await.unwrap();
+        let broker = handle.broker_arc_for_test();
         let addr = handle.listen_addr();
         assert!(addr.port() != 0);
         let stream = tokio::net::TcpStream::connect(addr)
             .await
             .expect("listener accepts before shutdown");
+        wait_for_connection_count(&broker, 1, "accept_loop did not register live connection").await;
         drop(stream);
+        wait_for_connection_count(&broker, 0, "connection guard did not release client slot").await;
         handle.shutdown().await;
         assert_listener_stops_accepting(addr).await;
     }
