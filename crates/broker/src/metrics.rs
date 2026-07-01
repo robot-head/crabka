@@ -1233,6 +1233,20 @@ mod tests {
         assert!(m.client_software_versions.get_or_create(&other).get() == 1);
     }
 
+    #[tokio::test]
+    async fn record_client_software_renders_labelled_openmetrics_counter() {
+        let m = BrokerMetrics::new();
+
+        m.record_client_software("render-lib", "2.0.0");
+
+        let mut body = String::new();
+        let registry = m.registry.lock().await;
+        prometheus_client::encoding::text::encode(&mut body, &registry).unwrap();
+        assert!(body.contains(
+            "crabka_broker_client_software_versions_total{software_name=\"render-lib\",software_version=\"2.0.0\"} 1"
+        ));
+    }
+
     #[test]
     fn partition_helpers_increment_the_right_family() {
         let m = BrokerMetrics::new();
