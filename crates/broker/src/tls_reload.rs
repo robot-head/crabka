@@ -81,3 +81,127 @@ pub(crate) async fn run(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert2::assert;
+    use crabka_security::ClientAuthMode;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    fn install_provider() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
+
+    fn generated_pair() -> (String, String) {
+        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        let params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+        let cert = params.self_signed(&key).unwrap();
+        (cert.pem(), key.serialize_pem())
+    }
+
+    fn write_file(dir: &Path, name: &str, body: &str) -> PathBuf {
+        let path = dir.join(name);
+        fs::write(&path, body).unwrap();
+        path
+    }
+
+    fn write_pair(dir: &Path, cert: &str, key: &str) -> (PathBuf, PathBuf) {
+        (
+            write_file(dir, "cert.pem", cert),
+            write_file(dir, "key.pem", key),
+        )
+    }
+
+    fn tls_config(cert_chain_path: PathBuf, private_key_path: PathBuf) -> TlsConfig {
+        TlsConfig {
+            cert_chain_path,
+            private_key_path,
+            trust_roots_path: None,
+            client_ca_path: None,
+            client_auth: ClientAuthMode::Disabled,
+        }
+    }
+
+    fn bump_mtime(path: &Path, delta: Duration) {
+        let file = fs::OpenOptions::new().write(true).open(path).unwrap();
+        file.set_modified(SystemTime::now() + delta).unwrap();
+    }
+
+    #[test]
+    fn read_mtime_reports_existing_files_and_missing_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(dir.path(), "cert.pem", "not a real cert");
+
+        assert!(read_mtime(&path).is_some());
+        assert!(read_mtime(&dir.path().join("missing.pem")).is_none());
+    }
+
+    #[test]
+    fn snapshot_mtimes_captures_cert_key_and_client_ca() {
+        let dir = tempfile::tempdir().unwrap();
+        let cert = write_file(dir.path(), "cert.pem", "cert");
+        let key = write_file(dir.path(), "key.pem", "key");
+        let ca = write_file(dir.path(), "client-ca.pem", "ca");
+        let cfg = TlsConfig {
+            cert_chain_path: cert.clone(),
+            private_key_path: key.clone(),
+            trust_roots_path: None,
+            client_ca_path: Some(ca.clone()),
+            client_auth: ClientAuthMode::Required,
+        };
+
+        let snapshot = snapshot_mtimes(&cfg);
+
+        assert!(snapshot != PathMtimes::default());
+        assert!(snapshot.cert == read_mtime(&cert));
+        assert!(snapshot.key == read_mtime(&key));
+        assert!(snapshot.client_ca == read_mtime(&ca));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn run_reloads_after_mtime_change_and_skips_unchanged_ticks() {
+        install_provider();
+        let dir = tempfile::tempdir().unwrap();
+        let (cert_a, key_a) = generated_pair();
+        let (cert, key) = write_pair(dir.path(), &cert_a, &key_a);
+        let cfg = tls_config(cert.clone(), key.clone());
+        let dynamic = DynamicServerConfig::from_tls_config(&cfg).unwrap();
+        let before = dynamic.current();
+        let shutdown = CancellationToken::new();
+
+        let task = tokio::spawn(run(
+            dynamic.clone(),
+            cfg.clone(),
+            Duration::from_secs(1),
+            shutdown.clone(),
+        ));
+        tokio::task::yield_now().await;
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        let unchanged = dynamic.current();
+        assert!(
+            Arc::ptr_eq(&before, &unchanged),
+            "unchanged mtimes must not reload"
+        );
+
+        let (cert_b, key_b) = generated_pair();
+        fs::write(&cert, cert_b).unwrap();
+        fs::write(&key, key_b).unwrap();
+        bump_mtime(&cert, Duration::from_mins(1));
+        bump_mtime(&key, Duration::from_secs(61));
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        let after = dynamic.current();
+        assert!(
+            !Arc::ptr_eq(&before, &after),
+            "changed mtimes must reload the server config"
+        );
+
+        shutdown.cancel();
+        task.await.unwrap();
+    }
+}
