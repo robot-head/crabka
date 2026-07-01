@@ -3266,7 +3266,9 @@ dependencies = [
  "hex",
  "http-body-util",
  "object_store",
+ "opentelemetry",
  "opentelemetry-proto",
+ "opentelemetry_sdk",
  "parquet",
  "prometheus-client",
  "prost 0.14.4",
@@ -3290,6 +3292,8 @@ dependencies = [
  "tonic-prost-build",
  "tower",
  "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
  "url",
  "wincode",
 ]
