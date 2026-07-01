@@ -71,11 +71,18 @@ crabka-client-core = { path = "../client-core", version = "0.3.8" }
 crabka-protocol = { path = "../protocol", version = "0.3.8" }
 datatest-stable = { workspace = true }
 http-body-util = "0.1"
+# OTel stack for the `set_remote_parent_from_records` re-parenting test — mirrors
+# the export-less tracer subscriber used in `crabka-telemetry`'s propagation
+# tests. Test-only, hence dev-dependencies.
+opentelemetry = { workspace = true, features = ["trace"] }
+opentelemetry_sdk = { workspace = true, features = ["trace"] }
 parquet = { workspace = true }
 tempfile = { workspace = true }
 testcontainers = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tower = { workspace = true, features = ["util"] }
+tracing-opentelemetry = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 [build-dependencies]
 protox = { workspace = true }

@@ -1262,6 +1262,25 @@ mod tests {
 
     use super::*;
 
+    /// Pins `tenant_for_span`'s span-label logic: a present non-empty header is
+    /// echoed verbatim, while a missing OR empty `X-Scope-OrgID` falls back to
+    /// `"unknown"`. Kills the whole-fn replacement mutants (`"xyzzy"` /
+    /// `String::new()`) and the `delete !` mutant on `!value.is_empty()` — the
+    /// empty-string case only maps to `"unknown"` while the negation stands.
+    #[test]
+    fn tenant_for_span_labels_present_and_falls_back_on_missing_or_empty() {
+        let mut present = HeaderMap::new();
+        present.insert("X-Scope-OrgID", "acme".parse().unwrap());
+        assert!(tenant_for_span(&present) == "acme");
+
+        let missing = HeaderMap::new();
+        assert!(tenant_for_span(&missing) == "unknown");
+
+        let mut empty = HeaderMap::new();
+        empty.insert("X-Scope-OrgID", "".parse().unwrap());
+        assert!(tenant_for_span(&empty) == "unknown");
+    }
+
     #[derive(Default)]
     struct RecordingSink {
         appends: Mutex<Vec<(Bytes, WalRecord)>>,

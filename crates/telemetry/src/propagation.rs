@@ -131,4 +131,92 @@ mod tests {
         let cx = extract_context([(TRACEPARENT, [0xff, 0xfe].as_slice())]);
         assert!(!cx.span().span_context().is_valid());
     }
+
+    /// Run `f` under a subscriber wired to a real (export-less) `OTel` tracer
+    /// with `AlwaysOn` sampling, so spans created inside carry a valid,
+    /// *sampled* `OTel` context — a prerequisite for the inject / re-parent
+    /// helpers to do anything observable.
+    fn with_otel_subscriber(f: impl FnOnce()) {
+        use opentelemetry::trace::TracerProvider as _;
+        use opentelemetry_sdk::trace::{Sampler, SdkTracerProvider};
+        use tracing_subscriber::prelude::*;
+
+        opentelemetry::global::set_text_map_propagator(
+            opentelemetry_sdk::propagation::TraceContextPropagator::new(),
+        );
+        let provider = SdkTracerProvider::builder()
+            .with_sampler(Sampler::AlwaysOn)
+            .build();
+        let tracer = provider.tracer("propagation-test");
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(tracer));
+        tracing::subscriber::with_default(subscriber, f);
+    }
+
+    #[test]
+    fn vec_injector_collects_key_value_pairs() {
+        // The Injector must actually record each (key, value); a no-op set()
+        // would silently drop the trace headers.
+        let mut out = Vec::new();
+        VecInjector(&mut out).set(TRACEPARENT, "abc".to_owned());
+        assert!(out == vec![(TRACEPARENT.to_owned(), "abc".to_owned())]);
+    }
+
+    #[test]
+    fn map_extractor_reads_values_and_lists_keys() {
+        // get() returns the stored value (None when absent); keys() must list the
+        // real header keys, not an empty/placeholder set.
+        let map: HashMap<String, String> = [(TRACEPARENT.to_owned(), "v".to_owned())]
+            .into_iter()
+            .collect();
+        let ex = MapExtractor(&map);
+        assert!(ex.get(TRACEPARENT) == Some("v"));
+        assert!(ex.get("absent").is_none());
+        assert!(ex.keys() == vec![TRACEPARENT]);
+    }
+
+    #[test]
+    fn current_trace_headers_emits_traceparent_for_active_span() {
+        with_otel_subscriber(|| {
+            let span = tracing::info_span!("producer");
+            let _g = span.enter();
+
+            let headers = current_trace_headers();
+            let tp = headers.iter().find(|(k, _)| k == TRACEPARENT);
+            assert!(tp.is_some());
+
+            // The injected value carries *this* span's trace id and the sampled
+            // flag — pinning both the key and the content so a wrong-key or
+            // placeholder-value mutant is caught.
+            let (_, value) = tp.unwrap();
+            let trace_id = tracing::Span::current()
+                .context()
+                .span()
+                .span_context()
+                .trace_id();
+            assert!(value.contains(&trace_id.to_string()));
+            assert!(value.ends_with("-01"));
+        });
+    }
+
+    #[test]
+    fn current_trace_headers_empty_without_active_span() {
+        // No subscriber ⇒ no OTel context ⇒ nothing to inject. Safe to call.
+        assert!(current_trace_headers().is_empty());
+    }
+
+    #[test]
+    fn set_remote_parent_reparents_span_into_header_trace() {
+        with_otel_subscriber(|| {
+            let traceparent = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
+            let span = tracing::info_span!("consumer");
+            set_remote_parent(&span, [(TRACEPARENT, traceparent.as_bytes())]);
+
+            // The span now belongs to the producer's trace (shares its trace id).
+            let sc = span.context().span().span_context().clone();
+            assert!(
+                sc.trace_id() == TraceId::from_hex("0af7651916cd43dd8448eb211c80319c").unwrap()
+            );
+        });
+    }
 }

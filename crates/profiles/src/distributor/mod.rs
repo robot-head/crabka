@@ -834,6 +834,24 @@ mod tests {
     use prost::Message;
 
     use super::*;
+
+    /// `ingest_span_tenant` reads the `X-Scope-OrgID` header, returning its
+    /// value verbatim when present and non-empty, and `"unknown"` when the
+    /// header is missing or empty.
+    #[test]
+    fn ingest_span_tenant_reads_scope_orgid_header() {
+        let mut present = HeaderMap::new();
+        present.insert("x-scope-orgid", "acme".parse().unwrap());
+        assert!(ingest_span_tenant(&present) == "acme");
+
+        let missing = HeaderMap::new();
+        assert!(ingest_span_tenant(&missing) == "unknown");
+
+        let mut empty = HeaderMap::new();
+        empty.insert("x-scope-orgid", "".parse().unwrap());
+        assert!(ingest_span_tenant(&empty) == "unknown");
+    }
+
     use crate::error::ProfilesError;
     use crate::ingest::{RelabelAction, RelabelConfig, TenantLimitConfig, TenantLimits};
     use crate::limits::OverridesProvider;

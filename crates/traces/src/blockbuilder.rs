@@ -694,6 +694,72 @@ mod tests {
     use super::*;
     use crate::span::{EventRecord, KeyValue, LinkRecord, SpanKind, StatusCode};
 
+    /// `set_remote_parent_from_records` must re-parent the span into the trace
+    /// carried on the FIRST record whose header key equals `TRACEPARENT_HEADER`.
+    ///
+    /// Guards two mutants: replacing the whole function with `()` (the span would
+    /// keep its own fresh trace id, not the header's), and flipping the header-key
+    /// comparison from `==` to `!=` (the non-traceparent record would be matched
+    /// first and its garbage/absent context would fail to re-parent the span).
+    /// The non-traceparent record is deliberately placed BEFORE the traceparent
+    /// one so the `==`/`!=` distinction is observable.
+    #[test]
+    fn set_remote_parent_from_records_reparents_into_header_trace() {
+        use opentelemetry::trace::{TraceContextExt as _, TraceId, TracerProvider as _};
+        use opentelemetry_sdk::trace::{Sampler, SdkTracerProvider};
+        use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+        use tracing_subscriber::prelude::*;
+
+        opentelemetry::global::set_text_map_propagator(
+            opentelemetry_sdk::propagation::TraceContextPropagator::new(),
+        );
+        let provider = SdkTracerProvider::builder()
+            .with_sampler(Sampler::AlwaysOn)
+            .build();
+        let tracer = provider.tracer("blockbuilder-test");
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(tracer));
+
+        tracing::subscriber::with_default(subscriber, || {
+            fn record(headers: Vec<crabka_client_consumer::Header>) -> ConsumerRecord {
+                ConsumerRecord {
+                    topic: "wal".into(),
+                    partition: 0,
+                    offset: 0,
+                    leader_epoch: 0,
+                    timestamp: 0,
+                    key: None,
+                    value: None,
+                    headers,
+                }
+            }
+
+            let traceparent = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
+            let records = vec![
+                // A record WITHOUT the traceparent header comes first: with the
+                // `==`→`!=` mutant, `find` would (wrongly) select this one and
+                // extract no valid context, so the trace-id assertion would fail.
+                record(vec![crabka_client_consumer::Header {
+                    key: "other".into(),
+                    value: Some(bytes::Bytes::from_static(b"x")),
+                }]),
+                // The record actually carrying the producer's W3C trace context.
+                record(vec![crabka_client_consumer::Header {
+                    key: TRACEPARENT_HEADER.into(),
+                    value: Some(bytes::Bytes::from(traceparent.as_bytes().to_vec())),
+                }]),
+            ];
+
+            let span = tracing::info_span!("t");
+            set_remote_parent_from_records(&span, &records);
+
+            // The span now belongs to the producer's trace (shares its trace id).
+            // A no-op mutant leaves the span in its own fresh trace, so this fails.
+            let sc = span.context().span().span_context().clone();
+            assert!(sc.trace_id() == TraceId::from_hex("0af7651916cd43dd8448eb211c80319c").unwrap());
+        });
+    }
+
     fn span() -> Span {
         Span {
             trace_id: [1; 16],

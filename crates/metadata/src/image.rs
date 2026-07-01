@@ -935,6 +935,27 @@ impl MetadataImage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `record_variant` maps each enum variant to its exact discriminant
+    /// name; asserting concrete mappings kills whole-fn replacements (e.g.
+    /// returning `""` or a constant).
+    #[test]
+    fn record_variant_returns_exact_discriminant_names() {
+        let topic = MetadataRecord::V1Topic(TopicRecord {
+            name: "orders".into(),
+            topic_id: Uuid::new_v4(),
+            partitions: 3,
+            replication_factor: 2,
+        });
+        assert!(record_variant(&topic) == "V1Topic");
+
+        let feature = MetadataRecord::V1FeatureLevel(crate::records::FeatureLevelRecord {
+            name: "metadata.version".into(),
+            level: 1,
+        });
+        assert!(record_variant(&feature) == "V1FeatureLevel");
+    }
+
     use crate::acl::{AclEntryFilter, AclOperation, PermissionType};
     use crate::records::{
         BrokerConfigRecord, ClientQuotaRecord, DeleteDelegationTokenRecord,

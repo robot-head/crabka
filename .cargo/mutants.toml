@@ -59,6 +59,23 @@ exclude_globs = [
     # (same rationale as `operator/src/run.rs`); its decision core lives in
     # `txn/two_pc.rs` and is mutation-tested + model-checked there.
     "crates/broker/src/txn/expiration.rs",
+    # The observability demo app is a runnable producer/consumer demo — order
+    # generation, produce/consume serve loops, and self-telemetry (traces +
+    # metrics) emission — exercised by running the `demo/observability` stack,
+    # not the unit suite. Same "demonstration/bench harness, no unit-testable
+    # production signal" rationale as `bench-driver` below; mirrors its
+    # codecov.yml `ignore` entry.
+    "crates/observability-demo-app/**",
+    # The observability-service binaries (traces / metrics / profiles / logs) are
+    # `main` + `run` / `run_block_builder` entrypoint + serve-loop glue: parse
+    # args, build config, run the ingest/compact loop until shutdown. No
+    # unit-testable signal — each service's decision core lives in its lib and is
+    # mutation-tested there. Same rationale as the grpc-gateway / schema-registry
+    # / broker / audit `src/bin/**` globs above.
+    "crates/traces/src/bin/**",
+    "crates/metrics/src/bin/**",
+    "crates/profiles/src/bin/**",
+    "crates/observability/src/bin/**",
     "crates/*/tests/**",
     "crates/*/benches/**",
     "crates/bench-driver/**",
