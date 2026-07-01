@@ -576,6 +576,19 @@ mod tests {
     }
 
     #[test]
+    fn first_batch_at_or_after_rejects_floor_past_base_plus_delta() {
+        let batch = test_batch_at(3, 4, b'z');
+        let mut buf = bytes::BytesMut::new();
+        batch.encode(&mut buf).unwrap();
+        let bytes = buf.freeze();
+
+        assert!(
+            first_batch_at_or_after(&bytes, 7).is_none(),
+            "batch 3..6 must not cover floor 7"
+        );
+    }
+
+    #[test]
     fn parse_txn_index_round_trips_known_entries() {
         // Mirror TxnIndex::append: 8B start_offset BE, 8B last_offset BE,
         // 8B producer_id BE.
@@ -669,6 +682,117 @@ mod tests {
             });
         }
         b
+    }
+
+    fn test_batch_at(
+        base_offset: i64,
+        record_count: i32,
+        value_byte: u8,
+    ) -> crabka_protocol::records::RecordBatch {
+        use bytes::Bytes;
+        let mut batch = crabka_protocol::records::RecordBatch {
+            base_offset,
+            last_offset_delta: record_count - 1,
+            ..crabka_protocol::records::RecordBatch::default()
+        };
+        for offset_delta in 0..record_count {
+            batch.records.push(Record {
+                offset_delta,
+                value: Some(Bytes::from(vec![value_byte; 4])),
+                ..Default::default()
+            });
+        }
+        batch
+    }
+
+    fn offset_index_bytes(entries: &[(u32, u32)]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        for (relative_offset, position) in entries {
+            buf.extend_from_slice(&relative_offset.to_be_bytes());
+            buf.extend_from_slice(&position.to_be_bytes());
+        }
+        buf
+    }
+
+    fn time_index_bytes(entries: &[(i64, u32)]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        for (timestamp, relative_offset) in entries {
+            buf.extend_from_slice(&timestamp.to_be_bytes());
+            buf.extend_from_slice(&relative_offset.to_be_bytes());
+        }
+        buf
+    }
+
+    fn write_test_file(dir: &std::path::Path, name: &str, bytes: &[u8]) -> std::path::PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    fn sparse_remote_segment_reader() -> (RemoteReader, tempfile::TempDir) {
+        let source_dir = tempfile::tempdir().unwrap();
+        let remote_dir = tempfile::tempdir().unwrap();
+
+        let first = test_batch_at(10, 4, b'a');
+        let second = test_batch_at(14, 3, b'b');
+        let mut log_bytes = bytes::BytesMut::new();
+        first.encode(&mut log_bytes).unwrap();
+        let second_position = u32::try_from(log_bytes.len()).unwrap();
+        second.encode(&mut log_bytes).unwrap();
+        let log_bytes = log_bytes.freeze();
+
+        let log_path = write_test_file(source_dir.path(), "00000000000000000010.log", &log_bytes);
+        let offset_index_path = write_test_file(
+            source_dir.path(),
+            "00000000000000000010.index",
+            &offset_index_bytes(&[(0, 0), (4, second_position)]),
+        );
+        let time_index_path = write_test_file(
+            source_dir.path(),
+            "00000000000000000010.timeindex",
+            &time_index_bytes(&[(1_000, 0), (2_000, 4)]),
+        );
+
+        let rsm: Arc<dyn RemoteStorageManager> =
+            Arc::new(LocalTieredStorage::new(remote_dir.path()));
+        let rlmm: Arc<dyn RemoteLogMetadataManager> =
+            Arc::new(InmemoryRemoteLogMetadataManager::new());
+        let id = crabka_remote_storage::RemoteLogSegmentId::new(tp(), Uuid::new_v4());
+        let md = RemoteLogSegmentMetadata::new(
+            id.clone(),
+            10,
+            16,
+            2_000,
+            1,
+            2_000,
+            i32::try_from(log_bytes.len()).unwrap_or(i32::MAX),
+            RemoteLogSegmentState::CopySegmentStarted,
+            BTreeMap::from([(0_i32, 10_i64)]),
+        )
+        .unwrap();
+
+        rlmm.add_remote_log_segment_metadata(md.clone()).unwrap();
+        let data = crabka_remote_storage::LogSegmentData {
+            log_segment: log_path,
+            offset_index: offset_index_path,
+            time_index: time_index_path,
+            transaction_index: None,
+            producer_snapshot_index: None,
+            leader_epoch_index: bytes::Bytes::from_static(b"0\n1\n0 10\n"),
+        };
+        rsm.copy_log_segment_data(&md, &data).unwrap();
+        rlmm.update_remote_log_segment_metadata(
+            crabka_remote_storage::RemoteLogSegmentMetadataUpdate {
+                remote_log_segment_id: id,
+                event_timestamp_ms: 2_000,
+                custom_metadata: None,
+                state: RemoteLogSegmentState::CopySegmentFinished,
+                broker_id: 1,
+            },
+        )
+        .unwrap();
+
+        (RemoteReader::new(rsm, rlmm), remote_dir)
     }
 
     /// Build a log rolled into several sealed segments under `dir`, then copy
@@ -910,6 +1034,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fetch_batch_uses_offset_relative_to_remote_segment_start() {
+        let (reader, _remote_dir) = sparse_remote_segment_reader();
+
+        let got = reader
+            .fetch_batch(&tp(), 0, 12, 4096)
+            .await
+            .expect("ok")
+            .expect("offset 12 is in the synthetic remote segment");
+
+        assert!(
+            got.base_offset == 10,
+            "relative offset 2 should read the first batch, not jump to {}",
+            got.base_offset
+        );
+    }
+
+    #[tokio::test]
     async fn fetch_batch_returns_none_when_segment_not_in_rlmm() {
         let remote_dir = tempfile::tempdir().unwrap();
         let rsm: Arc<dyn RemoteStorageManager> =
@@ -1008,6 +1149,19 @@ mod tests {
         // The first finished segment is the lowest-base one.
         let expected = exports.iter().map(|e| e.base_offset).min().unwrap();
         assert!(got == expected);
+    }
+
+    #[tokio::test]
+    async fn offset_for_timestamp_adds_relative_offset_to_segment_start() {
+        let (reader, _remote_dir) = sparse_remote_segment_reader();
+
+        let got = reader
+            .offset_for_timestamp(&tp(), 2_000)
+            .await
+            .unwrap()
+            .expect("timestamp 2000 is indexed");
+
+        assert!(got == 14);
     }
 
     #[tokio::test]
