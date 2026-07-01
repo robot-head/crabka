@@ -12696,8 +12696,70 @@ async fn execute_patterns_query(
 }
 
 fn log_line_pattern(line: &str) -> String {
+    // Crabka services (and every JSON-emitting collector) log compact objects
+    // like `{"timestamp":"…","severity":"INFO","message":"connection opened"}`.
+    // Whitespace tokenization mangles those — the quoted values contain spaces
+    // and the `:` separator is invisible to the logfmt `key=value` splitter — so
+    // every distinct timestamp became its own pattern. Templatize JSON lines
+    // structurally instead, keeping keys and constant values while collapsing
+    // variable values (timestamps, ids, numbers) to `<_>`.
+    if let Some(pattern) = json_log_pattern(line) {
+        return pattern;
+    }
     line.split_whitespace()
         .map(log_pattern_token)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Templatize a single-object JSON log line, returning `None` for anything that
+/// is not a JSON object (so the caller falls back to whitespace/logfmt mining).
+fn json_log_pattern(line: &str) -> Option<String> {
+    // `from_str` already rejects non-objects and non-JSON, so there is no
+    // cheap pre-check guard here: a leading-`{` fast path would be a pure
+    // performance optimization with no behavior of its own to test.
+    let Value::Object(map) = serde_json::from_str::<Value>(line.trim()).ok()? else {
+        return None;
+    };
+    let templatized = Value::Object(
+        map.iter()
+            .map(|(key, value)| (key.clone(), json_value_pattern(value)))
+            .collect(),
+    );
+    serde_json::to_string(&templatized).ok()
+}
+
+/// Replace variable JSON leaf values with the `<_>` placeholder while preserving
+/// object/array structure and constant (low-entropy) values.
+fn json_value_pattern(value: &Value) -> Value {
+    match value {
+        // Numbers are always high-cardinality dimensions (offsets, durations,
+        // counts), so collapse them; booleans and null are constants worth
+        // keeping as discriminators.
+        Value::Number(_) => Value::String("<_>".to_string()),
+        Value::Null | Value::Bool(_) => value.clone(),
+        Value::String(text) => Value::String(templatize_text(text)),
+        Value::Array(items) => Value::Array(items.iter().map(json_value_pattern).collect()),
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(key, value)| (key.clone(), json_value_pattern(value)))
+                .collect(),
+        ),
+    }
+}
+
+/// Templatize the variable whitespace-delimited tokens inside a free-text value
+/// (e.g. an embedded request id or timestamp in a `message` field), leaving the
+/// constant words intact so distinct messages stay distinct patterns.
+fn templatize_text(text: &str) -> String {
+    text.split_whitespace()
+        .map(|token| {
+            if pattern_value_is_variable(token) {
+                "<_>".to_string()
+            } else {
+                token.to_string()
+            }
+        })
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -12713,15 +12775,58 @@ fn log_pattern_token(token: &str) -> String {
     if key.is_empty() || value.is_empty() {
         return token.to_string();
     }
-    if pattern_value_is_variable(value.trim_matches('"')) {
+    if pattern_value_is_variable(value) {
         format!("{key}=<_>")
     } else {
         token.to_string()
     }
 }
 
+/// Whether a token looks like variable (per-line-varying) data that should be
+/// templatized to `<_>` rather than kept as a constant part of the pattern.
+///
+/// Timestamps and other numeric-leading values are caught by the leading-digit
+/// and float checks; identifiers that begin with a letter (UUIDs, trace/span
+/// hashes, opaque high-entropy tokens) need the explicit shape checks so they do
+/// not each become their own pattern.
 fn pattern_value_is_variable(value: &str) -> bool {
-    value.as_bytes().first().is_some_and(u8::is_ascii_digit) || value.parse::<f64>().is_ok()
+    let value = value.trim_matches('"');
+    if value.is_empty() {
+        return false;
+    }
+    value.as_bytes().first().is_some_and(u8::is_ascii_digit)
+        || value.parse::<f64>().is_ok()
+        || is_uuid(value)
+        || is_hex_id(value)
+        || is_high_entropy_id(value)
+}
+
+/// Canonical `8-4-4-4-12` hex UUID, regardless of leading character.
+fn is_uuid(value: &str) -> bool {
+    let mut groups = value.split('-');
+    let shaped = [8usize, 4, 4, 4, 12].into_iter().all(|len| {
+        groups
+            .next()
+            .is_some_and(|group| group.len() == len && group.bytes().all(|b| b.is_ascii_hexdigit()))
+    });
+    shaped && groups.next().is_none()
+}
+
+/// A long pure-hex string (trace/span id, digest, dash-less UUID). The length
+/// floor keeps short hex-looking words (`face`, `cafe`) from being templatized.
+fn is_hex_id(value: &str) -> bool {
+    value.len() >= 16 && value.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// A long opaque identifier (session token, base62 id, api key): purely
+/// alphanumeric with both letters and digits. Requiring a digit avoids
+/// templatizing long lowercase or mixed-case words, and the punctuation
+/// exclusion keeps module paths and file locations intact.
+fn is_high_entropy_id(value: &str) -> bool {
+    value.len() >= 16
+        && value.bytes().all(|b| b.is_ascii_alphanumeric())
+        && value.bytes().any(|b| b.is_ascii_digit())
+        && value.bytes().any(|b| b.is_ascii_alphabetic())
 }
 
 async fn execute_detected_fields_query(
@@ -21578,5 +21683,84 @@ mod tests {
                 .unwrap()
                 .has_rule_filter()
         );
+    }
+
+    #[test]
+    fn json_log_lines_collapse_to_a_single_templated_pattern() {
+        // Two Crabka-shaped JSON log lines differing only by timestamp must mine
+        // to one pattern with the timestamp templatized and every constant kept.
+        let first = r#"{"timestamp":"2026-07-01T04:19:26.1238077Z","severity":"INFO","target":"crabka_broker::network::dispatch","message":"connection opened"}"#;
+        let second = r#"{"timestamp":"2026-07-01T04:19:27.9981001Z","severity":"INFO","target":"crabka_broker::network::dispatch","message":"connection opened"}"#;
+        assert_eq!(log_line_pattern(first), log_line_pattern(second));
+        assert_eq!(
+            log_line_pattern(first),
+            r#"{"timestamp":"<_>","severity":"INFO","target":"crabka_broker::network::dispatch","message":"connection opened"}"#
+        );
+    }
+
+    #[test]
+    fn json_log_pattern_templatizes_ids_and_numbers_but_keeps_constants() {
+        let pattern = log_line_pattern(
+            r#"{"severity":"INFO","request_id":"550e8400-e29b-41d4-a716-446655440000","trace":"4f3a9c2be18d4f6a5b7c9e0f1a2d3e4b","offset":12345,"sasl":false,"listener":"PLAIN"}"#,
+        );
+        assert_eq!(
+            pattern,
+            r#"{"severity":"INFO","request_id":"<_>","trace":"<_>","offset":"<_>","sasl":false,"listener":"PLAIN"}"#
+        );
+    }
+
+    #[test]
+    fn json_message_field_templatizes_embedded_variables() {
+        assert_eq!(
+            log_line_pattern(r#"{"message":"processed request 550e8400e29b41d4a716 in 42ms"}"#),
+            r#"{"message":"processed request <_> in <_>"}"#
+        );
+    }
+
+    #[test]
+    fn non_json_lines_still_use_logfmt_mining() {
+        assert_eq!(
+            log_line_pattern("status=500 user=100 route=/checkout"),
+            "status=<_> user=<_> route=/checkout"
+        );
+        // A line that merely starts with `{` but is not valid JSON falls back.
+        assert_eq!(log_line_pattern("{not json ts=1"), "{not json ts=<_>");
+    }
+
+    #[test]
+    fn pattern_value_variable_classification() {
+        // Variable: timestamps, floats, UUIDs, long hex ids, opaque tokens.
+        assert!(pattern_value_is_variable("2026-07-01T04:19:26.1238077Z"));
+        assert!(pattern_value_is_variable("42.5"));
+        assert!(pattern_value_is_variable(
+            "550e8400-e29b-41d4-a716-446655440000"
+        ));
+        assert!(pattern_value_is_variable(
+            "4f3a9c2be18d4f6a5b7c9e0f1a2d3e4b"
+        ));
+        assert!(pattern_value_is_variable("AKIAIOSFODNN7EXAMPLE"));
+        assert!(pattern_value_is_variable("\"2026-07-01T04:19:26Z\""));
+        // Sole-reason coverage: each value below is variable via exactly one
+        // classifier, so every branch of the `||` chain (and the shape checks
+        // inside `is_uuid`/`is_hex_id`) is independently exercised.
+        assert!(pattern_value_is_variable("-42.5")); // negative float: only the f64 parse
+        assert!(pattern_value_is_variable(
+            "f47ac10b-58cc-4372-a567-0e02b2c3d479" // letter-led UUID: only is_uuid
+        ));
+        assert!(pattern_value_is_variable("abcdefabcdefabcd")); // 16 hex letters, no digit: only is_hex_id
+        // UUID *layout* but non-hex groups must not be accepted as a UUID (guards
+        // the `len == n && all-hex` check inside is_uuid).
+        assert!(!pattern_value_is_variable(
+            "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+        ));
+        // Constant: levels, module paths, file:line callers, short words.
+        assert!(!pattern_value_is_variable("INFO"));
+        assert!(!pattern_value_is_variable(
+            "crabka_broker::network::dispatch"
+        ));
+        assert!(!pattern_value_is_variable("grpc_logging.go:66"));
+        assert!(!pattern_value_is_variable("/cortex.Ingester/Push"));
+        assert!(!pattern_value_is_variable("cafe"));
+        assert!(!pattern_value_is_variable("authenticationToken"));
     }
 }
