@@ -355,131 +355,117 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_disabled_feature_preserves_group_error_rows() {
+    async fn handle_error_scenarios_preserve_expected_rows() {
         let version = describe_share_group_offsets_response::MAX_VERSION;
-        let (broker_handle, _dir) =
-            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer), false).await;
-        let broker = broker_handle.broker_arc_for_test();
-        let principal = principal();
-        let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
-        let ctx = test_context(&principal, &peer);
-        let req_bytes = encode_request(&request(&[
-            ("g1", vec![("t1", vec![0])]),
-            ("g2", vec![("t2", vec![1])]),
-        ]));
-
-        let resp = handle(&broker, version, 1, &req_bytes, &ctx)
-            .await
-            .expect("handle");
-        let resp = decode_response(&resp);
-
-        let expected = DescribeShareGroupOffsetsResponse {
-            throttle_time_ms: 0,
-            groups: vec![
-                DescribeShareGroupOffsetsResponseGroup {
-                    group_id: "g1".into(),
-                    topics: Vec::new(),
-                    error_code: codes::UNSUPPORTED_VERSION,
-                    error_message: None,
-                    unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
-                },
-                DescribeShareGroupOffsetsResponseGroup {
-                    group_id: "g2".into(),
-                    topics: Vec::new(),
-                    error_code: codes::UNSUPPORTED_VERSION,
-                    error_message: None,
-                    unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
-                },
-            ],
-            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
-        };
-        assert!(resp == expected);
-        broker_handle.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn handle_denied_group_preserves_group_id_and_error_code() {
-        let version = describe_share_group_offsets_response::MAX_VERSION;
-        let (broker_handle, _dir) = start_broker(Arc::new(DenyAll), true).await;
-        let broker = broker_handle.broker_arc_for_test();
-        let principal = principal();
-        let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
-        let ctx = test_context(&principal, &peer);
-        let req_bytes = encode_request(&request(&[("g1", vec![("missing", vec![0])])]));
-
-        let resp = handle(&broker, version, 1, &req_bytes, &ctx)
-            .await
-            .expect("handle");
-        let resp = decode_response(&resp);
-
-        let expected = DescribeShareGroupOffsetsResponse {
-            throttle_time_ms: 0,
-            groups: vec![DescribeShareGroupOffsetsResponseGroup {
-                group_id: "g1".into(),
-                topics: Vec::new(),
-                error_code: codes::GROUP_AUTHORIZATION_FAILED,
-                error_message: None,
-                unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
-            }],
-            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
-        };
-        assert!(resp == expected);
-        broker_handle.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn handle_unknown_topic_preserves_partition_error_rows() {
-        let version = describe_share_group_offsets_response::MAX_VERSION;
-        let (broker_handle, _dir) =
-            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer), true).await;
-        let broker = broker_handle.broker_arc_for_test();
-        let principal = principal();
-        let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
-        let ctx = test_context(&principal, &peer);
-        let req_bytes = encode_request(&request(&[("g1", vec![("missing-topic", vec![3, 5])])]));
-
-        let resp = handle(&broker, version, 1, &req_bytes, &ctx)
-            .await
-            .expect("handle");
-        let resp = decode_response(&resp);
-
-        let expected = DescribeShareGroupOffsetsResponse {
-            throttle_time_ms: 0,
-            groups: vec![DescribeShareGroupOffsetsResponseGroup {
-                group_id: "g1".into(),
-                topics: vec![DescribeShareGroupOffsetsResponseTopic {
-                    topic_name: "missing-topic".into(),
-                    topic_id: Uuid::default(),
-                    partitions: vec![
-                        DescribeShareGroupOffsetsResponsePartition {
-                            partition_index: 3,
-                            start_offset: -1,
-                            leader_epoch: -1,
-                            lag: -1,
-                            error_code: codes::UNKNOWN_TOPIC_OR_PARTITION,
+        type Case<'a> = (
+            &'a str,
+            Arc<dyn Authorizer>,
+            bool,
+            Vec<RequestGroup<'a>>,
+            DescribeShareGroupOffsetsResponse,
+        );
+        let cases: Vec<Case<'_>> = vec![
+            (
+                "disabled feature preserves group error rows",
+                Arc::new(crate::authorizer::AllowAllAuthorizer),
+                false,
+                vec![("g1", vec![("t1", vec![0])]), ("g2", vec![("t2", vec![1])])],
+                DescribeShareGroupOffsetsResponse {
+                    throttle_time_ms: 0,
+                    groups: vec![
+                        DescribeShareGroupOffsetsResponseGroup {
+                            group_id: "g1".into(),
+                            topics: Vec::new(),
+                            error_code: codes::UNSUPPORTED_VERSION,
                             error_message: None,
                             unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
                         },
-                        DescribeShareGroupOffsetsResponsePartition {
-                            partition_index: 5,
-                            start_offset: -1,
-                            leader_epoch: -1,
-                            lag: -1,
-                            error_code: codes::UNKNOWN_TOPIC_OR_PARTITION,
+                        DescribeShareGroupOffsetsResponseGroup {
+                            group_id: "g2".into(),
+                            topics: Vec::new(),
+                            error_code: codes::UNSUPPORTED_VERSION,
                             error_message: None,
                             unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
                         },
                     ],
                     unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
-                }],
-                error_code: codes::NONE,
-                error_message: None,
-                unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
-            }],
-            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
-        };
-        assert!(resp == expected);
-        broker_handle.shutdown().await;
+                },
+            ),
+            (
+                "denied group preserves group id and error code",
+                Arc::new(DenyAll),
+                true,
+                vec![("g1", vec![("missing", vec![0])])],
+                DescribeShareGroupOffsetsResponse {
+                    throttle_time_ms: 0,
+                    groups: vec![DescribeShareGroupOffsetsResponseGroup {
+                        group_id: "g1".into(),
+                        topics: Vec::new(),
+                        error_code: codes::GROUP_AUTHORIZATION_FAILED,
+                        error_message: None,
+                        unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                    }],
+                    unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                },
+            ),
+            (
+                "unknown topic preserves partition error rows",
+                Arc::new(crate::authorizer::AllowAllAuthorizer),
+                true,
+                vec![("g1", vec![("missing-topic", vec![3, 5])])],
+                DescribeShareGroupOffsetsResponse {
+                    throttle_time_ms: 0,
+                    groups: vec![DescribeShareGroupOffsetsResponseGroup {
+                        group_id: "g1".into(),
+                        topics: vec![DescribeShareGroupOffsetsResponseTopic {
+                            topic_name: "missing-topic".into(),
+                            topic_id: Uuid::default(),
+                            partitions: vec![
+                                DescribeShareGroupOffsetsResponsePartition {
+                                    partition_index: 3,
+                                    start_offset: -1,
+                                    leader_epoch: -1,
+                                    lag: -1,
+                                    error_code: codes::UNKNOWN_TOPIC_OR_PARTITION,
+                                    error_message: None,
+                                    unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                                },
+                                DescribeShareGroupOffsetsResponsePartition {
+                                    partition_index: 5,
+                                    start_offset: -1,
+                                    leader_epoch: -1,
+                                    lag: -1,
+                                    error_code: codes::UNKNOWN_TOPIC_OR_PARTITION,
+                                    error_message: None,
+                                    unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                                },
+                            ],
+                            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                        }],
+                        error_code: codes::NONE,
+                        error_message: None,
+                        unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                    }],
+                    unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                },
+            ),
+        ];
+        for (case, authorizer, share_enabled, groups, expected) in cases {
+            let (broker_handle, _dir) = start_broker(authorizer, share_enabled).await;
+            let broker = broker_handle.broker_arc_for_test();
+            let principal = principal();
+            let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+            let ctx = test_context(&principal, &peer);
+            let req_bytes = encode_request(&request(&groups));
+
+            let resp = handle(&broker, version, 1, &req_bytes, &ctx)
+                .await
+                .expect("handle");
+            let resp = decode_response(&resp);
+
+            assert!(resp == expected, "case: {case}");
+            broker_handle.shutdown().await;
+        }
     }
 
     #[tokio::test]

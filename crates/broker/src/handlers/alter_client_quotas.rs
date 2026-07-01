@@ -410,26 +410,19 @@ mod tests {
 
     #[test]
     fn out_of_range_value_rejected() {
-        let e = entry(
-            vec![("user", Some("alice"))],
-            vec![("producer_byte_rate", -100.0, false)],
-        );
-        let err = process_one_entry(&e).unwrap_err();
-        assert!(err.0 == INVALID_CONFIG);
-
-        let e2 = entry(
-            vec![("user", Some("alice"))],
-            vec![("request_percentage", 250.0, false)],
-        );
-        let err2 = process_one_entry(&e2).unwrap_err();
-        assert!(err2.0 == INVALID_CONFIG);
-
-        let e3 = entry(
-            vec![("user", Some("alice"))],
-            vec![("producer_byte_rate", f64::NAN, false)],
-        );
-        let err3 = process_one_entry(&e3).unwrap_err();
-        assert!(err3.0 == INVALID_CONFIG);
+        let cases = [
+            ("producer_byte_rate", -100.0),   // negative
+            ("request_percentage", 250.0),    // > 100.0 cap
+            ("producer_byte_rate", f64::NAN), // non-finite
+        ];
+        for (quota_key, value) in cases {
+            let e = entry(
+                vec![("user", Some("alice"))],
+                vec![(quota_key, value, false)],
+            );
+            let err = process_one_entry(&e).unwrap_err();
+            assert!(err.0 == INVALID_CONFIG, "key {quota_key}, value {value}");
+        }
     }
 
     #[test]
@@ -734,12 +727,15 @@ mod tests {
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
         assert!(resp == expected);
-        assert!(
-            (
-                quota_value(&broker_handle, "alice", "producer_byte_rate"),
-                quota_value(&broker_handle, "bob", "unknown_quota_key"),
-            ) == (Some(1024.0), None)
-        );
+        for (user, quota_key, want) in [
+            ("alice", "producer_byte_rate", Some(1024.0)),
+            ("bob", "unknown_quota_key", None),
+        ] {
+            assert!(
+                quota_value(&broker_handle, user, quota_key) == want,
+                "user {user}"
+            );
+        }
         broker_handle.shutdown().await;
     }
 

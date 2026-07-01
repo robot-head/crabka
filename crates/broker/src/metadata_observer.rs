@@ -411,15 +411,10 @@ mod tests {
         // proves the modulo, not integer division, indexes the list.
         // Wrap-around: index 3 must rotate back to the first voter (3 % 3 == 0);
         // `3 / 3 == 1` would return the second voter instead.
-        assert!(
-            (
-                voter_at(&voters, 0).0,
-                voter_at(&voters, 1).0,
-                voter_at(&voters, 2).0,
-                voter_at(&voters, 3).0,
-                voter_at(&voters, 4).0,
-            ) == (1, 2, 3, 1, 2)
-        );
+        let cases = [(0usize, 1u64), (1, 2), (2, 3), (3, 1), (4, 2)];
+        for (idx, expected_id) in cases {
+            assert!(voter_at(&voters, idx).0 == expected_id, "idx {idx}");
+        }
     }
 
     #[test]

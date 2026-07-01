@@ -514,19 +514,19 @@ mod tests {
     use assert2::assert;
 
     #[test]
-    fn validate_retention_ms_accepts_positive_and_minus_one() {
-        assert!(validate_topic_config(RETENTION_MS, "60000").is_ok());
-        assert!(validate_topic_config(RETENTION_MS, "-1").is_ok());
-    }
-
-    #[test]
-    fn validate_retention_ms_rejects_below_minus_one() {
-        assert!(validate_topic_config(RETENTION_MS, "-5").is_err());
-    }
-
-    #[test]
-    fn validate_retention_ms_rejects_non_integer() {
-        assert!(validate_topic_config(RETENTION_MS, "abc").is_err());
+    fn validate_retention_ms_boundary_cases() {
+        let cases = [
+            ("60000", true), // positive accepted
+            ("-1", true),    // -1 (unlimited) accepted
+            ("-5", false),   // below -1 rejected
+            ("abc", false),  // non-integer rejected
+        ];
+        for (value, want_ok) in cases {
+            assert!(
+                validate_topic_config(RETENTION_MS, value).is_ok() == want_ok,
+                "retention.ms={value}"
+            );
+        }
     }
 
     #[test]
@@ -583,21 +583,19 @@ mod tests {
     #[test]
     fn parse_compression_type_maps_codecs() {
         use crabka_compression::CompressionType;
-        assert!(
-            (
-                parse_compression_type("gzip"),
-                parse_compression_type("snappy"),
-                parse_compression_type("lz4"),
-                parse_compression_type("zstd"),
-                parse_compression_type("uncompressed"),
-            ) == (
-                Ok(Some(CompressionType::Gzip)),
-                Ok(Some(CompressionType::Snappy)),
-                Ok(Some(CompressionType::Lz4)),
-                Ok(Some(CompressionType::Zstd)),
-                Ok(Some(CompressionType::None)),
-            )
-        );
+        let cases = [
+            ("gzip", CompressionType::Gzip),
+            ("snappy", CompressionType::Snappy),
+            ("lz4", CompressionType::Lz4),
+            ("zstd", CompressionType::Zstd),
+            ("uncompressed", CompressionType::None),
+        ];
+        for (input, want) in cases {
+            assert!(
+                parse_compression_type(input) == Ok(Some(want)),
+                "compression.type={input}"
+            );
+        }
     }
 
     #[test]
@@ -688,23 +686,20 @@ mod tests {
     }
 
     #[test]
-    fn is_recognized_returns_true_for_whitelisted_keys() {
-        assert!(
-            (
-                is_recognized(RETENTION_MS),
-                is_recognized(RETENTION_BYTES),
-                is_recognized(SEGMENT_BYTES),
-                is_recognized(CLEANUP_POLICY),
-                is_recognized(COMPRESSION_TYPE),
-                is_recognized(MIN_INSYNC_REPLICAS),
-            ) == (true, true, true, true, true, true)
-        );
-    }
-
-    #[test]
-    fn is_recognized_returns_false_for_unknown_keys() {
-        assert!(!is_recognized("flush.ms"));
-        assert!(!is_recognized(""));
+    fn is_recognized_matches_whitelist() {
+        let cases = [
+            (RETENTION_MS, true),
+            (RETENTION_BYTES, true),
+            (SEGMENT_BYTES, true),
+            (CLEANUP_POLICY, true),
+            (COMPRESSION_TYPE, true),
+            (MIN_INSYNC_REPLICAS, true),
+            ("flush.ms", false),
+            ("", false),
+        ];
+        for (key, want) in cases {
+            assert!(is_recognized(key) == want, "key {key:?}");
+        }
     }
 
     #[test]
@@ -813,13 +808,12 @@ mod tests {
 
     #[test]
     fn validate_local_retention_ms_accepts_minus_one_minus_two_and_positive() {
-        assert!(
-            (
-                validate_topic_config(LOCAL_RETENTION_MS, "-2"),
-                validate_topic_config(LOCAL_RETENTION_MS, "-1"),
-                validate_topic_config(LOCAL_RETENTION_MS, "60000"),
-            ) == (Ok(()), Ok(()), Ok(()))
-        );
+        for value in ["-2", "-1", "60000"] {
+            assert!(
+                validate_topic_config(LOCAL_RETENTION_MS, value) == Ok(()),
+                "local.retention.ms={value}"
+            );
+        }
     }
 
     #[test]
@@ -888,13 +882,13 @@ mod tests {
 
     #[test]
     fn validate_delete_retention_ms_accepts_nonneg_rejects_negative() {
-        assert!(
-            (
-                validate_topic_config(DELETE_RETENTION_MS, "0"),
-                validate_topic_config(DELETE_RETENTION_MS, "86400000"),
-                validate_topic_config(DELETE_RETENTION_MS, "-1").is_err(),
-            ) == (Ok(()), Ok(()), true)
-        );
+        let cases = [("0", true), ("86400000", true), ("-1", false)];
+        for (value, want_ok) in cases {
+            assert!(
+                validate_topic_config(DELETE_RETENTION_MS, value).is_ok() == want_ok,
+                "delete.retention.ms={value}"
+            );
+        }
     }
 
     #[test]
@@ -932,19 +926,15 @@ mod tests {
 
     #[test]
     fn parse_recovery_strategy_maps_values() {
-        assert!(
-            (
-                RecoveryStrategy::parse("None"),
-                RecoveryStrategy::parse("Balanced"),
-                RecoveryStrategy::parse("Aggressive"),
-                RecoveryStrategy::parse("bogus"),
-            ) == (
-                Some(RecoveryStrategy::None),
-                Some(RecoveryStrategy::Balanced),
-                Some(RecoveryStrategy::Aggressive),
-                None,
-            )
-        );
+        let cases = [
+            ("None", Some(RecoveryStrategy::None)),
+            ("Balanced", Some(RecoveryStrategy::Balanced)),
+            ("Aggressive", Some(RecoveryStrategy::Aggressive)),
+            ("bogus", None),
+        ];
+        for (input, want) in cases {
+            assert!(RecoveryStrategy::parse(input) == want, "input {input:?}");
+        }
     }
 
     #[test]

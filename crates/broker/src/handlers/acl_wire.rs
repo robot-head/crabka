@@ -189,30 +189,27 @@ mod tests {
 
     #[test]
     fn resource_type_concrete_rejects_any() {
-        assert!(
-            (
-                resource_type_concrete(1),
-                resource_type_concrete(2),
-                resource_type_concrete(3),
-                resource_type_concrete(4),
-            ) == (
-                Err(WireAclError::AnyRequiresFilter),
-                Ok(ResourceType::Topic),
-                Ok(ResourceType::Group),
-                Ok(ResourceType::Cluster),
-            )
-        );
+        let cases = [
+            (1, Err(WireAclError::AnyRequiresFilter)),
+            (2, Ok(ResourceType::Topic)),
+            (3, Ok(ResourceType::Group)),
+            (4, Ok(ResourceType::Cluster)),
+        ];
+        for (byte, want) in cases {
+            assert!(resource_type_concrete(byte) == want, "byte {byte}");
+        }
     }
 
     #[test]
     fn pattern_type_filter_any_and_match_collapse_to_none() {
-        assert!(
-            (
-                pattern_type_filter(1),
-                pattern_type_filter(2),
-                pattern_type_filter(3),
-            ) == (Ok(None), Ok(None), Ok(Some(PatternType::Literal)))
-        );
+        let cases = [
+            (1, Ok(None)),
+            (2, Ok(None)),
+            (3, Ok(Some(PatternType::Literal))),
+        ];
+        for (byte, want) in cases {
+            assert!(pattern_type_filter(byte) == want, "byte {byte}");
+        }
     }
 
     #[test]

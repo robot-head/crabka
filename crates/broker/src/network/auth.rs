@@ -961,55 +961,46 @@ mod tests {
     }
 
     #[test]
-    fn pre_auth_allowlist_accepts_handshake_authenticate_apiversions() {
-        assert!(
+    fn pre_auth_allowlist_accepts_sasl_apis_and_rejects_data_plane() {
+        let cases = [
+            (17, true),  // SaslHandshake
+            (36, true),  // SaslAuthenticate
+            (18, true),  // ApiVersions
+            (0, false),  // Produce
+            (1, false),  // Fetch
+            (3, false),  // Metadata
+            (19, false), // CreateTopics
+        ];
+        for (api_key, allowed) in cases {
+            assert!(is_pre_auth_allowed(api_key) == allowed, "api key {api_key}");
+        }
+    }
+
+    #[test]
+    fn unauthenticated_states_have_no_principal() {
+        let cases = [
+            ("anonymous", ConnectionAuth::Anonymous),
             (
-                is_pre_auth_allowed(17), // SaslHandshake
-                is_pre_auth_allowed(36), // SaslAuthenticate
-                is_pre_auth_allowed(18), // ApiVersions
-            ) == (true, true, true)
-        );
-    }
-
-    #[test]
-    fn pre_auth_allowlist_rejects_data_plane_apis() {
-        assert!(
+                "negotiating_plain",
+                ConnectionAuth::Negotiating {
+                    mechanism: SaslMechanism::Plain,
+                    exchange: SaslExchange::Plain,
+                    pending_token_expiry_ms: None,
+                },
+            ),
             (
-                is_pre_auth_allowed(0),  // Produce
-                is_pre_auth_allowed(1),  // Fetch
-                is_pre_auth_allowed(3),  // Metadata
-                is_pre_auth_allowed(19), // CreateTopics
-            ) == (false, false, false, false)
-        );
-    }
-
-    #[test]
-    fn anonymous_is_not_authenticated() {
-        let a = ConnectionAuth::Anonymous;
-        assert!(!a.is_authenticated());
-        assert!(a.principal().is_none());
-    }
-
-    #[test]
-    fn negotiating_is_not_authenticated() {
-        let a = ConnectionAuth::Negotiating {
-            mechanism: SaslMechanism::Plain,
-            exchange: SaslExchange::Plain,
-            pending_token_expiry_ms: None,
-        };
-        assert!(!a.is_authenticated());
-        assert!(a.principal().is_none());
-    }
-
-    #[test]
-    fn negotiating_scram_pending_is_not_authenticated() {
-        let a = ConnectionAuth::Negotiating {
-            mechanism: SaslMechanism::ScramSha512,
-            exchange: SaslExchange::ScramPending,
-            pending_token_expiry_ms: None,
-        };
-        assert!(!a.is_authenticated());
-        assert!(a.principal().is_none());
+                "negotiating_scram_pending",
+                ConnectionAuth::Negotiating {
+                    mechanism: SaslMechanism::ScramSha512,
+                    exchange: SaslExchange::ScramPending,
+                    pending_token_expiry_ms: None,
+                },
+            ),
+        ];
+        for (name, a) in cases {
+            assert!(!a.is_authenticated(), "{name}");
+            assert!(a.principal().is_none(), "{name}");
+        }
     }
 
     fn unsecured_token(sub: &str, exp_s: i64) -> String {
@@ -1505,28 +1496,24 @@ mod tests {
             },
             exchange: SaslExchange::OAuthBearer,
         };
-        assert!(
-            (
-                auth.allows_request(36), // SaslAuthenticate
-                auth.allows_request(17), // SaslHandshake
-                auth.allows_request(18), // ApiVersions
-                auth.allows_request(3),  // Metadata
-            ) == (true, false, false, false)
-        );
+        let cases = [
+            (36, true),  // SaslAuthenticate
+            (17, false), // SaslHandshake
+            (18, false), // ApiVersions
+            (3, false),  // Metadata
+        ];
+        for (api_key, allowed) in cases {
+            assert!(auth.allows_request(api_key) == allowed, "api key {api_key}");
+        }
     }
 
     #[test]
     fn allows_request_anonymous_uses_pre_auth_allowlist() {
         let auth = ConnectionAuth::Anonymous;
-        assert!(
-            (
-                auth.allows_request(17),
-                auth.allows_request(36),
-                auth.allows_request(18),
-                auth.allows_request(0),
-                auth.allows_request(3),
-            ) == (true, true, true, false, false)
-        );
+        let cases = [(17, true), (36, true), (18, true), (0, false), (3, false)];
+        for (api_key, allowed) in cases {
+            assert!(auth.allows_request(api_key) == allowed, "api key {api_key}");
+        }
     }
 
     #[test]
@@ -1541,14 +1528,9 @@ mod tests {
             expires_at_ms: None,
             authenticated_via_token: false,
         };
-        assert!(
-            (
-                auth.allows_request(0),
-                auth.allows_request(3),
-                auth.allows_request(17),
-                auth.allows_request(36),
-            ) == (true, true, true, true)
-        );
+        for api_key in [0, 3, 17, 36] {
+            assert!(auth.allows_request(api_key), "api key {api_key}");
+        }
     }
 
     // KIP-368 ceiling: the server-side
@@ -1556,12 +1538,7 @@ mod tests {
     // the `Authenticated.expires_at_ms` stored on the connection.
 
     #[tokio::test]
-    async fn handle_authenticate_oauthbearer_clamps_session_lifetime_when_cap_set_below_exp() {
-        let mut auth = ConnectionAuth::Negotiating {
-            mechanism: SaslMechanism::OAuthBearer,
-            exchange: SaslExchange::OAuthBearer,
-            pending_token_expiry_ms: None,
-        };
+    async fn handle_authenticate_oauthbearer_applies_max_session_lifetime_cap() {
         let validator = crabka_security::OAuthBearerValidator::Unsecured(
             crabka_security::UnsecuredJwsValidator {
                 allowable_clock_skew_ms: 0,
@@ -1573,98 +1550,35 @@ mod tests {
         let token = unsecured_token("alice", exp_ms / 1000);
         let req = oauthbearer_client_response(&token);
 
-        let resp = handle_authenticate_oauthbearer(
-            &req,
-            &mut auth,
-            &validator,
-            now_ms,
-            Some(30), // 30s cap, less than token's 60s exp
-        )
-        .await;
-
-        assert!(resp.error_code == 0);
-        assert!(resp.session_lifetime_ms == 30_000);
-        match auth {
-            ConnectionAuth::Authenticated { expires_at_ms, .. } => {
-                assert!(
-                    expires_at_ms == Some(now_ms + 30_000),
-                    "expires_at_ms must reflect the clamped value (not raw token exp)"
-                );
+        // (server cap in seconds, expected session lifetime in ms). The
+        // stored expires_at_ms must reflect the clamped value too, not the
+        // raw token exp.
+        let cases = [
+            (Some(30), 30_000_i64), // cap below the token's 60s exp → clamped
+            (None, 60_000),         // unset cap → raw token exp
+            (Some(600), 60_000),    // cap above exp → no effect
+        ];
+        for (cap, want_lifetime_ms) in cases {
+            let mut auth = ConnectionAuth::Negotiating {
+                mechanism: SaslMechanism::OAuthBearer,
+                exchange: SaslExchange::OAuthBearer,
+                pending_token_expiry_ms: None,
+            };
+            let resp =
+                handle_authenticate_oauthbearer(&req, &mut auth, &validator, now_ms, cap).await;
+            assert!(
+                (resp.error_code, resp.session_lifetime_ms) == (0, want_lifetime_ms),
+                "cap {cap:?}"
+            );
+            match auth {
+                ConnectionAuth::Authenticated { expires_at_ms, .. } => {
+                    assert!(
+                        expires_at_ms == Some(now_ms + want_lifetime_ms),
+                        "cap {cap:?}: expires_at_ms must reflect the clamped value"
+                    );
+                }
+                _ => panic!("cap {cap:?}: expected Authenticated"),
             }
-            _ => panic!("expected Authenticated"),
-        }
-    }
-
-    #[tokio::test]
-    async fn handle_authenticate_oauthbearer_no_clamp_when_cap_unset() {
-        let mut auth = ConnectionAuth::Negotiating {
-            mechanism: SaslMechanism::OAuthBearer,
-            exchange: SaslExchange::OAuthBearer,
-            pending_token_expiry_ms: None,
-        };
-        let validator = crabka_security::OAuthBearerValidator::Unsecured(
-            crabka_security::UnsecuredJwsValidator {
-                allowable_clock_skew_ms: 0,
-                ..Default::default()
-            },
-        );
-        let now_ms = 1_000_000_i64;
-        let exp_ms = now_ms + 60_000;
-        let token = unsecured_token("alice", exp_ms / 1000);
-        let req = oauthbearer_client_response(&token);
-
-        let resp = handle_authenticate_oauthbearer(&req, &mut auth, &validator, now_ms, None).await;
-
-        assert!(resp.error_code == 0);
-        assert!(resp.session_lifetime_ms == 60_000);
-        match auth {
-            ConnectionAuth::Authenticated { expires_at_ms, .. } => {
-                assert!(expires_at_ms == Some(exp_ms), "unset cap = raw token exp");
-            }
-            _ => panic!("expected Authenticated"),
-        }
-    }
-
-    #[tokio::test]
-    async fn handle_authenticate_oauthbearer_no_clamp_when_cap_above_exp() {
-        let mut auth = ConnectionAuth::Negotiating {
-            mechanism: SaslMechanism::OAuthBearer,
-            exchange: SaslExchange::OAuthBearer,
-            pending_token_expiry_ms: None,
-        };
-        let validator = crabka_security::OAuthBearerValidator::Unsecured(
-            crabka_security::UnsecuredJwsValidator {
-                allowable_clock_skew_ms: 0,
-                ..Default::default()
-            },
-        );
-        let now_ms = 1_000_000_i64;
-        let exp_ms = now_ms + 60_000; // 60s
-        let token = unsecured_token("alice", exp_ms / 1000);
-        let req = oauthbearer_client_response(&token);
-
-        let resp = handle_authenticate_oauthbearer(
-            &req,
-            &mut auth,
-            &validator,
-            now_ms,
-            Some(600), // 600s cap, well above 60s token
-        )
-        .await;
-
-        assert!(resp.error_code == 0);
-        assert!(
-            resp.session_lifetime_ms == 60_000,
-            "cap above exp = no effect"
-        );
-        match auth {
-            ConnectionAuth::Authenticated { expires_at_ms, .. } => {
-                assert!(
-                    expires_at_ms == Some(exp_ms),
-                    "cap above exp = raw token exp"
-                );
-            }
-            _ => panic!("expected Authenticated"),
         }
     }
 

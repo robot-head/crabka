@@ -455,16 +455,17 @@ mod tests {
         assert_eq!(res.error_code, crate::codes::NONE);
         let by_name: std::collections::HashMap<_, _> =
             res.configs.iter().map(|c| (c.name.as_str(), c)).collect();
-        assert_eq!(by_name["metrics"].value.as_deref(), Some("a."));
-        assert_eq!(
-            by_name["metrics"].config_source,
-            super::CONFIG_SOURCE_CLIENT_METRICS
-        );
-        assert_eq!(by_name["interval.ms"].value.as_deref(), Some("300000"));
-        assert_eq!(
-            by_name["interval.ms"].config_source,
-            super::CONFIG_SOURCE_DEFAULT
-        );
+        let cases = [
+            ("metrics", Some("a."), super::CONFIG_SOURCE_CLIENT_METRICS),
+            ("interval.ms", Some("300000"), super::CONFIG_SOURCE_DEFAULT),
+        ];
+        for (key, want_value, want_source) in cases {
+            assert!(
+                (by_name[key].value.as_deref(), by_name[key].config_source)
+                    == (want_value, want_source),
+                "key {key}"
+            );
+        }
     }
 
     fn anon() -> crabka_security::Principal {

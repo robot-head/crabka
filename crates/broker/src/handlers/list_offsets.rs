@@ -310,7 +310,15 @@ mod tests {
 
     #[test]
     fn sentinel_constants_match_kafka_wire_values() {
-        assert!((EARLIEST, LATEST, MAX_TIMESTAMP, EARLIEST_LOCAL) == (-2, -1, -3, -4));
+        let cases = [
+            ("EARLIEST", EARLIEST, -2),
+            ("LATEST", LATEST, -1),
+            ("MAX_TIMESTAMP", MAX_TIMESTAMP, -3),
+            ("EARLIEST_LOCAL", EARLIEST_LOCAL, -4),
+        ];
+        for (name, sentinel, want) in cases {
+            assert!(sentinel == want, "{name}");
+        }
     }
 
     #[test]

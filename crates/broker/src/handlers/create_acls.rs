@@ -342,21 +342,23 @@ mod tests {
         };
         assert!(entry == expected);
 
-        let mut empty_name = valid.clone();
-        empty_name.resource_name.clear();
-        assert!(validate(&empty_name).unwrap_err().1 == "empty resource_name");
-
-        let mut nul_name = valid.clone();
-        nul_name.resource_name = "bad\0name".into();
-        assert!(validate(&nul_name).unwrap_err().1 == "resource_name contains NUL");
-
-        let mut bad_principal = valid.clone();
-        bad_principal.principal = "alice".into();
-        assert!(validate(&bad_principal).unwrap_err().1 == "principal must start with User:");
-
-        let mut empty_host = valid;
-        empty_host.host.clear();
-        assert!(validate(&empty_host).unwrap_err().1 == "empty host");
+        let cases: [(fn(&mut AclCreation), &str); 4] = [
+            (|c| c.resource_name.clear(), "empty resource_name"),
+            (
+                |c| c.resource_name = "bad\0name".into(),
+                "resource_name contains NUL",
+            ),
+            (
+                |c| c.principal = "alice".into(),
+                "principal must start with User:",
+            ),
+            (|c| c.host.clear(), "empty host"),
+        ];
+        for (corrupt, want) in cases {
+            let mut c = valid.clone();
+            corrupt(&mut c);
+            assert!(validate(&c).unwrap_err().1 == want, "expected {want:?}");
+        }
     }
 
     #[test]

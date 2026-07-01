@@ -50,17 +50,21 @@ fn jvm_dump_log_parses_crabka_bootstrap_checkpoint() {
         String::from_utf8_lossy(&out.stderr)
     );
     eprintln!("{text}");
-    assert!(
-        (
-            out.status.success(),
-            text.contains("SnapshotHeader"),
-            text.contains("FEATURE_LEVEL_RECORD"),
-            text.contains("metadata.version"),
-            text.contains("SnapshotFooter"),
-            // `isvalid: false` would mean a batch failed CRC validation.
-            text.contains("isvalid: false"),
-        ) == (true, true, true, true, true, false),
-        "kafka-dump-log must succeed with SnapshotHeader, FEATURE_LEVEL_RECORD, \
-         metadata.version, SnapshotFooter, and no CRC failures: {text}"
-    );
+    assert!(out.status.success(), "kafka-dump-log must succeed: {text}");
+    // (needle, expected presence in the dump-log output)
+    let cases = [
+        ("SnapshotHeader", true),
+        ("FEATURE_LEVEL_RECORD", true),
+        ("metadata.version", true),
+        ("SnapshotFooter", true),
+        // `isvalid: false` would mean a batch failed CRC validation.
+        ("isvalid: false", false),
+    ];
+    for (needle, expected) in cases {
+        assert!(
+            text.contains(needle) == expected,
+            "kafka-dump-log output must {} {needle:?}: {text}",
+            if expected { "contain" } else { "not contain" },
+        );
+    }
 }

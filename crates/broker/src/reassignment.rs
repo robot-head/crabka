@@ -429,11 +429,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wait_when_adding_not_in_isr() {
-        let img = img(&[1, 2, 3], &[1, 2], &[3], &[2], 1);
-        let l = liveness(&[1, 2, 3]).await;
-        let updates = compute_reassignment_progress(&img, &l).await;
-        assert!(updates.is_empty(), "should wait; got {updates:?}");
+    async fn no_update_emitted_when_waiting_idle_or_no_alive_target() {
+        // (case, replicas, isr, adding, removing, leader, alive) — every case
+        // should wait / stay idle: compute_reassignment_progress emits nothing.
+        let cases = [
+            // Adding replica 3 not yet in ISR → wait.
+            (
+                "adding_not_in_isr",
+                vec![1, 2, 3],
+                vec![1, 2],
+                vec![3],
+                vec![2],
+                1,
+                vec![1, 2, 3],
+            ),
+            // leader=2, removing=[2]; only target replicas {1,3} in isr but
+            // none alive (only 2 alive) — wait.
+            (
+                "leader_handoff_no_alive_target_replica",
+                vec![1, 2, 3],
+                vec![1, 2, 3],
+                vec![3],
+                vec![2],
+                2,
+                vec![2],
+            ),
+            // No reassignment in flight → idle partition emits no update.
+            (
+                "idle_partition",
+                vec![1, 2, 3],
+                vec![1, 2, 3],
+                vec![],
+                vec![],
+                1,
+                vec![1, 2, 3],
+            ),
+        ];
+        for (case, replicas, isr, adding, removing, leader, alive) in cases {
+            let img = img(&replicas, &isr, &adding, &removing, leader);
+            let l = liveness(&alive).await;
+            let updates = compute_reassignment_progress(&img, &l).await;
+            assert!(
+                updates.is_empty(),
+                "case {case}: should wait; got {updates:?}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -501,24 +541,6 @@ mod tests {
         task.await.expect("reassignment task panicked");
         assert!(observed.is_err(), "non-leader must not submit changes");
         assert!(controller.submitted_len() == 0);
-    }
-
-    #[tokio::test]
-    async fn leader_handoff_skipped_if_no_alive_target_replica() {
-        // leader=2, removing=[2]; only target replicas {1,3} in isr but
-        // none alive — wait.
-        let img = img(&[1, 2, 3], &[1, 2, 3], &[3], &[2], 2);
-        let l = liveness(&[2]).await; // only 2 alive
-        let updates = compute_reassignment_progress(&img, &l).await;
-        assert!(updates.is_empty());
-    }
-
-    #[tokio::test]
-    async fn idle_partition_emits_no_update() {
-        let img = img(&[1, 2, 3], &[1, 2, 3], &[], &[], 1);
-        let l = liveness(&[1, 2, 3]).await;
-        let updates = compute_reassignment_progress(&img, &l).await;
-        assert!(updates.is_empty());
     }
 
     #[tokio::test]

@@ -1131,15 +1131,14 @@ mod tests {
             assert!(buf.contains(needle), "missing {needle} in:\n{buf}");
         }
         // Topic label and values made it through.
-        assert!(
-            (
-                buf.contains("topic=\"topic-a\""),
-                buf.contains("100"),
-                buf.contains("50"),
-                buf.contains('7'),
-            ) == (true, true, true, true),
-            "expected topic label, bytes_in=100, bytes_out=50, partitions_led=7 in:\n{buf}"
-        );
+        for (needle, what) in [
+            ("topic=\"topic-a\"", "topic label"),
+            ("100", "bytes_in=100"),
+            ("50", "bytes_out=50"),
+            ("7", "partitions_led=7"),
+        ] {
+            assert!(buf.contains(needle), "expected {what} in:\n{buf}");
+        }
     }
 
     #[test]
@@ -1204,16 +1203,21 @@ mod tests {
         // failures (must not lazily allocate a failure entry from the
         // success bump). ILLEGAL_SASL_STATE: 0 successes, 1 failure
         // under the `Unknown` sentinel.
-        // Each read is its own statement: `get_or_create` returns a
-        // read guard, and a first-materialization on the same family
-        // takes the write lock — holding several guards in one
-        // expression self-deadlocks.
-        let plain_ok = m.successful_authentication.get_or_create(&plain).get();
-        let plain_fail = m.failed_authentication.get_or_create(&plain).get();
-        let scram_ok = m.successful_authentication.get_or_create(&scram).get();
-        let unknown_fail = m.failed_authentication.get_or_create(&unknown).get();
-        let unknown_ok = m.successful_authentication.get_or_create(&unknown).get();
-        assert!((plain_ok, plain_fail, scram_ok, unknown_fail, unknown_ok) == (2, 1, 1, 1, 0));
+        let cases = [
+            ("successful", &m.successful_authentication, &plain, 2),
+            ("failed", &m.failed_authentication, &plain, 1),
+            ("successful", &m.successful_authentication, &scram, 1),
+            ("failed", &m.failed_authentication, &unknown, 1),
+            ("successful", &m.successful_authentication, &unknown, 0),
+        ];
+        for (outcome, family, label, want) in cases {
+            // Each read is its own statement: `get_or_create` returns a
+            // read guard, and a first-materialization on the same family
+            // takes the write lock — holding several guards in one
+            // expression self-deadlocks.
+            let got = family.get_or_create(label).get();
+            assert!(got == want, "{outcome} auth for {:?}", label.mechanism);
+        }
     }
 
     #[test]
@@ -1237,10 +1241,10 @@ mod tests {
         m.record_client_software("crabka", "1.0.1");
         m.record_client_software("other-lib", "1.0.0");
 
-        let v100 = m.client_software_versions.get_or_create(&crabka_100).get();
-        let v101 = m.client_software_versions.get_or_create(&crabka_101).get();
-        let vother = m.client_software_versions.get_or_create(&other).get();
-        assert!((v100, v101, vother) == (2, 1, 1));
+        for (label, want) in [(&crabka_100, 2), (&crabka_101, 1), (&other, 1)] {
+            let got = m.client_software_versions.get_or_create(label).get();
+            assert!(got == want, "label {label:?}");
+        }
     }
 
     #[tokio::test]
@@ -1279,15 +1283,28 @@ mod tests {
             topic: "t".into(),
             partition: 1,
         };
-        let bytes_in_p0 = m.partition_bytes_in.get_or_create(&lbl_p0).get();
-        let bytes_in_p1 = m.partition_bytes_in.get_or_create(&lbl_p1).get();
-        let bytes_out_p0 = m.partition_bytes_out.get_or_create(&lbl_p0).get();
-        let cpu_p0 = m.partition_cpu_micros.get_or_create(&lbl_p0).get();
+        let cases = [
+            ("bytes_in", &m.partition_bytes_in, &lbl_p0, 1024),
+            ("bytes_in", &m.partition_bytes_in, &lbl_p1, 512),
+            ("bytes_out", &m.partition_bytes_out, &lbl_p0, 2048),
+            ("cpu_micros", &m.partition_cpu_micros, &lbl_p0, 500),
+        ];
+        for (family_name, family, label, want) in cases {
+            // Each read is its own statement: `get_or_create` returns a
+            // read guard, and a first-materialization on the same family
+            // takes the write lock — holding several guards in one
+            // expression self-deadlocks.
+            let got = family.get_or_create(label).get();
+            assert!(
+                got == want,
+                "{family_name} for partition {}",
+                label.partition
+            );
+        }
+        // `partition_disk_bytes` is a Gauge family (i64), so it stays
+        // out of the Counter table above.
         let disk_p0 = m.partition_disk_bytes.get_or_create(&lbl_p0).get();
-        assert!(
-            (bytes_in_p0, bytes_in_p1, bytes_out_p0, cpu_p0, disk_p0)
-                == (1024, 512, 2048, 500, 1_000_000)
-        );
+        assert!(disk_p0 == 1_000_000);
     }
 
     #[test]
@@ -1311,11 +1328,18 @@ mod tests {
         // t-bad never saw a failed fetch — series is materialized by
         // `get_or_create` at read time but its value is 0, which is
         // what `rate(failed_fetch{topic="t-bad"}[1m])` should compute.
-        let produce_good = m.topic_failed_produce_requests.get_or_create(&good).get();
-        let produce_bad = m.topic_failed_produce_requests.get_or_create(&bad).get();
-        let fetch_good = m.topic_failed_fetch_requests.get_or_create(&good).get();
-        let fetch_bad = m.topic_failed_fetch_requests.get_or_create(&bad).get();
-        assert!((produce_good, produce_bad, fetch_good, fetch_bad) == (2, 1, 1, 0));
+        let cases = [
+            ("failed_produce", &m.topic_failed_produce_requests, &good, 2),
+            ("failed_produce", &m.topic_failed_produce_requests, &bad, 1),
+            ("failed_fetch", &m.topic_failed_fetch_requests, &good, 1),
+            ("failed_fetch", &m.topic_failed_fetch_requests, &bad, 0),
+        ];
+        for (family_name, family, label, want) in cases {
+            // One `get_or_create` guard per statement (first
+            // materialization takes the family write lock).
+            let got = family.get_or_create(label).get();
+            assert!(got == want, "{family_name} for {:?}", label.topic);
+        }
     }
 
     #[test]
@@ -1381,18 +1405,38 @@ mod tests {
         let payments = TopicLabel {
             topic: "payments".into(),
         };
-        let produce_orders = m.produce_message_conversions.get_or_create(&orders).get();
-        let produce_payments = m.produce_message_conversions.get_or_create(&payments).get();
-        let fetch_orders = m.fetch_message_conversions.get_or_create(&orders).get();
-        let fetch_payments = m.fetch_message_conversions.get_or_create(&payments).get();
-        assert!(
+        let cases = [
             (
-                produce_orders,
-                produce_payments,
-                fetch_orders,
-                fetch_payments
-            ) == (2, 1, 1, 2)
-        );
+                "produce_conversions",
+                &m.produce_message_conversions,
+                &orders,
+                2,
+            ),
+            (
+                "produce_conversions",
+                &m.produce_message_conversions,
+                &payments,
+                1,
+            ),
+            (
+                "fetch_conversions",
+                &m.fetch_message_conversions,
+                &orders,
+                1,
+            ),
+            (
+                "fetch_conversions",
+                &m.fetch_message_conversions,
+                &payments,
+                2,
+            ),
+        ];
+        for (family_name, family, label, want) in cases {
+            // One `get_or_create` guard per statement (first
+            // materialization takes the family write lock).
+            let got = family.get_or_create(label).get();
+            assert!(got == want, "{family_name} for {:?}", label.topic);
+        }
     }
 
     #[test]
@@ -1415,18 +1459,28 @@ mod tests {
         // `record_unsupported_api_request` does NOT also bump
         // `api_requests`; the dispatcher already did that for the
         // request in question via `record_api_request`.
-        let unsupported_produce = m.unsupported_api_requests.get_or_create(&produce).get();
-        let unsupported_unknown = m.unsupported_api_requests.get_or_create(&unknown).get();
-        let api_produce = m.api_requests.get_or_create(&produce).get();
-        let api_unknown = m.api_requests.get_or_create(&unknown).get();
-        assert!(
+        let cases = [
             (
-                unsupported_produce,
-                unsupported_unknown,
-                api_produce,
-                api_unknown
-            ) == (1, 1, 0, 0)
-        );
+                "unsupported_api_requests",
+                &m.unsupported_api_requests,
+                &produce,
+                1,
+            ),
+            (
+                "unsupported_api_requests",
+                &m.unsupported_api_requests,
+                &unknown,
+                1,
+            ),
+            ("api_requests", &m.api_requests, &produce, 0),
+            ("api_requests", &m.api_requests, &unknown, 0),
+        ];
+        for (family_name, family, label, want) in cases {
+            // One `get_or_create` guard per statement (first
+            // materialization takes the family write lock).
+            let got = family.get_or_create(label).get();
+            assert!(got == want, "{family_name} for {:?}", label.api_key);
+        }
     }
 
     #[test]
@@ -1447,10 +1501,10 @@ mod tests {
         let unknown = ApiKeyLabel {
             api_key: "Unknown".into(),
         };
-        let produce_count = m.api_requests.get_or_create(&produce).get();
-        let fetch_count = m.api_requests.get_or_create(&fetch).get();
-        let unknown_count = m.api_requests.get_or_create(&unknown).get();
-        assert!((produce_count, fetch_count, unknown_count) == (2, 1, 1));
+        for (label, want) in [(&produce, 2), (&fetch, 1), (&unknown, 1)] {
+            let got = m.api_requests.get_or_create(label).get();
+            assert!(got == want, "api_key {:?}", label.api_key);
+        }
     }
 
     #[test]
@@ -1482,11 +1536,22 @@ mod tests {
             topic: "orders".into(),
             partition: 4,
         };
-        let in_p3 = m.replication_bytes_in.get_or_create(&lbl3).get();
-        let in_p4 = m.replication_bytes_in.get_or_create(&lbl4).get();
-        let out_p3 = m.replication_bytes_out.get_or_create(&lbl3).get();
-        let out_p4 = m.replication_bytes_out.get_or_create(&lbl4).get();
-        assert!((in_p3, in_p4, out_p3, out_p4) == (4_000, 100, 4_000, 0));
+        let cases = [
+            ("replication_in", &m.replication_bytes_in, &lbl3, 4_000),
+            ("replication_in", &m.replication_bytes_in, &lbl4, 100),
+            ("replication_out", &m.replication_bytes_out, &lbl3, 4_000),
+            ("replication_out", &m.replication_bytes_out, &lbl4, 0),
+        ];
+        for (family_name, family, label, want) in cases {
+            // One `get_or_create` guard per statement (first
+            // materialization takes the family write lock).
+            let got = family.get_or_create(label).get();
+            assert!(
+                got == want,
+                "{family_name} for partition {}",
+                label.partition
+            );
+        }
     }
 
     #[tokio::test]

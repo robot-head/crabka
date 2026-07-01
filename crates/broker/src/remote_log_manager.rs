@@ -1235,22 +1235,23 @@ mod tests {
             synth_export(20, 29, 300, 100),
         ];
         let finished: HashSet<i64> = [0, 10, 20].into_iter().collect();
-        // Total = 300; budget = 150 → must evict 150 bytes → oldest two go.
-        let target = local_retention_target(&exports, &finished, None, Some(150), 1_000);
-        assert!(target == Some(20));
-
-        // Budget tighter than one segment: still only the oldest, because
-        // after evicting 100B the remaining is 100 (>budget? no, 200>150,
-        // wait: total=300, budget=150 → need to evict 150; after dropping
-        // first 100B we still need 50 more → second segment also drops.
-        // Test with budget = 50: need to evict 250 → all three? but the
-        // walk stops since segments 0..=2 all become deletable.
-        let target = local_retention_target(&exports, &finished, None, Some(50), 1_000);
-        assert!(target == Some(30));
-
-        // Budget larger than total → nothing deletable.
-        let target = local_retention_target(&exports, &finished, None, Some(10_000), 1_000);
-        assert!(target == None);
+        let cases = [
+            // Total = 300; budget = 150 → must evict 150 bytes → oldest two go.
+            (Some(150), Some(20)),
+            // Budget tighter than one segment: still only the oldest, because
+            // after evicting 100B the remaining is 100 (>budget? no, 200>150,
+            // wait: total=300, budget=150 → need to evict 150; after dropping
+            // first 100B we still need 50 more → second segment also drops.
+            // Test with budget = 50: need to evict 250 → all three? but the
+            // walk stops since segments 0..=2 all become deletable.
+            (Some(50), Some(30)),
+            // Budget larger than total → nothing deletable.
+            (Some(10_000), None),
+        ];
+        for (budget, expected) in cases {
+            let target = local_retention_target(&exports, &finished, None, budget, 1_000);
+            assert!(target == expected, "budget: {budget:?}");
+        }
     }
 
     #[test]
@@ -1478,15 +1479,18 @@ mod tests {
             synth_remote_md(11, 10, 19, 200, 100),
             synth_remote_md(12, 20, 29, 300, 100),
         ];
-        // Total=300, budget=150 → reclaim 150 → oldest two go.
-        let out = remote_retention_eviction_set(&segs, None, Some(150), 1_000);
-        assert!(out.len() == 2);
-        // Budget tighter than one segment → all three.
-        let out = remote_retention_eviction_set(&segs, None, Some(50), 1_000);
-        assert!(out.len() == 3);
-        // Budget larger than total → none.
-        let out = remote_retention_eviction_set(&segs, None, Some(10_000), 1_000);
-        assert!(out.is_empty());
+        let cases = [
+            // Total=300, budget=150 → reclaim 150 → oldest two go.
+            (Some(150), 2),
+            // Budget tighter than one segment → all three.
+            (Some(50), 3),
+            // Budget larger than total → none.
+            (Some(10_000), 0),
+        ];
+        for (budget, expected_len) in cases {
+            let out = remote_retention_eviction_set(&segs, None, budget, 1_000);
+            assert!(out.len() == expected_len, "budget: {budget:?}");
+        }
     }
 
     #[test]

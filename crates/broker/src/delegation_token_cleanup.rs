@@ -167,14 +167,14 @@ mod tests {
 
         // Post-sweep image keeps only the fresh token.
         let after = mock.current_image();
-        assert!(
-            (
-                after.all_delegation_tokens().count(),
-                after.delegation_token_by_id("fresh").is_some(),
-                after.delegation_token_by_id("expired-1").is_none(),
-                after.delegation_token_by_id("expired-2").is_none(),
-            ) == (1, true, true, true)
-        );
+        assert!(after.all_delegation_tokens().count() == 1);
+        let cases = [("fresh", true), ("expired-1", false), ("expired-2", false)];
+        for (token_id, expect_present) in cases {
+            assert!(
+                after.delegation_token_by_id(token_id).is_some() == expect_present,
+                "case: {token_id}"
+            );
+        }
     }
 
     #[tokio::test]

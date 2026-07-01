@@ -201,12 +201,12 @@ mod tests {
     fn hw_advances_when_trailing_follower_catches_up() {
         let mut s = fresh();
         s.install_isr(&[1, 2, 3], &[1, 2, 3], 1, now());
-        let hw1 = s.update_follower_leo(2, 50, 100, now());
-        assert!(hw1 == 0);
-        let hw2 = s.update_follower_leo(3, 75, 100, now());
-        assert!(hw2 == 50);
-        let hw3 = s.update_follower_leo(2, 80, 100, now());
-        assert!(hw3 == 75);
+        // Ordered steps over shared state: (follower, follower_leo, expected_hw).
+        let steps = [(2, 50, 0), (3, 75, 50), (2, 80, 75)];
+        for (follower, leo, expected_hw) in steps {
+            let hw = s.update_follower_leo(follower, leo, 100, now());
+            assert!(hw == expected_hw, "step: follower {follower} leo {leo}");
+        }
     }
 
     #[test]

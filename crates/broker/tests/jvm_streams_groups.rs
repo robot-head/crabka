@@ -400,24 +400,31 @@ async fn jvm_streams_groups_admin_round_trips_crabka() {
     // describe response must carry the resolved topology ("missing the topology
     // information" must NOT appear) — the real JVM `DescribeStreamsGroupsHandler`
     // logs an ERROR and rejects a describe whose topology is absent.
-    assert!(
-        (
-            // Checkpoint 1.
-            wire.contains("Received API_VERSIONS response"),
-            wire.contains("apiKey=89"),
-            wire.contains("FinalizedFeatureKey(name='streams.version'"),
-            // Checkpoint 2.
-            wire.contains("Sending LIST_GROUPS request") && wire.contains("typesFilter=[Streams]"),
-            wire.contains("Received LIST_GROUPS response") && wire.contains("errorCode=0"),
-            // Checkpoint 3.
-            wire.contains("Received STREAMS_GROUP_DESCRIBE response"),
-            wire.contains("missing the topology information"),
-            wire.contains("subtopologyId='0'") && wire.contains(&format!("groupId='{group}'")),
-        ) == (true, true, true, true, true, true, false, true),
-        "JVM streams-group admin round-trip checkpoints failed: ApiVersions must \
-         advertise apiKey=89 + finalized streams.version; the streams-typed \
-         ListGroups must round-trip with errorCode=0; StreamsGroupDescribe must \
-         return the group with its topology and render subtopologyId='0' for \
-         groupId='{group}'; wire log:\n{wire}"
-    );
+    let group_needle = format!("groupId='{group}'");
+    // (needle, expected presence in the DEBUG wire log)
+    let cases = [
+        // Checkpoint 1.
+        ("Received API_VERSIONS response", true),
+        ("apiKey=89", true),
+        ("FinalizedFeatureKey(name='streams.version'", true),
+        // Checkpoint 2.
+        ("Sending LIST_GROUPS request", true),
+        ("typesFilter=[Streams]", true),
+        ("Received LIST_GROUPS response", true),
+        ("errorCode=0", true),
+        // Checkpoint 3. The describe response must carry the resolved topology,
+        // so "missing the topology information" must NOT appear.
+        ("Received STREAMS_GROUP_DESCRIBE response", true),
+        ("missing the topology information", false),
+        ("subtopologyId='0'", true),
+        (group_needle.as_str(), true),
+    ];
+    for (needle, expected) in cases {
+        assert!(
+            wire.contains(needle) == expected,
+            "JVM streams-group admin round-trip checkpoint failed: wire log must {} \
+             {needle:?}; wire log:\n{wire}",
+            if expected { "contain" } else { "not contain" },
+        );
+    }
 }

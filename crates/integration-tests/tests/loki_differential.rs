@@ -2496,116 +2496,311 @@ async fn real_loki_and_crabka_return_same_parser_filter_results() {
     assert!(crabka_metadata_result == loki_metadata_result);
 
     // Sanity-check the Loki-side payloads so the differential comparisons above
-    // cannot pass vacuously. Each tuple pairs the contains-checks (in the same
-    // order the queries ran) with the expected containment outcomes.
-    assert!(
+    // cannot pass vacuously. Each case pairs a contains-check (in the same
+    // order the queries ran) with the expected containment outcome.
+    let contains_cases = [
+        ("loki_json_result", &loki_json_result, json_error_line, true),
         (
-            json_contains_string(&loki_json_result, json_error_line),
-            json_contains_string(&loki_selected_json_result, json_error_line),
-            json_contains_string(&loki_selected_json_result, r#""method":"GET""#),
-            json_contains_string(&loki_selected_json_result, r#""request_method":"GET""#),
-        ) == (true, true, true, false)
-    );
-    assert!(
+            "loki_selected_json_result",
+            &loki_selected_json_result,
+            json_error_line,
+            true,
+        ),
         (
-            json_contains_string(&loki_logfmt_result, logfmt_error_line),
-            json_contains_string(&loki_parameterized_logfmt_result, logfmt_error_line),
-            json_contains_string(&loki_logfmt_or_result, logfmt_error_line),
-            json_contains_string(&loki_logfmt_or_result, r#"status=200 msg="api parser ok""#),
-            json_contains_string(&loki_logfmt_comma_and_result, logfmt_error_line),
-            json_contains_string(
-                &loki_logfmt_comma_and_result,
-                r#"status=200 msg="api parser ok""#
-            ),
-            json_contains_string(&loki_logfmt_adjacent_and_result, logfmt_error_line),
-            json_contains_string(
-                &loki_logfmt_adjacent_and_result,
-                r#"status=200 msg="api parser ok""#
-            ),
-            json_contains_string(&loki_backtick_field_filter_result, logfmt_error_line),
-        ) == (true, true, true, true, true, false, true, false, true)
-    );
-    assert!(
+            "loki_selected_json_result",
+            &loki_selected_json_result,
+            r#""method":"GET""#,
+            true,
+        ),
         (
-            json_contains_string(&loki_line_format_result, "api parser error 500"),
-            json_contains_string(&loki_line_format_result, logfmt_error_line),
-            json_contains_string(&loki_line_format_pipeline_result, "API_PARSER_ERROR 500"),
-            json_contains_string(&loki_line_format_pipeline_result, logfmt_error_line),
-        ) == (true, false, true, false)
-    );
-    assert!(
+            "loki_selected_json_result",
+            &loki_selected_json_result,
+            r#""request_method":"GET""#,
+            false,
+        ),
         (
-            json_contains_string(&loki_label_format_result, logfmt_error_line),
-            json_contains_string(&loki_label_format_pipeline_result, logfmt_error_line),
-            json_contains_string(
-                &loki_line_format_string_helper_result,
-                "Checkout checkout api/items items /api"
-            ),
-            json_contains_string(&loki_line_format_string_helper_result, logfmt_template_line),
-        ) == (true, true, true, false)
-    );
-    assert!(
+            "loki_logfmt_result",
+            &loki_logfmt_result,
+            logfmt_error_line,
+            true,
+        ),
         (
-            json_contains_string(
-                &loki_line_format_logical_helper_result,
-                "true true true true"
-            ),
-            json_contains_string(
-                &loki_line_format_logical_helper_result,
-                logfmt_template_line
-            ),
-            json_contains_string(&loki_line_format_ne_helper_result, "true true"),
-            json_contains_string(&loki_line_format_ne_helper_result, logfmt_template_line),
-            json_contains_string(&loki_line_format_len_helper_result, "len=15"),
-            json_contains_string(&loki_line_format_len_helper_result, logfmt_template_line),
-            json_contains_string(
-                &loki_line_format_spacing_helper_result,
-                "hi   |hello|   hi|world|xxx"
-            ),
-            json_contains_string(
-                &loki_line_format_spacing_helper_result,
-                logfmt_spacing_template_line
-            ),
-            json_contains_string(
-                &loki_line_format_regex_helper_result,
-                "4|helper-template|${2}-${1}"
-            ),
-            json_contains_string(&loki_line_format_regex_helper_result, logfmt_template_line),
-        ) == (
-            true, false, true, false, true, false, true, false, true, false
-        )
-    );
-    assert!(
+            "loki_parameterized_logfmt_result",
+            &loki_parameterized_logfmt_result,
+            logfmt_error_line,
+            true,
+        ),
         (
-            json_contains_string(&loki_drop_keep_result, logfmt_error_line),
-            json_contains_string(&loki_decolorize_result, decolored_logfmt_error_line),
-            json_contains_string(&loki_decolorize_result, colored_logfmt_error_line),
-            json_contains_string(&loki_pattern_result, logfmt_error_line),
-            json_contains_string(&loki_pattern_parser_result, logfmt_error_line),
-            json_contains_string(&loki_regexp_parser_result, logfmt_error_line),
-        ) == (true, true, false, true, true, true)
-    );
-    assert!(
+            "loki_logfmt_or_result",
+            &loki_logfmt_or_result,
+            logfmt_error_line,
+            true,
+        ),
         (
-            json_contains_string(&loki_unpack_parser_result, "original log message"),
-            json_contains_string(&loki_unpack_parser_result, packed_error_line),
-            json_contains_string(&loki_commented_result, logfmt_error_line),
-            json_contains_string(&loki_logfmt_typed_result, logfmt_typed_filter_line),
-        ) == (true, false, true, true)
-    );
-    assert!(
+            "loki_logfmt_or_result",
+            &loki_logfmt_or_result,
+            r#"status=200 msg="api parser ok""#,
+            true,
+        ),
         (
-            json_contains_string(&loki_ip_filter_result, logfmt_ip_line),
-            json_contains_string(&loki_ip_filter_result, logfmt_ip_miss_line),
-            json_contains_string(&loki_ip_single_filter_result, logfmt_ip_line),
-            json_contains_string(&loki_ip_single_filter_result, logfmt_ip_miss_line),
-            json_contains_string(&loki_ip_range_filter_result, logfmt_ip_line),
-            json_contains_string(&loki_ip_range_filter_result, logfmt_ip_miss_line),
-            json_contains_string(&loki_not_ip_filter_result, logfmt_ip_line),
-            json_contains_string(&loki_not_ip_filter_result, logfmt_ip_miss_line),
-            json_contains_string(&loki_metadata_result, "api metadata ok"),
-        ) == (true, false, true, false, true, false, true, false, true)
-    );
+            "loki_logfmt_comma_and_result",
+            &loki_logfmt_comma_and_result,
+            logfmt_error_line,
+            true,
+        ),
+        (
+            "loki_logfmt_comma_and_result",
+            &loki_logfmt_comma_and_result,
+            r#"status=200 msg="api parser ok""#,
+            false,
+        ),
+        (
+            "loki_logfmt_adjacent_and_result",
+            &loki_logfmt_adjacent_and_result,
+            logfmt_error_line,
+            true,
+        ),
+        (
+            "loki_logfmt_adjacent_and_result",
+            &loki_logfmt_adjacent_and_result,
+            r#"status=200 msg="api parser ok""#,
+            false,
+        ),
+        (
+            "loki_backtick_field_filter_result",
+            &loki_backtick_field_filter_result,
+            logfmt_error_line,
+            true,
+        ),
+        (
+            "loki_line_format_result",
+            &loki_line_format_result,
+            "api parser error 500",
+            true,
+        ),
+        (
+            "loki_line_format_result",
+            &loki_line_format_result,
+            logfmt_error_line,
+            false,
+        ),
+        (
+            "loki_line_format_pipeline_result",
+            &loki_line_format_pipeline_result,
+            "API_PARSER_ERROR 500",
+            true,
+        ),
+        (
+            "loki_line_format_pipeline_result",
+            &loki_line_format_pipeline_result,
+            logfmt_error_line,
+            false,
+        ),
+        (
+            "loki_label_format_result",
+            &loki_label_format_result,
+            logfmt_error_line,
+            true,
+        ),
+        (
+            "loki_label_format_pipeline_result",
+            &loki_label_format_pipeline_result,
+            logfmt_error_line,
+            true,
+        ),
+        (
+            "loki_line_format_string_helper_result",
+            &loki_line_format_string_helper_result,
+            "Checkout checkout api/items items /api",
+            true,
+        ),
+        (
+            "loki_line_format_string_helper_result",
+            &loki_line_format_string_helper_result,
+            logfmt_template_line,
+            false,
+        ),
+        (
+            "loki_line_format_logical_helper_result",
+            &loki_line_format_logical_helper_result,
+            "true true true true",
+            true,
+        ),
+        (
+            "loki_line_format_logical_helper_result",
+            &loki_line_format_logical_helper_result,
+            logfmt_template_line,
+            false,
+        ),
+        (
+            "loki_line_format_ne_helper_result",
+            &loki_line_format_ne_helper_result,
+            "true true",
+            true,
+        ),
+        (
+            "loki_line_format_ne_helper_result",
+            &loki_line_format_ne_helper_result,
+            logfmt_template_line,
+            false,
+        ),
+        (
+            "loki_line_format_len_helper_result",
+            &loki_line_format_len_helper_result,
+            "len=15",
+            true,
+        ),
+        (
+            "loki_line_format_len_helper_result",
+            &loki_line_format_len_helper_result,
+            logfmt_template_line,
+            false,
+        ),
+        (
+            "loki_line_format_spacing_helper_result",
+            &loki_line_format_spacing_helper_result,
+            "hi   |hello|   hi|world|xxx",
+            true,
+        ),
+        (
+            "loki_line_format_spacing_helper_result",
+            &loki_line_format_spacing_helper_result,
+            logfmt_spacing_template_line,
+            false,
+        ),
+        (
+            "loki_line_format_regex_helper_result",
+            &loki_line_format_regex_helper_result,
+            "4|helper-template|${2}-${1}",
+            true,
+        ),
+        (
+            "loki_line_format_regex_helper_result",
+            &loki_line_format_regex_helper_result,
+            logfmt_template_line,
+            false,
+        ),
+        (
+            "loki_drop_keep_result",
+            &loki_drop_keep_result,
+            logfmt_error_line,
+            true,
+        ),
+        (
+            "loki_decolorize_result",
+            &loki_decolorize_result,
+            decolored_logfmt_error_line,
+            true,
+        ),
+        (
+            "loki_decolorize_result",
+            &loki_decolorize_result,
+            colored_logfmt_error_line,
+            false,
+        ),
+        (
+            "loki_pattern_result",
+            &loki_pattern_result,
+            logfmt_error_line,
+            true,
+        ),
+        (
+            "loki_pattern_parser_result",
+            &loki_pattern_parser_result,
+            logfmt_error_line,
+            true,
+        ),
+        (
+            "loki_regexp_parser_result",
+            &loki_regexp_parser_result,
+            logfmt_error_line,
+            true,
+        ),
+        (
+            "loki_unpack_parser_result",
+            &loki_unpack_parser_result,
+            "original log message",
+            true,
+        ),
+        (
+            "loki_unpack_parser_result",
+            &loki_unpack_parser_result,
+            packed_error_line,
+            false,
+        ),
+        (
+            "loki_commented_result",
+            &loki_commented_result,
+            logfmt_error_line,
+            true,
+        ),
+        (
+            "loki_logfmt_typed_result",
+            &loki_logfmt_typed_result,
+            logfmt_typed_filter_line,
+            true,
+        ),
+        (
+            "loki_ip_filter_result",
+            &loki_ip_filter_result,
+            logfmt_ip_line,
+            true,
+        ),
+        (
+            "loki_ip_filter_result",
+            &loki_ip_filter_result,
+            logfmt_ip_miss_line,
+            false,
+        ),
+        (
+            "loki_ip_single_filter_result",
+            &loki_ip_single_filter_result,
+            logfmt_ip_line,
+            true,
+        ),
+        (
+            "loki_ip_single_filter_result",
+            &loki_ip_single_filter_result,
+            logfmt_ip_miss_line,
+            false,
+        ),
+        (
+            "loki_ip_range_filter_result",
+            &loki_ip_range_filter_result,
+            logfmt_ip_line,
+            true,
+        ),
+        (
+            "loki_ip_range_filter_result",
+            &loki_ip_range_filter_result,
+            logfmt_ip_miss_line,
+            false,
+        ),
+        (
+            "loki_not_ip_filter_result",
+            &loki_not_ip_filter_result,
+            logfmt_ip_line,
+            true,
+        ),
+        (
+            "loki_not_ip_filter_result",
+            &loki_not_ip_filter_result,
+            logfmt_ip_miss_line,
+            false,
+        ),
+        (
+            "loki_metadata_result",
+            &loki_metadata_result,
+            "api metadata ok",
+            true,
+        ),
+    ];
+    for (result_name, result, needle, want) in contains_cases {
+        assert!(
+            json_contains_string(result, needle) == want,
+            "case: {result_name} contains {needle:?}, want {want}"
+        );
+    }
     broker.shutdown().await;
 }
 
@@ -3346,13 +3541,17 @@ async fn real_loki_and_crabka_return_same_logfmt_malformed_field_results() {
     let crabka_result = crabka_query_range_result(querier.clone(), query, base_ns, end_ns).await;
 
     assert!(crabka_result == loki_result);
-    assert!(
-        (
-            json_contains_string(&loki_result, invalid_line),
-            json_contains_string(&loki_result, valid_line),
-            json_contains_string(&loki_result, standalone_key_line),
-        ) == (true, true, true)
-    );
+    let contains_cases = [
+        (invalid_line, true),
+        (valid_line, true),
+        (standalone_key_line, true),
+    ];
+    for (needle, want) in contains_cases {
+        assert!(
+            json_contains_string(&loki_result, needle) == want,
+            "case: loki_result contains {needle:?}, want {want}"
+        );
+    }
 
     let keep_empty_query = r#"{app="api",format="logfmt"} | logfmt --keep-empty | empty = """#;
     let loki_keep_empty_result =

@@ -683,15 +683,19 @@ mod tests {
     fn epoch_bumps_only_at_tv2() {
         use crate::txn::version::TxnVersion;
         let ids = crate::producer_id_manager::ProducerIdManager::new();
-        // Below TV_2 (Classic, Flexible): pid + epoch unchanged.
-        // TV_2 (Verified) non-overflow: same pid, epoch + 1.
-        assert!(
-            (
-                next_producer_identity(TxnVersion::Classic, 7, 3, &ids),
-                next_producer_identity(TxnVersion::Flexible, 7, 3, &ids),
-                next_producer_identity(TxnVersion::Verified, 7, 3, &ids)
-            ) == ((7, 3), (7, 3), (7, 4))
-        );
+        let cases = [
+            // Below TV_2 (Classic, Flexible): pid + epoch unchanged.
+            (TxnVersion::Classic, (7, 3)),
+            (TxnVersion::Flexible, (7, 3)),
+            // TV_2 (Verified) non-overflow: same pid, epoch + 1.
+            (TxnVersion::Verified, (7, 4)),
+        ];
+        for (version, want) in cases {
+            assert!(
+                next_producer_identity(version, 7, 3, &ids) == want,
+                "txn version {version:?}"
+            );
+        }
     }
 
     #[test]
@@ -721,97 +725,72 @@ mod tests {
     }
 
     #[test]
-    fn proceeds_when_unchanged() {
-        // Entry is exactly as Phase 1 left it: same pid/epoch, still in Prepare.
-        let e = entry(7, 3, TxnState::PrepareCommit);
-        assert!(
-            validate_complete_reacquire(
+    fn commit_reacquire_decision_matrix() {
+        // Phase 1 left (pid=7, epoch=3, PrepareCommit); the reacquire always
+        // asks to drive PrepareCommit → CompleteCommit.
+        // (observed_pid, observed_epoch, observed_state, expected)
+        let cases = [
+            // Entry is exactly as Phase 1 left it: same pid/epoch, still in
+            // Prepare — proceed.
+            (7, 3, TxnState::PrepareCommit, ReacquireDecision::Proceed),
+            // A concurrent InitProducerId bumped the epoch during the marker
+            // fan-out. We must NOT overwrite with the stale epoch / Complete
+            // state.
+            (
+                7,
+                4,
+                TxnState::PrepareCommit,
+                ReacquireDecision::Reject(codes::INVALID_PRODUCER_EPOCH),
+            ),
+            // Producer id changed underneath us — fenced.
+            (
+                8,
+                3,
+                TxnState::PrepareCommit,
+                ReacquireDecision::Reject(codes::INVALID_PRODUCER_EPOCH),
+            ),
+            // Another caller (or an EndTxn retry that lost the race) already
+            // drove this exact transition. Report success, do not re-write.
+            (
+                7,
+                3,
+                TxnState::CompleteCommit,
+                ReacquireDecision::AlreadyComplete,
+            ),
+            // A concurrent AddPartitionsToTxn re-opened the txn
+            // (Complete→Ongoing reuse, or some other interleave). Our marker
+            // fan-out no longer reflects the live transaction; refuse to
+            // finalise.
+            (
+                7,
+                3,
+                TxnState::Ongoing,
+                ReacquireDecision::Reject(codes::INVALID_TXN_STATE),
+            ),
+            // We prepared a Commit, but the entry is now in PrepareAbort — a
+            // different finalisation kind raced us. Refuse to write
+            // CompleteCommit.
+            (
+                7,
+                3,
+                TxnState::PrepareAbort,
+                ReacquireDecision::Reject(codes::INVALID_TXN_STATE),
+            ),
+        ];
+        for (pid, epoch, state, expected) in cases {
+            let e = entry(pid, epoch, state);
+            let decision = validate_complete_reacquire(
                 &e,
                 7,
                 3,
                 TxnState::PrepareCommit,
-                TxnState::CompleteCommit
-            ) == ReacquireDecision::Proceed
-        );
-    }
-
-    #[test]
-    fn fenced_when_epoch_bumped() {
-        // A concurrent InitProducerId bumped the epoch during the marker
-        // fan-out. We must NOT overwrite with the stale epoch / Complete state.
-        let e = entry(7, 4, TxnState::PrepareCommit);
-        assert!(
-            validate_complete_reacquire(
-                &e,
-                7,
-                3,
-                TxnState::PrepareCommit,
-                TxnState::CompleteCommit
-            ) == ReacquireDecision::Reject(codes::INVALID_PRODUCER_EPOCH)
-        );
-    }
-
-    #[test]
-    fn fenced_when_pid_changed() {
-        let e = entry(8, 3, TxnState::PrepareCommit);
-        assert!(
-            validate_complete_reacquire(
-                &e,
-                7,
-                3,
-                TxnState::PrepareCommit,
-                TxnState::CompleteCommit
-            ) == ReacquireDecision::Reject(codes::INVALID_PRODUCER_EPOCH)
-        );
-    }
-
-    #[test]
-    fn idempotent_when_already_complete() {
-        // Another caller (or an EndTxn retry that lost the race) already drove
-        // this exact transition. Report success, do not re-write.
-        let e = entry(7, 3, TxnState::CompleteCommit);
-        assert!(
-            validate_complete_reacquire(
-                &e,
-                7,
-                3,
-                TxnState::PrepareCommit,
-                TxnState::CompleteCommit
-            ) == ReacquireDecision::AlreadyComplete
-        );
-    }
-
-    #[test]
-    fn rejects_when_advanced_to_ongoing() {
-        // A concurrent AddPartitionsToTxn re-opened the txn (Complete→Ongoing
-        // reuse, or some other interleave). Our marker fan-out no longer
-        // reflects the live transaction; refuse to finalise.
-        let e = entry(7, 3, TxnState::Ongoing);
-        assert!(
-            validate_complete_reacquire(
-                &e,
-                7,
-                3,
-                TxnState::PrepareCommit,
-                TxnState::CompleteCommit
-            ) == ReacquireDecision::Reject(codes::INVALID_TXN_STATE)
-        );
-    }
-
-    #[test]
-    fn rejects_when_opposite_prepare_kind() {
-        // We prepared a Commit, but the entry is now in PrepareAbort — a
-        // different finalisation kind raced us. Refuse to write CompleteCommit.
-        let e = entry(7, 3, TxnState::PrepareAbort);
-        assert!(
-            validate_complete_reacquire(
-                &e,
-                7,
-                3,
-                TxnState::PrepareCommit,
-                TxnState::CompleteCommit
-            ) == ReacquireDecision::Reject(codes::INVALID_TXN_STATE)
-        );
+                TxnState::CompleteCommit,
+            );
+            assert!(
+                decision == expected,
+                "observed pid {pid}, epoch {epoch}, state {state:?}"
+            );
+        }
     }
 
     #[test]

@@ -320,17 +320,16 @@ mod tests {
 
     #[test]
     fn build_filter_rejects_malformed_axes() {
-        let mut req = request(Some("orders"), Some("User:alice"), OPERATION_READ);
-        req.resource_type_filter = 99;
-        assert!(build_filter(&req).is_err());
-
-        let mut req = request(Some("orders"), Some("User:alice"), OPERATION_READ);
-        req.pattern_type_filter = 99;
-        assert!(build_filter(&req).is_err());
-
-        let mut req = request(Some("orders"), Some("User:alice"), OPERATION_READ);
-        req.operation = 99;
-        assert!(build_filter(&req).is_err());
+        let cases: [(&str, fn(&mut DescribeAclsRequest)); 3] = [
+            ("resource_type_filter", |r| r.resource_type_filter = 99),
+            ("pattern_type_filter", |r| r.pattern_type_filter = 99),
+            ("operation", |r| r.operation = 99),
+        ];
+        for (axis, corrupt) in cases {
+            let mut req = request(Some("orders"), Some("User:alice"), OPERATION_READ);
+            corrupt(&mut req);
+            assert!(build_filter(&req).is_err(), "axis {axis}");
+        }
     }
 
     #[test]

@@ -414,79 +414,52 @@ mod tests {
         let controller = test_controller(dir.path().into()).await;
         let secret = SecretBytes::new(b"k".to_vec());
 
-        // Branch 1: max_lifetime_ms = 1h, default_renew_period_ms = 24h.
-        // The renew period is clamped *down* to chosen_lifetime, so both
-        // timestamps collapse to issue + 1h.
-        let one_hour = 60 * 60 * 1_000;
-        let req = CreateDelegationTokenRequest {
-            max_lifetime_ms: -1,
-            ..Default::default()
-        };
-        let resp = handle(
-            &req,
-            &authed("alice"),
-            Some(&secret),
-            one_hour,
-            RENEW_24H_MS,
-            &*controller,
-            &empty_super_users(),
-        )
-        .await;
-        // 1h ceiling clamps the 24h renew period: expiry must collapse to max,
-        // and both must equal issue + 1h (the chosen_lifetime).
-        let expected = CreateDelegationTokenResponse {
-            error_code: 0,
-            principal_type: "User".into(),
-            principal_name: "alice".into(),
-            token_requester_principal_type: "User".into(),
-            token_requester_principal_name: "alice".into(),
-            issue_timestamp_ms: resp.issue_timestamp_ms,
-            expiry_timestamp_ms: resp.issue_timestamp_ms + one_hour,
-            max_timestamp_ms: resp.issue_timestamp_ms + one_hour,
-            token_id: resp.token_id.clone(),
-            hmac: resp.hmac.clone(),
-            throttle_time_ms: 0,
-            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
-        };
-        assert!(resp == expected, "{resp:?}");
-
-        // Branch 2: max_lifetime_ms = 7d, default_renew_period_ms = 24h.
-        // Now the renew period is the smaller of the two, so expiry =
-        // issue + 24h and max = issue + 7d — they are SEPARATE, leaving
-        // room for Renew to extend expiry up to max.
-        let seven_days = 7 * 24 * 60 * 60 * 1_000;
-        let req = CreateDelegationTokenRequest {
-            max_lifetime_ms: -1,
-            ..Default::default()
-        };
-        let resp = handle(
-            &req,
-            &authed("alice"),
-            Some(&secret),
-            seven_days,
-            RENEW_24H_MS,
-            &*controller,
-            &empty_super_users(),
-        )
-        .await;
-        // 24h renew period < 7d ceiling: expiry (issue + 24h) and max
-        // (issue + 7d, the ceiling untouched) must be SEPARATE so Renew has
-        // room to extend.
-        let expected = CreateDelegationTokenResponse {
-            error_code: 0,
-            principal_type: "User".into(),
-            principal_name: "alice".into(),
-            token_requester_principal_type: "User".into(),
-            token_requester_principal_name: "alice".into(),
-            issue_timestamp_ms: resp.issue_timestamp_ms,
-            expiry_timestamp_ms: resp.issue_timestamp_ms + RENEW_24H_MS,
-            max_timestamp_ms: resp.issue_timestamp_ms + seven_days,
-            token_id: resp.token_id.clone(),
-            hmac: resp.hmac.clone(),
-            throttle_time_ms: 0,
-            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
-        };
-        assert!(resp == expected, "{resp:?}");
+        let one_hour: i64 = 60 * 60 * 1_000;
+        let seven_days: i64 = 7 * 24 * 60 * 60 * 1_000;
+        // (broker ceiling, expected expiry delta, expected max delta), with
+        // default_renew_period_ms = 24h throughout.
+        let cases = [
+            // Branch 1: ceiling = 1h < 24h renew period. The renew period is
+            // clamped *down* to chosen_lifetime, so expiry must collapse to
+            // max, and both must equal issue + 1h (the chosen_lifetime).
+            (one_hour, one_hour, one_hour),
+            // Branch 2: ceiling = 7d > 24h renew period. Now the renew period
+            // is the smaller of the two, so expiry (issue + 24h) and max
+            // (issue + 7d, the ceiling untouched) must be SEPARATE, leaving
+            // room for Renew to extend expiry up to max.
+            (seven_days, RENEW_24H_MS, seven_days),
+        ];
+        for (ceiling_ms, expiry_delta, max_delta) in cases {
+            let req = CreateDelegationTokenRequest {
+                max_lifetime_ms: -1,
+                ..Default::default()
+            };
+            let resp = handle(
+                &req,
+                &authed("alice"),
+                Some(&secret),
+                ceiling_ms,
+                RENEW_24H_MS,
+                &*controller,
+                &empty_super_users(),
+            )
+            .await;
+            let expected = CreateDelegationTokenResponse {
+                error_code: 0,
+                principal_type: "User".into(),
+                principal_name: "alice".into(),
+                token_requester_principal_type: "User".into(),
+                token_requester_principal_name: "alice".into(),
+                issue_timestamp_ms: resp.issue_timestamp_ms,
+                expiry_timestamp_ms: resp.issue_timestamp_ms + expiry_delta,
+                max_timestamp_ms: resp.issue_timestamp_ms + max_delta,
+                token_id: resp.token_id.clone(),
+                hmac: resp.hmac.clone(),
+                throttle_time_ms: 0,
+                unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+            };
+            assert!(resp == expected, "ceiling {ceiling_ms}: {resp:?}");
+        }
 
         controller.cancel().await;
     }
@@ -620,43 +593,31 @@ mod tests {
         let controller = test_controller(dir.path().into()).await;
         let secret = SecretBytes::new(b"k".to_vec());
 
-        // Type set but name empty.
-        let req_name_missing = CreateDelegationTokenRequest {
-            max_lifetime_ms: -1,
-            owner_principal_type: Some("User".to_string()),
-            owner_principal_name: None,
-            ..Default::default()
-        };
-        let resp = handle(
-            &req_name_missing,
-            &authed("admin"),
-            Some(&secret),
-            60_000,
-            RENEW_24H_MS,
-            &*controller,
-            &super_users_with(&["admin"]),
-        )
-        .await;
-        assert!(resp.error_code == crate::codes::INVALID_REQUEST);
-
-        // Name set but type empty.
-        let req_type_missing = CreateDelegationTokenRequest {
-            max_lifetime_ms: -1,
-            owner_principal_type: None,
-            owner_principal_name: Some("alice".to_string()),
-            ..Default::default()
-        };
-        let resp = handle(
-            &req_type_missing,
-            &authed("admin"),
-            Some(&secret),
-            60_000,
-            RENEW_24H_MS,
-            &*controller,
-            &super_users_with(&["admin"]),
-        )
-        .await;
-        assert!(resp.error_code == crate::codes::INVALID_REQUEST);
+        let cases = [
+            // Type set but name empty.
+            ("name missing", Some("User".to_string()), None),
+            // Name set but type empty.
+            ("type missing", None, Some("alice".to_string())),
+        ];
+        for (case, owner_principal_type, owner_principal_name) in cases {
+            let req = CreateDelegationTokenRequest {
+                max_lifetime_ms: -1,
+                owner_principal_type,
+                owner_principal_name,
+                ..Default::default()
+            };
+            let resp = handle(
+                &req,
+                &authed("admin"),
+                Some(&secret),
+                60_000,
+                RENEW_24H_MS,
+                &*controller,
+                &super_users_with(&["admin"]),
+            )
+            .await;
+            assert!(resp.error_code == crate::codes::INVALID_REQUEST, "{case}");
+        }
 
         controller.cancel().await;
     }
@@ -682,7 +643,11 @@ mod tests {
             .is_err()
         };
 
-        assert!((gate(None), gate(Some(13)), gate(Some(14))) == (false, true, false));
+        // (finalized metadata.version level; None = fresh image) → gated?
+        let cases = [(None, false), (Some(13), true), (Some(14), false)];
+        for (level, want_gated) in cases {
+            assert!(gate(level) == want_gated, "level {level:?}");
+        }
     }
 
     /// Spec §1.2: only `User` is supported as the act-as owner

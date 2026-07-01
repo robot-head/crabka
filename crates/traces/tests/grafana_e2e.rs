@@ -701,35 +701,34 @@ fn assert_all_doors_present(records: &[SpanRecord]) {
         "zipkin decode fidelity (error tag -> ERROR status)"
     );
 
-    // D4 (Jaeger binary thrift): process.service_name -> resource service.name,
-    // error tag -> ERROR status (binary decode path).
-    let binary = by_name("GET /binary");
-    assert!(resource_attr(&binary.span, "service.name") == Some("checkout"));
-    assert!(
-        binary.span.status.as_i32() == 2,
-        "jaeger binary error -> ERROR"
-    );
-
-    // D5 (OTLP gRPC): resource service.name from the independent gRPC OTLP body.
-    let otlp_grpc = by_name("otlp grpc op");
-    assert!(resource_attr(&otlp_grpc.span, "service.name") == Some("grpc-otlp-svc"));
-
-    // D6 (Jaeger gRPC): process.service_name -> resource, error bool -> ERROR.
-    let jaeger_grpc = by_name("jaeger grpc op");
-    assert!(resource_attr(&jaeger_grpc.span, "service.name") == Some("jaeger-grpc-svc"));
-    assert!(
-        jaeger_grpc.span.status.as_i32() == 2,
-        "jaeger gRPC error -> ERROR"
-    );
-
-    // D7 (Jaeger compact thrift): the compact decode path (shared with the UDP
-    // datagram receiver). process.service_name -> resource, error -> ERROR.
-    let compact = by_name("compact thrift op");
-    assert!(resource_attr(&compact.span, "service.name") == Some("compact-svc"));
-    assert!(
-        compact.span.status.as_i32() == 2,
-        "jaeger compact error -> ERROR"
-    );
+    // Per-door decode fidelity: process/resource service.name mapping, plus
+    // (where expected) error tag/bool -> ERROR status (`Some(2)`).
+    let cases = [
+        // D4 (Jaeger binary thrift): process.service_name -> resource
+        // service.name, error tag -> ERROR status (binary decode path).
+        ("GET /binary", "checkout", Some(2)),
+        // D5 (OTLP gRPC): resource service.name from the independent gRPC OTLP
+        // body (no error expectation).
+        ("otlp grpc op", "grpc-otlp-svc", None),
+        // D6 (Jaeger gRPC): process.service_name -> resource, error bool -> ERROR.
+        ("jaeger grpc op", "jaeger-grpc-svc", Some(2)),
+        // D7 (Jaeger compact thrift): the compact decode path (shared with the
+        // UDP datagram receiver). process.service_name -> resource, error -> ERROR.
+        ("compact thrift op", "compact-svc", Some(2)),
+    ];
+    for (name, service, error_status) in cases {
+        let record = by_name(name);
+        assert!(
+            resource_attr(&record.span, "service.name") == Some(service),
+            "door span {name:?} service.name"
+        );
+        if let Some(expected) = error_status {
+            assert!(
+                record.span.status.as_i32() == expected,
+                "door span {name:?}: error -> ERROR"
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1126,20 +1125,19 @@ async fn grafana_e2e_full_surface() -> TestResult {
         format!("{grafana_base}/api/datasources/proxy/uid/{GRAFANA_TEMPO_DATASOURCE_UID}/{path}")
     };
 
-    // E1 — /api/echo.
-    let (status, body) = get_text(&client, &proxy("api/echo")).await?;
-    assert!(status == ReqwestStatusCode::OK);
-    assert!(body == "echo");
-
-    // E2 — /ready.
-    let (status, body) = get_text(&client, &proxy("ready")).await?;
-    assert!(status == ReqwestStatusCode::OK);
-    assert!(body == "ready");
-
-    // E3 — /status (alias of /ready).
-    let (status, body) = get_text(&client, &proxy("status")).await?;
-    assert!(status == ReqwestStatusCode::OK);
-    assert!(body == "ready");
+    // E1 — /api/echo; E2 — /ready; E3 — /status (alias of /ready).
+    let cases = [
+        ("api/echo", "echo"), // E1
+        ("ready", "ready"),   // E2
+        ("status", "ready"),  // E3
+    ];
+    for (path, expected_body) in cases {
+        let (status, body) = get_text(&client, &proxy(path)).await?;
+        assert!(
+            (status, body.as_str()) == (ReqwestStatusCode::OK, expected_body),
+            "endpoint {path:?}"
+        );
+    }
 
     // E4 — trace-by-id, Trace A: COMPLETE, all 4 spans, root span present. The
     // in-process store groups a trace under its single root service, so the
@@ -1348,11 +1346,17 @@ async fn grafana_e2e_full_surface() -> TestResult {
             "missing scope {required}: {tags}"
         );
     }
-    let resource_tags = scope_tags(&tags, "resource");
-    assert!(resource_tags.contains(&"service.name".to_string()));
-    let intrinsic_tags = scope_tags(&tags, "intrinsic");
-    assert!(intrinsic_tags.contains(&"span:name".to_string()));
-    assert!(intrinsic_tags.contains(&"span:duration".to_string()));
+    let cases = [
+        ("resource", "service.name"),
+        ("intrinsic", "span:name"),
+        ("intrinsic", "span:duration"),
+    ];
+    for (scope, tag) in cases {
+        assert!(
+            scope_tags(&tags, scope).contains(&tag.to_string()),
+            "missing {scope} tag {tag}: {tags}"
+        );
+    }
 
     // E14 — v2 tags scoped to resource only.
     let tags = get_json(

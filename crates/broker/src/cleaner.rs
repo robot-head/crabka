@@ -157,48 +157,42 @@ mod tests {
     async fn tick_all_compacts_only_local_leader_compact_topics() {
         let dir = tempfile::tempdir().expect("log root");
         let registry = PartitionRegistry::new();
-        let local_compact = compactable_partition(
-            &dir,
-            "local-compact",
-            0,
-            7,
-            crabka_log::CleanupPolicy::Compact,
-        );
-        let follower_compact = compactable_partition(
-            &dir,
-            "follower-compact",
-            0,
-            8,
-            crabka_log::CleanupPolicy::Compact,
-        );
-        let local_delete = compactable_partition(
-            &dir,
-            "local-delete",
-            0,
-            7,
-            crabka_log::CleanupPolicy::Delete,
-        );
-
-        let local_compact_before = record_count(&local_compact);
-        let follower_compact_before = record_count(&follower_compact);
-        let local_delete_before = record_count(&local_delete);
-        registry.insert("local-compact".to_string(), 0, Arc::clone(&local_compact));
-        registry.insert(
-            "follower-compact".to_string(),
-            0,
-            Arc::clone(&follower_compact),
-        );
-        registry.insert("local-delete".to_string(), 0, Arc::clone(&local_delete));
+        // (topic, leader, cleanup_policy, expect_compacted): only partitions
+        // led locally (leader 7) with the Compact policy should shrink.
+        let specs = [
+            ("local-compact", 7, crabka_log::CleanupPolicy::Compact, true),
+            (
+                "follower-compact",
+                8,
+                crabka_log::CleanupPolicy::Compact,
+                false,
+            ),
+            ("local-delete", 7, crabka_log::CleanupPolicy::Delete, false),
+        ];
+        let cases: Vec<_> = specs
+            .into_iter()
+            .map(|(topic, leader, policy, expect_compacted)| {
+                let partition = compactable_partition(&dir, topic, 0, leader, policy);
+                let before = record_count(&partition);
+                registry.insert(topic.to_string(), 0, Arc::clone(&partition));
+                (topic, partition, before, expect_compacted)
+            })
+            .collect();
 
         tick_all(&registry, 7).await;
 
-        assert!(
-            (
-                record_count(&local_compact) < local_compact_before,
-                record_count(&follower_compact),
-                record_count(&local_delete),
-            ) == (true, follower_compact_before, local_delete_before)
-        );
+        for (topic, partition, before, expect_compacted) in cases {
+            let after = record_count(&partition);
+            let count_ok = if expect_compacted {
+                after < before
+            } else {
+                after == before
+            };
+            assert!(
+                count_ok,
+                "case: {topic} (before={before}, after={after}, expect_compacted={expect_compacted})"
+            );
+        }
     }
 
     #[tokio::test]

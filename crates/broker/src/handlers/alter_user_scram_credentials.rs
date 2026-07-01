@@ -380,19 +380,15 @@ mod tests {
 
     #[test]
     fn wire_to_mech_maps_both_scram_variants() {
-        assert!(
-            (
-                wire_to_mech(1),
-                wire_to_mech(2),
-                wire_to_mech(0),
-                wire_to_mech(99)
-            ) == (
-                Some(SaslMechanism::ScramSha256),
-                Some(SaslMechanism::ScramSha512),
-                None,
-                None
-            )
-        );
+        let cases = [
+            (1, Some(SaslMechanism::ScramSha256)),
+            (2, Some(SaslMechanism::ScramSha512)),
+            (0, None),
+            (99, None),
+        ];
+        for (wire, expected) in cases {
+            assert!(wire_to_mech(wire) == expected, "wire {wire}");
+        }
     }
 
     #[test]
@@ -452,7 +448,17 @@ mod tests {
             .is_err()
         };
 
-        assert!((gate(None), gate(Some(10)), gate(Some(11))) == (false, true, false));
+        let cases = [
+            // No finalized metadata.version — gate permits.
+            (None, false),
+            // Below SCRAM_MIN_LEVEL — gate rejects.
+            (Some(10), true),
+            // At SCRAM_MIN_LEVEL — gate permits.
+            (Some(11), false),
+        ];
+        for (level, want_err) in cases {
+            assert!(gate(level) == want_err, "level {level:?}");
+        }
     }
 
     #[test]
@@ -460,38 +466,41 @@ mod tests {
         let mut seen = HashSet::new();
         let mut records = Vec::new();
 
-        let mut too_few_iterations = valid_upsertion("too-few");
-        too_few_iterations.iterations = MIN_ITERATIONS - 1;
-        let r = process_upsertion(too_few_iterations, true, &mut seen, &mut records);
-        let expected = expected_result(
-            "too-few",
-            codes::UNACCEPTABLE_CREDENTIAL,
-            Some("iterations < 4096"),
-        );
-        assert!(r == expected);
-        assert!(records.is_empty());
-
-        let mut empty_salt = valid_upsertion("empty-salt");
-        empty_salt.salt = Bytes::new();
-        let r = process_upsertion(empty_salt, true, &mut seen, &mut records);
-        let expected = expected_result(
-            "empty-salt",
-            codes::UNACCEPTABLE_CREDENTIAL,
-            Some("empty salt"),
-        );
-        assert!(r == expected);
-        assert!(records.is_empty());
-
-        let mut wrong_len = valid_upsertion("wrong-len");
-        wrong_len.salted_password = Bytes::from(vec![7; 31]);
-        let r = process_upsertion(wrong_len, true, &mut seen, &mut records);
-        let expected = expected_result(
-            "wrong-len",
-            codes::UNACCEPTABLE_CREDENTIAL,
-            Some("wrong salted_password length"),
-        );
-        assert!(r == expected);
-        assert!(records.is_empty());
+        let rejections = [
+            (
+                {
+                    let mut u = valid_upsertion("too-few");
+                    u.iterations = MIN_ITERATIONS - 1;
+                    u
+                },
+                "iterations < 4096",
+            ),
+            (
+                {
+                    let mut u = valid_upsertion("empty-salt");
+                    u.salt = Bytes::new();
+                    u
+                },
+                "empty salt",
+            ),
+            (
+                {
+                    let mut u = valid_upsertion("wrong-len");
+                    u.salted_password = Bytes::from(vec![7; 31]);
+                    u
+                },
+                "wrong salted_password length",
+            ),
+        ];
+        for (upsertion, msg) in rejections {
+            let user = upsertion.name.clone();
+            let r = process_upsertion(upsertion, true, &mut seen, &mut records);
+            assert!(
+                r == expected_result(&user, codes::UNACCEPTABLE_CREDENTIAL, Some(msg)),
+                "case: {user}"
+            );
+            assert!(records.is_empty(), "case: {user}");
+        }
 
         let r = process_upsertion(valid_upsertion("alice"), true, &mut seen, &mut records);
         assert!(r == expected_result("alice", 0, None));

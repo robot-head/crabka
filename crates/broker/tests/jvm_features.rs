@@ -111,45 +111,45 @@ async fn kafka_features_describe_and_round_trip() {
     let desc = kafka_features(&["describe"]);
     assert!(desc.status.success(), "describe failed");
     let out = String::from_utf8_lossy(&desc.stdout);
-    assert!(
-        (
-            out.contains("metadata.version"),
-            out.contains("group.version"),
-            out.contains("transaction.version"),
-            finalized_level(&out, "transaction.version"),
-            finalized_level(&out, "group.version"),
-        ) == (true, true, true, Some(2), Some(1)),
-        "describe must list metadata.version/group.version/transaction.version, with \
-         transaction.version starting finalized at 2 and group.version finalized at 1:\n{out}"
-    );
+    // (feature, pinned starting finalized level; None = only presence is pinned)
+    let features = [
+        ("metadata.version", None),
+        ("group.version", Some(1)),
+        ("transaction.version", Some(2)),
+    ];
+    for (feature, want_level) in features {
+        assert!(
+            out.contains(feature),
+            "describe must list {feature}:\n{out}"
+        );
+        if let Some(want) = want_level {
+            assert!(
+                finalized_level(&out, feature) == Some(want),
+                "{feature} must start finalized at {want}:\n{out}"
+            );
+        }
+    }
 
-    // 2. downgrade transaction.version 2 -> 1 (within the advertised range).
-    let down = kafka_features(&["downgrade", "--feature", "transaction.version=1"]);
-    assert!(
-        down.status.success(),
-        "downgrade transaction.version=1 failed: {}",
-        String::from_utf8_lossy(&down.stderr)
-    );
-    let desc2 = kafka_features(&["describe"]);
-    let out2 = String::from_utf8_lossy(&desc2.stdout);
-    assert!(
-        finalized_level(&out2, "transaction.version") == Some(1),
-        "transaction.version should now be 1:\n{out2}"
-    );
-
-    // 3. upgrade transaction.version 1 -> 2 again.
-    let up = kafka_features(&["upgrade", "--feature", "transaction.version=2"]);
-    assert!(
-        up.status.success(),
-        "upgrade transaction.version=2 failed: {}",
-        String::from_utf8_lossy(&up.stderr)
-    );
-    let desc3 = kafka_features(&["describe"]);
-    let out3 = String::from_utf8_lossy(&desc3.stdout);
-    assert!(
-        finalized_level(&out3, "transaction.version") == Some(2),
-        "transaction.version should be back to 2:\n{out3}"
-    );
+    // 2. downgrade transaction.version 2 -> 1 (within the advertised range),
+    // 3. then upgrade it 1 -> 2 again; a follow-up describe reflects each change.
+    let round_trip = [
+        ("downgrade", "transaction.version=1", 1),
+        ("upgrade", "transaction.version=2", 2),
+    ];
+    for (verb, spec, want) in round_trip {
+        let out = kafka_features(&[verb, "--feature", spec]);
+        assert!(
+            out.status.success(),
+            "{verb} {spec} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let desc = kafka_features(&["describe"]);
+        let text = String::from_utf8_lossy(&desc.stdout);
+        assert!(
+            finalized_level(&text, "transaction.version") == Some(want),
+            "transaction.version should be {want} after {verb}:\n{text}"
+        );
+    }
 
     handle.shutdown().await;
 }

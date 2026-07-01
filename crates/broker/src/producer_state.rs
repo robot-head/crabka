@@ -492,7 +492,12 @@ mod tests {
         )];
         assert!(snap == expected);
         // Untouched partition / topic report empty without panicking.
-        assert!((s.snapshot("t", 0).await, s.snapshot("other", 3).await) == (vec![], vec![]));
+        for (topic, partition) in [("t", 0), ("other", 3)] {
+            assert!(
+                s.snapshot(topic, partition).await == vec![],
+                "case: {topic}/{partition}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -550,12 +555,12 @@ mod tests {
         let expected: HashMap<i64, i64> = [(2, 20)].into_iter().collect();
         assert!(snap == expected);
         // Unknown partition / topic → empty without panicking.
-        assert!(
-            (
-                s.active_snapshot("t", 99, 10_000, 5_000).await,
-                s.active_snapshot("nope", 0, 10_000, 5_000).await,
-            ) == (HashMap::new(), HashMap::new())
-        );
+        for (topic, partition) in [("t", 99), ("nope", 0)] {
+            assert!(
+                s.active_snapshot(topic, partition, 10_000, 5_000).await == HashMap::new(),
+                "case: {topic}/{partition}"
+            );
+        }
     }
 
     #[tokio::test]

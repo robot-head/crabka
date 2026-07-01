@@ -1576,16 +1576,16 @@ mod tests {
         };
         let dbg = format!("{cfg:?}");
         // Secrets are redacted; non-secret fields are still printed.
-        assert!(
-            (
-                dbg.contains("super-secret-key-value"),
-                dbg.contains("AKIAEXAMPLEKEYID"),
-                dbg.contains("***"),
-                dbg.contains("logs"),
-                dbg.contains("us-east-1"),
-            ) == (false, false, true, true, true),
-            "{dbg}"
-        );
+        let cases = [
+            ("super-secret-key-value", false),
+            ("AKIAEXAMPLEKEYID", false),
+            ("***", true),
+            ("logs", true),
+            ("us-east-1", true),
+        ];
+        for (needle, want) in cases {
+            assert!(dbg.contains(needle) == want, "needle {needle:?} in: {dbg}");
+        }
     }
 
     #[test]
@@ -1918,55 +1918,25 @@ controller_quorum_voters = ["0@demo-broker-0-0.demo-broker-headless.default.svc.
     }
 
     #[test]
-    fn apply_to_rejects_quorum_voter_missing_port() {
+    fn apply_to_rejects_malformed_quorum_voters() {
         use crate::config::BrokerConfig;
 
-        let src = r#"
-controller_quorum_voters = ["0@just-a-host"]
-"#;
-        let file: FileConfig = toml::from_str(src).unwrap();
-        let mut cfg = BrokerConfig::default();
-        let err = file.apply_to(&mut cfg).unwrap_err();
-        assert!(matches!(err, FileConfigError::InvalidQuorumVoter(_)));
-    }
-
-    #[test]
-    fn apply_to_rejects_quorum_voter_non_numeric_port() {
-        use crate::config::BrokerConfig;
-
-        let src = r#"
-controller_quorum_voters = ["0@host:nine-thousand"]
-"#;
-        let file: FileConfig = toml::from_str(src).unwrap();
-        let mut cfg = BrokerConfig::default();
-        let err = file.apply_to(&mut cfg).unwrap_err();
-        assert!(matches!(err, FileConfigError::InvalidQuorumVoter(_)));
-    }
-
-    #[test]
-    fn apply_to_rejects_malformed_quorum_voter_missing_at() {
-        use crate::config::BrokerConfig;
-
-        let src = r#"
-controller_quorum_voters = ["127.0.0.1:9093"]
-"#;
-        let file: FileConfig = toml::from_str(src).unwrap();
-        let mut cfg = BrokerConfig::default();
-        let err = file.apply_to(&mut cfg).unwrap_err();
-        assert!(matches!(err, FileConfigError::InvalidQuorumVoter(_)));
-    }
-
-    #[test]
-    fn apply_to_rejects_malformed_quorum_voter_non_numeric_id() {
-        use crate::config::BrokerConfig;
-
-        let src = r#"
-controller_quorum_voters = ["foo@127.0.0.1:9093"]
-"#;
-        let file: FileConfig = toml::from_str(src).unwrap();
-        let mut cfg = BrokerConfig::default();
-        let err = file.apply_to(&mut cfg).unwrap_err();
-        assert!(matches!(err, FileConfigError::InvalidQuorumVoter(_)));
+        let cases = [
+            ("0@just-a-host", "missing port"),
+            ("0@host:nine-thousand", "non-numeric port"),
+            ("127.0.0.1:9093", "missing @"),
+            ("foo@127.0.0.1:9093", "non-numeric id"),
+        ];
+        for (voter, label) in cases {
+            let src = format!("controller_quorum_voters = [\"{voter}\"]\n");
+            let file: FileConfig = toml::from_str(&src).unwrap();
+            let mut cfg = BrokerConfig::default();
+            let err = file.apply_to(&mut cfg).unwrap_err();
+            assert!(
+                matches!(err, FileConfigError::InvalidQuorumVoter(_)),
+                "voter {voter:?} ({label}) must be rejected as InvalidQuorumVoter; got {err:?}"
+            );
+        }
     }
 
     #[test]
@@ -2655,16 +2625,19 @@ service_account_path = "/etc/gcs/key.json"
         let rendered = format!("{gcs:?}");
         // All three credential fields are redacted; non-secret fields are
         // still printed.
-        assert!(
-            (
-                rendered.contains("/etc/gcs/sa-path.json"),
-                rendered.contains("super-secret-inline-key"),
-                rendered.contains("/etc/gcs/adc.json"),
-                rendered.contains("***"),
-                rendered.contains("crabka-prod"),
-            ) == (false, false, false, true, true),
-            "{rendered}"
-        );
+        let cases = [
+            ("/etc/gcs/sa-path.json", false),
+            ("super-secret-inline-key", false),
+            ("/etc/gcs/adc.json", false),
+            ("***", true),
+            ("crabka-prod", true),
+        ];
+        for (needle, want) in cases {
+            assert!(
+                rendered.contains(needle) == want,
+                "needle {needle:?} in: {rendered}"
+            );
+        }
     }
 
     #[test]

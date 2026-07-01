@@ -540,13 +540,19 @@ mod tests {
     #[test]
     fn byte_range_returns_expected_slice() {
         let buf: Vec<u8> = (0u8..=255).collect();
-        // In-range read; position past EOF → empty; length clamps to buffer end.
-        assert!(
-            (
-                SnapshotReader::byte_range(&buf, 10, 5),
-                SnapshotReader::byte_range(&buf, 1000, 5),
-                SnapshotReader::byte_range(&buf, 250, 100)
-            ) == (&buf[10..15], &[] as &[u8], &buf[250..])
-        );
+        let cases: [(usize, usize, &[u8]); 3] = [
+            // In-range read.
+            (10, 5, &buf[10..15]),
+            // Position past EOF → empty.
+            (1000, 5, &[]),
+            // Length clamps to buffer end.
+            (250, 100, &buf[250..]),
+        ];
+        for (position, max, want) in cases {
+            assert!(
+                SnapshotReader::byte_range(&buf, position, max) == want,
+                "position {position}, max {max}"
+            );
+        }
     }
 }

@@ -459,14 +459,19 @@ mod tests {
     #[test]
     fn position_for_relative_offset_returns_floor() {
         let entries = offset_entries(&[(0, 0), (10, 256), (20, 512), (30, 1024)]);
-        let got = (
-            position_for_relative_offset(&entries, 10),  // exact
-            position_for_relative_offset(&entries, 15),  // between
-            position_for_relative_offset(&entries, 0),   // first entry exact
-            position_for_relative_offset(&entries, 100), // after last
-            position_for_relative_offset(&[], 50),       // empty
-        );
-        assert!(got == (256, 256, 0, 1024, 0));
+        let cases: [(&[OffsetIndexEntry], u32, u32); 5] = [
+            (&entries, 10, 256),   // exact
+            (&entries, 15, 256),   // between
+            (&entries, 0, 0),      // first entry exact
+            (&entries, 100, 1024), // after last
+            (&[], 50, 0),          // empty
+        ];
+        for (entries, rel, want) in cases {
+            assert!(
+                position_for_relative_offset(entries, rel) == want,
+                "rel {rel}"
+            );
+        }
     }
 
     #[test]
@@ -494,29 +499,40 @@ mod tests {
     #[test]
     fn relative_offset_for_timestamp_returns_first_ge() {
         let entries = time_entries(&[(1_000, 0), (2_000, 10), (3_000, 20)]);
-        let got = (
-            relative_offset_for_timestamp(&entries, 1_000), // exact match
-            relative_offset_for_timestamp(&entries, 1_500), // between → next
-            relative_offset_for_timestamp(&entries, 4_000), // after last
-            relative_offset_for_timestamp(&[], 1_000),      // empty
-        );
-        assert!(got == (Some(0), Some(10), None, None));
+        let cases: [(&[TimeIndexEntry], i64, Option<u32>); 4] = [
+            (&entries, 1_000, Some(0)),  // exact match
+            (&entries, 1_500, Some(10)), // between → next
+            (&entries, 4_000, None),     // after last
+            (&[], 1_000, None),          // empty
+        ];
+        for (entries, ts, want) in cases {
+            assert!(
+                relative_offset_for_timestamp(entries, ts) == want,
+                "ts {ts} entries_len {}",
+                entries.len()
+            );
+        }
     }
 
     #[test]
     fn end_position_for_caps_with_max_bytes() {
-        let got = (
+        let cases = [
             // start=0, segment=1024, max_bytes=256 → exclusive_end=256 →
             // inclusive=255.
-            end_position_for(0, 1024, 256),
+            (0, 1024, 256, Some(255)),
             // max_bytes >= remaining → read to end.
-            end_position_for(512, 1024, 999_999),
+            (512, 1024, 999_999, None),
             // max_bytes=0 → read to end (zero is a no-cap sentinel).
-            end_position_for(0, 1024, 0),
+            (0, 1024, 0, None),
             // start past the segment-end cap still safe via saturating add.
-            end_position_for(u32::MAX, 1024, 100),
-        );
-        assert!(got == (Some(255), None, None, None));
+            (u32::MAX, 1024, 100, None),
+        ];
+        for (start, segment, max_bytes, want) in cases {
+            assert!(
+                end_position_for(start, segment, max_bytes) == want,
+                "start {start} segment {segment} max_bytes {max_bytes}"
+            );
+        }
     }
 
     #[test]
@@ -555,15 +571,20 @@ mod tests {
         b.encode(&mut buf).unwrap();
         let bytes = buf.freeze();
 
-        let got = first_batch_at_or_after(&bytes, 10).expect("found batch");
-        assert!(got.base_offset == 10);
-
-        // Floor below everything → first batch.
-        let got = first_batch_at_or_after(&bytes, 0).expect("found batch");
-        assert!(got.base_offset == 0);
-
-        // Floor above everything → None.
-        assert!(first_batch_at_or_after(&bytes, 1_000).is_none());
+        let cases = [
+            // Floor=10 skips the first batch (last=9), returns the second.
+            (10, Some(10)),
+            // Floor below everything → first batch.
+            (0, Some(0)),
+            // Floor above everything → None.
+            (1_000, None),
+        ];
+        for (floor, want_base) in cases {
+            assert!(
+                first_batch_at_or_after(&bytes, floor).map(|b| b.base_offset) == want_base,
+                "floor {floor}"
+            );
+        }
 
         // Empty buffer → None.
         assert!(first_batch_at_or_after(&[], 0).is_none());
@@ -631,21 +652,26 @@ mod tests {
             last_offset: I64::new(14),
             producer_id: I64::new(1),
         };
-        let got = (
+        let cases = [
             // Range fully before the entry → excluded.
-            txn_overlaps(&e, 0, 9),
+            (0, 9, false),
             // Range touching the entry's first offset → included.
-            txn_overlaps(&e, 0, 10),
+            (0, 10, true),
             // Range fully inside the entry → included.
-            txn_overlaps(&e, 11, 13),
+            (11, 13, true),
             // Range touching the entry's last offset → included.
-            txn_overlaps(&e, 14, 100),
+            (14, 100, true),
             // Range fully after the entry → excluded.
-            txn_overlaps(&e, 15, 100),
+            (15, 100, false),
             // Range fully covering the entry → included.
-            txn_overlaps(&e, 0, 100),
-        );
-        assert!(got == (false, true, true, true, false, true));
+            (0, 100, true),
+        ];
+        for (start, end, want) in cases {
+            assert!(
+                txn_overlaps(&e, start, end) == want,
+                "range [{start},{end}]"
+            );
+        }
     }
 
     // ── Integration tests against `LocalTieredStorage` +

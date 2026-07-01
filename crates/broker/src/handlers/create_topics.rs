@@ -465,20 +465,22 @@ mod replica_assignment_tests {
             config_key: "controller_mutation_rate".into(),
             config_value: Some(1.0),
         }));
-        let buckets = crate::quota::QuotaBuckets::new();
-        let delay_match =
-            crate::quota::consume_controller_mutation_quota(&img, &buckets, "alice", "app-x", 10);
-        assert!(
-            delay_match > std::time::Duration::ZERO,
-            "tuple quota match should throttle on overage; got {delay_match:?}"
-        );
-        let buckets2 = crate::quota::QuotaBuckets::new();
-        let delay_other =
-            crate::quota::consume_controller_mutation_quota(&img, &buckets2, "alice", "other", 10);
-        assert!(
-            delay_other == std::time::Duration::ZERO,
-            "non-matching client_id should not throttle; got {delay_other:?}"
-        );
+        let cases = [
+            // Exact (user, client-id) tuple match should throttle on overage.
+            ("app-x", true),
+            // Non-matching client_id should not throttle.
+            ("other", false),
+        ];
+        for (client_id, want_throttle) in cases {
+            let buckets = crate::quota::QuotaBuckets::new();
+            let delay = crate::quota::consume_controller_mutation_quota(
+                &img, &buckets, "alice", client_id, 10,
+            );
+            assert!(
+                (delay > std::time::Duration::ZERO) == want_throttle,
+                "client_id {client_id}, delay {delay:?}"
+            );
+        }
     }
 }
 
@@ -697,15 +699,23 @@ mod handler_tests {
 
     #[test]
     fn local_materialization_predicates_track_replica_membership_and_leader() {
-        assert!(
-            (
-                should_materialize_locally(&[1, 2], 1),
-                should_materialize_locally(&[1, 2], 2),
-                should_materialize_locally(&[1, 2], 3),
-                is_local_leader(1, 1),
-                is_local_leader(2, 1),
-            ) == (true, true, false, true, false)
-        );
+        let materialize_cases: [(&[crabka_raft::NodeId], crabka_raft::NodeId, bool); 3] =
+            [(&[1, 2], 1, true), (&[1, 2], 2, true), (&[1, 2], 3, false)];
+        for (replicas, node_id, want) in materialize_cases {
+            assert!(
+                should_materialize_locally(replicas, node_id) == want,
+                "replicas {replicas:?}, node {node_id}"
+            );
+        }
+
+        let leader_cases: [(crabka_raft::NodeId, crabka_raft::NodeId, bool); 2] =
+            [(1, 1, true), (2, 1, false)];
+        for (leader, node_id, want) in leader_cases {
+            assert!(
+                is_local_leader(leader, node_id) == want,
+                "leader {leader}, node {node_id}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -796,18 +806,10 @@ mod handler_tests {
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
         assert!(resp == expected);
-        assert!(
-            (
-                broker_handle
-                    .controller_image_for_test()
-                    .topic("bad-count")
-                    .is_none(),
-                broker_handle
-                    .controller_image_for_test()
-                    .topic("bad-rf")
-                    .is_none(),
-            ) == (true, true)
-        );
+        for name in ["bad-count", "bad-rf"] {
+            let image = broker_handle.controller_image_for_test();
+            assert!(image.topic(name).is_none(), "topic {name} not committed");
+        }
         broker_handle.shutdown().await;
     }
 

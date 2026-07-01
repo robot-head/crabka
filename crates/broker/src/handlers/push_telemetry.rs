@@ -204,10 +204,6 @@ mod tests {
         }
     }
 
-    fn assert_close(actual: f64, expected: f64) {
-        assert!((actual - expected).abs() < f64::EPSILON);
-    }
-
     fn encode_request(req: &PushTelemetryRequest) -> Bytes {
         let version = push_telemetry_response::MAX_VERSION;
         let mut buf = BytesMut::with_capacity(req.encoded_len(version));
@@ -351,21 +347,26 @@ mod tests {
 
         let points = flatten_for_prometheus(&md, "instance-1", "client-a");
 
+        assert!(points.len() == 4, "{points:?}");
         assert!(
             (
-                points.len(),
-                points[0].metric.as_str(),
                 points[0].client_instance_id.as_str(),
                 points[0].client_id.as_str(),
-            ) == (4, "cpu.utilization", "instance-1", "client-a"),
+            ) == ("instance-1", "client-a"),
             "{points:?}"
         );
-        assert_close(points[0].value, 0.75);
-        assert!(points[1].metric == "requests.total");
-        assert_close(points[1].value, 42.0);
-        assert!(points[2].metric == "latency.ms_count");
-        assert_close(points[2].value, 3.0);
-        assert!(points[3].metric == "latency.ms_sum");
-        assert_close(points[3].value, 9.5);
+        let cases = [
+            (0usize, "cpu.utilization", 0.75f64),
+            (1, "requests.total", 42.0),
+            (2, "latency.ms_count", 3.0),
+            (3, "latency.ms_sum", 9.5),
+        ];
+        for (idx, metric, value) in cases {
+            assert!(points[idx].metric == metric, "point {idx}: {points:?}");
+            assert!(
+                (points[idx].value - value).abs() < f64::EPSILON,
+                "point {idx}: {points:?}"
+            );
+        }
     }
 }

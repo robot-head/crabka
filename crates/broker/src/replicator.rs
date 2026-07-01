@@ -1008,23 +1008,38 @@ mod tests {
 
     #[test]
     fn next_reconnect_delay_doubles_until_cap() {
-        assert!(
-            next_reconnect_delay(Duration::from_millis(100), Duration::from_secs(5))
-                == Duration::from_millis(200)
-        );
-        assert!(
-            next_reconnect_delay(Duration::from_secs(4), Duration::from_secs(5))
-                == Duration::from_secs(5)
-        );
+        let cases = [
+            // Doubles below the cap.
+            (
+                Duration::from_millis(100),
+                Duration::from_secs(5),
+                Duration::from_millis(200),
+            ),
+            // Clamps at the cap.
+            (
+                Duration::from_secs(4),
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+            ),
+        ];
+        for (current, cap, want) in cases {
+            assert!(
+                next_reconnect_delay(current, cap) == want,
+                "current {current:?} cap {cap:?}"
+            );
+        }
     }
 
     #[test]
     fn became_partition_leader_reflects_current_metadata_leader() {
-        let (cfg, _log_dir) = test_config(image_with_leader(NODE_ID));
-        assert!(became_partition_leader(&cfg));
-
-        let (cfg, _log_dir) = test_config(image_with_leader(LEADER_ID));
-        assert!(!became_partition_leader(&cfg));
+        let cases = [(NODE_ID, true), (LEADER_ID, false)];
+        for (leader, want) in cases {
+            let (cfg, _log_dir) = test_config(image_with_leader(leader));
+            assert!(
+                became_partition_leader(&cfg) == want,
+                "metadata leader {leader}"
+            );
+        }
     }
 
     #[test]

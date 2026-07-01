@@ -712,141 +712,107 @@ mod tests {
 
     #[test]
     fn is_eof_only_matches_unexpected_eof_io_errors() {
-        let eof = super::RaftError::Storage(crabka_log::LogError::Io(std::io::Error::new(
-            std::io::ErrorKind::UnexpectedEof,
-            "eof",
-        )));
-        assert!(super::is_eof(&eof));
-
-        let broken_pipe = super::RaftError::Storage(crabka_log::LogError::Io(std::io::Error::new(
-            std::io::ErrorKind::BrokenPipe,
-            "broken",
-        )));
-        assert!(!super::is_eof(&broken_pipe));
-
-        let protocol =
-            super::RaftError::Protocol(crabka_protocol::ProtocolError::InvalidValue("not io"));
-        assert!(!super::is_eof(&protocol));
+        let io_error = |kind| {
+            super::RaftError::Storage(crabka_log::LogError::Io(std::io::Error::new(kind, "io")))
+        };
+        let cases = [
+            (io_error(std::io::ErrorKind::UnexpectedEof), true),
+            (io_error(std::io::ErrorKind::BrokenPipe), false),
+            (
+                super::RaftError::Protocol(crabka_protocol::ProtocolError::InvalidValue("not io")),
+                false,
+            ),
+        ];
+        for (err, want) in cases {
+            assert!(super::is_eof(&err) == want, "err: {err:?}");
+        }
     }
 
     #[tokio::test]
-    async fn read_one_request_decodes_flexible_header_and_body() {
-        let (mut client, mut server) = tokio::io::duplex(128);
-        let frame = request_frame(52, 2, 123, "raft-client", b"payload");
-        let writer = tokio::spawn(async move {
-            client.write_all(&frame).await.unwrap();
-        });
+    async fn read_one_request_decodes_header_variants() {
+        let cases = [
+            (
+                "flexible header with client id and body",
+                request_frame(52, 2, 123, "raft-client", b"payload"),
+                b"payload".as_slice(),
+            ),
+            (
+                "null client id with no body",
+                raw_request_frame(52, 2, 123, -1, &[], &[]),
+                b"".as_slice(),
+            ),
+        ];
+        for (case, frame, want_body) in cases {
+            let (mut client, mut server) = tokio::io::duplex(128);
+            let writer = tokio::spawn(async move {
+                client.write_all(&frame).await.unwrap();
+            });
 
-        let (api_key, api_version, correlation_id, body) =
-            super::read_one_request(&mut server).await.expect("decode");
+            let (api_key, api_version, correlation_id, body) =
+                super::read_one_request(&mut server).await.expect("decode");
 
-        assert!(
-            (api_key, api_version, correlation_id, body.as_ref())
-                == (52, 2, 123, b"payload".as_slice())
-        );
-        writer.await.unwrap();
+            assert!(
+                (api_key, api_version, correlation_id, body.as_ref()) == (52, 2, 123, want_body),
+                "case: {case}"
+            );
+            writer.await.unwrap();
+        }
     }
 
     #[tokio::test]
-    async fn read_one_request_reports_fixed_header_shortfall() {
-        let (mut client, mut server) = tokio::io::duplex(128);
-        let frame = length_prefixed(&[0, 52, 0, 2]);
-        let writer = tokio::spawn(async move {
-            client.write_all(&frame).await.unwrap();
-        });
+    async fn read_one_request_reports_header_shortfalls() {
+        let partial_fixed = {
+            let mut f = bytes::BytesMut::new();
+            f.put_i16(52);
+            f.put_i16(2);
+            f.put_i32(123);
+            f
+        };
+        let mut partial_client_id_len = partial_fixed.clone();
+        partial_client_id_len.put_u8(0x80);
+        let cases = [
+            // Frame ends inside the 8-byte fixed header.
+            ("short fixed header", length_prefixed(&[0, 52, 0, 2]), 4),
+            // Fixed header complete, client-id length missing entirely.
+            (
+                "missing client id length",
+                length_prefixed(&partial_fixed),
+                2,
+            ),
+            // Only one byte of the 2-byte client-id length present.
+            (
+                "partial client id length",
+                length_prefixed(&partial_client_id_len),
+                1,
+            ),
+            // Client-id length declares 4 bytes; only 1 present.
+            (
+                "client id bytes shortfall",
+                raw_request_frame(52, 2, 123, 4, b"x", &[]),
+                3,
+            ),
+        ];
+        for (case, frame, needed) in cases {
+            let (mut client, mut server) = tokio::io::duplex(128);
+            let writer = tokio::spawn(async move {
+                client.write_all(&frame).await.unwrap();
+            });
 
-        let err = super::read_one_request(&mut server)
-            .await
-            .expect_err("short fixed header");
+            let err = super::read_one_request(&mut server)
+                .await
+                .expect_err("short frame");
 
-        assert!(matches!(
-            err,
-            super::RaftError::Protocol(crabka_protocol::ProtocolError::UnexpectedEof { needed: 4 })
-        ));
-        writer.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn read_one_request_reports_client_id_length_shortfall() {
-        let (mut client, mut server) = tokio::io::duplex(128);
-        let mut fixed = bytes::BytesMut::new();
-        fixed.put_i16(52);
-        fixed.put_i16(2);
-        fixed.put_i32(123);
-        let frame = length_prefixed(&fixed);
-        let writer = tokio::spawn(async move {
-            client.write_all(&frame).await.unwrap();
-        });
-
-        let err = super::read_one_request(&mut server)
-            .await
-            .expect_err("missing client id length");
-
-        assert!(matches!(
-            err,
-            super::RaftError::Protocol(crabka_protocol::ProtocolError::UnexpectedEof { needed: 2 })
-        ));
-        writer.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn read_one_request_accepts_null_client_id_with_no_body() {
-        let (mut client, mut server) = tokio::io::duplex(128);
-        let frame = raw_request_frame(52, 2, 123, -1, &[], &[]);
-        let writer = tokio::spawn(async move {
-            client.write_all(&frame).await.unwrap();
-        });
-
-        let (api_key, api_version, correlation_id, body) =
-            super::read_one_request(&mut server).await.expect("decode");
-
-        assert!(
-            (api_key, api_version, correlation_id, body.as_ref()) == (52, 2, 123, b"".as_slice())
-        );
-        writer.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn read_one_request_reports_partial_client_id_length_shortfall() {
-        let (mut client, mut server) = tokio::io::duplex(128);
-        let mut fixed = bytes::BytesMut::new();
-        fixed.put_i16(52);
-        fixed.put_i16(2);
-        fixed.put_i32(123);
-        fixed.put_u8(0x80);
-        let frame = length_prefixed(&fixed);
-        let writer = tokio::spawn(async move {
-            client.write_all(&frame).await.unwrap();
-        });
-
-        let err = super::read_one_request(&mut server)
-            .await
-            .expect_err("partial client id length");
-
-        assert!(matches!(
-            err,
-            super::RaftError::Protocol(crabka_protocol::ProtocolError::UnexpectedEof { needed: 1 })
-        ));
-        writer.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn read_one_request_reports_client_id_bytes_shortfall() {
-        let (mut client, mut server) = tokio::io::duplex(128);
-        let frame = raw_request_frame(52, 2, 123, 4, b"x", &[]);
-        let writer = tokio::spawn(async move {
-            client.write_all(&frame).await.unwrap();
-        });
-
-        let err = super::read_one_request(&mut server)
-            .await
-            .expect_err("partial client id");
-
-        assert!(matches!(
-            err,
-            super::RaftError::Protocol(crabka_protocol::ProtocolError::UnexpectedEof { needed: 3 })
-        ));
-        writer.await.unwrap();
+            assert!(
+                matches!(
+                    err,
+                    super::RaftError::Protocol(
+                        crabka_protocol::ProtocolError::UnexpectedEof { needed: n }
+                    ) if n == needed
+                ),
+                "case: {case}, err: {err:?}"
+            );
+            writer.await.unwrap();
+        }
     }
 
     #[tokio::test]

@@ -421,20 +421,15 @@ mod tests {
 
     #[test]
     fn state_to_str_covers_all_classic_states() {
-        assert!(
-            (
-                state_to_str(GroupState::Empty),
-                state_to_str(GroupState::PreparingRebalance),
-                state_to_str(GroupState::CompletingRebalance),
-                state_to_str(GroupState::Stable),
-                state_to_str(GroupState::Dead),
-            ) == (
-                "Empty",
-                "PreparingRebalance",
-                "CompletingRebalance",
-                "Stable",
-                "Dead",
-            )
-        );
+        let cases = [
+            (GroupState::Empty, "Empty"),
+            (GroupState::PreparingRebalance, "PreparingRebalance"),
+            (GroupState::CompletingRebalance, "CompletingRebalance"),
+            (GroupState::Stable, "Stable"),
+            (GroupState::Dead, "Dead"),
+        ];
+        for (state, want) in cases {
+            assert!(state_to_str(state) == want, "{state:?}");
+        }
     }
 }

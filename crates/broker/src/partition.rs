@@ -746,14 +746,15 @@ mod tests {
         let s = format!("{p:?}");
         // topic/partition_id appear; the mutex/log internals must NOT appear
         // in Debug output.
-        assert!(
-            (
-                s.contains("topic"),
-                s.contains("partition_id"),
-                s.contains("Mutex"),
-                s.contains("segments"),
-            ) == (true, true, false, false)
-        );
+        let cases = [
+            ("topic", true),
+            ("partition_id", true),
+            ("Mutex", false),
+            ("segments", false),
+        ];
+        for (needle, expected) in cases {
+            assert!(s.contains(needle) == expected, "needle {needle:?} in {s:?}");
+        }
     }
 
     #[tokio::test]
@@ -862,39 +863,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn install_leader_change_clears_followers_when_only_leader_changes() {
-        let (p, _td) = test_partition(Arc::new(Notify::new()));
-        p.install_isr(&[1, 2], &[1, 2], 1).await;
-        {
-            let mut st = p.replica_state.lock().await;
-            st.per_follower.get_mut(&2).expect("follower").leo = 11;
+    async fn install_leader_change_clears_followers() {
+        // (new_leader, new_epoch, seeded_follower_leo):
+        // first case changes only the leader, second only the epoch —
+        // either change alone must clear follower state.
+        let cases = [(2u64, 0i32, 11i64), (0, 9, 17)];
+        for (leader, epoch, seeded_leo) in cases {
+            let (p, _td) = test_partition(Arc::new(Notify::new()));
+            p.install_isr(&[1, 2], &[1, 2], 1).await;
+            {
+                let mut st = p.replica_state.lock().await;
+                st.per_follower.get_mut(&2).expect("follower").leo = seeded_leo;
+            }
+
+            p.install_leader_change(leader, epoch).await;
+
+            assert!(
+                p.current_leader.load(Ordering::Acquire) == leader,
+                "case ({leader}, {epoch})"
+            );
+            assert!(
+                p.current_leader_epoch.load(Ordering::Acquire) == epoch,
+                "case ({leader}, {epoch})"
+            );
+            let st = p.replica_state.lock().await;
+            assert!(st.per_follower.is_empty(), "case ({leader}, {epoch})");
+            assert!(st.current_leader_epoch == epoch, "case ({leader}, {epoch})");
         }
-
-        p.install_leader_change(2, 0).await;
-
-        assert!(p.current_leader.load(Ordering::Acquire) == 2);
-        assert!(p.current_leader_epoch.load(Ordering::Acquire) == 0);
-        let st = p.replica_state.lock().await;
-        assert!(st.per_follower.is_empty());
-        assert!(st.current_leader_epoch == 0);
-    }
-
-    #[tokio::test]
-    async fn install_leader_change_clears_followers_when_only_epoch_changes() {
-        let (p, _td) = test_partition(Arc::new(Notify::new()));
-        p.install_isr(&[1, 2], &[1, 2], 1).await;
-        {
-            let mut st = p.replica_state.lock().await;
-            st.per_follower.get_mut(&2).expect("follower").leo = 17;
-        }
-
-        p.install_leader_change(0, 9).await;
-
-        assert!(p.current_leader.load(Ordering::Acquire) == 0);
-        assert!(p.current_leader_epoch.load(Ordering::Acquire) == 9);
-        let st = p.replica_state.lock().await;
-        assert!(st.per_follower.is_empty());
-        assert!(st.current_leader_epoch == 9);
     }
 
     #[tokio::test]

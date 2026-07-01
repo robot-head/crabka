@@ -283,31 +283,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_assignments_rejects_missing_controller_leader() {
-        let source: Arc<dyn crate::metadata_source::MetadataSource> = Arc::new(MockSource {
-            image: Arc::new(MetadataImage::new(uuid::Uuid::nil())),
-            leader: None,
-        });
+    async fn send_assignments_rejects_bad_controller_leader() {
+        let cases = [
+            // No controller leader elected at all.
+            (None, "no controller leader"),
+            // Leader elected but its broker record is missing from the image.
+            (Some(42), "controller leader not in image"),
+        ];
+        for (leader, expected) in cases {
+            let source: Arc<dyn crate::metadata_source::MetadataSource> = Arc::new(MockSource {
+                image: Arc::new(MetadataImage::new(uuid::Uuid::nil())),
+                leader,
+            });
 
-        let err = send_assignments(&source, "assign-test", build_request(1, &[]))
-            .await
-            .expect_err("missing leader must fail");
+            let err = send_assignments(&source, "assign-test", build_request(1, &[]))
+                .await
+                .expect_err("bad controller leader must fail");
 
-        assert!(err == "no controller leader");
-    }
-
-    #[tokio::test]
-    async fn send_assignments_rejects_leader_missing_from_image() {
-        let source: Arc<dyn crate::metadata_source::MetadataSource> = Arc::new(MockSource {
-            image: Arc::new(MetadataImage::new(uuid::Uuid::nil())),
-            leader: Some(42),
-        });
-
-        let err = send_assignments(&source, "assign-test", build_request(1, &[]))
-            .await
-            .expect_err("missing leader broker record must fail");
-
-        assert!(err == "controller leader not in image");
+            assert!(err == expected, "case: leader={leader:?}");
+        }
     }
 
     #[test]

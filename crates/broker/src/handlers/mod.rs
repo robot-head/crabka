@@ -366,17 +366,13 @@ mod tests {
     fn build_table_registers_required_plain_handlers() {
         let table = build_table();
 
-        assert!(
-            (
-                std::ptr::fn_addr_eq(
-                    table.get(18).expect("ApiVersions is registered"),
-                    api_versions::handle as HandlerFn
-                ),
-                table.get(59).is_some(),
-                table.get(69).is_some(),
-                table.get(89).is_some()
-            ) == (true, true, true, true)
-        );
+        assert!(std::ptr::fn_addr_eq(
+            table.get(18).expect("ApiVersions is registered"),
+            api_versions::handle as HandlerFn
+        ));
+        for api_key in [59, 69, 89] {
+            assert!(table.get(api_key).is_some(), "api_key {api_key}");
+        }
     }
 
     #[test]

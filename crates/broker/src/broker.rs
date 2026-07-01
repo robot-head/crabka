@@ -4519,19 +4519,18 @@ mod tests {
 
     #[test]
     fn advertised_listener_parser_preserves_valid_host_ports_and_uses_fallback() {
-        assert!(
-            (
-                parse_advertised_host_port("broker-1.example:19092"),
-                parse_advertised_host_port("[2001:db8::7]:9094"),
-                parse_advertised_host_port("missing-port"),
-                parse_advertised_host_port("broker:not-a-port"),
-            ) == (
-                ("broker-1.example".into(), 19092),
-                ("[2001:db8::7]".into(), 9094),
-                ("localhost".into(), 9092),
-                ("localhost".into(), 9092),
-            )
-        );
+        let cases = [
+            ("broker-1.example:19092", ("broker-1.example", 19092)),
+            ("[2001:db8::7]:9094", ("[2001:db8::7]", 9094)),
+            ("missing-port", ("localhost", 9092)),
+            ("broker:not-a-port", ("localhost", 9092)),
+        ];
+        for (input, (host, port)) in cases {
+            assert!(
+                parse_advertised_host_port(input) == (host.to_string(), port),
+                "input {input:?}"
+            );
+        }
     }
 
     #[test]
@@ -4648,19 +4647,18 @@ mod tests {
     #[test]
     fn loopback_bootstrap_maps_wildcard_to_loopback() {
         use std::net::SocketAddr;
-        assert!(
-            (
-                loopback_bootstrap("0.0.0.0:9092".parse::<SocketAddr>().unwrap()),
-                loopback_bootstrap("192.168.1.5:9094".parse::<SocketAddr>().unwrap()),
-                loopback_bootstrap("[::]:9092".parse::<SocketAddr>().unwrap()),
-                loopback_bootstrap("[2001:db8::5]:9092".parse::<SocketAddr>().unwrap()),
-            ) == (
-                "127.0.0.1:9092".to_string(),
-                "192.168.1.5:9094".to_string(),
-                "[::1]:9092".to_string(),
-                "[2001:db8::5]:9092".to_string(),
-            )
-        );
+        let cases = [
+            ("0.0.0.0:9092", "127.0.0.1:9092"),
+            ("192.168.1.5:9094", "192.168.1.5:9094"),
+            ("[::]:9092", "[::1]:9092"),
+            ("[2001:db8::5]:9092", "[2001:db8::5]:9092"),
+        ];
+        for (listen, expected) in cases {
+            assert!(
+                loopback_bootstrap(listen.parse::<SocketAddr>().unwrap()) == expected,
+                "listen {listen}"
+            );
+        }
     }
 
     #[test]
@@ -5520,155 +5518,137 @@ mod tests {
         let topic_id = uuid::Uuid::from_u128(0xFEED);
 
         // Every wait helper must still be pending (time out) while its
-        // condition is unmet.
-        assert!(
+        // condition is unmet. The futures are lazy async fns, so building the
+        // table up front does no work; each is awaited sequentially below.
+        let pending_waits: [(
+            &str,
+            std::pin::Pin<Box<dyn std::future::Future<Output = ()> + '_>>,
+        ); 9] = [
             (
-                tokio::time::timeout(
-                    timeout,
-                    handle.wait_for_share_state_summary("missing-mutant-group", topic_id, 0),
-                )
-                .await
-                .is_err(),
-                tokio::time::timeout(
-                    timeout,
-                    handle.wait_until_share_spso("missing-mutant-group", topic_id, 0, 1),
-                )
-                .await
-                .is_err(),
-                tokio::time::timeout(
-                    timeout,
-                    handle.wait_until_share_delivery_complete(
-                        "missing-mutant-group",
-                        topic_id,
-                        0,
-                        1,
-                    ),
-                )
-                .await
-                .is_err(),
-                tokio::time::timeout(
-                    timeout,
-                    handle.wait_until_group_member_count("missing-mutant-group", 1),
-                )
-                .await
-                .is_err(),
-                tokio::time::timeout(
-                    timeout,
-                    handle.wait_until_streams_group_member_count("missing-mutant-streams", 1),
-                )
-                .await
-                .is_err(),
-                tokio::time::timeout(timeout, handle.wait_until_brokers_registered(2))
-                    .await
-                    .is_err(),
-                tokio::time::timeout(
-                    timeout,
-                    handle.wait_until_partition_present("missing-mutant-topic", 0),
-                )
-                .await
-                .is_err(),
-                tokio::time::timeout(
-                    timeout,
-                    handle.wait_until_partition_leader_changed("missing-mutant-topic", 0, 1),
-                )
-                .await
-                .is_err(),
-                tokio::time::timeout(
-                    timeout,
-                    handle.wait_until_isr_len("missing-mutant-topic", 0, 1)
-                )
-                .await
-                .is_err(),
-            ) == (true, true, true, true, true, true, true, true, true)
-        );
+                "wait_for_share_state_summary",
+                Box::pin(async {
+                    let _ = handle
+                        .wait_for_share_state_summary("missing-mutant-group", topic_id, 0)
+                        .await;
+                }),
+            ),
+            (
+                "wait_until_share_spso",
+                Box::pin(async {
+                    handle
+                        .wait_until_share_spso("missing-mutant-group", topic_id, 0, 1)
+                        .await;
+                }),
+            ),
+            (
+                "wait_until_share_delivery_complete",
+                Box::pin(async {
+                    handle
+                        .wait_until_share_delivery_complete("missing-mutant-group", topic_id, 0, 1)
+                        .await;
+                }),
+            ),
+            (
+                "wait_until_group_member_count",
+                Box::pin(async {
+                    handle
+                        .wait_until_group_member_count("missing-mutant-group", 1)
+                        .await;
+                }),
+            ),
+            (
+                "wait_until_streams_group_member_count",
+                Box::pin(async {
+                    handle
+                        .wait_until_streams_group_member_count("missing-mutant-streams", 1)
+                        .await;
+                }),
+            ),
+            (
+                "wait_until_brokers_registered",
+                Box::pin(async {
+                    handle.wait_until_brokers_registered(2).await;
+                }),
+            ),
+            (
+                "wait_until_partition_present",
+                Box::pin(async {
+                    handle
+                        .wait_until_partition_present("missing-mutant-topic", 0)
+                        .await;
+                }),
+            ),
+            (
+                "wait_until_partition_leader_changed",
+                Box::pin(async {
+                    handle
+                        .wait_until_partition_leader_changed("missing-mutant-topic", 0, 1)
+                        .await;
+                }),
+            ),
+            (
+                "wait_until_isr_len",
+                Box::pin(async {
+                    handle
+                        .wait_until_isr_len("missing-mutant-topic", 0, 1)
+                        .await;
+                }),
+            ),
+        ];
+        for (name, wait) in pending_waits {
+            assert!(
+                tokio::time::timeout(timeout, wait).await.is_err(),
+                "{name} resolved while its condition was unmet"
+            );
+        }
 
-        submit_metadata_topic_partition(
-            &handle,
-            "leader-zero-mutant-topic",
-            0xF001,
-            0,
-            0,
-            &[1],
-            &[1],
-            3,
-        )
-        .await;
+        // wait_until_partition_leader_changed must stay pending for each of
+        // these submitted partitions:
+        // (topic, topic_id, leader, replicas/isr, leader_epoch, excluded leader)
+        let leader_changed_cases: [(&str, u128, u64, &[u64], i32, u64); 4] = [
+            // leader 0 means "no leader" — never counts as a change.
+            ("leader-zero-mutant-topic", 0xF001, 0, &[1], 3, 1),
+            // the current leader is exactly the excluded node.
+            ("leader-excluded-mutant-topic", 0xF002, 2, &[1, 2], 3, 2),
+            // leader epoch 0 is not a completed election.
+            ("leader-epoch-zero-mutant-topic", 0xF003, 2, &[1, 2], 0, 1),
+            // negative leader epoch likewise.
+            (
+                "leader-epoch-negative-mutant-topic",
+                0xF004,
+                2,
+                &[1, 2],
+                -1,
+                1,
+            ),
+        ];
+        for (topic, topic_id, leader, replicas, leader_epoch, excluded) in leader_changed_cases {
+            submit_metadata_topic_partition(
+                &handle,
+                topic,
+                topic_id,
+                0,
+                leader,
+                replicas,
+                replicas,
+                leader_epoch,
+            )
+            .await;
+            assert!(
+                tokio::time::timeout(
+                    timeout,
+                    handle.wait_until_partition_leader_changed(topic, 0, excluded),
+                )
+                .await
+                .is_err(),
+                "{topic}: wait_until_partition_leader_changed resolved"
+            );
+        }
+        // Leader 0 is also reported as "no leader" by the direct helper.
         assert!(
             handle
                 .partition_leader_for_test("leader-zero-mutant-topic", 0)
                 .is_none()
-        );
-        assert!(
-            tokio::time::timeout(
-                timeout,
-                handle.wait_until_partition_leader_changed("leader-zero-mutant-topic", 0, 1),
-            )
-            .await
-            .is_err()
-        );
-
-        submit_metadata_topic_partition(
-            &handle,
-            "leader-excluded-mutant-topic",
-            0xF002,
-            0,
-            2,
-            &[1, 2],
-            &[1, 2],
-            3,
-        )
-        .await;
-        assert!(
-            tokio::time::timeout(
-                timeout,
-                handle.wait_until_partition_leader_changed("leader-excluded-mutant-topic", 0, 2),
-            )
-            .await
-            .is_err()
-        );
-
-        submit_metadata_topic_partition(
-            &handle,
-            "leader-epoch-zero-mutant-topic",
-            0xF003,
-            0,
-            2,
-            &[1, 2],
-            &[1, 2],
-            0,
-        )
-        .await;
-        assert!(
-            tokio::time::timeout(
-                timeout,
-                handle.wait_until_partition_leader_changed("leader-epoch-zero-mutant-topic", 0, 1,),
-            )
-            .await
-            .is_err()
-        );
-
-        submit_metadata_topic_partition(
-            &handle,
-            "leader-epoch-negative-mutant-topic",
-            0xF004,
-            0,
-            2,
-            &[1, 2],
-            &[1, 2],
-            -1,
-        )
-        .await;
-        assert!(
-            tokio::time::timeout(
-                timeout,
-                handle.wait_until_partition_leader_changed(
-                    "leader-epoch-negative-mutant-topic",
-                    0,
-                    1,
-                ),
-            )
-            .await
-            .is_err()
         );
 
         submit_metadata_topic_partition(
@@ -5779,13 +5759,17 @@ mod tests {
     fn rlmm_backoff_doubles_then_caps() {
         use std::time::Duration;
         let max = Duration::from_secs(10);
-        assert!(
-            (
-                next_rlmm_backoff(Duration::from_millis(250), max),
-                next_rlmm_backoff(Duration::from_secs(8), max), // 16s capped to 10s
-                next_rlmm_backoff(max, max),
-            ) == (Duration::from_millis(500), max, max)
-        );
+        let cases = [
+            (Duration::from_millis(250), Duration::from_millis(500)),
+            (Duration::from_secs(8), max), // 16s capped to 10s
+            (max, max),
+        ];
+        for (current, expected) in cases {
+            assert!(
+                next_rlmm_backoff(current, max) == expected,
+                "current {current:?}"
+            );
+        }
     }
 
     #[tokio::test]

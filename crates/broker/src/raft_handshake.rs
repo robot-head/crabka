@@ -643,26 +643,36 @@ mod tests {
     fn header_flexibility_table_matches_outbound_encoder() {
         // SaslHandshake — never flexible (v0/v1). SaslAuthenticate —
         // flexible from v2.
-        let request_flex = (
-            is_request_header_flexible(API_KEY_SASL_HANDSHAKE, 0),
-            is_request_header_flexible(API_KEY_SASL_HANDSHAKE, 1),
-            is_request_header_flexible(API_KEY_SASL_AUTHENTICATE, 1),
-            is_request_header_flexible(API_KEY_SASL_AUTHENTICATE, 2),
-        );
-        assert!(request_flex == (false, false, false, true));
+        let request_cases = [
+            (API_KEY_SASL_HANDSHAKE, 0, false),
+            (API_KEY_SASL_HANDSHAKE, 1, false),
+            (API_KEY_SASL_AUTHENTICATE, 1, false),
+            (API_KEY_SASL_AUTHENTICATE, 2, true),
+        ];
+        for (api_key, version, want) in request_cases {
+            assert!(
+                is_request_header_flexible(api_key, version) == want,
+                "request api_key {api_key} v{version}"
+            );
+        }
 
         // Response headers mirror the request rules for SaslHandshake /
         // SaslAuthenticate; ApiVersions — response header always v0 per
         // Kafka spec.
-        let response_flex = (
-            is_response_header_flexible(API_KEY_SASL_HANDSHAKE, 0),
-            is_response_header_flexible(API_KEY_SASL_HANDSHAKE, 1),
-            is_response_header_flexible(API_KEY_SASL_AUTHENTICATE, 1),
-            is_response_header_flexible(API_KEY_SASL_AUTHENTICATE, 2),
-            is_response_header_flexible(API_KEY_API_VERSIONS, 0),
-            is_response_header_flexible(API_KEY_API_VERSIONS, 3),
-        );
-        assert!(response_flex == (false, false, false, true, false, false));
+        let response_cases = [
+            (API_KEY_SASL_HANDSHAKE, 0, false),
+            (API_KEY_SASL_HANDSHAKE, 1, false),
+            (API_KEY_SASL_AUTHENTICATE, 1, false),
+            (API_KEY_SASL_AUTHENTICATE, 2, true),
+            (API_KEY_API_VERSIONS, 0, false),
+            (API_KEY_API_VERSIONS, 3, false),
+        ];
+        for (api_key, version, want) in response_cases {
+            assert!(
+                is_response_header_flexible(api_key, version) == want,
+                "response api_key {api_key} v{version}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -683,10 +693,6 @@ mod tests {
         let mut short = Vec::new();
         short.extend_from_slice(&9u32.to_be_bytes());
         short.extend_from_slice(&[0; 9]);
-        assert!(matches!(
-            read_request_from_frame(short).await,
-            Err(RaftHandshakeError::Protocol(msg)) if msg.contains("short request header")
-        ));
 
         let mut truncated_client = Vec::new();
         truncated_client.extend_from_slice(&12u32.to_be_bytes());
@@ -695,16 +701,24 @@ mod tests {
         truncated_client.extend_from_slice(&7i32.to_be_bytes());
         truncated_client.extend_from_slice(&3i16.to_be_bytes());
         truncated_client.extend_from_slice(b"xy");
-        assert!(matches!(
-            read_request_from_frame(truncated_client).await,
-            Err(RaftHandshakeError::Protocol(msg)) if msg.contains("client_id extends past frame")
-        ));
 
         let missing_tag = request_frame(36, 2, 44, Some(b"c"), false, b"");
-        assert!(matches!(
-            read_request_from_frame(missing_tag).await,
-            Err(RaftHandshakeError::Protocol(msg)) if msg.contains("missing tagged-fields byte")
-        ));
+
+        let cases = [
+            (short, "short request header"),
+            (truncated_client, "client_id extends past frame"),
+            (missing_tag, "missing tagged-fields byte"),
+        ];
+        for (frame, want_msg) in cases {
+            let got = read_request_from_frame(frame).await;
+            assert!(
+                matches!(
+                    &got,
+                    Err(RaftHandshakeError::Protocol(msg)) if msg.contains(want_msg)
+                ),
+                "want protocol error containing {want_msg:?}, got {got:?}"
+            );
+        }
     }
 
     #[tokio::test]

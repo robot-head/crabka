@@ -416,13 +416,19 @@ mod tests {
     #[test]
     fn downgrade_flag_v1_uses_upgrade_type() {
         // upgrade_type: 1 = UPGRADE, 2 = SAFE_DOWNGRADE, 3 = UNSAFE_DOWNGRADE.
-        assert!(
-            (
-                downgrade_allowed(1, true, 1),
-                downgrade_allowed(1, false, 2),
-                downgrade_allowed(1, false, 3),
-            ) == (false, true, true)
-        );
+        let cases = [
+            // (allow_downgrade, upgrade_type, want); allow_downgrade is
+            // ignored at v1+ — only upgrade_type decides.
+            (true, 1, false),
+            (false, 2, true),
+            (false, 3, true),
+        ];
+        for (allow_downgrade, upgrade_type, want) in cases {
+            assert!(
+                downgrade_allowed(1, allow_downgrade, upgrade_type) == want,
+                "allow_downgrade {allow_downgrade}, upgrade_type {upgrade_type}"
+            );
+        }
     }
 
     #[test]

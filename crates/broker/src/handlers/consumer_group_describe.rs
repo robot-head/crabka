@@ -175,14 +175,18 @@ mod tests {
 
     #[test]
     fn group_version_gate_distinguishes_disabled_and_enabled_images() {
-        let fresh = MetadataImage::new(uuid::Uuid::nil());
-        assert!(group_version_disabled(&fresh));
-
-        let enabled = image_with_group_version(1);
-        assert!(!group_version_disabled(&enabled));
-
-        let disabled = image_with_group_version(0);
-        assert!(group_version_disabled(&disabled));
+        // (finalized group.version level; None = fresh image) → disabled?
+        let cases = [(None, true), (Some(1), false), (Some(0), true)];
+        for (level, want_disabled) in cases {
+            let image = match level {
+                None => MetadataImage::new(uuid::Uuid::nil()),
+                Some(level) => image_with_group_version(level),
+            };
+            assert!(
+                group_version_disabled(&image) == want_disabled,
+                "level {level:?}"
+            );
+        }
     }
 
     #[test]
@@ -193,17 +197,13 @@ mod tests {
 
     #[test]
     fn group_state_reflects_member_count() {
-        let actual = (
-            group_state_for_member_count(0),
-            group_state_for_member_count(1),
-            group_state_for_member_count(3),
-        );
-        let expected = (
-            "EMPTY".to_string(),
-            "STABLE".to_string(),
-            "STABLE".to_string(),
-        );
-        assert!(actual == expected);
+        let cases = [(0, "EMPTY"), (1, "STABLE"), (3, "STABLE")];
+        for (members, want) in cases {
+            assert!(
+                group_state_for_member_count(members) == want,
+                "members {members}"
+            );
+        }
     }
 
     #[test]

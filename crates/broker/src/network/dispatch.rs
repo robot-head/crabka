@@ -4440,44 +4440,60 @@ mod tests {
 
     #[test]
     fn parse_header_rejects_missing_fixed_header_client_id_and_tags() {
-        assert!(parse_request_header(&[0; 7]).is_err());
-
         let mut missing_client_id_len = BytesMut::new();
         missing_client_id_len.put_i16(3);
         missing_client_id_len.put_i16(8);
         missing_client_id_len.put_i32(42);
-        assert!(parse_request_header(&missing_client_id_len).is_err());
-
         let truncated_client_id = request_frame(3, 8, 42, Some(b"client"), None, b"");
-        assert!(
-            parse_request_header(&truncated_client_id[..truncated_client_id.len() - 1]).is_err()
-        );
 
-        let flexible_without_tags = request_frame(18, 3, 42, Some(b"client"), None, b"");
-        assert!(parse_request_header(&flexible_without_tags).is_err());
+        let cases = [
+            ("missing fixed header", vec![0u8; 7]),
+            ("missing client id length", missing_client_id_len.to_vec()),
+            (
+                "truncated client id",
+                truncated_client_id[..truncated_client_id.len() - 1].to_vec(),
+            ),
+            (
+                "flexible header without tagged byte",
+                request_frame(18, 3, 42, Some(b"client"), None, b"").to_vec(),
+            ),
+        ];
+        for (case, frame) in cases {
+            assert!(parse_request_header(&frame).is_err(), "{case}");
+        }
     }
 
     #[test]
     fn peek_client_id_handles_present_null_empty_truncated_and_invalid_utf8() {
-        let present = request_frame(3, 8, 42, Some(b"client-a"), None, b"body");
-        assert!(peek_client_id(&present) == Some("client-a"));
-
-        let null = request_frame(3, 8, 42, None, None, b"body");
-        assert!(peek_client_id(&null).is_none());
-
-        let empty = request_frame(3, 8, 42, Some(b""), None, b"body");
-        assert!(peek_client_id(&empty).is_none());
-
         let mut truncated = BytesMut::new();
         truncated.put_i16(3);
         truncated.put_i16(8);
         truncated.put_i32(42);
         truncated.put_i16(8);
         truncated.put_slice(b"cli");
-        assert!(peek_client_id(&truncated).is_none());
 
-        let invalid_utf8 = request_frame(3, 8, 42, Some(&[0xFF, 0xFE]), None, b"body");
-        assert!(peek_client_id(&invalid_utf8).is_none());
+        let cases = [
+            (
+                "present",
+                request_frame(3, 8, 42, Some(b"client-a"), None, b"body"),
+                Some("client-a"),
+            ),
+            ("null", request_frame(3, 8, 42, None, None, b"body"), None),
+            (
+                "empty",
+                request_frame(3, 8, 42, Some(b""), None, b"body"),
+                None,
+            ),
+            ("truncated", truncated, None),
+            (
+                "invalid utf8",
+                request_frame(3, 8, 42, Some(&[0xFF, 0xFE]), None, b"body"),
+                None,
+            ),
+        ];
+        for (case, frame, want) in cases {
+            assert!(peek_client_id(&frame) == want, "{case}");
+        }
     }
 
     #[test]
@@ -4492,8 +4508,6 @@ mod tests {
             expires_at_ms: Some(123),
             authenticated_via_token: false,
         };
-        assert!(auth_principal_name(&authenticated) == Some("alice"));
-
         let reauth = crate::network::auth::ConnectionAuth::Reauthenticating {
             previous: crate::network::auth::AuthenticatedSnapshot {
                 principal: crabka_security::Principal {
@@ -4506,10 +4520,16 @@ mod tests {
             },
             exchange: crate::network::auth::SaslExchange::OAuthBearer,
         };
-        assert!(auth_principal_name(&reauth) == Some("bob"));
-
         let anonymous = crate::network::auth::ConnectionAuth::Anonymous;
-        assert!(auth_principal_name(&anonymous).is_none());
+
+        let cases = [
+            ("authenticated", &authenticated, Some("alice")),
+            ("reauthenticating uses previous", &reauth, Some("bob")),
+            ("anonymous", &anonymous, None),
+        ];
+        for (case, auth, want) in cases {
+            assert!(auth_principal_name(auth) == want, "{case}");
+        }
     }
 
     #[tokio::test]
@@ -4553,18 +4573,26 @@ mod tests {
     fn handler_body_flexible_matches_selected_schema_boundaries() {
         use crabka_protocol::owned;
 
-        assert!(
+        let cases = [
+            (0, owned::produce_request::FLEXIBLE_MIN - 1, false),
+            (0, owned::produce_request::FLEXIBLE_MIN, true),
+            (1, owned::fetch_request::FLEXIBLE_MIN - 1, false),
+            (1, owned::fetch_request::FLEXIBLE_MIN, true),
             (
-                handler_body_flexible(0, owned::produce_request::FLEXIBLE_MIN - 1),
-                handler_body_flexible(0, owned::produce_request::FLEXIBLE_MIN),
-                handler_body_flexible(1, owned::fetch_request::FLEXIBLE_MIN - 1),
-                handler_body_flexible(1, owned::fetch_request::FLEXIBLE_MIN),
-                handler_body_flexible(36, owned::sasl_authenticate_request::FLEXIBLE_MIN - 1),
-                handler_body_flexible(36, owned::sasl_authenticate_request::FLEXIBLE_MIN),
-                handler_body_flexible(17, i16::MAX),
-                handler_body_flexible(999, 0)
-            ) == (false, true, false, true, false, true, false, false)
-        );
+                36,
+                owned::sasl_authenticate_request::FLEXIBLE_MIN - 1,
+                false,
+            ),
+            (36, owned::sasl_authenticate_request::FLEXIBLE_MIN, true),
+            (17, i16::MAX, false),
+            (999, 0, false),
+        ];
+        for (api_key, version, want) in cases {
+            assert!(
+                handler_body_flexible(api_key, version) == want,
+                "api_key {api_key} version {version}"
+            );
+        }
     }
 
     #[test]
@@ -4582,22 +4610,24 @@ mod tests {
         // Present-and-leading version boundaries (verified vs 4.x schemas).
         // OffsetDelete (47) leads with ErrorCode — must never be patched.
         // Produce/Fetch self-account; ApiVersions is not in the table.
-        assert!(
-            (
-                throttle_is_leading_field(11, 1), // JoinGroup v1: no throttle
-                throttle_is_leading_field(11, 2), // JoinGroup v2+: leading
-                throttle_is_leading_field(3, 2),  // Metadata v2: no throttle
-                throttle_is_leading_field(3, 3),  // Metadata v3+
-                throttle_is_leading_field(12, 1), // Heartbeat v1+
-                throttle_is_leading_field(68, 0), // ConsumerGroupHeartbeat v0+
-                throttle_is_leading_field(47, 0), // OffsetDelete
-                throttle_is_leading_field(0, 9),  // Produce
-                throttle_is_leading_field(1, 13), // Fetch
-                throttle_is_leading_field(18, 3)  // ApiVersions
-            ) == (
-                false, true, false, true, true, true, false, false, false, false
-            )
-        );
+        let cases = [
+            (11, 1, false), // JoinGroup v1: no throttle
+            (11, 2, true),  // JoinGroup v2+: leading
+            (3, 2, false),  // Metadata v2: no throttle
+            (3, 3, true),   // Metadata v3+
+            (12, 1, true),  // Heartbeat v1+
+            (68, 0, true),  // ConsumerGroupHeartbeat v0+
+            (47, 0, false), // OffsetDelete
+            (0, 9, false),  // Produce
+            (1, 13, false), // Fetch
+            (18, 3, false), // ApiVersions
+        ];
+        for (api_key, version, want) in cases {
+            assert!(
+                throttle_is_leading_field(api_key, version) == want,
+                "api_key {api_key} version {version}"
+            );
+        }
     }
 
     #[test]

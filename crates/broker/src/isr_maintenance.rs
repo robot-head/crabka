@@ -741,48 +741,66 @@ mod tests {
 
     #[test]
     fn not_controller_classification_covers_global_and_partition_codes() {
-        assert_eq!(
-            (
-                is_not_controller_response(crate::codes::NOT_CONTROLLER, 0),
-                is_not_controller_response(0, crate::codes::NOT_CONTROLLER),
-                is_not_controller_response(0, 0),
-                is_not_controller_response(crate::codes::UNKNOWN_SERVER_ERROR, 0),
-            ),
-            (true, true, false, false)
-        );
+        let cases = [
+            (crate::codes::NOT_CONTROLLER, 0, true),
+            (0, crate::codes::NOT_CONTROLLER, true),
+            (0, 0, false),
+            (crate::codes::UNKNOWN_SERVER_ERROR, 0, false),
+        ];
+        for (global_err, part_err, want) in cases {
+            assert_eq!(
+                is_not_controller_response(global_err, part_err),
+                want,
+                "global_err={global_err} part_err={part_err}"
+            );
+        }
     }
 
     #[test]
     fn alter_partition_response_classifies_all_error_surfaces() {
-        assert_eq!(
+        let cases = [
+            (0, 0, Ok(())),
             (
-                classify_alter_partition_response(0, 0),
-                classify_alter_partition_response(crate::codes::NOT_CONTROLLER, 0),
-                classify_alter_partition_response(0, crate::codes::NOT_CONTROLLER),
-                classify_alter_partition_response(crate::codes::UNKNOWN_SERVER_ERROR, 0),
-                classify_alter_partition_response(0, crate::codes::UNKNOWN_SERVER_ERROR),
-                classify_alter_partition_response(
-                    crate::codes::UNKNOWN_SERVER_ERROR,
-                    crate::codes::UNKNOWN_TOPIC_OR_PARTITION,
-                ),
+                crate::codes::NOT_CONTROLLER,
+                0,
+                Err(AlterPartitionSendError::NotController),
             ),
             (
-                Ok(()),
+                0,
+                crate::codes::NOT_CONTROLLER,
                 Err(AlterPartitionSendError::NotController),
-                Err(AlterPartitionSendError::NotController),
+            ),
+            (
+                crate::codes::UNKNOWN_SERVER_ERROR,
+                0,
                 Err(AlterPartitionSendError::Rejected {
                     global_err: crate::codes::UNKNOWN_SERVER_ERROR,
                     part_err: 0,
                 }),
+            ),
+            (
+                0,
+                crate::codes::UNKNOWN_SERVER_ERROR,
                 Err(AlterPartitionSendError::Rejected {
                     global_err: 0,
                     part_err: crate::codes::UNKNOWN_SERVER_ERROR,
                 }),
+            ),
+            (
+                crate::codes::UNKNOWN_SERVER_ERROR,
+                crate::codes::UNKNOWN_TOPIC_OR_PARTITION,
                 Err(AlterPartitionSendError::Rejected {
                     global_err: crate::codes::UNKNOWN_SERVER_ERROR,
                     part_err: crate::codes::UNKNOWN_TOPIC_OR_PARTITION,
                 }),
-            )
-        );
+            ),
+        ];
+        for (global_err, part_err, want) in cases {
+            assert_eq!(
+                classify_alter_partition_response(global_err, part_err),
+                want,
+                "global_err={global_err} part_err={part_err}"
+            );
+        }
     }
 }

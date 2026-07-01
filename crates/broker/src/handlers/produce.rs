@@ -1423,26 +1423,28 @@ mod tests {
 
     #[test]
     fn resolve_topic_compression_distinguishes_producer_and_forced_codecs() {
-        let mut producer = image_with_topic("producer-topic", &[1]);
-        let mut overrides = BTreeMap::new();
-        overrides.insert(
-            crate::config_keys::COMPRESSION_TYPE.into(),
-            "producer".into(),
-        );
-        producer.apply(&MetadataRecord::V1TopicConfig(TopicConfigRecord {
-            topic: "producer-topic".into(),
-            overrides,
-        }));
-        assert!(resolve_topic_compression(&producer, "producer-topic").is_none());
-
-        let mut forced = image_with_topic("forced-topic", &[1]);
-        let mut overrides = BTreeMap::new();
-        overrides.insert(crate::config_keys::COMPRESSION_TYPE.into(), "zstd".into());
-        forced.apply(&MetadataRecord::V1TopicConfig(TopicConfigRecord {
-            topic: "forced-topic".into(),
-            overrides,
-        }));
-        assert!(resolve_topic_compression(&forced, "forced-topic") == Some(CompressionType::Zstd));
+        let cases = [
+            // "producer" keeps the producer's codec → no forced compression.
+            ("producer", None),
+            // A concrete codec forces recompression to that codec.
+            ("zstd", Some(CompressionType::Zstd)),
+        ];
+        for (config_value, want) in cases {
+            let mut img = image_with_topic("t", &[1]);
+            let mut overrides = BTreeMap::new();
+            overrides.insert(
+                crate::config_keys::COMPRESSION_TYPE.into(),
+                config_value.into(),
+            );
+            img.apply(&MetadataRecord::V1TopicConfig(TopicConfigRecord {
+                topic: "t".into(),
+                overrides,
+            }));
+            assert!(
+                resolve_topic_compression(&img, "t") == want,
+                "compression.type {config_value:?}"
+            );
+        }
     }
 
     #[test]
@@ -1669,13 +1671,18 @@ mod tests {
             };
             let wire = encode(&batch);
             // A null field and a non-v2 (zeroed) slice both contribute zero.
-            assert!(
+            let cases = [
+                (PartitionPayload::Slice(wire), 3, "v2 slice with 3 records"),
+                (PartitionPayload::Null, 0, "null records field"),
                 (
-                    PartitionPayload::Slice(wire).message_count(),
-                    PartitionPayload::Null.message_count(),
-                    PartitionPayload::Slice(Bytes::from_static(&[0u8; 64])).message_count(),
-                ) == (3, 0, 0)
-            );
+                    PartitionPayload::Slice(Bytes::from_static(&[0u8; 64])),
+                    0,
+                    "non-v2 zeroed slice",
+                ),
+            ];
+            for (payload, want, label) in cases {
+                assert!(payload.message_count() == want, "case: {label}");
+            }
         }
 
         /// Run the full dispatch over a v≥3 records slice: `prepare_batch`

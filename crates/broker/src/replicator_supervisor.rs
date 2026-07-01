@@ -769,7 +769,7 @@ mod tests {
     }
 
     #[test]
-    fn includes_partition_where_self_is_follower() {
+    fn desired_follower_set_includes_followers_excludes_leader_and_non_replicas() {
         let img = image_with(&[
             MetadataRecord::V1Topic(TopicRecord {
                 name: "t".into(),
@@ -790,9 +790,20 @@ mod tests {
                 partition_epoch: 0,
             }),
         ]);
-        let d = desired_follower_set(2, &img);
-        assert!(d.contains(&("t".into(), 0)));
-        assert!(d.len() == 1);
+        let cases = [
+            // Self is a follower replica → included.
+            (2, HashSet::from_iter([("t".to_string(), 0)])),
+            // Self is the leader → excluded.
+            (1, HashSet::new()),
+            // Self is not a replica at all → excluded.
+            (99, HashSet::new()),
+        ];
+        for (node_id, want) in cases {
+            assert!(
+                desired_follower_set(node_id, &img) == want,
+                "node {node_id}"
+            );
+        }
     }
 
     #[test]
@@ -817,56 +828,6 @@ mod tests {
                     ("c".to_string(), -1),
                 ])
         );
-    }
-
-    #[test]
-    fn excludes_partition_where_self_is_leader() {
-        let img = image_with(&[
-            MetadataRecord::V1Topic(TopicRecord {
-                name: "t".into(),
-                topic_id: Uuid::new_v4(),
-                partitions: 1,
-                replication_factor: 3,
-            }),
-            MetadataRecord::V1Partition(PartitionRecord {
-                topic: "t".into(),
-                partition: 0,
-                leader: 1,
-                replicas: vec![1, 2, 3],
-                isr: vec![1, 2, 3],
-                leader_epoch: 0,
-                adding_replicas: vec![],
-                removing_replicas: vec![],
-                directories: vec![],
-                partition_epoch: 0,
-            }),
-        ]);
-        assert!(desired_follower_set(1, &img).is_empty());
-    }
-
-    #[test]
-    fn excludes_partition_where_self_is_not_a_replica() {
-        let img = image_with(&[
-            MetadataRecord::V1Topic(TopicRecord {
-                name: "t".into(),
-                topic_id: Uuid::new_v4(),
-                partitions: 1,
-                replication_factor: 3,
-            }),
-            MetadataRecord::V1Partition(PartitionRecord {
-                topic: "t".into(),
-                partition: 0,
-                leader: 1,
-                replicas: vec![1, 2, 3],
-                isr: vec![1, 2, 3],
-                leader_epoch: 0,
-                adding_replicas: vec![],
-                removing_replicas: vec![],
-                directories: vec![],
-                partition_epoch: 0,
-            }),
-        ]);
-        assert!(desired_follower_set(99, &img).is_empty());
     }
 
     #[tokio::test]

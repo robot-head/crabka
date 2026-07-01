@@ -709,33 +709,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn preferred_already_leader() {
-        let img = img_with_partition("foo", 0, /*leader*/ 1, &[1, 2, 3], &[1, 2, 3]);
-        let l = liveness_with_alive(&[1, 2, 3]).await;
-        let err = select_new_leader_for_partition(&img, &l, "foo", 0, ElectionType::Preferred)
-            .await
-            .unwrap_err();
-        assert!(err == ElectError::PreferredAlreadyLeader);
-    }
-
-    #[tokio::test]
-    async fn preferred_not_in_isr() {
-        let img = img_with_partition("foo", 0, 2, &[1, 2, 3], &[2, 3]);
-        let l = liveness_with_alive(&[1, 2, 3]).await;
-        let err = select_new_leader_for_partition(&img, &l, "foo", 0, ElectionType::Preferred)
-            .await
-            .unwrap_err();
-        assert!(err == ElectError::PreferredNotInIsr);
-    }
-
-    #[tokio::test]
-    async fn preferred_not_alive() {
-        let img = img_with_partition("foo", 0, 2, &[1, 2, 3], &[1, 2, 3]);
-        let l = liveness_with_alive(&[2, 3]).await; // 1 dead
-        let err = select_new_leader_for_partition(&img, &l, "foo", 0, ElectionType::Preferred)
-            .await
-            .unwrap_err();
-        assert!(err == ElectError::PreferredNotAlive);
+    async fn preferred_election_error_cases() {
+        // Replicas are always [1, 2, 3]; the preferred leader is replica 1.
+        // (current_leader, isr, alive, expected)
+        let cases: [(NodeId, &[NodeId], &[NodeId], ElectError); 3] = [
+            // Preferred replica 1 is already the leader.
+            (
+                1,
+                &[1, 2, 3],
+                &[1, 2, 3],
+                ElectError::PreferredAlreadyLeader,
+            ),
+            // Preferred replica 1 is not in the ISR.
+            (2, &[2, 3], &[1, 2, 3], ElectError::PreferredNotInIsr),
+            // Preferred replica 1 is in the ISR but dead.
+            (2, &[1, 2, 3], &[2, 3], ElectError::PreferredNotAlive),
+        ];
+        for (leader, isr, alive, expected) in cases {
+            let img = img_with_partition("foo", 0, leader, &[1, 2, 3], isr);
+            let l = liveness_with_alive(alive).await;
+            let err = select_new_leader_for_partition(&img, &l, "foo", 0, ElectionType::Preferred)
+                .await
+                .unwrap_err();
+            assert!(
+                err == expected,
+                "leader {leader}, isr {isr:?}, alive {alive:?}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -820,37 +820,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shutdown_replacement_election_not_needed_when_not_leader() {
-        // Broker 5 wants to shut down, but leader is 1. No-op.
-        let img = img_with_partition("foo", 0, 1, &[1, 2, 3], &[1, 2, 3]);
-        let l = liveness_with_alive(&[1, 2, 3, 5]).await;
-        let err = select_replacement_leader_for_shutdown(&img, &l, "foo", 0, 5)
-            .await
-            .unwrap_err();
-        assert!(err == ElectError::ElectionNotNeeded);
-    }
-
-    #[tokio::test]
-    async fn shutdown_replacement_no_other_isr_alive() {
-        // Broker 1 wants to drain. ISR is {1} only (singleton). No
-        // other broker eligible.
-        let img = img_with_partition("foo", 0, 1, &[1, 2, 3], &[1]);
-        let l = liveness_with_alive(&[1, 2, 3]).await;
-        let err = select_replacement_leader_for_shutdown(&img, &l, "foo", 0, 1)
-            .await
-            .unwrap_err();
-        assert!(err == ElectError::NoEligibleReplica);
-    }
-
-    #[tokio::test]
-    async fn shutdown_replacement_other_isr_member_dead_falls_to_no_eligible() {
-        // Broker 1 wants to drain. ISR {1,2} but 2 is dead.
-        let img = img_with_partition("foo", 0, 1, &[1, 2, 3], &[1, 2]);
-        let l = liveness_with_alive(&[1, 3]).await; // 2 dead, 3 alive but not in ISR
-        let err = select_replacement_leader_for_shutdown(&img, &l, "foo", 0, 1)
-            .await
-            .unwrap_err();
-        assert!(err == ElectError::NoEligibleReplica);
+    async fn shutdown_replacement_error_cases() {
+        // Replicas are always [1, 2, 3]; leader is always broker 1.
+        // (isr, alive, shutting_down, expected)
+        let cases: [(&[NodeId], &[NodeId], NodeId, ElectError); 3] = [
+            // Broker 5 wants to shut down, but leader is 1. No-op.
+            (&[1, 2, 3], &[1, 2, 3, 5], 5, ElectError::ElectionNotNeeded),
+            // Broker 1 wants to drain. ISR is {1} only (singleton). No
+            // other broker eligible.
+            (&[1], &[1, 2, 3], 1, ElectError::NoEligibleReplica),
+            // Broker 1 wants to drain. ISR {1,2} but 2 is dead; 3 is alive
+            // but not in ISR.
+            (&[1, 2], &[1, 3], 1, ElectError::NoEligibleReplica),
+        ];
+        for (isr, alive, shutting_down, expected) in cases {
+            let img = img_with_partition("foo", 0, 1, &[1, 2, 3], isr);
+            let l = liveness_with_alive(alive).await;
+            let err = select_replacement_leader_for_shutdown(&img, &l, "foo", 0, shutting_down)
+                .await
+                .unwrap_err();
+            assert!(
+                err == expected,
+                "isr {isr:?}, alive {alive:?}, shutting_down {shutting_down}"
+            );
+        }
     }
 
     #[tokio::test]

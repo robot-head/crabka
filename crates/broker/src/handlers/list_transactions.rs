@@ -156,25 +156,18 @@ mod tests {
 
     #[test]
     fn txn_state_str_matches_jvm_names() {
-        let actual = (
-            txn_state_str(TxnState::Empty),
-            txn_state_str(TxnState::Ongoing),
-            txn_state_str(TxnState::PrepareCommit),
-            txn_state_str(TxnState::PrepareAbort),
-            txn_state_str(TxnState::CompleteCommit),
-            txn_state_str(TxnState::CompleteAbort),
-            txn_state_str(TxnState::Dead),
-        );
-        let expected = (
-            "Empty",
-            "Ongoing",
-            "PrepareCommit",
-            "PrepareAbort",
-            "CompleteCommit",
-            "CompleteAbort",
-            "Dead",
-        );
-        assert!(actual == expected);
+        let cases = [
+            (TxnState::Empty, "Empty"),
+            (TxnState::Ongoing, "Ongoing"),
+            (TxnState::PrepareCommit, "PrepareCommit"),
+            (TxnState::PrepareAbort, "PrepareAbort"),
+            (TxnState::CompleteCommit, "CompleteCommit"),
+            (TxnState::CompleteAbort, "CompleteAbort"),
+            (TxnState::Dead, "Dead"),
+        ];
+        for (state, want) in cases {
+            assert!(txn_state_str(state) == want, "{state:?}");
+        }
     }
 
     fn encode_request(req: &ListTransactionsRequest, version: i16) -> Bytes {

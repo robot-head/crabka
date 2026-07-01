@@ -112,16 +112,17 @@ async fn real_pyroscope_render_matches_crabka_after_identical_ingest() -> TestRe
     )
     .await?;
 
-    assert_eq!(
-        (
-            flame_ticks(&pyroscope_render).is_some_and(|ticks| ticks > 0),
-            flame_ticks(&crabka_render).is_some_and(|ticks| ticks > 0),
-            flame_names(&pyroscope_render).contains("runtime/pprof.profileWriter"),
-            flame_names(&crabka_render).contains("runtime/pprof.profileWriter"),
-        ),
-        (true, true, true, true),
-        "both renders must report positive ticks and contain runtime/pprof.profileWriter"
-    );
+    let cases = [("pyroscope", &pyroscope_render), ("crabka", &crabka_render)];
+    for (backend, render) in cases {
+        assert!(
+            flame_ticks(render).is_some_and(|ticks| ticks > 0),
+            "{backend} render must report positive ticks"
+        );
+        assert!(
+            flame_names(render).contains("runtime/pprof.profileWriter"),
+            "{backend} render must contain runtime/pprof.profileWriter"
+        );
+    }
     assert_flamebearer_equal(&pyroscope_render, &crabka_render)?;
 
     assert_profile_types_match(&client, &pyroscope_base, &crabka.querier_base).await?;
@@ -982,26 +983,20 @@ async fn assert_profile_types_contain(
                 .and_then(Value::as_str)
                 == Some(PROFILE_TYPE)
             {
-                assert_eq!(
-                    profile_type.get("name").and_then(Value::as_str),
-                    Some("goroutines")
-                );
-                assert_eq!(
-                    profile_type.get("sampleType").and_then(Value::as_str),
-                    Some("goroutine")
-                );
-                assert_eq!(
-                    profile_type.get("sampleUnit").and_then(Value::as_str),
-                    Some("count")
-                );
-                assert_eq!(
-                    profile_type.get("periodType").and_then(Value::as_str),
-                    Some("goroutine")
-                );
-                assert_eq!(
-                    profile_type.get("periodUnit").and_then(Value::as_str),
-                    Some("count")
-                );
+                let field_cases = [
+                    ("name", "goroutines"),
+                    ("sampleType", "goroutine"),
+                    ("sampleUnit", "count"),
+                    ("periodType", "goroutine"),
+                    ("periodUnit", "count"),
+                ];
+                for (field, expected) in field_cases {
+                    assert_eq!(
+                        profile_type.get(field).and_then(Value::as_str),
+                        Some(expected),
+                        "profile type field `{field}`"
+                    );
+                }
             }
         })
         .filter_map(|value| {
@@ -2303,14 +2298,15 @@ async fn grafana_renders_crabka_profiles_end_to_end() -> TestResult {
             positive && names.contains(FUNC_WORK)
         })
         .await?;
-    assert_eq!(
-        (
-            names_a.contains(FUNC_WORK),
-            names_a.contains(FUNC_HOT),
-            positive_a,
-        ),
-        (true, true, true),
-        "Grafana query must return {FUNC_WORK} and {FUNC_HOT} with a positive sample value: {names_a:?}"
+    for func in [FUNC_WORK, FUNC_HOT] {
+        assert!(
+            names_a.contains(func),
+            "Grafana query must return {func}: {names_a:?}"
+        );
+    }
+    assert!(
+        positive_a,
+        "Grafana query must return a positive sample value: {names_a:?}"
     );
 
     // 5. Multi-tenant isolation THROUGH Grafana: tenant-b's datasource must not see any of

@@ -3760,26 +3760,21 @@ mod tests {
         // not consult it — it must run the consumer epoch fence.
         assert!(handle.kind == GroupKindTag::Classic);
 
-        // STALE epoch (< current) → STALE_MEMBER_EPOCH.
-        let stale = validate_commit(&handle, &native, current_epoch - 1).await;
-        assert!(
-            stale == Err(codes::STALE_MEMBER_EPOCH),
-            "an upgraded group must run the consumer epoch fence (stale); got {stale:?}"
-        );
-
-        // FENCED epoch (> current) → FENCED_MEMBER_EPOCH.
-        let fenced = validate_commit(&handle, &native, current_epoch + 1).await;
-        assert!(
-            fenced == Err(codes::FENCED_MEMBER_EPOCH),
-            "an upgraded group must run the consumer epoch fence (fenced); got {fenced:?}"
-        );
-
-        // The current epoch is accepted.
-        let ok = validate_commit(&handle, &native, current_epoch).await;
-        assert!(
-            ok == Ok(()),
-            "the current epoch must be accepted; got {ok:?}"
-        );
+        let cases = [
+            // STALE epoch (< current) → STALE_MEMBER_EPOCH.
+            (current_epoch - 1, Err(codes::STALE_MEMBER_EPOCH), "stale"),
+            // FENCED epoch (> current) → FENCED_MEMBER_EPOCH.
+            (current_epoch + 1, Err(codes::FENCED_MEMBER_EPOCH), "fenced"),
+            // The current epoch is accepted.
+            (current_epoch, Ok(()), "current"),
+        ];
+        for (epoch, want, label) in cases {
+            let got = validate_commit(&handle, &native, epoch).await;
+            assert!(
+                got == want,
+                "an upgraded group must run the consumer epoch fence ({label}, epoch {epoch}); got {got:?}"
+            );
+        }
     }
 
     #[test]

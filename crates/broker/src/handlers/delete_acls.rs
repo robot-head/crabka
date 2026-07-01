@@ -362,17 +362,16 @@ mod tests {
 
     #[test]
     fn build_filter_rejects_malformed_axes() {
-        let mut f = filter(Some("orders"), Some("User:alice"));
-        f.resource_type_filter = 99;
-        assert!(build_filter(&f).is_err());
-
-        let mut f = filter(Some("orders"), Some("User:alice"));
-        f.pattern_type_filter = 99;
-        assert!(build_filter(&f).is_err());
-
-        let mut f = filter(Some("orders"), Some("User:alice"));
-        f.operation = 99;
-        assert!(build_filter(&f).is_err());
+        let cases: [(&str, fn(&mut DeleteAclsFilter)); 3] = [
+            ("resource_type_filter", |f| f.resource_type_filter = 99),
+            ("pattern_type_filter", |f| f.pattern_type_filter = 99),
+            ("operation", |f| f.operation = 99),
+        ];
+        for (axis, corrupt) in cases {
+            let mut f = filter(Some("orders"), Some("User:alice"));
+            corrupt(&mut f);
+            assert!(build_filter(&f).is_err(), "axis {axis}");
+        }
     }
 
     #[test]

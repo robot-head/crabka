@@ -244,16 +244,17 @@ mod tests {
     #[test]
     fn migration_policy_direction_truth_table() {
         use ConsumerGroupMigrationPolicy as P;
-        let truth_table = [P::Disabled, P::Upgrade, P::Downgrade, P::Bidirectional]
-            .map(|p| (p.allows_upgrade(), p.allows_downgrade()));
-        assert!(
-            truth_table
-                == [
-                    (false, false), // Disabled
-                    (true, false),  // Upgrade
-                    (false, true),  // Downgrade
-                    (true, true),   // Bidirectional
-                ]
-        );
+        let cases = [
+            (P::Disabled, (false, false)),
+            (P::Upgrade, (true, false)),
+            (P::Downgrade, (false, true)),
+            (P::Bidirectional, (true, true)),
+        ];
+        for (policy, want) in cases {
+            assert!(
+                (policy.allows_upgrade(), policy.allows_downgrade()) == want,
+                "policy {policy:?}"
+            );
+        }
     }
 }

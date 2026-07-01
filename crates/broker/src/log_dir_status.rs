@@ -362,12 +362,17 @@ mod tests {
 
         let rendered = format!("{reg:?}");
 
-        let contains = (
-            rendered.contains("LogDirRegistry"),
-            rendered.contains("offline_count"),
-            rendered.contains("debug reason"),
-            rendered.contains("crabka-debug-offline-dir"),
-        );
-        assert!(contains == (true, true, true, true), "rendered: {rendered}");
+        let needles = [
+            "LogDirRegistry",
+            "offline_count",
+            "debug reason",
+            "crabka-debug-offline-dir",
+        ];
+        for needle in needles {
+            assert!(
+                rendered.contains(needle),
+                "missing {needle:?} in rendered: {rendered}"
+            );
+        }
     }
 }

@@ -2274,15 +2274,11 @@ rules:
             metric_store.series("tenant-a", &matchers, 0, 20_000),
         );
 
-        assert!(
-            (
-                a.unwrap().len(),
-                b.unwrap().len(),
-                c.unwrap().len(),
-                d.unwrap().len(),
-                list_calls.load(Ordering::SeqCst),
-            ) == (1, 1, 1, 1, 1)
-        );
+        let cases = [("a", a), ("b", b), ("c", c), ("d", d)];
+        for (name, result) in cases {
+            assert!(result.unwrap().len() == 1, "concurrent load: {name}");
+        }
+        assert!(list_calls.load(Ordering::SeqCst) == 1);
     }
 
     #[tokio::test]

@@ -137,13 +137,13 @@ mod tests {
 
     #[test]
     fn tail_window_start_keeps_only_last_4096_offsets() {
-        let actual = (
-            tail_window_start(0),
-            tail_window_start(4096),
-            tail_window_start(4097),
-            tail_window_start(8192),
-        );
-        assert!(actual == (0, 0, 1, 4096));
+        let cases = [(0, 0), (4096, 0), (4097, 1), (8192, 4096)];
+        for (log_end_offset, want) in cases {
+            assert!(
+                tail_window_start(log_end_offset) == want,
+                "log_end_offset {log_end_offset}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -212,8 +212,10 @@ mod tests {
             ..Default::default()
         };
 
-        assert!(header_bytes(&rec, "target") == Some(vec![0xCA, 0xFE]));
-        assert!(header_bytes(&rec, "missing").is_none());
+        let cases = [("target", Some(vec![0xCA, 0xFE])), ("missing", None)];
+        for (key, want) in cases {
+            assert!(header_bytes(&rec, key) == want, "key {key:?}");
+        }
     }
 
     #[test]
@@ -226,11 +228,13 @@ mod tests {
             ..Default::default()
         };
 
-        let actual = (
-            header_str(&rec, "text"),
-            header_str(&rec, "binary"),
-            header_str(&rec, "missing"),
-        );
-        assert!(actual == (Some("audit-seq".to_string()), None, None));
+        let cases = [
+            ("text", Some("audit-seq".to_string())),
+            ("binary", None), // invalid UTF-8 → rejected
+            ("missing", None),
+        ];
+        for (key, want) in cases {
+            assert!(header_str(&rec, key) == want, "key {key:?}");
+        }
     }
 }

@@ -258,13 +258,9 @@ mod tests {
 
     #[test]
     fn leader_predicate_matches_current_node_only() {
-        assert!(
-            (
-                is_controller_leader(Some(1), 1),
-                is_controller_leader(Some(2), 1),
-                is_controller_leader(None, 1)
-            ) == (true, false, false)
-        );
+        for (leader, want) in [(Some(1), true), (Some(2), false), (None, false)] {
+            assert!(is_controller_leader(leader, 1) == want, "leader {leader:?}");
+        }
     }
 
     #[test]

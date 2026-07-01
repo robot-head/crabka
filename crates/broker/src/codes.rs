@@ -316,15 +316,24 @@ mod tests {
 
     #[test]
     fn share_group_error_codes_match_kafka() {
-        assert!(
+        let cases = [
+            ("INVALID_RECORD_STATE", INVALID_RECORD_STATE, 121),
+            ("SHARE_SESSION_NOT_FOUND", SHARE_SESSION_NOT_FOUND, 122),
             (
-                INVALID_RECORD_STATE,
-                SHARE_SESSION_NOT_FOUND,
+                "INVALID_SHARE_SESSION_EPOCH",
                 INVALID_SHARE_SESSION_EPOCH,
-                FENCED_STATE_EPOCH,
-                SHARE_SESSION_LIMIT_REACHED
-            ) == (121, 122, 123, 124, 133)
-        );
+                123,
+            ),
+            ("FENCED_STATE_EPOCH", FENCED_STATE_EPOCH, 124),
+            (
+                "SHARE_SESSION_LIMIT_REACHED",
+                SHARE_SESSION_LIMIT_REACHED,
+                133,
+            ),
+        ];
+        for (name, code, want) in cases {
+            assert!(code == want, "{name}");
+        }
     }
 
     #[test]
@@ -334,66 +343,69 @@ mod tests {
     }
 
     #[test]
-    fn maps_unsupported_to_35() {
-        let e = BrokerError::UnsupportedApi {
-            api_key: 0,
-            version: 99,
-        };
-        assert!(from_broker_error(&e) == UNSUPPORTED_VERSION);
-    }
-
-    #[test]
-    fn maps_writer_death_to_6() {
-        let e = BrokerError::PartitionWriterDied {
-            topic: "t".into(),
-            partition: 0,
-        };
-        assert!(from_broker_error(&e) == NOT_LEADER_OR_FOLLOWER);
-    }
-
-    #[test]
-    fn maps_group_invalid_state_to_27() {
-        let e = BrokerError::GroupInvalidState {
-            group_id: "g".into(),
-            state: "PreparingRebalance".into(),
-        };
-        assert!(from_broker_error(&e) == REBALANCE_IN_PROGRESS);
-    }
-
-    #[test]
-    fn maps_unknown_member_to_25() {
-        let e = BrokerError::UnknownMember {
-            group_id: "g".into(),
-            member_id: "m".into(),
-        };
-        assert!(from_broker_error(&e) == UNKNOWN_MEMBER_ID);
-    }
-
-    #[test]
-    fn maps_generation_mismatch_to_22() {
-        let e = BrokerError::GenerationMismatch {
-            group_id: "g".into(),
-            current: 5,
-            requested: 4,
-        };
-        assert!(from_broker_error(&e) == ILLEGAL_GENERATION);
-    }
-
-    #[test]
-    fn maps_producer_epoch_fenced_to_47() {
-        let e = BrokerError::ProducerEpochFenced {
-            producer_id: 1000,
-            current: 2,
-            requested: 1,
-        };
-        assert!(from_broker_error(&e) == INVALID_PRODUCER_EPOCH);
-        assert!(from_broker_error(&e) == 47);
-    }
-
-    #[test]
-    fn txn_variant_maps_to_unknown_server_error() {
-        let e = BrokerError::Txn("test".into());
-        assert!(from_broker_error(&e) == UNKNOWN_SERVER_ERROR);
+    fn from_broker_error_maps_variants_to_wire_codes() {
+        let cases = [
+            (
+                BrokerError::UnsupportedApi {
+                    api_key: 0,
+                    version: 99,
+                },
+                UNSUPPORTED_VERSION, // 35
+            ),
+            (
+                BrokerError::PartitionWriterDied {
+                    topic: "t".into(),
+                    partition: 0,
+                },
+                NOT_LEADER_OR_FOLLOWER, // 6
+            ),
+            (
+                BrokerError::GroupInvalidState {
+                    group_id: "g".into(),
+                    state: "PreparingRebalance".into(),
+                },
+                REBALANCE_IN_PROGRESS, // 27
+            ),
+            (
+                BrokerError::UnknownMember {
+                    group_id: "g".into(),
+                    member_id: "m".into(),
+                },
+                UNKNOWN_MEMBER_ID, // 25
+            ),
+            (
+                BrokerError::GenerationMismatch {
+                    group_id: "g".into(),
+                    current: 5,
+                    requested: 4,
+                },
+                ILLEGAL_GENERATION, // 22
+            ),
+            (
+                BrokerError::ProducerEpochFenced {
+                    producer_id: 1000,
+                    current: 2,
+                    requested: 1,
+                },
+                INVALID_PRODUCER_EPOCH, // 47
+            ),
+            (
+                BrokerError::FencedLeaderEpoch {
+                    have: 0,
+                    current: 1,
+                },
+                FENCED_LEADER_EPOCH, // 74
+            ),
+            (BrokerError::UnknownLeaderEpoch(2), UNKNOWN_LEADER_EPOCH), // 75
+            // Catch-all arm: internal variants map to the generic code.
+            (BrokerError::Txn("test".into()), UNKNOWN_SERVER_ERROR), // -1
+        ];
+        for (err, want) in cases {
+            assert!(from_broker_error(&err) == want, "{err:?}");
+        }
+        // Pin the concrete wire value for the producer-fence path: the Rust
+        // producer client maps 47 to `ProducerError::FencedProducer`.
+        assert!(INVALID_PRODUCER_EPOCH == 47);
     }
 
     #[test]
@@ -403,28 +415,18 @@ mod tests {
     }
 
     #[test]
-    fn fenced_leader_epoch_maps_correctly() {
-        let e = BrokerError::FencedLeaderEpoch {
-            have: 0,
-            current: 1,
-        };
-        assert!(from_broker_error(&e) == FENCED_LEADER_EPOCH);
-    }
-
-    #[test]
-    fn unknown_leader_epoch_maps_correctly() {
-        let e = BrokerError::UnknownLeaderEpoch(2);
-        assert!(from_broker_error(&e) == UNKNOWN_LEADER_EPOCH);
-    }
-
-    #[test]
     fn kip516_error_code_numbers_match_kafka() {
-        assert!(
+        let cases = [
+            ("UNKNOWN_TOPIC_ID", super::UNKNOWN_TOPIC_ID, 100),
+            ("INCONSISTENT_TOPIC_ID", super::INCONSISTENT_TOPIC_ID, 103),
             (
-                super::UNKNOWN_TOPIC_ID,
-                super::INCONSISTENT_TOPIC_ID,
-                super::FETCH_SESSION_TOPIC_ID_ERROR
-            ) == (100, 103, 106)
-        );
+                "FETCH_SESSION_TOPIC_ID_ERROR",
+                super::FETCH_SESSION_TOPIC_ID_ERROR,
+                106,
+            ),
+        ];
+        for (name, code, want) in cases {
+            assert!(code == want, "{name}");
+        }
     }
 }

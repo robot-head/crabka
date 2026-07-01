@@ -529,14 +529,10 @@ mod tests {
 
     #[test]
     fn next_epoch_wraps_skipping_sentinels() {
-        assert!(
-            (
-                next_epoch(0),
-                next_epoch(1),
-                next_epoch(i32::MAX),
-                next_epoch(-1)
-            ) == (1, 2, 1, 1)
-        );
+        let cases = [(0, 1), (1, 2), (i32::MAX, 1), (-1, 1)];
+        for (epoch, want) in cases {
+            assert!(next_epoch(epoch) == want, "epoch {epoch}");
+        }
     }
 
     #[test]
@@ -576,13 +572,13 @@ mod tests {
 
     #[test]
     fn session_id_reserved_predicate_matches_wire_sentinels() {
-        assert!(
-            (
-                session_id_is_reserved(INVALID_SESSION_ID),
-                session_id_is_reserved(FINAL_EPOCH),
-                session_id_is_reserved(1)
-            ) == (true, true, false)
-        );
+        let cases = [(INVALID_SESSION_ID, true), (FINAL_EPOCH, true), (1, false)];
+        for (session_id, want) in cases {
+            assert!(
+                session_id_is_reserved(session_id) == want,
+                "session_id {session_id}"
+            );
+        }
     }
 
     #[test]
