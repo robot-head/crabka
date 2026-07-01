@@ -152,8 +152,6 @@ async fn send_alter_partition(
     new_isr: Vec<NodeId>,
     leader_epoch: i32,
 ) -> Result<(), String> {
-    use crabka_protocol::owned::alter_partition_request::{BrokerState, PartitionData, TopicData};
-
     let image = controller.current_image();
     let leader_id = *controller.watch_leader().borrow();
     let targets = alter_partition_targets(&image, leader_id);
@@ -164,59 +162,8 @@ async fn send_alter_partition(
         };
     }
 
-    // Look up topic_id from the metadata image and convert to the protocol Uuid type.
-    let topic_id = {
-        let raw: [u8; 16] = image
-            .topic(topic)
-            .map_or([0u8; 16], |t| *t.topic_id.as_bytes());
-        crabka_protocol::primitives::uuid::Uuid(raw)
-    };
-
-    // `new_isr` is the v2 field (versions 2 only on the wire).
-    // `new_isr_with_epochs` is the v3 field; the client negotiates MAX_VERSION
-    // (= 3), so we must populate both so that whichever version is selected
-    // carries the correct ISR.  The handler side reads `new_isr_with_epochs`
-    // when `new_isr` is empty (i.e. version 3).
-    // KIP-903: per-member epochs come from the metadata image; unknown brokers fall back to -1.
-    let new_isr_i32: Vec<i32> = new_isr
-        .iter()
-        .map(|n| i32::try_from(*n).unwrap_or(i32::MAX))
-        .collect();
-    let new_isr_with_epochs: Vec<BrokerState> = new_isr_i32
-        .iter()
-        .map(|&bid| BrokerState {
-            broker_id: bid,
-            broker_epoch: image
-                .broker_epoch(u64::try_from(bid).unwrap_or(0))
-                .unwrap_or(-1),
-            ..Default::default()
-        })
-        .collect();
-
-    let req = AlterPartitionRequest {
-        broker_id,
-        // KIP-903: the partition leader stamps its own broker epoch and each
-        // ISR member's epoch from the metadata image so the controller can
-        // fence stale replicas. Unknown brokers fall back to -1 (skip-check).
-        broker_epoch: image
-            .broker_epoch(u64::try_from(broker_id).unwrap_or(0))
-            .unwrap_or(-1),
-        topics: vec![TopicData {
-            topic_id,
-            partitions: vec![PartitionData {
-                partition_index: partition,
-                leader_epoch,
-                new_isr: new_isr_i32,
-                new_isr_with_epochs,
-                leader_recovery_state: 0,
-                partition_epoch: 0,
-                ..Default::default()
-            }],
-            ..Default::default()
-        }],
-        ..Default::default()
-    };
-
+    let req =
+        build_alter_partition_request(&image, broker_id, topic, partition, &new_isr, leader_epoch);
     let mut last_err = String::new();
     for (target_id, addr) in targets {
         match send_alter_partition_to(broker_id, &addr, req.clone()).await {
@@ -256,6 +203,70 @@ async fn send_alter_partition(
         }
     }
     Err(last_err)
+}
+
+fn build_alter_partition_request(
+    image: &crabka_metadata::MetadataImage,
+    broker_id: i32,
+    topic: &str,
+    partition: i32,
+    new_isr: &[NodeId],
+    leader_epoch: i32,
+) -> AlterPartitionRequest {
+    use crabka_protocol::owned::alter_partition_request::{BrokerState, PartitionData, TopicData};
+
+    // Look up topic_id from the metadata image and convert to the protocol Uuid type.
+    let topic_id = {
+        let raw: [u8; 16] = image
+            .topic(topic)
+            .map_or([0u8; 16], |t| *t.topic_id.as_bytes());
+        crabka_protocol::primitives::uuid::Uuid(raw)
+    };
+
+    // `new_isr` is the v2 field (versions 2 only on the wire).
+    // `new_isr_with_epochs` is the v3 field; the client negotiates MAX_VERSION
+    // (= 3), so we must populate both so that whichever version is selected
+    // carries the correct ISR.  The handler side reads `new_isr_with_epochs`
+    // when `new_isr` is empty (i.e. version 3).
+    // KIP-903: per-member epochs come from the metadata image; unknown brokers fall back to -1.
+    let new_isr_i32: Vec<i32> = new_isr
+        .iter()
+        .map(|n| i32::try_from(*n).unwrap_or(i32::MAX))
+        .collect();
+    let new_isr_with_epochs: Vec<BrokerState> = new_isr_i32
+        .iter()
+        .map(|&bid| BrokerState {
+            broker_id: bid,
+            broker_epoch: image
+                .broker_epoch(u64::try_from(bid).unwrap_or(0))
+                .unwrap_or(-1),
+            ..Default::default()
+        })
+        .collect();
+
+    AlterPartitionRequest {
+        broker_id,
+        // KIP-903: the partition leader stamps its own broker epoch and each
+        // ISR member's epoch from the metadata image so the controller can
+        // fence stale replicas. Unknown brokers fall back to -1 (skip-check).
+        broker_epoch: image
+            .broker_epoch(u64::try_from(broker_id).unwrap_or(0))
+            .unwrap_or(-1),
+        topics: vec![TopicData {
+            topic_id,
+            partitions: vec![PartitionData {
+                partition_index: partition,
+                leader_epoch,
+                new_isr: new_isr_i32,
+                new_isr_with_epochs,
+                leader_recovery_state: 0,
+                partition_epoch: 0,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
 }
 
 fn alter_partition_targets(
@@ -333,7 +344,12 @@ fn is_not_controller_response(global_err: i16, part_err: i16) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crabka_metadata::{BrokerRegistrationRecord, MetadataImage, MetadataRecord};
+    use std::path::Path;
+    use std::sync::atomic::Ordering;
+
+    use crabka_metadata::{BrokerRegistrationRecord, MetadataImage, MetadataRecord, TopicRecord};
+    use tempfile::tempdir;
+    use tokio::sync::watch;
 
     fn reg(id: NodeId) -> MetadataRecord {
         MetadataRecord::V1BrokerRegistration(BrokerRegistrationRecord {
@@ -345,6 +361,327 @@ mod tests {
             rack: None,
             endpoints: vec![],
         })
+    }
+
+    fn topic(name: &str, topic_id: uuid::Uuid) -> MetadataRecord {
+        MetadataRecord::V1Topic(TopicRecord {
+            name: name.to_string(),
+            topic_id,
+            partitions: 1,
+            replication_factor: 3,
+        })
+    }
+
+    fn fixture_partition(log_dir: &Path, topic: &str, partition: i32) -> Arc<Partition> {
+        let part_dir = crate::log_dir::partition_dir(log_dir, topic, partition);
+        std::fs::create_dir_all(&part_dir).unwrap();
+        let log = crabka_log::Log::open(&part_dir, crabka_log::LogConfig::default()).unwrap();
+        crate::broker::spawn_partition(
+            topic.to_string(),
+            partition,
+            log_dir.to_path_buf(),
+            log,
+            crate::log_dir_status::LogDirRegistry::default(),
+            Arc::new(crate::producer_state::ProducerState::new()),
+        )
+    }
+
+    async fn set_replica_state(
+        part: &Partition,
+        isr: &[NodeId],
+        replicas: &[NodeId],
+        leader: NodeId,
+        leader_epoch: i32,
+        follower_ages: &[(NodeId, Duration, Duration)],
+    ) {
+        let now = Instant::now();
+        let mut st = part.replica_state.lock().await;
+        st.install_isr(isr, replicas, leader, now);
+        st.current_leader_epoch = leader_epoch;
+        for &(follower, last_fetch_age, last_caught_up_age) in follower_ages {
+            st.per_follower.insert(
+                follower,
+                crate::replica_state::FollowerStats {
+                    leo: 0,
+                    last_fetch: now
+                        .checked_sub(last_fetch_age)
+                        .expect("test fetch age is representable"),
+                    last_caught_up: now
+                        .checked_sub(last_caught_up_age)
+                        .expect("test caught-up age is representable"),
+                },
+            );
+        }
+    }
+
+    struct TestMetadataSource {
+        image_tx: watch::Sender<Arc<MetadataImage>>,
+        leader_tx: watch::Sender<Option<NodeId>>,
+    }
+
+    impl TestMetadataSource {
+        fn new(image: MetadataImage, leader: Option<NodeId>) -> Self {
+            let (image_tx, _) = watch::channel(Arc::new(image));
+            let (leader_tx, _) = watch::channel(leader);
+            Self {
+                image_tx,
+                leader_tx,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::metadata_source::MetadataSource for TestMetadataSource {
+        fn current_image(&self) -> Arc<MetadataImage> {
+            self.image_tx.borrow().clone()
+        }
+
+        fn watch_image(&self) -> watch::Receiver<Arc<MetadataImage>> {
+            self.image_tx.subscribe()
+        }
+
+        fn watch_leader(&self) -> watch::Receiver<Option<NodeId>> {
+            self.leader_tx.subscribe()
+        }
+
+        fn quorum_state(&self) -> crabka_raft::QuorumState {
+            unimplemented!("unused in isr_maintenance tests")
+        }
+
+        async fn submit_change(
+            &self,
+            _records: Vec<MetadataRecord>,
+        ) -> Result<(), crabka_raft::RaftError> {
+            unimplemented!("unused in isr_maintenance tests")
+        }
+
+        async fn change_membership(
+            &self,
+            _new_voters: std::collections::BTreeSet<NodeId>,
+        ) -> Result<(), crabka_raft::RaftError> {
+            unimplemented!("unused in isr_maintenance tests")
+        }
+
+        async fn add_learner(
+            &self,
+            _node_id: NodeId,
+            _node: crabka_raft::Node,
+        ) -> Result<(), crabka_raft::RaftError> {
+            unimplemented!("unused in isr_maintenance tests")
+        }
+
+        fn controller_bound_addr(&self) -> std::net::SocketAddr {
+            unimplemented!("unused in isr_maintenance tests")
+        }
+
+        fn read_snapshot_range(
+            &self,
+            _position: i64,
+            _max_bytes: i32,
+        ) -> crabka_raft::SnapshotRange {
+            unimplemented!("unused in isr_maintenance tests")
+        }
+
+        async fn trigger_snapshot(&self) -> Result<(), crabka_raft::RaftError> {
+            unimplemented!("unused in isr_maintenance tests")
+        }
+
+        async fn add_voter(
+            &self,
+            _req: crabka_raft::AddVoter,
+        ) -> Result<crabka_raft::ReconfigOutcome, crabka_raft::RaftError> {
+            unimplemented!("unused in isr_maintenance tests")
+        }
+
+        async fn remove_voter(
+            &self,
+            _req: crabka_raft::RemoveVoter,
+        ) -> Result<crabka_raft::ReconfigOutcome, crabka_raft::RaftError> {
+            unimplemented!("unused in isr_maintenance tests")
+        }
+
+        async fn update_voter(
+            &self,
+            _req: crabka_raft::UpdateVoter,
+        ) -> Result<crabka_raft::ReconfigOutcome, crabka_raft::RaftError> {
+            unimplemented!("unused in isr_maintenance tests")
+        }
+
+        async fn cancel(&self) {}
+    }
+
+    #[tokio::test]
+    async fn compute_proposal_shrinks_lagging_isr_member() {
+        let log_dir = tempdir().unwrap();
+        let part = fixture_partition(log_dir.path(), "t", 0);
+        set_replica_state(
+            &part,
+            &[1, 2, 3],
+            &[1, 2, 3],
+            1,
+            7,
+            &[
+                (2, Duration::from_secs(1), Duration::from_secs(1)),
+                (3, Duration::from_secs(30), Duration::from_secs(30)),
+            ],
+        )
+        .await;
+
+        let proposal = compute_proposal(&part, Duration::from_secs(5))
+            .await
+            .expect("lagging ISR member should produce a shrink proposal");
+
+        assert!(proposal.prev_isr == vec![1, 2, 3]);
+        assert!(proposal.new_isr == vec![1, 2]);
+        assert!(proposal.leader_epoch == 7);
+    }
+
+    #[tokio::test]
+    async fn compute_proposal_expands_recently_caught_up_replica() {
+        let log_dir = tempdir().unwrap();
+        let part = fixture_partition(log_dir.path(), "t", 0);
+        set_replica_state(
+            &part,
+            &[1, 2],
+            &[1, 2, 3],
+            1,
+            8,
+            &[
+                (2, Duration::from_secs(1), Duration::from_secs(1)),
+                (3, Duration::from_secs(1), Duration::from_secs(1)),
+            ],
+        )
+        .await;
+
+        let proposal = compute_proposal(&part, Duration::from_secs(5))
+            .await
+            .expect("caught-up replica should produce an expand proposal");
+
+        assert!(proposal.prev_isr == vec![1, 2]);
+        assert!(proposal.new_isr == vec![1, 2, 3]);
+        assert!(proposal.leader_epoch == 8);
+    }
+
+    #[tokio::test]
+    async fn compute_proposal_ignores_stale_non_isr_replica() {
+        let log_dir = tempdir().unwrap();
+        let part = fixture_partition(log_dir.path(), "t", 0);
+        set_replica_state(
+            &part,
+            &[1, 2],
+            &[1, 2, 3],
+            1,
+            9,
+            &[
+                (2, Duration::from_secs(1), Duration::from_secs(1)),
+                (3, Duration::from_secs(1), Duration::from_secs(30)),
+            ],
+        )
+        .await;
+
+        assert!(
+            compute_proposal(&part, Duration::from_secs(5))
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn run_bumps_shrink_metric_for_leader_partition() {
+        let log_dir = tempdir().unwrap();
+        let part = fixture_partition(log_dir.path(), "t", 0);
+        part.current_leader.store(1, Ordering::Release);
+        set_replica_state(
+            &part,
+            &[1, 2],
+            &[1, 2],
+            1,
+            10,
+            &[(2, Duration::from_secs(30), Duration::from_secs(30))],
+        )
+        .await;
+
+        let partitions = Arc::new(PartitionRegistry::new());
+        partitions.insert("t".to_string(), 0, part);
+        let controller: Arc<dyn crate::metadata_source::MetadataSource> = Arc::new(
+            TestMetadataSource::new(MetadataImage::new(uuid::Uuid::nil()), None),
+        );
+        let metrics = crate::metrics::BrokerMetrics::default();
+        let shutdown = CancellationToken::new();
+        let task = tokio::spawn(run(Config {
+            node_id: 1,
+            partitions,
+            controller,
+            replica_lag_time_max: Duration::from_secs(5),
+            broker_id: 1,
+            shutdown: shutdown.clone(),
+            metrics: metrics.clone(),
+        }));
+
+        tokio::time::timeout(Duration::from_millis(500), async {
+            while metrics.isr_shrinks_total.get() == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("leader partition should be scanned and classified as a shrink");
+
+        shutdown.cancel();
+        task.await.unwrap();
+        assert!(metrics.isr_shrinks_total.get() == 1);
+        assert!(metrics.isr_expands_total.get() == 0);
+    }
+
+    #[test]
+    fn build_request_preserves_topic_broker_epochs_and_isr_fields() {
+        let topic_id = uuid::Uuid::from_u128(0xA11CE);
+        let mut image = MetadataImage::new(uuid::Uuid::nil());
+        image.apply(&topic("orders", topic_id));
+        image.apply(&reg(1));
+
+        let req = build_alter_partition_request(&image, 4, "orders", 6, &[1, 9], 12);
+
+        assert!(req.broker_id == 4);
+        assert!(req.broker_epoch == -1);
+        assert!(req.topics.len() == 1);
+        let topic = &req.topics[0];
+        assert!(topic.topic_id == crabka_protocol::primitives::uuid::Uuid(*topic_id.as_bytes()));
+        assert!(topic.partitions.len() == 1);
+        let partition = &topic.partitions[0];
+        assert!(partition.partition_index == 6);
+        assert!(partition.leader_epoch == 12);
+        assert!(partition.new_isr == vec![1, 9]);
+        assert!(partition.new_isr_with_epochs.len() == 2);
+        assert!(partition.new_isr_with_epochs[0].broker_id == 1);
+        assert!(partition.new_isr_with_epochs[0].broker_epoch == 1);
+        assert!(partition.new_isr_with_epochs[1].broker_id == 9);
+        assert!(partition.new_isr_with_epochs[1].broker_epoch == -1);
+    }
+
+    #[tokio::test]
+    async fn send_alter_partition_errors_without_controller_target() {
+        let controller: Arc<dyn crate::metadata_source::MetadataSource> = Arc::new(
+            TestMetadataSource::new(MetadataImage::new(uuid::Uuid::nil()), None),
+        );
+
+        let err = send_alter_partition(&controller, 1, "orders", 0, vec![1], 3)
+            .await
+            .expect_err("missing controller leader should reject the send");
+
+        assert!(err == "no controller leader");
+    }
+
+    #[tokio::test]
+    async fn send_alter_partition_to_reports_transport_error_for_closed_port() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+
+        let err = send_alter_partition_to(1, &addr.to_string(), AlterPartitionRequest::default())
+            .await
+            .expect_err("closed local port should fail as transport");
+
+        assert!(matches!(err, AlterPartitionSendError::Transport(_)));
     }
 
     #[test]
