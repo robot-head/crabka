@@ -1164,6 +1164,14 @@ mod tests {
     }
 
     #[test]
+    fn for_tests_uses_20_mib_metadata_snapshot_threshold() {
+        let cfg = BrokerConfig::for_tests(std::path::PathBuf::from("/tmp"));
+        let mib = 1024 * 1024;
+        assert!(cfg.metadata_max_bytes_between_snapshots == 20 * mib);
+        assert!(cfg.metadata_max_bytes_between_snapshots / mib == 20);
+    }
+
+    #[test]
     fn for_tests_uses_short_raft_timings_for_fast_failover() {
         let c = BrokerConfig::for_tests(std::path::PathBuf::from("/tmp"));
         // Short enough that a 3-broker test can detect a dead leader and
@@ -1183,6 +1191,16 @@ mod tests {
     fn for_tests_uses_bootstrap_mode() {
         let c = BrokerConfig::for_tests(std::path::PathBuf::from("/tmp"));
         assert!(c.bootstrap_mode == BootstrapMode::Bootstrap);
+    }
+
+    #[test]
+    fn all_log_dirs_keeps_primary_first_and_deduplicates_extras() {
+        let primary = std::path::PathBuf::from("/data/primary");
+        let extra = std::path::PathBuf::from("/data/extra");
+        let mut c = BrokerConfig::for_tests(primary.clone());
+        c.extra_log_dirs = vec![extra.clone(), primary.clone(), extra.clone()];
+
+        assert!(c.all_log_dirs() == vec![primary, extra]);
     }
 
     #[test]
@@ -1380,6 +1398,17 @@ mod tests {
             c.validate(),
             Err(BrokerError::InvalidLeaderRebalanceThreshold { value: 101 })
         ));
+    }
+
+    #[test]
+    fn rebalance_threshold_100_is_allowed_by_validate() {
+        let c = BrokerConfig {
+            leader_imbalance_per_broker_percentage: 100,
+            ..BrokerConfig::default()
+        };
+
+        c.validate()
+            .expect("100% leader imbalance threshold is the maximum valid value");
     }
 
     #[test]
