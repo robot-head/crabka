@@ -892,7 +892,7 @@ struct CachedMetricBlockStore {
     cold: MetricBlockStore,
 }
 
-const UNBOUNDED_COMPATIBILITY_LOOKBACK: Duration = Duration::from_secs(60 * 60);
+const UNBOUNDED_COMPATIBILITY_LOOKBACK: Duration = Duration::from_hours(1);
 
 impl CachedMetricBlockStore {
     fn covers(&self, start_ms: i64, end_ms: i64, ttl: Duration) -> bool {
@@ -989,12 +989,11 @@ fn normalize_refresh_range(start_ms: i64, end_ms: i64) -> (i64, i64) {
 fn unix_time_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
-        .unwrap_or(0)
+        .map_or(0, duration_ms)
 }
 
 fn duration_ms(duration: Duration) -> i64 {
-    duration.as_millis().min(i64::MAX as u128) as i64
+    i64::try_from(duration.as_millis().min(i64::MAX as u128)).unwrap_or(i64::MAX)
 }
 
 #[async_trait::async_trait]
@@ -2314,10 +2313,11 @@ rules:
         let base = url::Url::parse("memory:///").unwrap();
         let writer_store = crabka_blockstore::BlockStore::new(object_store.clone(), base.clone());
         let sink = crabka_metrics::ObjectStoreCompactionIndexSink::new(object_store.clone());
-        let now_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock before Unix epoch")
-            .as_millis() as i64;
+        let now_ms = super::duration_ms(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock before Unix epoch"),
+        );
 
         write_float_manifest(
             &writer_store,

@@ -18,6 +18,24 @@ fn docker_compose() -> String {
         .expect("read observability compose file")
 }
 
+fn compose_service_block<'a>(compose: &'a str, service: &str) -> &'a str {
+    let marker = format!("  {service}:");
+    let start = compose.find(&marker).expect("compose service exists");
+    let rest = &compose[start..];
+    let mut offset = 0_usize;
+    for (index, line) in rest.split_inclusive('\n').enumerate() {
+        if index > 0
+            && line.starts_with("  ")
+            && !line.starts_with("    ")
+            && !line.trim_start().starts_with('#')
+        {
+            return &rest[..offset];
+        }
+        offset += line.len();
+    }
+    rest
+}
+
 fn demo_melange_config() -> String {
     std::fs::read_to_string(repo_root().join("packaging/melange/crabka-demo.yaml"))
         .expect("read demo melange config")
@@ -190,10 +208,61 @@ fn jemalloc_heap_profiling_uses_bounded_always_on_sampling() {
 }
 
 #[test]
+fn metrics_compactor_bounds_cold_block_retention_for_demo() {
+    let compose = docker_compose();
+    let block = compose_service_block(&compose, "metrics-compactor");
+    assert!(
+        block
+            .contains("--compactor-retention-ms=${CRABKA_METRICS_COMPACTOR_RETENTION_MS:-3600000}"),
+        "metrics compactor should bound cold metric block/index growth by default"
+    );
+    assert!(
+        block.contains(
+            "--compactor-retention-sweep-ms=${CRABKA_METRICS_COMPACTOR_RETENTION_SWEEP_MS:-30000}"
+        ),
+        "metrics compactor should sweep retention often enough for the demo"
+    );
+}
+
+#[test]
+fn otlp_heartbeat_traces_use_per_component_service_names() {
+    let compose = docker_compose();
+    assert!(
+        compose.contains("CRABKA_OTLP_HEARTBEAT_INTERVAL_SECS: \"15\""),
+        "demo OTLP env should emit low-rate heartbeat spans so idle services are visible in Tempo"
+    );
+    for service in [
+        "broker",
+        "schema-registry",
+        "metrics-distributor",
+        "metrics-compactor",
+        "metrics-querier",
+        "traces-distributor",
+        "traces-block-builder",
+        "traces-querier",
+        "logs-distributor",
+        "logs-compactor",
+        "logs-querier",
+        "profiles-distributor",
+        "profiles-block-builder",
+        "profiles-querier",
+        "demo-produce",
+        "demo-stream",
+        "demo-consume",
+    ] {
+        let block = compose_service_block(&compose, service);
+        assert!(
+            block.contains(&format!("OTEL_SERVICE_NAME: {service}")),
+            "{service} should set a role-specific OTEL_SERVICE_NAME for trace coverage"
+        );
+    }
+}
+
+#[test]
 fn demo_app_profiles_cover_all_roles_without_heap_scrape() {
     let config = alloy_config();
     let scrape = scrape_block(&config, "demo_apps");
-    for role in ["demo-produce", "demo-stream", "demo-consume"] {
+    for role in ["demo-produce", "demo-stream"] {
         assert!(
             scrape.contains(&format!("service_name = \"{role}\"")),
             "demo app profile scrape should include {role}"
@@ -209,6 +278,22 @@ fn demo_app_profiles_cover_all_roles_without_heap_scrape() {
         memory.contains("enabled = false"),
         "demo app roles should not scrape /debug/pprof/heap until their allocator supports it"
     );
+
+    let consume_scrape = scrape_block(&config, "demo_consume_cpu");
+    assert!(
+        consume_scrape.contains("service_name = \"demo-consume\""),
+        "idle demo-consume should use a separate longer CPU scrape so fresh profiles are visible"
+    );
+    let consume_cpu = normalize_whitespace(profile_process_cpu_block(consume_scrape));
+    assert!(
+        consume_cpu.contains("enabled = true"),
+        "demo-consume should keep CPU profiling enabled"
+    );
+    let consume_memory = profile_memory_block(consume_scrape);
+    assert!(
+        consume_memory.contains("enabled = false"),
+        "demo-consume should not scrape /debug/pprof/heap until its allocator supports it"
+    );
 }
 
 #[test]
@@ -217,6 +302,9 @@ fn cpu_profiles_use_bounded_sampling_windows() {
     for (scrape_name, expected_duration) in [
         ("crabka_services", "5s"),
         ("demo_apps", "5s"),
+        ("demo_consume_cpu", "20s"),
+        ("trace_cpu", "15s"),
+        ("trace_block_builder_cpu", "30s"),
         ("crabka_workers", "3s"),
     ] {
         let scrape = scrape_block(&config, scrape_name);
@@ -236,6 +324,26 @@ fn cpu_profiles_use_bounded_sampling_windows() {
             "{scrape_name} should set the CPU duration on pyroscope.scrape, not profile.process_cpu"
         );
     }
+}
+
+#[test]
+fn idle_profile_scrapes_are_lower_frequency() {
+    let config = alloy_config();
+    let consume_scrape = scrape_block(&config, "demo_consume_cpu");
+    assert!(
+        consume_scrape.contains("scrape_interval          = \"120s\""),
+        "idle demo-consume should use a lower-frequency scrape when the CPU window is longer"
+    );
+    assert!(
+        consume_scrape.contains("scrape_timeout           = \"30s\""),
+        "demo-consume scrape timeout should exceed its 20s CPU profile window"
+    );
+
+    let trace_scrape = scrape_block(&config, "trace_block_builder_cpu");
+    assert!(
+        trace_scrape.contains("scrape_interval          = \"60s\""),
+        "trace block-builder keeps a 60s cadence because it is a core service profile"
+    );
 }
 
 #[test]

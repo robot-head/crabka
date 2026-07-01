@@ -196,18 +196,17 @@ async fn main() -> anyhow::Result<()> {
         .install_default()
         .ok();
 
-    // Structured Cloud Logging-friendly JSON to stdout (see `crabka_logfmt`),
-    // so GKE / Cloud Logging ingests fields rather than ANSI-coloured text.
-    {
-        use tracing_subscriber::layer::SubscriberExt as _;
-        use tracing_subscriber::util::SubscriberInitExt as _;
-
-        let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| "crabka_schema_registry=info,info".into());
-        tracing_subscriber::registry()
-            .with(crabka_logfmt::layer(filter, std::io::stdout))
-            .init();
-    }
+    let telemetry = crabka_telemetry::init(
+        crabka_telemetry::OtlpConfig::from_env(
+            |k| std::env::var(k).ok(),
+            "crabka-schema-registry",
+            env!("CARGO_PKG_VERSION"),
+            "crabka-schema-registry",
+        ),
+        "crabka_schema_registry=info,info",
+        "info",
+        "crabka-schema-registry",
+    )?;
 
     crabka_telemetry::profiling::serve_admin_from_env("0.0.0.0:9404").await?;
 
@@ -319,6 +318,7 @@ async fn main() -> anyhow::Result<()> {
     } else {
         serve_http(listener, app, shutdown).await?;
     }
+    telemetry.shutdown();
     Ok(())
 }
 

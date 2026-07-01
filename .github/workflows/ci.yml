@@ -234,6 +234,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
+      - uses: ./.github/actions/free-disk-space
+        if: matrix.os == 'ubuntu-latest'
       # Fail fast if any crate's html_root_url drifted from the workspace version
       # (run: tools/html-root-url.sh --fix). No toolchain needed.
       - name: html_root_url in sync

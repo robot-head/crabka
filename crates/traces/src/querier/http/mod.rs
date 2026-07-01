@@ -8,8 +8,9 @@ use axum::routing::get;
 use axum::{Json, Router};
 use base64::Engine;
 use crabka_traceql::{
-    AttrValue, ScanJob, ScanOptions, ScopedTag, SearchOptions, SearchResponse, SpanRef, SpanStore,
-    TagScope, TraceMetricsResponse, TraceSpans, TraceqlEngine, TraceqlError, TypedValue,
+    AttrValue, ComparisonOp, Field, FieldExpr, Intrinsic, ScanJob, ScanOptions, Scope, ScopedTag,
+    SearchOptions, SearchResponse, SpanRef, SpanStore, SpansetExpr, TagScope, TraceMetricsResponse,
+    TraceSpans, TraceqlEngine, TraceqlError, TypedValue, Value as TraceqlValue,
 };
 use opentelemetry_proto::tonic::common::v1::{
     AnyValue as OtlpAnyValue, ArrayValue as OtlpArrayValue, InstrumentationScope,
@@ -50,6 +51,7 @@ const INTRINSIC_TAGS: &[&str] = &[
 const EVENT_TAGS: &[&str] = &["event:name", "event:timeSinceStart"];
 const LINK_TAGS: &[&str] = &["link:spanID", "link:traceID"];
 const INSTRUMENTATION_TAGS: &[&str] = &["instrumentation:name", "instrumentation:version"];
+const TAG_QUERY_FILTER_AUTOCOMPLETE_LIMIT: usize = 25;
 
 struct AppState<S: SpanStore> {
     engine: Arc<TraceqlEngine<S>>,
@@ -319,7 +321,21 @@ where
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
     };
     if let Some(query) = query_param(&uri, "q") {
+        if is_match_all_query(&query) {
+            return match state
+                .engine
+                .tag_names(&tenant, scope, start_ns, end_ns)
+                .await
+            {
+                Ok(tags) => Json(search_tags_json(&tags)).into_response(),
+                Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+            };
+        }
         let scan_options = match scan_options_param(&uri) {
+            Ok(value) => value,
+            Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+        };
+        let limit = match q_filter_limit(&uri, state.engine.max_traces()) {
             Ok(value) => value,
             Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
         };
@@ -330,6 +346,7 @@ where
             start_ns,
             end_ns,
             scan_options,
+            limit,
         )
         .await
         {
@@ -378,7 +395,23 @@ where
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
     };
     if let Some(query) = query_param(&uri, "q") {
+        if is_match_all_query(&query) {
+            return match state
+                .engine
+                .tag_names(&tenant, scope, start_ns, end_ns)
+                .await
+            {
+                Ok(tags) => {
+                    Json(search_tags_v2_json(&add_intrinsic_tags(tags, scope))).into_response()
+                }
+                Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+            };
+        }
         let scan_options = match scan_options_param(&uri) {
+            Ok(value) => value,
+            Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+        };
+        let limit = match q_filter_limit(&uri, state.engine.max_traces()) {
             Ok(value) => value,
             Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
         };
@@ -389,6 +422,7 @@ where
             start_ns,
             end_ns,
             scan_options,
+            limit,
         )
         .await
         {
@@ -436,12 +470,46 @@ where
     S: SpanStore + 'static,
 {
     let tenant = tenant(&headers);
+    let tag = tempo_tag_alias(&tag);
     let (start_ns, end_ns) = match optional_time_bounds(&uri) {
         Ok(bounds) => bounds,
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
     };
     if let Some(query) = query_param(&uri, "q") {
+        if is_match_all_query(&query) {
+            return match state
+                .engine
+                .tag_values(&tenant, tag, start_ns, end_ns)
+                .await
+            {
+                Ok(values) => Json(search_tag_values_json(&values)).into_response(),
+                Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+            };
+        }
+        match exact_tag_value_filter(&query, tag) {
+            Ok(Some(expected)) => {
+                return match state
+                    .engine
+                    .tag_values(&tenant, tag, start_ns, end_ns)
+                    .await
+                {
+                    Ok(values) => Json(search_tag_values_json(&filter_tag_values(
+                        values, &expected,
+                    )))
+                    .into_response(),
+                    Err(err) => {
+                        (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
+                    }
+                };
+            }
+            Ok(None) => {}
+            Err(err) => return traceql_query_error_response(&err),
+        }
         let scan_options = match scan_options_param(&uri) {
+            Ok(value) => value,
+            Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+        };
+        let limit = match q_filter_limit(&uri, state.engine.max_traces()) {
             Ok(value) => value,
             Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
         };
@@ -452,11 +520,12 @@ where
             start_ns,
             end_ns,
             scan_options,
+            limit,
         )
         .await
         {
             Ok(traces) => Json(search_tag_values_json(&tag_values_from_traces(
-                &traces, &tag,
+                &traces, tag,
             )))
             .into_response(),
             Err(err) => traceql_query_error_response(&err),
@@ -464,7 +533,7 @@ where
     } else {
         match state
             .engine
-            .tag_values(&tenant, &tag, start_ns, end_ns)
+            .tag_values(&tenant, tag, start_ns, end_ns)
             .await
         {
             Ok(values) => Json(search_tag_values_json(&values)).into_response(),
@@ -498,12 +567,46 @@ where
     S: SpanStore + 'static,
 {
     let tenant = tenant(&headers);
+    let tag = tempo_tag_alias(&tag);
     let (start_ns, end_ns) = match optional_time_bounds(&uri) {
         Ok(bounds) => bounds,
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
     };
     if let Some(query) = query_param(&uri, "q") {
+        if is_match_all_query(&query) {
+            return match state
+                .engine
+                .tag_values(&tenant, tag, start_ns, end_ns)
+                .await
+            {
+                Ok(values) => Json(search_tag_values_v2_json(&values)).into_response(),
+                Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+            };
+        }
+        match exact_tag_value_filter(&query, tag) {
+            Ok(Some(expected)) => {
+                return match state
+                    .engine
+                    .tag_values(&tenant, tag, start_ns, end_ns)
+                    .await
+                {
+                    Ok(values) => Json(search_tag_values_v2_json(&filter_tag_values(
+                        values, &expected,
+                    )))
+                    .into_response(),
+                    Err(err) => {
+                        (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
+                    }
+                };
+            }
+            Ok(None) => {}
+            Err(err) => return traceql_query_error_response(&err),
+        }
         let scan_options = match scan_options_param(&uri) {
+            Ok(value) => value,
+            Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+        };
+        let limit = match q_filter_limit(&uri, state.engine.max_traces()) {
             Ok(value) => value,
             Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
         };
@@ -514,11 +617,12 @@ where
             start_ns,
             end_ns,
             scan_options,
+            limit,
         )
         .await
         {
             Ok(traces) => Json(search_tag_values_v2_json(&tag_values_from_traces(
-                &traces, &tag,
+                &traces, tag,
             )))
             .into_response(),
             Err(err) => traceql_query_error_response(&err),
@@ -526,7 +630,7 @@ where
     } else {
         match state
             .engine
-            .tag_values(&tenant, &tag, start_ns, end_ns)
+            .tag_values(&tenant, tag, start_ns, end_ns)
             .await
         {
             Ok(values) => Json(search_tag_values_v2_json(&values)).into_response(),
@@ -900,6 +1004,113 @@ fn traceql_tag_field(key: &str) -> String {
     } else {
         format!(".{}", key.strip_prefix('.').unwrap_or(key))
     }
+}
+
+fn tempo_tag_alias(tag: &str) -> &str {
+    match tag.strip_prefix('.').unwrap_or(tag) {
+        "name" => "span:name",
+        "status" => "span:status",
+        tag => tag,
+    }
+}
+
+fn is_match_all_query(query: &str) -> bool {
+    query
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .eq("{}".chars())
+}
+
+fn q_filter_limit(uri: &Uri, max_traces: usize) -> Result<usize, String> {
+    Ok(
+        optional_usize_param(uri, "limit")?.map_or(usize::MAX, |limit| {
+            if limit == 0 {
+                max_traces.min(TAG_QUERY_FILTER_AUTOCOMPLETE_LIMIT)
+            } else {
+                limit
+                    .min(max_traces)
+                    .min(TAG_QUERY_FILTER_AUTOCOMPLETE_LIMIT)
+            }
+        }),
+    )
+}
+
+fn exact_tag_value_filter(query: &str, tag: &str) -> Result<Option<TypedValue>, TraceqlError> {
+    let query = crabka_traceql::parse(query)?;
+    if !query.pipeline.is_empty() {
+        return Ok(None);
+    }
+    let SpansetExpr::Selector(expr) = query.root else {
+        return Ok(None);
+    };
+    let FieldExpr::Comparison { lhs, op, rhs } = *expr else {
+        return Ok(None);
+    };
+    if op != ComparisonOp::Eq || !field_matches_tag(&lhs, tag) {
+        return Ok(None);
+    }
+    Ok(typed_traceql_value(&rhs))
+}
+
+fn filter_tag_values(values: Vec<TypedValue>, expected: &TypedValue) -> Vec<TypedValue> {
+    values
+        .into_iter()
+        .filter(|value| value == expected)
+        .collect()
+}
+
+fn field_matches_tag(field: &Field, tag: &str) -> bool {
+    let tag = tag.strip_prefix('.').unwrap_or(tag);
+    match &field.scope {
+        Scope::Both => tag == field.key.as_str(),
+        Scope::Span => tag == format!("span.{}", field.key),
+        Scope::Resource => tag == format!("resource.{}", field.key),
+        Scope::Parent => tag == format!("parent.{}", field.key),
+        Scope::Event => tag == format!("event.{}", field.key),
+        Scope::Link => tag == format!("link.{}", field.key),
+        Scope::Instrumentation => tag == format!("instrumentation.{}", field.key),
+        Scope::Intrinsic(intrinsic) => tag == intrinsic_tag_name(intrinsic),
+    }
+}
+
+fn intrinsic_tag_name(intrinsic: &Intrinsic) -> &'static str {
+    match intrinsic {
+        Intrinsic::Name => "span:name",
+        Intrinsic::Duration => "span:duration",
+        Intrinsic::Kind => "span:kind",
+        Intrinsic::Status => "span:status",
+        Intrinsic::StatusMessage => "span:statusMessage",
+        Intrinsic::Id => "span:id",
+        Intrinsic::ParentId => "span:parentID",
+        Intrinsic::ChildCount => "span:childCount",
+        Intrinsic::TraceDuration => "trace:duration",
+        Intrinsic::TraceRootName => "trace:rootName",
+        Intrinsic::TraceRootService => "trace:rootService",
+        Intrinsic::TraceId => "trace:id",
+        Intrinsic::EventName => "event:name",
+        Intrinsic::EventTimeSinceStart => "event:timeSinceStart",
+        Intrinsic::LinkTraceId => "link:traceID",
+        Intrinsic::LinkSpanId => "link:spanID",
+        Intrinsic::InstrumentationName => "instrumentation:name",
+        Intrinsic::InstrumentationVersion => "instrumentation:version",
+        Intrinsic::NestedSetLeft => "span:nestedSetLeft",
+        Intrinsic::NestedSetRight => "span:nestedSetRight",
+        Intrinsic::NestedSetParent => "span:nestedSetParent",
+    }
+}
+
+fn typed_traceql_value(value: &TraceqlValue) -> Option<TypedValue> {
+    let (type_, value) = match value {
+        TraceqlValue::Str(value) => ("string", value.clone()),
+        TraceqlValue::Int(value) | TraceqlValue::Duration(value) => ("int", value.to_string()),
+        TraceqlValue::Float(value) if value.is_finite() => ("float", value.to_string()),
+        TraceqlValue::Bool(value) => ("bool", value.to_string()),
+        TraceqlValue::Float(_) | TraceqlValue::Nil => return None,
+    };
+    Some(TypedValue {
+        type_: type_.into(),
+        value,
+    })
 }
 
 fn optional_time_bounds(uri: &Uri) -> Result<(i64, i64), String> {
@@ -1329,6 +1540,7 @@ async fn matching_traces<S>(
     start_ns: i64,
     end_ns: i64,
     scan_options: ScanOptions,
+    limit: usize,
 ) -> Result<Vec<TraceSpans>, TraceqlError>
 where
     S: SpanStore + 'static,
@@ -1340,9 +1552,9 @@ where
             start_ns,
             end_ns,
             SearchOptions {
-                limit: usize::MAX,
+                limit,
                 spss: 0,
-                search_limit: Some(usize::MAX),
+                search_limit: Some(limit),
                 scan_options,
             },
         )
@@ -2319,6 +2531,82 @@ mod tests {
             },
         ));
         router_with_config(engine, cfg)
+    }
+
+    #[test]
+    fn match_all_query_requires_only_empty_selector() {
+        assert!(is_match_all_query("{}"));
+        assert!(is_match_all_query("{ \n\t }"));
+        assert!(!is_match_all_query("{ .service.name = \"api\" }"));
+        assert!(!is_match_all_query("{ } | count()"));
+    }
+
+    #[test]
+    fn field_matches_tag_honors_scopes_and_intrinsics() {
+        let field = |scope, key: &str| Field {
+            scope,
+            key: key.into(),
+        };
+
+        assert!(field_matches_tag(
+            &field(Scope::Both, "service.name"),
+            "service.name"
+        ));
+        assert!(field_matches_tag(
+            &field(Scope::Both, "service.name"),
+            ".service.name"
+        ));
+        assert!(!field_matches_tag(
+            &field(Scope::Both, "service.name"),
+            "resource.service.name"
+        ));
+        assert!(field_matches_tag(
+            &field(Scope::Span, "service.name"),
+            "span.service.name"
+        ));
+        assert!(field_matches_tag(
+            &field(Scope::Resource, "service.name"),
+            "resource.service.name"
+        ));
+        assert!(field_matches_tag(&field(Scope::Parent, "id"), "parent.id"));
+        assert!(field_matches_tag(
+            &field(Scope::Event, "name"),
+            "event.name"
+        ));
+        assert!(field_matches_tag(
+            &field(Scope::Link, "span_id"),
+            "link.span_id"
+        ));
+        assert!(field_matches_tag(
+            &field(Scope::Instrumentation, "name"),
+            "instrumentation.name"
+        ));
+        assert!(field_matches_tag(
+            &field(Scope::Intrinsic(Intrinsic::Name), ""),
+            "span:name"
+        ));
+        assert!(field_matches_tag(
+            &field(Scope::Intrinsic(Intrinsic::TraceRootService), ""),
+            "trace:rootService"
+        ));
+        assert!(!field_matches_tag(
+            &field(Scope::Intrinsic(Intrinsic::TraceRootService), ""),
+            "span:name"
+        ));
+    }
+
+    #[test]
+    fn typed_traceql_value_keeps_only_supported_values() {
+        assert!(
+            typed_traceql_value(&TraceqlValue::Float(1.5))
+                == Some(TypedValue {
+                    type_: "float".into(),
+                    value: "1.5".into(),
+                })
+        );
+        assert!(typed_traceql_value(&TraceqlValue::Float(f64::NAN)).is_none());
+        assert!(typed_traceql_value(&TraceqlValue::Float(f64::INFINITY)).is_none());
+        assert!(typed_traceql_value(&TraceqlValue::Nil).is_none());
     }
 
     async fn get_json(uri: &str) -> (StatusCode, Value) {
@@ -4660,6 +4948,41 @@ overrides:
     }
 
     #[tokio::test]
+    async fn search_tag_values_v2_accepts_grafana_unscoped_intrinsic_aliases() {
+        let (status, body) = get_json("/api/v2/search/tag/name/values").await;
+        assert!(status == StatusCode::OK);
+        assert!(
+            body == json!({
+                "tagValues": [
+                    {
+                        "type": "string",
+                        "value": "span"
+                    }
+                ],
+                "metrics": {
+                    "inspectedBytes": "0"
+                }
+            })
+        );
+
+        let (status, body) = get_json("/api/v2/search/tag/status/values").await;
+        assert!(status == StatusCode::OK);
+        assert!(
+            body == json!({
+                "tagValues": [
+                    {
+                        "type": "int",
+                        "value": "0"
+                    }
+                ],
+                "metrics": {
+                    "inspectedBytes": "0"
+                }
+            })
+        );
+    }
+
+    #[tokio::test]
     async fn search_tag_values_v2_accepts_resource_scope_prefix() {
         let (status, body) = get_json("/api/v2/search/tag/resource.service.name/values").await;
         assert!(status == StatusCode::OK);
@@ -4674,6 +4997,94 @@ overrides:
                 }
             })
         );
+    }
+
+    struct IndexedOnlyStore {
+        scans: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl SpanStore for IndexedOnlyStore {
+        async fn scan(
+            &self,
+            _tenant: &str,
+            _matchers: &[crabka_traceql::SpanMatcher],
+            _start_ns: i64,
+            _end_ns: i64,
+        ) -> Result<crabka_traceql::ScanResult, TraceqlError> {
+            self.scans.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            panic!("exact same-tag autocomplete should use indexed tag values");
+        }
+
+        async fn trace_by_id(
+            &self,
+            _tenant: &str,
+            _trace_id: &[u8; 16],
+        ) -> Result<Option<TraceSpans>, TraceqlError> {
+            Ok(None)
+        }
+
+        async fn tag_names(
+            &self,
+            _tenant: &str,
+            _scope: Option<TagScope>,
+            _start_ns: i64,
+            _end_ns: i64,
+        ) -> Result<Vec<ScopedTag>, TraceqlError> {
+            Ok(Vec::new())
+        }
+
+        async fn tag_values(
+            &self,
+            _tenant: &str,
+            tag: &str,
+            _start_ns: i64,
+            _end_ns: i64,
+        ) -> Result<Vec<TypedValue>, TraceqlError> {
+            assert!(tag == "resource.service.name");
+            Ok(vec![TypedValue {
+                type_: "string".into(),
+                value: "crabka-broker".into(),
+            }])
+        }
+    }
+
+    #[tokio::test]
+    async fn search_tag_values_v2_same_tag_query_filter_uses_indexed_values() {
+        let store = Arc::new(IndexedOnlyStore {
+            scans: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let app = router(Arc::new(TraceqlEngine::new(
+            Arc::clone(&store),
+            EngineOpts::default(),
+        )));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v2/search/tag/resource.service.name/values?q=%7B%20resource.service.name%20%3D%20%22crabka-broker%22%20%7D&limit=5000")
+                    .header("x-scope-orgid", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert!(status == StatusCode::OK);
+        assert!(
+            body == json!({
+                "tagValues": [{
+                    "type": "string",
+                    "value": "crabka-broker"
+                }],
+                "metrics": {
+                    "inspectedBytes": "0"
+                }
+            })
+        );
+        assert!(store.scans.load(std::sync::atomic::Ordering::SeqCst) == 0);
     }
 
     #[tokio::test]
@@ -5500,5 +5911,103 @@ overrides:
                 }
             })
         );
+    }
+
+    #[tokio::test]
+    async fn search_tag_values_v2_query_filter_honors_request_limit() {
+        let mut store = InMemorySpanStore::new();
+        store.push_trace(
+            "tenant-a",
+            "svc-a",
+            "root-old",
+            vec![span_at_with_attrs(
+                1,
+                1,
+                None,
+                "a",
+                1_000,
+                vec![
+                    ("env".into(), AttrValue::Str("prod".into())),
+                    ("target".into(), AttrValue::Str("old".into())),
+                ],
+            )],
+        );
+        store.push_trace(
+            "tenant-a",
+            "svc-a",
+            "root-new",
+            vec![span_at_with_attrs(
+                2,
+                1,
+                None,
+                "a",
+                2_000,
+                vec![
+                    ("env".into(), AttrValue::Str("prod".into())),
+                    ("target".into(), AttrValue::Str("new".into())),
+                ],
+            )],
+        );
+        let engine = Arc::new(TraceqlEngine::new(Arc::new(store), EngineOpts::default()));
+        let app = router(engine);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v2/search/tag/.target/values?q=%7B%20.env%20%3D%20%22prod%22%20%7D&limit=1")
+                    .header("x-scope-orgid", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert!(status == StatusCode::OK);
+        let values = body["tagValues"].as_array().unwrap();
+        assert!(values.len() == 1);
+    }
+
+    #[tokio::test]
+    async fn search_tag_values_v2_query_filter_caps_large_autocomplete_limits() {
+        let mut store = InMemorySpanStore::new();
+        for i in 0u8..30 {
+            store.push_trace(
+                "tenant-a",
+                "svc-a",
+                &format!("root-{i:02}"),
+                vec![span_at_with_attrs(
+                    i + 1,
+                    1,
+                    None,
+                    "a",
+                    i64::from(i) * 1_000,
+                    vec![
+                        ("env".into(), AttrValue::Str("prod".into())),
+                        ("target".into(), AttrValue::Str(format!("value-{i:02}"))),
+                    ],
+                )],
+            );
+        }
+        let engine = Arc::new(TraceqlEngine::new(Arc::new(store), EngineOpts::default()));
+        let app = router(engine);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v2/search/tag/.target/values?q=%7B%20.env%20%3D%20%22prod%22%20%7D&limit=5000")
+                    .header("x-scope-orgid", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert!(status == StatusCode::OK);
+        let values = body["tagValues"].as_array().unwrap();
+        assert!(values.len() == 25);
     }
 }

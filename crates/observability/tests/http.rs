@@ -5627,9 +5627,9 @@ async fn ruler_rule_group_read_endpoints_return_loki_not_found_errors() {
             .await
             .unwrap();
 
-        assert!(response.status() == StatusCode::NOT_FOUND);
+        assert!(response.status() == StatusCode::BAD_REQUEST);
         let body = text_body(response).await;
-        assert!(body == "group does not exist\n");
+        assert!(body == "GetRuleGroup unsupported in rule local store\n");
     }
 }
 

@@ -7140,11 +7140,16 @@ async fn loki_rule_group(
         .tenants
         .lock()
         .expect("Loki rule store lock poisoned");
-    let Some(group) = rules
+    let Some(groups) = rules
         .get(&tenant)
         .and_then(|namespaces| namespaces.get(&namespace))
-        .and_then(|groups| groups.get(&group_name))
     else {
+        return text_response(
+            StatusCode::BAD_REQUEST,
+            "GetRuleGroup unsupported in rule local store\n",
+        );
+    };
+    let Some(group) = groups.get(&group_name) else {
         return text_response(StatusCode::NOT_FOUND, "group does not exist\n");
     };
     loki_yaml_response(StatusCode::OK, group)

@@ -32,6 +32,7 @@ crabka-client-producer = { path = "../client-producer", version = "0.3.8" }
 crabka-telemetry = { path = "../telemetry", version = "0.3.8" }
 crabka-throttle = { path = "../throttle", version = "0.3.8" }
 dashmap = { workspace = true }
+futures = { workspace = true }
 object_store = { workspace = true }
 opentelemetry-proto = { workspace = true }
 prometheus-client = { workspace = true }
@@ -42,7 +43,7 @@ serde-wincode = { workspace = true }
 serde_yaml = { workspace = true }
 snap = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "time"] }
 tonic = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
@@ -60,6 +61,7 @@ protoc-bin-vendored = { workspace = true }
 assert2 = { workspace = true }
 crabka-broker = { path = "../broker", version = "0.3.8" }
 crabka-client-admin = { path = "../client-admin", version = "0.3.8" }
+mutants = { workspace = true }
 proptest = { workspace = true }
 reqwest = { workspace = true }
 tempfile = { workspace = true }

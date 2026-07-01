@@ -1943,7 +1943,7 @@ mod tests {
             "client",
             "127.0.0.1",
             Duration::from_secs(30),
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             vec![("range".into(), Bytes::new())],
         ));
         state.add_member(Member::new(
@@ -1951,10 +1951,14 @@ mod tests {
             "client",
             "127.0.0.1",
             Duration::from_secs(30),
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             vec![("cooperative-sticky".into(), Bytes::new())],
         ));
-        state.rebalance_deadline = Some(Instant::now() - Duration::from_secs(1));
+        state.rebalance_deadline = Some(
+            Instant::now()
+                .checked_sub(Duration::from_secs(1))
+                .unwrap_or_else(Instant::now),
+        );
         assert!(state.state == ClassicGroupState::PreparingRebalance);
 
         let (tx1, _rx1) = tokio::sync::oneshot::channel();
