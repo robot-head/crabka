@@ -1704,6 +1704,59 @@ protocol = "Plaintext"
     }
 
     #[test]
+    fn apply_to_log_dir_fills_default_but_preserves_existing() {
+        use crate::config::BrokerConfig;
+
+        let file: FileConfig = toml::from_str(r#"log_dir = "/var/lib/crabka/file""#).unwrap();
+
+        let mut default_cfg = BrokerConfig::default();
+        file.clone().apply_to(&mut default_cfg).unwrap();
+        assert!(default_cfg.log_dir == std::path::PathBuf::from("/var/lib/crabka/file"));
+
+        let mut existing_cfg = BrokerConfig {
+            log_dir: std::path::PathBuf::from("/var/lib/crabka/cli"),
+            ..BrokerConfig::default()
+        };
+        file.apply_to(&mut existing_cfg).unwrap();
+        assert!(existing_cfg.log_dir == std::path::PathBuf::from("/var/lib/crabka/cli"));
+    }
+
+    #[test]
+    fn apply_to_extra_log_dirs_fills_empty_but_preserves_existing() {
+        use crate::config::BrokerConfig;
+
+        let file: FileConfig = toml::from_str(r#"extra_log_dirs = ["/mnt/a", "/mnt/b"]"#).unwrap();
+
+        let mut default_cfg = BrokerConfig::default();
+        file.clone().apply_to(&mut default_cfg).unwrap();
+        assert!(
+            default_cfg.extra_log_dirs
+                == vec![
+                    std::path::PathBuf::from("/mnt/a"),
+                    std::path::PathBuf::from("/mnt/b"),
+                ]
+        );
+
+        let mut existing_cfg = BrokerConfig {
+            extra_log_dirs: vec![std::path::PathBuf::from("/mnt/cli")],
+            ..BrokerConfig::default()
+        };
+        file.apply_to(&mut existing_cfg).unwrap();
+        assert!(existing_cfg.extra_log_dirs == vec![std::path::PathBuf::from("/mnt/cli")]);
+
+        let mut empty_file_existing_cfg = BrokerConfig {
+            extra_log_dirs: vec![std::path::PathBuf::from("/mnt/cli")],
+            ..BrokerConfig::default()
+        };
+        FileConfig::default()
+            .apply_to(&mut empty_file_existing_cfg)
+            .unwrap();
+        assert!(
+            empty_file_existing_cfg.extra_log_dirs == vec![std::path::PathBuf::from("/mnt/cli")]
+        );
+    }
+
+    #[test]
     fn apply_to_maps_connection_caps() {
         use crate::config::BrokerConfig;
 
@@ -2031,6 +2084,7 @@ valid_issuer_uri = "https://idp.example"
 expected_audience = "kafka"
 principal_claim_name = "client_id"
 jwks_refresh_interval_ms = 60000
+jwks_expiry_seconds = 360
 "#;
         let file: FileConfig = toml::from_str(src).expect("parse");
         let mut cfg = crate::config::BrokerConfig::default();
@@ -2042,6 +2096,7 @@ jwks_refresh_interval_ms = 60000
                 assert!(v.valid_issuer.as_deref() == Some("https://idp.example"));
                 assert!(v.expected_audience.as_deref() == Some("kafka"));
                 assert!(v.principal_claim_name == "client_id");
+                assert!(v.expiry_ms == Some(360_000));
             }
             other => panic!("jwks_endpoint_uri must select the Signed validator; got {other:?}"),
         }
