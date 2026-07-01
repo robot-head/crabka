@@ -39,6 +39,12 @@ const FETCH_MAX_BYTES: i32 = 1 << 20;
 const FETCH_MAX_WAIT_MS: i32 = 500;
 const FETCH_MIN_BYTES: i32 = 1;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FetchThrottleDecision {
+    Fetch(i32),
+    Sleep,
+}
+
 /// Configuration handed to a single replicator task.
 pub(crate) struct Config {
     pub node_id: NodeId,
@@ -165,31 +171,20 @@ async fn run_inner(cfg: &Config) -> Result<(), String> {
         // throttled-partition Fetch isolation is free — no need to split
         // requests here. We set `partition_max_bytes` on the single partition
         // in the request to the bucket-granted amount.
-        let partition_max_bytes_cap = {
-            let image = cfg.controller.current_image();
-            let throttle = TopicThrottle::for_topic(&image, &cfg.topic);
-            let throttled = throttle.follower.contains(cfg.partition, cfg.node_id);
-            if throttled && cfg.throttle_state.follower_in.rate() > 0 {
-                let granted = cfg
-                    .throttle_state
-                    .follower_in
-                    .try_consume(u64::try_from(FETCH_MAX_BYTES).unwrap_or(0));
-                if granted == 0 {
-                    tracing::debug!(
-                        topic = %cfg.topic,
-                        partition = cfg.partition,
-                        "follower throttle: skip fetch this round (bucket exhausted)"
-                    );
-                    // Bucket exhausted — yield and retry next loop iteration.
-                    tokio::select! {
-                        () = cfg.shutdown.cancelled() => return Ok(()),
-                        () = tokio::time::sleep(Duration::from_millis(100)) => {}
-                    }
-                    continue;
+        let partition_max_bytes_cap = match follower_partition_fetch_cap(cfg) {
+            FetchThrottleDecision::Fetch(cap) => cap,
+            FetchThrottleDecision::Sleep => {
+                tracing::debug!(
+                    topic = %cfg.topic,
+                    partition = cfg.partition,
+                    "follower throttle: skip fetch this round (bucket exhausted)"
+                );
+                // Bucket exhausted — yield and retry next loop iteration.
+                tokio::select! {
+                    () = cfg.shutdown.cancelled() => return Ok(()),
+                    () = tokio::time::sleep(Duration::from_millis(100)) => {}
                 }
-                i32::try_from(granted).unwrap_or(FETCH_MAX_BYTES)
-            } else {
-                FETCH_MAX_BYTES
+                continue;
             }
         };
 
@@ -227,6 +222,25 @@ async fn run_inner(cfg: &Config) -> Result<(), String> {
                 return Ok(());
             }
         }
+    }
+}
+
+fn follower_partition_fetch_cap(cfg: &Config) -> FetchThrottleDecision {
+    let image = cfg.controller.current_image();
+    let throttle = TopicThrottle::for_topic(&image, &cfg.topic);
+    let throttled = throttle.follower.contains(cfg.partition, cfg.node_id);
+    if !throttled || cfg.throttle_state.follower_in.rate() == 0 {
+        return FetchThrottleDecision::Fetch(FETCH_MAX_BYTES);
+    }
+
+    let granted = cfg
+        .throttle_state
+        .follower_in
+        .try_consume(u64::try_from(FETCH_MAX_BYTES).unwrap_or(0));
+    if granted == 0 {
+        FetchThrottleDecision::Sleep
+    } else {
+        FetchThrottleDecision::Fetch(i32::try_from(granted).unwrap_or(FETCH_MAX_BYTES))
     }
 }
 
@@ -296,6 +310,7 @@ fn build_fetch_request(
 }
 
 /// Outcome of one fetch round.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LoopAction {
     Continue,
     StopNotLeader,
@@ -543,10 +558,7 @@ async fn handle_epoch_fence(cfg: &Config) -> Result<(), String> {
         .load(std::sync::atomic::Ordering::Acquire);
     drop(part);
 
-    let opts = ConnectionOptions {
-        client_id: cfg.client_id.clone(),
-        ..ConnectionOptions::default()
-    };
+    let opts = connection_options(&cfg.client_id);
     let client = cfg
         .inter_broker_client
         .connect_as_connection(
@@ -559,20 +571,7 @@ async fn handle_epoch_fence(cfg: &Config) -> Result<(), String> {
         .await
         .map_err(|e| format!("handle_epoch_fence: connect: {e}"))?;
 
-    let req = OffsetForLeaderEpochRequest {
-        replica_id: i32::try_from(cfg.node_id).unwrap_or(-1),
-        topics: vec![OffsetForLeaderTopic {
-            topic: cfg.topic.clone(),
-            partitions: vec![OffsetForLeaderPartition {
-                partition: cfg.partition,
-                current_leader_epoch: our_epoch,
-                leader_epoch: our_epoch,
-                ..OffsetForLeaderPartition::default()
-            }],
-            ..OffsetForLeaderTopic::default()
-        }],
-        ..OffsetForLeaderEpochRequest::default()
-    };
+    let req = build_offset_for_leader_epoch_request(cfg, our_epoch);
 
     let resp = client
         .send(req)
@@ -649,6 +648,33 @@ async fn handle_epoch_fence(cfg: &Config) -> Result<(), String> {
     Ok(())
 }
 
+fn connection_options(client_id: &str) -> ConnectionOptions {
+    ConnectionOptions {
+        client_id: client_id.to_string(),
+        ..ConnectionOptions::default()
+    }
+}
+
+fn build_offset_for_leader_epoch_request(
+    cfg: &Config,
+    our_epoch: i32,
+) -> OffsetForLeaderEpochRequest {
+    OffsetForLeaderEpochRequest {
+        replica_id: i32::try_from(cfg.node_id).unwrap_or(-1),
+        topics: vec![OffsetForLeaderTopic {
+            topic: cfg.topic.clone(),
+            partitions: vec![OffsetForLeaderPartition {
+                partition: cfg.partition,
+                current_leader_epoch: our_epoch,
+                leader_epoch: our_epoch,
+                ..OffsetForLeaderPartition::default()
+            }],
+            ..OffsetForLeaderTopic::default()
+        }],
+        ..OffsetForLeaderEpochRequest::default()
+    }
+}
+
 /// Open a [`Connection`] against the partition's leader, retrying with
 /// exponential backoff (capped at 5s). Returns `Err` only if shutdown is
 /// requested while we were waiting.
@@ -660,10 +686,7 @@ async fn connect_with_backoff(cfg: &Config) -> Result<Connection, String> {
     let mut delay = Duration::from_millis(100);
     let cap = Duration::from_secs(5);
     loop {
-        let opts = ConnectionOptions {
-            client_id: cfg.client_id.clone(),
-            ..ConnectionOptions::default()
-        };
+        let opts = connection_options(&cfg.client_id);
         let attempt = cfg.inter_broker_client.connect_as_connection(
             &cfg.leader_host,
             cfg.leader_port,
@@ -686,8 +709,437 @@ async fn connect_with_backoff(cfg: &Config) -> Result<Connection, String> {
                     () = cfg.shutdown.cancelled() => return Err("cancelled".into()),
                     () = tokio::time::sleep(delay) => {}
                 }
-                delay = (delay * 2).min(cap);
+                delay = next_reconnect_delay(delay, cap);
             }
         }
+    }
+}
+
+fn next_reconnect_delay(delay: Duration, cap: Duration) -> Duration {
+    (delay * 2).min(cap)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert2::assert;
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::net::SocketAddr;
+    use tokio::sync::watch;
+
+    use crabka_metadata::{
+        MetadataImage, MetadataRecord, PartitionRecord, TopicConfigRecord, TopicRecord,
+    };
+    use crabka_protocol::owned::fetch_response::{
+        EpochEndOffset, FetchableTopicResponse, PartitionData,
+    };
+    use crabka_raft::{
+        AddVoter, Node, QuorumState, RaftError, ReconfigOutcome, RemoveVoter, SnapshotRange,
+        UpdateVoter,
+    };
+
+    const TOPIC: &str = "orders";
+    const PARTITION: i32 = 0;
+    const NODE_ID: NodeId = 2;
+    const LEADER_ID: NodeId = 1;
+    const WIRE_TOPIC_ID: WireUuid = WireUuid([7; 16]);
+
+    struct StaticMetadataSource {
+        image: Arc<MetadataImage>,
+        image_rx: watch::Receiver<Arc<MetadataImage>>,
+        leader_rx: watch::Receiver<Option<NodeId>>,
+    }
+
+    impl StaticMetadataSource {
+        fn new(image: MetadataImage) -> Self {
+            let image = Arc::new(image);
+            let (_image_tx, image_rx) = watch::channel(image.clone());
+            let (_leader_tx, leader_rx) = watch::channel(None);
+            Self {
+                image,
+                image_rx,
+                leader_rx,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::metadata_source::MetadataSource for StaticMetadataSource {
+        fn current_image(&self) -> Arc<MetadataImage> {
+            self.image.clone()
+        }
+
+        fn watch_image(&self) -> watch::Receiver<Arc<MetadataImage>> {
+            self.image_rx.clone()
+        }
+
+        fn watch_leader(&self) -> watch::Receiver<Option<NodeId>> {
+            self.leader_rx.clone()
+        }
+
+        fn quorum_state(&self) -> QuorumState {
+            QuorumState {
+                current_term: 0,
+                last_applied_index: 0,
+                current_leader: None,
+                voters: Vec::new(),
+                voter_nodes: BTreeMap::new(),
+                per_voter_matched_index: BTreeMap::new(),
+            }
+        }
+
+        async fn submit_change(&self, _records: Vec<MetadataRecord>) -> Result<(), RaftError> {
+            panic!("unused in replicator tests")
+        }
+
+        async fn change_membership(&self, _new_voters: BTreeSet<NodeId>) -> Result<(), RaftError> {
+            panic!("unused in replicator tests")
+        }
+
+        async fn add_learner(&self, _node_id: NodeId, _node: Node) -> Result<(), RaftError> {
+            panic!("unused in replicator tests")
+        }
+
+        fn controller_bound_addr(&self) -> SocketAddr {
+            SocketAddr::from(([127, 0, 0, 1], 0))
+        }
+
+        fn read_snapshot_range(&self, _position: i64, _max_bytes: i32) -> SnapshotRange {
+            SnapshotRange::NoSnapshot
+        }
+
+        async fn trigger_snapshot(&self) -> Result<(), RaftError> {
+            panic!("unused in replicator tests")
+        }
+
+        async fn add_voter(&self, _req: AddVoter) -> Result<ReconfigOutcome, RaftError> {
+            panic!("unused in replicator tests")
+        }
+
+        async fn remove_voter(&self, _req: RemoveVoter) -> Result<ReconfigOutcome, RaftError> {
+            panic!("unused in replicator tests")
+        }
+
+        async fn update_voter(&self, _req: UpdateVoter) -> Result<ReconfigOutcome, RaftError> {
+            panic!("unused in replicator tests")
+        }
+
+        async fn cancel(&self) {}
+    }
+
+    fn image_with_leader(leader: NodeId) -> MetadataImage {
+        let mut image = MetadataImage::new(uuid::Uuid::nil());
+        image.apply(&MetadataRecord::V1Topic(TopicRecord {
+            name: TOPIC.into(),
+            topic_id: uuid::Uuid::from_bytes(WIRE_TOPIC_ID.0),
+            partitions: 1,
+            replication_factor: 2,
+        }));
+        image.apply(&MetadataRecord::V1Partition(PartitionRecord {
+            topic: TOPIC.into(),
+            partition: PARTITION,
+            leader,
+            replicas: vec![LEADER_ID, NODE_ID],
+            isr: vec![LEADER_ID, NODE_ID],
+            leader_epoch: 4,
+            adding_replicas: Vec::new(),
+            removing_replicas: Vec::new(),
+            directories: Vec::new(),
+            partition_epoch: 0,
+        }));
+        image
+    }
+
+    fn image_with_follower_throttle(value: &str) -> MetadataImage {
+        let mut image = image_with_leader(LEADER_ID);
+        let mut overrides = BTreeMap::new();
+        overrides.insert(
+            crate::throttle::FOLLOWER_THROTTLED_REPLICAS_KEY.to_string(),
+            value.to_string(),
+        );
+        image.apply(&MetadataRecord::V1TopicConfig(TopicConfigRecord {
+            topic: TOPIC.into(),
+            overrides,
+        }));
+        image
+    }
+
+    fn test_config(image: MetadataImage) -> (Config, tempfile::TempDir) {
+        let log_dir = tempfile::tempdir().unwrap();
+        let cfg = Config {
+            node_id: NODE_ID,
+            topic: TOPIC.into(),
+            topic_id: WIRE_TOPIC_ID,
+            partition: PARTITION,
+            leader_node_id: LEADER_ID,
+            leader_host: "127.0.0.1".into(),
+            leader_port: 9,
+            partitions: Arc::new(PartitionRegistry::new()),
+            log_dirs: vec![log_dir.path().to_path_buf()],
+            log_config: LogConfig::default(),
+            client_id: "replica-test".into(),
+            shutdown: CancellationToken::new(),
+            inter_broker_client: Arc::new(crate::network::client::InterBrokerClient::new(
+                None, None,
+            )),
+            inter_broker_listener_protocol: ListenerProtocol::Plaintext,
+            throttle_state: Arc::new(ThrottleState::new()),
+            controller: Arc::new(StaticMetadataSource::new(image)),
+            log_dir_status: crate::log_dir_status::LogDirRegistry::default(),
+            producer_state: Arc::new(crate::producer_state::ProducerState::new()),
+            metrics: crate::metrics::BrokerMetrics::default(),
+        };
+        (cfg, log_dir)
+    }
+
+    fn fetch_response(topic: &str, topic_id: WireUuid, part: PartitionData) -> FetchResponse {
+        FetchResponse {
+            responses: vec![FetchableTopicResponse {
+                topic: topic.into(),
+                topic_id,
+                partitions: vec![part],
+                ..FetchableTopicResponse::default()
+            }],
+            ..FetchResponse::default()
+        }
+    }
+
+    fn partition_response(partition_index: i32, error_code: i16) -> PartitionData {
+        PartitionData {
+            partition_index,
+            error_code,
+            ..PartitionData::default()
+        }
+    }
+
+    #[test]
+    fn fetch_max_bytes_is_one_mebibyte() {
+        assert!(FETCH_MAX_BYTES == 1_048_576);
+    }
+
+    #[test]
+    fn build_fetch_request_populates_replica_and_partition_fields() {
+        let (cfg, _log_dir) = test_config(image_with_leader(LEADER_ID));
+
+        let req = build_fetch_request(&cfg, 123, 456);
+
+        assert!(req.replica_id == i32::try_from(NODE_ID).unwrap());
+        assert!(req.replica_state.replica_id == i32::try_from(NODE_ID).unwrap());
+        assert!(req.max_wait_ms == FETCH_MAX_WAIT_MS);
+        assert!(req.min_bytes == FETCH_MIN_BYTES);
+        assert!(req.max_bytes == FETCH_MAX_BYTES);
+        assert!(req.topics.len() == 1);
+        let topic = &req.topics[0];
+        assert!(topic.topic == TOPIC);
+        assert!(topic.topic_id == WIRE_TOPIC_ID);
+        assert!(topic.partitions.len() == 1);
+        let partition = &topic.partitions[0];
+        assert!(partition.partition == PARTITION);
+        assert!(partition.fetch_offset == 123);
+        assert!(partition.current_leader_epoch == -1);
+        assert!(partition.last_fetched_epoch == -1);
+        assert!(partition.partition_max_bytes == 456);
+    }
+
+    #[test]
+    fn build_fetch_request_uses_negative_replica_sentinel_when_node_id_overflows() {
+        let (mut cfg, _log_dir) = test_config(image_with_leader(LEADER_ID));
+        cfg.node_id = NodeId::from(i32::MAX as u32) + 1;
+
+        let req = build_fetch_request(&cfg, 0, FETCH_MAX_BYTES);
+
+        assert!(req.replica_id == -1);
+        assert!(req.replica_state.replica_id == -1);
+    }
+
+    #[test]
+    fn offset_epoch_request_and_connection_options_preserve_identity_fields() {
+        let (cfg, _log_dir) = test_config(image_with_leader(LEADER_ID));
+        let opts = connection_options(&cfg.client_id);
+        assert!(opts.client_id == "replica-test");
+
+        let req = build_offset_for_leader_epoch_request(&cfg, 7);
+        assert!(req.replica_id == i32::try_from(NODE_ID).unwrap());
+        assert!(req.topics.len() == 1);
+        assert!(req.topics[0].topic == TOPIC);
+        assert!(req.topics[0].partitions.len() == 1);
+        let partition = &req.topics[0].partitions[0];
+        assert!(partition.partition == PARTITION);
+        assert!(partition.current_leader_epoch == 7);
+        assert!(partition.leader_epoch == 7);
+    }
+
+    #[test]
+    fn offset_epoch_request_uses_negative_replica_sentinel_when_node_id_overflows() {
+        let (mut cfg, _log_dir) = test_config(image_with_leader(LEADER_ID));
+        cfg.node_id = NodeId::from(i32::MAX as u32) + 1;
+
+        let req = build_offset_for_leader_epoch_request(&cfg, 7);
+
+        assert!(req.replica_id == -1);
+    }
+
+    #[test]
+    fn next_reconnect_delay_doubles_until_cap() {
+        assert!(
+            next_reconnect_delay(Duration::from_millis(100), Duration::from_secs(5))
+                == Duration::from_millis(200)
+        );
+        assert!(
+            next_reconnect_delay(Duration::from_secs(4), Duration::from_secs(5))
+                == Duration::from_secs(5)
+        );
+    }
+
+    #[test]
+    fn became_partition_leader_reflects_current_metadata_leader() {
+        let (cfg, _log_dir) = test_config(image_with_leader(NODE_ID));
+        assert!(became_partition_leader(&cfg));
+
+        let (cfg, _log_dir) = test_config(image_with_leader(LEADER_ID));
+        assert!(!became_partition_leader(&cfg));
+    }
+
+    #[test]
+    fn follower_partition_fetch_cap_ignores_unthrottled_partitions() {
+        let (cfg, _log_dir) = test_config(image_with_leader(LEADER_ID));
+        cfg.throttle_state.follower_in.set_rate_with_burst(1234, 0);
+
+        assert!(
+            follower_partition_fetch_cap(&cfg) == FetchThrottleDecision::Fetch(FETCH_MAX_BYTES)
+        );
+    }
+
+    #[test]
+    fn follower_partition_fetch_cap_ignores_zero_rate_throttle() {
+        let (cfg, _log_dir) = test_config(image_with_follower_throttle("*"));
+
+        assert!(
+            follower_partition_fetch_cap(&cfg) == FetchThrottleDecision::Fetch(FETCH_MAX_BYTES)
+        );
+    }
+
+    #[test]
+    fn follower_partition_fetch_cap_sleeps_when_throttled_bucket_is_empty() {
+        let (cfg, _log_dir) = test_config(image_with_follower_throttle("*"));
+        cfg.throttle_state.follower_in.set_rate_with_burst(1024, 0);
+
+        assert!(follower_partition_fetch_cap(&cfg) == FetchThrottleDecision::Sleep);
+    }
+
+    #[test]
+    fn follower_partition_fetch_cap_uses_granted_bucket_size() {
+        let (cfg, _log_dir) = test_config(image_with_follower_throttle("*"));
+        cfg.throttle_state
+            .follower_in
+            .set_rate_with_burst(1234, 1234);
+
+        assert!(follower_partition_fetch_cap(&cfg) == FetchThrottleDecision::Fetch(1234));
+    }
+
+    #[tokio::test]
+    async fn handle_response_matches_fetch_topic_by_name() {
+        let (cfg, _log_dir) = test_config(image_with_leader(LEADER_ID));
+        let resp = fetch_response(
+            TOPIC,
+            WireUuid::ZERO,
+            partition_response(PARTITION, codes::NOT_LEADER_OR_FOLLOWER),
+        );
+
+        assert!(handle_response(resp, &cfg).await == LoopAction::StopNotLeader);
+    }
+
+    #[tokio::test]
+    async fn handle_response_matches_fetch_topic_by_topic_id() {
+        let (cfg, _log_dir) = test_config(image_with_leader(LEADER_ID));
+        let resp = fetch_response(
+            "",
+            WIRE_TOPIC_ID,
+            partition_response(PARTITION, codes::NOT_LEADER_OR_FOLLOWER),
+        );
+
+        assert!(handle_response(resp, &cfg).await == LoopAction::StopNotLeader);
+    }
+
+    #[tokio::test]
+    async fn handle_response_ignores_other_partition_index() {
+        let (cfg, _log_dir) = test_config(image_with_leader(LEADER_ID));
+        let resp = fetch_response(
+            TOPIC,
+            WIRE_TOPIC_ID,
+            partition_response(PARTITION + 1, codes::NOT_LEADER_OR_FOLLOWER),
+        );
+
+        assert!(handle_response(resp, &cfg).await == LoopAction::Continue);
+    }
+
+    #[tokio::test]
+    async fn handle_response_stops_on_diverging_epoch_after_local_promotion() {
+        let (cfg, _log_dir) = test_config(image_with_leader(NODE_ID));
+        let resp = fetch_response(
+            TOPIC,
+            WIRE_TOPIC_ID,
+            PartitionData {
+                partition_index: PARTITION,
+                error_code: codes::NONE,
+                diverging_epoch: EpochEndOffset {
+                    epoch: 4,
+                    end_offset: 0,
+                    ..EpochEndOffset::default()
+                },
+                ..PartitionData::default()
+            },
+        );
+
+        assert!(handle_response(resp, &cfg).await == LoopAction::StopNotLeader);
+    }
+
+    #[tokio::test]
+    async fn handle_response_stops_on_out_of_range_after_local_promotion() {
+        let (cfg, _log_dir) = test_config(image_with_leader(NODE_ID));
+        let resp = fetch_response(
+            TOPIC,
+            WIRE_TOPIC_ID,
+            partition_response(PARTITION, codes::OFFSET_OUT_OF_RANGE),
+        );
+
+        assert!(handle_response(resp, &cfg).await == LoopAction::StopNotLeader);
+    }
+
+    #[tokio::test]
+    async fn run_materializes_local_partition_before_observing_cancelled_shutdown() {
+        let (cfg, _log_dir) = test_config(image_with_leader(LEADER_ID));
+        cfg.shutdown.cancel();
+        let partitions = cfg.partitions.clone();
+
+        run(cfg).await;
+
+        assert!(partitions.contains(TOPIC, PARTITION));
+    }
+
+    #[tokio::test]
+    async fn run_inner_reports_cancelled_before_first_connection() {
+        let (cfg, _log_dir) = test_config(image_with_leader(LEADER_ID));
+        cfg.shutdown.cancel();
+
+        let err = run_inner(&cfg).await.unwrap_err();
+
+        assert!(err == "cancelled");
+    }
+
+    #[tokio::test]
+    async fn handle_epoch_fence_surfaces_connection_failure_for_local_partition() {
+        let (mut cfg, _log_dir) = test_config(image_with_leader(LEADER_ID));
+        ensure_local_partition(&cfg).unwrap();
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        cfg.leader_port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let err = handle_epoch_fence(&cfg).await.unwrap_err();
+
+        assert!(
+            err.contains("handle_epoch_fence: connect"),
+            "unexpected error: {err}"
+        );
     }
 }
