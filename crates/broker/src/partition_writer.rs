@@ -543,6 +543,7 @@ fn swap_future_log(
 mod tests {
     use super::*;
     use assert2::assert;
+    use crabka_compression::CompressionType;
     use crabka_log::LogConfig;
     use crabka_protocol::records::{Record, RecordBatch};
     use tempfile::tempdir;
@@ -749,6 +750,35 @@ mod tests {
 
         drop(tx);
         writer.await.expect("writer join");
+    }
+
+    #[test]
+    fn append_owned_batch_recompresses_to_configured_log_codec() {
+        let dir = tempdir().expect("tempdir");
+        let log = Mutex::new(
+            Log::open(
+                dir.path(),
+                LogConfig {
+                    compression_type: Some(CompressionType::Lz4),
+                    ..LogConfig::default()
+                },
+            )
+            .expect("open log"),
+        );
+
+        let original = sample_batch(2);
+        assert!(original.attributes.compression() == CompressionType::None);
+
+        let (results, leo) = append_produce_batch(&log, vec![ProduceData::Owned(original)]);
+        assert!(results.len() == 1);
+        let assigned = results.into_iter().next().unwrap().expect("append ok");
+        assert!(assigned == 0);
+        assert!(leo == 2);
+
+        let read = log.lock().unwrap().read(0, 10 * 1024 * 1024).unwrap();
+        assert!(read.batches.len() == 1);
+        assert!(read.batches[0].attributes.compression() == CompressionType::Lz4);
+        assert!(read.batches[0].records.len() == 2);
     }
 
     #[tokio::test]

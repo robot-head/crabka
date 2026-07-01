@@ -182,6 +182,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn partitions_of_and_len_track_topics_and_removals() {
+        let dir = tempdir().unwrap();
+        let reg = PartitionRegistry::new();
+        assert!(reg.partitions_of("missing").is_empty());
+        assert!(reg.len() == 0);
+
+        reg.insert("a".to_string(), 2, fixture_partition(dir.path(), "a", 2));
+        reg.insert("a".to_string(), 4, fixture_partition(dir.path(), "a", 4));
+        reg.insert("b".to_string(), 7, fixture_partition(dir.path(), "b", 7));
+
+        let mut a_parts = reg.partitions_of("a");
+        a_parts.sort_unstable();
+        assert!(a_parts == vec![2, 4]);
+        assert!(reg.partitions_of("b") == vec![7]);
+        assert!(reg.len() == 3);
+
+        let removed = reg.remove("a", 2).expect("removed");
+        drop(removed);
+
+        assert!(reg.partitions_of("a") == vec![4]);
+        assert!(reg.partitions_of("missing").is_empty());
+        assert!(reg.len() == 2);
+    }
+
+    #[tokio::test]
     async fn materialize_if_vacant_builds_once() {
         let dir = tempdir().unwrap();
         let reg = PartitionRegistry::new();
