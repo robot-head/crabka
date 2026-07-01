@@ -589,6 +589,18 @@ mod tests {
     }
 
     #[test]
+    fn allocate_skips_existing_session_id_collision() {
+        let cache = FetchSessionCache::new(10);
+        let first = cache.try_allocate(false, "alice".into(), vec![]);
+
+        cache.next_id.store(first, Ordering::Relaxed);
+        let second = cache.try_allocate(false, "bob".into(), vec![]);
+
+        assert!(second == first + 1);
+        assert!(cache.len() == 2);
+    }
+
+    #[test]
     fn allocate_returns_zero_when_max_slots_zero() {
         let cache = FetchSessionCache::new(0);
         let id = cache.try_allocate(false, "alice".into(), vec![]);

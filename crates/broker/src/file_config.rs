@@ -2813,6 +2813,17 @@ expire_after_ms = 60000
     }
 
     #[test]
+    fn opa_cache_defaults_match_documented_capacity_and_ttl() {
+        let toml = r#"
+url = "http://opa.invalid:8181/v1/data/k/a"
+"#;
+        let opa: FileOpaConfig = toml::from_str(toml).unwrap();
+
+        assert!(opa.maximum_cache_size == 50_000);
+        assert!(opa.expire_after_ms == 3_600_000);
+    }
+
+    #[test]
     fn authorization_section_absent_defaults_to_allow_all() {
         use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
         use crabka_metadata::{AclOperation, MetadataImage, ResourceType};
