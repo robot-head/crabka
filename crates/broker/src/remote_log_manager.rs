@@ -695,6 +695,7 @@ mod tests {
     use assert2::assert;
 
     use crabka_log::{Log, LogConfig};
+    use crabka_metadata::{MetadataImage, MetadataRecord, TopicRecord};
     use crabka_protocol::records::{Record, RecordBatch};
     use crabka_remote_storage::{
         CustomMetadata, IndexType, InmemoryRemoteLogMetadataManager, LocalTieredStorage,
@@ -740,8 +741,122 @@ mod tests {
         }
     }
 
+    struct FixedMetadataSource {
+        image: Arc<MetadataImage>,
+        leader_tx: tokio::sync::watch::Sender<Option<NodeId>>,
+    }
+
+    impl FixedMetadataSource {
+        fn new(image: MetadataImage) -> Self {
+            let (leader_tx, _) = tokio::sync::watch::channel(Some(1));
+            Self {
+                image: Arc::new(image),
+                leader_tx,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::metadata_source::MetadataSource for FixedMetadataSource {
+        fn current_image(&self) -> Arc<MetadataImage> {
+            self.image.clone()
+        }
+
+        fn watch_image(&self) -> tokio::sync::watch::Receiver<Arc<MetadataImage>> {
+            let (_, rx) = tokio::sync::watch::channel(self.image.clone());
+            rx
+        }
+
+        fn watch_leader(&self) -> tokio::sync::watch::Receiver<Option<NodeId>> {
+            self.leader_tx.subscribe()
+        }
+
+        fn quorum_state(&self) -> crabka_raft::QuorumState {
+            crabka_raft::QuorumState {
+                current_term: 0,
+                last_applied_index: 0,
+                current_leader: *self.leader_tx.borrow(),
+                voters: Vec::new(),
+                voter_nodes: std::collections::BTreeMap::new(),
+                per_voter_matched_index: std::collections::BTreeMap::new(),
+            }
+        }
+
+        async fn submit_change(
+            &self,
+            _records: Vec<MetadataRecord>,
+        ) -> Result<(), crabka_raft::RaftError> {
+            Err(crabka_raft::RaftError::Unsupported("fixed metadata source"))
+        }
+
+        async fn change_membership(
+            &self,
+            _new_voters: std::collections::BTreeSet<NodeId>,
+        ) -> Result<(), crabka_raft::RaftError> {
+            Err(crabka_raft::RaftError::Unsupported("fixed metadata source"))
+        }
+
+        async fn add_learner(
+            &self,
+            _node_id: NodeId,
+            _node: crabka_raft::Node,
+        ) -> Result<(), crabka_raft::RaftError> {
+            Err(crabka_raft::RaftError::Unsupported("fixed metadata source"))
+        }
+
+        fn controller_bound_addr(&self) -> std::net::SocketAddr {
+            std::net::SocketAddr::from(([0, 0, 0, 0], 0))
+        }
+
+        fn read_snapshot_range(
+            &self,
+            _position: i64,
+            _max_bytes: i32,
+        ) -> crabka_raft::SnapshotRange {
+            crabka_raft::SnapshotRange::NoSnapshot
+        }
+
+        async fn trigger_snapshot(&self) -> Result<(), crabka_raft::RaftError> {
+            Err(crabka_raft::RaftError::Unsupported("fixed metadata source"))
+        }
+
+        async fn add_voter(
+            &self,
+            _req: crabka_raft::AddVoter,
+        ) -> Result<crabka_raft::ReconfigOutcome, crabka_raft::RaftError> {
+            Err(crabka_raft::RaftError::Unsupported("fixed metadata source"))
+        }
+
+        async fn remove_voter(
+            &self,
+            _req: crabka_raft::RemoveVoter,
+        ) -> Result<crabka_raft::ReconfigOutcome, crabka_raft::RaftError> {
+            Err(crabka_raft::RaftError::Unsupported("fixed metadata source"))
+        }
+
+        async fn update_voter(
+            &self,
+            _req: crabka_raft::UpdateVoter,
+        ) -> Result<crabka_raft::ReconfigOutcome, crabka_raft::RaftError> {
+            Err(crabka_raft::RaftError::Unsupported("fixed metadata source"))
+        }
+
+        async fn cancel(&self) {}
+    }
+
     fn tp() -> TopicIdPartition {
         TopicIdPartition::new(Uuid::from_u128(1), "orders", 0)
+    }
+
+    fn image_with_orders_topic() -> MetadataImage {
+        let mut image = MetadataImage::new(Uuid::from_u128(9));
+        image.apply(&MetadataRecord::V1Topic(TopicRecord {
+            name: "orders".into(),
+            topic_id: tp().topic_id,
+            partitions: 1,
+            replication_factor: 1,
+        }));
+        image
     }
 
     fn batch(n: i32) -> RecordBatch {
@@ -775,6 +890,99 @@ mod tests {
             log.append(&mut b).unwrap();
         }
         log
+    }
+
+    fn rolled_tiered_partition(log_dir: &std::path::Path) -> Arc<Partition> {
+        let part_dir = crate::log_dir::partition_dir(log_dir, "orders", 0);
+        std::fs::create_dir_all(&part_dir).unwrap();
+        let mut log = Log::open(
+            &part_dir,
+            LogConfig {
+                segment_bytes: 256,
+                remote_storage_enable: true,
+                retention_ms: None,
+                retention_bytes: None,
+                ..LogConfig::default()
+            },
+        )
+        .unwrap();
+        for _ in 0..12 {
+            let mut b = batch(2);
+            log.append(&mut b).unwrap();
+        }
+        let partition = crate::broker::spawn_partition(
+            "orders".to_string(),
+            0,
+            log_dir.to_path_buf(),
+            log,
+            crate::log_dir_status::LogDirRegistry::default(),
+            Arc::new(crate::producer_state::ProducerState::new()),
+        );
+        partition.current_leader.store(1, Ordering::Relaxed);
+        partition.current_leader_epoch.store(0, Ordering::Release);
+        partition
+    }
+
+    async fn wait_for_remote_segments(rlmm: &Arc<dyn RemoteLogMetadataManager>, expected: usize) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let listed = rlmm.list_remote_log_segments(&tp()).unwrap();
+                if listed.len() >= expected {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("remote-log-manager run loop did not copy expected segments");
+    }
+
+    #[tokio::test]
+    async fn run_ticks_and_copies_eligible_segments() {
+        let log_dir = tempfile::tempdir().unwrap();
+        let remote_dir = tempfile::tempdir().unwrap();
+        let partitions = Arc::new(PartitionRegistry::new());
+        let partition = rolled_tiered_partition(log_dir.path());
+        let export_count = partition
+            .log
+            .lock()
+            .expect("partition log mutex poisoned")
+            .tierable_segments()
+            .len();
+        assert!(export_count >= 2, "test needs multiple sealed segments");
+        partitions.insert("orders".to_string(), 0, partition);
+
+        let controller: Arc<dyn crate::metadata_source::MetadataSource> =
+            Arc::new(FixedMetadataSource::new(image_with_orders_topic()));
+        let rsm: Arc<dyn RemoteStorageManager> =
+            Arc::new(LocalTieredStorage::new(remote_dir.path()));
+        let rlmm: Arc<dyn RemoteLogMetadataManager> =
+            Arc::new(InmemoryRemoteLogMetadataManager::new());
+        let shutdown = CancellationToken::new();
+        let task = tokio::spawn(run(
+            partitions,
+            controller,
+            rsm,
+            rlmm.clone(),
+            1,
+            1,
+            RemoteLogManagerConfig {
+                interval: Duration::from_millis(10),
+            },
+            shutdown.clone(),
+        ));
+
+        wait_for_remote_segments(&rlmm, export_count).await;
+        shutdown.cancel();
+        task.await.expect("remote-log-manager task panicked");
+
+        let listed = rlmm.list_remote_log_segments(&tp()).unwrap();
+        assert!(listed.len() == export_count);
+        assert!(
+            listed
+                .iter()
+                .all(|md| md.state() == RemoteLogSegmentState::CopySegmentFinished)
+        );
     }
 
     #[tokio::test]
