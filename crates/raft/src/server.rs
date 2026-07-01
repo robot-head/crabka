@@ -300,6 +300,7 @@ fn api_versions_response_body(req_version: i16) -> Bytes {
 /// which decodes the body, runs the core, and replies on a oneshot with the
 /// encoded response body. The Crabka-private 1003/1004 keep their bespoke
 /// request/response wire types.
+#[tracing::instrument(level = "debug", skip_all, fields(node = engine.node_id(), api_key = api_key_n), err)]
 async fn dispatch(
     api_key_n: i16,
     body: Bytes,

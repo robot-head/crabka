@@ -198,6 +198,7 @@ fn anomaly_key_to_proto(k: &crate::detector::AnomalyKey) -> pb::AnomalyKey {
 // ────────────────────────────────────────────────────────────────────────────
 
 /// Read the latest cluster snapshot; 503 (`Unavailable`) if none yet.
+#[tracing::instrument(level = "info", skip_all, err(Debug))]
 pub async fn get_state(
     Extension(state): Extension<Arc<AppState>>,
     _req: ConnectRequest<pb::GetStateRequest>,
@@ -210,6 +211,12 @@ pub async fn get_state(
 }
 
 /// Run the optimizer with the selected goals, persist the proposal, return it.
+#[tracing::instrument(
+    level = "info",
+    skip_all,
+    fields(goals = req.0.goals.len()),
+    err(Debug),
+)]
 pub async fn create_proposal(
     Extension(state): Extension<Arc<AppState>>,
     req: ConnectRequest<pb::CreateProposalRequest>,
@@ -223,8 +230,21 @@ pub async fn create_proposal(
         .goal_registry
         .select(&names)
         .map_err(|e| ConnectError::new(Code::InvalidArgument, e.to_string()))?;
-    let out = optimizer::optimize(snap, &goals, &state.goal_ctx)
-        .map_err(|e| ConnectError::new(Code::Internal, e.to_string()))?;
+    let started = std::time::Instant::now();
+    let out = optimizer::optimize(snap, &goals, &state.goal_ctx).map_err(|e| {
+        state.metrics.record_rebalance("error");
+        ConnectError::new(Code::Internal, e.to_string())
+    })?;
+    state
+        .metrics
+        .observe_rebalance_duration(started.elapsed().as_secs_f64());
+    state
+        .metrics
+        .record_rebalance(if out.proposal.movements.is_empty() {
+            "no_movements"
+        } else {
+            "ok"
+        });
     state.store.insert(out.proposal.clone());
     state.metrics.proposals_created_total.inc();
     Ok(ConnectResponse::new(proposal_to_proto(&out.proposal)))
@@ -277,6 +297,12 @@ pub async fn list_proposals(
 /// Kick off an execution. Returns Executing-state proposal; operator
 /// polls `GetProposal` for progress. Async — the executor runs on a
 /// detached task.
+#[tracing::instrument(
+    level = "info",
+    skip_all,
+    fields(proposal_id = %req.0.id),
+    err(Debug),
+)]
 pub async fn execute_proposal(
     Extension(state): Extension<Arc<AppState>>,
     req: ConnectRequest<pb::ExecuteProposalRequest>,
@@ -388,6 +414,12 @@ pub async fn execute_proposal(
 
 /// Signal cancellation on the in-flight execution. Returns the proposal
 /// already transitioned to `Cancelled`.
+#[tracing::instrument(
+    level = "info",
+    skip_all,
+    fields(proposal_id = %req.0.id),
+    err(Debug),
+)]
 pub async fn cancel_execution(
     Extension(state): Extension<Arc<AppState>>,
     req: ConnectRequest<pb::CancelExecutionRequest>,
@@ -452,6 +484,7 @@ fn cancel_poll_expired(now: std::time::Instant, deadline: std::time::Instant) ->
 /// `AnomalyStore`'s full capacity. `include_resolved` defaults to `true`
 /// when unset — the wire's default boolean false would be surprising;
 /// most callers want the full history surface.
+#[tracing::instrument(level = "info", skip_all, err(Debug))]
 pub async fn get_anomalies(
     Extension(state): Extension<Arc<AppState>>,
     req: ConnectRequest<pb::GetAnomaliesRequest>,

@@ -22,6 +22,13 @@ use crate::codes;
 use crate::error::BrokerError;
 use crate::handlers::add_raft_voter::outcome_to_code;
 
+#[tracing::instrument(
+    name = "handle_remove_raft_voter",
+    level = "info",
+    skip_all,
+    fields(api = "RemoveRaftVoter", version, req_bytes = req_bytes.len()),
+    err,
+)]
 pub(crate) async fn handle(
     broker: &Broker,
     version: i16,

@@ -75,6 +75,18 @@ impl ScramServerExchange {
         }
     }
 
+    // Per-step SCRAM server driver. skip_all keeps the raw `client_bytes`
+    // (client-first/-final carrying nonce + proof) out of span fields; only
+    // the non-sensitive mechanism + username are recorded. Returns a
+    // `StepResult` enum (not a Result), so no `err`.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(
+            mechanism = %self.credential.mechanism.wire_name(),
+            principal = %self.username,
+        )
+    )]
     pub fn step(&mut self, client_bytes: &[u8]) -> StepResult {
         match std::mem::replace(&mut self.state, State::Finished) {
             State::AwaitingClientFirst => self.step_first(client_bytes),

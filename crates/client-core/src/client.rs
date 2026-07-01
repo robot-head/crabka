@@ -27,6 +27,12 @@ pub struct Client {
 impl Client {
     /// Build a [`Client`] pointed at the given bootstrap address.
     #[builder(start_fn = builder, finish_fn = build)]
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(bootstrap = %bootstrap, client_id = %client_id),
+        err,
+    )]
     pub async fn start(
         #[builder(into)] bootstrap: String,
         #[builder(into, default = "crabka".to_string())] client_id: String,
@@ -47,6 +53,12 @@ impl Client {
 }
 
 impl Client {
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(bootstrap = %bootstrap, client_id = %options.client_id),
+        err,
+    )]
     async fn start_with_options(
         bootstrap: String,
         options: ConnectionOptions,
@@ -61,6 +73,7 @@ impl Client {
     }
 
     /// Send a request to the bootstrap broker (or any cached open connection).
+    #[tracing::instrument(level = "debug", skip_all, fields(api_key = R::API_KEY), err)]
     pub async fn send<R: ProtocolRequest>(&self, req: R) -> Result<R::Response, ClientError> {
         let conn = self.pool.bootstrap_connection().await?;
         conn.send(req).await
@@ -70,6 +83,7 @@ impl Client {
     /// list from the original bootstrap string. Callers that know their
     /// bootstrap request is safe to retry can use this after a transport error
     /// before sending again.
+    #[tracing::instrument(level = "debug", skip_all, fields(bootstrap = %self.bootstrap))]
     pub async fn reconnect_bootstrap(&self) {
         self.pool.evict_bootstrap();
         if let Ok(addrs) = bootstrap::resolve(&self.bootstrap).await {
@@ -114,6 +128,12 @@ impl Client {
     /// refresh the pool's address registry, and return the typed response.
     // cargo-mutants: live-broker metadata round-trip; not unit-testable
     #[cfg_attr(test, mutants::skip)]
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(brokers = tracing::field::Empty),
+        err,
+    )]
     pub async fn refresh_metadata(
         &self,
     ) -> Result<crabka_protocol::owned::metadata_response::MetadataResponse, ClientError> {
@@ -149,6 +169,7 @@ impl Client {
                 rack: b.rack.clone(),
             })
             .collect();
+        tracing::Span::current().record("brokers", brokers.len());
         self.pool.refresh_brokers(&brokers).await;
         Ok(resp)
     }
@@ -163,6 +184,12 @@ impl Client {
     /// # Errors
     /// Transport / version-negotiation failure, or a partition not present in
     /// the response.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(topic = %topic, partition, current_leader_epoch, leader_epoch),
+        err,
+    )]
     pub async fn offset_for_leader_epoch(
         &self,
         topic: &str,
@@ -206,6 +233,12 @@ impl Client {
     /// # Errors
     /// `Disconnected` if `broker_id` is not in the registry; transport /
     /// version-negotiation failure; or a partition not present in the response.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(broker_id, topic = %topic, partition, current_leader_epoch, leader_epoch),
+        err,
+    )]
     pub async fn offset_for_leader_epoch_on(
         &self,
         broker_id: i32,
@@ -267,6 +300,12 @@ impl BrokerHandle<'_> {
     /// fallback only triggers when the id was never in the registry.
     // cargo-mutants: live-broker send path; not unit-testable
     #[cfg_attr(test, mutants::skip)]
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(broker_id = self.broker_id, api_key = R::API_KEY),
+        err,
+    )]
     pub async fn send<R: ProtocolRequest>(&self, req: R) -> Result<R::Response, ClientError> {
         let conn = match self.client.pool.get(self.broker_id).await {
             Ok(conn) => conn,

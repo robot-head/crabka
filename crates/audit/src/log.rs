@@ -125,6 +125,11 @@ impl AuditWriter {
 
     /// Drain the channel until all senders drop; emit a final checkpoint for
     /// any pending tail.
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(checkpoint_every_n = self.checkpoint_every_n, spooling = self.spooling)
+    )]
     pub async fn run(mut self) {
         let mut ckpt = tokio::time::interval_at(
             Instant::now() + self.checkpoint_every,
@@ -167,20 +172,32 @@ impl AuditWriter {
         }
     }
 
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(class = ?event.class(), seq = tracing::field::Empty)
+    )]
     async fn write_chained(&mut self, event: &AuditEvent) {
         let mut record = AuditRecord::from_event(event, &self.product);
         let (seq, prev) = self.chain.extend(&record.value);
+        tracing::Span::current().record("seq", seq);
         record.push_chain_headers(seq, &prev);
         self.write_or_spool(record).await;
         self.since_checkpoint += 1;
     }
 
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(since_checkpoint = self.since_checkpoint, seq_high = tracing::field::Empty)
+    )]
     async fn emit_checkpoint(&mut self) {
         let Some(signer) = self.signer.clone() else {
             self.since_checkpoint = 0;
             return;
         };
         let seq_high = self.chain.next_seq().saturating_sub(1);
+        tracing::Span::current().record("seq_high", seq_high);
         let head = self.chain.head();
         let cp = Checkpoint::signed(signer.as_ref(), seq_high, &head, now_ms());
         self.write_or_spool(cp.to_record()).await;
@@ -189,6 +206,11 @@ impl AuditWriter {
 
     /// Write to the sink, or to the spool if we're in (sticky) spool mode or
     /// the sink write fails.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(class = ?record.class, spooling = self.spooling)
+    )]
     async fn write_or_spool(&mut self, record: AuditRecord) {
         if self.spooling {
             self.spool_record(&record);
@@ -201,6 +223,7 @@ impl AuditWriter {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(class = ?record.class))]
     fn spool_record(&mut self, record: &AuditRecord) {
         let Some(spool) = &mut self.spool else {
             self.stats.inc_dropped();
@@ -224,6 +247,11 @@ impl AuditWriter {
 
     /// Drain the spool to the sink in order; exit spool mode when fully
     /// drained.
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(replayed = tracing::field::Empty, total = tracing::field::Empty)
+    )]
     async fn try_replay(&mut self) {
         let Some(spool) = &mut self.spool else {
             self.spooling = false;
@@ -247,6 +275,9 @@ impl AuditWriter {
             }
             replayed += 1;
         }
+        let span = tracing::Span::current();
+        span.record("replayed", replayed);
+        span.record("total", records.len());
         if replayed == records.len() {
             if let Err(e) = spool.truncate() {
                 tracing::error!(error = %e, "audit spool truncate failed");

@@ -55,6 +55,7 @@ pub struct TcpConnector {
 impl BrokerConnector for TcpConnector {
     type Conn = Connection;
 
+    #[tracing::instrument(level = "debug", skip_all, fields(addr = %addr), err)]
     async fn dial(&self, addr: SocketAddr) -> Result<Connection, ClientError> {
         Connection::connect_with_options(addr, self.options.clone()).await
     }
@@ -104,6 +105,7 @@ impl<C: BrokerConnector> BrokerPool<C> {
     /// learned the (id, address) mapping via [`refresh_brokers`].
     ///
     /// [`refresh_brokers`]: BrokerPool::refresh_brokers
+    #[tracing::instrument(level = "debug", skip_all, fields(broker_id), err)]
     pub async fn get(&self, broker_id: i32) -> Result<Arc<C::Conn>, ClientError> {
         if let Some(entry) = self.by_id.get(&broker_id) {
             return Ok(entry.clone());
@@ -151,6 +153,7 @@ impl<C: BrokerConnector> BrokerPool<C> {
 
     /// Get-or-connect to the first reachable bootstrap address. The bootstrap
     /// connection is cached under the synthetic broker id `-1`.
+    #[tracing::instrument(level = "debug", skip_all, err)]
     pub async fn bootstrap_connection(&self) -> Result<Arc<C::Conn>, ClientError> {
         if let Some(entry) = self.by_id.get(&BOOTSTRAP_ID) {
             return Ok(entry.clone());
@@ -182,6 +185,7 @@ impl<C: BrokerConnector> BrokerPool<C> {
     /// [`get`](BrokerPool::get) reports `Disconnected` for that id, letting a
     /// caller fall back to the bootstrap connection rather than attempting a
     /// doomed `host:0` connect.
+    #[tracing::instrument(level = "debug", skip_all, fields(brokers = brokers.len()))]
     pub async fn refresh_brokers(&self, brokers: &[BrokerInfo]) {
         for b in brokers {
             let Ok(port) = u16::try_from(b.port) else {

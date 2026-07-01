@@ -104,6 +104,13 @@ fn coordinator_node_id(r: &FindCoordinatorResponse) -> i32 {
 /// Returns the coordinator's `node_id`. Errors with `Server(code)` if the lookup
 /// keeps returning a non-zero, non-retriable code; with `CoordinatorUnavailable`
 /// if after the refresh the pool still has no dialable address for that id.
+#[tracing::instrument(
+    name = "consumer.find_coordinator",
+    level = "info",
+    skip_all,
+    fields(group_id = %group_id, coordinator_id = tracing::field::Empty),
+    err
+)]
 pub(crate) async fn find_coordinator(
     client: &Client,
     group_id: &str,
@@ -138,6 +145,7 @@ pub(crate) async fn find_coordinator(
     // a single-broker cluster IS the coordinator. So we no longer hard-fail when
     // the coordinator isn't a separately dialable broker.
     client.refresh_metadata().await?;
+    tracing::Span::current().record("coordinator_id", node_id);
     Ok(node_id)
 }
 
@@ -404,6 +412,13 @@ const SUBSCRIPTION_METADATA_REFRESH: Duration = Duration::from_secs(5);
 /// Current partition count of each subscribed topic that exists in broker
 /// metadata. A subscribed topic not yet created is simply absent from the map
 /// (so it later shows up as growth once the topic is created).
+#[tracing::instrument(
+    name = "consumer.subscribed_partition_counts",
+    level = "debug",
+    skip_all,
+    fields(group_id = %state.group_id, topics = tracing::field::Empty),
+    err
+)]
 async fn subscribed_partition_counts(
     state: &CoordinatorState,
 ) -> Result<HashMap<String, i32>, ConsumerError> {
@@ -418,6 +433,7 @@ async fn subscribed_partition_counts(
             );
         }
     }
+    tracing::Span::current().record("topics", counts.len());
     Ok(counts)
 }
 
@@ -566,6 +582,12 @@ pub(crate) async fn run(mut state: CoordinatorState, shutdown: CancellationToken
 /// from-scratch rejoin that never re-completed), which the broker wouldn't
 /// recognize anyway.
 #[cfg_attr(test, mutants::skip)] // cargo-mutants: best-effort shutdown I/O, exercised by integration tests
+#[tracing::instrument(
+    name = "consumer.leave_group",
+    level = "info",
+    skip_all,
+    fields(group_id = %state.group_id, member_id = %state.member_id)
+)]
 async fn leave_group(state: &CoordinatorState) {
     if state.member_id.is_empty() {
         return;
@@ -594,6 +616,16 @@ async fn leave_group(state: &CoordinatorState) {
 /// re-discovery — the coordinator moved, so the next tick's heartbeat/rejoin
 /// must target the new broker — and is reported as `Transient` so we simply
 /// retry on the next tick.
+#[tracing::instrument(
+    name = "consumer.heartbeat",
+    level = "debug",
+    skip_all,
+    fields(
+        group_id = %state.group_id,
+        member_id = %state.member_id,
+        generation = state.generation_id,
+    )
+)]
 async fn heartbeat_once(state: &CoordinatorState) -> HeartbeatOutcome {
     let result = state
         .client
@@ -654,6 +686,20 @@ async fn refind_after(state: &CoordinatorState, ctx: &str) {
 /// For [`RebalanceProtocol::Cooperative`] this may issue *two* Join+Sync
 /// rounds back-to-back: the first to install the kept partitions only,
 /// the second (phase 2) to receive the freshly placed ones. See KIP-429.
+#[tracing::instrument(
+    name = "consumer.rejoin",
+    level = "info",
+    skip_all,
+    fields(
+        group_id = %state.group_id,
+        member_id = %state.member_id,
+        protocol = ?state.assignor.rebalance_protocol(),
+        generation = tracing::field::Empty,
+        revoked = tracing::field::Empty,
+        added = tracing::field::Empty,
+    ),
+    err
+)]
 async fn rejoin(state: &mut CoordinatorState) -> Result<HashMap<String, i32>, ConsumerError> {
     let owned: Vec<(String, i32)> = state.assigned.lock().await.clone();
     let (new_assignment, new_generation, _protocol_name, topic_partitions) =
@@ -663,6 +709,10 @@ async fn rejoin(state: &mut CoordinatorState) -> Result<HashMap<String, i32>, Co
     let new_set: HashSet<(String, i32)> = new_assignment.iter().cloned().collect();
     let revoked: Vec<(String, i32)> = old_set.difference(&new_set).cloned().collect();
     let added: Vec<(String, i32)> = new_set.difference(&old_set).cloned().collect();
+    let span = tracing::Span::current();
+    span.record("generation", new_generation);
+    span.record("revoked", revoked.len());
+    span.record("added", added.len());
 
     // The subscribed-topic partition snapshot the FINAL published assignment was
     // computed against — returned so the coordinator re-baselines against exactly
@@ -783,6 +833,16 @@ async fn rejoin(state: &mut CoordinatorState) -> Result<HashMap<String, i32>, Co
 /// into `poll()` would break the KIP-429 transparency guarantee. Worst
 /// case the new owner re-delivers a few records (at-least-once).
 #[cfg_attr(test, mutants::skip)] // cargo-mutants: best-effort revoke-time commit I/O, exercised by integration tests
+#[tracing::instrument(
+    name = "consumer.commit_revoked",
+    level = "debug",
+    skip_all,
+    fields(
+        group_id = %state.group_id,
+        generation = state.generation_id,
+        revoked = revoked.len(),
+    )
+)]
 async fn commit_revoked(state: &CoordinatorState, revoked: &[(String, i32)]) {
     let revoked_set: HashSet<&(String, i32)> = revoked.iter().collect();
     let offsets: HashMap<(String, i32), (i64, i32)> = {
@@ -908,6 +968,20 @@ fn build_sync_group_request(
 // Sequential join/sync state machine; splitting fragments the linear
 // MEMBER_ID_REQUIRED → leader-assign → SyncGroup flow.
 #[allow(clippy::too_many_lines)]
+#[tracing::instrument(
+    name = "consumer.join_and_sync",
+    level = "info",
+    skip_all,
+    fields(
+        group_id = %state.group_id,
+        member_id = tracing::field::Empty,
+        generation = tracing::field::Empty,
+        is_leader = tracing::field::Empty,
+        protocol = tracing::field::Empty,
+        assigned_partitions = tracing::field::Empty,
+    ),
+    err
+)]
 async fn join_and_sync(
     state: &mut CoordinatorState,
     owned: &[(String, i32)],
@@ -1034,6 +1108,13 @@ async fn join_and_sync(
 
     // Leader: resolve partition counts via Metadata and run the assignor.
     let is_leader = join_resp.leader == state.member_id;
+    {
+        let span = tracing::Span::current();
+        span.record("member_id", state.member_id.as_str());
+        span.record("generation", generation_id);
+        span.record("is_leader", is_leader);
+        span.record("protocol", chosen_protocol.as_str());
+    }
     // Subscribed-topic partition counts the assignment is computed against,
     // captured from the SAME Metadata the leader runs the assignor on (empty for
     // a non-leader). Returned so the coordinator's rejoin baseline tracks exactly
@@ -1127,6 +1208,7 @@ async fn join_and_sync(
         return Err(ConsumerError::Server(sync_resp.error_code));
     }
     let my_assignment = decode_assignment(&sync_resp.assignment);
+    tracing::Span::current().record("assigned_partitions", my_assignment.len());
     Ok((
         my_assignment,
         generation_id,
@@ -1139,6 +1221,13 @@ async fn join_and_sync(
 /// committed offsets, falling back to `auto.offset.reset` semantics
 /// when no commit exists. Mirrors the initial-prime in
 /// `consumer.rs::start` step 5.
+#[tracing::instrument(
+    name = "consumer.prime_offsets",
+    level = "debug",
+    skip_all,
+    fields(group_id = %state.group_id, partitions = partitions.len()),
+    err
+)]
 async fn prime_offsets(
     state: &CoordinatorState,
     partitions: &[(String, i32)],

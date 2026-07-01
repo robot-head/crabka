@@ -9,6 +9,12 @@
 //! `None` is structural metadata and has no Processor-API node to lower.
 use crate::dsl::graph::{GraphNodeKind, LogicalGraph, LowerState};
 
+#[tracing::instrument(
+    name = "streams.dsl.lower",
+    level = "info",
+    skip_all,
+    fields(app_id = %app_id, nodes = graph.nodes.len()),
+)]
 pub(crate) fn lower(mut graph: LogicalGraph, app_id: &str) -> crate::topology::Topology {
     // REUSE_KTABLE_SOURCE_TOPICS: collect node id → source topic for every
     // TableSource the optimizer flagged, so its thunk can register its store with

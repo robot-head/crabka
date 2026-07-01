@@ -9,6 +9,12 @@ use std::collections::HashMap;
 
 /// Returns `member_id → Vec<(topic, partition)>` assignments.
 #[must_use]
+#[tracing::instrument(
+    name = "consumer.assignor.range",
+    level = "info",
+    skip_all,
+    fields(members = members.len(), topics = topic_partitions.len())
+)]
 pub fn assign(
     mut members: Vec<(String, Vec<String>)>,
     topic_partitions: &HashMap<String, i32>,

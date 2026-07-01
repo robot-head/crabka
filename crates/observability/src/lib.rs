@@ -99,6 +99,7 @@ use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, sleep};
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument as _;
 use url::Url;
 
 const LOKI_REJECT_OLD_SAMPLES_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
@@ -746,6 +747,9 @@ pub async fn run_compactor_until_shutdown(
     let mut object_store_retry_backoff = Duration::from_millis(10);
     let mut tenant_indexes = TenantCompactionIndexCache::new();
     let mut pending_compaction_records: Option<Vec<KafkaWalRecord>> = None;
+    // Shared RED-metrics bundle for the `:9404` exporter; `None` in tests that
+    // don't wire metrics, so block-written accounting is a no-op there.
+    let metrics = dependencies.metrics.clone();
     tokio::pin!(shutdown);
 
     loop {
@@ -837,6 +841,10 @@ pub async fn run_compactor_until_shutdown(
                     {
                         Ok(()) => {
                             object_store_retry_backoff = Duration::from_millis(10);
+                            // One durable log block persisted to object storage.
+                            if let Some(metrics) = &metrics {
+                                metrics.record_block_written();
+                            }
                             break;
                         }
                         Err(error) if compactor_run_error_is_object_store(&error) => {
@@ -1042,6 +1050,47 @@ async fn compact_polled_kafka_wal_records_to_object_store_from_existing_manifest
         return Ok(Vec::new());
     }
 
+    // ONE consumer span per poll batch: stitch it onto the ingest trace via the
+    // `traceparent` a producer injected in `build_kafka_wal_record`. The first
+    // record carrying a trace context is representative of the batch.
+    let span = tracing::info_span!(
+        "logs_compaction",
+        otel.kind = "consumer",
+        crabka.wal.records = records.len(),
+    );
+    if let Some(parent) = records
+        .iter()
+        .find(|rec| rec.headers.iter().any(|h| h.key == "traceparent"))
+    {
+        crabka_telemetry::propagation::set_remote_parent(
+            &span,
+            parent
+                .headers
+                .iter()
+                .map(|h| (h.key.as_str(), h.value.as_deref().unwrap_or(&[][..]))),
+        );
+    }
+
+    compact_polled_kafka_wal_records_inner(
+        store,
+        prefix,
+        consumer,
+        records,
+        delete_requests,
+        tenant_indexes,
+    )
+    .instrument(span)
+    .await
+}
+
+async fn compact_polled_kafka_wal_records_inner(
+    store: &dyn ObjectStore,
+    prefix: &ObjectPath,
+    consumer: &mut (impl LogWalConsumer + ?Sized),
+    records: Vec<KafkaWalRecord>,
+    delete_requests: &SharedLogDeleteRequests,
+    tenant_indexes: &mut TenantCompactionIndexCache,
+) -> Result<Vec<BlockDescriptor>, CompactorRunError> {
     let decoded = records
         .into_iter()
         .map(decode_kafka_wal_record_envelope)
@@ -2744,21 +2793,32 @@ pub fn build_kafka_wal_record(
     record: &WalLogRecord,
 ) -> Result<ProducerRecord, WalSinkError> {
     let fingerprint = series_fingerprint(&record.labels);
+    let mut headers = vec![
+        ProducerHeader {
+            key: "crabka-wal-record-type".to_string(),
+            value: Some(Bytes::from_static(b"log")),
+        },
+        ProducerHeader {
+            key: "crabka-tenant".to_string(),
+            value: Some(Bytes::from(record.tenant.clone())),
+        },
+    ];
+    // Inject the current span's W3C trace context (`traceparent`/`tracestate`)
+    // so the compactor can stitch its consume/compaction span onto the ingest
+    // trace. Additive: the record body is unchanged, and this is a no-op when
+    // there is no active/sampled span.
+    for (key, value) in crabka_telemetry::propagation::current_trace_headers() {
+        headers.push(ProducerHeader {
+            key,
+            value: Some(Bytes::from(value.into_bytes())),
+        });
+    }
     Ok(ProducerRecord {
         topic: topic.into(),
         partition: None,
         key: Some(Bytes::from(format!("{}:{fingerprint}", record.tenant))),
         value: Some(Bytes::from(serde_json::to_vec(record)?)),
-        headers: vec![
-            ProducerHeader {
-                key: "crabka-wal-record-type".to_string(),
-                value: Some(Bytes::from_static(b"log")),
-            },
-            ProducerHeader {
-                key: "crabka-tenant".to_string(),
-                value: Some(Bytes::from(record.tenant.clone())),
-            },
-        ],
+        headers,
         timestamp_ms: Some(record.timestamp_ns / 1_000_000),
     })
 }
@@ -3436,33 +3496,66 @@ struct OtlpKeyValueList {
     values: Option<Vec<OtlpKeyValue>>,
 }
 
+/// Tenant for an ingest request from `X-Scope-OrgID`, falling back to
+/// `"unknown"` when the header is missing, non-UTF-8, or empty. Used only to
+/// label the ingest span / per-tenant metric — the WAL records carry their own
+/// per-record tenant, so a permissive fallback here never affects storage.
+fn ingest_tenant(headers: &HeaderMap) -> String {
+    headers
+        .get("X-Scope-OrgID")
+        .and_then(|v| v.to_str().ok())
+        .filter(|t| !t.is_empty())
+        .unwrap_or("unknown")
+        .to_string()
+}
+
 async fn push_logs(
     State(state): State<DistributorState>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let start = Instant::now();
     let bytes = body.len() as u64;
-    if let Err(error) = validate_ingest_body_limit(&state, body.len()) {
-        return record_ingest_response(&state, error.into_response(), bytes, 0, start);
-    }
-    let resp = match normalize_loki_http_push(
-        &headers,
-        &body,
-        state.reject_old_samples_max_age,
-        state.creation_grace_period,
-    ) {
-        Ok(records) => {
-            let items = records.len() as u64;
-            let resp = match append_distributor_wal_records(&state, records).await {
-                Ok(()) => StatusCode::NO_CONTENT.into_response(),
-                Err(error) => error.into_response(),
-            };
-            return record_ingest_response(&state, resp, bytes, items, start);
+    let tenant = ingest_tenant(&headers);
+    // ONE server span per push request (not per log line): wraps the whole
+    // ingest body so the produce-side WAL append (which injects `traceparent`)
+    // and downstream compaction stitch onto this trace. `crabka.ingest.lines`
+    // is unknown until normalization, so it is recorded on the span below.
+    let span = tracing::info_span!(
+        "logs_ingest",
+        otel.kind = "server",
+        messaging.system = "kafka",
+        messaging.destination.name = "__crabka_observability_logs_wal",
+        crabka.tenant = %tenant,
+        crabka.ingest.lines = tracing::field::Empty,
+        crabka.ingest.bytes = bytes,
+    );
+    async move {
+        let start = Instant::now();
+        if let Err(error) = validate_ingest_body_limit(&state, body.len()) {
+            return record_ingest_response(&state, error.into_response(), bytes, 0, start);
         }
-        Err(error) => error.into_response(),
-    };
-    record_ingest_response(&state, resp, bytes, 0, start)
+        let resp = match normalize_loki_http_push(
+            &headers,
+            &body,
+            state.reject_old_samples_max_age,
+            state.creation_grace_period,
+        ) {
+            Ok(records) => {
+                let items = records.len() as u64;
+                tracing::Span::current().record("crabka.ingest.lines", items);
+                state.metrics.record_ingest_lines(&tenant, items);
+                let resp = match append_distributor_wal_records(&state, records).await {
+                    Ok(()) => StatusCode::NO_CONTENT.into_response(),
+                    Err(error) => error.into_response(),
+                };
+                return record_ingest_response(&state, resp, bytes, items, start);
+            }
+            Err(error) => error.into_response(),
+        };
+        record_ingest_response(&state, resp, bytes, 0, start)
+    }
+    .instrument(span)
+    .await
 }
 
 async fn push_otlp_logs(
@@ -3470,44 +3563,63 @@ async fn push_otlp_logs(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let start = Instant::now();
     let bytes = body.len() as u64;
-    if let Err(error) = validate_ingest_body_limit(&state, body.len()) {
-        return record_ingest_response(&state, error.into_response(), bytes, 0, start);
+    let tenant = ingest_tenant(&headers);
+    // ONE server span per OTLP push request, mirroring the Loki push handler:
+    // the OTLP emit path feeds the same log WAL, so instrumenting it keeps the
+    // produce→compaction trace intact for OTLP-emitted logs too.
+    let span = tracing::info_span!(
+        "logs_ingest",
+        otel.kind = "server",
+        messaging.system = "kafka",
+        messaging.destination.name = "__crabka_observability_logs_wal",
+        crabka.tenant = %tenant,
+        crabka.ingest.lines = tracing::field::Empty,
+        crabka.ingest.bytes = bytes,
+    );
+    async move {
+        let start = Instant::now();
+        if let Err(error) = validate_ingest_body_limit(&state, body.len()) {
+            return record_ingest_response(&state, error.into_response(), bytes, 0, start);
+        }
+        let resp = match normalize_otlp_http_logs(
+            &headers,
+            &body,
+            state.reject_old_samples_max_age,
+            state.creation_grace_period,
+        ) {
+            Ok(records) => {
+                let items = records.len() as u64;
+                tracing::Span::current().record("crabka.ingest.lines", items);
+                state.metrics.record_ingest_lines(&tenant, items);
+                let resp = match append_distributor_wal_records(&state, records).await {
+                    Ok(()) => StatusCode::NO_CONTENT.into_response(),
+                    Err(error) => {
+                        // Surface why an accepted OTLP log batch failed to persist
+                        // (WAL append errors are otherwise opaque to the client).
+                        tracing::debug!(error = %error, "OTLP logs: WAL append failed");
+                        error.into_response()
+                    }
+                };
+                return record_ingest_response(&state, resp, bytes, items, start);
+            }
+            Err(error) => {
+                // Surface why an OTLP log push was rejected at decode/normalize
+                // (content-type, encoding, and size pinpoint client misconfig).
+                tracing::debug!(
+                    error = %error,
+                    content_type = ?headers.get(CONTENT_TYPE).and_then(|v| v.to_str().ok()),
+                    content_encoding = ?headers.get(CONTENT_ENCODING).and_then(|v| v.to_str().ok()),
+                    bytes,
+                    "OTLP logs: decode/normalize rejected the request"
+                );
+                otlp_http_error_response(error)
+            }
+        };
+        record_ingest_response(&state, resp, bytes, 0, start)
     }
-    let resp = match normalize_otlp_http_logs(
-        &headers,
-        &body,
-        state.reject_old_samples_max_age,
-        state.creation_grace_period,
-    ) {
-        Ok(records) => {
-            let items = records.len() as u64;
-            let resp = match append_distributor_wal_records(&state, records).await {
-                Ok(()) => StatusCode::NO_CONTENT.into_response(),
-                Err(error) => {
-                    // Surface why an accepted OTLP log batch failed to persist
-                    // (WAL append errors are otherwise opaque to the client).
-                    tracing::debug!(error = %error, "OTLP logs: WAL append failed");
-                    error.into_response()
-                }
-            };
-            return record_ingest_response(&state, resp, bytes, items, start);
-        }
-        Err(error) => {
-            // Surface why an OTLP log push was rejected at decode/normalize
-            // (content-type, encoding, and size pinpoint client misconfig).
-            tracing::debug!(
-                error = %error,
-                content_type = ?headers.get(CONTENT_TYPE).and_then(|v| v.to_str().ok()),
-                content_encoding = ?headers.get(CONTENT_ENCODING).and_then(|v| v.to_str().ok()),
-                bytes,
-                "OTLP logs: decode/normalize rejected the request"
-            );
-            otlp_http_error_response(error)
-        }
-    };
-    record_ingest_response(&state, resp, bytes, 0, start)
+    .instrument(span)
+    .await
 }
 
 /// Record one push-handler ingest outcome from the response status and return

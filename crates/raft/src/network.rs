@@ -53,6 +53,7 @@ pub struct PlaintextDialer;
 
 #[async_trait]
 impl OutboundDialer for PlaintextDialer {
+    #[tracing::instrument(level = "debug", skip_all, fields(target = _target, addr), err)]
     async fn dial(
         &self,
         _target: NodeId,
@@ -127,6 +128,7 @@ impl RealPeerSender {
     }
 
     /// Look up or open a connection to `peer`.
+    #[tracing::instrument(level = "debug", skip_all, fields(peer), err)]
     async fn connect(&self, peer: NodeId) -> Result<Arc<Connection>, RaftError> {
         if let Some(c) = self.connections.get(&peer) {
             return Ok(c.value().clone());
@@ -146,6 +148,7 @@ impl RealPeerSender {
 
 #[async_trait]
 impl PeerSender for RealPeerSender {
+    #[tracing::instrument(level = "debug", skip_all, fields(peer, api_key = key), err)]
     async fn send(&self, peer: NodeId, key: i16, body: Bytes) -> Result<Bytes, RaftError> {
         let conn = self.connect(peer).await?;
         let version = api_version_for(key);

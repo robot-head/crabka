@@ -25,6 +25,13 @@ use crate::codes;
 use crate::error::BrokerError;
 
 #[allow(clippy::unused_async)] // async to match the inline-intercept handler shape.
+#[tracing::instrument(
+    name = "handle_get_replica_log_info",
+    level = "info",
+    skip_all,
+    fields(api = "GetReplicaLogInfo", version, req_bytes = req_bytes.len()),
+    err,
+)]
 pub(crate) async fn handle(
     broker: &Broker,
     version: i16,

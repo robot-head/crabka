@@ -76,6 +76,13 @@ fn key_authz_failure(
 }
 
 #[allow(clippy::too_many_lines)]
+#[tracing::instrument(
+    name = "handle_find_coordinator",
+    level = "info",
+    skip_all,
+    fields(api = "FindCoordinator", version, req_bytes = req_bytes.len()),
+    err,
+)]
 pub(crate) async fn handle(
     broker: &Broker,
     version: i16,

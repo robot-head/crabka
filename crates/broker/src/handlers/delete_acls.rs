@@ -17,6 +17,13 @@ use crate::broker::Broker;
 use crate::codes;
 
 #[allow(clippy::too_many_lines)]
+#[tracing::instrument(
+    name = "handle_delete_acls",
+    level = "info",
+    skip_all,
+    fields(api = "DeleteAcls"),
+    err
+)]
 pub(crate) async fn handle(
     broker: &Broker,
     req: DeleteAclsRequest,

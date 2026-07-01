@@ -29,6 +29,11 @@ pub struct Checkpoint {
 impl Checkpoint {
     /// Build and sign a checkpoint with `signer`.
     #[must_use]
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(key_id = %signer.key_id(), seq_high, time_ms)
+    )]
     pub fn signed(
         signer: &dyn SigningKeyProvider,
         seq_high: u64,
@@ -48,6 +53,11 @@ impl Checkpoint {
 
     /// Verify this checkpoint's signature against a trusted public key.
     #[must_use]
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(key_id = %self.key_id, seq_high = self.seq_high)
+    )]
     pub fn verify(&self, public_key: &[u8]) -> bool {
         let msg =
             checkpoint_signing_bytes(&self.key_id, self.seq_high, &self.chain_head, self.time_ms);

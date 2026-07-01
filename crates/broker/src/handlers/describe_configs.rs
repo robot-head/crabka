@@ -202,6 +202,13 @@ fn denied_result(
 }
 
 #[allow(clippy::unused_async)] // async to match the inline-intercept handler shape.
+#[tracing::instrument(
+    name = "handle_describe_configs",
+    level = "info",
+    skip_all,
+    fields(api = "DescribeConfigs", version, req_bytes = req_bytes.len()),
+    err,
+)]
 pub(crate) async fn handle(
     broker: &Broker,
     version: i16,

@@ -2,6 +2,10 @@
 //!
 //! Parses `PromQL` with `promql-parser`, lowers the AST onto `DataFusion` plans, and
 //! evaluates instant/range queries over a step grid.
+// `#[tracing::instrument]` adds a future layer to already deeply-nested
+// DataFusion plan/optimizer types; the test target's Send auto-trait evaluation
+// then overflows the default depth, so raise it.
+#![recursion_limit = "512"]
 
 mod block_store;
 mod conformance;

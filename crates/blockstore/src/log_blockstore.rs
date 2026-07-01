@@ -32,6 +32,7 @@ use object_store::{ObjectStore, ObjectStoreExt};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tracing::instrument;
 use xxhash_rust::xxh3::xxh3_64;
 
 pub type Labels = BTreeMap<String, String>;
@@ -362,6 +363,11 @@ impl LogRow {
     }
 }
 
+#[instrument(
+    skip_all,
+    fields(tenant = %key.tenant, partition = key.partition, rows = rows.len()),
+    err
+)]
 pub fn write_log_block(
     root: impl AsRef<Path>,
     key: &BlockKey,
@@ -389,6 +395,11 @@ pub fn write_log_block(
     ))
 }
 
+#[instrument(
+    skip_all,
+    fields(tenant = %key.tenant, partition = key.partition, rows = rows.len(), size = tracing::field::Empty),
+    err
+)]
 pub async fn write_log_block_to_object_store(
     store: &dyn ObjectStore,
     prefix: &ObjectPath,
@@ -400,6 +411,7 @@ pub async fn write_log_block_to_object_store(
 
     let payload = encode_log_block(&rows)?;
     let size_bytes = u64::try_from(payload.len()).unwrap_or(u64::MAX);
+    tracing::Span::current().record("size", size_bytes);
     store
         .put(&log_block_object_path(prefix, key), payload.into())
         .await?;
@@ -411,6 +423,12 @@ pub async fn write_log_block_to_object_store(
     ))
 }
 
+#[instrument(
+    level = "debug",
+    skip_all,
+    fields(tenant = %key.tenant, partition = key.partition),
+    err
+)]
 pub fn read_log_block(
     root: impl AsRef<Path>,
     key: &BlockKey,
@@ -424,6 +442,12 @@ pub fn read_log_block(
     Ok(rows)
 }
 
+#[instrument(
+    level = "debug",
+    skip_all,
+    fields(tenant = %key.tenant, partition = key.partition),
+    err
+)]
 pub async fn read_log_block_from_object_store(
     store: &dyn ObjectStore,
     prefix: &ObjectPath,
@@ -614,6 +638,7 @@ fn validate_planned_blocks(blocks: &[BlockDescriptor]) -> Result<(), BlockStoreE
 const LOG_INDEX_MANIFEST_RELATIVE_PATH: &str = "index/logs/manifest.json";
 const LOG_INDEX_MANIFEST_VERSION: u32 = 1;
 
+#[instrument(skip_all, err)]
 pub fn write_log_index_manifest(
     root: impl AsRef<Path>,
     label_index: &LabelIndex,
@@ -629,6 +654,7 @@ pub fn write_log_index_manifest(
     Ok(())
 }
 
+#[instrument(skip_all, err)]
 pub async fn write_log_index_manifest_to_object_store(
     store: &dyn ObjectStore,
     prefix: &ObjectPath,
@@ -643,6 +669,7 @@ pub async fn write_log_index_manifest_to_object_store(
     Ok(())
 }
 
+#[instrument(skip_all, fields(tenant = %tenant), err)]
 pub async fn write_tenant_log_index_manifest_to_object_store(
     store: &dyn ObjectStore,
     prefix: &ObjectPath,
@@ -661,6 +688,11 @@ pub async fn write_tenant_log_index_manifest_to_object_store(
     Ok(())
 }
 
+#[instrument(
+    skip_all,
+    fields(tenant = %tenant, start_ns = shard_range.start_ns, end_ns = shard_range.end_ns),
+    err
+)]
 pub async fn write_tenant_log_index_shard_to_object_store(
     store: &dyn ObjectStore,
     prefix: &ObjectPath,
@@ -708,6 +740,7 @@ pub async fn write_tenant_log_index_shards_to_object_store(
     write_tenant_log_index_shard_catalog_to_object_store(store, prefix, tenant, shard_ranges).await
 }
 
+#[instrument(skip_all, fields(tenant = %tenant, shards = shard_ranges.len()), err)]
 pub async fn write_tenant_log_index_shard_catalog_to_object_store(
     store: &dyn ObjectStore,
     prefix: &ObjectPath,
@@ -725,6 +758,7 @@ pub async fn write_tenant_log_index_shard_catalog_to_object_store(
     Ok(())
 }
 
+#[instrument(level = "debug", skip_all, err)]
 pub fn read_log_index_manifest(
     root: impl AsRef<Path>,
 ) -> Result<(LabelIndex, BlockIndex), BlockStoreError> {
@@ -733,6 +767,7 @@ pub fn read_log_index_manifest(
     manifest.into_indexes()
 }
 
+#[instrument(level = "debug", skip_all, fields(tenant = %tenant), err)]
 pub async fn read_tenant_log_index_manifest_from_object_store(
     store: &dyn ObjectStore,
     prefix: &ObjectPath,
@@ -747,6 +782,12 @@ pub async fn read_tenant_log_index_manifest_from_object_store(
     manifest.into_indexes_for_tenant(tenant)
 }
 
+#[instrument(
+    level = "debug",
+    skip_all,
+    fields(tenant = %tenant, start_ns = shard_range.start_ns, end_ns = shard_range.end_ns),
+    err
+)]
 pub async fn read_tenant_log_index_shard_from_object_store(
     store: &dyn ObjectStore,
     prefix: &ObjectPath,
@@ -766,6 +807,7 @@ pub async fn read_tenant_log_index_shard_from_object_store(
     manifest.into_indexes_for_tenant(tenant)
 }
 
+#[instrument(level = "debug", skip_all, fields(tenant = %tenant), err)]
 pub async fn read_tenant_log_index_shard_ranges_from_object_store(
     store: &dyn ObjectStore,
     prefix: &ObjectPath,
@@ -780,6 +822,7 @@ pub async fn read_tenant_log_index_shard_ranges_from_object_store(
     catalog.into_shards()
 }
 
+#[instrument(level = "debug", skip_all, fields(tenant = %tenant), err)]
 pub async fn list_tenant_log_index_shard_ranges_from_object_store(
     store: &dyn ObjectStore,
     prefix: &ObjectPath,
@@ -794,6 +837,12 @@ pub async fn list_tenant_log_index_shard_ranges_from_object_store(
     .await
 }
 
+#[instrument(
+    level = "debug",
+    skip_all,
+    fields(tenant = %tenant, start_ns = query_range.start_ns, end_ns = query_range.end_ns),
+    err
+)]
 pub async fn list_tenant_log_index_shard_ranges_overlapping_query_from_object_store(
     store: &dyn ObjectStore,
     prefix: &ObjectPath,
@@ -887,6 +936,7 @@ pub async fn read_tenant_log_index_shards_from_object_store(
     Ok((merged_labels, block_index))
 }
 
+#[instrument(level = "debug", skip_all, err)]
 pub async fn read_log_index_manifest_from_object_store(
     store: &dyn ObjectStore,
     prefix: &ObjectPath,

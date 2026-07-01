@@ -35,6 +35,7 @@ impl ParsedSchema for AvroSchema {
 
 /// Directional Avro check: can a reader using `reader` read data written with
 /// `writer`? `Ok(())` if compatible, else `Err(messages)`.
+#[tracing::instrument(level = "debug", name = "avro.check", skip_all, fields(reader_refs = reader_refs.len(), writer_refs = writer_refs.len()))]
 pub fn check(
     reader: &str,
     writer: &str,

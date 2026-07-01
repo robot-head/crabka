@@ -20,6 +20,13 @@ use crate::codes;
 const MAX_PRINCIPAL_LEN: usize = 256;
 const MAX_RESOURCE_NAME_LEN: usize = 256;
 
+#[tracing::instrument(
+    name = "handle_create_acls",
+    level = "info",
+    skip_all,
+    fields(api = "CreateAcls"),
+    err
+)]
 pub(crate) async fn handle(
     broker: &Broker,
     req: CreateAclsRequest,

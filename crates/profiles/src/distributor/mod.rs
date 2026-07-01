@@ -13,10 +13,11 @@ use axum::{Extension, Router, routing::post};
 use connectrpc_axum::message::{Code, ConnectError, ConnectRequest, ConnectResponse};
 use connectrpc_axum::{MakeServiceBuilder, MessageLimits};
 use crabka_broker::throttle::TokenBucket;
-use crabka_client_producer::{Producer, ProducerRecord};
+use crabka_client_producer::{Header, Producer, ProducerRecord};
 use crabka_pprof::PprofProfile;
 use prost::Message;
 use tokio::net::TcpListener;
+use tracing::Instrument as _;
 
 use crate::error::ProfilesError;
 use crate::ingest::{
@@ -72,6 +73,17 @@ impl WalSink for KafkaSink {
     async fn append(&self, rec: ProfileRecord) -> Result<(), ProfilesError> {
         let key = partition_key(&rec.tenant, rec.series_fingerprint());
         let value = rec.encode()?;
+        // Inject the current span's W3C trace context (traceparent/tracestate)
+        // as Kafka record headers so the block-builder consumer can re-parent
+        // its block-build span onto this ingest span, stitching one distributed
+        // trace across the WAL. Additive: empty when no active/sampled span.
+        let headers = crabka_telemetry::propagation::current_trace_headers()
+            .into_iter()
+            .map(|(k, v)| Header {
+                key: k,
+                value: Some(Bytes::from(v.into_bytes())),
+            })
+            .collect();
         let ack = self
             .producer
             .send(ProducerRecord {
@@ -79,6 +91,7 @@ impl WalSink for KafkaSink {
                 partition: None,
                 key: Some(key),
                 value: Some(Bytes::from(value)),
+                headers,
                 ..Default::default()
             })
             .await;
@@ -434,6 +447,17 @@ async fn push_handler(
     // No raw body is exposed by the Connect codec; the decoded message size is a
     // faithful proxy for the request payload bytes.
     let bytes = req.0.encoded_len() as u64;
+    // ONE server span per ingest request (not per sample). `crabka.ingest.samples`
+    // is filled in after the body runs and the item count is known.
+    let ingest_span = tracing::info_span!(
+        "profiles_ingest",
+        otel.kind = "server",
+        messaging.system = "kafka",
+        messaging.destination.name = PROFILES_WAL_TOPIC,
+        crabka.tenant = %ingest_span_tenant(&headers),
+        crabka.ingest.samples = tracing::field::Empty,
+        crabka.ingest.bytes = bytes,
+    );
     let result = async {
         let tenant = tenant_from_headers(&headers)?;
         let raws = decode_push(&req.0, state.max_decompressed)?;
@@ -441,8 +465,13 @@ async fn push_handler(
         process_raw(&state, &tenant, raws).await?;
         Ok::<u64, ProfilesError>(items)
     }
+    .instrument(ingest_span.clone())
     .await;
     let items = *result.as_ref().unwrap_or(&0);
+    ingest_span.record("crabka.ingest.samples", items);
+    if let Ok(tenant) = tenant_from_headers(&headers) {
+        state.metrics.record_ingest_samples(&tenant, items);
+    }
     state
         .metrics
         .record_ingest(result.is_ok(), bytes, items, start.elapsed().as_secs_f64());
@@ -459,6 +488,17 @@ async fn export_handler(
     // No raw body is exposed by the Connect codec; the decoded message size is a
     // faithful proxy for the request payload bytes.
     let bytes = req.0.encoded_len() as u64;
+    // ONE server span per ingest request (not per sample). `crabka.ingest.samples`
+    // is filled in after the body runs and the item count is known.
+    let ingest_span = tracing::info_span!(
+        "profiles_ingest",
+        otel.kind = "server",
+        messaging.system = "kafka",
+        messaging.destination.name = PROFILES_WAL_TOPIC,
+        crabka.tenant = %ingest_span_tenant(&headers),
+        crabka.ingest.samples = tracing::field::Empty,
+        crabka.ingest.bytes = bytes,
+    );
     let result = async {
         let tenant = tenant_from_headers(&headers)?;
         let raws = decode_otlp(&req.0)?;
@@ -466,8 +506,13 @@ async fn export_handler(
         process_raw(&state, &tenant, raws).await?;
         Ok::<u64, ProfilesError>(items)
     }
+    .instrument(ingest_span.clone())
     .await;
     let items = *result.as_ref().unwrap_or(&0);
+    ingest_span.record("crabka.ingest.samples", items);
+    if let Ok(tenant) = tenant_from_headers(&headers) {
+        state.metrics.record_ingest_samples(&tenant, items);
+    }
     state
         .metrics
         .record_ingest(result.is_ok(), bytes, items, start.elapsed().as_secs_f64());
@@ -487,6 +532,17 @@ async fn otlp_http_handler(
     let start = std::time::Instant::now();
     let bytes = body.len() as u64;
     let mut items: u64 = 0;
+    // ONE server span per ingest request (not per sample). `crabka.ingest.samples`
+    // is filled in after the body runs and the item count is known.
+    let ingest_span = tracing::info_span!(
+        "profiles_ingest",
+        otel.kind = "server",
+        messaging.system = "kafka",
+        messaging.destination.name = PROFILES_WAL_TOPIC,
+        crabka.tenant = %ingest_span_tenant(&headers),
+        crabka.ingest.samples = tracing::field::Empty,
+        crabka.ingest.bytes = bytes,
+    );
     let result = async {
         let tenant = tenant_from_headers(&headers)?;
         let req = pb::otlp_profiles::ExportProfilesServiceRequest::decode(body)
@@ -501,8 +557,13 @@ async fn otlp_http_handler(
             .encode_to_vec(),
         )
     }
+    .instrument(ingest_span.clone())
     .await;
 
+    ingest_span.record("crabka.ingest.samples", items);
+    if let Ok(tenant) = tenant_from_headers(&headers) {
+        state.metrics.record_ingest_samples(&tenant, items);
+    }
     state
         .metrics
         .record_ingest(result.is_ok(), bytes, items, start.elapsed().as_secs_f64());
@@ -525,6 +586,17 @@ async fn ingest_handler(
 ) -> Response {
     let start = std::time::Instant::now();
     let bytes = body.len() as u64;
+    // ONE server span per ingest request. The `/ingest` door carries exactly one
+    // profile per request, so `crabka.ingest.samples` is fixed at 1.
+    let ingest_span = tracing::info_span!(
+        "profiles_ingest",
+        otel.kind = "server",
+        messaging.system = "kafka",
+        messaging.destination.name = PROFILES_WAL_TOPIC,
+        crabka.tenant = %ingest_span_tenant(&headers),
+        crabka.ingest.samples = 1_u64,
+        crabka.ingest.bytes = bytes,
+    );
     let result = async {
         let tenant = tenant_from_headers(&headers)?;
         let query = parse_ingest_query(query.as_deref().unwrap_or(""))?;
@@ -534,8 +606,12 @@ async fn ingest_handler(
         let raw = decode_ingest_body(&query, content_type, body, state.max_decompressed).await?;
         process_raw(&state, &tenant, vec![raw]).await
     }
+    .instrument(ingest_span)
     .await;
 
+    if let Ok(tenant) = tenant_from_headers(&headers) {
+        state.metrics.record_ingest_samples(&tenant, 1);
+    }
     // The `/ingest` door carries exactly one profile per request.
     state
         .metrics
@@ -559,6 +635,20 @@ fn tenant_from_headers(headers: &HeaderMap) -> Result<String, ProfilesError> {
         .get("x-scope-orgid")
         .and_then(|value| value.to_str().ok());
     crate::tenant::tenant_from_header(value)
+}
+
+/// Best-effort tenant label for the ingest tracing span, read straight from the
+/// `X-Scope-OrgID` header without validation (an unvalidated/absent header falls
+/// back to `"unknown"`). This is only used to tag the span; the actual tenant
+/// used for storage is resolved and validated separately by
+/// [`tenant_from_headers`].
+fn ingest_span_tenant(headers: &HeaderMap) -> String {
+    headers
+        .get("x-scope-orgid")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("unknown")
+        .to_string()
 }
 
 /// Generic, non-leaky message returned to clients for any server-side (5xx)

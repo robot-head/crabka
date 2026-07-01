@@ -50,6 +50,13 @@ fn topic_min_insync_replicas(image: &crabka_metadata::MetadataImage, topic: &str
 }
 
 #[allow(clippy::too_many_lines)]
+#[tracing::instrument(
+    name = "handle_produce",
+    level = "info",
+    skip_all,
+    fields(api = "Produce", version, req_bytes = req_bytes.len()),
+    err,
+)]
 pub(crate) async fn handle(
     broker: &Broker,
     version: i16,

@@ -326,6 +326,13 @@ pub(crate) async fn compute_offline_dir_failover_changes(
 ///
 /// No-op unless `controller` is currently the openraft leader (only
 /// the leader can `submit_change`).
+#[tracing::instrument(
+    name = "leader_election_on_broker_dead",
+    level = "info",
+    skip_all,
+    fields(node_id, dead),
+    err
+)]
 pub(crate) async fn on_broker_dead(
     controller: &Arc<dyn crate::metadata_source::MetadataSource>,
     node_id: NodeId,

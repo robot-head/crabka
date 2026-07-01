@@ -12,10 +12,12 @@ use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
 use crabka_blockstore::{BlockMeta, BlockStoreError, BlockWriter};
 use crabka_client_consumer::{AutoOffsetReset, Consumer, ConsumerError, ConsumerRecord};
+use crabka_telemetry::propagation::{TRACEPARENT, set_remote_parent};
 use futures::TryStreamExt;
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 use serde::{Deserialize, Serialize};
+use tracing::Instrument as _;
 
 use crate::histogram::HistogramCodecError;
 use crate::schema::{exemplar_schema, metadata_schema};
@@ -1288,6 +1290,37 @@ where
     .await
 }
 
+/// Build the per-poll-batch `metrics_compaction` consumer span, joining it to the
+/// producer trace carried on a WAL record's `traceparent` header (if any).
+///
+/// ONE span per poll batch (not per record). `set_remote_parent` is a no-op when
+/// no polled record carries a valid trace context, so the span is always safe to
+/// build. The first record carrying a `traceparent` header anchors the parent.
+fn compaction_batch_span(records: &[ConsumerRecord], wal_records: usize) -> tracing::Span {
+    let span = tracing::info_span!(
+        "metrics_compaction",
+        otel.kind = "consumer",
+        crabka.wal.records = wal_records,
+    );
+    if let Some(record) = records.iter().find(|record| {
+        record
+            .headers
+            .iter()
+            .any(|header| header.key == TRACEPARENT)
+    }) {
+        set_remote_parent(
+            &span,
+            record.headers.iter().map(|header| {
+                (
+                    header.key.as_str(),
+                    header.value.as_deref().unwrap_or(&[][..]),
+                )
+            }),
+        );
+    }
+    span
+}
+
 /// Accumulate-then-flush single-consumer compactor loop with an injectable clock.
 ///
 /// Mirrors [`run_compactor_loop_with_clock`] but polls and commits through one
@@ -1315,6 +1348,12 @@ where
         let wal_records =
             compaction_wal_records_from_consumer_records(&config.wal_topic, &records)?;
         let compacted_records = wal_records.len();
+        // ONE consumer span per poll batch, parented on the producer trace carried
+        // in a polled WAL record's `traceparent` header. Built once per batch and
+        // run over the flush so the compaction block/index writes join the ingest
+        // trace; a batch that only buffers (no flush this iteration) does no
+        // compaction work and correctly carries no span.
+        let span = compaction_batch_span(&records, compacted_records);
 
         let now = clock.now();
         buffer.extend(wal_records, now);
@@ -1329,7 +1368,10 @@ where
                 &buffered,
                 &mut summary,
             )
+            .instrument(span)
             .await?;
+        } else {
+            drop(span);
         }
 
         summary.polls += 1;

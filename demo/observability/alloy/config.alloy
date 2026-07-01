@@ -54,9 +54,9 @@ otelcol.exporter.otlphttp "traces" {
 // (the broker via its metrics server; the four observability services via the
 // shared profiling-admin server, across all roles). The `job` label carries the
 // compose service name so dashboards/alerts can select per service+role. The
-// demo apps are intentionally NOT scraped here — they expose pprof on 9404 but
-// no /metrics, so a metrics scrape would 404 (up=0). They remain in the
-// pyroscope scrape below for CPU profiles.
+// demo apps also expose /metrics on 9404 now (crabka_demo_* business metrics:
+// orders produced/processed by category×region×payment, order value, per-stage
+// processing latency) alongside their pprof endpoint, so they are scraped too.
 prometheus.scrape "crabka" {
 	targets = [
 		{__address__ = "broker:9404", job = "broker"},
@@ -72,6 +72,9 @@ prometheus.scrape "crabka" {
 		{__address__ = "profiles-distributor:9404", job = "profiles-distributor"},
 		{__address__ = "profiles-querier:9404", job = "profiles-querier"},
 		{__address__ = "profiles-block-builder:9404", job = "profiles-block-builder"},
+		{__address__ = "demo-produce:9404", job = "demo-produce"},
+		{__address__ = "demo-stream:9404", job = "demo-stream"},
+		{__address__ = "demo-consume:9404", job = "demo-consume"},
 	]
 	scrape_interval = "15s"
 	forward_to      = [prometheus.remote_write.crabka.receiver]

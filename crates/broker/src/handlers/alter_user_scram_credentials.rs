@@ -53,6 +53,12 @@ const MIN_ITERATIONS: i32 = 4096;
 /// Run the `AlterUserScramCredentials` request and return the typed
 /// response. The caller (dispatch.rs) is responsible for wire-encoding
 /// the response and prepending the response header.
+#[tracing::instrument(
+    name = "handle_alter_user_scram_credentials",
+    level = "info",
+    skip_all,
+    fields(api = "AlterUserScramCredentials")
+)]
 pub(crate) async fn handle(
     broker: &Broker,
     req: AlterUserScramCredentialsRequest,

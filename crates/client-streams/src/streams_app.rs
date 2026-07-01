@@ -127,12 +127,26 @@ impl StreamsApp {
     }
 
     /// Lower the DSL topology, pre-warm its schema subjects, and start the app.
+    #[tracing::instrument(
+        name = "streams.app.run",
+        level = "info",
+        skip_all,
+        fields(application_id = %self.application_id),
+        err,
+    )]
     pub async fn run(self, builder: StreamsBuilder) -> Result<KafkaStreams, StreamsClientError> {
         let built = builder.build(&self.application_id)?;
         self.run_built(built).await
     }
 
     /// Like [`run`](Self::run), but for an already-built topology (Processor API).
+    #[tracing::instrument(
+        name = "streams.app.run_built",
+        level = "info",
+        skip_all,
+        fields(application_id = %self.application_id, guarantee = ?self.processing_guarantee),
+        err,
+    )]
     pub async fn run_built(
         self,
         topology: BuiltTopology,

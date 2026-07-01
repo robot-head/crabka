@@ -169,6 +169,15 @@ impl UnsecuredJwsValidator {
     /// [`AuthError::InvalidToken`] for any structural, signature, temporal,
     /// scope, or principal-claim failure. The caller maps this onto the RFC
     /// 7628 `invalid_token` server error status.
+    // skip_all keeps the bearer `token` out of span fields; only the
+    // non-sensitive mechanism is recorded. `err` surfaces the InvalidToken
+    // reason (Debug) without the token contents.
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(mechanism = "OAUTHBEARER", validator = "unsecured"),
+        err
+    )]
     pub fn validate(&self, token: &str, now_ms: i64) -> Result<AuthOutcome, AuthError> {
         // JWS compact serialization: header.payload.signature. For `alg:none`
         // the signature segment is empty.
@@ -438,6 +447,15 @@ impl SignedJwsValidator {
     ///
     /// [`AuthError::InvalidToken`] for any structural, signature, temporal,
     /// issuer, audience, scope, or principal-claim failure.
+    // skip_all keeps the bearer `token` (and its signature) out of span
+    // fields; only the non-sensitive mechanism is recorded. `err` surfaces the
+    // rejection reason (Debug) without leaking the token.
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(mechanism = "OAUTHBEARER", validator = "signed"),
+        err
+    )]
     pub fn validate(&self, token: &str, now_ms: i64) -> Result<AuthOutcome, AuthError> {
         // JWS compact serialization: header.payload.signature, all non-empty.
         let mut segs = token.split('.');
@@ -620,6 +638,12 @@ impl OAuthBearerValidator {
     /// - [`AuthError::InvalidToken`] when the token fails validation.
     /// - [`AuthError::IntrospectionTransport`] when the introspection variant's
     ///   HTTP call fails at the transport layer.
+    // Dispatcher over the configured validator. skip_all keeps `token` out of
+    // span fields. The match arms each produce a `Result<AuthOutcome, _>`
+    // value (the introspection arm is `.await`ed to a value), NOT a bare
+    // future, so `async_yields_async` does not fire. `err` surfaces the
+    // rejection reason (Debug) without leaking the token.
+    #[tracing::instrument(level = "info", skip_all, fields(mechanism = "OAUTHBEARER"), err)]
     pub async fn validate(&self, token: &str, now_ms: i64) -> Result<AuthOutcome, AuthError> {
         match self {
             Self::Unsecured(v) => v.validate(token, now_ms),
@@ -720,6 +744,17 @@ impl IntrospectionValidator {
     ///   missing principal claim, scope mismatch, or temporal-claim failure.
     ///   `exp` is required so the SASL handler can populate
     ///   `session_lifetime_ms` for KIP-368 re-authentication.
+    // skip_all keeps the bearer `token` out of span fields; only the
+    // non-sensitive mechanism is recorded. `err` surfaces the rejection /
+    // transport error (Debug) without leaking the token. The async body ends
+    // by returning an `AuthOutcome` value (not another future), so
+    // `async_yields_async` does not apply.
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(mechanism = "OAUTHBEARER", validator = "introspection"),
+        err
+    )]
     pub async fn validate(&self, token: &str, now_ms: i64) -> Result<AuthOutcome, AuthError> {
         let mut claims = self
             .client

@@ -26,6 +26,13 @@ use crate::coordinator::unified::GroupType;
 use crate::coordinator::unified::classic_state::GroupState;
 use crate::error::BrokerError;
 
+#[tracing::instrument(
+    name = "handle_list_groups",
+    level = "info",
+    skip_all,
+    fields(api = "ListGroups", version, req_bytes = req_bytes.len()),
+    err,
+)]
 pub(crate) async fn handle(
     broker: &Broker,
     version: i16,

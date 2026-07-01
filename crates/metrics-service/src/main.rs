@@ -115,6 +115,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "metrics.run_query_frontend",
+    skip_all,
+    fields(listen = %cli.listen, object_store = %cli.object_store_url, manifest_prefix = %cli.manifest_prefix),
+    err
+)]
 async fn run_query_frontend(
     cli: Cli,
     metrics: crabka_promql::metrics::ServiceMetrics,
@@ -156,6 +163,13 @@ async fn run_query_frontend(
     Ok(())
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "metrics.run_ruler",
+    skip_all,
+    fields(listen = %cli.listen, tenant = %cli.ruler_tenant, shard_index = cli.ruler_shard_index, shard_total = cli.ruler_shard_total),
+    err
+)]
 async fn run_ruler(
     cli: Cli,
     metrics: crabka_promql::metrics::ServiceMetrics,
@@ -259,6 +273,13 @@ async fn run_ruler(
     Ok(())
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "metrics.run_querier",
+    skip_all,
+    fields(listen = %cli.listen, object_store = %cli.object_store_url, manifest_prefix = %cli.manifest_prefix, wal_topic = %cli.wal_topic),
+    err
+)]
 async fn run_querier(
     cli: Cli,
     metrics: crabka_promql::metrics::ServiceMetrics,

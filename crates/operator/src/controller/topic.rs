@@ -53,8 +53,36 @@ pub fn error_policy(_obj: Arc<KafkaTopic>, err: &ReconcileError, _ctx: Arc<Conte
     Action::requeue(Duration::from_secs(15))
 }
 
-#[allow(clippy::too_many_lines)] // linear pipeline; extraction hurts more than helps
+/// Reconcile entry point. Times the pass and records the reconcile
+/// counter/histogram, then delegates to [`reconcile_inner`].
+#[tracing::instrument(
+    level = "info",
+    skip_all,
+    fields(
+        kind = "KafkaTopic",
+        namespace = %obj.namespace().unwrap_or_else(|| "default".into()),
+        name = %obj.name_any(),
+        generation = ?obj.meta().generation,
+    )
+)]
 pub async fn reconcile(obj: Arc<KafkaTopic>, ctx: Arc<Context>) -> Result<Action, ReconcileError> {
+    let started = std::time::Instant::now();
+    let result = reconcile_inner(obj, ctx.clone()).await;
+    let outcome = if result.is_ok() {
+        crate::telemetry::ReconcileResult::Ok
+    } else {
+        crate::telemetry::ReconcileResult::Error
+    };
+    ctx.metrics
+        .record_reconcile("KafkaTopic", outcome, started.elapsed().as_secs_f64());
+    result
+}
+
+#[allow(clippy::too_many_lines)] // linear pipeline; extraction hurts more than helps
+async fn reconcile_inner(
+    obj: Arc<KafkaTopic>,
+    ctx: Arc<Context>,
+) -> Result<Action, ReconcileError> {
     let ns = obj.namespace().unwrap_or_else(|| "default".into());
     let name = obj.name_any();
     let topic_api: Api<KafkaTopic> = Api::namespaced(ctx.client.clone(), &ns);
@@ -443,6 +471,7 @@ fn has_finalizer(obj: &KafkaTopic) -> bool {
         .is_some_and(|f| f.iter().any(|s| s == FINALIZER))
 }
 
+#[tracing::instrument(level = "debug", skip_all, fields(topic = %name), err)]
 async fn add_finalizer(api: &Api<KafkaTopic>, name: &str) -> Result<(), ReconcileError> {
     let patch = json!({ "metadata": { "finalizers": [FINALIZER] } });
     let params = PatchParams {
@@ -453,6 +482,7 @@ async fn add_finalizer(api: &Api<KafkaTopic>, name: &str) -> Result<(), Reconcil
     Ok(())
 }
 
+#[tracing::instrument(level = "info", skip_all, fields(topic = %name), err)]
 async fn remove_finalizer(api: &Api<KafkaTopic>, name: &str) -> Result<(), ReconcileError> {
     let patch = json!({ "metadata": { "finalizers": [] } });
     let params = PatchParams {
@@ -467,6 +497,12 @@ async fn remove_finalizer(api: &Api<KafkaTopic>, name: &str) -> Result<(), Recon
 /// `observedGeneration` to the current generation (only on successful
 /// True/Ready landings).
 #[allow(clippy::too_many_arguments)] // pure status helper; arity reflects the condition contract
+#[tracing::instrument(
+    level = "info",
+    skip_all,
+    fields(topic = %name, status = %status, reason = %reason),
+    err,
+)]
 async fn patch_status(
     api: &Api<KafkaTopic>,
     name: &str,

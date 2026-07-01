@@ -209,6 +209,11 @@ struct PipelineState {
     retry: HashMap<(String, i32), PreparedBatch>,
 }
 
+#[tracing::instrument(
+    level = "debug",
+    skip_all,
+    fields(producer_id = cfg.producer_id, max_in_flight = cfg.max_in_flight),
+)]
 pub(crate) async fn run(mut cfg: SenderConfig) {
     let mut ticker = tokio::time::interval(cfg.linger.max(Duration::from_millis(1)));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -282,6 +287,11 @@ struct PreparedBatch {
 /// a batch reaches a terminal outcome (ack, terminal failure, fence, or routing
 /// budget exhausted). `flush_notify` is woken when `in_flight` hits zero and
 /// when there is nothing to send.
+#[tracing::instrument(
+    level = "debug",
+    skip_all,
+    fields(batches = tracing::field::Empty),
+)]
 async fn drain_once(cfg: &mut SenderConfig, state: &mut PipelineState) {
     let now = Instant::now();
 
@@ -355,6 +365,7 @@ async fn drain_once(cfg: &mut SenderConfig, state: &mut PipelineState) {
         to_send.push(pb);
     }
 
+    tracing::Span::current().record("batches", to_send.len());
     if to_send.is_empty() {
         cfg.flush_notify.notify_waiters();
         return;
@@ -494,6 +505,16 @@ fn positive_partition_count(count: i32) -> Option<i32> {
 /// Build the v2 `RecordBatch` for a drained partition batch, allocating its
 /// `base_sequence` range from `next_seq`. The result is sent (and any retry
 /// resent) verbatim, so the sequence is allocated exactly once per batch.
+#[tracing::instrument(
+    level = "debug",
+    skip_all,
+    fields(
+        topic = %topic,
+        partition,
+        batch_records = batch.records.len(),
+        base_sequence = tracing::field::Empty,
+    ),
+)]
 async fn prepare_batch(
     cfg: &SenderConfig,
     topic: &str,
@@ -511,6 +532,7 @@ async fn prepare_batch(
         *entry = cur.wrapping_add(count);
         cur
     };
+    tracing::Span::current().record("base_sequence", base_sequence);
 
     // Resolve the topic_id from the metadata cache (zero is fine — the broker
     // falls back to the `name` field for v ≤ 12).
@@ -560,6 +582,7 @@ struct BatchSendResult {
 /// broker busy without ever putting two same-partition requests on the wire, and
 /// per-partition ordering is undisturbed. Futures are polled on this one task
 /// (no spawn), so they share `&cfg` safely.
+#[tracing::instrument(level = "debug", skip_all, fields(batches = to_send.len()))]
 async fn send_batches(cfg: &SenderConfig, state: &mut PipelineState, to_send: Vec<PreparedBatch>) {
     let mut results: FuturesUnordered<_> = to_send
         .into_iter()
@@ -692,6 +715,16 @@ fn backoff_deadline(now: Instant, retry_backoff: Duration) -> Instant {
 /// its transport/broker result to a [`BatchVerdict`]. The batch is returned
 /// alongside the verdict (the caller still owns its records). On a connection
 /// error the broker is evicted so a reconnect targets its current address.
+#[tracing::instrument(
+    level = "debug",
+    skip_all,
+    fields(
+        topic = %pb.topic,
+        partition = pb.partition,
+        base_sequence = pb.base_sequence,
+        leader = tracing::field::Empty,
+    ),
+)]
 async fn send_one_batch(cfg: &SenderConfig, mut pb: PreparedBatch) -> BatchSendResult {
     // A batch prepared before its topic existed (cold-boot race: the WAL topic's
     // leadership is still settling) carries a ZERO `topic_id`. Produce v≥13 keys
@@ -713,6 +746,7 @@ async fn send_one_batch(cfg: &SenderConfig, mut pb: PreparedBatch) -> BatchSendR
     }
 
     let leader = resolve_leader(cfg, &pb.topic, pb.partition);
+    tracing::Span::current().record("leader", leader);
     let req = build_single_batch_request(cfg, &pb);
 
     let route = if leader == BOOTSTRAP_LEADER {
@@ -890,6 +924,7 @@ fn build_single_batch_request(cfg: &SenderConfig, pb: &PreparedBatch) -> Produce
 /// Refresh cluster metadata and adopt the fresh partition→leader map. The
 /// refresh also re-populates the pool's broker-address registry, so a leader
 /// re-elected onto a broker the pool hadn't dialed becomes routable.
+#[tracing::instrument(level = "debug", skip_all)]
 async fn update_leaders_from_metadata(cfg: &SenderConfig) {
     if let Ok(md) = cfg.transport.refresh_metadata().await {
         // Hold the cache lock across the loop so a tracked topic's correction is

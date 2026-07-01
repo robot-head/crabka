@@ -60,6 +60,12 @@ pub struct AutoTriggerCtx<'a> {
 /// are not errors); returns Err only on optimizer failure or an unknown
 /// goal name (which would be a bug — the registry should contain every
 /// goal in `goals_for_kind`).
+#[tracing::instrument(
+    level = "info",
+    skip_all,
+    fields(anomaly_id = %anomaly.id, kind = anomaly.kind.as_str()),
+    err,
+)]
 pub async fn maybe_trigger(
     anomaly: &Anomaly,
     ctx: &AutoTriggerCtx<'_>,
@@ -100,19 +106,25 @@ pub async fn maybe_trigger(
         AutoTriggerError::UnknownGoal(e.to_string())
     })?;
 
+    let rebal_metrics = &ctx.executor_state.metrics;
+    let started = std::time::Instant::now();
     let out = match optimizer::optimize(state, &goals, ctx.goal_ctx) {
         Ok(out) => out,
         Err(e) => {
+            rebal_metrics.record_rebalance("error");
             ctx.metrics.auto_trigger_skipped_optimizer_error.inc();
             warn!(error = %e, anomaly_id = %anomaly.id, "auto-trigger optimizer error");
             return Err(AutoTriggerError::Optimizer(e));
         }
     };
+    rebal_metrics.observe_rebalance_duration(started.elapsed().as_secs_f64());
     if out.proposal.movements.is_empty() {
+        rebal_metrics.record_rebalance("no_movements");
         ctx.metrics.auto_trigger_skipped_no_movements.inc();
         debug!(anomaly_id = %anomaly.id, "auto-trigger skipped: optimizer produced no movements");
         return Ok(());
     }
+    rebal_metrics.record_rebalance("ok");
 
     let proposal_id = out.proposal.id.clone();
     ctx.proposal_store.insert(out.proposal);

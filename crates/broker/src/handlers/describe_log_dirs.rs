@@ -47,6 +47,13 @@ impl Filter {
 }
 
 #[allow(clippy::too_many_lines)]
+#[tracing::instrument(
+    name = "handle_describe_log_dirs",
+    level = "info",
+    skip_all,
+    fields(api = "DescribeLogDirs", version, req_bytes = req_bytes.len()),
+    err,
+)]
 pub(crate) async fn handle(
     broker: &Broker,
     version: i16,

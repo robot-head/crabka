@@ -77,6 +77,12 @@ impl TargetSink {
     ///
     /// Returns [`ConnectError::Backend`] if the producer cannot connect or the
     /// offset-syncs topic cannot be created.
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(target = %params.target_bootstrap, source_alias = %params.source_alias),
+        err,
+    )]
     pub async fn start(params: SinkParams) -> Result<Self, ConnectError> {
         let offset_syncs_topic = OffsetSync::topic_name(&params.source_alias);
 
@@ -147,10 +153,17 @@ impl Sink<(), ReplicatedRecord> for TargetSink {
     /// - Identity-naming loop-guard fires: the record's `__crabka_origin` header
     ///   matches our own `source_alias`.
     /// - Residency gate blocks the topic for the target's zones.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(records = records.len(), accepted = tracing::field::Empty),
+        err,
+    )]
     async fn put(
         &mut self,
         records: Vec<ConnectRecord<(), ReplicatedRecord>>,
     ) -> Result<(), ConnectError> {
+        let mut accepted = 0usize;
         for cr in records {
             let Some(r) = cr.value else { continue };
 
@@ -220,13 +233,21 @@ impl Sink<(), ReplicatedRecord> for TargetSink {
                 .await;
 
             self.pending.push((rx, r.topic, r.partition, r.offset));
+            accepted += 1;
         }
 
+        tracing::Span::current().record("accepted", accepted);
         Ok(())
     }
 
     /// Await all pending produce acks, write offset-syncs to the target, and
     /// flush the producer.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(pending = self.pending.len()),
+        err,
+    )]
     async fn flush(&mut self) -> Result<(), ConnectError> {
         let pending = std::mem::take(&mut self.pending);
 

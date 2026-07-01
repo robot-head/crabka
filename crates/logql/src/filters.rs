@@ -147,6 +147,7 @@ impl FieldFilter {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(op = ?op), err)]
     pub fn try_new(
         name: impl Into<String>,
         op: ComparisonOp,
@@ -290,6 +291,7 @@ pub struct LineFilter {
 }
 
 impl LineFilter {
+    #[tracing::instrument(level = "debug", skip_all, fields(op = ?op), err)]
     pub fn new(op: LineFilterOp, pattern: impl Into<String>) -> Result<Self, ParseError> {
         let filter = Self {
             op,
@@ -300,6 +302,7 @@ impl LineFilter {
         Ok(filter)
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(op = ?op), err)]
     pub fn ip(op: LineFilterOp, pattern: impl Into<String>) -> Result<Self, ParseError> {
         let pattern = pattern.into();
         let filter = Self {
@@ -365,6 +368,7 @@ pub struct IpMatcher {
 }
 
 impl IpMatcher {
+    #[tracing::instrument(level = "debug", skip_all, fields(pattern = %pattern), err)]
     pub fn parse(pattern: &str) -> Result<Self, ParseError> {
         let range = if let Some((start, end)) = pattern.split_once('-') {
             IpRange::range(parse_ip_addr(start)?, parse_ip_addr(end)?)?

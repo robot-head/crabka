@@ -2011,6 +2011,7 @@ dependencies = [
  "crabka-metadata",
  "crabka-security",
  "proptest",
+ "tracing",
  "uuid",
 ]
 
@@ -2572,6 +2573,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "time",
+ "tracing",
 ]
 
 [[package]]
@@ -2589,6 +2591,7 @@ dependencies = [
  "serde",
  "serde-wincode",
  "thiserror 2.0.18",
+ "tracing",
  "uuid",
  "wincode",
 ]
@@ -7055,6 +7058,7 @@ name = "observability-demo-app"
 version = "0.3.8"
 dependencies = [
  "assert2",
+ "axum",
  "bytes",
  "clap",
  "crabka-client-consumer",
@@ -7062,6 +7066,7 @@ dependencies = [
  "crabka-client-streams",
  "crabka-schema-serde",
  "crabka-telemetry",
+ "prometheus-client",
  "prost 0.14.4",
  "prost-build 0.14.4",
  "prost-reflect",

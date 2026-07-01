@@ -10,6 +10,7 @@ use std::sync::Arc;
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 use serde::{Deserialize, Serialize};
+use tracing::instrument;
 
 use crate::block::BlockMeta;
 use crate::block_index::BlockIndex;
@@ -325,8 +326,10 @@ impl ProfileIndex {
         self.series.all_blocks_unscoped()
     }
 
+    #[instrument(skip_all, fields(key = %key, len = tracing::field::Empty), err)]
     pub async fn save(&self, store: &Arc<dyn ObjectStore>, key: &str) -> Result<()> {
         let bytes = serde_json::to_vec(self)?;
+        tracing::Span::current().record("len", bytes.len());
         store.put(&Path::from(key), PutPayload::from(bytes)).await?;
         Ok(())
     }
@@ -358,12 +361,19 @@ impl ProfileIndex {
         Self::load_path_with_cap(store, &Path::from(key), max_bytes).await
     }
 
+    #[instrument(
+        level = "debug",
+        skip_all,
+        fields(path = %path, size = tracing::field::Empty),
+        err
+    )]
     async fn load_path_with_cap(
         store: &Arc<dyn ObjectStore>,
         path: &Path,
         max_bytes: usize,
     ) -> Result<Self> {
         let meta = store.head(path).await?;
+        tracing::Span::current().record("size", meta.size);
         if meta.size > max_bytes as u64 {
             return Err(BlockStoreError::InvalidBlock(format!(
                 "profile index snapshot `{}` is {} bytes, exceeds cap of {max_bytes} bytes",

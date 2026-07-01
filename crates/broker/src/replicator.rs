@@ -527,6 +527,13 @@ async fn handle_response(mut resp: FetchResponse, cfg: &Config) -> LoopAction {
 /// KIP-101: the follower sends our current `leader_epoch`; the leader
 /// replies with `end_offset` = the first offset of the next epoch,
 /// which is the safe truncation point.
+#[tracing::instrument(
+    name = "replicator_handle_epoch_fence",
+    level = "info",
+    skip_all,
+    fields(topic = %cfg.topic, partition = cfg.partition),
+    err,
+)]
 async fn handle_epoch_fence(cfg: &Config) -> Result<(), String> {
     let Some(part) = cfg.partitions.get(&cfg.topic, cfg.partition) else {
         return Ok(());

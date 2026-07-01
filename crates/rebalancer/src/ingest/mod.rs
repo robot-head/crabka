@@ -73,6 +73,11 @@ impl Ingester {
                     // observe.
                     self.metrics.snapshot_at_ms.set(state.snapshot_at_ms);
                     self.metrics.snapshots_total.inc();
+                    // Reflect the in-flight-reassignment backlog observed in
+                    // this snapshot (gauge — the current level, not a rate).
+                    self.metrics.set_pending_reassignments(
+                        i64::try_from(state.in_flight_reassignments.len()).unwrap_or(i64::MAX),
+                    );
                     self.snapshot.store(Arc::new(Some(state)));
                 }
                 Err(e) => {
@@ -83,6 +88,7 @@ impl Ingester {
     }
 }
 
+#[tracing::instrument(level = "info", skip_all, err)]
 pub async fn snapshot_once(client: &Client) -> Result<ClusterState, anyhow::Error> {
     let md = admin_client::fetch_metadata(client).await?;
     let dc = admin_client::fetch_describe_cluster(client).await?;

@@ -114,6 +114,18 @@ impl ShareConsumer {
     /// interval / assignment, resolves assignment topic ids → names via
     /// Metadata, then spawns the heartbeat loop.
     #[builder(start_fn = builder, finish_fn = build)]
+    #[tracing::instrument(
+        name = "share_consumer.start",
+        level = "info",
+        skip_all,
+        fields(
+            group_id = %group_id,
+            member_id = tracing::field::Empty,
+            member_epoch = tracing::field::Empty,
+            assigned_partitions = tracing::field::Empty,
+        ),
+        err
+    )]
     pub async fn start(
         #[builder(into)] bootstrap: String,
         #[builder(into, default = "crabka-share-consumer".to_string())] client_id: String,
@@ -160,6 +172,11 @@ impl ShareConsumer {
             ));
         }
         let member_epoch_val = join.member_epoch;
+        {
+            let span = tracing::Span::current();
+            span.record("member_id", member_id.as_str());
+            span.record("member_epoch", member_epoch_val);
+        }
         // Honor the broker's heartbeat interval when it supplies one; else keep
         // the configured default.
         let hb_interval =
@@ -187,6 +204,7 @@ impl ShareConsumer {
             }
         }
 
+        tracing::Span::current().record("assigned_partitions", assignment_vec.len());
         let member_epoch = Arc::new(Mutex::new(member_epoch_val));
         let assignment = Arc::new(Mutex::new(assignment_vec));
         let topic_names = Arc::new(Mutex::new(topic_names));
@@ -262,6 +280,13 @@ impl ShareConsumer {
     /// best-effort leave heartbeat (`member_epoch = -1`) on its way out so the
     /// broker evicts this member promptly rather than waiting out the session
     /// timeout. A flush failure is best-effort (logged) so close still leaves.
+    #[tracing::instrument(
+        name = "share_consumer.close",
+        level = "info",
+        skip_all,
+        fields(group_id = %self.group_id, member_id = %self.member_id),
+        err
+    )]
     pub async fn close(&mut self) -> Result<(), ConsumerError> {
         // Roll the previous poll's implicit Accepts into the explicit ack queue
         // so the final flush below covers both modes in one ShareAcknowledge.

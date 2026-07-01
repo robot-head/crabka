@@ -31,13 +31,32 @@ impl SimpleAclAuthorizer {
 }
 
 impl Authorizer for SimpleAclAuthorizer {
+    // Per-request ACL decision: skip_all keeps the borrowed principal/host
+    // structs (which may carry the raw name) out of span fields; only
+    // non-sensitive routing context is recorded. No `err` — this returns a
+    // plain Allow/Deny, not a Result. `decision` is filled in before each
+    // return path.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(
+            principal = %req.principal.name,
+            resource_type = ?req.resource_type,
+            resource = %req.resource_name,
+            operation = ?req.operation,
+            host = %req.host.ip(),
+            decision = tracing::field::Empty,
+        )
+    )]
     fn authorize(
         &self,
         source: &dyn AclSource,
         req: &AuthorizationRequest<'_>,
     ) -> AuthorizationResult {
+        let span = tracing::Span::current();
         // Super-user bypass.
         if self.super_users.contains(&req.principal.name) {
+            span.record("decision", "allow-superuser");
             return AuthorizationResult::Allow;
         }
 
@@ -52,13 +71,18 @@ impl Authorizer for SimpleAclAuthorizer {
                 continue;
             }
             match entry.permission_type {
-                PermissionType::Deny => return AuthorizationResult::Deny,
+                PermissionType::Deny => {
+                    span.record("decision", "deny-explicit");
+                    return AuthorizationResult::Deny;
+                }
                 PermissionType::Allow => saw_allow = true,
             }
         }
         if saw_allow {
+            span.record("decision", "allow-acl");
             AuthorizationResult::Allow
         } else {
+            span.record("decision", "deny-default");
             AuthorizationResult::Deny
         }
     }

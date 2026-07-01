@@ -85,6 +85,7 @@ impl TokioPgCatalog {
     /// Dial `database_url`, spawn the connection driver task, and return the
     /// catalog. The spawned task owns the protocol connection for the lifetime
     /// of the client.
+    #[tracing::instrument(level = "info", skip_all, err)]
     pub(crate) async fn connect(database_url: &str) -> Result<Self, ConnectError> {
         let (client, connection) = tokio_postgres::connect(database_url, NoTls)
             .await
@@ -106,6 +107,7 @@ fn backend(error: &tokio_postgres::Error) -> ConnectError {
 
 #[async_trait]
 impl PgCatalog for TokioPgCatalog {
+    #[tracing::instrument(level = "debug", skip_all, err)]
     async fn current_database(&self) -> Result<String, ConnectError> {
         self.client
             .query_one("SELECT current_database()", &[])
@@ -114,6 +116,7 @@ impl PgCatalog for TokioPgCatalog {
             .map_err(|error| backend(&error))
     }
 
+    #[tracing::instrument(level = "debug", skip_all, err)]
     async fn ensure_publication(&self, ddl: &str) -> Result<(), ConnectError> {
         self.client
             .batch_execute(ddl)
@@ -121,6 +124,7 @@ impl PgCatalog for TokioPgCatalog {
             .map_err(|error| backend(&error))
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(publication = %publication, schema = %schema), err)]
     async fn published_tables(
         &self,
         publication: &str,
@@ -137,6 +141,7 @@ impl PgCatalog for TokioPgCatalog {
             .collect())
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(publication = %publication), err)]
     async fn publication_settings(
         &self,
         publication: &str,
@@ -158,6 +163,7 @@ impl PgCatalog for TokioPgCatalog {
         ]))
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(slot = %slot_name), err)]
     async fn replication_slot(
         &self,
         slot_name: &str,
@@ -178,6 +184,7 @@ impl PgCatalog for TokioPgCatalog {
         }))
     }
 
+    #[tracing::instrument(level = "info", skip_all, fields(slot = %slot_name), err)]
     async fn create_logical_slot(&self, slot_name: &str) -> Result<(), ConnectError> {
         self.client
             .query(create_logical_slot_sql(), &[&slot_name])
@@ -186,6 +193,12 @@ impl PgCatalog for TokioPgCatalog {
         Ok(())
     }
 
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(slot = %slot_name, max_messages, changes = tracing::field::Empty),
+        err,
+    )]
     async fn peek_changes(
         &self,
         slot_name: &str,
@@ -200,6 +213,7 @@ impl PgCatalog for TokioPgCatalog {
             )
             .await
             .map_err(|error| backend(&error))?;
+        tracing::Span::current().record("changes", rows.len());
         Ok(rows
             .into_iter()
             .map(|row| SlotChange {
@@ -209,6 +223,7 @@ impl PgCatalog for TokioPgCatalog {
             .collect())
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(slot = %slot_name, lsn = %lsn_text), err)]
     async fn advance_slot(&self, slot_name: &str, lsn_text: &str) -> Result<(), ConnectError> {
         self.client
             .execute(advance_slot_sql(), &[&slot_name, &lsn_text])

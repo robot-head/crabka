@@ -19,6 +19,7 @@ workspace = true
 [dependencies]
 crabka-metadata = { version = "0.3.8", path = "../metadata" }
 crabka-security = { version = "0.3.8", path = "../security" }
+tracing = { workspace = true }
 
 [dev-dependencies]
 assert2 = { workspace = true }

@@ -61,6 +61,21 @@ struct QueryFrontendState {
     cache: Arc<dyn RangeQueryCache>,
 }
 
+/// RAII guard that keeps `active_queries` incremented while an in-flight query
+/// is executing, decrementing it on drop (covering early returns and panics).
+/// A no-op when no metrics bundle is configured.
+struct ActiveQueryGuard {
+    metrics: Option<ServiceMetrics>,
+}
+
+impl Drop for ActiveQueryGuard {
+    fn drop(&mut self) {
+        if let Some(metrics) = &self.metrics {
+            metrics.query_finished();
+        }
+    }
+}
+
 type RulerRuleStore = BTreeMap<String, BTreeMap<String, BTreeMap<String, serde_yaml::Value>>>;
 type RulerAlertStateStore = BTreeMap<AlertStateKey, i64>;
 
@@ -136,6 +151,29 @@ impl<S: MetricStore> PrometheusApiState<S> {
     fn record_query(&self, route: &str, ok: bool, secs: f64) {
         if let Some(metrics) = &self.metrics {
             metrics.record_query(route, ok, secs);
+        }
+    }
+
+    /// Record one `PromQL` engine evaluation (`query_type` = `"instant"` /
+    /// `"range"`) — its latency and, when `!ok`, an error increment. No-op when
+    /// no metrics bundle is configured.
+    fn record_eval(&self, query_type: &str, ok: bool, secs: f64) {
+        if let Some(metrics) = &self.metrics {
+            metrics.record_eval(query_type, ok, secs);
+        }
+    }
+
+    /// Bump the in-flight-query gauge for the lifetime of `guard`, decrementing
+    /// on drop. Returns a guard that is a no-op when no metrics bundle is
+    /// configured.
+    fn active_query_guard(&self) -> ActiveQueryGuard {
+        if let Some(metrics) = &self.metrics {
+            metrics.query_started();
+            ActiveQueryGuard {
+                metrics: Some(metrics.clone()),
+            }
+        } else {
+            ActiveQueryGuard { metrics: None }
         }
     }
 
@@ -504,6 +542,9 @@ async fn query_inner<S: MetricStore>(
 ) -> Response {
     let started = std::time::Instant::now();
     let _query_permit = acquire_query_permit(&state).await;
+    // Held across dispatch so `active_queries` reflects queries admitted past
+    // the concurrency gate and now executing; decremented on drop.
+    let _active = state.active_query_guard();
     let response = query_dispatch(&state, &headers, params).await;
     record_query_response(&state, "query", &response, started);
     response
@@ -524,7 +565,17 @@ async fn query_dispatch<S: MetricStore>(
     };
 
     let engine = state.engine_for_tenant(&tenant);
-    match engine.query_instant(&tenant, &params.query, time_ms).await {
+    // Time the pure engine eval (parse+plan+execute), excluding param decode,
+    // permit wait, and response encoding — that whole-handler span is already
+    // covered by `query_duration{route}`.
+    let eval_started = std::time::Instant::now();
+    let outcome = engine.query_instant(&tenant, &params.query, time_ms).await;
+    state.record_eval(
+        "instant",
+        outcome.is_ok(),
+        eval_started.elapsed().as_secs_f64(),
+    );
+    match outcome {
         Ok(mut result) => {
             apply_result_limit(&mut result, params.limit);
             success_response(result)
@@ -577,6 +628,7 @@ async fn query_range_inner<S: MetricStore>(
 ) -> Response {
     let started = std::time::Instant::now();
     let _query_permit = acquire_query_permit(&state).await;
+    let _active = state.active_query_guard();
     let response = query_range_dispatch(&state, &headers, params).await;
     record_query_response(&state, "query_range", &response, started);
     response
@@ -621,6 +673,10 @@ async fn query_range_dispatch<S: MetricStore>(
         }
     }
 
+    // Time the pure range eval (through the frontend cache/split when enabled),
+    // labelled `type="range"`; the whole-handler span stays on
+    // `query_duration{route="query_range"}`.
+    let eval_started = std::time::Instant::now();
     let result = if let Some(frontend) = &state.query_frontend {
         let engine = state.engine_for_tenant(&tenant);
         execute_range_query_frontend(
@@ -642,6 +698,11 @@ async fn query_range_dispatch<S: MetricStore>(
             .query_range(&tenant, &params.query, start_ms, end_ms, step_ms)
             .await
     };
+    state.record_eval(
+        "range",
+        result.is_ok(),
+        eval_started.elapsed().as_secs_f64(),
+    );
 
     match result {
         Ok(mut result) => {

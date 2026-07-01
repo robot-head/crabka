@@ -56,8 +56,36 @@ pub fn error_policy(_obj: Arc<SchemaRegistry>, err: &ReconcileError, _ctx: Arc<C
     Action::requeue(Duration::from_secs(15))
 }
 
-#[allow(clippy::too_many_lines)]
+/// Reconcile entry point. Times the pass and records the reconcile
+/// counter/histogram, then delegates to [`reconcile_inner`].
+#[tracing::instrument(
+    level = "info",
+    skip_all,
+    fields(
+        kind = "SchemaRegistry",
+        namespace = %obj.namespace().unwrap_or_else(|| "default".into()),
+        name = %obj.name_any(),
+        generation = ?obj.meta().generation,
+    )
+)]
 pub async fn reconcile(
+    obj: Arc<SchemaRegistry>,
+    ctx: Arc<Context>,
+) -> Result<Action, ReconcileError> {
+    let started = std::time::Instant::now();
+    let result = reconcile_inner(obj, ctx.clone()).await;
+    let outcome = if result.is_ok() {
+        crate::telemetry::ReconcileResult::Ok
+    } else {
+        crate::telemetry::ReconcileResult::Error
+    };
+    ctx.metrics
+        .record_reconcile("SchemaRegistry", outcome, started.elapsed().as_secs_f64());
+    result
+}
+
+#[allow(clippy::too_many_lines)]
+async fn reconcile_inner(
     obj: Arc<SchemaRegistry>,
     ctx: Arc<Context>,
 ) -> Result<Action, ReconcileError> {
@@ -530,6 +558,12 @@ fn build_args_and_mounts(
 /// (avoids a cert-manager Rust crate dep — same pattern as `metrics.rs`).
 ///
 /// DNS SANs: per-pod headless DNS + `ClusterIP` service DNS.
+#[tracing::instrument(
+    level = "info",
+    skip_all,
+    fields(name = %name, namespace = %ns, cert_secret = %cert_secret_name),
+    err,
+)]
 async fn apply_certificate_cr(
     client: &kube::Client,
     ns: &str,
@@ -578,6 +612,7 @@ async fn apply_certificate_cr(
 
 /// Patch status with a single rolled-up `Ready` condition + a `KafkaReady`
 /// condition. `reason == "Available"` ⇒ Ready=True.
+#[tracing::instrument(level = "info", skip_all, fields(name = %name, reason = %reason), err)]
 async fn set_status(
     api: &Api<SchemaRegistry>,
     name: &str,

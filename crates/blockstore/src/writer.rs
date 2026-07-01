@@ -10,6 +10,7 @@ use object_store::ObjectStore;
 use object_store::path::Path;
 use parquet::arrow::AsyncArrowWriter;
 use parquet::arrow::async_writer::ParquetObjectWriter;
+use tracing::instrument;
 
 use crate::block::{BlockMeta, COL_FINGERPRINT, COL_TIMESTAMP, validate_against};
 use crate::block_index::{BlockSchema, series_block_schema};
@@ -73,6 +74,11 @@ impl BlockWriter {
     /// Write a block validated against a signal-specific schema declaration.
     ///
     /// Returns [`BlockMeta`] computed from the declared summary columns.
+    #[instrument(
+        skip_all,
+        fields(tenant = %tenant, object_key = %object_key, batches = batches.len()),
+        err
+    )]
     pub async fn write_block_with_decl(
         &self,
         tenant: &str,

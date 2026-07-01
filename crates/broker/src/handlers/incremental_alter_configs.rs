@@ -67,6 +67,13 @@ fn validate_broker_config_value(name: &str, value: &str) -> Result<(), String> {
 }
 
 #[allow(clippy::too_many_lines)]
+#[tracing::instrument(
+    name = "handle_incremental_alter_configs",
+    level = "info",
+    skip_all,
+    fields(api = "IncrementalAlterConfigs", version, req_bytes = req_bytes.len()),
+    err,
+)]
 pub(crate) async fn handle(
     broker: &Broker,
     version: i16,

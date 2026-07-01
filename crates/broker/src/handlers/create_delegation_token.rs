@@ -37,6 +37,12 @@ fn is_empty_owner_field(f: Option<&str>) -> bool {
     f.is_none_or(str::is_empty)
 }
 
+#[tracing::instrument(
+    name = "handle_create_delegation_token",
+    level = "info",
+    skip_all,
+    fields(api = "CreateDelegationToken")
+)]
 pub(crate) async fn handle<S: BuildHasher>(
     req: &CreateDelegationTokenRequest,
     auth: &ConnectionAuth,

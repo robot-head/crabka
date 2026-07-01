@@ -40,6 +40,12 @@ fn downgrade_allowed(version: i16, allow_downgrade: bool, upgrade_type: i8) -> b
 }
 
 #[allow(clippy::too_many_lines)]
+#[tracing::instrument(
+    name = "handle_update_features",
+    level = "info",
+    skip_all,
+    fields(api = "UpdateFeatures", version)
+)]
 pub(crate) async fn handle(
     broker: &Broker,
     req: UpdateFeaturesRequest,

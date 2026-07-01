@@ -37,6 +37,7 @@
 #![forbid(unsafe_code)]
 
 pub mod profiling;
+pub mod propagation;
 
 use std::time::Duration;
 

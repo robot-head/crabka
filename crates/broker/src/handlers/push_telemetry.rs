@@ -19,6 +19,13 @@ use crate::error::BrokerError;
 use crate::handlers::context::TelemetryContext;
 
 #[allow(clippy::unused_async)] // signature symmetry with other inline-intercept handlers
+#[tracing::instrument(
+    name = "handle_push_telemetry",
+    level = "info",
+    skip_all,
+    fields(api = "PushTelemetry", version, req_bytes = req_bytes.len()),
+    err,
+)]
 pub(crate) async fn handle(
     broker: &Broker,
     version: i16,

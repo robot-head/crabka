@@ -161,6 +161,12 @@ impl Producer {
     ///
     /// [`init_transactions`]: Self::init_transactions
     /// [`send`]: Self::send
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(transactional_id = self.transactional_id.as_deref()),
+        err,
+    )]
     pub async fn begin_transaction(&self) -> Result<(), ProducerError> {
         if self.transactional_id.is_none() {
             return Err(ProducerError::NotTransactional);
@@ -190,6 +196,12 @@ impl Producer {
     /// - [`ProducerError::FencedProducer`] — broker returned `INVALID_PRODUCER_EPOCH (47)`.
     /// - [`ProducerError::ConcurrentTransactions`] — broker returned `CONCURRENT_TRANSACTIONS (49)`; caller may retry.
     /// - [`ProducerError::Server`] — any other broker error code.
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(transactional_id = self.transactional_id.as_deref()),
+        err,
+    )]
     pub async fn commit_transaction(&self) -> Result<(), ProducerError> {
         self.end_transaction(true).await
     }
@@ -203,10 +215,22 @@ impl Producer {
     /// # Errors
     ///
     /// Same as [`commit_transaction`](Self::commit_transaction).
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(transactional_id = self.transactional_id.as_deref()),
+        err,
+    )]
     pub async fn abort_transaction(&self) -> Result<(), ProducerError> {
         self.end_transaction(false).await
     }
 
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(committed, error_code = tracing::field::Empty),
+        err,
+    )]
     async fn end_transaction(&self, committed: bool) -> Result<(), ProducerError> {
         let tid = self
             .transactional_id
@@ -248,6 +272,7 @@ impl Producer {
             })
             .await?;
 
+        tracing::Span::current().record("error_code", resp.error_code);
         let mut state = self.txn_state.lock().await;
         match resp.error_code {
             0 => {
@@ -295,6 +320,18 @@ impl Producer {
     ///   `INVALID_PRODUCER_EPOCH (47)`.
     /// - [`ProducerError::Server`] — any other broker error code.
     /// - [`ProducerError::Client`] — transport-level failure.
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(
+            transactional_id = self.transactional_id.as_deref(),
+            coordinator = tracing::field::Empty,
+            producer_id = tracing::field::Empty,
+            producer_epoch = tracing::field::Empty,
+            error_code = tracing::field::Empty,
+        ),
+        err,
+    )]
     pub async fn init_transactions(&self) -> Result<(), ProducerError> {
         let Some(tid) = self.transactional_id.as_deref() else {
             return Err(ProducerError::NotTransactional);
@@ -311,6 +348,7 @@ impl Producer {
         }
 
         let coord_addr = self.find_txn_coordinator(tid).await?;
+        tracing::Span::current().record("coordinator", coord_addr.as_str());
 
         let coord = Client::builder()
             .bootstrap(coord_addr)
@@ -329,8 +367,11 @@ impl Producer {
             })
             .await?;
 
+        tracing::Span::current().record("error_code", resp.error_code);
         match resp.error_code {
             0 => {
+                tracing::Span::current().record("producer_id", resp.producer_id);
+                tracing::Span::current().record("producer_epoch", resp.producer_epoch);
                 *self.txn_pid_epoch.lock().await = (resp.producer_id, resp.producer_epoch);
                 *self.txn_coord_client.lock().await = Some(coord);
                 *state = TxnState::Ready;
@@ -348,6 +389,7 @@ impl Producer {
     ///
     /// Handles both the legacy top-level response (versions 0–3) and the
     /// `coordinators` array introduced in version 4.
+    #[tracing::instrument(level = "debug", skip_all, fields(transactional_id = %tid), err)]
     async fn find_txn_coordinator(&self, tid: &str) -> Result<String, ProducerError> {
         let resp = self
             .client
@@ -398,6 +440,17 @@ impl Producer {
     /// - [`ProducerError::Client`] — transport-level failure.
     ///
     /// [`init_transactions`]: Self::init_transactions
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(
+            transactional_id = self.transactional_id.as_deref(),
+            group_id = %group_meta.group_id,
+            generation_id = group_meta.generation_id,
+            offset_count = tracing::field::Empty,
+        ),
+        err,
+    )]
     pub async fn send_offsets_to_transaction(
         &self,
         offsets: impl IntoIterator<Item = ((String, i32), i64)>,
@@ -409,6 +462,7 @@ impl Producer {
             .ok_or(ProducerError::NotTransactional)?
             .to_string();
         let offsets_vec: Vec<_> = offsets.into_iter().collect();
+        tracing::Span::current().record("offset_count", offsets_vec.len());
 
         let (pid, epoch) = *self.txn_pid_epoch.lock().await;
 
@@ -480,6 +534,7 @@ impl Producer {
     /// the group coordinator rather than the transaction coordinator.
     ///
     /// [`find_txn_coordinator`]: Self::find_txn_coordinator
+    #[tracing::instrument(level = "debug", skip_all, fields(group_id = %group_id), err)]
     async fn find_group_coordinator(&self, group_id: &str) -> Result<String, ProducerError> {
         let resp = self
             .client
@@ -534,6 +589,16 @@ impl Producer {
     ///
     /// Returns a `oneshot::Receiver`. The outer call is `async` because
     /// partition resolution may need to fetch metadata over the wire.
+    // The instrument macro wraps the body in an async block whose value is the
+    // returned `oneshot::Receiver` — itself awaitable — which trips
+    // `async_yields_async`. Returning the un-awaited receiver is intentional
+    // here (the caller awaits the broker ack), so allow the lint.
+    #[allow(clippy::async_yields_async)]
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(topic = %record.topic, partition = tracing::field::Empty),
+    )]
     pub async fn send(
         &self,
         record: ProducerRecord,
@@ -560,6 +625,7 @@ impl Producer {
                     .await
             }
         };
+        tracing::Span::current().record("partition", partition);
 
         let key = (record.topic.clone(), partition);
         let acc = self
@@ -591,6 +657,11 @@ impl Producer {
     /// Resolve the destination partition for a record. Hashes the key when
     /// present, otherwise consults the sticky partitioner. Fetches and
     /// caches topic metadata on first reference.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(topic = %topic, keyed = key.is_some()),
+    )]
     async fn partition_for(&self, topic: &str, key: Option<&[u8]>) -> i32 {
         let num_partitions = self.partitions_for(topic).await;
         self.partitioner.pick(topic, key, num_partitions)
@@ -608,10 +679,16 @@ impl Producer {
     /// `Client::broker(id)` instead of always hitting the bootstrap connection.
     /// We then record each partition's `leader_id` in `partition_leaders` for
     /// the sender to consult.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(topic = %topic, num_partitions = tracing::field::Empty),
+    )]
     async fn partitions_for(&self, topic: &str) -> i32 {
         {
             let m = self.metadata_cache.lock().await;
             if let Some(meta) = m.get(topic) {
+                tracing::Span::current().record("num_partitions", meta.num_partitions);
                 return meta.num_partitions;
             }
         }
@@ -655,12 +732,19 @@ impl Producer {
                         topic_id,
                     },
                 );
+                tracing::Span::current().record("num_partitions", count);
                 count
             }
             Err(_) => 1,
         }
     }
 
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(client_id = %self.client_id, transactional_id = self.transactional_id.as_deref()),
+        err,
+    )]
     pub async fn close(mut self) -> Result<(), ProducerError> {
         self.flush().await?;
         self.state.store(STATE_CLOSED, Ordering::Release);
@@ -671,6 +755,7 @@ impl Producer {
         Ok(())
     }
 
+    #[tracing::instrument(level = "debug", skip_all, err)]
     pub async fn flush(&self) -> Result<(), ProducerError> {
         self.is_active()?;
         let _ = self.wake_tx.send(()).await;

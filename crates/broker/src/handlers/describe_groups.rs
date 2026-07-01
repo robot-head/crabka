@@ -28,6 +28,13 @@ use crate::coordinator::unified::streams::actor::StreamsGroupActorMessage;
 use crate::error::BrokerError;
 use crate::handlers::authorized_operations::authorized_operations_bits;
 
+#[tracing::instrument(
+    name = "handle_describe_groups",
+    level = "info",
+    skip_all,
+    fields(api = "DescribeGroups", version, req_bytes = req_bytes.len()),
+    err,
+)]
 pub(crate) async fn handle(
     broker: &Broker,
     version: i16,

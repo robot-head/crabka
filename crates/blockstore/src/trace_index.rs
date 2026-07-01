@@ -6,6 +6,7 @@ use std::sync::Arc;
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 use serde::{Deserialize, Serialize};
+use tracing::instrument;
 
 use crate::block::BlockMeta;
 use crate::block_index::BlockIndex;
@@ -183,8 +184,10 @@ impl TraceIndex {
         out.into_iter().collect()
     }
 
+    #[instrument(skip_all, fields(key = %key, len = tracing::field::Empty), err)]
     pub async fn save(&self, store: &Arc<dyn ObjectStore>, key: &str) -> Result<()> {
         let bytes = serde_json::to_vec(self)?;
+        tracing::Span::current().record("len", bytes.len());
         store.put(&Path::from(key), PutPayload::from(bytes)).await?;
         Ok(())
     }
@@ -208,6 +211,7 @@ impl TraceIndex {
         Self::load(store, key).await
     }
 
+    #[instrument(level = "debug", skip_all, fields(path = %path), err)]
     async fn load_path(store: &Arc<dyn ObjectStore>, path: &Path) -> Result<Self> {
         let bytes = store.get(path).await?.bytes().await?;
         let index: Self = serde_json::from_slice(&bytes)?;

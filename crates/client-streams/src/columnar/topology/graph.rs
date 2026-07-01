@@ -179,6 +179,13 @@ impl ColumnarTopology {
     ///
     /// # Errors
     /// Returns the validation error message if the graph is structurally invalid.
+    #[tracing::instrument(
+        name = "streams.columnar.build",
+        level = "info",
+        skip_all,
+        fields(nodes = self.nodes.len()),
+        err,
+    )]
     pub fn build(&self) -> Result<BuiltColumnarTopology<'_>, String> {
         self.validate()?;
         Ok(BuiltColumnarTopology { topo: self })
@@ -191,6 +198,13 @@ impl BuiltColumnarTopology<'_> {
     ///
     /// # Errors
     /// Returns `BatchError` if any codec or operator fails.
+    #[tracing::instrument(
+        name = "streams.columnar.run_batch",
+        level = "debug",
+        skip_all,
+        fields(topic = %topic, records = records.len()),
+        err,
+    )]
     pub fn run_batch(
         &self,
         topic: &str,

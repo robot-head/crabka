@@ -6,6 +6,7 @@ use std::sync::Arc;
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 use serde::{Deserialize, Serialize};
+use tracing::instrument;
 
 use crate::block::BlockMeta;
 use crate::block_index::BlockIndex;
@@ -448,8 +449,14 @@ impl Index {
     }
 
     /// Persist the index as a JSON snapshot to object storage.
+    #[instrument(
+        skip_all,
+        fields(object_key = %object_key, len = tracing::field::Empty),
+        err
+    )]
     pub async fn save(&self, store: &Arc<dyn ObjectStore>, object_key: &str) -> Result<()> {
         let bytes = serde_json::to_vec(self)?;
+        tracing::Span::current().record("len", bytes.len());
         let path = Path::from(object_key);
         store.put(&path, PutPayload::from(bytes)).await?;
         Ok(())
@@ -464,6 +471,12 @@ impl Index {
         Self::load_with_cap(store, object_key, MAX_INDEX_SNAPSHOT_BYTES).await
     }
 
+    #[instrument(
+        level = "debug",
+        skip_all,
+        fields(object_key = %object_key, size = tracing::field::Empty),
+        err
+    )]
     async fn load_with_cap(
         store: &Arc<dyn ObjectStore>,
         object_key: &str,
@@ -471,6 +484,7 @@ impl Index {
     ) -> Result<Self> {
         let path = Path::from(object_key);
         let meta = store.head(&path).await?;
+        tracing::Span::current().record("size", meta.size);
         if meta.size > max_bytes as u64 {
             return Err(BlockStoreError::InvalidBlock(format!(
                 "index snapshot `{object_key}` is {} bytes, exceeds cap of {max_bytes} bytes",

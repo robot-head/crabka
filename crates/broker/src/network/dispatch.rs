@@ -293,6 +293,10 @@ async fn serve_connection_stream<S>(
             authenticated_via_token: false,
         }
     };
+    // Track live connections for the duration of this serve loop. The
+    // gauge is decremented when `_conn` drops on any loop exit (EOF,
+    // decode/send error, or SASL-session expiry).
+    let _conn = ActiveConnectionGuard::new(&broker.metrics);
     tracing::info!(listener = %spec.name, sasl = is_sasl_listener, "connection opened");
 
     // KIP-714: per-connection client software name + version, populated from
@@ -4007,14 +4011,32 @@ fn peek_client_id(frame: &[u8]) -> Option<&str> {
 /// ready for `framed.send` (which prepends the i32 length).
 ///
 /// Errors here close the connection — they're protocol violations.
+#[tracing::instrument(
+    level = "debug",
+    skip_all,
+    fields(
+        api_key = tracing::field::Empty,
+        api_version = tracing::field::Empty,
+        correlation_id = tracing::field::Empty,
+    ),
+    err,
+)]
 async fn dispatch_one(broker: &Broker, frame: &[u8]) -> Result<Bytes, BrokerError> {
     let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
     let body_flexible = handler_body_flexible(api_key, api_version);
+    let span = tracing::Span::current();
+    span.record("api_key", api_key);
+    span.record("api_version", api_version);
+    span.record("correlation_id", correlation_id);
     // Account this dispatched request before any handler
     // work. Counter bumps even for the UNSUPPORTED_VERSION
     // synthetic-response path below, so operators see traffic from
     // misconfigured clients alongside healthy traffic.
     broker.metrics.record_api_request(api_key);
+    // Track concurrent handler occupancy + full round-trip latency. The
+    // gauge is decremented and the histogram observed on every exit path
+    // (including the handler-error early return below) via the RAII guard.
+    let _in_flight = InFlightGuard::new(&broker.metrics, api_key);
     tracing::info!(
         api_key,
         api_version,
@@ -4033,7 +4055,16 @@ async fn dispatch_one(broker: &Broker, frame: &[u8]) -> Result<Bytes, BrokerErro
         });
 
     let resp_body: Bytes = if let Ok(h) = handler {
-        h(broker, api_version, correlation_id, body).await?
+        match h(broker, api_version, correlation_id, body).await {
+            Ok(b) => b,
+            Err(e) => {
+                // Handler-level fault. Account it per-api before the
+                // guard fires (which decrements in-flight + observes the
+                // latency) and the connection closes upstream.
+                broker.metrics.record_request_error(api_key);
+                return Err(e);
+            }
+        }
     } else {
         tracing::warn!(api_key, api_version, "unsupported api, returning error");
         // Account this synthetic UNSUPPORTED_VERSION
@@ -4057,6 +4088,59 @@ async fn dispatch_one(broker: &Broker, frame: &[u8]) -> Result<Bytes, BrokerErro
         "response built"
     );
     Ok(out)
+}
+
+/// RAII guard covering one dispatched request: bumps `in_flight_requests`
+/// on construction and, on drop (any exit path — success, handler error,
+/// or panic unwind), decrements it and observes the elapsed wall-clock on
+/// the `request_duration_seconds{api}` histogram. Holds a cheap
+/// `BrokerMetrics` clone (an `Arc`-bundle) so it does not borrow `broker`
+/// across the handler `.await`.
+struct InFlightGuard {
+    metrics: crate::metrics::BrokerMetrics,
+    api_key: i16,
+    started: std::time::Instant,
+}
+
+impl InFlightGuard {
+    fn new(metrics: &crate::metrics::BrokerMetrics, api_key: i16) -> Self {
+        metrics.in_flight_requests.inc();
+        Self {
+            metrics: metrics.clone(),
+            api_key,
+            started: std::time::Instant::now(),
+        }
+    }
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        self.metrics.in_flight_requests.dec();
+        self.metrics
+            .observe_request_duration(self.api_key, self.started.elapsed().as_secs_f64());
+    }
+}
+
+/// RAII guard for one live client connection: bumps `active_connections`
+/// on construction, decrements it when the per-connection serve loop exits
+/// (drop). Holds a cheap `BrokerMetrics` clone.
+struct ActiveConnectionGuard {
+    metrics: crate::metrics::BrokerMetrics,
+}
+
+impl ActiveConnectionGuard {
+    fn new(metrics: &crate::metrics::BrokerMetrics) -> Self {
+        metrics.active_connections.inc();
+        Self {
+            metrics: metrics.clone(),
+        }
+    }
+}
+
+impl Drop for ActiveConnectionGuard {
+    fn drop(&mut self) {
+        self.metrics.active_connections.dec();
+    }
 }
 
 /// Parse `RequestHeader` and return `(api_key, version, corr_id, &body)`.

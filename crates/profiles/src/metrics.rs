@@ -43,6 +43,12 @@ pub struct RouteLabel {
     pub route: String,
 }
 
+/// `tenant` label set for the per-tenant ingested-samples counter family.
+#[derive(Debug, Clone, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct TenantLabel {
+    pub tenant: String,
+}
+
 /// Cheaply-clonable bundle of metric handles plus the shared registry.
 /// Construct once via [`ServiceMetrics::new`]; clone freely (each clone is a
 /// handful of `Arc::clone`s).
@@ -63,6 +69,13 @@ pub struct ServiceMetrics {
     /// Cumulative WAL/produce append failures. Renders as
     /// `crabka_profiles_wal_append_failures_total`.
     pub wal_append_failures: Counter,
+    /// Cumulative profile samples accepted, labelled by tenant. Renders as
+    /// `crabka_profiles_ingest_samples_total{tenant}`. Bumped once per ingest
+    /// request with the number of WAL samples that request produced.
+    pub ingest_samples: Family<TenantLabel, Counter>,
+    /// Cumulative profile sample blocks flushed to object storage by the
+    /// block-builder. Renders as `crabka_profiles_blocks_built_total`.
+    pub blocks_built: Counter,
     /// Query requests, labelled by route + outcome. Renders as
     /// `crabka_profiles_query_requests_total{route,status}`.
     pub query_requests: Family<RouteStatusLabel, Counter>,
@@ -83,6 +96,8 @@ impl ServiceMetrics {
             0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0,
         ]);
         let wal_append_failures = Counter::default();
+        let ingest_samples = Family::<TenantLabel, Counter>::default();
+        let blocks_built = Counter::default();
         let query_requests = Family::<RouteStatusLabel, Counter>::default();
         let query_duration = Family::<RouteLabel, Histogram>::new_with_constructor(|| {
             Histogram::new([0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0])
@@ -114,6 +129,16 @@ impl ServiceMetrics {
             wal_append_failures.clone(),
         );
         registry.register(
+            "ingest_samples",
+            "Cumulative profile samples accepted, labelled by tenant.",
+            ingest_samples.clone(),
+        );
+        registry.register(
+            "blocks_built",
+            "Cumulative profile sample blocks flushed to object storage by the block-builder.",
+            blocks_built.clone(),
+        );
+        registry.register(
             "query_requests",
             "Query requests handled, labelled by route and outcome (ok/error).",
             query_requests.clone(),
@@ -131,6 +156,8 @@ impl ServiceMetrics {
             ingest_items,
             ingest_duration,
             wal_append_failures,
+            ingest_samples,
+            blocks_built,
             query_requests,
             query_duration,
         }
@@ -162,6 +189,30 @@ impl ServiceMetrics {
     /// WAL topic failed). Distinct from a 4xx client/validation rejection.
     pub fn record_wal_append_failure(&self) {
         self.wal_append_failures.inc();
+    }
+
+    /// Add `samples` to the per-tenant cumulative ingested-samples counter.
+    /// Called once per ingest request with the number of WAL samples that
+    /// request produced (a no-op when `samples == 0`).
+    pub fn record_ingest_samples(&self, tenant: &str, samples: u64) {
+        if samples == 0 {
+            return;
+        }
+        self.ingest_samples
+            .get_or_create(&TenantLabel {
+                tenant: tenant.into(),
+            })
+            .inc_by(samples);
+    }
+
+    /// Add `blocks` to the cumulative block-builder blocks-flushed counter.
+    /// Called once per block-build poll batch with the number of blocks the
+    /// flush wrote to object storage (a no-op when `blocks == 0`).
+    pub fn record_blocks_built(&self, blocks: u64) {
+        if blocks == 0 {
+            return;
+        }
+        self.blocks_built.inc_by(blocks);
     }
 
     /// Record one query request outcome on `route`: bump the per-route+status
@@ -234,6 +285,8 @@ mod tests {
         m.record_ingest(true, 1024, 3, 0.012);
         m.record_ingest(false, 0, 0, 0.001);
         m.record_wal_append_failure();
+        m.record_ingest_samples("tenant-a", 3);
+        m.record_blocks_built(2);
         m.record_query("select_series", true, 0.5);
         m.record_query("render", false, 0.1);
 
@@ -246,11 +299,17 @@ mod tests {
             "crabka_profiles_ingest_items_total",
             "crabka_profiles_ingest_duration_seconds",
             "crabka_profiles_wal_append_failures_total",
+            "crabka_profiles_ingest_samples_total",
+            "crabka_profiles_blocks_built_total",
             "crabka_profiles_query_requests_total",
             "crabka_profiles_query_duration_seconds",
         ] {
             assert!(buf.contains(needle), "missing {needle} in:\n{buf}");
         }
+        assert!(
+            buf.contains("tenant=\"tenant-a\""),
+            "tenant label missing in:\n{buf}"
+        );
         assert!(buf.contains("status=\"ok\""), "ok status label missing");
         assert!(
             buf.contains("status=\"error\""),

@@ -19,6 +19,13 @@ const MATCH_TYPE_DEFAULT: i8 = 1;
 const MATCH_TYPE_ANY: i8 = 2;
 
 #[allow(clippy::unused_async)]
+#[tracing::instrument(
+    name = "handle_describe_client_quotas",
+    level = "info",
+    skip_all,
+    fields(api = "DescribeClientQuotas"),
+    err
+)]
 pub(crate) async fn handle(
     broker: &Broker,
     req: DescribeClientQuotasRequest,

@@ -25,6 +25,12 @@ use crate::dsl::graph::{GraphNodeKind, LogicalGraph, NodeId};
 /// appear in the merged subtopology.
 ///
 /// [`Repartition`]: GraphNodeKind::Repartition
+#[tracing::instrument(
+    name = "streams.dsl.merge_repartition_topics",
+    level = "debug",
+    skip_all,
+    fields(nodes = graph.nodes.len()),
+)]
 pub(crate) fn merge_repartition_topics(graph: &mut LogicalGraph) {
     // predecessor id → repartition node ids sharing it (id-ascending via BTreeMap
     // keys + push order, since nodes are visited in id order below).
@@ -64,6 +70,12 @@ pub(crate) fn merge_repartition_topics(graph: &mut LogicalGraph) {
 /// placement are untouched — only the changelog topic name changes.
 ///
 /// [`TableSource`]: GraphNodeKind::TableSource
+#[tracing::instrument(
+    name = "streams.dsl.reuse_ktable_source_topics",
+    level = "debug",
+    skip_all,
+    fields(nodes = graph.nodes.len()),
+)]
 pub(crate) fn reuse_ktable_source_topics(graph: &mut LogicalGraph) {
     for node in &mut graph.nodes {
         if let GraphNodeKind::TableSource {

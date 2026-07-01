@@ -34,6 +34,13 @@ pub struct RouteStatusLabel {
     pub status: String,
 }
 
+/// Per-tenant ingest label (`tenant="…"`), paired with the accepted-lines
+/// counter so ingest volume can be attributed per tenant.
+#[derive(Debug, Clone, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct TenantLabel {
+    pub tenant: String,
+}
+
 /// Query route label (`route="query"`), paired with the per-route latency
 /// histogram family.
 #[derive(Debug, Clone, Hash, PartialEq, Eq, EncodeLabelSet)]
@@ -54,6 +61,13 @@ pub struct ServiceMetrics {
     pub ingest_items: Counter,
     pub ingest_duration: Histogram,
     pub wal_append_failures: Counter,
+    /// Per-tenant accepted log lines on the ingest path. Complements the
+    /// tenant-agnostic `ingest_items` counter with per-tenant attribution.
+    pub ingest_lines: Family<TenantLabel, Counter>,
+    // COMPACT (compactor role).
+    /// Log blocks durably written to object storage by the compactor (one
+    /// increment per persisted [`crabka_blockstore::BlockDescriptor`]).
+    pub blocks_written: Counter,
     // QUERY (querier role).
     pub query_requests: Family<RouteStatusLabel, Counter>,
     pub query_duration: Family<RouteLabel, Histogram>,
@@ -72,6 +86,8 @@ impl ServiceMetrics {
             0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0,
         ]);
         let wal_append_failures = Counter::default();
+        let ingest_lines = Family::<TenantLabel, Counter>::default();
+        let blocks_written = Counter::default();
         let query_requests = Family::<RouteStatusLabel, Counter>::default();
         let query_duration = Family::<RouteLabel, Histogram>::new_with_constructor(|| {
             Histogram::new([0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0])
@@ -103,6 +119,16 @@ impl ServiceMetrics {
             wal_append_failures.clone(),
         );
         registry.register(
+            "ingest_lines",
+            "Accepted log lines on the ingest path, by tenant",
+            ingest_lines.clone(),
+        );
+        registry.register(
+            "blocks_written",
+            "Log blocks durably written to object storage by the compactor",
+            blocks_written.clone(),
+        );
+        registry.register(
             "query_requests",
             "Querier requests by route and outcome (route, status=ok|error)",
             query_requests.clone(),
@@ -120,6 +146,8 @@ impl ServiceMetrics {
             ingest_items,
             ingest_duration,
             wal_append_failures,
+            ingest_lines,
+            blocks_written,
             query_requests,
             query_duration,
         }
@@ -148,6 +176,26 @@ impl ServiceMetrics {
     /// 4xx.
     pub fn record_wal_append_failure(&self) {
         self.wal_append_failures.inc();
+    }
+
+    /// Add `lines` accepted log lines to the per-tenant ingest-lines counter.
+    /// Called once per accepted ingest request from the push handlers, where
+    /// the tenant (`X-Scope-OrgID`) and normalized record count are both known.
+    pub fn record_ingest_lines(&self, tenant: &str, lines: u64) {
+        if lines == 0 {
+            return;
+        }
+        self.ingest_lines
+            .get_or_create(&TenantLabel {
+                tenant: tenant.into(),
+            })
+            .inc_by(lines);
+    }
+
+    /// Bump the compactor blocks-written counter once per log block durably
+    /// persisted to object storage.
+    pub fn record_block_written(&self) {
+        self.blocks_written.inc();
     }
 
     /// Record one querier request: bumps the per-(route, status) request
@@ -222,6 +270,8 @@ mod tests {
         m.record_ingest(true, 1_024, 7, 0.01);
         m.record_ingest(false, 0, 0, 0.002);
         m.record_wal_append_failure();
+        m.record_ingest_lines("demo", 7);
+        m.record_block_written();
         m.record_query("query", true, 0.05);
         m.record_query("query_range", false, 0.2);
 
@@ -235,11 +285,14 @@ mod tests {
             "crabka_logs_ingest_items_total",
             "crabka_logs_ingest_duration_seconds",
             "crabka_logs_wal_append_failures_total",
+            "crabka_logs_ingest_lines_total",
+            "crabka_logs_blocks_written_total",
             "crabka_logs_query_requests_total",
             "crabka_logs_query_duration_seconds",
         ] {
             assert!(buf.contains(needle), "missing {needle} in:\n{buf}");
         }
+        assert!(buf.contains("tenant=\"demo\""), "tenant label missing");
         assert!(buf.contains("status=\"ok\""), "ok status label missing");
         assert!(
             buf.contains("status=\"error\""),

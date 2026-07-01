@@ -51,6 +51,12 @@ impl SourceConsumer {
     /// # Errors
     ///
     /// Returns [`ConnectError::Backend`] if the consumer cannot join the group.
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(bootstrap = %bootstrap, group_id = %group_id, topics = topics.len()),
+        err,
+    )]
     pub async fn start(
         bootstrap: &str,
         group_id: &str,
@@ -88,6 +94,12 @@ impl Source<(), ReplicatedRecord> for SourceConsumer {
     /// # Errors
     ///
     /// Returns [`ConnectError::Backend`] if the underlying consumer poll fails.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(fetched = tracing::field::Empty),
+        err,
+    )]
     async fn poll(&mut self) -> Result<Option<ConnectRecord<(), ReplicatedRecord>>, ConnectError> {
         if self.buf.is_empty() {
             let recs = self
@@ -98,6 +110,7 @@ impl Source<(), ReplicatedRecord> for SourceConsumer {
                 .await
                 .map_err(|e| ConnectError::Backend(e.to_string()))?;
 
+            tracing::Span::current().record("fetched", recs.len());
             for r in recs {
                 // Track the next offset to read (committed position = offset + 1).
                 self.positions
@@ -163,6 +176,12 @@ impl Source<(), ReplicatedRecord> for SourceConsumer {
     /// # Errors
     ///
     /// Returns [`ConnectError::Backend`] if the consumer is already closed.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(positions = offset.position.len()),
+        err,
+    )]
     async fn seek(&mut self, offset: SourceOffset) -> Result<(), ConnectError> {
         let consumer = self
             .consumer
@@ -200,6 +219,7 @@ impl Source<(), ReplicatedRecord> for SourceConsumer {
     /// # Errors
     ///
     /// Returns [`ConnectError::Backend`] if the consumer fails to close cleanly.
+    #[tracing::instrument(level = "info", skip_all, err)]
     async fn close(&mut self) -> Result<(), ConnectError> {
         if let Some(consumer) = self.consumer.take() {
             consumer

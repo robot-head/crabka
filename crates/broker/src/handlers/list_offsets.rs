@@ -30,6 +30,13 @@ const MAX_TIMESTAMP: i64 = -3; // KIP-734
 const EARLIEST_LOCAL: i64 = -4; // KIP-405
 
 #[allow(clippy::too_many_lines)]
+#[tracing::instrument(
+    name = "handle_list_offsets",
+    level = "info",
+    skip_all,
+    fields(api = "ListOffsets", version, req_bytes = req_bytes.len()),
+    err,
+)]
 pub(crate) async fn handle(
     broker: &Broker,
     version: i16,

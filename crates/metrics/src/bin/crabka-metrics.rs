@@ -116,7 +116,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     match cli.target {
         Target::Distributor => run_distributor(cli, metrics).await?,
-        Target::Compactor => run_compactor(cli).await?,
+        Target::Compactor => run_compactor(cli, metrics).await?,
         Target::Querier => run_querier(cli).await?,
         Target::QueryFrontend => run_query_frontend(cli).await?,
         Target::Ruler => run_ruler(cli).await?,
@@ -305,7 +305,10 @@ async fn run_distributor(
 
 // cargo-mutants: live compactor I/O wiring is covered by integration workflows.
 #[cfg_attr(test, mutants::skip)]
-async fn run_compactor(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_compactor(
+    cli: Cli,
+    metrics: ServiceMetrics,
+) -> Result<(), Box<dyn std::error::Error>> {
     let store = build_object_store(&cli.object_store_url)?;
     let mut config = MetricsCompactorConfig::new(cli.bootstrap);
     config.group_id = cli.compactor_group_id;
@@ -337,6 +340,8 @@ async fn run_compactor(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         |_| stopping.load(Ordering::SeqCst),
     )
     .await?;
+    // Record the cumulative metric blocks the compactor wrote to object storage.
+    metrics.record_blocks_compacted(result.writes as u64);
     tracing::info!(
         polls = result.polls,
         polled_records = result.polled_records,

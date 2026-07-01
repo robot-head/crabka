@@ -41,6 +41,12 @@ use crate::network::auth::ConnectionAuth;
 // `async` matches the call-site shape used by every other
 // `crate::handlers::*::handle`; today the body is purely synchronous.
 #[allow(clippy::unused_async)]
+#[tracing::instrument(
+    name = "handle_describe_delegation_token",
+    level = "info",
+    skip_all,
+    fields(api = "DescribeDelegationToken")
+)]
 pub(crate) async fn handle(
     req: &DescribeDelegationTokenRequest,
     auth: &ConnectionAuth,

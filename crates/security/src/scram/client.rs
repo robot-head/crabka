@@ -48,6 +48,14 @@ impl ScramClientExchange {
         }
     }
 
+    // SCRAM client-first. skip_all keeps the stored `password` out of span
+    // fields; only the non-sensitive mechanism + username are recorded.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(mechanism = %self.mechanism.wire_name(), principal = %self.username),
+        err
+    )]
     pub fn client_first(&mut self) -> Result<Vec<u8>, AuthError> {
         if !matches!(self.state, State::Initial) {
             return Err(AuthError::MalformedMessage);
@@ -66,6 +74,14 @@ impl ScramClientExchange {
         Ok(msg.into_bytes())
     }
 
+    // SCRAM client processing of server-first. skip_all keeps the stored
+    // `password` and the raw `server_bytes` out of span fields.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(mechanism = %self.mechanism.wire_name(), principal = %self.username),
+        err
+    )]
     pub fn step(&mut self, server_bytes: &[u8]) -> Result<Vec<u8>, AuthError> {
         let State::AwaitingServerFirst {
             client_first_bare,
@@ -118,6 +134,14 @@ impl ScramClientExchange {
         Ok(client_final.into_bytes())
     }
 
+    // SCRAM client verification of server-final (server signature). skip_all
+    // keeps the stored `password` and raw `server_bytes` out of span fields.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(mechanism = %self.mechanism.wire_name(), principal = %self.username),
+        err
+    )]
     pub fn verify_server_final(&mut self, server_bytes: &[u8]) -> Result<(), AuthError> {
         let State::AwaitingServerFinal {
             auth_message,

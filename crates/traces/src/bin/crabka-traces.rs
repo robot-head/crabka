@@ -205,7 +205,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     match cli.target {
         Target::Distributor => run_distributor(cli, metrics, shutdown).await?,
-        Target::BlockBuilder => run_block_builder(cli, shutdown).await?,
+        Target::BlockBuilder => run_block_builder(cli, metrics, shutdown).await?,
         Target::LiveStore => run_live_store(cli, shutdown).await?,
         Target::Querier => run_querier(cli, metrics, shutdown).await?,
         Target::QueryFrontend => run_query_frontend(cli, shutdown).await?,
@@ -282,6 +282,7 @@ async fn run_distributor(
 
 async fn run_block_builder(
     cli: Cli,
+    metrics: ServiceMetrics,
     shutdown: CancellationToken,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let promoted_attrs = promoted_attrs_from_cli(&cli)?;
@@ -312,6 +313,7 @@ async fn run_block_builder(
             flush_max_records: cli.block_builder_flush_max_records,
             flush_max_age: Duration::from_millis(cli.block_builder_flush_max_age_ms),
         },
+        metrics,
         shutdown,
     )
     .await?;

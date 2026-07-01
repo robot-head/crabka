@@ -15,6 +15,7 @@
 use std::path::Path;
 
 use bytes::{BufMut, BytesMut};
+use tracing::instrument;
 
 use crabka_remote_storage::{
     PartitionDump, RemoteLogSegmentMetadata, RemotePartitionDeleteState, RlmmCacheDump,
@@ -196,6 +197,11 @@ impl Snapshot {
     ///
     /// Returns [`SnapshotError::Io`] on any filesystem failure up to and
     /// including the rename.
+    #[instrument(
+        skip_all,
+        fields(path = %path.display(), partitions = self.dump.partitions.len()),
+        err
+    )]
     pub fn write_atomic(&self, path: &Path) -> Result<(), SnapshotError> {
         use std::io::Write;
         let bytes = self.encode();
@@ -230,6 +236,7 @@ impl Snapshot {
     ///
     /// Returns [`SnapshotError::Io`] for read failures other than
     /// not-found, or a decode error for a present-but-malformed file.
+    #[instrument(skip_all, fields(path = %path.display()), err)]
     pub fn load(path: &Path) -> Result<Option<Self>, SnapshotError> {
         let bytes = match std::fs::read(path) {
             Ok(b) => b,

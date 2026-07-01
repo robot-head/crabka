@@ -33,7 +33,7 @@ use tokio::runtime::Handle;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
+use tracing::{instrument, warn};
 
 use crabka_remote_storage::{
     InmemoryRemoteLogMetadataManager, RemoteLogMetadataManager, RemoteLogSegmentMetadata,
@@ -277,6 +277,7 @@ impl TopicBasedRemoteLogMetadataManager {
     /// round-trips happen inside, so the hold is bounded. Returns the
     /// highest committed offset written (for the "advanced since last"
     /// check).
+    #[instrument(skip_all, err)]
     fn write_snapshot(&self) -> Result<i64, crate::error::SnapshotError> {
         // Benign-replay invariant: the pump updates `inner` BEFORE bumping
         // `applied`, so the captured cache may lead the captured committed

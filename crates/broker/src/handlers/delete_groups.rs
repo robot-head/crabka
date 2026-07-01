@@ -14,6 +14,13 @@ use crate::codes;
 use crate::coordinator::DeleteGroupError;
 use crate::error::BrokerError;
 
+#[tracing::instrument(
+    name = "handle_delete_groups",
+    level = "info",
+    skip_all,
+    fields(api = "DeleteGroups", version, req_bytes = req_bytes.len()),
+    err,
+)]
 pub(crate) async fn handle(
     broker: &Broker,
     version: i16,

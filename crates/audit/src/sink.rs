@@ -34,9 +34,15 @@ impl AuditRecord {
 
     /// Serialize an event to OCSF JSON and attach SIEM-filterable headers.
     #[must_use]
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(class = ?event.class(), bytes = tracing::field::Empty)
+    )]
     pub fn from_event(event: &AuditEvent, product: &ProductInfo) -> Self {
         let class = event.class();
         let value = serde_json::to_vec(&to_ocsf(event, product)).unwrap_or_else(|_| b"{}".to_vec());
+        tracing::Span::current().record("bytes", value.len());
         let mut headers = vec![(
             "event_class".to_string(),
             class.as_header().as_bytes().to_vec(),

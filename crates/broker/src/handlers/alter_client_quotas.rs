@@ -27,6 +27,13 @@ const KNOWN_QUOTA_KEYS: &[&str] = &[
 ];
 const SUPPORTED_ENTITY_TYPES: &[&str] = &["user", "client-id", "ip"];
 
+#[tracing::instrument(
+    name = "handle_alter_client_quotas",
+    level = "info",
+    skip_all,
+    fields(api = "AlterClientQuotas"),
+    err
+)]
 pub(crate) async fn handle(
     broker: &Broker,
     req: AlterClientQuotasRequest,

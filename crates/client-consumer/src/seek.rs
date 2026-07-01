@@ -60,6 +60,13 @@ impl Consumer {
     /// # Errors
     ///
     /// Returns [`ConsumerError::InvalidOffset`] if `offset` is negative.
+    #[tracing::instrument(
+        name = "consumer.seek",
+        level = "debug",
+        skip_all,
+        fields(group_id = %self.group_id, topic = tracing::field::Empty, partition, offset),
+        err
+    )]
     pub async fn seek(
         &self,
         topic: impl Into<String>,
@@ -69,10 +76,12 @@ impl Consumer {
         if offset < 0 {
             return Err(ConsumerError::InvalidOffset(offset));
         }
+        let topic = topic.into();
+        tracing::Span::current().record("topic", tracing::field::display(&topic));
         self.pending_seeks
             .lock()
             .await
-            .insert((topic.into(), partition), offset);
+            .insert((topic, partition), offset);
         Ok(())
     }
 
@@ -90,6 +99,12 @@ impl Consumer {
     /// is asserting a fresh position with no consumed-epoch history to validate
     /// against, so a stale epoch must not wedge the partition in
     /// `validate_positions`.
+    #[tracing::instrument(
+        name = "consumer.apply_pending_seeks",
+        level = "debug",
+        skip_all,
+        fields(group_id = %self.group_id, pending = tracing::field::Empty)
+    )]
     pub(crate) async fn apply_pending_seeks(&self) {
         // Cheap fast path: steady-state polls have no pending seeks, so avoid
         // taking the assigned/offsets/positions locks on every poll.
@@ -102,6 +117,7 @@ impl Consumer {
         if pending.is_empty() {
             return;
         }
+        tracing::Span::current().record("pending", pending.len());
         let mut offsets = self.next_offsets.lock().await;
         let mut positions = self.positions.lock().await;
         pending.retain(|key, &mut offset| {

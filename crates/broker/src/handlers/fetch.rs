@@ -75,6 +75,13 @@ struct PendingRead {
 /// lets the connection writer split out each partition's records region as a
 /// separate write segment instead of materializing the whole body.
 #[allow(clippy::too_many_lines)]
+#[tracing::instrument(
+    name = "handle_fetch",
+    level = "info",
+    skip_all,
+    fields(api = "Fetch", version, req_bytes = req_bytes.len()),
+    err,
+)]
 pub(crate) async fn handle(
     broker: &Broker,
     version: i16,

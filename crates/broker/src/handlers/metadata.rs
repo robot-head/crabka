@@ -20,10 +20,18 @@ use crate::error::BrokerError;
 use crate::handlers::authorized_operations::authorized_operations_bits;
 
 #[allow(clippy::too_many_lines)] // ACL preamble + asymmetric loop
-#[allow(clippy::unused_async)] // Handler is wholly sync but we keep the
+#[allow(clippy::unused_async)]
+// Handler is wholly sync but we keep the
 // `async fn` shape so it mirrors the other inline-intercept handlers
 // (produce/fetch/etc) and lets future Metadata work (e.g. waiting on
 // topic creation) add `.await`s without changing the signature.
+#[tracing::instrument(
+    name = "handle_metadata",
+    level = "info",
+    skip_all,
+    fields(api = "Metadata", version, req_bytes = req_bytes.len()),
+    err,
+)]
 pub(crate) async fn handle(
     broker: &Broker,
     version: i16,

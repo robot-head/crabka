@@ -111,6 +111,11 @@ impl QuorumStateMachine {
     // ownership to the machine. The current arms happen to only read Copy
     // fields, but future events can carry owned records/snapshots.
     #[allow(clippy::needless_pass_by_value)]
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(node = self.me, epoch = self.state.leader_epoch, role = self.role.name())
+    )]
     pub fn on_event(&mut self, event: Event, log: &dyn LogView, now: SimInstant) -> Vec<Action> {
         match event {
             Event::ReceiveVoteRequest {
@@ -162,6 +167,11 @@ impl QuorumStateMachine {
     /// replicated up to `fetch_epoch`. If the follower's claimed epoch extends
     /// past where that epoch ends in our log, the logs diverged: reply with the
     /// truncation point. Otherwise record its progress and advance the HWM.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(node = self.me, epoch = self.state.leader_epoch, from, fetch_epoch, fetch_offset)
+    )]
     fn handle_fetch(
         &mut self,
         log: &dyn LogView,
@@ -251,6 +261,11 @@ impl QuorumStateMachine {
 
     /// (Follower side) the leader answered our Fetch. A diverging hint means we
     /// must truncate; otherwise we re-arm the fetch timer and fetch again.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(node = self.me, epoch = self.state.leader_epoch, leader_id, diverging = diverging.is_some())
+    )]
     fn handle_fetch_response(
         &mut self,
         leader_id: NodeId,
@@ -273,6 +288,11 @@ impl QuorumStateMachine {
 
     /// The fetch timer fired: a follower/observer lost contact with the leader.
     /// A voter starts an election; an observer just keeps trying to find a leader.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(node = self.me, epoch = self.state.leader_epoch, is_voter = self.is_voter())
+    )]
     fn handle_fetch_timeout(&mut self, log: &dyn LogView, now: SimInstant) -> Vec<Action> {
         if self.is_voter() {
             self.start_election(log, now)
@@ -284,6 +304,11 @@ impl QuorumStateMachine {
     /// A leader announced its epoch. If it is at least our current epoch, follow
     /// it (becoming `Follower`/an attached `Observer`); a stale (lower-epoch)
     /// announcement is ignored.
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(node = self.me, epoch = self.state.leader_epoch, leader_id, leader_epoch)
+    )]
     fn handle_begin_quorum_epoch(
         &mut self,
         leader_id: NodeId,
@@ -342,6 +367,11 @@ impl QuorumStateMachine {
     /// A resigning leader asked us to start an election. If it is not stale, a
     /// voter immediately begins a pre-vote round (no waiting for the election
     /// timer); an observer simply detaches and keeps observing.
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(node = self.me, epoch = self.state.leader_epoch, leader_epoch)
+    )]
     fn handle_end_quorum_epoch(
         &mut self,
         log: &dyn LogView,
@@ -363,6 +393,11 @@ impl QuorumStateMachine {
 
     /// The election timer fired. A voter begins a KIP-996 pre-vote round
     /// (becomes `Prospective`); an observer never elects.
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(node = self.me, epoch = self.state.leader_epoch, is_voter = self.is_voter())
+    )]
     fn handle_election_timeout(&mut self, log: &dyn LogView, now: SimInstant) -> Vec<Action> {
         if !self.is_voter() {
             return Vec::new();
@@ -374,6 +409,11 @@ impl QuorumStateMachine {
     /// leader's `EndQuorumEpoch`): become `Prospective` and broadcast a
     /// non-binding pre-vote at the *current* epoch (epoch is not bumped until the
     /// pre-vote succeeds).
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(node = self.me, epoch = self.state.leader_epoch)
+    )]
     fn start_election(&mut self, log: &dyn LogView, now: SimInstant) -> Vec<Action> {
         // Starting a pre-vote round means we have given up on the current leader
         // (our fetch timed out, or the leader resigned). Drop the leader belief:
@@ -411,6 +451,11 @@ impl QuorumStateMachine {
         actions
     }
 
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(node = self.me, epoch = self.state.leader_epoch, from, resp_epoch = epoch, vote_granted, role = self.role.name())
+    )]
     fn handle_vote_response(
         &mut self,
         log: &dyn LogView,
@@ -471,6 +516,11 @@ impl QuorumStateMachine {
     }
 
     /// Pre-vote succeeded: bump the epoch, self-vote, and broadcast a real vote.
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(node = self.me, epoch = self.state.leader_epoch)
+    )]
     fn promote_to_candidate(&mut self, log: &dyn LogView, now: SimInstant) -> Vec<Action> {
         self.state.leader_epoch = self.state.leader_epoch.saturating_add(1);
         self.state.leader_id = None;
@@ -509,6 +559,11 @@ impl QuorumStateMachine {
         self.promote_to_leader_inner(log)
     }
 
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(node = self.me, epoch = self.state.leader_epoch)
+    )]
     fn promote_to_leader_inner(&mut self, log: &dyn LogView) -> Vec<Action> {
         let epoch = self.state.leader_epoch;
         self.state.leader_id = Some(self.me);
@@ -535,6 +590,11 @@ impl QuorumStateMachine {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(node = self.me, epoch = self.state.leader_epoch, from, voter_id, candidate, candidate_epoch, pre_vote)
+    )]
     fn handle_vote_request(
         &mut self,
         log: &dyn LogView,
@@ -628,6 +688,11 @@ impl QuorumStateMachine {
         actions
     }
 
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(node = self.me, from_epoch = self.state.leader_epoch, to_epoch = epoch)
+    )]
     fn transition_to_unattached(
         &mut self,
         epoch: LeaderEpoch,

@@ -43,6 +43,13 @@ use crate::error::BrokerError;
 use crate::partition::{ProduceData, ProduceJob, WriterMessage};
 
 #[allow(clippy::too_many_lines)] // ACL preamble + subscription guard + tombstone pipeline; splitting hurts readability
+#[tracing::instrument(
+    name = "handle_offset_delete",
+    level = "info",
+    skip_all,
+    fields(api = "OffsetDelete", version, req_bytes = req_bytes.len()),
+    err,
+)]
 pub(crate) async fn handle(
     broker: &Broker,
     version: i16,

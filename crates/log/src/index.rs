@@ -10,6 +10,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
+use tracing::instrument;
 use zerocopy::byteorder::{I64, U32};
 use zerocopy::{BigEndian, FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
@@ -38,6 +39,12 @@ pub struct OffsetIndex {
 impl OffsetIndex {
     /// Open or create an offset-index file. If the file exists, load its
     /// entries into memory. If it doesn't, create an empty file.
+    #[instrument(
+        level = "debug",
+        skip_all,
+        fields(path = %path.display(), entries = tracing::field::Empty),
+        err,
+    )]
     pub fn open(path: &Path) -> Result<Self, LogError> {
         let mut file = OpenOptions::new()
             .read(true)
@@ -66,6 +73,7 @@ impl OffsetIndex {
             }
             entries.push((rel, pos));
         }
+        tracing::Span::current().record("entries", entries.len());
         Ok(Self { file, entries })
     }
 
@@ -96,6 +104,7 @@ impl OffsetIndex {
 
     /// Truncate entries (and the on-disk file) so that all entries with
     /// `position >= max_position_exclusive` are removed.
+    #[instrument(level = "debug", skip(self), fields(entries = tracing::field::Empty), err)]
     pub fn truncate_by_position(&mut self, max_position_exclusive: u32) -> Result<(), LogError> {
         let new_len = self
             .entries
@@ -106,6 +115,7 @@ impl OffsetIndex {
         let new_file_len = (new_len * OFFSET_ENTRY_SIZE) as u64;
         self.file.set_len(new_file_len)?;
         self.file.seek(SeekFrom::End(0))?;
+        tracing::Span::current().record("entries", new_len);
         Ok(())
     }
 
@@ -131,6 +141,7 @@ impl OffsetIndex {
         self.entries.len()
     }
 
+    #[instrument(level = "debug", skip_all, err)]
     pub fn flush(&mut self) -> Result<(), LogError> {
         self.file.sync_data().map_err(LogError::Io)
     }
@@ -258,6 +269,12 @@ pub struct TimeIndex {
 }
 
 impl TimeIndex {
+    #[instrument(
+        level = "debug",
+        skip_all,
+        fields(path = %path.display(), entries = tracing::field::Empty),
+        err,
+    )]
     pub fn open(path: &Path) -> Result<Self, LogError> {
         let mut file = OpenOptions::new()
             .read(true)
@@ -285,6 +302,7 @@ impl TimeIndex {
             }
             entries.push((ts, rel));
         }
+        tracing::Span::current().record("entries", entries.len());
         Ok(Self { file, entries })
     }
 
@@ -315,6 +333,7 @@ impl TimeIndex {
         }
     }
 
+    #[instrument(level = "debug", skip(self), fields(entries = tracing::field::Empty), err)]
     pub fn truncate_by_relative_offset(&mut self, max_rel_exclusive: u32) -> Result<(), LogError> {
         let new_len = self
             .entries
@@ -324,6 +343,7 @@ impl TimeIndex {
         self.entries.truncate(new_len);
         self.file.set_len((new_len * TIME_ENTRY_SIZE) as u64)?;
         self.file.seek(SeekFrom::End(0))?;
+        tracing::Span::current().record("entries", new_len);
         Ok(())
     }
 
@@ -337,6 +357,7 @@ impl TimeIndex {
         self.entries.len()
     }
 
+    #[instrument(level = "debug", skip_all, err)]
     pub fn flush(&mut self) -> Result<(), LogError> {
         self.file.sync_data().map_err(LogError::Io)
     }

@@ -50,6 +50,13 @@ fn normalize_schema(ty: SchemaType, schema: &str) -> Result<String, SrError> {
 }
 
 /// POST /subjects/{subject}/versions[?normalize=true] -> `{"id":N}`
+#[tracing::instrument(
+    level = "info",
+    name = "sr.register",
+    skip_all,
+    fields(subject = %subject, normalize = n.normalize, schema_type = tracing::field::Empty, id = tracing::field::Empty),
+    err
+)]
 pub async fn register(
     State(st): State<AppState>,
     Path(subject): Path<String>,
@@ -59,6 +66,7 @@ pub async fn register(
     let req: RegisterBody =
         serde_json::from_str(&body).map_err(|e| SrError::InvalidSchema(e.to_string()))?;
     let ty = SchemaType::from_wire(req.schema_type.as_deref());
+    tracing::Span::current().record("schema_type", tracing::field::debug(ty));
     let schema = if n.normalize {
         normalize_schema(ty, &req.schema)?
     } else {
@@ -76,10 +84,18 @@ pub async fn register(
             import_version: req.version,
         })
         .await?;
+    tracing::Span::current().record("id", reg.id);
     Ok(ok_json(&serde_json::json!({ "id": reg.id })))
 }
 
 /// POST /subjects/{subject}[?normalize=true][&deleted=true] -> `{subject,id,version,schema}` | 404
+#[tracing::instrument(
+    level = "debug",
+    name = "sr.lookup_by_schema",
+    skip_all,
+    fields(subject = %subject, deleted = q.deleted, normalize = n.normalize, schema_type = tracing::field::Empty, id = tracing::field::Empty, version = tracing::field::Empty),
+    err
+)]
 pub async fn lookup(
     State(st): State<AppState>,
     Path(subject): Path<String>,
@@ -90,6 +106,7 @@ pub async fn lookup(
     let req: RegisterBody =
         serde_json::from_str(&body).map_err(|e| SrError::InvalidSchema(e.to_string()))?;
     let ty = SchemaType::from_wire(req.schema_type.as_deref());
+    tracing::Span::current().record("schema_type", tracing::field::debug(ty));
     let schema_to_find = if n.normalize {
         normalize_schema(ty, &req.schema)?
     } else {
@@ -112,6 +129,8 @@ pub async fn lookup(
     let (sty, schema, _references, message_type) = s
         .schema_by_id(found.id, q.deleted)
         .ok_or(SrError::SchemaNotFound)?;
+    tracing::Span::current().record("id", found.id);
+    tracing::Span::current().record("version", found.version);
     let mut m = serde_json::Map::new();
     m.insert("subject".into(), subject.into());
     m.insert("id".into(), found.id.into());
@@ -129,11 +148,13 @@ pub async fn lookup(
 /// GET /subjects
 // axum requires async handlers even when the body is synchronous.
 #[allow(clippy::unused_async)]
+#[tracing::instrument(level = "debug", name = "sr.list_subjects", skip_all, fields(deleted = q.deleted))]
 pub async fn list(State(st): State<AppState>, Query(q): Query<DeletedQ>) -> Response {
     ok_json(&st.store.store.read().subjects(q.deleted))
 }
 
 /// GET /subjects/{subject}/versions
+#[tracing::instrument(level = "debug", name = "sr.list_versions", skip_all, fields(subject = %subject, deleted = q.deleted), err)]
 pub async fn versions(
     State(st): State<AppState>,
     Path(subject): Path<String>,
@@ -159,6 +180,7 @@ fn parse_version(v: &str) -> Result<Option<i32>, SrError> {
 }
 
 /// GET /subjects/{subject}/versions/{version}
+#[tracing::instrument(level = "debug", name = "sr.get_version", skip_all, fields(subject = %subject, version = %version, deleted = q.deleted), err)]
 pub async fn get_version(
     State(st): State<AppState>,
     Path((subject, version)): Path<(String, String)>,
@@ -193,6 +215,7 @@ pub async fn get_version(
 }
 
 /// GET /subjects/{subject}/versions/{version}/schema -> raw schema text
+#[tracing::instrument(level = "debug", name = "sr.get_version_schema", skip_all, fields(subject = %subject, version = %version, deleted = q.deleted), err)]
 pub async fn get_version_schema(
     State(st): State<AppState>,
     Path((subject, version)): Path<(String, String)>,
@@ -211,6 +234,7 @@ pub async fn get_version_schema(
 
 /// GET /subjects/{subject}/versions/{version}/referencedby -> ids of the live
 /// schemas that reference this `(subject, version)` (ascending; empty if none).
+#[tracing::instrument(level = "debug", name = "sr.referenced_by", skip_all, fields(subject = %subject, version = %version), err)]
 pub async fn referencedby(
     State(st): State<AppState>,
     Path((subject, version)): Path<(String, String)>,

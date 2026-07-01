@@ -10,6 +10,16 @@ use crate::{AuthError, AuthMethod, Principal};
 /// On a known user, password comparison is constant-time. On an unknown
 /// user, returns `UnknownUser` (but the wire response collapses both to
 /// `SASL_AUTHENTICATION_FAILED` upstream).
+///
+/// `skip_all` keeps `creds` and the raw `password` bytes out of span fields;
+/// only the non-sensitive `user` and mechanism name are recorded. `err`
+/// surfaces `AuthError` (Debug) without leaking the password.
+#[tracing::instrument(
+    level = "debug",
+    skip_all,
+    fields(mechanism = "PLAIN", user = %user),
+    err
+)]
 pub fn verify_plain<S: BuildHasher>(
     creds: &HashMap<String, String, S>,
     user: &str,

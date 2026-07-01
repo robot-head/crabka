@@ -137,6 +137,13 @@ async fn compute_proposal(part: &Partition, lag_max: Duration) -> Option<Proposa
     }
 }
 
+#[tracing::instrument(
+    name = "isr_send_alter_partition",
+    level = "info",
+    skip_all,
+    fields(topic = %topic, partition, leader_epoch, new_isr_len = new_isr.len()),
+    err,
+)]
 async fn send_alter_partition(
     controller: &Arc<dyn crate::metadata_source::MetadataSource>,
     broker_id: i32,

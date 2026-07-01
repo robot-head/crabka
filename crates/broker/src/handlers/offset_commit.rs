@@ -31,6 +31,13 @@ use crate::partition::{ProduceData, ProduceJob, WriterMessage};
 use crate::partition_registry::PartitionRegistry;
 
 #[allow(clippy::too_many_lines)] // ACL preamble (group + per-topic) + commit pipeline; splitting hurts readability
+#[tracing::instrument(
+    name = "handle_offset_commit",
+    level = "info",
+    skip_all,
+    fields(api = "OffsetCommit", version, req_bytes = req_bytes.len()),
+    err,
+)]
 pub(crate) async fn handle(
     broker: &Broker,
     version: i16,

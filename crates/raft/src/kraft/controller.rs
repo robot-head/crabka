@@ -490,6 +490,12 @@ impl KraftController {
     ///
     /// # Errors
     /// Returns [`RaftError`] if the log/checkpoint cannot be opened or read.
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(node = me, %cluster_id, election_timeout_ms),
+        err
+    )]
     pub fn open(
         data_dir: PathBuf,
         me: NodeId,
@@ -775,6 +781,11 @@ impl Engine {
         }
     }
 
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(node = self.me, epoch = self.core.quorum_state().leader_epoch, role = self.core.role().name())
+    )]
     fn on_event(&mut self, event: Event) {
         let now = self.now();
         let prev_role = self.core.role().name();
@@ -833,6 +844,11 @@ impl Engine {
     }
 
     #[allow(clippy::too_many_lines)]
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(node = self.me, epoch = self.core.quorum_state().leader_epoch, role = self.core.role().name())
+    )]
     fn on_inbound(&mut self, inbound: Inbound) {
         // Decode the request body, run it through the core, and encode the
         // produced reply back onto the oneshot.
@@ -1175,6 +1191,7 @@ impl Engine {
     }
 
     /// Append the leader's `LeaderChange` control marker for `epoch`.
+    #[tracing::instrument(level = "info", skip_all, fields(node = self.me, epoch), err)]
     fn append_leader_change(&mut self, epoch: LeaderEpoch) -> Result<i64, RaftError> {
         let voter_ids: Vec<NodeId> = self.core.quorum_state().voters.ids().into_iter().collect();
         let mut batch = leader_change_batch(epoch, self.me, &voter_ids);
@@ -1193,6 +1210,16 @@ impl Engine {
     /// rejects immediately with the leader hint. Takes `records` by value: it
     /// owns the batch moved out of the [`Command`].
     #[allow(clippy::needless_pass_by_value)]
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(
+            node = self.me,
+            epoch = self.core.quorum_state().leader_epoch,
+            is_leader = self.core.role().is_leader(),
+            records = records.len()
+        )
+    )]
     fn on_submit_change(
         &mut self,
         records: Vec<crabka_metadata::MetadataRecord>,
@@ -1351,8 +1378,14 @@ impl Engine {
 
     /// Advance the HWM and apply the records newly committed by it to the
     /// [`MetadataImage`], then publish and resolve any satisfied waiters.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(node = self.me, new_hwm, prev_hwm = tracing::field::Empty)
+    )]
     fn advance_and_apply(&mut self, new_hwm: i64) {
         let prev_hwm = self.log.hwm();
+        tracing::Span::current().record("prev_hwm", prev_hwm);
         let expected_hwm = expected_hwm_after_advance(prev_hwm, new_hwm, self.log.log_end_offset());
         self.log.advance_hwm(new_hwm);
         let applied_hwm = self.log.hwm();
@@ -1429,6 +1462,11 @@ impl Engine {
     /// (Leader, KIP-630) once the committed offset has advanced
     /// `snapshot_interval_records` past the last snapshot, serialize the current
     /// image to a checkpoint and prune the log below the snapshot boundary.
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(node = self.me, epoch = self.core.quorum_state().leader_epoch, hwm = tracing::field::Empty)
+    )]
     fn maybe_snapshot_and_prune(&mut self) {
         if self.snapshot_interval_records == 0 || !self.core.role().is_leader() {
             return;
@@ -1438,6 +1476,7 @@ impl Engine {
         if !snapshot_interval_reached(advanced, self.snapshot_interval_records) {
             return;
         }
+        tracing::Span::current().record("hwm", hwm);
         let bytes = match crate::snapshot::SnapshotWriter::serialize(&self.image, 0) {
             Ok(b) => b,
             Err(e) => {
@@ -1509,6 +1548,12 @@ impl Engine {
     }
 
     /// Serialize the current image into a KIP-630 checkpoint under the data dir.
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(node = self.me, epoch = self.core.quorum_state().leader_epoch, end_offset = self.log.hwm()),
+        err
+    )]
     fn do_trigger_snapshot(&self) -> Result<(), RaftError> {
         let bytes = crate::snapshot::SnapshotWriter::serialize(&self.image, 0)?;
         let end_offset = self.log.hwm();
@@ -1591,6 +1636,7 @@ impl Engine {
             .collect()
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(node = self.me, epoch, pre_vote))]
     fn broadcast_vote(&self, epoch: LeaderEpoch, pre_vote: bool) {
         let last_epoch = self.log.last_epoch();
         let last_offset = self.log.end_offset();
@@ -1612,6 +1658,7 @@ impl Engine {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(node = self.me, epoch))]
     fn broadcast_begin_quorum_epoch(&self, epoch: LeaderEpoch) {
         let body = wire::PeerRequest::BeginQuorumEpoch {
             leader_id: self.me,
@@ -1623,6 +1670,7 @@ impl Engine {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(node = self.me, epoch))]
     fn broadcast_end_quorum_epoch(&self, epoch: LeaderEpoch) {
         let body = wire::PeerRequest::EndQuorumEpoch {
             leader_id: self.me,
@@ -1634,6 +1682,7 @@ impl Engine {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(node = self.me, leader_id, fetch_offset = self.log.end_offset()))]
     fn send_fetch(&self, leader_id: NodeId) {
         if leader_id == self.me {
             return;
@@ -1702,6 +1751,11 @@ impl Engine {
     /// offsets, advance our HWM to `min(leader_hwm, own log_end)`, apply the
     /// newly-committed records to the image, then feed the core
     /// `ReceiveFetchResponse` (which re-arms the fetch timer / re-fetches).
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(node = self.me, from, log_end = self.log.log_end_offset())
+    )]
     fn on_fetch_response(&mut self, from: NodeId, body: &[u8]) {
         let Some(wire::PeerResponse::Fetch {
             leader_id,
@@ -1796,6 +1850,7 @@ impl Engine {
     /// the [`SnapshotFetchState`], requesting the next range until complete, then
     /// install the assembled snapshot and resume normal fetching. Any error /
     /// abort falls back to a plain Fetch against the same peer.
+    #[tracing::instrument(level = "debug", skip_all, fields(node = self.me, from))]
     fn on_fetch_snapshot_response(&mut self, from: NodeId, body: &[u8]) {
         let Some(wire::PeerResponse::FetchSnapshot {
             snapshot_id,
@@ -1838,6 +1893,12 @@ impl Engine {
     /// its records, write the checkpoint, install it into the log (resetting the
     /// log-start/end to `end_offset`), publish the new image, and arm the
     /// post-install fetch epoch (see `send_fetch`).
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(node = self.me, end_offset = id.0, snapshot_epoch = id.1, bytes = bytes.len()),
+        err
+    )]
     fn install_fetched_snapshot(&mut self, id: (i64, i32), bytes: &[u8]) -> Result<(), RaftError> {
         let (end_offset, epoch) = id;
         // Validate the bytes decode before mutating any durable state.

@@ -59,6 +59,13 @@ impl Consumer {
     /// `Metadata`. A partition whose metadata leader epoch is greater than the
     /// epoch we last consumed (`offset_epoch`) is flagged `awaiting_validation`.
     #[cfg_attr(test, mutants::skip)] // cargo-mutants: metadata-refresh I/O, exercised by integration tests
+    #[tracing::instrument(
+        name = "consumer.refresh_leader_epochs",
+        level = "debug",
+        skip_all,
+        fields(group_id = %self.group_id),
+        err
+    )]
     pub(crate) async fn refresh_leader_epochs(&self) -> Result<(), ConsumerError> {
         // `refresh_metadata` (not a bare `send(MetadataRequest)`) so the main
         // client's BrokerPool learns each broker's (id → addr) mapping — this
@@ -84,6 +91,17 @@ impl Consumer {
     /// the caller must reset `next_offsets` to. Clears the validation flag for
     /// partitions confirmed consistent.
     #[cfg_attr(test, mutants::skip)] // cargo-mutants: OffsetForLeaderEpoch RPC orchestration, exercised by integration tests
+    #[tracing::instrument(
+        name = "consumer.validate_positions",
+        level = "debug",
+        skip_all,
+        fields(
+            group_id = %self.group_id,
+            to_validate = tracing::field::Empty,
+            truncated = tracing::field::Empty,
+        ),
+        err
+    )]
     pub(crate) async fn validate_positions(
         &self,
     ) -> Result<HashMap<(String, i32), i64>, ConsumerError> {
@@ -119,6 +137,7 @@ impl Consumer {
                 .collect()
         };
 
+        tracing::Span::current().record("to_validate", to_validate.len());
         let mut truncated: HashMap<(String, i32), i64> = HashMap::new();
         for (topic, partition, offset, offset_epoch, leader_epoch, leader_id) in to_validate {
             // RPC issued with no lock held. KIP-320 requires the
@@ -180,6 +199,7 @@ impl Consumer {
                 }
             }
         }
+        tracing::Span::current().record("truncated", truncated.len());
         Ok(truncated)
     }
 }

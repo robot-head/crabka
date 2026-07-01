@@ -38,7 +38,7 @@ use bytes::Bytes;
 use futures_util::stream::{StreamExt, unfold};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, warn};
+use tracing::{debug, instrument, warn};
 
 use crabka_client_admin::{AdminClient, CreateTopicSpec};
 use crabka_client_core::Client;
@@ -125,6 +125,7 @@ impl KafkaMetadataEventLog {
     ///
     /// Returns [`MetadataLogError::Other`] on admin / producer /
     /// client construction failures.
+    #[instrument(skip_all, fields(topic = %cfg.topic, bootstrap = %cfg.bootstrap), err)]
     pub async fn start(cfg: KafkaMetadataLogConfig) -> Result<Arc<Self>, MetadataLogError> {
         // 1. Provision the topic, learn its partition count and id. The
         //    manual Fetch path needs the topic Uuid (Fetch v≥13 carries
@@ -263,6 +264,12 @@ impl MetadataEventLog for KafkaMetadataEventLog {
         self.partition_count
     }
 
+    #[instrument(
+        level = "debug",
+        skip_all,
+        fields(topic = %self.topic, partition, len = event.len()),
+        err
+    )]
     async fn publish(&self, partition: i32, event: Bytes) -> Result<i64, MetadataLogError> {
         if partition < 0 || partition >= self.partition_count {
             return Err(MetadataLogError::PartitionOutOfRange {
@@ -313,6 +320,12 @@ impl MetadataEventLog for KafkaMetadataEventLog {
         (stream, handle)
     }
 
+    #[instrument(
+        level = "debug",
+        skip_all,
+        fields(topic = %self.topic, partition_count = self.partition_count),
+        err
+    )]
     async fn high_water_marks(&self) -> Result<Vec<i64>, MetadataLogError> {
         let partitions = (0..self.partition_count)
             .map(|p| ListOffsetsPartition {
@@ -364,6 +377,7 @@ impl MetadataEventLog for KafkaMetadataEventLog {
 /// topic_id)`. An existing topic's count and id win; a freshly-created
 /// topic's id is re-read with a second metadata round-trip (the
 /// `CreateTopics` outcome does not reliably carry it).
+#[instrument(skip_all, fields(topic = %cfg.topic), err)]
 async fn ensure_topic(cfg: &KafkaMetadataLogConfig) -> Result<(i32, WireUuid), MetadataLogError> {
     let mut admin =
         AdminClient::connect_secured(std::slice::from_ref(&cfg.bootstrap), cfg.security.clone())
@@ -462,6 +476,7 @@ fn to_wire_uuid(u: uuid::Uuid) -> WireUuid {
 /// A dedicated connection per partition keeps the metadata consumer off
 /// any parkable/shared stream: the broker is serial per-connection, so a
 /// long-`max_wait_ms` fetch must not head-of-line-block other RPCs.
+#[instrument(level = "debug", skip_all, fields(partition, start_offset))]
 async fn partition_fetch_loop(
     state: Arc<ConsumerState>,
     partition: i32,

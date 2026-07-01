@@ -1,3 +1,7 @@
+// `#[tracing::instrument]` on the deeply-nested replication futures pushes the
+// type-layout query past the default depth limit; raise it (mirrors lib.rs).
+#![recursion_limit = "256"]
+
 use anyhow::Context as _;
 use clap::Parser;
 use crabka_replicator::config::ReplicatorConfig;

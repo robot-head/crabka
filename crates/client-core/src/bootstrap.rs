@@ -8,6 +8,7 @@ use crate::error::ClientError;
 /// Parse a comma-separated `host:port` list and resolve each entry via
 /// [`tokio::net::lookup_host`]. Silently skips entries that fail to resolve;
 /// returns [`ClientError::Disconnected`] if *none* resolve.
+#[tracing::instrument(level = "debug", skip_all, fields(bootstrap = %bootstrap), err)]
 pub async fn resolve(bootstrap: &str) -> Result<Vec<SocketAddr>, ClientError> {
     let mut out = Vec::new();
     for part in bootstrap.split(',') {

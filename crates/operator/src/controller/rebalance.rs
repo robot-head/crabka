@@ -444,7 +444,35 @@ pub fn error_policy(_obj: Arc<KafkaRebalance>, err: &ReconcileError, _ctx: Arc<C
     Action::requeue(TRANSPORT_RETRY)
 }
 
+/// Reconcile entry point. Times the pass and records the reconcile
+/// counter/histogram, then delegates to [`reconcile_inner`].
+#[tracing::instrument(
+    level = "info",
+    skip_all,
+    fields(
+        kind = "KafkaRebalance",
+        namespace = %obj.namespace().unwrap_or_else(|| "default".into()),
+        name = %obj.name_any(),
+        generation = ?obj.meta().generation,
+    )
+)]
 pub async fn reconcile(
+    obj: Arc<KafkaRebalance>,
+    ctx: Arc<Context>,
+) -> Result<Action, ReconcileError> {
+    let started = std::time::Instant::now();
+    let result = reconcile_inner(obj, ctx.clone()).await;
+    let outcome = if result.is_ok() {
+        crate::telemetry::ReconcileResult::Ok
+    } else {
+        crate::telemetry::ReconcileResult::Error
+    };
+    ctx.metrics
+        .record_reconcile("KafkaRebalance", outcome, started.elapsed().as_secs_f64());
+    result
+}
+
+async fn reconcile_inner(
     obj: Arc<KafkaRebalance>,
     ctx: Arc<Context>,
 ) -> Result<Action, ReconcileError> {
@@ -566,6 +594,12 @@ pub async fn reconcile(
 /// Merge-patch the status. Carries forward `sessionId` /
 /// `optimizationResult` / `observedGeneration` when the outcome doesn't
 /// set new values, so a poll pass never wipes the computed result.
+#[tracing::instrument(
+    level = "info",
+    skip_all,
+    fields(rebalance = %name, state = %outcome.state.as_str(), reason = %outcome.reason),
+    err,
+)]
 async fn write_status(
     api: &Api<KafkaRebalance>,
     name: &str,

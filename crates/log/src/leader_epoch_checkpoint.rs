@@ -18,6 +18,8 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 
+use tracing::instrument;
+
 use crate::error::LogError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -39,12 +41,19 @@ pub const UNDEFINED_OFFSET: i64 = -1;
 
 impl LeaderEpochCheckpoint {
     /// Open (or recover) the checkpoint at `path`. Missing file → empty.
+    #[instrument(
+        level = "debug",
+        skip_all,
+        fields(path = %path.display(), entries = tracing::field::Empty),
+        err,
+    )]
     pub fn open(path: PathBuf) -> Result<Self, LogError> {
         let entries = match fs::read_to_string(&path) {
             Ok(s) => Self::parse(&s)?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(e) => return Err(LogError::Io(e)),
         };
+        tracing::Span::current().record("entries", entries.len());
         Ok(Self { path, entries })
     }
 
@@ -83,6 +92,7 @@ impl LeaderEpochCheckpoint {
     /// Append `(epoch, start_offset)`. Idempotent: re-appending an entry
     /// with the same epoch is a no-op (keeps the earliest recorded
     /// `start_offset`). Rewrites the file atomically.
+    #[instrument(level = "debug", skip(self), fields(epoch, start_offset), err)]
     pub fn append(&mut self, epoch: i32, start_offset: i64) -> Result<(), LogError> {
         if append_to(&mut self.entries, epoch, start_offset) {
             self.flush()?;
@@ -92,6 +102,7 @@ impl LeaderEpochCheckpoint {
 
     /// Remove epoch entries that begin at or after `end_offset` (mirrors Kafka's
     /// LeaderEpochFileCache.truncateFromEnd). Persists if anything changed.
+    #[instrument(level = "debug", skip(self), fields(end_offset), err)]
     pub fn truncate_from_end(&mut self, end_offset: i64) -> Result<(), LogError> {
         let before = self.entries.len();
         truncate_to(&mut self.entries, end_offset);
@@ -106,6 +117,7 @@ impl LeaderEpochCheckpoint {
     /// `LocalLog.truncateFullyAndStartAt`). Used by [`Log::reset_to`]: once the
     /// log has been emptied, no offset has a backing record, so no epoch may be
     /// advertised. Persists the now-empty file only when something was removed.
+    #[instrument(level = "debug", skip(self), fields(cleared = self.entries.len()), err)]
     pub fn clear(&mut self) -> Result<(), LogError> {
         if self.entries.is_empty() {
             return Ok(());

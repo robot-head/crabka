@@ -12,10 +12,20 @@ use x509_parser::prelude::X509Certificate;
 
 /// Parse `cert_der` and return the Subject DN in RFC 2253 format.
 /// Returns `None` if the bytes don't parse as a valid X.509 cert.
+// mTLS principal extraction. skip_all keeps the raw `cert_der` bytes out of
+// span fields; the derived Subject DN (the principal, non-secret) is recorded
+// mid-fn. Returns `Option`, not `Result`, so no `err`.
 #[must_use]
+#[tracing::instrument(
+    level = "debug",
+    skip_all,
+    fields(mechanism = "mTLS", principal = tracing::field::Empty)
+)]
 pub fn extract_principal_from_cert(cert_der: &[u8]) -> Option<String> {
     let (_, cert) = X509Certificate::from_der(cert_der).ok()?;
-    Some(cert.subject().to_string())
+    let dn = cert.subject().to_string();
+    tracing::Span::current().record("principal", dn.as_str());
+    Some(dn)
 }
 
 #[cfg(test)]

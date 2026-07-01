@@ -20,8 +20,17 @@ use prometheus_client::encoding::EncodeLabelSet;
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::gauge::Gauge;
+use prometheus_client::metrics::histogram::Histogram;
 use prometheus_client::registry::Registry;
 use tokio::sync::Mutex;
+
+/// Latency buckets (seconds) for the per-API `request_duration_seconds`
+/// histogram. Spans ~100µs (idempotent `ApiVersions`) to 10s (a slow
+/// controller round-trip or a throttled admin RPC), tuned so the common
+/// Produce/Fetch band (0.5ms–50ms) lands on distinct buckets.
+const REQUEST_DURATION_BUCKETS: [f64; 12] = [
+    0.0001, 0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 10.0,
+];
 
 /// Shared registry owning every metric the broker emits. Wrapped in
 /// `Arc<Mutex<…>>` because `prometheus-client` requires `&mut Registry`
@@ -222,6 +231,33 @@ pub struct BrokerMetrics {
     /// doesn't speak — frequently the smoking gun for upgrade-skew
     /// or misconfigured clients.
     pub unsupported_api_requests: Family<ApiKeyLabel, Counter>,
+    /// Per-Kafka-API request-handling latency in seconds
+    /// (`crabka_broker_request_duration_seconds{api}`). Observed in the
+    /// dispatch path around the full handler round-trip (decode → handle →
+    /// encode) for every dispatched frame, labelled by the `ApiKey`
+    /// variant name. Operators graph
+    /// `histogram_quantile(0.99, rate(request_duration_seconds_bucket[5m]))`
+    /// per api to spot handler tail-latency regressions, and use `_count`
+    /// as a request-rate stream that pairs with `api_requests`.
+    pub request_duration_seconds: Family<ApiKeyLabel, Histogram>,
+    /// Number of requests currently being handled by this
+    /// broker (gauge). Incremented on dispatch entry, decremented on exit
+    /// (including the error/close path). A sustained climb signals handler
+    /// stalls or a wedged downstream (controller / replication).
+    pub in_flight_requests: Gauge,
+    /// Number of client connections currently open to this
+    /// broker (gauge). Incremented when a connection is accepted and the
+    /// per-connection serve loop starts, decremented when that loop exits
+    /// (EOF, error, or SASL-session expiry). Mirrors Kafka's
+    /// `kafka.network:type=Acceptor` connection-count intent.
+    pub active_connections: Gauge,
+    /// Per-Kafka-API counter of requests whose handler
+    /// returned an error (the dispatcher closed the connection). Labelled
+    /// by the `ApiKey` variant name; disjoint from
+    /// `unsupported_api_requests` (which counts the synthetic
+    /// `UNSUPPORTED_VERSION` arm). Operators alert on
+    /// `rate(request_errors_total[5m]) > 0` to catch handler-level faults.
+    pub request_errors: Family<ApiKeyLabel, Counter>,
     /// KIP-405: `1` when this broker has finished swapping in
     /// the topic-backed `RemoteLogMetadataManager` and is
     /// answering metadata queries from the durable
@@ -318,6 +354,11 @@ impl BrokerMetrics {
         let failed_authentication: Family<SaslMechanismLabel, Counter> = Family::default();
         let api_requests: Family<ApiKeyLabel, Counter> = Family::default();
         let unsupported_api_requests: Family<ApiKeyLabel, Counter> = Family::default();
+        let request_duration_seconds: Family<ApiKeyLabel, Histogram> =
+            Family::new_with_constructor(|| Histogram::new(REQUEST_DURATION_BUCKETS));
+        let in_flight_requests = Gauge::default();
+        let active_connections = Gauge::default();
+        let request_errors: Family<ApiKeyLabel, Counter> = Family::default();
         let tiered_storage_rlmm_topic_backed = Gauge::default();
         let tiered_storage_rlmm_bootstrap_attempts = Counter::default();
         let produce_message_conversions: Family<TopicLabel, Counter> = Family::default();
@@ -567,6 +608,39 @@ impl BrokerMetrics {
             unsupported_api_requests.clone(),
         );
         registry.register(
+            "request_duration_seconds",
+            "Per-Kafka-API request-handling latency in \
+             seconds, observed in the dispatch path around the full \
+             handler round-trip (decode → handle → encode). Labelled by \
+             the ApiKey variant name. Operators graph \
+             histogram_quantile(0.99, rate(..._bucket[5m])) per api to \
+             spot tail-latency regressions.",
+            request_duration_seconds.clone(),
+        );
+        registry.register(
+            "in_flight_requests",
+            "Number of requests currently being handled by this broker \
+             (gauge). Incremented on dispatch entry, decremented on exit; \
+             a sustained climb signals handler stalls.",
+            in_flight_requests.clone(),
+        );
+        registry.register(
+            "active_connections",
+            "Number of client connections currently open to this broker \
+             (gauge). Incremented when the per-connection serve loop \
+             starts, decremented when it exits (EOF / error / SASL expiry).",
+            active_connections.clone(),
+        );
+        registry.register(
+            "request_errors",
+            "Per-Kafka-API count of requests whose handler \
+             returned an error (dispatcher closed the connection). \
+             Labelled by the ApiKey variant name; disjoint from \
+             unsupported_api_requests. Alert on rate(...) > 0 to catch \
+             handler-level faults.",
+            request_errors.clone(),
+        );
+        registry.register(
             "tiered_storage_rlmm_topic_backed",
             "KIP-405: 1 when this broker is answering remote-log \
              metadata queries from the durable __remote_log_metadata topic \
@@ -683,6 +757,10 @@ impl BrokerMetrics {
             failed_authentication,
             api_requests,
             unsupported_api_requests,
+            request_duration_seconds,
+            in_flight_requests,
+            active_connections,
+            request_errors,
             tiered_storage_rlmm_topic_backed,
             tiered_storage_rlmm_bootstrap_attempts,
             produce_message_conversions,
@@ -755,6 +833,40 @@ impl BrokerMetrics {
             api_key: name.to_string(),
         };
         self.unsupported_api_requests.get_or_create(&lbl).inc();
+    }
+
+    /// Observe the wall-clock handling latency for one dispatched
+    /// request on the `request_duration_seconds{api}` histogram. `api_key`
+    /// is resolved to the same human-readable label as
+    /// `record_api_request` (unknown keys fold under `"Unknown"`), so the
+    /// two families share a label set. Called from the dispatch path once
+    /// per frame with the elapsed seconds of the full handler round-trip.
+    pub fn observe_request_duration(&self, api_key: i16, seconds: f64) {
+        let name: &'static str = match crabka_protocol::api_key::ApiKey::from_i16(api_key) {
+            Some(k) => k.into(),
+            None => "Unknown",
+        };
+        let lbl = ApiKeyLabel {
+            api_key: name.to_string(),
+        };
+        self.request_duration_seconds
+            .get_or_create(&lbl)
+            .observe(seconds);
+    }
+
+    /// Account one request whose handler returned an error (the
+    /// dispatcher closed the connection). Labelled like
+    /// `record_api_request`; disjoint from the
+    /// `unsupported_api_requests` family.
+    pub fn record_request_error(&self, api_key: i16) {
+        let name: &'static str = match crabka_protocol::api_key::ApiKey::from_i16(api_key) {
+            Some(k) => k.into(),
+            None => "Unknown",
+        };
+        let lbl = ApiKeyLabel {
+            api_key: name.to_string(),
+        };
+        self.request_errors.get_or_create(&lbl).inc();
     }
 
     /// Convenience: record a Produce hit on `topic` with the given
@@ -950,6 +1062,11 @@ mod tests {
         m.record_api_request(0); // Produce
         m.record_api_request(999); // unknown → "Unknown" label
         m.record_unsupported_api_request(999);
+        m.observe_request_duration(0, 0.002); // Produce latency sample
+        m.observe_request_duration(999, 1.5); // unknown → "Unknown" label
+        m.record_request_error(1); // Fetch handler error
+        m.in_flight_requests.set(3);
+        m.active_connections.set(11);
         m.partition_disk_bytes
             .get_or_create(&PartitionLabel {
                 topic: "topic-a".into(),
@@ -999,6 +1116,12 @@ mod tests {
             "crabka_broker_unclean_leader_elections_total",
             "crabka_broker_api_requests_total",
             "crabka_broker_unsupported_api_requests_total",
+            "crabka_broker_request_duration_seconds_bucket",
+            "crabka_broker_request_duration_seconds_sum",
+            "crabka_broker_request_duration_seconds_count",
+            "crabka_broker_in_flight_requests",
+            "crabka_broker_active_connections",
+            "crabka_broker_request_errors_total",
             "crabka_broker_messages_in_total",
             "crabka_broker_topic_failed_produce_requests_total",
             "crabka_broker_topic_failed_fetch_requests_total",
@@ -1291,6 +1414,51 @@ mod tests {
         assert!(m.replication_bytes_in.get_or_create(&lbl4).get() == 100);
         assert!(m.replication_bytes_out.get_or_create(&lbl3).get() == 4_000);
         assert!(m.replication_bytes_out.get_or_create(&lbl4).get() == 0);
+    }
+
+    #[tokio::test]
+    async fn request_duration_errors_and_gauges_render() {
+        let m = BrokerMetrics::new();
+        // Two Produce latency samples + one unknown-key sample.
+        m.observe_request_duration(0, 0.0008);
+        m.observe_request_duration(0, 0.04);
+        m.observe_request_duration(12_345, 2.0); // → "Unknown" label
+        m.record_request_error(1); // Fetch handler fault
+        m.record_request_error(1);
+        m.in_flight_requests.inc();
+        m.in_flight_requests.inc();
+        m.in_flight_requests.dec();
+        m.active_connections.set(5);
+
+        let produce = ApiKeyLabel {
+            api_key: "Produce".into(),
+        };
+        let fetch = ApiKeyLabel {
+            api_key: "Fetch".into(),
+        };
+        // Histogram Family exposes sample count via the encoded `_count`;
+        // assert the render + the error/gauge values here.
+        assert!(m.request_errors.get_or_create(&fetch).get() == 2);
+        assert!(m.in_flight_requests.get() == 1);
+        assert!(m.active_connections.get() == 5);
+
+        let mut buf = String::new();
+        let r = m.registry.lock().await;
+        prometheus_client::encoding::text::encode(&mut buf, &r).unwrap();
+        assert!(
+            buf.contains("crabka_broker_request_duration_seconds_count{api_key=\"Produce\"} 2"),
+            "expected 2 Produce latency samples in:\n{buf}"
+        );
+        assert!(
+            buf.contains("crabka_broker_request_errors_total{api_key=\"Fetch\"} 2"),
+            "expected 2 Fetch request errors in:\n{buf}"
+        );
+        assert!(buf.contains("crabka_broker_in_flight_requests 1"));
+        assert!(buf.contains("crabka_broker_active_connections 5"));
+        // Unknown api_key folds under the shared "Unknown" label.
+        assert!(buf.contains("api_key=\"Unknown\""), "unknown label missing");
+        // Keep `produce` referenced to document the intended label.
+        let _ = produce;
     }
 
     #[test]

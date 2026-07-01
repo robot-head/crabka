@@ -69,6 +69,13 @@ pub fn parse_promql(query: &str) -> Result<Expr> {
 ///
 /// Returns [`PromqlError::Parse`] when normalization or the upstream parser
 /// rejects the query.
+#[tracing::instrument(
+    name = "promql.parse",
+    level = "debug",
+    skip_all,
+    fields(query = %query),
+    err
+)]
 pub fn parse_promql_with_duration_context(
     query: &str,
     context: DurationExprContext,

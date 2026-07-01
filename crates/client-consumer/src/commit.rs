@@ -85,11 +85,24 @@ impl Consumer {
     /// Commit the current next-offsets for every assigned partition.
     /// Blocks until the broker acks.
     #[cfg_attr(test, mutants::skip)] // cargo-mutants: I/O-bound coordinator RPC, exercised by integration tests
+    #[tracing::instrument(
+        name = "consumer.commit_sync",
+        level = "debug",
+        skip_all,
+        fields(
+            group_id = %self.group_id,
+            member_id = %self.member_id,
+            generation = self.current_generation.load(Ordering::Relaxed),
+            partitions = tracing::field::Empty,
+        ),
+        err
+    )]
     pub async fn commit_sync(&self) -> Result<(), ConsumerError> {
         let raw_offsets = self.next_offsets.lock().await.clone();
         if raw_offsets.is_empty() {
             return Ok(());
         }
+        tracing::Span::current().record("partitions", raw_offsets.len());
         let pos = self.positions.lock().await;
         let offsets = commit_offsets(raw_offsets, &pos);
         drop(pos);
@@ -156,6 +169,16 @@ impl Consumer {
     /// client's writer task; does NOT wait for the broker ack. Errors are
     /// logged but not returned.
     #[cfg_attr(test, mutants::skip)] // cargo-mutants: fire-and-forget I/O spawn, exercised by integration tests
+    #[tracing::instrument(
+        name = "consumer.commit_async",
+        level = "debug",
+        skip_all,
+        fields(
+            group_id = %self.group_id,
+            member_id = %self.member_id,
+            generation = self.current_generation.load(Ordering::Relaxed),
+        )
+    )]
     pub fn commit_async(&self) {
         let client = self.client.clone();
         let group_id = self.group_id.clone();

@@ -15,6 +15,13 @@ use crate::codes;
 use crate::coordinator::unified::share::actor::ShareGroupActorMessage;
 use crate::error::BrokerError;
 
+#[tracing::instrument(
+    name = "handle_share_group_heartbeat",
+    level = "info",
+    skip_all,
+    fields(api = "ShareGroupHeartbeat", version, req_bytes = req_bytes.len()),
+    err,
+)]
 pub(crate) async fn handle(
     broker: &Broker,
     version: i16,

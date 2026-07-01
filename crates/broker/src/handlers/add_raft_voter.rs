@@ -30,6 +30,13 @@ use crate::broker::Broker;
 use crate::codes;
 use crate::error::BrokerError;
 
+#[tracing::instrument(
+    name = "handle_add_raft_voter",
+    level = "info",
+    skip_all,
+    fields(api = "AddRaftVoter", version, req_bytes = req_bytes.len()),
+    err,
+)]
 pub(crate) async fn handle(
     broker: &Broker,
     version: i16,

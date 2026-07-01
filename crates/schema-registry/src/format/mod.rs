@@ -52,6 +52,7 @@ pub struct ResolvedReference {
 
 /// Parse `schema` as `ty` with its resolved references available, returning a
 /// boxed parsed form or `SrError::InvalidSchema`.
+#[tracing::instrument(level = "debug", name = "format.parse", skip_all, fields(schema_type = ?ty, refs = refs.len()), err)]
 pub fn parse(
     ty: SchemaType,
     schema: &str,
@@ -91,6 +92,7 @@ pub fn normalized_storage_form(
 /// Directional compatibility check: can a reader using `reader` read data
 /// written with `writer`, per format `ty`? `Err(messages)` on incompatibility.
 /// Avro is backed by `apache-avro`; Protobuf and JSON Schema are permissive.
+#[tracing::instrument(level = "debug", name = "format.check", skip_all, fields(schema_type = ?ty, reader_refs = reader_refs.len(), writer_refs = writer_refs.len()))]
 pub fn check(
     ty: SchemaType,
     reader: &str,

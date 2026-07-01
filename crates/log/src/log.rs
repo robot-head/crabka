@@ -7,6 +7,7 @@ use std::time::SystemTime;
 
 use bytes::{Bytes, BytesMut};
 use crabka_protocol::records::{HEADER_LEN, RecordBatch};
+use tracing::instrument;
 
 use crate::config::LogConfig;
 use crate::error::LogError;
@@ -192,6 +193,16 @@ impl Log {
     /// Open or create a `Log` at `dir`. Discovers existing segments by
     /// `.log` filename, marks all but the latest as sealed, and (if the
     /// directory is empty) creates a fresh active segment at offset 0.
+    #[instrument(
+        level = "info",
+        skip_all,
+        fields(
+            dir = %dir.as_ref().display(),
+            segments = tracing::field::Empty,
+            log_end = tracing::field::Empty,
+        ),
+        err,
+    )]
     pub fn open(dir: impl AsRef<Path>, config: LogConfig) -> Result<Self, LogError> {
         let dir = dir.as_ref().to_path_buf();
         fs::create_dir_all(&dir)?;
@@ -243,6 +254,10 @@ impl Log {
         let lso = active.last_offset() + 1;
 
         let config = std::sync::Arc::new(std::sync::RwLock::new(config));
+
+        let span = tracing::Span::current();
+        span.record("segments", segments.len() + 1);
+        span.record("log_end", lso);
 
         Ok(Self {
             dir,
@@ -316,6 +331,7 @@ impl Log {
     /// recovery path when the follower has fallen behind the leader's
     /// `log_start` — `truncate_to` can't help here because we need to
     /// move `log_start` *forward* past where there is no local data.
+    #[instrument(level = "info", skip_all, fields(new_base), err)]
     pub fn reset_to(&mut self, new_base: i64) -> Result<(), LogError> {
         if new_base < 0 {
             return Err(LogError::OffsetMismatch {
@@ -437,9 +453,16 @@ impl Log {
     /// by the log to be the next assigned offset; `last_offset_delta`
     /// determines how many absolute offsets this batch consumes.
     /// Returns the assigned `base_offset`.
+    #[instrument(
+        level = "debug",
+        skip_all,
+        fields(assigned_base = tracing::field::Empty, leader_epoch = batch.partition_leader_epoch),
+        err,
+    )]
     pub fn append(&mut self, batch: &mut RecordBatch) -> Result<i64, LogError> {
         let leader_epoch = batch.partition_leader_epoch;
         let assigned_base = self.log_end_offset();
+        tracing::Span::current().record("assigned_base", assigned_base);
         batch.base_offset = assigned_base;
         self.append_preserving_offset(batch)?;
         // Record epoch transition when the epoch is valid and exceeds the
@@ -467,9 +490,20 @@ impl Log {
     /// tracking, and the leader-epoch checkpoint behave exactly as
     /// [`Log::append`] — verbatim vs. owned differ only in how the batch
     /// bytes are produced, not in any log-level invariant.
+    #[instrument(
+        level = "debug",
+        skip_all,
+        fields(
+            assigned_base = tracing::field::Empty,
+            leader_epoch = batch.leader_epoch,
+            bytes = batch.bytes.len(),
+        ),
+        err,
+    )]
     pub fn append_verbatim(&mut self, batch: &VerbatimBatch) -> Result<i64, LogError> {
         let leader_epoch = batch.leader_epoch;
         let assigned_base = self.log_end_offset();
+        tracing::Span::current().record("assigned_base", assigned_base);
         self.append_verbatim_preserving_offset(batch, assigned_base)?;
         if leader_epoch >= 0
             && self
@@ -559,6 +593,12 @@ impl Log {
     /// [`LogError::OffsetMismatch`]. On success, `batch.base_offset` is
     /// set to `offset` (it should already match) before the batch is
     /// written.
+    #[instrument(
+        level = "debug",
+        skip(self, batch),
+        fields(leader_epoch = batch.partition_leader_epoch),
+        err,
+    )]
     pub fn append_at(&mut self, batch: &mut RecordBatch, offset: i64) -> Result<(), LogError> {
         let expected = self.log_end_offset();
         if offset != expected {
@@ -657,8 +697,15 @@ impl Log {
         Ok(())
     }
 
+    #[instrument(
+        level = "info",
+        skip_all,
+        fields(new_base = tracing::field::Empty),
+        err,
+    )]
     fn roll_active_segment(&mut self) -> Result<(), LogError> {
         let new_base = self.log_end_offset();
+        tracing::Span::current().record("new_base", new_base);
         let mut old = self
             .active
             .take()
@@ -674,6 +721,12 @@ impl Log {
     /// Read batches starting at `offset`, returning up to roughly
     /// `max_bytes` of `.log` data. Walks sealed segments first, then the
     /// active segment, so reads can span segment boundaries.
+    #[instrument(
+        level = "debug",
+        skip(self),
+        fields(batches = tracing::field::Empty),
+        err,
+    )]
     pub fn read(&self, offset: i64, max_bytes: usize) -> Result<ReadOutput, LogError> {
         let log_start = self.log_start_offset();
         let log_end = self.log_end_offset();
@@ -720,6 +773,7 @@ impl Log {
         }
 
         let start_offset = batches.first().map_or(offset, |b| b.base_offset);
+        tracing::Span::current().record("batches", batches.len());
         Ok(ReadOutput {
             start_offset,
             batches,
@@ -729,6 +783,12 @@ impl Log {
     /// Like [`Log::read`] but returns verbatim wire bytes (no decode), walking
     /// sealed segments then the active segment. Includes only batches with
     /// `base_offset < limit_offset`, up to roughly `max_bytes` (≥ one batch).
+    #[instrument(
+        level = "debug",
+        skip(self),
+        fields(total = tracing::field::Empty),
+        err,
+    )]
     pub fn read_raw(
         &self,
         fetch_offset: i64,
@@ -799,6 +859,7 @@ impl Log {
             }
         };
         let total = bytes.len();
+        tracing::Span::current().record("total", total);
         Ok(RawRead {
             start_offset,
             bytes,
@@ -816,6 +877,12 @@ impl Log {
     ///
     /// The selected byte ranges are byte-identical to what `read_raw` would
     /// have returned for the same `(fetch_offset, limit_offset, max_bytes)`.
+    #[instrument(
+        level = "debug",
+        skip(self),
+        fields(regions = tracing::field::Empty, total = tracing::field::Empty),
+        err,
+    )]
     pub fn read_raw_desc(
         &self,
         fetch_offset: i64,
@@ -877,6 +944,9 @@ impl Log {
         }
 
         let total: usize = regions.iter().map(|r| r.len).sum();
+        let span = tracing::Span::current();
+        span.record("regions", regions.len());
+        span.record("total", total);
         Ok(RawReadDesc {
             start_offset,
             regions,
@@ -887,6 +957,7 @@ impl Log {
 
     /// Truncate the log so no records at offset `>= offset` remain. Used
     /// by replication / leader election.
+    #[instrument(level = "info", skip(self), err)]
     pub fn truncate_to(&mut self, offset: i64) -> Result<(), LogError> {
         let log_start = self.log_start_offset();
         let log_end = self.log_end_offset();
@@ -970,6 +1041,12 @@ impl Log {
     /// # Errors
     ///
     /// Returns `LogError::InvalidArgument` if `target < 0`.
+    #[instrument(
+        level = "info",
+        skip(self),
+        fields(new_log_start = tracing::field::Empty),
+        err,
+    )]
     pub fn trim_to_offset(&mut self, target: i64) -> Result<i64, LogError> {
         if target < 0 {
             return Err(LogError::InvalidArgument(
@@ -980,6 +1057,7 @@ impl Log {
         let target = target.min(leo);
         let log_start = self.log_start_offset();
         if target <= log_start {
+            tracing::Span::current().record("new_log_start", log_start);
             return Ok(log_start);
         }
 
@@ -1024,13 +1102,21 @@ impl Log {
         if target > new_log_start {
             self.set_log_start_offset(target)?;
         }
-        Ok(self.log_start_offset())
+        let result = self.log_start_offset();
+        tracing::Span::current().record("new_log_start", result);
+        Ok(result)
     }
 
     /// Periodic maintenance: apply time- and size-based retention to the
     /// sealed segments. The active segment is never deleted, and if every
     /// segment would otherwise be evicted we retain at least one.
     /// (Active-roll-on-age is a placeholder per the plan; skip it.)
+    #[instrument(
+        level = "debug",
+        skip_all,
+        fields(evicted = tracing::field::Empty),
+        err,
+    )]
     pub fn tick(&mut self, now: SystemTime) -> Result<(), LogError> {
         // Tiered topics' segment lifecycle is owned by the RemoteLogManager.
         if self.config.read().unwrap().remote_storage_enable {
@@ -1061,6 +1147,7 @@ impl Log {
         }
 
         let evict: HashSet<i64> = to_evict.iter().copied().collect();
+        tracing::Span::current().record("evicted", evict.len());
         self.segments.retain(|s| !evict.contains(&s.base_offset()));
         for base in to_evict {
             let _ = retention::delete_segment_files(&self.dir, base);
@@ -1141,6 +1228,12 @@ impl Log {
     /// # Errors
     ///
     /// Returns [`LogError::InvalidArgument`] if `target` is negative.
+    #[instrument(
+        level = "info",
+        skip(self),
+        fields(removed = tracing::field::Empty),
+        err,
+    )]
     pub fn delete_local_segments_through(&mut self, target: i64) -> Result<usize, LogError> {
         if target < 0 {
             return Err(LogError::InvalidArgument(
@@ -1177,6 +1270,7 @@ impl Log {
             .collect();
 
         let removed = to_drop.len();
+        tracing::Span::current().record("removed", removed);
         let drop_set: HashSet<i64> = to_drop.iter().copied().collect();
         self.segments
             .retain(|s| !drop_set.contains(&s.base_offset()));
@@ -1252,6 +1346,12 @@ impl Log {
     /// computation) and the set of currently-active producers (so their
     /// last batch is preserved via `RETAIN_EMPTY` even when fully
     /// compacted away).
+    #[instrument(
+        level = "info",
+        skip_all,
+        fields(sealed_segments = self.segments.len()),
+        err,
+    )]
     pub fn compact(&mut self, ctx: &CompactionContext) -> Result<(), LogError> {
         if self.segments.is_empty() {
             return Ok(());

@@ -50,6 +50,13 @@ impl StreamsMembership {
     /// Join a streams group and start heartbeating.
     #[builder(start_fn = builder, finish_fn = build)]
     #[allow(clippy::too_many_lines)]
+    #[tracing::instrument(
+        name = "streams.membership.start",
+        level = "info",
+        skip_all,
+        fields(group_id = %group_id, member_id = tracing::field::Empty),
+        err,
+    )]
     pub async fn start(
         #[builder(into)] bootstrap: String,
         #[builder(into, default = "crabka-streams".to_string())] client_id: String,
@@ -69,6 +76,7 @@ impl StreamsMembership {
         }
         let process_id = process_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let member_id = uuid::Uuid::new_v4().to_string();
+        tracing::Span::current().record("member_id", tracing::field::display(&member_id));
         let rebalance_timeout_ms = i32::try_from(rebalance_timeout.as_millis()).unwrap_or(30_000);
 
         let client = Client::builder()
@@ -185,6 +193,12 @@ impl StreamsMembership {
     /// "generation"). The epoch lives behind the coordinator's async `Mutex`, so
     /// this reader is `async` (a sync accessor would have to `blocking_lock`,
     /// which panics inside the runtime's async supervisor).
+    #[tracing::instrument(
+        name = "streams.membership.group_metadata",
+        level = "debug",
+        skip_all,
+        fields(group_id = %self.group_id, member_id = %self.member_id),
+    )]
     pub async fn group_metadata(&self) -> crate::runtime::eos::StreamsGroupMeta {
         let epoch = *self.member_epoch.lock().await;
         crate::runtime::eos::StreamsGroupMeta {
@@ -202,6 +216,13 @@ impl StreamsMembership {
     }
 
     /// Leave the group and stop heartbeating.
+    #[tracing::instrument(
+        name = "streams.membership.close",
+        level = "info",
+        skip_all,
+        fields(group_id = %self.group_id, member_id = %self.member_id),
+        err,
+    )]
     pub async fn close(&mut self) -> Result<(), StreamsClientError> {
         self.shutdown.cancel();
         if let Some(h) = self.hb_handle.take() {

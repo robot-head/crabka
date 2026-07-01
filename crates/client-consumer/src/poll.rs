@@ -158,6 +158,19 @@ impl Consumer {
     /// task, which mutates the live `assigned` snapshot in place; `poll()`
     /// simply reads it on each call.
     #[allow(clippy::too_many_lines)]
+    #[tracing::instrument(
+        name = "consumer.poll",
+        level = "debug",
+        skip_all,
+        fields(
+            group_id = %self.group_id,
+            timeout_ms = timeout.as_millis(),
+            assigned_partitions = tracing::field::Empty,
+            leaders = tracing::field::Empty,
+            records = tracing::field::Empty,
+        ),
+        err
+    )]
     pub async fn poll(&mut self, timeout: Duration) -> Result<Vec<ConsumerRecord>, ConsumerError> {
         // 0. Materialise any pending `seek` whose partition is now assigned,
         //    BEFORE the fetch is built. This must run after the coordinator's
@@ -201,6 +214,7 @@ impl Consumer {
 
         // 2. Build a FetchRequest covering every assigned partition.
         let assigned = self.assigned.lock().await.clone();
+        tracing::Span::current().record("assigned_partitions", assigned.len());
         if assigned.is_empty() {
             tokio::time::sleep(timeout).await;
             return Ok(Vec::new());
@@ -261,6 +275,7 @@ impl Consumer {
             }
         }
 
+        tracing::Span::current().record("leaders", by_leader.len());
         let topic_ids = self.topic_ids.lock().await.clone();
         let timeout_ms = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
 
@@ -564,6 +579,7 @@ impl Consumer {
         // Drop the offsets guard before any `.await`: refreshing metadata is an
         // RPC, and we must never hold a Mutex guard across an await point.
         drop(offsets);
+        tracing::Span::current().record("records", out.len());
         if refresh_after_processing {
             // Best-effort: a NOT_LEADER_OR_FOLLOWER without a current_leader
             // hint means our cached leader is stale; learn the new one so the
@@ -590,6 +606,13 @@ impl Consumer {
     /// Replace any `i64::MAX` sentinels in `next_offsets` (planted by
     /// `auto_offset_reset = Latest` at build time) with the real log-end
     /// offset from `ListOffsets(timestamp=-1)`.
+    #[tracing::instrument(
+        name = "consumer.resolve_latest_sentinels",
+        level = "debug",
+        skip_all,
+        fields(group_id = %self.group_id, sentinels = tracing::field::Empty),
+        err
+    )]
     async fn resolve_latest_sentinels(&self) -> Result<(), ConsumerError> {
         let mut offsets = self.next_offsets.lock().await;
         let sentinels: Vec<(String, i32)> = offsets
@@ -600,6 +623,7 @@ impl Consumer {
         if sentinels.is_empty() {
             return Ok(());
         }
+        tracing::Span::current().record("sentinels", sentinels.len());
         let mut by_topic: HashMap<String, Vec<i32>> = HashMap::new();
         for (t, p) in &sentinels {
             by_topic.entry(t.clone()).or_default().push(*p);
@@ -621,6 +645,13 @@ impl Consumer {
     /// Apply truncations detected by the proactive validate pass to
     /// `next_offsets`, honoring `auto.offset.reset` (None → error on the first
     /// truncated partition).
+    #[tracing::instrument(
+        name = "consumer.apply_truncation",
+        level = "debug",
+        skip_all,
+        fields(group_id = %self.group_id, truncated = truncated.len()),
+        err
+    )]
     async fn apply_truncation(
         &self,
         truncated: &HashMap<(String, i32), i64>,

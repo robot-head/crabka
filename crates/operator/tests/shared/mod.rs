@@ -24,7 +24,7 @@ use std::sync::Mutex;
 use crabka_operator::config::OperatorConfig;
 use crabka_operator::context::Context;
 use crabka_operator::crd::{KafkaNodePool, KafkaNodePoolSpec, NodeRole};
-use crabka_operator::telemetry::new_registry;
+use crabka_operator::telemetry::new_registry_with_metrics;
 use http::{Method, Request, Response};
 use http_body_util::BodyExt as _;
 use hyper::body::Bytes;
@@ -426,10 +426,12 @@ pub fn op_config(namespace: &str) -> OperatorConfig {
 /// Build a `Context` wired to the supplied mock client. Mirrors the
 /// fixture used by `tests/reconcile.rs`.
 pub fn fixture_ctx(client: kube::Client, namespace: &str) -> Context {
+    let (registry, metrics) = new_registry_with_metrics();
     Context::new(
         client,
         op_config(namespace),
-        Arc::new(AsyncMutex::new(new_registry())),
+        Arc::new(AsyncMutex::new(registry)),
+        metrics,
     )
 }
 

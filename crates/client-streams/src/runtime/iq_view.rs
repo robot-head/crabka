@@ -48,6 +48,13 @@ pub(crate) fn unexpected(p: &IqPayload) -> StreamsClientError {
 }
 
 /// Validate a store exists locally + has the requested kind (eager, in accessors).
+#[tracing::instrument(
+    name = "streams.iq.validate",
+    level = "debug",
+    skip_all,
+    fields(store = %store, kind = ?kind),
+    err,
+)]
 pub(crate) async fn validate(
     tx: &mpsc::Sender<IqRequest>,
     store: &str,

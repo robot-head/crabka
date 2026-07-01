@@ -147,6 +147,20 @@ impl ShareConsumer {
     /// With no assignment yet, sleeps for `timeout` and returns empty (mirroring
     /// the classic [`Consumer::poll`](crate::Consumer::poll)).
     #[allow(clippy::too_many_lines)]
+    #[tracing::instrument(
+        name = "share_consumer.poll",
+        level = "debug",
+        skip_all,
+        fields(
+            group_id = %self.group_id,
+            member_id = %self.member_id,
+            session_epoch = self.share_session_epoch,
+            timeout_ms = timeout.as_millis(),
+            assigned_partitions = tracing::field::Empty,
+            records = tracing::field::Empty,
+        ),
+        err
+    )]
     pub async fn poll(
         &mut self,
         timeout: Duration,
@@ -154,6 +168,7 @@ impl ShareConsumer {
         // Snapshot the live assignment; with nothing assigned there is nothing
         // to fetch — sleep out the timeout and return empty (matches classic).
         let assignment = self.assignment.lock().await.clone();
+        tracing::Span::current().record("assigned_partitions", assignment.len());
         if assignment.is_empty() {
             tokio::time::sleep(timeout).await;
             return Ok(Vec::new());
@@ -261,6 +276,7 @@ impl ShareConsumer {
         // Implicit mode auto-Accepts these ranges on the next poll/close; explicit
         // mode acknowledges per record, so the ranges are not auto-accepted.
         self.prev_delivered = delivered;
+        tracing::Span::current().record("records", out.len());
         Ok(out)
     }
 
@@ -314,6 +330,17 @@ impl ShareConsumer {
     /// [`Implicit`](super::types::ShareAckMode::Implicit) mode (records are
     /// auto-accepted on the next poll/close, so renewing a lock is meaningless),
     /// and [`ConsumerError::Server`] if the broker rejects the renew.
+    #[tracing::instrument(
+        name = "share_consumer.renew",
+        level = "debug",
+        skip_all,
+        fields(
+            group_id = %self.group_id,
+            partition = record.partition,
+            offset = record.offset,
+        ),
+        err
+    )]
     pub async fn renew(&mut self, record: &ShareConsumerRecord) -> Result<(), ConsumerError> {
         if self.ack_mode == ShareAckMode::Implicit {
             return Err(ConsumerError::IllegalState(
@@ -350,6 +377,13 @@ impl ShareConsumer {
 
     /// Flush staged explicit acknowledgements via a standalone
     /// `ShareAcknowledge`. No-op when nothing is staged.
+    #[tracing::instrument(
+        name = "share_consumer.commit",
+        level = "debug",
+        skip_all,
+        fields(group_id = %self.group_id, pending_acks = self.pending_acks.len()),
+        err
+    )]
     pub async fn commit(&mut self) -> Result<(), ConsumerError> {
         self.flush_pending_acks().await
     }
@@ -357,6 +391,17 @@ impl ShareConsumer {
     /// Drain `pending_acks` into a `ShareAcknowledge`. Advances the session epoch
     /// on success (an accepted `ShareAcknowledge` consumes one epoch, exactly
     /// like a `ShareFetch`). No-op (and no epoch advance) when nothing is staged.
+    #[tracing::instrument(
+        name = "share_consumer.flush_pending_acks",
+        level = "debug",
+        skip_all,
+        fields(
+            group_id = %self.group_id,
+            session_epoch = self.share_session_epoch,
+            pending_acks = self.pending_acks.len(),
+        ),
+        err
+    )]
     pub(crate) async fn flush_pending_acks(&mut self) -> Result<(), ConsumerError> {
         if self.pending_acks.is_empty() {
             return Ok(());

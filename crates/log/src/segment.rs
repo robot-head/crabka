@@ -10,6 +10,7 @@ use bytes::Bytes;
 use crabka_protocol::records::{
     HEADER_LEN, RecordBatch, RecordBatchHeader, patch_base_offset_and_leader_epoch,
 };
+use tracing::instrument;
 use zerocopy::FromBytes;
 
 use crate::error::LogError;
@@ -167,6 +168,12 @@ impl RawSegmentRead {
 impl Segment {
     /// Create a fresh active segment at the given base offset. Fails if
     /// the `.log` file already exists.
+    #[instrument(
+        level = "debug",
+        skip_all,
+        fields(dir = %dir.display(), base_offset),
+        err,
+    )]
     pub fn create(dir: &Path, base_offset: i64) -> Result<Self, LogError> {
         let log_path = name::log_path(dir, base_offset);
         let log_file = OpenOptions::new()
@@ -193,6 +200,12 @@ impl Segment {
     /// to EOF when `validate` is true. A partial trailing batch (or one
     /// that fails to decode) is truncated; cleanly decoded batches update
     /// `last_offset` and `max_timestamp`.
+    #[instrument(
+        level = "info",
+        skip_all,
+        fields(dir = %dir.display(), base_offset, validate),
+        err,
+    )]
     pub fn open_active(dir: &Path, base_offset: i64, validate: bool) -> Result<Self, LogError> {
         let mut seg = Self::open(dir, base_offset)?;
         if validate {
@@ -201,6 +214,16 @@ impl Segment {
         Ok(seg)
     }
 
+    #[instrument(
+        level = "debug",
+        skip_all,
+        fields(
+            base_offset = self.base_offset,
+            log_size = self.log_size,
+            recovered_last_offset = tracing::field::Empty,
+        ),
+        err,
+    )]
     fn recover_active_tail(&mut self) -> Result<(), LogError> {
         let scan_start = self
             .offset_index
@@ -238,6 +261,7 @@ impl Segment {
         seek_to_log_size(&self.log_file, self.log_size)?;
         self.last_offset = last_offset;
         self.max_timestamp = max_ts;
+        tracing::Span::current().record("recovered_last_offset", last_offset);
         Ok(())
     }
 
@@ -246,6 +270,12 @@ impl Segment {
     /// must already exist on disk; the segment is initialized with
     /// `last_offset = base_offset - 1` and `max_timestamp = i64::MIN`
     /// until tail recovery (via [`Segment::open_active`]) populates them.
+    #[instrument(
+        level = "debug",
+        skip_all,
+        fields(dir = %dir.display(), base_offset),
+        err,
+    )]
     pub fn open(dir: &Path, base_offset: i64) -> Result<Self, LogError> {
         let log_path = name::log_path(dir, base_offset);
         let log_file = OpenOptions::new().read(true).write(true).open(&log_path)?;
@@ -414,6 +444,12 @@ impl Segment {
     /// Read batches starting at or just before `offset`, up to roughly
     /// `max_bytes` of `.log` data. Returns an empty `Vec` when `offset`
     /// is past `last_offset`.
+    #[instrument(
+        level = "debug",
+        skip(self),
+        fields(base_offset = self.base_offset, batches = tracing::field::Empty),
+        err,
+    )]
     pub fn read(&self, offset: i64, max_bytes: usize) -> Result<Vec<RecordBatch>, LogError> {
         if offset > self.last_offset {
             return Ok(vec![]);
@@ -444,6 +480,7 @@ impl Segment {
                 }
             }
         }
+        tracing::Span::current().record("batches", out.len());
         Ok(out)
     }
 
@@ -452,6 +489,12 @@ impl Segment {
     /// batches whose `base_offset < limit_offset`, up to roughly `max_bytes`
     /// (always at least one batch — Kafka's anti-stall rule). No record
     /// decoding: only fixed batch headers are read to find boundaries.
+    #[instrument(
+        level = "debug",
+        skip(self),
+        fields(base_offset = self.base_offset, bytes = tracing::field::Empty),
+        err,
+    )]
     pub fn read_raw(
         &self,
         fetch_offset: i64,
@@ -523,11 +566,15 @@ impl Segment {
         }
 
         match range_start {
-            Some(s) => Ok(RawSegmentRead {
-                start_offset,
-                last_offset,
-                bytes: Bytes::from(buf).slice(s..range_end),
-            }),
+            Some(s) => {
+                let bytes = Bytes::from(buf).slice(s..range_end);
+                tracing::Span::current().record("bytes", bytes.len());
+                Ok(RawSegmentRead {
+                    start_offset,
+                    last_offset,
+                    bytes,
+                })
+            }
             None => Ok(RawSegmentRead::empty()),
         }
     }
@@ -543,6 +590,12 @@ impl Segment {
     /// find batch boundaries (using the header's `batch_length`), never the
     /// record payloads. The resulting region is byte-identical to `read_raw`'s
     /// `bytes` for the same `(fetch_offset, limit_offset, max_bytes)`.
+    #[instrument(
+        level = "debug",
+        skip(self),
+        fields(base_offset = self.base_offset),
+        err,
+    )]
     pub fn read_raw_desc(
         &self,
         fetch_offset: i64,
@@ -678,6 +731,17 @@ impl Segment {
     /// - Updates `log_size`, `max_timestamp`, `last_offset`.
     /// - Adds sparse index entries when bytes-since-last-entry exceeds
     ///   `index_interval_bytes` (or for the first batch).
+    #[instrument(
+        level = "debug",
+        skip(self, batch),
+        fields(
+            base_offset = self.base_offset,
+            batch_base = batch.base_offset,
+            bytes = batch.encoded_len(),
+            position = tracing::field::Empty,
+        ),
+        err,
+    )]
     pub fn append(
         &mut self,
         batch: &RecordBatch,
@@ -718,6 +782,7 @@ impl Segment {
             self.time_index.append(self.max_timestamp, rel)?;
         }
 
+        tracing::Span::current().record("position", position);
         Ok(position)
     }
 
@@ -738,6 +803,17 @@ impl Segment {
     /// sparse index) are updated identically to [`Segment::append`].
     ///
     /// Returns the byte position where the batch starts.
+    #[instrument(
+        level = "debug",
+        skip(self, bytes),
+        fields(
+            seg_base_offset = self.base_offset,
+            base_offset,
+            bytes_len = bytes.len(),
+            position = tracing::field::Empty,
+        ),
+        err,
+    )]
     pub fn append_verbatim(
         &mut self,
         bytes: &[u8],
@@ -795,6 +871,7 @@ impl Segment {
             self.time_index.append(self.max_timestamp, rel)?;
         }
 
+        tracing::Span::current().record("position", position);
         Ok(position)
     }
 
@@ -830,6 +907,12 @@ impl Segment {
     }
 
     /// Force-sync everything to disk.
+    #[instrument(
+        level = "debug",
+        skip_all,
+        fields(base_offset = self.base_offset, log_size = self.log_size),
+        err,
+    )]
     pub fn flush(&mut self) -> Result<(), LogError> {
         self.log_file.sync_data()?;
         self.offset_index.flush()?;
@@ -839,6 +922,12 @@ impl Segment {
 
     /// Truncate `.log` and indexes so no batches at `relative_offset` `>= rel`
     /// remain. Used by `Log::truncate_to`. Leaves the segment unsealed.
+    #[instrument(
+        level = "info",
+        skip(self),
+        fields(base_offset = self.base_offset, new_last_offset = tracing::field::Empty),
+        err,
+    )]
     pub fn truncate_to_relative(&mut self, rel: u32) -> Result<(), LogError> {
         // Read only as far as the cut can be: every kept batch lives below
         // the first index entry at or after `rel`. When `rel` is past the
@@ -884,6 +973,7 @@ impl Segment {
         self.offset_index.truncate_by_position(pos_u32)?;
         self.time_index.truncate_by_relative_offset(rel)?;
         self.sealed = false;
+        tracing::Span::current().record("new_last_offset", self.last_offset);
         Ok(())
     }
 }

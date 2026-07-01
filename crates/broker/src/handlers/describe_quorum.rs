@@ -51,6 +51,13 @@ const UNKNOWN_LOG_END_OFFSET: i64 = -1;
 const CLUSTER_METADATA_TOPIC: &str = "__cluster_metadata";
 
 #[allow(clippy::unused_async)]
+#[tracing::instrument(
+    name = "handle_describe_quorum",
+    level = "info",
+    skip_all,
+    fields(api = "DescribeQuorum", version, req_bytes = req_bytes.len()),
+    err,
+)]
 pub(crate) async fn handle(
     broker: &Broker,
     version: i16,

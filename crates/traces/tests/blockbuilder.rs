@@ -11,6 +11,7 @@ use crabka_traces::{
         build_blocks_with_prefix, build_blocks_with_promoted_attrs, decode_consumer_records,
         flush_partition_windows, group_by_trace, object_key, run,
     },
+    metrics::ServiceMetrics,
 };
 use futures::stream::BoxStream;
 use object_store::memory::InMemory;
@@ -749,6 +750,7 @@ async fn run_commits_offsets_only_after_a_durable_block_write() {
         Arc::clone(&index),
         object_store.clone(),
         block_builder_config(),
+        ServiceMetrics::new(),
         shutdown,
     )
     .await
@@ -819,6 +821,7 @@ async fn run_does_not_commit_when_the_flush_write_fails() {
         Arc::clone(&index),
         object_store,
         block_builder_config(),
+        ServiceMetrics::new(),
         shutdown,
     )
     .await;
@@ -868,6 +871,7 @@ async fn run_drains_remaining_buffer_exactly_once_on_shutdown() {
         Arc::clone(&index),
         object_store.clone(),
         block_builder_config(),
+        ServiceMetrics::new(),
         shutdown,
     )
     .await

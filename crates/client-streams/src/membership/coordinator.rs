@@ -80,6 +80,12 @@ enum Outcome {
 }
 
 /// Drive the loop until `shutdown` fires, then leave.
+#[tracing::instrument(
+    name = "streams.coordinator.run",
+    level = "info",
+    skip_all,
+    fields(group_id = %state.group_id, member_id = %state.member_id),
+)]
 pub(crate) async fn run<T: HeartbeatTransport>(
     state: CoordinatorState<T>,
     shutdown: CancellationToken,
@@ -125,6 +131,12 @@ pub(crate) async fn run<T: HeartbeatTransport>(
     let _ = tokio::time::timeout(Duration::from_secs(5), leave).await;
 }
 
+#[tracing::instrument(
+    name = "streams.coordinator.heartbeat_once",
+    level = "debug",
+    skip_all,
+    fields(group_id = %state.group_id, member_id = %state.member_id, rejoining),
+)]
 async fn heartbeat_once<T: HeartbeatTransport>(
     state: &CoordinatorState<T>,
     rejoining: bool,
@@ -233,6 +245,12 @@ async fn heartbeat_once<T: HeartbeatTransport>(
 /// Emit `NotReady` (status present) and/or `Assigned` (tasks present and
 /// changed since last emission), and update the owned-active set for the next
 /// echo.
+#[tracing::instrument(
+    name = "streams.coordinator.emit_response",
+    level = "debug",
+    skip_all,
+    fields(group_id = %state.group_id, member_id = %state.member_id, member_epoch = r.member_epoch),
+)]
 async fn emit_response<T: HeartbeatTransport>(
     state: &CoordinatorState<T>,
     r: &StreamsGroupHeartbeatResponse,

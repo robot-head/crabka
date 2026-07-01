@@ -130,6 +130,20 @@ fn apply_manifest_to_blockstore(store: &mut BlockStore, manifest: &CompactionInd
 
 #[async_trait::async_trait]
 impl MetricStore for MetricBlockStore {
+    #[tracing::instrument(
+        name = "promql.blockstore_scan",
+        level = "debug",
+        skip_all,
+        fields(
+            tenant = %tenant,
+            matchers = matchers.len(),
+            start_ms = start_ms,
+            end_ms = end_ms,
+            has_float = tracing::field::Empty,
+            has_histograms = tracing::field::Empty
+        ),
+        err
+    )]
     async fn scan(
         &self,
         tenant: &str,
@@ -171,6 +185,10 @@ impl MetricStore for MetricBlockStore {
         } else {
             false
         };
+
+        let span = tracing::Span::current();
+        span.record("has_float", has_float);
+        span.record("has_histograms", has_histograms);
 
         Ok(ScanResult {
             ctx,

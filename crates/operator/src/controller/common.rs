@@ -140,6 +140,7 @@ pub(crate) fn condition(type_: &str, status: &str, reason: &str, message: &str) 
 /// force-takeover is on so we wrest fields back from any previous manager
 /// if any happen to linger. Object shape is stable across reconciles
 /// because renderers are pure functions of the owner.
+#[tracing::instrument(level = "debug", skip_all, fields(name = %name), err)]
 pub(crate) async fn apply_object<K>(api: &Api<K>, name: &str, obj: &K) -> Result<(), ReconcileError>
 where
     K: Resource + Clone + Serialize + DeserializeOwned + Debug,
@@ -157,6 +158,12 @@ where
 /// `OpenShift` `Route`), given its GVK + plural and a JSON body. Errors —
 /// including a 404 when the CRD's API is not served (a non-`OpenShift` cluster)
 /// — propagate to the caller.
+#[tracing::instrument(
+    level = "debug",
+    skip_all,
+    fields(namespace = %namespace, api_version = %api_version, kind = %kind, name = %name),
+    err,
+)]
 pub(crate) async fn apply_dynamic(
     client: &kube::Client,
     namespace: &str,
@@ -182,6 +189,7 @@ pub(crate) async fn apply_dynamic(
 /// only overwrite the fields we set rather than replacing the whole
 /// status (which would conflict with any future status writers). Generic
 /// over the parent resource `K` and status payload `S`.
+#[tracing::instrument(level = "info", skip_all, fields(name = %name), err)]
 pub(crate) async fn patch_status<K, S>(
     api: &Api<K>,
     name: &str,

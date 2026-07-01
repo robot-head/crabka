@@ -21,6 +21,7 @@ fn parse_concrete_version(v: &str) -> Result<i32, SrError> {
 }
 
 /// `DELETE /subjects/{subject}/versions/{version}[?permanent=true] -> <version:int>`
+#[tracing::instrument(level = "info", name = "sr.delete_version", skip_all, fields(subject = %subject, version = %version, permanent = q.permanent), err)]
 pub async fn delete_version(
     State(st): State<AppState>,
     Path((subject, version)): Path<(String, String)>,
@@ -45,6 +46,7 @@ pub async fn delete_version(
 }
 
 /// `DELETE /subjects/{subject}[?permanent=true] -> [<versions>]`
+#[tracing::instrument(level = "info", name = "sr.delete_subject", skip_all, fields(subject = %subject, permanent = q.permanent), err)]
 pub async fn delete_subject(
     State(st): State<AppState>,
     Path(subject): Path<String>,

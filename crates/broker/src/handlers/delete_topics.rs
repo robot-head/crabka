@@ -17,6 +17,13 @@ use crate::error::BrokerError;
 use crate::log_dir;
 
 #[allow(clippy::too_many_lines)]
+#[tracing::instrument(
+    name = "handle_delete_topics",
+    level = "info",
+    skip_all,
+    fields(api = "DeleteTopics", version, req_bytes = req_bytes.len()),
+    err,
+)]
 pub(crate) async fn handle(
     broker: &Broker,
     version: i16,

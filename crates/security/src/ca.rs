@@ -66,6 +66,10 @@ fn validity_window(validity_days: u32) -> Result<(OffsetDateTime, OffsetDateTime
 /// Generate a self-signed clients CA with `Subject = CN=<cn>, O=crabka`,
 /// `BasicConstraints: CA:TRUE`, and `KeyUsage = keyCertSign|cRLSign`.
 /// ECDSA P-256.
+// Clients-CA issuance. skip_all keeps the generated private key (a local)
+// out of span fields; only the non-sensitive CN + validity are recorded.
+// `err` surfaces rcgen / time failures (Debug).
+#[tracing::instrument(level = "info", skip_all, fields(cn = %cn, validity_days), err)]
 pub fn generate_clients_ca(cn: &str, validity_days: u32) -> Result<CaMaterial, CaError> {
     let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)?;
 
@@ -95,6 +99,10 @@ pub fn generate_clients_ca(cn: &str, validity_days: u32) -> Result<CaMaterial, C
 /// cRLSign) but the subject DN carries `OU=cluster` so the cluster CA
 /// and clients CA are trivially distinguishable in cert chains and
 /// audit logs.
+// Cluster-CA issuance. skip_all keeps the generated private key (a local)
+// out of span fields; only the non-sensitive CN + validity are recorded.
+// `err` surfaces rcgen / time failures (Debug).
+#[tracing::instrument(level = "info", skip_all, fields(cn = %cn, validity_days), err)]
 pub fn generate_cluster_ca(cn: &str, validity_days: u32) -> Result<CaMaterial, CaError> {
     let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)?;
 
@@ -129,6 +137,10 @@ pub fn generate_cluster_ca(cn: &str, validity_days: u32) -> Result<CaMaterial, C
 /// the cert this replaces, leaf certs issued under the old cert still chain to
 /// the renewed one — the renewal is non-disruptive. Returns the cert PEM only;
 /// the caller already holds the key.
+// Cluster-CA same-key renewal. skip_all keeps the `key_pem` secret out of span
+// fields; only the non-sensitive CN + validity are recorded. `err` surfaces
+// rcgen / time failures (Debug).
+#[tracing::instrument(level = "info", skip_all, fields(cn = %cn, validity_days), err)]
 pub fn renew_cluster_ca(key_pem: &str, cn: &str, validity_days: u32) -> Result<String, CaError> {
     renew_ca(key_pem, cn, validity_days, true)
 }
@@ -136,6 +148,10 @@ pub fn renew_cluster_ca(key_pem: &str, cn: &str, validity_days: u32) -> Result<S
 /// Re-sign a clients CA cert reusing an existing key (same-key renewal).
 /// Like [`renew_cluster_ca`] but with the clients-CA subject DN (no
 /// `OU=cluster`).
+// Clients-CA same-key renewal. skip_all keeps the `key_pem` secret out of span
+// fields; only the non-sensitive CN + validity are recorded. `err` surfaces
+// rcgen / time failures (Debug).
+#[tracing::instrument(level = "info", skip_all, fields(cn = %cn, validity_days), err)]
 pub fn renew_clients_ca(key_pem: &str, cn: &str, validity_days: u32) -> Result<String, CaError> {
     renew_ca(key_pem, cn, validity_days, false)
 }
@@ -171,6 +187,10 @@ fn renew_ca(key_pem: &str, cn: &str, validity_days: u32, cluster: bool) -> Resul
 /// Merges `base_sans` and `extra_sans` (e.g. external advertised addresses
 /// for `NodePort` or `LoadBalancer` listeners) into a single SAN list;
 /// duplicates are silently dropped.
+// Broker leaf-cert issuance. skip_all keeps the signing `ca_key_pem` secret +
+// the generated leaf key (a local) out of span fields; only the non-sensitive
+// CN + validity are recorded. `err` surfaces rcgen / time failures (Debug).
+#[tracing::instrument(level = "info", skip_all, fields(cn = %cn, validity_days), err)]
 pub fn issue_broker_cert(
     ca_cert_pem: &str,
     ca_key_pem: &str,
@@ -231,6 +251,10 @@ pub fn issue_broker_cert(
 /// matches Strimzi, avoids RFC 2253 vs 4514 ordering ambiguity).
 /// `ExtendedKeyUsage = clientAuth`, `KeyUsage = digitalSignature|keyEncipherment`.
 /// ECDSA P-256.
+// User leaf-cert issuance. skip_all keeps the signing `ca_key_pem` secret + the
+// generated leaf key (a local) out of span fields; only the non-sensitive CN +
+// validity are recorded. `err` surfaces rcgen / time failures (Debug).
+#[tracing::instrument(level = "info", skip_all, fields(cn = %cn, validity_days), err)]
 pub fn issue_user_cert(
     ca_cert_pem: &str,
     ca_key_pem: &str,
