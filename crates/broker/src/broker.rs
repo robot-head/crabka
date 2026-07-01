@@ -4130,6 +4130,23 @@ mod tests {
         async fn cancel(&self) {}
     }
 
+    async fn assert_listener_stops_accepting(addr: SocketAddr) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            match tokio::net::TcpStream::connect(addr).await {
+                Ok(stream) => {
+                    drop(stream);
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "listener at {addr} still accepts connections after shutdown"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+                Err(_) => return,
+            }
+        }
+    }
+
     fn local_partition_with_records(
         log_dir: &std::path::Path,
         topic: &str,
@@ -4482,6 +4499,17 @@ mod tests {
     }
 
     #[test]
+    fn advertised_listener_parser_preserves_valid_host_ports_and_uses_fallback() {
+        assert!(
+            parse_advertised_host_port("broker-1.example:19092")
+                == ("broker-1.example".into(), 19092)
+        );
+        assert!(parse_advertised_host_port("[2001:db8::7]:9094") == ("[2001:db8::7]".into(), 9094));
+        assert!(parse_advertised_host_port("missing-port") == ("localhost".into(), 9092));
+        assert!(parse_advertised_host_port("broker:not-a-port") == ("localhost".into(), 9092));
+    }
+
+    #[test]
     fn connection_guard_increments_and_decrements_global_and_per_ip() {
         let limiter = Arc::new(ConnectionLimiter::new(usize::MAX, usize::MAX));
         let ip: IpAddr = "10.0.0.1".parse().unwrap();
@@ -4613,6 +4641,34 @@ mod tests {
             MockMetadataSource::new(crabka_metadata::MetadataImage::new(cluster_id), Some(1)),
         );
 
+        let leader = ControllerAdapter {
+            handle: source.clone(),
+            node_id: 1,
+        };
+        assert!(
+            crate::leader_rebalance::ControllerLike::current_image(&leader).cluster_id()
+                == cluster_id
+        );
+
+        let reassignment = ReassignmentControllerAdapter {
+            handle: source.clone(),
+            node_id: 1,
+        };
+        assert!(
+            crate::reassignment::ReassignmentController::current_image(&reassignment).cluster_id()
+                == cluster_id
+        );
+        let reassignment_rx =
+            crate::reassignment::ReassignmentController::watch_image(&reassignment);
+        assert!(reassignment_rx.borrow().cluster_id() == cluster_id);
+
+        let throttle = ThrottleControllerAdapter {
+            handle: source.clone(),
+        };
+        assert!(crate::throttle::ImageWatcher::current_image(&throttle).cluster_id() == cluster_id);
+        let throttle_rx = crate::throttle::ImageWatcher::watch_image(&throttle);
+        assert!(throttle_rx.borrow().cluster_id() == cluster_id);
+
         let quota = QuotaControllerAdapter {
             handle: source.clone(),
         };
@@ -4627,6 +4683,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn controller_adapters_forward_submit_errors() {
+        let source: Arc<dyn crate::metadata_source::MetadataSource> =
+            Arc::new(MockMetadataSource::new(
+                crabka_metadata::MetadataImage::new(uuid::Uuid::from_u128(1)),
+                Some(1),
+            ));
+        let record = metadata_topic_record("adapter-submit-mutant-topic", 0xADAD);
+
+        let leader = ControllerAdapter {
+            handle: source.clone(),
+            node_id: 1,
+        };
+        assert!(
+            crate::leader_rebalance::ControllerLike::submit_change(&leader, vec![record.clone()])
+                .await
+                .is_err()
+        );
+
+        let reassignment = ReassignmentControllerAdapter {
+            handle: source.clone(),
+            node_id: 1,
+        };
+        assert!(
+            crate::reassignment::ReassignmentController::submit_change(
+                &reassignment,
+                vec![record.clone()],
+            )
+            .await
+            .is_err()
+        );
+
+        let cleanup = DelegationTokenCleanupControllerAdapter { handle: source };
+        assert!(
+            crate::delegation_token_cleanup::DelegationTokenController::submit_change(
+                &cleanup,
+                vec![record],
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
     async fn rlmm_bootstrap_backoff_returns_false_when_cancelled() {
         let shutdown = CancellationToken::new();
         shutdown.cancel();
@@ -4634,6 +4733,105 @@ mod tests {
 
         assert!(!rlmm_bootstrap_backoff(&mut backoff, &shutdown).await);
         assert!(backoff == std::time::Duration::from_mins(1));
+    }
+
+    #[tokio::test]
+    async fn rlmm_bootstrap_backoff_returns_true_after_sleep_and_advances() {
+        tokio::time::pause();
+        let shutdown = CancellationToken::new();
+        let task = tokio::spawn(async move {
+            let mut backoff = std::time::Duration::from_millis(250);
+            let ok = rlmm_bootstrap_backoff(&mut backoff, &shutdown).await;
+            (ok, backoff)
+        });
+
+        tokio::time::advance(std::time::Duration::from_millis(250)).await;
+        let (ok, backoff) = task.await.expect("backoff task");
+        assert!(ok);
+        assert!(backoff == std::time::Duration::from_millis(500));
+    }
+
+    #[tokio::test]
+    async fn cancelled_topic_rlmm_bootstrap_attempts_once_without_activating() {
+        let placeholder: Arc<dyn crabka_remote_storage::RemoteLogMetadataManager> =
+            Arc::new(crabka_remote_storage_topic::NotReadyRlmm::new());
+        let swap = Arc::new(crabka_remote_storage_topic::SwappableRlmm::new(placeholder));
+        let metrics = crate::metrics::BrokerMetrics::new();
+        let snapshot_dir = tempfile::tempdir().expect("snapshot tempdir");
+        let closed_bootstrap = unused_loopback_addr();
+        let kickoff = KafkaSwapKickoff {
+            cfg: crate::config::KafkaRlmmConfig {
+                bootstrap: closed_bootstrap.to_string(),
+                num_partitions: 1,
+                replication: 1,
+                snapshot_interval: std::time::Duration::from_hours(1),
+                snapshot_dir: snapshot_dir.path().join("rlmm-snapshot"),
+                security: None,
+            },
+            broker_id: 1,
+        };
+        let (_image_tx, image_rx) = tokio::sync::watch::channel(Arc::new(
+            crabka_metadata::MetadataImage::new(uuid::Uuid::from_u128(0x5151)),
+        ));
+        let shutdown = CancellationToken::new();
+        shutdown.cancel();
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            bootstrap_topic_rlmm(
+                swap,
+                kickoff,
+                tokio::runtime::Handle::current(),
+                metrics.clone(),
+                1,
+                image_rx,
+                shutdown,
+            ),
+        )
+        .await
+        .expect("cancelled bootstrap should return promptly");
+
+        assert!(metrics.tiered_storage_rlmm_bootstrap_attempts.get() == 1);
+        assert!(metrics.tiered_storage_rlmm_topic_backed.get() == 0);
+    }
+
+    #[tokio::test]
+    async fn rlmm_reconciler_applies_initial_and_changed_assignments() {
+        let log: Arc<dyn crabka_remote_storage_topic::MetadataEventLog> =
+            crabka_remote_storage_topic::InProcessMetadataEventLog::new(3);
+        let snapshot_dir = tempfile::tempdir().expect("snapshot tempdir");
+        let manager = crabka_remote_storage_topic::TopicBasedRemoteLogMetadataManager::start(
+            log,
+            tokio::runtime::Handle::current(),
+            snapshot_dir.path().join("rlmm-manager"),
+            std::time::Duration::from_hours(1),
+        )
+        .await
+        .expect("topic-backed manager start");
+        let (set_tx, set_rx) = tokio::sync::watch::channel(vec![0, 2]);
+        let shutdown = CancellationToken::new();
+
+        spawn_rlmm_reconciler(manager.clone(), set_rx, shutdown.clone());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while manager.assigned_metadata_partitions() != vec![0, 2] {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "initial assignment was not reconciled"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        set_tx.send(vec![1]).expect("send changed assignment");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while manager.assigned_metadata_partitions() != vec![1] {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "changed assignment was not reconciled"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        shutdown.cancel();
     }
 
     #[tokio::test]
@@ -4647,11 +4845,17 @@ mod tests {
 
         assert!(broker.handlers().get(18).is_some());
         assert!(handle.metrics_addr().is_some_and(|addr| addr.port() != 0));
+        assert!(handle.offset_for_leader_epoch_count_for_test() == 0);
+        broker
+            .offset_for_leader_epoch_requests
+            .store(2, std::sync::atomic::Ordering::Release);
+        assert!(handle.offset_for_leader_epoch_count_for_test() == 2);
         assert!(!handle.rlmm_topic_backed_active_for_test());
         broker.metrics.tiered_storage_rlmm_topic_backed.set(1);
         assert!(handle.rlmm_topic_backed_active_for_test());
         broker.metrics.tiered_storage_rlmm_topic_backed.set(2);
         assert!(!handle.rlmm_topic_backed_active_for_test());
+        assert!(handle.reload_tls().is_err());
         assert!(!handle.has_partition("missing-mutant-topic", 0).await);
         assert!(
             handle
@@ -5029,6 +5233,8 @@ mod tests {
                 .is_none()
         );
 
+        assert!(handle.test_mark_log_dir_offline(dir.path()));
+        assert!(!handle.test_mark_log_dir_offline(dir.path()));
         handle.shutdown().await;
     }
 
@@ -5465,8 +5671,28 @@ mod tests {
         let dir = tempdir().unwrap();
         let config = BrokerConfig::for_tests(dir.path().to_path_buf());
         let handle = Broker::start(config).await.unwrap();
-        assert!(handle.listen_addr().port() != 0);
+        let addr = handle.listen_addr();
+        assert!(addr.port() != 0);
+        let stream = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("listener accepts before shutdown");
+        drop(stream);
         handle.shutdown().await;
+        assert_listener_stops_accepting(addr).await;
+    }
+
+    #[tokio::test]
+    async fn controlled_shutdown_timeout_stops_listener_and_reports_error() {
+        let dir = tempdir().unwrap();
+        let config = BrokerConfig::for_tests(dir.path().to_path_buf());
+        let handle = Broker::start(config).await.unwrap();
+        let addr = handle.listen_addr();
+        let err = handle
+            .controlled_shutdown(std::time::Duration::ZERO)
+            .await
+            .expect_err("zero-timeout controlled shutdown should report drain timeout");
+        assert!(matches!(err, BrokerError::ShutdownTimeout(timeout) if timeout.is_zero()));
+        assert_listener_stops_accepting(addr).await;
     }
 
     #[test]
