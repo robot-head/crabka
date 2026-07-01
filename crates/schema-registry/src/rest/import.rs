@@ -20,6 +20,13 @@ use crate::rest::{AppState, response::ok_json};
 /// PROTOBUF schema under subject `<file.name>`. Imports become Schema Registry
 /// references using Confluent's default reference subject policy:
 /// `{ name: import_path, subject: import_path, version: dependency_version }`.
+#[tracing::instrument(
+    level = "info",
+    name = "sr.import_descriptor_set",
+    skip_all,
+    fields(body_len = body.len(), files = tracing::field::Empty),
+    err
+)]
 pub async fn file_descriptor_set(
     State(st): State<AppState>,
     body: Bytes,
@@ -27,6 +34,7 @@ pub async fn file_descriptor_set(
     let set = FileDescriptorSet::decode(body)
         .map_err(|e| SrError::InvalidSchema(format!("FileDescriptorSet: {e}")))?;
     let import = DescriptorSetImport::new(set)?;
+    tracing::Span::current().record("files", import.order.len());
     let mut registered = BTreeMap::<String, i32>::new();
     let mut rows = Vec::with_capacity(import.order.len());
 

@@ -102,7 +102,20 @@ pub trait Authorizer: Send + Sync + std::fmt::Debug {
 /// host / operation. Used by `Produce`, `Fetch`, and `Metadata`
 /// per-topic enforcement. The returned map's keys are borrowed from
 /// the input iterator so callers can avoid copying topic strings.
+// Batch entry point for per-topic enforcement. skip_all keeps the borrowed
+// principal/host out of span fields; only the shared operation + principal
+// name are recorded. Each inner `authorize` opens its own child span, so this
+// is a batch-level span, not a per-entry loop span.
 #[must_use]
+#[tracing::instrument(
+    level = "debug",
+    skip_all,
+    fields(
+        principal = %principal.name,
+        operation = ?operation,
+        host = %host.ip(),
+    )
+)]
 pub fn authorize_topics<'a>(
     authorizer: &dyn Authorizer,
     source: &dyn AclSource,

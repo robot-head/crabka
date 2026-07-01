@@ -101,6 +101,13 @@ fn check_pair(
 
 /// Enforcement on register: `Ok(())` if compatible / `NONE` / first version;
 /// `Err(SrError::Incompatible)` otherwise. `candidate` must be normalised.
+#[tracing::instrument(
+    level = "debug",
+    name = "compat.check_registration",
+    skip_all,
+    fields(subject = %subject, schema_type = ?ty, level = tracing::field::Empty, transitive = tracing::field::Empty),
+    err
+)]
 pub fn check_registration(
     snap: &StoreState,
     subject: &str,
@@ -109,6 +116,9 @@ pub fn check_registration(
     candidate_refs: &[crate::format::ResolvedReference],
 ) -> Result<(), SrError> {
     let level = effective_level(snap, subject);
+    let span = tracing::Span::current();
+    span.record("level", tracing::field::debug(level));
+    span.record("transitive", level.is_transitive());
     let dirs = level.directions();
     if dirs.is_empty() {
         return Ok(());
@@ -151,6 +161,13 @@ pub fn check_registration(
 /// `/compatibility` query: verdict of `candidate` against version `version`
 /// (`None` = latest) under the subject's effective level. `Err` for unknown
 /// subject/version.
+#[tracing::instrument(
+    level = "debug",
+    name = "compat.check_against_version",
+    skip_all,
+    fields(subject = %subject, schema_type = ?ty, level = tracing::field::Empty, is_compatible = tracing::field::Empty),
+    err
+)]
 pub fn check_against_version(
     snap: &StoreState,
     subject: &str,
@@ -166,8 +183,10 @@ pub fn check_against_version(
         .version(subject, version, false)
         .ok_or(SrError::VersionNotFound)?;
     let level = effective_level(snap, subject);
+    tracing::Span::current().record("level", tracing::field::debug(level));
     let dirs = level.directions();
     if dirs.is_empty() {
+        tracing::Span::current().record("is_compatible", true);
         return Ok(Verdict {
             is_compatible: true,
             messages: Vec::new(),
@@ -188,6 +207,7 @@ pub fn check_against_version(
         dirs,
         &mut msgs,
     );
+    tracing::Span::current().record("is_compatible", msgs.is_empty());
     Ok(Verdict {
         is_compatible: msgs.is_empty(),
         messages: msgs,

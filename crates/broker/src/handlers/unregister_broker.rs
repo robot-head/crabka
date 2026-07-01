@@ -27,6 +27,13 @@ use crate::broker::Broker;
 use crate::codes;
 use crate::error::BrokerError;
 
+#[tracing::instrument(
+    name = "handle_unregister_broker",
+    level = "info",
+    skip_all,
+    fields(api = "UnregisterBroker", version, req_bytes = req_bytes.len()),
+    err,
+)]
 pub(crate) async fn handle(
     broker: &Broker,
     version: i16,

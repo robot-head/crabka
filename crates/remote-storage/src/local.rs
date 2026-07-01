@@ -8,6 +8,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use tracing::instrument;
+
 use crate::error::RemoteStorageError;
 use crate::metadata::{CustomMetadata, RemoteLogSegmentMetadata};
 use crate::storage_manager::{IndexType, LogSegmentData, RemoteStorageManager};
@@ -65,6 +67,17 @@ impl LocalTieredStorage {
 }
 
 impl RemoteStorageManager for LocalTieredStorage {
+    #[instrument(
+        skip_all,
+        fields(
+            topic_id = %metadata.remote_log_segment_id().topic_id_partition.topic_id,
+            partition = metadata.remote_log_segment_id().topic_id_partition.partition,
+            segment = %metadata.remote_log_segment_id().id,
+            start_offset = metadata.start_offset(),
+            end_offset = metadata.end_offset(),
+        ),
+        err
+    )]
     fn copy_log_segment_data(
         &self,
         metadata: &RemoteLogSegmentMetadata,
@@ -99,6 +112,18 @@ impl RemoteStorageManager for LocalTieredStorage {
         Ok(None)
     }
 
+    #[instrument(
+        level = "debug",
+        skip_all,
+        fields(
+            topic_id = %metadata.remote_log_segment_id().topic_id_partition.topic_id,
+            partition = metadata.remote_log_segment_id().topic_id_partition.partition,
+            segment = %metadata.remote_log_segment_id().id,
+            start_position,
+            end_position = ?end_position,
+        ),
+        err
+    )]
     fn fetch_log_segment(
         &self,
         metadata: &RemoteLogSegmentMetadata,
@@ -136,6 +161,17 @@ impl RemoteStorageManager for LocalTieredStorage {
         Ok(bytes[start..end_exclusive].to_vec())
     }
 
+    #[instrument(
+        level = "debug",
+        skip_all,
+        fields(
+            topic_id = %metadata.remote_log_segment_id().topic_id_partition.topic_id,
+            partition = metadata.remote_log_segment_id().topic_id_partition.partition,
+            segment = %metadata.remote_log_segment_id().id,
+            index_type = ?index_type,
+        ),
+        err
+    )]
     fn fetch_index(
         &self,
         metadata: &RemoteLogSegmentMetadata,
@@ -151,6 +187,15 @@ impl RemoteStorageManager for LocalTieredStorage {
         Ok(fs::read(&path)?)
     }
 
+    #[instrument(
+        skip_all,
+        fields(
+            topic_id = %metadata.remote_log_segment_id().topic_id_partition.topic_id,
+            partition = metadata.remote_log_segment_id().topic_id_partition.partition,
+            segment = %metadata.remote_log_segment_id().id,
+        ),
+        err
+    )]
     fn delete_log_segment_data(
         &self,
         metadata: &RemoteLogSegmentMetadata,

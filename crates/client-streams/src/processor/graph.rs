@@ -301,6 +301,13 @@ impl Graph {
 
     /// Call `init` on every node in index order. Nodes that don't override
     /// `ErasedNode::init` (sink, source) get the default no-op.
+    #[tracing::instrument(
+        name = "streams.graph.init_processors",
+        level = "info",
+        skip_all,
+        fields(nodes = self.nodes.len()),
+        err,
+    )]
     pub async fn init_processors(&mut self) -> Result<(), ProcessorError> {
         let n = self.nodes.len();
         for idx in 0..n {
@@ -337,6 +344,12 @@ impl Graph {
     }
 
     /// Call `close` on every node (in index order).
+    #[tracing::instrument(
+        name = "streams.graph.close_processors",
+        level = "info",
+        skip_all,
+        fields(nodes = self.nodes.len()),
+    )]
     pub async fn close_processors(&mut self) {
         for node in &mut self.nodes {
             node.close().await;
@@ -402,6 +415,7 @@ impl Graph {
     }
 
     /// Wipe every state store (for EOS rollback before re-restore).
+    #[tracing::instrument(name = "streams.graph.clear_stores", level = "debug", skip_all)]
     pub async fn clear_stores(&mut self) {
         for name in self.stores.names() {
             if let Some(s) = self.stores.get_mut(&name) {

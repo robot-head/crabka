@@ -33,6 +33,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use object_store::path::Path as ObjectPath;
 use object_store::{GetOptions, GetRange, ObjectStore, ObjectStoreExt, PutPayload, WriteMultipart};
+use tracing::instrument;
 
 use crate::error::RemoteStorageError;
 use crate::metadata::{CustomMetadata, RemoteLogSegmentMetadata};
@@ -251,8 +252,16 @@ impl S3RemoteStorage {
         result.map_err(map_object_store_error)
     }
 
+    #[instrument(
+        skip_all,
+        fields(key = %key, len = tracing::field::Empty, multipart = tracing::field::Empty),
+        err
+    )]
     fn put_path(&self, key: &ObjectPath, path: &Path) -> Result<(), RemoteStorageError> {
         let len = std::fs::metadata(path)?.len();
+        let span = tracing::Span::current();
+        span.record("len", len);
+        span.record("multipart", len >= self.multipart_threshold);
         if len < self.multipart_threshold {
             // Single-PUT path: read the whole file into memory, one request.
             let bytes = std::fs::read(path)?;
@@ -267,6 +276,7 @@ impl S3RemoteStorage {
     /// blocks and pushes each into the [`WriteMultipart`] buffer; `finish`
     /// flushes the tail and completes the upload (aborting on failure so
     /// we don't leak in-progress parts in the bucket).
+    #[instrument(skip_all, fields(key = %key, chunk_size = self.multipart_chunk_size), err)]
     fn put_path_multipart(&self, key: &ObjectPath, path: &Path) -> Result<(), RemoteStorageError> {
         let file = std::fs::File::open(path)?;
         let store = self.store.clone();
@@ -292,6 +302,7 @@ impl S3RemoteStorage {
         })
     }
 
+    #[instrument(skip_all, fields(key = %key, len = bytes.len()), err)]
     fn put_bytes(&self, key: &ObjectPath, bytes: Bytes) -> Result<(), RemoteStorageError> {
         Self::block(self.store.put(key, PutPayload::from_bytes(bytes)))?;
         Ok(())
@@ -323,6 +334,17 @@ fn map_object_store_error(e: object_store::Error) -> RemoteStorageError {
 }
 
 impl RemoteStorageManager for S3RemoteStorage {
+    #[instrument(
+        skip_all,
+        fields(
+            topic_id = %metadata.remote_log_segment_id().topic_id_partition.topic_id,
+            partition = metadata.remote_log_segment_id().topic_id_partition.partition,
+            segment = %metadata.remote_log_segment_id().id,
+            start_offset = metadata.start_offset(),
+            end_offset = metadata.end_offset(),
+        ),
+        err
+    )]
     fn copy_log_segment_data(
         &self,
         metadata: &RemoteLogSegmentMetadata,
@@ -353,6 +375,18 @@ impl RemoteStorageManager for S3RemoteStorage {
         Ok(None)
     }
 
+    #[instrument(
+        level = "debug",
+        skip_all,
+        fields(
+            topic_id = %metadata.remote_log_segment_id().topic_id_partition.topic_id,
+            partition = metadata.remote_log_segment_id().topic_id_partition.partition,
+            segment = %metadata.remote_log_segment_id().id,
+            start_position,
+            end_position = ?end_position,
+        ),
+        err
+    )]
     fn fetch_log_segment(
         &self,
         metadata: &RemoteLogSegmentMetadata,
@@ -389,6 +423,17 @@ impl RemoteStorageManager for S3RemoteStorage {
         }
     }
 
+    #[instrument(
+        level = "debug",
+        skip_all,
+        fields(
+            topic_id = %metadata.remote_log_segment_id().topic_id_partition.topic_id,
+            partition = metadata.remote_log_segment_id().topic_id_partition.partition,
+            segment = %metadata.remote_log_segment_id().id,
+            index_type = ?index_type,
+        ),
+        err
+    )]
     fn fetch_index(
         &self,
         metadata: &RemoteLogSegmentMetadata,
@@ -408,6 +453,15 @@ impl RemoteStorageManager for S3RemoteStorage {
         }
     }
 
+    #[instrument(
+        skip_all,
+        fields(
+            topic_id = %metadata.remote_log_segment_id().topic_id_partition.topic_id,
+            partition = metadata.remote_log_segment_id().topic_id_partition.partition,
+            segment = %metadata.remote_log_segment_id().id,
+        ),
+        err
+    )]
     fn delete_log_segment_data(
         &self,
         metadata: &RemoteLogSegmentMetadata,

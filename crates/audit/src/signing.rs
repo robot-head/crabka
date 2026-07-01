@@ -44,6 +44,7 @@ impl std::fmt::Debug for FileEd25519Signer {
 
 impl FileEd25519Signer {
     /// Load a PKCS#8 Ed25519 key from `path`.
+    #[tracing::instrument(level = "debug", skip_all, fields(key_id = %key_id), err)]
     pub fn from_pkcs8_file(path: impl AsRef<Path>, key_id: String) -> Result<Self, AuditError> {
         let der = std::fs::read(path.as_ref())
             .map_err(|e| AuditError::Key(format!("read key file: {e}")))?;
@@ -51,6 +52,7 @@ impl FileEd25519Signer {
     }
 
     /// Load a PKCS#8 Ed25519 key from DER bytes.
+    #[tracing::instrument(level = "debug", skip_all, fields(key_id = %key_id, bytes = der.len()), err)]
     pub fn from_pkcs8_bytes(der: &[u8], key_id: String) -> Result<Self, AuditError> {
         let key_pair = Ed25519KeyPair::from_pkcs8(der)
             .map_err(|_| AuditError::Key("invalid PKCS#8 Ed25519 key".to_string()))?;

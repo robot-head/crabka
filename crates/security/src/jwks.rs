@@ -85,6 +85,10 @@ impl Jwks {
     ///
     /// [`AuthError::MalformedMessage`] when the document is not valid JSON or
     /// has no `keys` array.
+    // JWKS key-set load/reload. skip_all keeps the raw JWKS document `s` out of
+    // span fields (it is not secret, but is large); only the non-sensitive
+    // `ignore_key_use` toggle is recorded. `err` surfaces a parse failure.
+    #[tracing::instrument(level = "info", skip_all, fields(ignore_key_use = ignore_key_use), err)]
     pub fn from_json(s: &str, ignore_key_use: bool) -> Result<Self, AuthError> {
         let doc: Value = serde_json::from_str(s).map_err(|_| AuthError::MalformedMessage)?;
         let arr = doc
@@ -120,6 +124,16 @@ impl Jwks {
     ///
     /// [`AuthError::InvalidToken`] for an unknown / ambiguous key, an
     /// alg/key-type mismatch, or a bad signature.
+    // Per-token JWS signature verification. skip_all keeps `signing_input` +
+    // `signature` bytes out of span fields; only the non-sensitive `alg` and
+    // `kid` (a key identifier, not a secret) are recorded. `err` surfaces a
+    // verification failure (Debug).
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(alg = %alg, kid = kid.unwrap_or("<none>")),
+        err
+    )]
     pub fn verify(
         &self,
         kid: Option<&str>,

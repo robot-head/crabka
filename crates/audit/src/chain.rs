@@ -53,6 +53,7 @@ impl ChainState {
     /// Advance the chain for a record carrying `value`. Returns the `(seq,
     /// prev_head)` to stamp on that record (the head as it was *before* this
     /// record), then folds the record into the head.
+    #[tracing::instrument(level = "debug", skip_all, fields(seq = self.next_seq, bytes = value.len()))]
     pub fn extend(&mut self, value: &[u8]) -> (u64, [u8; 32]) {
         let seq = self.next_seq;
         let prev = self.head;

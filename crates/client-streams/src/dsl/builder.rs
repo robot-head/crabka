@@ -501,6 +501,13 @@ impl StreamsBuilder {
     /// [`KStream`]: crate::dsl::kstream::KStream
     /// [`KTable`]: crate::dsl::ktable::KTable
     /// [`BuiltTopology`]: crate::topology::BuiltTopology
+    #[tracing::instrument(
+        name = "streams.dsl.build",
+        level = "info",
+        skip_all,
+        fields(app_id = %app_id),
+        err,
+    )]
     pub fn build(
         self,
         app_id: &str,
@@ -519,6 +526,13 @@ impl StreamsBuilder {
     /// `REUSE_KTABLE_SOURCE_TOPICS` (a `builder.table_explicit()` store reuses its source
     /// topic as its changelog). They're independent, so order doesn't matter.
     /// Same outstanding-handle requirement as [`build`](Self::build).
+    #[tracing::instrument(
+        name = "streams.dsl.build_optimized",
+        level = "info",
+        skip_all,
+        fields(app_id = %app_id),
+        err,
+    )]
     pub fn build_optimized(
         self,
         app_id: &str,

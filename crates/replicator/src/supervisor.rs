@@ -94,6 +94,12 @@ impl FlowSupervisor {
     /// Returns [`ReplicatorError`] if the config is invalid, a source cluster
     /// cannot be reached for topic discovery, a selector fails to compile, or an
     /// initial worker fails to build within its retry budget.
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(flows = config.flows.len(), clusters = config.clusters.len()),
+        err,
+    )]
     pub async fn run(config: ReplicatorConfig) -> crate::Result<Self> {
         config.validate()?;
 

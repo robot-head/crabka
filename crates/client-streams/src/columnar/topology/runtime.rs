@@ -36,6 +36,13 @@ fn to_consumed(partition: i32, batch: &FetchBatch) -> Vec<ConsumedRecord> {
     clippy::too_many_arguments,
     reason = "fetch/process/produce cycle needs topo + both I/O handles + (topic, partition, offset)"
 )]
+#[tracing::instrument(
+    name = "streams.columnar.run_partition_once",
+    level = "debug",
+    skip_all,
+    fields(topic = %topic, partition, offset),
+    err,
+)]
 pub async fn run_partition_once(
     topo: &ColumnarTopology,
     fetcher: &dyn RecordFetcher,

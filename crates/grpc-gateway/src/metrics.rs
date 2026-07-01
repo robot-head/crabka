@@ -33,6 +33,13 @@ pub struct KindLabel {
     pub kind: String,
 }
 
+/// Label for the gateway request method / entry point (`"send"`,
+/// `"webhook_in"`, `"produce_http"`, …).
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct MethodLabel {
+    pub method: String,
+}
+
 /// Process-global Prometheus metrics bundle for the gRPC gateway.
 ///
 /// Construct once via [`GatewayMetrics::new`] (or the global [`metrics()`]
@@ -56,6 +63,11 @@ pub struct GatewayMetrics {
     webhook_out_total: Family<ResultLabel, Counter>,
     webhook_retries_total: Counter,
     dead_letter_total: Counter,
+    // -- request-level RED signals ----------------------------------------
+    /// End-to-end handler latency per request method (histogram family).
+    request_duration_seconds: Family<MethodLabel, Histogram>,
+    /// Requests currently being served across all entry points (gauge).
+    inflight_requests: Gauge,
 }
 
 impl GatewayMetrics {
@@ -63,6 +75,7 @@ impl GatewayMetrics {
     /// metrics, and return the bundle. Typically called exactly once via the
     /// global [`metrics()`] accessor.
     #[must_use]
+    #[allow(clippy::too_many_lines)] // flat registration of every metric family
     pub fn new() -> Self {
         let mut registry = Registry::with_prefix("crabka_gateway");
 
@@ -158,6 +171,29 @@ impl GatewayMetrics {
             dead_letter_total.clone(),
         );
 
+        // A Histogram family: `prometheus-client` needs a constructor closure
+        // because `Histogram` is not `Default` (each series is seeded with the
+        // same 1 ms – 5 s buckets used for the produce-latency histogram).
+        let request_duration_seconds =
+            Family::<MethodLabel, Histogram>::new_with_constructor(|| {
+                Histogram::new([
+                    0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0,
+                ])
+            });
+        registry.register(
+            "request_duration_seconds",
+            "End-to-end gateway handler latency in seconds (histogram), \
+             labelled by request method (send, webhook_in, produce_http).",
+            request_duration_seconds.clone(),
+        );
+
+        let inflight_requests: Gauge = Gauge::default();
+        registry.register(
+            "inflight_requests",
+            "Number of gateway requests currently being served (gauge).",
+            inflight_requests.clone(),
+        );
+
         Self {
             registry,
             sends_total,
@@ -171,6 +207,8 @@ impl GatewayMetrics {
             webhook_out_total,
             webhook_retries_total,
             dead_letter_total,
+            request_duration_seconds,
+            inflight_requests,
         }
     }
 
@@ -260,6 +298,59 @@ impl GatewayMetrics {
     pub fn record_dead_letter(&self) {
         self.dead_letter_total.inc();
     }
+
+    /// Observe an end-to-end handler latency (seconds) for `method`
+    /// (`"send"`, `"webhook_in"`, `"produce_http"`).
+    pub fn observe_request_duration(&self, method: &str, secs: f64) {
+        self.request_duration_seconds
+            .get_or_create(&MethodLabel {
+                method: method.into(),
+            })
+            .observe(secs);
+    }
+
+    /// Increment the in-flight-requests gauge (call at handler entry).
+    pub fn inc_inflight(&self) {
+        self.inflight_requests.inc();
+    }
+
+    /// Decrement the in-flight-requests gauge (call at handler exit, on all
+    /// paths).
+    pub fn dec_inflight(&self) {
+        self.inflight_requests.dec();
+    }
+
+    /// Begin an in-flight request for `method`: bumps the in-flight gauge and
+    /// starts a latency timer. The returned [`RequestGuard`] decrements the
+    /// gauge and observes the elapsed latency into
+    /// `request_duration_seconds{method}` on drop — covering every early-return
+    /// path of a handler with many exits (webhook guards) without threading a
+    /// `dec`/`observe` call through each one.
+    #[must_use]
+    pub fn begin_request(&'static self, method: &'static str) -> RequestGuard {
+        self.inc_inflight();
+        RequestGuard {
+            metrics: self,
+            method,
+            start: std::time::Instant::now(),
+        }
+    }
+}
+
+/// RAII guard returned by [`GatewayMetrics::begin_request`]. Decrements the
+/// in-flight gauge and records the handler latency on drop.
+pub struct RequestGuard {
+    metrics: &'static GatewayMetrics,
+    method: &'static str,
+    start: std::time::Instant,
+}
+
+impl Drop for RequestGuard {
+    fn drop(&mut self) {
+        self.metrics
+            .observe_request_duration(self.method, self.start.elapsed().as_secs_f64());
+        self.metrics.dec_inflight();
+    }
 }
 
 impl Default for GatewayMetrics {
@@ -348,7 +439,7 @@ mod tests {
     }
 
     #[test]
-    fn all_11_metrics_appear_in_encoded_output() {
+    fn all_metrics_appear_in_encoded_output() {
         let m = fresh();
 
         m.record_send("ok");
@@ -362,6 +453,8 @@ mod tests {
         m.record_webhook_out("delivered");
         m.record_webhook_retry();
         m.record_dead_letter();
+        m.observe_request_duration("send", 0.01);
+        m.inc_inflight();
 
         let buf = encode(&m);
 
@@ -377,9 +470,36 @@ mod tests {
             "crabka_gateway_webhook_out_total",
             "crabka_gateway_webhook_retries_total",
             "crabka_gateway_dead_letter_total",
+            "crabka_gateway_request_duration_seconds_bucket",
+            "crabka_gateway_request_duration_seconds_count",
+            "crabka_gateway_inflight_requests",
         ] {
             assert!(buf.contains(needle), "missing {needle} in:\n{buf}");
         }
+    }
+
+    #[test]
+    fn request_duration_labelled_per_method_and_inflight_moves() {
+        let m = fresh();
+        m.observe_request_duration("send", 0.01);
+        m.observe_request_duration("send", 0.5);
+        m.observe_request_duration("webhook_in", 0.02);
+
+        let buf = encode(&m);
+        assert!(
+            buf.contains("method=\"send\""),
+            "send label missing:\n{buf}"
+        );
+        assert!(
+            buf.contains("method=\"webhook_in\""),
+            "webhook_in label missing:\n{buf}"
+        );
+
+        m.inc_inflight();
+        m.inc_inflight();
+        assert!(m.inflight_requests.get() == 2);
+        m.dec_inflight();
+        assert!(m.inflight_requests.get() == 1);
     }
 
     #[test]

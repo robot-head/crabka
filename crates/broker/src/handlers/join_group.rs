@@ -19,6 +19,13 @@ use crate::coordinator::unified::actor::{GroupActorMessage, GroupKindTag};
 use crate::error::BrokerError;
 use crate::time_util::now_ms;
 
+#[tracing::instrument(
+    name = "handle_join_group",
+    level = "info",
+    skip_all,
+    fields(api = "JoinGroup", version, req_bytes = req_bytes.len()),
+    err,
+)]
 pub(crate) async fn handle(
     broker: &Broker,
     version: i16,

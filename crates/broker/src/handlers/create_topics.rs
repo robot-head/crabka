@@ -50,6 +50,13 @@ pub(crate) fn round_robin_replicas(
 }
 
 #[allow(clippy::too_many_lines)]
+#[tracing::instrument(
+    name = "handle_create_topics",
+    level = "info",
+    skip_all,
+    fields(api = "CreateTopics", version, req_bytes = req_bytes.len()),
+    err,
+)]
 pub(crate) async fn handle(
     broker: &Broker,
     version: i16,

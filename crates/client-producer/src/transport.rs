@@ -62,6 +62,7 @@ impl ClientTransport {
 
 #[async_trait]
 impl ProduceTransport for ClientTransport {
+    #[tracing::instrument(level = "debug", skip_all, fields(leader = ?leader), err)]
     async fn send_produce(
         &self,
         leader: Option<i32>,
@@ -81,6 +82,7 @@ impl ProduceTransport for ClientTransport {
         self.client.knows_broker(broker_id)
     }
 
+    #[tracing::instrument(level = "debug", skip_all, err)]
     async fn refresh_metadata(&self) -> Result<MetadataResponse, ClientError> {
         self.client.refresh_metadata().await
     }

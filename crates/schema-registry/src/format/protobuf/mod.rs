@@ -236,6 +236,7 @@ impl ProtobufSchema {
 /// Confluent Protobuf compatibility: can a reader using `reader` read data
 /// written with `writer`? Computes the structural diff (original = writer,
 /// update = reader) and rejects if any difference is backward-incompatible.
+#[tracing::instrument(level = "debug", name = "protobuf.check", skip_all, fields(reader_refs = reader_refs.len(), writer_refs = writer_refs.len(), diffs = tracing::field::Empty))]
 pub fn check(
     reader: &str,
     writer: &str,
@@ -245,6 +246,7 @@ pub fn check(
     let reader_d = parse(reader, reader_refs).map_err(|e| vec![format!("reader: {e}")])?;
     let writer_d = parse(writer, writer_refs).map_err(|e| vec![format!("writer: {e}")])?;
     let diffs = diff::compare(writer_d.descriptor(), reader_d.descriptor());
+    tracing::Span::current().record("diffs", diffs.len());
     let incompatible: Vec<&diff::Difference> = diffs
         .iter()
         .filter(|d| !compat::is_backward_compatible(&d.kind))

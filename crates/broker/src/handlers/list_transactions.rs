@@ -45,6 +45,13 @@ fn txn_state_str(s: TxnState) -> &'static str {
     }
 }
 
+#[tracing::instrument(
+    name = "handle_list_transactions",
+    level = "info",
+    skip_all,
+    fields(api = "ListTransactions", version, req_bytes = req_bytes.len()),
+    err,
+)]
 pub(crate) async fn handle(
     broker: &Broker,
     version: i16,

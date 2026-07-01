@@ -1,0 +1,222 @@
+//! W3C Trace Context propagation over Kafka record headers.
+//!
+//! [`crate::init`] installs a global `TraceContextPropagator`, so a producer can
+//! serialise the current span's `traceparent`/`tracestate` into record headers
+//! (via [`current_trace_headers`]) and a consumer can rebuild that context (via
+//! [`extract_context`] / [`set_remote_parent`]) to make its own span a child of
+//! the producer's — stitching one distributed trace across services through the
+//! Kafka WAL / topics.
+//!
+//! The helpers work in terms of `(key, value)` string/byte pairs so this crate
+//! stays independent of the concrete `crabka_client_{producer,consumer}` header
+//! types; callers convert to/from their own `Header` at the edge.
+
+use std::collections::HashMap;
+
+use opentelemetry::Context;
+use opentelemetry::propagation::{Extractor, Injector};
+use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+
+/// The canonical W3C trace-context header keys. Producers should attach these
+/// (lower-case) keys to Kafka record headers.
+pub const TRACEPARENT: &str = "traceparent";
+pub const TRACESTATE: &str = "tracestate";
+
+/// Collects injected key/value pairs into a `Vec` for the caller to convert
+/// into its own header type (`crabka_client_producer::Header`, …).
+struct VecInjector<'a>(&'a mut Vec<(String, String)>);
+
+impl Injector for VecInjector<'_> {
+    fn set(&mut self, key: &str, value: String) {
+        self.0.push((key.to_owned(), value));
+    }
+}
+
+/// Reads W3C headers back out of a borrowed key→value map.
+struct MapExtractor<'a>(&'a HashMap<String, String>);
+
+impl Extractor for MapExtractor<'_> {
+    fn get(&self, key: &str) -> Option<&str> {
+        self.0.get(key).map(String::as_str)
+    }
+
+    fn keys(&self) -> Vec<&str> {
+        self.0.keys().map(String::as_str).collect()
+    }
+}
+
+/// W3C `traceparent` (and `tracestate` when present) for the **current**
+/// `tracing` span, as `(key, value)` pairs ready to attach to Kafka record
+/// headers. Returns an empty `Vec` when there is no active span, the span is
+/// not sampled/recorded, or OTLP is disabled — so it is always safe to call.
+///
+/// ```no_run
+/// let span = tracing::info_span!("produce_order");
+/// let _g = span.enter();
+/// let carriers = crabka_telemetry::propagation::current_trace_headers();
+/// // convert each (key, value) into your producer's Header and attach it
+/// ```
+#[must_use]
+pub fn current_trace_headers() -> Vec<(String, String)> {
+    let cx = tracing::Span::current().context();
+    let mut out = Vec::new();
+    opentelemetry::global::get_text_map_propagator(|prop| {
+        prop.inject_context(&cx, &mut VecInjector(&mut out));
+    });
+    out
+}
+
+/// Rebuild an OpenTelemetry [`Context`] from Kafka record headers (each a key
+/// plus a raw byte value). Non-UTF-8 values are skipped. Use the result as the
+/// remote parent of a consumer-side span (see [`set_remote_parent`]).
+#[must_use]
+pub fn extract_context<'a, I, V>(headers: I) -> Context
+where
+    I: IntoIterator<Item = (&'a str, V)>,
+    V: AsRef<[u8]>,
+{
+    let map: HashMap<String, String> = headers
+        .into_iter()
+        .filter_map(|(k, v)| {
+            std::str::from_utf8(v.as_ref())
+                .ok()
+                .map(|s| (k.to_owned(), s.to_owned()))
+        })
+        .collect();
+    opentelemetry::global::get_text_map_propagator(|prop| prop.extract(&MapExtractor(&map)))
+}
+
+/// Make `span` a child of the trace carried in `headers` (the producer's
+/// context) so consumer-side work appears in the same distributed trace. A
+/// no-op when the headers carry no valid trace context.
+pub fn set_remote_parent<'a, I, V>(span: &tracing::Span, headers: I)
+where
+    I: IntoIterator<Item = (&'a str, V)>,
+    V: AsRef<[u8]>,
+{
+    // `set_parent` returns the previous `Context`; we don't need it.
+    let _ = span.set_parent(extract_context(headers));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert2::assert;
+    use opentelemetry::trace::{TraceContextExt as _, TraceId};
+
+    #[test]
+    fn extract_context_roundtrips_w3c_traceparent() {
+        // The global propagator is a no-op until one is installed; install the
+        // W3C propagator (idempotent for our purposes) so extraction works even
+        // when `init()` has not run in this test process.
+        opentelemetry::global::set_text_map_propagator(
+            opentelemetry_sdk::propagation::TraceContextPropagator::new(),
+        );
+
+        let traceparent = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
+        let cx = extract_context([(TRACEPARENT, traceparent.as_bytes())]);
+        let sc = cx.span().span_context().clone();
+
+        assert!(sc.is_valid());
+        assert!(sc.trace_id() == TraceId::from_hex("0af7651916cd43dd8448eb211c80319c").unwrap());
+        assert!(sc.is_sampled());
+    }
+
+    #[test]
+    fn extract_context_skips_non_utf8_and_missing() {
+        opentelemetry::global::set_text_map_propagator(
+            opentelemetry_sdk::propagation::TraceContextPropagator::new(),
+        );
+        // Invalid UTF-8 header value is dropped, leaving no valid context.
+        let cx = extract_context([(TRACEPARENT, [0xff, 0xfe].as_slice())]);
+        assert!(!cx.span().span_context().is_valid());
+    }
+
+    /// Run `f` under a subscriber wired to a real (export-less) `OTel` tracer
+    /// with `AlwaysOn` sampling, so spans created inside carry a valid,
+    /// *sampled* `OTel` context — a prerequisite for the inject / re-parent
+    /// helpers to do anything observable.
+    fn with_otel_subscriber(f: impl FnOnce()) {
+        use opentelemetry::trace::TracerProvider as _;
+        use opentelemetry_sdk::trace::{Sampler, SdkTracerProvider};
+        use tracing_subscriber::prelude::*;
+
+        opentelemetry::global::set_text_map_propagator(
+            opentelemetry_sdk::propagation::TraceContextPropagator::new(),
+        );
+        let provider = SdkTracerProvider::builder()
+            .with_sampler(Sampler::AlwaysOn)
+            .build();
+        let tracer = provider.tracer("propagation-test");
+        let subscriber =
+            tracing_subscriber::registry().with(tracing_opentelemetry::layer().with_tracer(tracer));
+        tracing::subscriber::with_default(subscriber, f);
+    }
+
+    #[test]
+    fn vec_injector_collects_key_value_pairs() {
+        // The Injector must actually record each (key, value); a no-op set()
+        // would silently drop the trace headers.
+        let mut out = Vec::new();
+        VecInjector(&mut out).set(TRACEPARENT, "abc".to_owned());
+        assert!(out == vec![(TRACEPARENT.to_owned(), "abc".to_owned())]);
+    }
+
+    #[test]
+    fn map_extractor_reads_values_and_lists_keys() {
+        // get() returns the stored value (None when absent); keys() must list the
+        // real header keys, not an empty/placeholder set.
+        let map: HashMap<String, String> = [(TRACEPARENT.to_owned(), "v".to_owned())]
+            .into_iter()
+            .collect();
+        let ex = MapExtractor(&map);
+        assert!(ex.get(TRACEPARENT) == Some("v"));
+        assert!(ex.get("absent").is_none());
+        assert!(ex.keys() == vec![TRACEPARENT]);
+    }
+
+    #[test]
+    fn current_trace_headers_emits_traceparent_for_active_span() {
+        with_otel_subscriber(|| {
+            let span = tracing::info_span!("producer");
+            let _g = span.enter();
+
+            let headers = current_trace_headers();
+            let tp = headers.iter().find(|(k, _)| k == TRACEPARENT);
+            assert!(tp.is_some());
+
+            // The injected value carries *this* span's trace id and the sampled
+            // flag — pinning both the key and the content so a wrong-key or
+            // placeholder-value mutant is caught.
+            let (_, value) = tp.unwrap();
+            let trace_id = tracing::Span::current()
+                .context()
+                .span()
+                .span_context()
+                .trace_id();
+            assert!(value.contains(&trace_id.to_string()));
+            assert!(value.ends_with("-01"));
+        });
+    }
+
+    #[test]
+    fn current_trace_headers_empty_without_active_span() {
+        // No subscriber ⇒ no OTel context ⇒ nothing to inject. Safe to call.
+        assert!(current_trace_headers().is_empty());
+    }
+
+    #[test]
+    fn set_remote_parent_reparents_span_into_header_trace() {
+        with_otel_subscriber(|| {
+            let traceparent = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
+            let span = tracing::info_span!("consumer");
+            set_remote_parent(&span, [(TRACEPARENT, traceparent.as_bytes())]);
+
+            // The span now belongs to the producer's trace (shares its trace id).
+            let sc = span.context().span().span_context().clone();
+            assert!(
+                sc.trace_id() == TraceId::from_hex("0af7651916cd43dd8448eb211c80319c").unwrap()
+            );
+        });
+    }
+}

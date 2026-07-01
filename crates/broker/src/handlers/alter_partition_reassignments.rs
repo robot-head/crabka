@@ -184,6 +184,13 @@ use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
 use crate::codes::{CLUSTER_AUTHORIZATION_FAILED, COORDINATOR_NOT_AVAILABLE};
 
+#[tracing::instrument(
+    name = "handle_alter_partition_reassignments",
+    level = "info",
+    skip_all,
+    fields(api = "AlterPartitionReassignments"),
+    err
+)]
 pub(crate) async fn handle(
     broker: &Broker,
     req: AlterPartitionReassignmentsRequest,

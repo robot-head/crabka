@@ -15,10 +15,16 @@ use object_store::ObjectStore;
 use tokio::sync::Mutex;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument as _;
 
 use crate::error::TracesError;
+use crate::metrics::ServiceMetrics;
 use crate::span::{AttrValue, Span, batch::span_batch_with_promoted_attrs};
 use crate::wal::SpanRecord;
+
+/// W3C trace-context header key carried on WAL records by the distributor's
+/// ingest span; used to continue the same distributed trace on the consume side.
+const TRACEPARENT_HEADER: &str = "traceparent";
 
 /// Minimal WAL-consumer poll surface the block-builder loop drives.
 ///
@@ -408,6 +414,7 @@ pub async fn run<C>(
     index: Arc<Mutex<TraceIndex>>,
     object_store: Arc<dyn ObjectStore>,
     config: BlockBuilderConfig,
+    metrics: ServiceMetrics,
     shutdown: CancellationToken,
 ) -> Result<(), TracesError>
 where
@@ -417,32 +424,60 @@ where
     while !shutdown.is_cancelled() {
         let records = consumer.poll(config.window).await?;
         let windows = decode_consumer_records(&records)?;
-        if windows.is_empty() {
-            // `poll` normally long-polls for `config.window`, so an empty round
-            // already cost a full window. But when every assigned leader hits a
-            // transient transport error (e.g. the demo's flaky Docker DNS) `poll`
-            // returns `Ok(vec![])` immediately — without this backoff the loop
-            // would busy-spin a core. A short sleep bounds that to a trickle.
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        } else {
-            accumulator.merge(windows, Instant::now());
-        }
 
-        // Flush + commit only when a threshold is reached; a low-traffic stream
-        // still flushes within `flush_max_age` because every poll re-checks the
-        // age of the oldest buffered record (the empty-poll backoff above bounds
-        // the re-check interval). Committing only after `flush_partition_windows`
-        // returns `Ok` keeps WAL offsets behind the durable block(s).
-        if accumulator.should_flush(&config, Instant::now()) {
-            flush_and_commit(
-                &mut consumer,
-                &writer,
-                &index,
-                &object_store,
-                &config,
-                &mut accumulator,
-            )
-            .await?;
+        // One consume span per NON-EMPTY poll batch (NOT per record). Parent it
+        // to the distributor's ingest span via the W3C trace context carried on
+        // any consumed record so the block-build continues the same distributed
+        // trace; a no-op when no record carries a `traceparent`. Empty polls run
+        // outside the span so age-based flushing is still re-checked without
+        // emitting a span per idle round.
+        let build_span = (!windows.is_empty()).then(|| {
+            let span = tracing::info_span!(
+                "traces_block_build",
+                otel.kind = "consumer",
+                crabka.wal.records = records.len(),
+            );
+            set_remote_parent_from_records(&span, &records);
+            span
+        });
+
+        let iteration = async {
+            if windows.is_empty() {
+                // `poll` normally long-polls for `config.window`, so an empty
+                // round already cost a full window. But when every assigned
+                // leader hits a transient transport error (e.g. the demo's flaky
+                // Docker DNS) `poll` returns `Ok(vec![])` immediately — without
+                // this backoff the loop would busy-spin a core. A short sleep
+                // bounds that to a trickle.
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            } else {
+                accumulator.merge(windows, Instant::now());
+            }
+
+            // Flush + commit only when a threshold is reached; a low-traffic
+            // stream still flushes within `flush_max_age` because every poll
+            // re-checks the age of the oldest buffered record (the empty-poll
+            // backoff above bounds the re-check interval). Committing only after
+            // `flush_partition_windows` returns `Ok` keeps WAL offsets behind the
+            // durable block(s).
+            if accumulator.should_flush(&config, Instant::now()) {
+                flush_and_commit(
+                    &mut consumer,
+                    &writer,
+                    &index,
+                    &object_store,
+                    &config,
+                    &metrics,
+                    &mut accumulator,
+                )
+                .await?;
+            }
+            Ok::<(), TracesError>(())
+        };
+
+        match build_span {
+            Some(span) => iteration.instrument(span).await?,
+            None => iteration.await?,
         }
     }
 
@@ -454,11 +489,31 @@ where
             &index,
             &object_store,
             &config,
+            &metrics,
             &mut accumulator,
         )
         .await?;
     }
     Ok(())
+}
+
+/// Make `span` a child of the distributed trace carried on any consumed record's
+/// `traceparent` header. Uses the first record that carries one; a no-op when
+/// none do (e.g. records produced by an unsampled ingest request).
+fn set_remote_parent_from_records(span: &tracing::Span, records: &[ConsumerRecord]) {
+    let Some(record) = records
+        .iter()
+        .find(|record| record.headers.iter().any(|h| h.key == TRACEPARENT_HEADER))
+    else {
+        return;
+    };
+    crabka_telemetry::propagation::set_remote_parent(
+        span,
+        record
+            .headers
+            .iter()
+            .map(|h| (h.key.as_str(), h.value.as_deref().unwrap_or(&[][..]))),
+    );
 }
 
 /// Flush the accumulated buffer to durable blocks, then commit WAL offsets.
@@ -472,13 +527,14 @@ async fn flush_and_commit<C>(
     index: &Arc<Mutex<TraceIndex>>,
     object_store: &Arc<dyn ObjectStore>,
     config: &BlockBuilderConfig,
+    metrics: &ServiceMetrics,
     accumulator: &mut FlushAccumulator,
 ) -> Result<(), TracesError>
 where
     C: WalConsumerCommit,
 {
     let windows = accumulator.take();
-    {
+    let blocks = {
         let mut guard = index.lock().await;
         flush_partition_windows(
             writer,
@@ -487,24 +543,30 @@ where
             config,
             windows,
         )
-        .await?;
+        .await?
+    };
+    // One counter tick per durably-written span block (post-flush, pre-commit).
+    for _ in 0..blocks {
+        metrics.record_block_flushed();
     }
     consumer.commit_sync().await
 }
 
-/// Flush decoded partition windows and durably save the trace index.
+/// Flush decoded partition windows and durably save the trace index, returning
+/// the number of span blocks durably written.
 ///
-/// The caller should commit WAL offsets only after this returns `Ok(())`.
+/// The caller should commit WAL offsets only after this returns `Ok(_)`.
 pub async fn flush_partition_windows(
     writer: &BlockWriter,
     index: &mut TraceIndex,
     object_store: Arc<dyn ObjectStore>,
     config: &BlockBuilderConfig,
     windows: BTreeMap<i32, PartitionWindow>,
-) -> Result<(), TracesError> {
+) -> Result<usize, TracesError> {
+    let mut blocks_written = 0usize;
     for (partition, partition_window) in windows {
         for tenant in tenants_in_records(&partition_window.records) {
-            build_blocks_with_options(
+            let metas = build_blocks_with_options(
                 writer,
                 index,
                 &tenant,
@@ -517,12 +579,13 @@ pub async fn flush_partition_windows(
                 },
             )
             .await?;
+            blocks_written += metas.len();
         }
     }
     index
         .save_latest_snapshot(&object_store, &config.index_key)
         .await
-        .map(|_| ())
+        .map(|_| blocks_written)
         .map_err(|err| TracesError::Block(err.to_string()))
 }
 
@@ -630,6 +693,74 @@ mod tests {
 
     use super::*;
     use crate::span::{EventRecord, KeyValue, LinkRecord, SpanKind, StatusCode};
+
+    /// `set_remote_parent_from_records` must re-parent the span into the trace
+    /// carried on the FIRST record whose header key equals `TRACEPARENT_HEADER`.
+    ///
+    /// Guards two mutants: replacing the whole function with `()` (the span would
+    /// keep its own fresh trace id, not the header's), and flipping the header-key
+    /// comparison from `==` to `!=` (the non-traceparent record would be matched
+    /// first and its garbage/absent context would fail to re-parent the span).
+    /// The non-traceparent record is deliberately placed BEFORE the traceparent
+    /// one so the `==`/`!=` distinction is observable.
+    #[test]
+    fn set_remote_parent_from_records_reparents_into_header_trace() {
+        use opentelemetry::trace::{TraceContextExt as _, TraceId, TracerProvider as _};
+        use opentelemetry_sdk::trace::{Sampler, SdkTracerProvider};
+        use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+        use tracing_subscriber::prelude::*;
+
+        opentelemetry::global::set_text_map_propagator(
+            opentelemetry_sdk::propagation::TraceContextPropagator::new(),
+        );
+        let provider = SdkTracerProvider::builder()
+            .with_sampler(Sampler::AlwaysOn)
+            .build();
+        let tracer = provider.tracer("blockbuilder-test");
+        let subscriber =
+            tracing_subscriber::registry().with(tracing_opentelemetry::layer().with_tracer(tracer));
+
+        tracing::subscriber::with_default(subscriber, || {
+            fn record(headers: Vec<crabka_client_consumer::Header>) -> ConsumerRecord {
+                ConsumerRecord {
+                    topic: "wal".into(),
+                    partition: 0,
+                    offset: 0,
+                    leader_epoch: 0,
+                    timestamp: 0,
+                    key: None,
+                    value: None,
+                    headers,
+                }
+            }
+
+            let traceparent = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
+            let records = vec![
+                // A record WITHOUT the traceparent header comes first: with the
+                // `==`→`!=` mutant, `find` would (wrongly) select this one and
+                // extract no valid context, so the trace-id assertion would fail.
+                record(vec![crabka_client_consumer::Header {
+                    key: "other".into(),
+                    value: Some(bytes::Bytes::from_static(b"x")),
+                }]),
+                // The record actually carrying the producer's W3C trace context.
+                record(vec![crabka_client_consumer::Header {
+                    key: TRACEPARENT_HEADER.into(),
+                    value: Some(bytes::Bytes::from(traceparent.as_bytes().to_vec())),
+                }]),
+            ];
+
+            let span = tracing::info_span!("t");
+            set_remote_parent_from_records(&span, &records);
+
+            // The span now belongs to the producer's trace (shares its trace id).
+            // A no-op mutant leaves the span in its own fresh trace, so this fails.
+            let sc = span.context().span().span_context().clone();
+            assert!(
+                sc.trace_id() == TraceId::from_hex("0af7651916cd43dd8448eb211c80319c").unwrap()
+            );
+        });
+    }
 
     fn span() -> Span {
         Span {

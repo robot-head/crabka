@@ -95,6 +95,16 @@ impl SspiAcceptor {
     ///
     /// Returns [`GssError::Keytab`] if the keytab cannot be read or has no
     /// matching key, or [`GssError::Context`] if sspi rejects the server config.
+    // GSSAPI server-context establishment from a keytab. skip_all keeps the
+    // extracted service-key material (loaded into locals) out of span fields;
+    // only the non-sensitive mechanism + service name are recorded. `err`
+    // surfaces keytab/context failures (Debug).
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(mechanism = "GSSAPI", service = %service_name),
+        err
+    )]
     pub fn new(keytab_path: &str, service_name: &str) -> Result<Self, GssError> {
         let bytes = std::fs::read(keytab_path)
             .map_err(|e| GssError::Keytab(format!("reading {keytab_path}: {e}")))?;
@@ -219,6 +229,16 @@ impl SspiInitiator {
     /// Returns [`GssError::Keytab`] if the keytab cannot be read or has no
     /// matching key, or [`GssError::Context`] if sspi rejects the principal,
     /// credentials, or client configuration.
+    // GSSAPI client-credentials acquisition from a keytab. skip_all keeps the
+    // extracted client-key material (loaded into locals) out of span fields;
+    // only the non-sensitive mechanism + principal + target SPN are recorded.
+    // `err` surfaces keytab/context failures (Debug).
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(mechanism = "GSSAPI", principal = %client_principal, target = %target_spn),
+        err
+    )]
     pub fn new(
         keytab_path: &str,
         client_principal: &str,

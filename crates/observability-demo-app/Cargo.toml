@@ -24,11 +24,13 @@ crabka-client-producer = { version = "0.3.8", path = "../client-producer" }
 crabka-client-consumer = { version = "0.3.8", path = "../client-consumer" }
 crabka-schema-serde = { version = "0.3.8", path = "../schema-serde", features = ["protobuf"] }
 crabka-telemetry = { version = "0.3.8", path = "../telemetry" }
+axum = { workspace = true }
 bytes = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
+prometheus-client = { workspace = true }
 prost = { workspace = true }
 prost-reflect = { workspace = true, features = ["derive"] }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "signal"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "signal", "sync"] }
 tracing = { workspace = true }
 
 [build-dependencies]

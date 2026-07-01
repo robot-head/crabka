@@ -62,6 +62,10 @@ impl GssapiServerExchange {
     /// Returns an error if a GSS context/wrap/unwrap operation fails, the
     /// client selects an unsupported security layer, or a token arrives after
     /// the exchange has completed.
+    // Per-step GSSAPI accept driver. skip_all keeps the raw `client_token`
+    // (opaque GSS/Kerberos context bytes) out of span fields; only the
+    // non-sensitive mechanism is recorded. `err` surfaces the failure (Debug).
+    #[tracing::instrument(level = "debug", skip_all, fields(mechanism = "GSSAPI"), err)]
     pub fn step(&mut self, client_token: &[u8]) -> Result<ServerStep, ServerExchangeError> {
         match self.state {
             State::AcceptingContext => match self.acceptor.accept(client_token)? {

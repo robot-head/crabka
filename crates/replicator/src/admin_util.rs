@@ -16,6 +16,12 @@ const TOPIC_ALREADY_EXISTS: i16 = 36;
 
 /// Ensure `topic` exists with the given parameters, treating an
 /// already-exists response as success.
+#[tracing::instrument(
+    level = "info",
+    skip_all,
+    fields(topic = %topic, partitions, bootstrap = %bootstrap),
+    err,
+)]
 pub async fn ensure_topic(
     bootstrap: &str,
     topic: &str,
@@ -54,6 +60,12 @@ pub async fn ensure_topic(
 }
 
 /// Ensure a compacted topic exists with 1 partition and 1 replica.
+#[tracing::instrument(
+    level = "info",
+    skip_all,
+    fields(topic = %topic, bootstrap = %bootstrap),
+    err,
+)]
 pub async fn ensure_compacted_topic(
     bootstrap: &str,
     topic: &str,
@@ -129,6 +141,13 @@ async fn build_drain_consumer(
 ///
 /// Uses N=3 consecutive empty polls (500 ms each) as the drain sentinel.
 /// Poll errors for a not-yet-existing topic are silently treated as empty.
+#[tracing::instrument(
+    level = "debug",
+    skip_all,
+    fields(topic = %topic, drained = tracing::field::Empty),
+    err,
+)]
+#[allow(clippy::type_complexity)]
 pub async fn read_all(
     bootstrap: &str,
     topic: &str,
@@ -179,6 +198,7 @@ pub async fn read_all(
     }
 
     let _ = consumer.close().await;
+    tracing::Span::current().record("drained", records.len());
     Ok(records)
 }
 

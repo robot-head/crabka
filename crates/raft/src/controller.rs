@@ -220,6 +220,11 @@ impl ControllerHandle {
     /// applied on the leader. Pre-validation lives in the engine. On a follower
     /// (`NotLeader` with a known leader), forwards directly to the leader's
     /// controller listener via `API_KEY_SUBMIT_CHANGE`.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(node = self.self_node_id, records = records.len())
+    )]
     pub async fn submit_change(&self, records: Vec<MetadataRecord>) -> Result<(), RaftError> {
         match self.engine.submit_change(records.clone()).await {
             Ok(()) => Ok(()),
@@ -312,6 +317,12 @@ impl ControllerHandle {
     /// and maps the transport `error_code` into a `RaftError`.
     // cargo-mutants: thin wrapper; builds the live DialerSubmitTransport, needs a real dialer
     #[cfg_attr(test, mutants::skip)]
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(node = self.self_node_id, leader, addr, records = records.len()),
+        err
+    )]
     async fn forward_submit_to(
         &self,
         leader: NodeId,
@@ -623,6 +634,12 @@ impl Controller {
     /// The supplied listener's local address MUST equal
     /// `config.controller_listen_addr`.
     #[allow(clippy::too_many_lines)]
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(node = config.node_id, mode = ?config.bootstrap_mode),
+        err
+    )]
     pub async fn start_with_listener(
         config: ControllerConfig,
         prebound: Option<tokio::net::TcpListener>,

@@ -115,6 +115,13 @@ fn resolve_new_partition_assignments(
 }
 
 #[allow(clippy::too_many_lines)]
+#[tracing::instrument(
+    name = "handle_create_partitions",
+    level = "info",
+    skip_all,
+    fields(api = "CreatePartitions", version, req_bytes = req_bytes.len()),
+    err,
+)]
 pub(crate) async fn handle(
     broker: &Broker,
     version: i16,

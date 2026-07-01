@@ -1,3 +1,6 @@
+// `#[tracing::instrument]` on the DSL runtime deepens this example's `main`
+// future past the default type-layout depth limit; raise it.
+#![recursion_limit = "512"]
 //! Applied Avro Streams pipeline over **rich compound types** (a realistic
 //! e-commerce scenario), using `StreamsApp` + the default-serde DSL. Requires a
 //! running broker (`127.0.0.1:9092`) and a Confluent-compatible registry

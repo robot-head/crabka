@@ -1405,6 +1405,13 @@ impl BuiltTopology {
     ///
     /// Each call produces an independent graph (its own processor instances and
     /// a fresh byte-store backend opened via `backend`).
+    #[tracing::instrument(
+        name = "streams.topology.instantiate",
+        level = "info",
+        skip_all,
+        fields(app_id = %app_id, nodes = self.node_specs.len(), cache_max_bytes),
+        err,
+    )]
     pub(crate) async fn instantiate(
         &self,
         backend: &crate::store::backend::StoreBackend,

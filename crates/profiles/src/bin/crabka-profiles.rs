@@ -177,7 +177,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Target::BlockBuilder => {
             let configured = build_object_store(&cli.object_store_url)
                 .map_err(|e| format!("object store: {e}"))?;
-            let mut config = BlockBuilderConfig::new(cli.bootstrap, configured.store);
+            let mut config =
+                BlockBuilderConfig::new(cli.bootstrap, configured.store).with_metrics(metrics);
             config.flush_records = cli.block_builder_flush_records;
             config.flush_max_age = Duration::from_millis(cli.block_builder_flush_max_age_ms);
             crabka_profiles::blockbuilder::run_with_config(config).await?;

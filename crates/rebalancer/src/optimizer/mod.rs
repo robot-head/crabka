@@ -31,6 +31,20 @@ pub struct OptimizeOutput {
 /// applied in priority order (Hard before Soft). The cluster state
 /// passed to each goal reflects the cumulative effect of prior goals'
 /// movements — soft goals see post-hard-goal counts.
+// One span per rebalance-plan compute (info): the entry point operators
+// care about. `skip_all` keeps the (large) `state`/`goals`/`ctx` out of the
+// span; `fields` carry the scale of the problem, `err` records the
+// hard-goal-overflow failure.
+#[tracing::instrument(
+    level = "info",
+    skip_all,
+    fields(
+        goals = goals.len(),
+        brokers = state.brokers.len(),
+        partitions = state.partitions.len(),
+    ),
+    err,
+)]
 pub fn optimize(
     state: &ClusterState,
     goals: &[&dyn Goal],

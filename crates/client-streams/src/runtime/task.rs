@@ -90,6 +90,13 @@ impl StreamTask {
     }
 
     /// Call `Processor::init` on every node in the graph.
+    #[tracing::instrument(
+        name = "streams.task.init",
+        level = "info",
+        skip_all,
+        fields(subtopology = %self.subtopology_id, partition = self.partition),
+        err,
+    )]
     pub async fn init(&mut self) -> Result<(), StreamsClientError> {
         self.graph
             .init_processors()
@@ -106,6 +113,12 @@ impl StreamTask {
     /// Close is infallible, so a flush error is logged and swallowed (the partition
     /// is being revoked anyway; the thread still commits offsets afterwards). After
     /// this, the cache is clean, so the subsequent `commit()` flush is a no-op.
+    #[tracing::instrument(
+        name = "streams.task.close_processors",
+        level = "info",
+        skip_all,
+        fields(subtopology = %self.subtopology_id, partition = self.partition),
+    )]
     pub async fn close_processors(&mut self) {
         if let Err(e) = self.flush_caches().await {
             tracing::warn!(error = %e, "flush_caches failed during task close; continuing");
@@ -120,6 +133,13 @@ impl StreamTask {
     /// `READ_COMMITTED` so aborted writes (records from a transaction that later
     /// aborted) are excluded — the restored store reflects only committed state.
     /// At-least-once reads `READ_UNCOMMITTED` (behaviour unchanged).
+    #[tracing::instrument(
+        name = "streams.task.restore",
+        level = "info",
+        skip_all,
+        fields(subtopology = %self.subtopology_id, partition = self.partition, guarantee = ?self.guarantee),
+        err,
+    )]
     pub async fn restore(&mut self, fetcher: &dyn RecordFetcher) -> Result<(), StreamsClientError> {
         let isolation = if self.guarantee == ProcessingGuarantee::ExactlyOnceV2 {
             IsolationLevel::ReadCommitted
@@ -173,6 +193,13 @@ impl StreamTask {
 
     /// Incrementally restore standby/warmup task by fetching a single batch
     /// from each store's changelog topic.
+    #[tracing::instrument(
+        name = "streams.task.restore_step",
+        level = "debug",
+        skip_all,
+        fields(subtopology = %self.subtopology_id, partition = self.partition, role = ?self.role),
+        err,
+    )]
     pub async fn restore_step(
         &mut self,
         fetcher: &dyn RecordFetcher,
@@ -217,6 +244,13 @@ impl StreamTask {
     }
 
     /// Compute cumulative restored and end offsets across all stores' changelog partitions.
+    #[tracing::instrument(
+        name = "streams.task.compute_changelog_offsets",
+        level = "debug",
+        skip_all,
+        fields(subtopology = %self.subtopology_id, partition = self.partition, role = ?self.role),
+        err,
+    )]
     pub async fn compute_changelog_offsets(&mut self) -> Result<(i64, i64), StreamsClientError> {
         let mut current_sum = 0;
         let mut end_sum = 0;
@@ -244,6 +278,13 @@ impl StreamTask {
     /// Roll back to the last committed state after a txn abort: rewind source
     /// positions to committed offsets, wipe stores, re-restore from the committed
     /// changelog. Reuses [`seek_to_start`](Self::seek_to_start) + [`restore`](Self::restore).
+    #[tracing::instrument(
+        name = "streams.task.rollback",
+        level = "info",
+        skip_all,
+        fields(subtopology = %self.subtopology_id, partition = self.partition),
+        err,
+    )]
     pub async fn rollback(
         &mut self,
         fetcher: &dyn RecordFetcher,
@@ -256,6 +297,13 @@ impl StreamTask {
     }
     /// Seek each assigned partition to its committed offset, or `earliest` if
     /// none (auto.offset.reset = earliest).
+    #[tracing::instrument(
+        name = "streams.task.seek_to_start",
+        level = "debug",
+        skip_all,
+        fields(subtopology = %self.subtopology_id, partition = self.partition),
+        err,
+    )]
     pub async fn seek_to_start(&mut self) -> Result<(), StreamsClientError> {
         let keys: Vec<(String, i32)> = self.positions.keys().cloned().collect();
         for (topic, partition) in keys {
@@ -278,6 +326,13 @@ impl StreamTask {
     /// the thread opens a transaction lazily — an interval that fetches no
     /// records produces nothing and opens no transaction (no empty-txn churn).
     /// Under at-least-once `begin_gate` is `None` and this is a no-op gate.
+    #[tracing::instrument(
+        name = "streams.task.process_once",
+        level = "debug",
+        skip_all,
+        fields(subtopology = %self.subtopology_id, partition = self.partition, eos = begin_gate.is_some()),
+        err,
+    )]
     pub async fn process_once(
         &mut self,
         fetcher: &dyn RecordFetcher,
@@ -340,6 +395,13 @@ impl StreamTask {
     /// Fire all due `STREAM_TIME` punctuators at the graph's current stream-time,
     /// producing any forwarded sink output + changelog entries. Driven at the end
     /// of each `process_once` batch.
+    #[tracing::instrument(
+        name = "streams.task.punctuate_stream_time",
+        level = "debug",
+        skip_all,
+        fields(subtopology = %self.subtopology_id, partition = self.partition, stream_time = self.graph.stream_time),
+        err,
+    )]
     pub async fn punctuate_stream_time(&mut self) -> Result<(), StreamsClientError> {
         self.graph
             .punctuate_stream_time(self.graph.stream_time)
@@ -351,6 +413,13 @@ impl StreamTask {
     /// Fire all due `WALL_CLOCK_TIME` punctuators at `now_ms`, producing any
     /// forwarded sink output + changelog entries. Driven between polls by the
     /// `StreamThread` wall-clock tick.
+    #[tracing::instrument(
+        name = "streams.task.punctuate_wall_clock",
+        level = "debug",
+        skip_all,
+        fields(subtopology = %self.subtopology_id, partition = self.partition, now_ms),
+        err,
+    )]
     pub async fn punctuate_wall_clock(&mut self, now_ms: i64) -> Result<(), StreamsClientError> {
         self.graph
             .punctuate_wall_clock(now_ms)
@@ -400,6 +469,13 @@ impl StreamTask {
     /// A no-op when no store is cached (`cache_owner` empty, e.g. the
     /// `cache_max_bytes = 0` test-driver path): `flush_caches` forwards nothing,
     /// so the drain produces nothing.
+    #[tracing::instrument(
+        name = "streams.task.flush_caches",
+        level = "debug",
+        skip_all,
+        fields(subtopology = %self.subtopology_id, partition = self.partition),
+        err,
+    )]
     pub(crate) async fn flush_caches(&mut self) -> Result<(), StreamsClientError> {
         self.graph
             .flush_caches()
@@ -413,6 +489,13 @@ impl StreamTask {
     /// flush + its sink/changelog drain happen BEFORE the producer flush/commit so
     /// the forwarded records are part of the committed batch (under EOS-v2, part of
     /// the transaction the thread commits after this call).
+    #[tracing::instrument(
+        name = "streams.task.commit",
+        level = "info",
+        skip_all,
+        fields(subtopology = %self.subtopology_id, partition = self.partition),
+        err,
+    )]
     pub async fn commit(&mut self) -> Result<(), StreamsClientError> {
         self.flush_caches().await?;
         self.producer.flush().await?;

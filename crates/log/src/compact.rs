@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 
 use bytes::{Bytes, BytesMut};
 use crabka_protocol::records::RecordBatch;
+use tracing::instrument;
 
 use crate::error::LogError;
 use crate::name;
@@ -359,6 +360,12 @@ fn read_all_batches(seg: &Segment) -> Result<Vec<RecordBatch>, LogError> {
 ///
 /// The map's value is the absolute offset of the **newest** record
 /// observed for each key (later writes overwrite earlier ones).
+#[instrument(
+    level = "debug",
+    skip_all,
+    fields(segments = segments.len(), keys = tracing::field::Empty),
+    err,
+)]
 pub fn build_offset_map(segments: &[&Segment]) -> Result<HashMap<Bytes, i64>, LogError> {
     // Keyed by `Bytes` (cheap refcounted clone of the record key) rather
     // than `Vec<u8>` to avoid a heap copy of every key. Zero-length keys
@@ -383,6 +390,7 @@ pub fn build_offset_map(segments: &[&Segment]) -> Result<HashMap<Bytes, i64>, Lo
             }
         }
     }
+    tracing::Span::current().record("keys", map.len());
     Ok(map)
 }
 
@@ -407,6 +415,12 @@ impl CleanedTransactionMetadata {
     /// transactional DATA records will survive (a data record that is
     /// newest-for-key per `offset_map`). Aborted-txn entries are seeded from
     /// every sealed segment's `.txnindex`.
+    #[instrument(
+        level = "debug",
+        skip_all,
+        fields(segments = segments.len(), survivors = tracing::field::Empty),
+        err,
+    )]
     pub fn build(
         segments: &[&Segment],
         offset_map: &HashMap<Bytes, i64>,
@@ -442,6 +456,7 @@ impl CleanedTransactionMetadata {
                 }
             }
         }
+        tracing::Span::current().record("survivors", survivors.len());
         Ok(Self { survivors, aborted })
     }
 
@@ -674,6 +689,17 @@ pub struct RewriteOutput {
 /// The `.swap` files are written to the segments' shared directory. Caller is
 /// responsible for fsyncing + promoting via [`atomic_swap`].
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[instrument(
+    level = "info",
+    skip_all,
+    fields(
+        dir = %dir.display(),
+        segments = segments.len(),
+        new_base = tracing::field::Empty,
+        new_last_offset = tracing::field::Empty,
+    ),
+    err,
+)]
 pub fn rewrite_segments(
     dir: &Path,
     segments: &[&Segment],
@@ -688,6 +714,7 @@ pub fn rewrite_segments(
         .first()
         .ok_or_else(|| LogError::Io(std::io::Error::other("rewrite_segments: empty input")))?;
     let new_base = first.base_offset();
+    tracing::Span::current().record("new_base", new_base);
 
     let log_swap = swap_path(dir, new_base, "log");
     let index_swap = swap_path(dir, new_base, "index");
@@ -860,6 +887,7 @@ pub fn rewrite_segments(
         Some(path)
     };
 
+    tracing::Span::current().record("new_last_offset", last_kept_offset);
     Ok(RewriteOutput {
         log_swap,
         index_swap,
@@ -1195,6 +1223,16 @@ mod rewrite_tests {
 ///
 /// On crash recovery, [`crate::recovery::swap_orphan_recover`] heals
 /// any intermediate state.
+#[instrument(
+    level = "info",
+    skip_all,
+    fields(
+        dir = %dir.display(),
+        consumed = consumed_base_offsets.len(),
+        new_base = rewrite.new_base_offset,
+    ),
+    err,
+)]
 pub fn atomic_swap(
     dir: &Path,
     consumed_base_offsets: &[i64],

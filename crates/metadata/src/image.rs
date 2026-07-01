@@ -54,6 +54,33 @@ pub fn canonicalize_entity(mut tuple: Vec<(String, Option<String>)>) -> EntityKe
     tuple
 }
 
+/// Static discriminant name for a [`MetadataRecord`], used as tracing span
+/// context (the record itself is skipped to keep spans cheap and PII-free).
+fn record_variant(rec: &MetadataRecord) -> &'static str {
+    match rec {
+        MetadataRecord::V1Topic(_) => "V1Topic",
+        MetadataRecord::V1Partition(_) => "V1Partition",
+        MetadataRecord::V1BrokerRegistration(_) => "V1BrokerRegistration",
+        MetadataRecord::V1DeleteTopic(_) => "V1DeleteTopic",
+        MetadataRecord::V1TopicConfig(_) => "V1TopicConfig",
+        MetadataRecord::V1ScramCredential(_) => "V1ScramCredential",
+        MetadataRecord::V1DeleteScramCredential(_) => "V1DeleteScramCredential",
+        MetadataRecord::V1AccessControlEntry(_) => "V1AccessControlEntry",
+        MetadataRecord::V1DeleteAccessControlEntry(_) => "V1DeleteAccessControlEntry",
+        MetadataRecord::V1BrokerConfig(_) => "V1BrokerConfig",
+        MetadataRecord::V1ClientQuota(_) => "V1ClientQuota",
+        MetadataRecord::V1DelegationToken(_) => "V1DelegationToken",
+        MetadataRecord::V1DeleteDelegationToken(_) => "V1DeleteDelegationToken",
+        MetadataRecord::V1UnregisterBroker(_) => "V1UnregisterBroker",
+        MetadataRecord::V1KRaftVersion(_) => "V1KRaftVersion",
+        MetadataRecord::V1Voters(_) => "V1Voters",
+        MetadataRecord::V1FeatureLevel(_) => "V1FeatureLevel",
+        MetadataRecord::V1ClientMetricsConfig(_) => "V1ClientMetricsConfig",
+        MetadataRecord::V1FeaturesEpoch(_) => "V1FeaturesEpoch",
+        MetadataRecord::V1PartitionDirAssignment(_) => "V1PartitionDirAssignment",
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MetadataImage {
     cluster_id: Uuid,
@@ -122,12 +149,14 @@ impl MetadataImage {
         self.topics.values()
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(topic = %name))]
     #[must_use]
     pub fn topic(&self, name: &str) -> Option<&TopicRecord> {
         self.topics.get(name)
     }
 
     /// KIP-516: resolve a topic by its UUID. O(1) via the `topic_ids` index.
+    #[tracing::instrument(level = "debug", skip_all, fields(topic_id = %id))]
     #[must_use]
     pub fn topic_by_id(&self, id: &Uuid) -> Option<&TopicRecord> {
         let name = self.topic_ids.get(id)?;
@@ -140,6 +169,7 @@ impl MetadataImage {
         self.topic_ids.get(id).map(String::as_str)
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(topic = %topic, partition = idx))]
     #[must_use]
     pub fn partition(&self, topic: &str, idx: i32) -> Option<&PartitionRecord> {
         self.partitions.get(&(topic.to_string(), idx))
@@ -434,6 +464,7 @@ impl MetadataImage {
     /// Infallible — pre-validation against the current image happens
     /// in the controller before submitting to Raft. Apply must never
     /// fail on a committed entry.
+    #[tracing::instrument(level = "info", skip_all, fields(record = record_variant(rec)))]
     #[allow(clippy::too_many_lines)] // exhaustive match over MetadataRecord
     pub fn apply(&mut self, rec: &MetadataRecord) {
         match rec {
@@ -642,6 +673,11 @@ impl MetadataImage {
     /// `apply`ing them never sees a dangling reference: brokers,
     /// broker-configs, topics, partitions, topic-configs, SCRAM creds,
     /// ACLs, client quotas, delegation tokens.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(topics = self.topics.len(), partitions = self.partitions.len())
+    )]
     #[must_use]
     pub fn to_records(&self) -> Vec<MetadataRecord> {
         let mut out = Vec::new();
@@ -790,6 +826,7 @@ impl MetadataImage {
     /// Reconstruct an image from a `cluster_id` and a record sequence
     /// (typically [`Self::to_records`] output read back from a snapshot):
     /// `new` an empty image and `apply` each record in order.
+    #[tracing::instrument(level = "info", skip_all, fields(records = records.len()))]
     #[must_use]
     pub fn from_records(cluster_id: Uuid, records: &[MetadataRecord]) -> Self {
         let mut image = Self::new(cluster_id);
@@ -802,6 +839,7 @@ impl MetadataImage {
     /// Synchronous pre-validation: returns `Ok` if the record would be a
     /// no-conflict apply, otherwise the appropriate error. Used by
     /// `Controller::submit_change` before forwarding to openraft.
+    #[tracing::instrument(level = "debug", skip_all, fields(record = record_variant(rec)), err)]
     pub fn validate(&self, rec: &MetadataRecord) -> Result<(), MetadataError> {
         match rec {
             MetadataRecord::V1Topic(t) => {
@@ -897,6 +935,27 @@ impl MetadataImage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `record_variant` maps each enum variant to its exact discriminant
+    /// name; asserting concrete mappings kills whole-fn replacements (e.g.
+    /// returning `""` or a constant).
+    #[test]
+    fn record_variant_returns_exact_discriminant_names() {
+        let topic = MetadataRecord::V1Topic(TopicRecord {
+            name: "orders".into(),
+            topic_id: Uuid::new_v4(),
+            partitions: 3,
+            replication_factor: 2,
+        });
+        assert!(record_variant(&topic) == "V1Topic");
+
+        let feature = MetadataRecord::V1FeatureLevel(crate::records::FeatureLevelRecord {
+            name: "metadata.version".into(),
+            level: 1,
+        });
+        assert!(record_variant(&feature) == "V1FeatureLevel");
+    }
+
     use crate::acl::{AclEntryFilter, AclOperation, PermissionType};
     use crate::records::{
         BrokerConfigRecord, ClientQuotaRecord, DeleteDelegationTokenRecord,

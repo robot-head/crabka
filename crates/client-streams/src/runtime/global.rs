@@ -24,6 +24,12 @@ pub(crate) struct GlobalStateManager {
 impl GlobalStateManager {
     /// Build the global stores from the topology's global factories.
     /// `topic_for` maps each global store name to its source topic (the consumer reads it).
+    #[tracing::instrument(
+        name = "streams.global.build",
+        level = "info",
+        skip_all,
+        fields(app_id = %app_id, stores = factories.len()),
+    )]
     pub(crate) async fn build(
         factories: &HashMap<String, (Option<String>, crate::topology::builder::StoreFactory)>,
         topic_for: HashMap<String, String>,
@@ -97,6 +103,13 @@ impl GlobalStateManager {
     /// partitions from offset 0 to end-of-log and apply each record. Returns the
     /// per-`(topic, partition)` next-offset map so a live poll can resume. Blocks
     /// until every partition is drained.
+    #[tracing::instrument(
+        name = "streams.global.bootstrap",
+        level = "info",
+        skip_all,
+        fields(stores = self.topics.len()),
+        err,
+    )]
     pub(crate) async fn bootstrap(
         &self,
         fetcher: &dyn RecordFetcher,
@@ -148,6 +161,13 @@ impl GlobalStateManager {
     /// One live-update pass from the given resume offsets: fetch new records on
     /// each `(topic, partition)` and apply them, advancing the offsets in place.
     /// Fetches one batch per partition (not to end-of-log); the caller repeats.
+    #[tracing::instrument(
+        name = "streams.global.poll_once",
+        level = "debug",
+        skip_all,
+        fields(partitions = offsets.len()),
+        err,
+    )]
     pub(crate) async fn poll_once(
         &self,
         fetcher: &dyn RecordFetcher,

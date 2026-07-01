@@ -1353,6 +1353,12 @@ fn condition_for_validation_error(err: &PoolValidationError) -> KafkaCondition {
 }
 
 /// Wrap `common::patch_status` with the pool-specific status shape.
+#[tracing::instrument(
+    level = "info",
+    skip_all,
+    fields(pool = %name, condition = %cond.type_, status = %cond.status, reason = %cond.reason),
+    err,
+)]
 async fn patch_status_for_pool(
     pool_api: &Api<KafkaNodePool>,
     name: &str,
@@ -1456,7 +1462,35 @@ pub async fn run(ctx: Context) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Reconcile entry point. Times the pass and records the reconcile
+/// counter/histogram, then delegates to [`reconcile_inner`].
+#[tracing::instrument(
+    level = "info",
+    skip_all,
+    fields(
+        kind = "KafkaNodePool",
+        namespace = %pool.namespace().unwrap_or_else(|| "default".into()),
+        name = %pool.name_any(),
+        generation = ?pool.meta().generation,
+    )
+)]
 pub async fn reconcile(
+    pool: Arc<KafkaNodePool>,
+    ctx: Arc<Context>,
+) -> Result<Action, ReconcileError> {
+    let started = std::time::Instant::now();
+    let result = reconcile_inner(pool, ctx.clone()).await;
+    let outcome = if result.is_ok() {
+        crate::telemetry::ReconcileResult::Ok
+    } else {
+        crate::telemetry::ReconcileResult::Error
+    };
+    ctx.metrics
+        .record_reconcile("KafkaNodePool", outcome, started.elapsed().as_secs_f64());
+    result
+}
+
+async fn reconcile_inner(
     pool: Arc<KafkaNodePool>,
     ctx: Arc<Context>,
 ) -> Result<Action, ReconcileError> {

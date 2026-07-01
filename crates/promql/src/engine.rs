@@ -386,6 +386,13 @@ impl<S: MetricStore> PromqlEngine<S> {
     /// # Errors
     ///
     /// Returns parse, store, execution, or unsupported-expression errors.
+    #[tracing::instrument(
+        name = "promql.query_instant",
+        level = "info",
+        skip_all,
+        fields(tenant = %tenant, query = %query, time_ms = time_ms),
+        err
+    )]
     pub async fn query_instant_with_annotations(
         &self,
         tenant: &str,
@@ -422,6 +429,13 @@ impl<S: MetricStore> PromqlEngine<S> {
     /// `Ok(None)` is therefore unreachable; should it ever arise it is a planner
     /// bug, surfaced as an internal [`PromqlError::Plan`] rather than silently
     /// diverging.
+    #[tracing::instrument(
+        name = "promql.eval_instant",
+        level = "debug",
+        skip_all,
+        fields(time_ms = time_ms),
+        err
+    )]
     async fn eval_top_level_instant_expr(
         &self,
         tenant: &str,
@@ -1951,6 +1965,13 @@ impl<S: MetricStore> PromqlEngine<S> {
     /// Execute a planned instant query and assemble its output batches into an
     /// [`InstantVector`](QueryResult::InstantVector), reading each shape's
     /// columns per [`InstantShape`].
+    #[tracing::instrument(
+        name = "promql.execute_operator",
+        level = "debug",
+        skip_all,
+        fields(time_ms = time_ms, shape = tracing::field::Empty),
+        err
+    )]
     async fn assemble_planned_instant(
         &self,
         planned: PlannedInstant,
@@ -1985,6 +2006,14 @@ impl<S: MetricStore> PromqlEngine<S> {
             labels_by_fp,
             shape,
         } = *operator;
+        let shape_name = match &shape {
+            InstantShape::Selector => "selector",
+            InstantShape::RateProjection => "rate_projection",
+            InstantShape::OverTimeProjection { .. } => "over_time_projection",
+            InstantShape::Aggregate => "aggregate",
+            InstantShape::ScalarMath => "scalar_math",
+        };
+        tracing::Span::current().record("shape", shape_name);
         let batches = ctx.execute_logical_plan(plan).await?.collect().await?;
         match shape {
             InstantShape::Selector => Ok(assemble_selector_batches(&batches, &labels_by_fp)?),
@@ -2138,6 +2167,19 @@ impl<S: MetricStore> PromqlEngine<S> {
     /// # Errors
     ///
     /// Returns parse, store, execution, or unsupported-expression errors.
+    #[tracing::instrument(
+        name = "promql.query_range",
+        level = "info",
+        skip_all,
+        fields(
+            tenant = %tenant,
+            query = %query,
+            start_ms = start_ms,
+            end_ms = end_ms,
+            step_ms = step_ms
+        ),
+        err
+    )]
     pub async fn query_range_with_annotations(
         &self,
         tenant: &str,
@@ -2157,6 +2199,13 @@ impl<S: MetricStore> PromqlEngine<S> {
             .await
     }
 
+    #[tracing::instrument(
+        name = "promql.eval_range",
+        level = "debug",
+        skip_all,
+        fields(start_ms = start_ms, end_ms = end_ms, step_ms = step_ms, route = tracing::field::Empty),
+        err
+    )]
     async fn eval_range_query(
         &self,
         tenant: &str,
@@ -2188,6 +2237,7 @@ impl<S: MetricStore> PromqlEngine<S> {
         // for a plannable shape; an `Ok(None)` would be a planner bug, surfaced
         // as an internal error rather than silently diverging.
         if range_expr_routes_through_planner(expr) {
+            tracing::Span::current().record("route", "planner");
             let Some(series) = self
                 .eval_range_via_planner_scoped(tenant, expr, start_ms, end_ms, step_ms)
                 .await?
@@ -2204,14 +2254,18 @@ impl<S: MetricStore> PromqlEngine<S> {
         // from the shared kernels (with the range query's `[start, end]`
         // bounds). Every other shape is plannable and handled above.
         match expr {
-            Expr::MatrixSelector(ms) => self
-                .eval_matrix_selector(tenant, ms, start_ms, end_ms, None)
-                .await
-                .map(QueryResult::RangeMatrix),
-            Expr::Subquery(subquery) => self
-                .eval_subquery(tenant, subquery, end_ms)
-                .await
-                .map(QueryResult::RangeMatrix),
+            Expr::MatrixSelector(ms) => {
+                tracing::Span::current().record("route", "matrix");
+                self.eval_matrix_selector(tenant, ms, start_ms, end_ms, None)
+                    .await
+                    .map(QueryResult::RangeMatrix)
+            }
+            Expr::Subquery(subquery) => {
+                tracing::Span::current().record("route", "subquery");
+                self.eval_subquery(tenant, subquery, end_ms)
+                    .await
+                    .map(QueryResult::RangeMatrix)
+            }
             other => Err(PromqlError::Unsupported(format!(
                 "range expression not implemented yet: {other}"
             ))),
@@ -2282,6 +2336,13 @@ impl<S: MetricStore> PromqlEngine<S> {
     /// Returns `Ok(None)` only if some step's [`Self::plan_instant_expr`] returns
     /// `None`. The planner is total, so for a plannable `expr` this never
     /// happens; the caller treats an `Ok(None)` as an internal planner bug.
+    #[tracing::instrument(
+        name = "promql.range_planner",
+        level = "debug",
+        skip_all,
+        fields(start_ms = start_ms, end_ms = end_ms, step_ms = step_ms, steps = tracing::field::Empty),
+        err
+    )]
     async fn eval_range_via_planner(
         &self,
         tenant: &str,
@@ -2295,7 +2356,8 @@ impl<S: MetricStore> PromqlEngine<S> {
         // rather than looping ~1e11 times. The HTTP front-gate enforces the same
         // cap on the top-level query window; this guards the engine itself
         // (including subqueries, whose grid the front-gate never sees).
-        check_resolution_points(start_ms, end_ms, step_ms)?;
+        let step_count = check_resolution_points(start_ms, end_ms, step_ms)?;
+        tracing::Span::current().record("steps", step_count);
         // Scan the union of all per-step lookback windows once per matcher set,
         // shared across the step loop via the RANGE_SCAN_CACHE task-local. The
         // union starts at the first step's lookback floor (`start - lookback`)

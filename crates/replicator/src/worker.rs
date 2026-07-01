@@ -93,6 +93,12 @@ impl FlowWorker {
     /// the retry budget.
     // cargo-mutants: retry/backoff loop has no value-asserting unit coverage
     #[cfg_attr(test, mutants::skip)]
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(flow = %p.flow_name, source = %p.source_alias, target = %p.target_alias, topics = p.topics.len()),
+        err,
+    )]
     pub async fn start(p: FlowWorkerParams) -> crate::Result<Self> {
         let mut backoff = INITIAL_BACKOFF;
         let mut elapsed = Duration::ZERO;
@@ -120,8 +126,15 @@ impl FlowWorker {
 
     /// A single build attempt: stand up the source, sink, checkpoint store,
     /// connect runtime, and both background tasks.
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(flow = %p.flow_name, group_id = tracing::field::Empty),
+        err,
+    )]
     async fn build(p: &FlowWorkerParams) -> crate::Result<Self> {
         let group_id = format!("crabka-replicator-{}", p.flow_name);
+        tracing::Span::current().record("group_id", group_id.as_str());
 
         let source = SourceConsumer::start(
             &p.source_bootstrap,
@@ -197,6 +210,7 @@ impl FlowWorker {
     /// background tasks.
     // cargo-mutants: shutdown ordering not asserted by unit tests
     #[cfg_attr(test, mutants::skip)]
+    #[tracing::instrument(level = "info", skip_all)]
     pub async fn shutdown(self) {
         let _ = self.runtime.shutdown().await;
         self.heartbeat.shutdown().await;

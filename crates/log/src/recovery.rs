@@ -8,6 +8,8 @@
 use std::collections::HashSet;
 use std::path::Path;
 
+use tracing::instrument;
+
 use crate::error::LogError;
 use crate::name;
 
@@ -20,6 +22,12 @@ use crate::name;
 ///   `.swap` files complete) → finish the rename to final names.
 ///
 /// Idempotent. Safe to call on every `Log::open`.
+#[instrument(
+    level = "info",
+    skip_all,
+    fields(dir = %dir.display(), swaps = tracing::field::Empty),
+    err,
+)]
 pub fn swap_orphan_recover(dir: &Path) -> Result<(), LogError> {
     let entries = std::fs::read_dir(dir)?;
     let mut log_swaps: Vec<i64> = Vec::new();
@@ -41,6 +49,7 @@ pub fn swap_orphan_recover(dir: &Path) -> Result<(), LogError> {
         }
     }
 
+    tracing::Span::current().record("swaps", log_swaps.len());
     for base in log_swaps {
         let log_swap = swap_triple(dir, base, "log");
         let index_swap = swap_triple(dir, base, "index");

@@ -73,7 +73,10 @@ pub fn webhook_router(state: Arc<AppState>) -> Router {
 // ---------------------------------------------------------------------------
 
 /// `POST /v1/webhooks/{name}` — named, config-driven inbound webhook.
-#[tracing::instrument(skip_all)]
+// HTTP request entry (info): one span per inbound webhook, tagged with the
+// endpoint name. The RED signals (in-flight gauge + latency histogram under
+// method="webhook_in") are recorded by the drop-guard on every return path.
+#[tracing::instrument(level = "info", skip_all, fields(webhook = %name))]
 pub async fn webhook_handler(
     Extension(state): Extension<Arc<AppState>>,
     Path(name): Path<String>,
@@ -81,6 +84,7 @@ pub async fn webhook_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    let _req = metrics().begin_request("webhook_in");
     // 1. Look up the compiled endpoint config.
     let Some(cfg) = state.config.webhooks.get(&name) else {
         metrics().record_webhook_in("not_found");
@@ -212,6 +216,10 @@ pub async fn webhook_handler(
 /// No HMAC or body-size enforcement; respects an optional `Idempotency-Key`
 /// header; uses the injected caller [`Principal`] (from mTLS / bearer auth) or
 /// falls back to ANONYMOUS.
+// HTTP request entry (info): one span per generic produce-by-topic call,
+// tagged with the target topic. RED signals recorded via the drop-guard under
+// method="produce_http".
+#[tracing::instrument(level = "info", skip_all, fields(topic = %topic))]
 pub async fn produce_handler(
     Extension(state): Extension<Arc<AppState>>,
     Path(topic): Path<String>,
@@ -220,6 +228,7 @@ pub async fn produce_handler(
     principal: Option<Extension<Principal>>,
     body: Bytes,
 ) -> Response {
+    let _req = metrics().begin_request("produce_http");
     // Idempotency key from the standard header if present.
     let idempotency_key: Option<String> = headers
         .get("Idempotency-Key")

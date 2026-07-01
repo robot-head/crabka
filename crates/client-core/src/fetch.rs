@@ -68,6 +68,12 @@ pub struct FetchedRecord {
 /// instead of silently re-fetching the same offset forever.
 // cargo-mutants: thin wrapper over fetch_partition_on (tested core)
 #[cfg_attr(test, mutants::skip)]
+#[tracing::instrument(
+    level = "debug",
+    skip_all,
+    fields(topic = %topic, partition, fetch_offset),
+    err,
+)]
 pub async fn fetch_partition(
     conn: &Connection,
     topic: &str,
@@ -128,6 +134,12 @@ async fn fetch_partition_on<T: FetchTransport + ?Sized>(
 // cargo-mutants: thin wrapper over fetch_partition_with_isolation_on (tested core)
 #[allow(clippy::too_many_arguments)]
 #[cfg_attr(test, mutants::skip)]
+#[tracing::instrument(
+    level = "debug",
+    skip_all,
+    fields(topic = %topic, partition, fetch_offset, isolation_level),
+    err,
+)]
 pub async fn fetch_partition_with_isolation(
     conn: &Connection,
     topic: &str,

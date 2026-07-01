@@ -27,7 +27,8 @@ use crate::telemetry;
 /// supervisor glue and the e2e test is the contract.
 pub async fn run(config: OperatorConfig) -> anyhow::Result<()> {
     telemetry::init_tracing(&config.log_filter);
-    let registry = Arc::new(Mutex::new(telemetry::new_registry()));
+    let (registry, metrics) = telemetry::new_registry_with_metrics();
+    let registry = Arc::new(Mutex::new(registry));
     let health_state = HealthState::new(registry.clone());
 
     let health_addr = config.health_addr;
@@ -46,7 +47,7 @@ pub async fn run(config: OperatorConfig) -> anyhow::Result<()> {
     )
     .await?;
 
-    let ctx = Context::new(client, config, registry);
+    let ctx = Context::new(client, config, registry, metrics);
     health_state.mark_ready();
 
     let kafka_handle = tokio::spawn({

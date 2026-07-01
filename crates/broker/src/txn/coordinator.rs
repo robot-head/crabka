@@ -326,6 +326,13 @@ impl TxnCoordinator {
     ///
     /// Returns [`BrokerError::Txn`] if the partition is not locally held
     /// or the append fails.
+    #[tracing::instrument(
+        name = "txn_coordinator_put",
+        level = "debug",
+        skip_all,
+        fields(tid = %entry.transactional_id, producer_id = entry.producer_id),
+        err,
+    )]
     pub(crate) async fn put(
         &self,
         entry: TxnEntry,
@@ -378,6 +385,12 @@ impl TxnCoordinator {
     /// Complete write). Returns the tids it finalized.
     // cargo-mutants: I/O orchestration over live DashMap/partition state
     #[cfg_attr(test, mutants::skip)]
+    #[tracing::instrument(
+        name = "txn_coordinator_sweep_expired",
+        level = "debug",
+        skip_all,
+        fields(now_ms)
+    )]
     pub(crate) async fn sweep_expired(&self, now_ms: i64, txnv: TxnVersion) -> Vec<String> {
         // Snapshot the candidate tids first so we don't hold DashMap shard locks
         // across the async abort work; the orchestration then drives the live
@@ -395,6 +408,7 @@ impl TxnCoordinator {
     /// Returns [`BrokerError`] if reading a partition's log fails with an
     /// error other than reading past the end (which is treated as a normal
     /// "partition is empty" condition).
+    #[tracing::instrument(name = "txn_coordinator_recover", level = "info", skip_all, err)]
     pub(crate) async fn recover(&self, image: &MetadataImage) -> Result<(), BrokerError> {
         self.refresh_leader_partitions(image).await;
 

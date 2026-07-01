@@ -38,6 +38,12 @@ pub struct CheckpointParams {
 ///
 /// # Errors
 /// Returns [`ReplicatorError`] on topic-ensure, admin-connect, or produce failures.
+#[tracing::instrument(
+    level = "info",
+    skip_all,
+    fields(source_alias = %params.source_alias, groups = tracing::field::Empty),
+    err,
+)]
 pub async fn run_once(
     params: &CheckpointParams,
     store: &OffsetSyncStore,
@@ -73,6 +79,7 @@ pub async fn run_once(
         .filter(|g| !g.starts_with("crabka-replicator-"))
         .filter(|g| params.group_selector.matches(g))
         .collect();
+    tracing::Span::current().record("groups", groups.len());
 
     // 4. Build a producer to write checkpoint records to the target.
     let producer = build_producer(&params.target_bootstrap, params.security.clone())
@@ -150,6 +157,12 @@ impl CheckpointTask {
     /// Returns [`ReplicatorError`] only if initial setup fails (currently infallible;
     /// error type is reserved for future validation).
     #[allow(clippy::unused_async)]
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(source_alias = %params.source_alias, interval_ms = interval.as_millis()),
+        err,
+    )]
     pub async fn start(
         params: CheckpointParams,
         interval: std::time::Duration,

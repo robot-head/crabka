@@ -25,7 +25,15 @@ use crate::codes;
 use crate::coordinator::unified::actor::{GroupActorMessage, GroupKindTag};
 use crate::error::BrokerError;
 
-#[allow(clippy::too_many_lines)] // ACL preamble (group + per-topic) + fetch-all vs named-topic branches; splitting hurts readability
+#[allow(clippy::too_many_lines)]
+// ACL preamble (group + per-topic) + fetch-all vs named-topic branches; splitting hurts readability
+#[tracing::instrument(
+    name = "handle_offset_fetch",
+    level = "info",
+    skip_all,
+    fields(api = "OffsetFetch", version, req_bytes = req_bytes.len()),
+    err,
+)]
 pub(crate) async fn handle(
     broker: &Broker,
     version: i16,

@@ -55,6 +55,13 @@ impl KafkaStore {
     /// rebalance multi-writer window) is a documented deferred limitation of the
     /// HA support. Tests start from a fresh (empty) `_schemas`, so there is nothing
     /// to replay.
+    #[tracing::instrument(
+        level = "info",
+        name = "kafkastore.start",
+        skip_all,
+        fields(topic = %cfg.schemas_topic, bootstrap = %cfg.bootstrap),
+        err
+    )]
     pub async fn start(
         cfg: &RegistryConfig,
         cancel: CancellationToken,
@@ -94,6 +101,21 @@ impl KafkaStore {
     /// `import_id`/`import_version` (no id-assignment, no compat check). In
     /// `READONLY` mode, rejected. Otherwise the path is dedup → compat →
     /// assign → persist → read-your-writes.
+    #[tracing::instrument(
+        level = "info",
+        name = "kafkastore.register",
+        skip_all,
+        fields(
+            subject = %req.subject,
+            schema_type = ?req.ty,
+            refs = req.references.len(),
+            mode = tracing::field::Empty,
+            id = tracing::field::Empty,
+            version = tracing::field::Empty,
+            dedup = tracing::field::Empty,
+        ),
+        err
+    )]
     pub async fn register(&self, req: RegisterSchema<'_>) -> Result<Registered, SrError> {
         let _gate = self.write_gate.lock().await;
         let RegisterSchema {
@@ -106,6 +128,7 @@ impl KafkaStore {
             import_version,
         } = req;
         let mode = self.effective_mode(subject);
+        tracing::Span::current().record("mode", mode.as_str());
         if mode == "READONLY" {
             return Err(SrError::OperationNotPermitted(subject.to_string()));
         }
@@ -138,6 +161,10 @@ impl KafkaStore {
                 .await
                 .map_err(|e| SrError::Backend(e.to_string()))?;
             self.await_applied(offset).await;
+            let span = tracing::Span::current();
+            span.record("id", id);
+            span.record("version", version);
+            span.record("dedup", false);
             return Ok(Registered { id, version });
         }
         if let Some(existing) = self.store.read().find_under_subject(
@@ -148,6 +175,10 @@ impl KafkaStore {
             message_type,
             false,
         ) {
+            let span = tracing::Span::current();
+            span.record("id", existing.id);
+            span.record("version", existing.version);
+            span.record("dedup", true);
             return Ok(existing);
         }
         // Enforce compatibility against existing versions per the subject's
@@ -176,6 +207,10 @@ impl KafkaStore {
             .await
             .map_err(|e| SrError::Backend(e.to_string()))?;
         self.await_applied(offset).await;
+        let span = tracing::Span::current();
+        span.record("id", reg.id);
+        span.record("version", reg.version);
+        span.record("dedup", false);
         Ok(reg)
     }
 
@@ -193,6 +228,7 @@ impl KafkaStore {
     /// Remove the per-subject compat override and revert to global. Returns the
     /// deleted level string (e.g. `"BACKWARD"`) or `None` if no per-subject
     /// override was set.
+    #[tracing::instrument(level = "info", name = "kafkastore.delete_subject_compat", skip_all, fields(subject = %subject), err)]
     pub async fn delete_subject_compat(&self, subject: &str) -> Result<Option<String>, SrError> {
         let _gate = self.write_gate.lock().await;
         let current = self
@@ -213,12 +249,14 @@ impl KafkaStore {
         Ok(Some(level))
     }
 
+    #[tracing::instrument(level = "info", name = "kafkastore.set_compat", skip_all, fields(subject = subject.unwrap_or("global"), level = %level, mode = tracing::field::Empty), err)]
     async fn set_compat(&self, subject: Option<&str>, level: String) -> Result<(), SrError> {
         let _gate = self.write_gate.lock().await;
         let mode = match subject {
             Some(s) => self.store.read().effective_mode(s).to_string(),
             None => self.store.read().global_mode().to_string(),
         };
+        tracing::Span::current().record("mode", mode.as_str());
         if mode == "READONLY" {
             return Err(SrError::OperationNotPermitted(
                 subject.unwrap_or("global").to_string(),
@@ -235,6 +273,7 @@ impl KafkaStore {
     }
 
     /// Soft-delete a version: re-emit its SCHEMA record with `deleted=true`.
+    #[tracing::instrument(level = "info", name = "kafkastore.soft_delete_version", skip_all, fields(subject = %subject, version), err)]
     pub async fn soft_delete_version(&self, subject: &str, version: i32) -> Result<i32, SrError> {
         let _gate = self.write_gate.lock().await;
         self.ensure_writable(subject)?;
@@ -274,6 +313,7 @@ impl KafkaStore {
     }
 
     /// Permanently delete a version (tombstone). Requires a prior soft delete.
+    #[tracing::instrument(level = "info", name = "kafkastore.permanent_delete_version", skip_all, fields(subject = %subject, version), err)]
     pub async fn permanent_delete_version(
         &self,
         subject: &str,
@@ -313,6 +353,7 @@ impl KafkaStore {
     }
 
     /// Soft-delete a subject (`DELETE_SUBJECT` marker). Returns the live versions.
+    #[tracing::instrument(level = "info", name = "kafkastore.soft_delete_subject", skip_all, fields(subject = %subject), err)]
     pub async fn soft_delete_subject(&self, subject: &str) -> Result<Vec<i32>, SrError> {
         let _gate = self.write_gate.lock().await;
         self.ensure_writable(subject)?;
@@ -352,6 +393,7 @@ impl KafkaStore {
 
     /// Permanently delete a subject (per-version tombstones). Requires a prior
     /// soft delete (no live versions remain).
+    #[tracing::instrument(level = "info", name = "kafkastore.permanent_delete_subject", skip_all, fields(subject = %subject), err)]
     pub async fn permanent_delete_subject(&self, subject: &str) -> Result<Vec<i32>, SrError> {
         let _gate = self.write_gate.lock().await;
         self.ensure_writable(subject)?;
@@ -392,6 +434,7 @@ impl KafkaStore {
     }
 
     /// Set the global mode. `IMPORT` requires the registry to be empty.
+    #[tracing::instrument(level = "info", name = "kafkastore.set_global_mode", skip_all, fields(mode = %mode), err)]
     pub async fn set_global_mode(&self, mode: String) -> Result<(), SrError> {
         if !VALID_MODES.contains(&mode.as_str()) {
             return Err(SrError::InvalidMode(mode));
@@ -411,6 +454,7 @@ impl KafkaStore {
     }
 
     /// Set a per-subject mode. `IMPORT` requires the subject to have no versions.
+    #[tracing::instrument(level = "info", name = "kafkastore.set_subject_mode", skip_all, fields(subject = %subject, mode = %mode), err)]
     pub async fn set_subject_mode(&self, subject: &str, mode: String) -> Result<(), SrError> {
         if !VALID_MODES.contains(&mode.as_str()) {
             return Err(SrError::InvalidMode(mode));
@@ -430,6 +474,7 @@ impl KafkaStore {
     }
 
     /// Clear a per-subject mode override (MODE tombstone).
+    #[tracing::instrument(level = "info", name = "kafkastore.clear_subject_mode", skip_all, fields(subject = %subject), err)]
     pub async fn clear_subject_mode(&self, subject: &str) -> Result<(), SrError> {
         let _gate = self.write_gate.lock().await;
         let key = record::mode_key(Some(subject));

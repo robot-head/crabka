@@ -8,6 +8,7 @@ use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt};
 use parquet::arrow::ParquetRecordBatchStreamBuilder;
 use parquet::arrow::async_reader::ParquetObjectReader;
+use tracing::instrument;
 
 use crate::error::{BlockStoreError, Result};
 
@@ -35,6 +36,12 @@ pub async fn read_block(store: Arc<dyn ObjectStore>, object_key: &str) -> Result
     read_block_with_cap(store, object_key, MAX_BLOCK_BYTES).await
 }
 
+#[instrument(
+    level = "debug",
+    skip_all,
+    fields(object_key = %object_key, size = tracing::field::Empty),
+    err
+)]
 async fn read_block_with_cap(
     store: Arc<dyn ObjectStore>,
     object_key: &str,
@@ -42,6 +49,7 @@ async fn read_block_with_cap(
 ) -> Result<Vec<RecordBatch>> {
     let path = Path::from(object_key);
     let meta = store.head(&path).await?;
+    tracing::Span::current().record("size", meta.size);
     if meta.size > max_bytes {
         return Err(BlockStoreError::InvalidBlock(format!(
             "block `{object_key}` is {} bytes, exceeds cap of {max_bytes} bytes",
@@ -63,6 +71,12 @@ pub async fn read_row_group_metadata(
     read_row_group_metadata_with_cap(store, object_key, MAX_BLOCK_BYTES).await
 }
 
+#[instrument(
+    level = "debug",
+    skip_all,
+    fields(object_key = %object_key, size = tracing::field::Empty),
+    err
+)]
 async fn read_row_group_metadata_with_cap(
     store: Arc<dyn ObjectStore>,
     object_key: &str,
@@ -70,6 +84,7 @@ async fn read_row_group_metadata_with_cap(
 ) -> Result<Vec<RowGroupMeta>> {
     let path = Path::from(object_key);
     let meta = store.head(&path).await?;
+    tracing::Span::current().record("size", meta.size);
     if meta.size > max_bytes {
         return Err(BlockStoreError::InvalidBlock(format!(
             "block `{object_key}` is {} bytes, exceeds cap of {max_bytes} bytes",
@@ -102,6 +117,12 @@ pub async fn read_block_row_groups(
     read_block_row_groups_with_cap(store, object_key, row_groups, MAX_BLOCK_BYTES).await
 }
 
+#[instrument(
+    level = "debug",
+    skip_all,
+    fields(object_key = %object_key, row_groups = row_groups.len(), size = tracing::field::Empty),
+    err
+)]
 async fn read_block_row_groups_with_cap(
     store: Arc<dyn ObjectStore>,
     object_key: &str,
@@ -110,6 +131,7 @@ async fn read_block_row_groups_with_cap(
 ) -> Result<Vec<RecordBatch>> {
     let path = Path::from(object_key);
     let meta = store.head(&path).await?;
+    tracing::Span::current().record("size", meta.size);
     if meta.size > max_bytes {
         return Err(BlockStoreError::InvalidBlock(format!(
             "block `{object_key}` is {} bytes, exceeds cap of {max_bytes} bytes",

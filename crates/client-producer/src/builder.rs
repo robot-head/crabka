@@ -93,6 +93,7 @@ fn producer_identity_from_init(init: &InitProducerIdResponse) -> Result<(i64, i1
 /// or surfaces the transport error if the final attempt disconnected. Idempotent
 /// producers carry no `transactional_id`, so the id is allocated from any broker
 /// — no `FindCoordinator` routing is needed here.
+#[tracing::instrument(level = "info", skip_all, err)]
 async fn init_producer_id(client: &Client) -> Result<InitProducerIdResponse, ProducerError> {
     let start = tokio::time::Instant::now();
     let mut backoff = Duration::from_millis(100);
@@ -130,6 +131,18 @@ impl Producer {
     /// [`ProducerError::InvalidConfig`].
     #[builder(start_fn = builder, finish_fn = build)]
     #[allow(clippy::too_many_arguments)] // bon builder; each arg is an independent knob
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(
+            bootstrap = %bootstrap,
+            client_id = %client_id,
+            acks = ?acks,
+            enable_idempotence,
+            transactional_id = transactional_id.as_deref(),
+        ),
+        err,
+    )]
     pub async fn start(
         #[builder(into)] bootstrap: String,
         #[builder(into, default = "crabka-producer".to_string())] client_id: String,

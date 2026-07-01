@@ -21,14 +21,17 @@ pub async fn get_global(State(st): State<AppState>) -> Response {
 }
 
 /// PUT /mode {"mode":"READONLY"} -> {"mode":"READONLY"}
+#[tracing::instrument(level = "info", name = "sr.set_global_mode", skip_all, fields(mode = tracing::field::Empty), err)]
 pub async fn put_global(State(st): State<AppState>, body: String) -> Result<Response, SrError> {
     let req: PutMode =
         serde_json::from_str(&body).map_err(|e| SrError::InvalidMode(e.to_string()))?;
+    tracing::Span::current().record("mode", req.mode.as_str());
     st.store.set_global_mode(req.mode.clone()).await?;
     Ok(ok_json(&serde_json::json!({ "mode": req.mode })))
 }
 
 /// `GET /mode/{subject} -> {"mode": "<M>"} | 404 if no override`
+#[tracing::instrument(level = "debug", name = "sr.get_subject_mode", skip_all, fields(subject = %subject), err)]
 pub async fn get_subject(
     State(st): State<AppState>,
     Path(subject): Path<String>,
@@ -44,6 +47,7 @@ pub async fn get_subject(
 }
 
 /// PUT /mode/{subject} {"mode":"IMPORT"} -> {"mode":"IMPORT"}
+#[tracing::instrument(level = "info", name = "sr.set_subject_mode", skip_all, fields(subject = %subject, mode = tracing::field::Empty), err)]
 pub async fn put_subject(
     State(st): State<AppState>,
     Path(subject): Path<String>,
@@ -51,6 +55,7 @@ pub async fn put_subject(
 ) -> Result<Response, SrError> {
     let req: PutMode =
         serde_json::from_str(&body).map_err(|e| SrError::InvalidMode(e.to_string()))?;
+    tracing::Span::current().record("mode", req.mode.as_str());
     st.store
         .set_subject_mode(&subject, req.mode.clone())
         .await?;
@@ -58,6 +63,7 @@ pub async fn put_subject(
 }
 
 /// `DELETE /mode/{subject} -> {"mode": "<prior>"}` clears the override.
+#[tracing::instrument(level = "info", name = "sr.clear_subject_mode", skip_all, fields(subject = %subject), err)]
 pub async fn delete_subject(
     State(st): State<AppState>,
     Path(subject): Path<String>,

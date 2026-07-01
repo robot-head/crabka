@@ -17,7 +17,8 @@ use axum::routing::post;
 use bytes::Bytes;
 use crabka_blockstore::SeriesFingerprint;
 use crabka_client_consumer::{Consumer, ConsumerRecord};
-use crabka_client_producer::{Producer, ProducerRecord};
+use crabka_client_producer::{Header as ProducerHeader, Producer, ProducerRecord};
+use crabka_telemetry::propagation::current_trace_headers;
 use opentelemetry_proto::tonic::collector::metrics::v1::{
     ExportMetricsServiceRequest, ExportMetricsServiceResponse,
     metrics_service_server::{MetricsService, MetricsServiceServer},
@@ -25,6 +26,7 @@ use opentelemetry_proto::tonic::collector::metrics::v1::{
 use opentelemetry_proto::tonic::metrics::v1::MetricsData;
 use tokio::net::TcpListener;
 use tonic::{Request as TonicRequest, Response as TonicResponse, Status};
+use tracing::Instrument as _;
 
 use crate::metrics::ServiceMetrics;
 use crate::otlp::{
@@ -123,6 +125,18 @@ impl WalSink for KafkaSink {
         let value = record
             .encode()
             .map_err(|error| ProduceError::Append(error.to_string()))?;
+        // Inject the current ingest span's W3C trace context into the WAL record
+        // headers so the downstream compactor can stitch its `metrics_compaction`
+        // span onto this producer's trace. Additive: it only appends the
+        // traceparent/tracestate headers, and is an empty `Vec` (no-op) when no
+        // span is active or OTLP is disabled.
+        let headers = current_trace_headers()
+            .into_iter()
+            .map(|(key, value)| ProducerHeader {
+                key,
+                value: Some(Bytes::from(value.into_bytes())),
+            })
+            .collect::<Vec<_>>();
         let ack = self
             .producer
             .send(ProducerRecord {
@@ -130,6 +144,7 @@ impl WalSink for KafkaSink {
                 partition: None,
                 key: Some(key),
                 value: Some(Bytes::from(value)),
+                headers,
                 ..Default::default()
             })
             .await;
@@ -512,12 +527,44 @@ async fn push(
 ) -> Response {
     let started = std::time::Instant::now();
     let bytes = body.len() as u64;
-    let result = push_inner(&state, &headers, &body).await;
+    // ONE ingest span per request (not per series/sample). `crabka.ingest.series`
+    // starts empty and is recorded from inside `push_inner` once the body is
+    // decoded; the WAL producer injects this span's trace context into the record
+    // headers so the compactor's span joins the same distributed trace.
+    let span = ingest_span(&headers, bytes);
+    let result = push_inner(&state, &headers, &body).instrument(span).await;
     record_ingest_outcome(&state, &result, bytes, started.elapsed().as_secs_f64());
     match result {
         Ok((success, _items)) => success.into_response(),
         Err(error) => error.into_response(),
     }
+}
+
+/// Build the per-request ingest span. `crabka.ingest.series` is declared empty
+/// here and recorded once the request body is decoded (see `push_inner`).
+fn ingest_span(headers: &HeaderMap, bytes: u64) -> tracing::Span {
+    let tenant = tenant_for_span(headers);
+    tracing::info_span!(
+        "metrics_ingest",
+        otel.kind = "server",
+        messaging.system = "kafka",
+        messaging.destination.name = WAL_TOPIC,
+        crabka.tenant = %tenant,
+        crabka.ingest.series = tracing::field::Empty,
+        crabka.ingest.bytes = bytes,
+    )
+}
+
+/// Tenant label for the ingest span, falling back to `"unknown"` when the
+/// `X-Scope-OrgID` header is absent or non-ASCII. This is span-only labelling and
+/// never rejects the request — validation stays in `tenant_from_headers`.
+fn tenant_for_span(headers: &HeaderMap) -> String {
+    headers
+        .get("X-Scope-OrgID")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("unknown")
+        .to_string()
 }
 
 async fn push_inner(
@@ -540,6 +587,8 @@ async fn push_inner(
         }
     };
     let items = series.len() as u64;
+    // Backfill the decoded series count onto the enclosing `metrics_ingest` span.
+    tracing::Span::current().record("crabka.ingest.series", items);
 
     if !append_decoded_series(state, tenant, &mut series).await? {
         return Ok((
@@ -550,6 +599,9 @@ async fn push_inner(
         ));
     }
 
+    if let Some(metrics) = &state.metrics {
+        metrics.record_ingest_series(tenant, items);
+    }
     Ok((PushSuccess::NoContent { counts }, items))
 }
 
@@ -577,7 +629,11 @@ async fn otlp_push(
 ) -> Response {
     let started = std::time::Instant::now();
     let bytes = body.len() as u64;
-    let result = otlp_push_inner(&state, &headers, &body).await;
+    // ONE ingest span per OTLP HTTP push request; series recorded post-decode.
+    let span = ingest_span(&headers, bytes);
+    let result = otlp_push_inner(&state, &headers, &body)
+        .instrument(span)
+        .await;
     record_ingest_outcome(&state, &result, bytes, started.elapsed().as_secs_f64());
     match result {
         Ok((success, _items)) => success.into_response(),
@@ -600,8 +656,13 @@ async fn otlp_push_inner(
         decode_otlp_stateful_bytes(body, TranslationStrategy::default(), &mut accumulator)?
     };
     let items = series.len() as u64;
+    // Backfill the decoded series count onto the enclosing `metrics_ingest` span.
+    tracing::Span::current().record("crabka.ingest.series", items);
     if !append_decoded_series(state, tenant, &mut series).await? {
         return Ok((PushSuccess::Accepted { counts: None }, items));
+    }
+    if let Some(metrics) = &state.metrics {
+        metrics.record_ingest_series(tenant, items);
     }
     Ok((PushSuccess::Ok, items))
 }
@@ -642,7 +703,11 @@ async fn otlp_grpc_export_inner(
         decode_otlp_stateful(&data, TranslationStrategy::default(), &mut accumulator)?
     };
     let items = series.len() as u64;
-    let _accepted = append_decoded_series(state, &tenant, &mut series).await?;
+    if append_decoded_series(state, &tenant, &mut series).await?
+        && let Some(metrics) = &state.metrics
+    {
+        metrics.record_ingest_series(&tenant, items);
+    }
     Ok(items)
 }
 
@@ -1196,6 +1261,25 @@ mod tests {
     use crate::wire::DecodedSample;
 
     use super::*;
+
+    /// Pins `tenant_for_span`'s span-label logic: a present non-empty header is
+    /// echoed verbatim, while a missing OR empty `X-Scope-OrgID` falls back to
+    /// `"unknown"`. Kills the whole-fn replacement mutants (`"xyzzy"` /
+    /// `String::new()`) and the `delete !` mutant on `!value.is_empty()` — the
+    /// empty-string case only maps to `"unknown"` while the negation stands.
+    #[test]
+    fn tenant_for_span_labels_present_and_falls_back_on_missing_or_empty() {
+        let mut present = HeaderMap::new();
+        present.insert("X-Scope-OrgID", "acme".parse().unwrap());
+        assert!(tenant_for_span(&present) == "acme");
+
+        let missing = HeaderMap::new();
+        assert!(tenant_for_span(&missing) == "unknown");
+
+        let mut empty = HeaderMap::new();
+        empty.insert("X-Scope-OrgID", "".parse().unwrap());
+        assert!(tenant_for_span(&empty) == "unknown");
+    }
 
     #[derive(Default)]
     struct RecordingSink {

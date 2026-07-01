@@ -36,6 +36,9 @@ impl DynamicServerConfig {
     ///
     /// Propagates the underlying [`TlsError`] from
     /// [`TlsConfig::build_server_config`].
+    // Initial dynamic-TLS-config construction. skip_all keeps cert/key material
+    // out of span fields. `err` surfaces build failures (Debug).
+    #[tracing::instrument(level = "info", skip_all, err)]
     pub fn from_tls_config(cfg: &TlsConfig) -> Result<Arc<Self>, TlsError> {
         let server_config = cfg.build_server_config()?;
         Ok(Arc::new(Self {
@@ -67,6 +70,10 @@ impl DynamicServerConfig {
     ///
     /// Propagates the underlying [`TlsError`] from
     /// [`TlsConfig::build_server_config`].
+    // TLS cert/key hot-reload + atomic swap. skip_all keeps cert/key material
+    // out of span fields. `err` surfaces rebuild failures (Debug); on error the
+    // previous config stays in place.
+    #[tracing::instrument(level = "info", skip_all, err)]
     pub fn reload_from(&self, cfg: &TlsConfig) -> Result<(), TlsError> {
         let new = cfg.build_server_config()?;
         self.inner.store(new);

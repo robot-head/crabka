@@ -19,6 +19,11 @@ impl UniformStickyPartitioner {
     /// Pick the partition for a record.
     ///
     /// `num_partitions` must be > 0.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(topic = %topic, keyed = key.is_some(), num_partitions),
+    )]
     pub fn pick(&self, topic: &str, key: Option<&[u8]>, num_partitions: i32) -> i32 {
         assert!(num_partitions > 0, "num_partitions must be > 0");
         if let Some(k) = key {

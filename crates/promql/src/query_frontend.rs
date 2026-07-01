@@ -454,6 +454,19 @@ impl<S: MetricStore> RangeQueryExecutor for PromqlEngine<S> {
 }
 
 /// Execute a range query through query-frontend planning, cache, and merge.
+#[tracing::instrument(
+    name = "promql.query_frontend_range",
+    level = "info",
+    skip_all,
+    fields(
+        tenant = %request.tenant,
+        query = %request.query,
+        start_ms = request.start_ms,
+        end_ms = request.end_ms,
+        step_ms = request.step_ms
+    ),
+    err
+)]
 pub async fn execute_range_query_frontend<E, C>(
     executor: &E,
     cache: &C,

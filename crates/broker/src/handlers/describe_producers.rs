@@ -36,6 +36,13 @@ use crate::codes;
 use crate::error::BrokerError;
 
 #[allow(clippy::unused_async)] // signature symmetry with other inline-intercept handlers
+#[tracing::instrument(
+    name = "handle_describe_producers",
+    level = "info",
+    skip_all,
+    fields(api = "DescribeProducers", version, req_bytes = req_bytes.len()),
+    err,
+)]
 pub(crate) async fn handle(
     broker: &Broker,
     version: i16,

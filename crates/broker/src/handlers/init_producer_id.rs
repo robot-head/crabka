@@ -34,6 +34,13 @@ use crate::txn::state::{TxnEntry, TxnState};
 use crate::txn::util::now_millis;
 
 #[allow(clippy::too_many_lines)]
+#[tracing::instrument(
+    name = "handle_init_producer_id",
+    level = "info",
+    skip_all,
+    fields(api = "InitProducerId", version, req_bytes = req_bytes.len()),
+    err,
+)]
 pub(crate) async fn handle(
     broker: &Broker,
     version: i16,

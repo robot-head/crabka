@@ -34,6 +34,13 @@ pub struct RouteStatusLabel {
     pub status: String,
 }
 
+/// Per-tenant ingest label (`tenant="anonymous"`), paired with the spans-accepted
+/// counter family so accepted-span volume can be attributed per tenant.
+#[derive(Debug, Clone, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct TenantLabel {
+    pub tenant: String,
+}
+
 /// Query route label (`route="search"`), paired with the per-route latency
 /// histogram family.
 #[derive(Debug, Clone, Hash, PartialEq, Eq, EncodeLabelSet)]
@@ -54,6 +61,11 @@ pub struct ServiceMetrics {
     pub ingest_items: Counter,
     pub ingest_duration: Histogram,
     pub wal_append_failures: Counter,
+    /// Spans accepted on the ingest path, attributed per tenant.
+    pub ingest_spans: Family<TenantLabel, Counter>,
+    // BLOCK-BUILDER (WAL-consumer role).
+    /// WAL span blocks durably written by the block-builder.
+    pub blocks_flushed: Counter,
     // QUERY (querier role).
     pub query_requests: Family<RouteStatusLabel, Counter>,
     pub query_duration: Family<RouteLabel, Histogram>,
@@ -72,6 +84,8 @@ impl ServiceMetrics {
             0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0,
         ]);
         let wal_append_failures = Counter::default();
+        let ingest_spans = Family::<TenantLabel, Counter>::default();
+        let blocks_flushed = Counter::default();
         let query_requests = Family::<RouteStatusLabel, Counter>::default();
         let query_duration = Family::<RouteLabel, Histogram>::new_with_constructor(|| {
             Histogram::new([0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0])
@@ -103,6 +117,16 @@ impl ServiceMetrics {
             wal_append_failures.clone(),
         );
         registry.register(
+            "ingest_spans",
+            "Cumulative spans accepted on the trace-ingest path, by tenant",
+            ingest_spans.clone(),
+        );
+        registry.register(
+            "blocks_flushed",
+            "Cumulative trace-WAL span blocks durably written by the block-builder",
+            blocks_flushed.clone(),
+        );
+        registry.register(
             "query_requests",
             "Querier requests by route and outcome (route, status=ok|error)",
             query_requests.clone(),
@@ -120,6 +144,8 @@ impl ServiceMetrics {
             ingest_items,
             ingest_duration,
             wal_append_failures,
+            ingest_spans,
+            blocks_flushed,
             query_requests,
             query_duration,
         }
@@ -148,6 +174,27 @@ impl ServiceMetrics {
     /// 4xx.
     pub fn record_wal_append_failure(&self) {
         self.wal_append_failures.inc();
+    }
+
+    /// Attribute `count` accepted spans to `tenant` on the ingest path. Called
+    /// once per successful push request (not per span-record) with the batch
+    /// size, so per-tenant span volume is visible without a high-cardinality
+    /// per-record hop.
+    pub fn record_ingest_spans(&self, tenant: &str, count: u64) {
+        if count == 0 {
+            return;
+        }
+        self.ingest_spans
+            .get_or_create(&TenantLabel {
+                tenant: tenant.into(),
+            })
+            .inc_by(count);
+    }
+
+    /// Bump the block-builder flushed-block counter once per span block durably
+    /// written to object storage.
+    pub fn record_block_flushed(&self) {
+        self.blocks_flushed.inc();
     }
 
     /// Record one querier request: bumps the per-(route, status) request
@@ -222,6 +269,8 @@ mod tests {
         m.record_ingest(true, 1_024, 7, 0.01);
         m.record_ingest(false, 0, 0, 0.002);
         m.record_wal_append_failure();
+        m.record_ingest_spans("tenant-a", 7);
+        m.record_block_flushed();
         m.record_query("search", true, 0.05);
         m.record_query("trace_by_id", false, 0.2);
 
@@ -235,11 +284,14 @@ mod tests {
             "crabka_traces_ingest_items_total",
             "crabka_traces_ingest_duration_seconds",
             "crabka_traces_wal_append_failures_total",
+            "crabka_traces_ingest_spans_total",
+            "crabka_traces_blocks_flushed_total",
             "crabka_traces_query_requests_total",
             "crabka_traces_query_duration_seconds",
         ] {
             assert!(buf.contains(needle), "missing {needle} in:\n{buf}");
         }
+        assert!(buf.contains("tenant=\"tenant-a\""), "tenant label missing");
         assert!(buf.contains("status=\"ok\""), "ok status label missing");
         assert!(
             buf.contains("status=\"error\""),
@@ -277,6 +329,36 @@ mod tests {
         // A produce failure: bump explicitly at the WAL error site.
         m.record_wal_append_failure();
         assert!(m.wal_append_failures.get() == 1);
+    }
+
+    #[test]
+    fn ingest_spans_split_by_tenant_and_blocks_flushed_accumulate() {
+        let m = ServiceMetrics::new();
+        m.record_ingest_spans("tenant-a", 3);
+        m.record_ingest_spans("tenant-a", 2);
+        m.record_ingest_spans("tenant-b", 4);
+        // A zero-span request must not create a tenant series.
+        m.record_ingest_spans("tenant-c", 0);
+        m.record_block_flushed();
+        m.record_block_flushed();
+
+        assert!(
+            m.ingest_spans
+                .get_or_create(&TenantLabel {
+                    tenant: "tenant-a".into()
+                })
+                .get()
+                == 5
+        );
+        assert!(
+            m.ingest_spans
+                .get_or_create(&TenantLabel {
+                    tenant: "tenant-b".into()
+                })
+                .get()
+                == 4
+        );
+        assert!(m.blocks_flushed.get() == 2);
     }
 
     #[test]

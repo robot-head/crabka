@@ -25,6 +25,12 @@ use crabka_security::SecretBytes;
 use crate::network::auth::ConnectionAuth;
 use crate::time_util::now_ms;
 
+#[tracing::instrument(
+    name = "handle_renew_delegation_token",
+    level = "info",
+    skip_all,
+    fields(api = "RenewDelegationToken")
+)]
 pub(crate) async fn handle<S: BuildHasher>(
     req: &RenewDelegationTokenRequest,
     auth: &ConnectionAuth,

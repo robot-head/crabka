@@ -42,6 +42,12 @@ impl HeartbeatTask {
     ///
     /// Returns [`ReplicatorError::Client`] if topic creation or producer
     /// construction fails.
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(source = %p.source_alias, target = %p.target_alias, interval_ms = p.interval.as_millis()),
+        err,
+    )]
     pub async fn start(p: HeartbeatParams) -> Result<Self, ReplicatorError> {
         // Ensure the heartbeats topic exists before we start producing.
         crate::admin_util::ensure_topic(

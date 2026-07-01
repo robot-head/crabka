@@ -1,4 +1,8 @@
 //! `crabka-replicator` — cross-cluster geo-replication for Crabka.
+// `#[tracing::instrument]` wraps each async fn's future in an extra layer;
+// combined with the deeply-nested consumer/producer futures this pushes the
+// type-layout query past the default depth limit, so raise it.
+#![recursion_limit = "256"]
 
 pub mod admin_util;
 pub mod checkpoint_store;

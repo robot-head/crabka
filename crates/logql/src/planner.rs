@@ -1,5 +1,7 @@
 use std::collections::BTreeSet;
 
+use tracing::field::Empty;
+
 use crabka_blockstore::{
     BlockDescriptor, LabelIndex, LabelPredicate, LogBlockIndex as BlockIndex,
     LogBlockStoreError as BlockStoreError, LogMatchOp as BlockMatchOp,
@@ -24,6 +26,18 @@ pub enum PlanError {
     BlockStore(#[from] BlockStoreError),
 }
 
+#[tracing::instrument(
+    level = "info",
+    skip_all,
+    fields(
+        tenant = Empty,
+        matchers = query.matchers.len(),
+        pipeline_stages = query.pipeline.len(),
+        fingerprints = Empty,
+        blocks = Empty,
+    ),
+    err
+)]
 pub fn plan_stream_query(
     tenant: impl Into<String>,
     time_range: TimeRange,
@@ -32,6 +46,7 @@ pub fn plan_stream_query(
     block_index: &BlockIndex,
 ) -> Result<StreamPlan, PlanError> {
     let tenant = tenant.into();
+    tracing::Span::current().record("tenant", tenant.as_str());
     let predicates = query
         .matchers
         .iter()
@@ -44,6 +59,9 @@ pub fn plan_stream_query(
     } else {
         block_index.match_blocks(&tenant, time_range, &fingerprint_list)
     };
+    let span = tracing::Span::current();
+    span.record("fingerprints", fingerprint_list.len());
+    span.record("blocks", blocks.len());
 
     Ok(StreamPlan {
         tenant,

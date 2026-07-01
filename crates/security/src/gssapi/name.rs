@@ -135,16 +135,29 @@ fn expand_format(format: &str, components: &[&str], realm: &str) -> String {
 }
 
 /// Apply rules in order; first match wins.
+// auth_to_local principal mapping (Kerberos principal -> short ACL name).
+// skip_all avoids capturing the compiled `rules`; the non-sensitive realm is
+// recorded up front and the resolved short name in `mapped` on success. `err`
+// surfaces a no-match / rule failure (Debug). One span per mapping, not per
+// rule iteration.
+#[tracing::instrument(
+    level = "debug",
+    skip_all,
+    fields(mechanism = "GSSAPI", realm = %realm, mapped = tracing::field::Empty),
+    err
+)]
 pub fn apply(
     rules: &[Rule],
     realm: &str,
     components: &[&str],
     default_realm: &str,
 ) -> Result<String, NameError> {
+    let span = tracing::Span::current();
     for rule in rules {
         match rule {
             Rule::Default => {
                 if components.len() == 1 && realm == default_realm {
+                    span.record("mapped", components[0]);
                     return Ok(components[0].to_string());
                 }
             }
@@ -175,6 +188,7 @@ pub fn apply(
                 if *lowercase {
                     result = result.to_lowercase();
                 }
+                span.record("mapped", result.as_str());
                 return Ok(result);
             }
         }

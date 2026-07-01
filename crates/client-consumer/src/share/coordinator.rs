@@ -149,6 +149,12 @@ pub(crate) async fn run(state: ShareCoordinatorState, shutdown: CancellationToke
 /// When `rejoining` we re-send `subscribed_topic_names` (the broker requires
 /// the subscription on a fresh join); otherwise we send `None` (the broker
 /// remembers it across steady-state heartbeats).
+#[tracing::instrument(
+    name = "share_consumer.heartbeat",
+    level = "debug",
+    skip_all,
+    fields(group_id = %state.group_id, member_id = %state.member_id, rejoining)
+)]
 async fn heartbeat_once(state: &ShareCoordinatorState, rejoining: bool) -> HeartbeatOutcome {
     let epoch = *state.member_epoch.lock().await;
     let subscribed = if rejoining {

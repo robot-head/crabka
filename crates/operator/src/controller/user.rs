@@ -64,8 +64,33 @@ pub fn error_policy(_obj: Arc<KafkaUser>, err: &ReconcileError, _ctx: Arc<Contex
     Action::requeue(Duration::from_secs(15))
 }
 
-#[allow(clippy::too_many_lines)] // linear pipeline; extraction hurts more than helps
+/// Reconcile entry point. Times the pass and records the reconcile
+/// counter/histogram, then delegates to [`reconcile_inner`].
+#[tracing::instrument(
+    level = "info",
+    skip_all,
+    fields(
+        kind = "KafkaUser",
+        namespace = %obj.namespace().unwrap_or_else(|| "default".into()),
+        name = %obj.name_any(),
+        generation = ?obj.meta().generation,
+    )
+)]
 pub async fn reconcile(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Action, ReconcileError> {
+    let started = std::time::Instant::now();
+    let result = reconcile_inner(obj, ctx.clone()).await;
+    let outcome = if result.is_ok() {
+        crate::telemetry::ReconcileResult::Ok
+    } else {
+        crate::telemetry::ReconcileResult::Error
+    };
+    ctx.metrics
+        .record_reconcile("KafkaUser", outcome, started.elapsed().as_secs_f64());
+    result
+}
+
+#[allow(clippy::too_many_lines)] // linear pipeline; extraction hurts more than helps
+async fn reconcile_inner(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Action, ReconcileError> {
     let ns = obj.namespace().unwrap_or_else(|| "default".into());
     let name = obj.name_any();
     let user_api: Api<KafkaUser> = Api::namespaced(ctx.client.clone(), &ns);
@@ -618,6 +643,7 @@ async fn apply_alter_user_quotas(
     Ok(())
 }
 
+#[tracing::instrument(level = "info", skip_all, fields(additions = additions.len()), err)]
 async fn apply_create_acls(
     admin: &mut tokio::sync::MutexGuard<'_, dyn crabka_client_admin::AdminClientLike + Send>,
     additions: &[AclEntry],
@@ -634,6 +660,7 @@ async fn apply_create_acls(
     Ok(())
 }
 
+#[tracing::instrument(level = "info", skip_all, fields(deletions = deletions.len()), err)]
 async fn apply_delete_acls(
     admin: &mut tokio::sync::MutexGuard<'_, dyn crabka_client_admin::AdminClientLike + Send>,
     deletions: &[AclEntry],
@@ -824,6 +851,7 @@ fn op_to_admin(op: AclOp) -> AclOperation {
 /// is stable). On first reconcile the operator allocates
 /// `password_len_bytes` of cryptographically-random data and stores its
 /// URL-safe base64 encoding.
+#[tracing::instrument(level = "info", skip_all, fields(user = %obj.name_any()), err)]
 async fn ensure_password_secret(
     api: &Api<Secret>,
     obj: &KafkaUser,
@@ -930,6 +958,7 @@ fn has_finalizer(obj: &KafkaUser) -> bool {
         .is_some_and(|f| f.iter().any(|s| s == FINALIZER))
 }
 
+#[tracing::instrument(level = "debug", skip_all, fields(user = %name), err)]
 async fn add_finalizer(api: &Api<KafkaUser>, name: &str) -> Result<(), ReconcileError> {
     let patch = json!({ "metadata": { "finalizers": [FINALIZER] } });
     let params = PatchParams {
@@ -940,6 +969,7 @@ async fn add_finalizer(api: &Api<KafkaUser>, name: &str) -> Result<(), Reconcile
     Ok(())
 }
 
+#[tracing::instrument(level = "info", skip_all, fields(user = %name), err)]
 async fn remove_finalizer(api: &Api<KafkaUser>, name: &str) -> Result<(), ReconcileError> {
     let patch = json!({ "metadata": { "finalizers": [] } });
     let params = PatchParams {
@@ -973,6 +1003,7 @@ struct StatusPatch<'a> {
     quotas_in_sync: bool,
 }
 
+#[tracing::instrument(level = "info", skip_all, fields(user = %name, status = %p.status, reason = %p.reason), err)]
 async fn patch_status(
     api: &Api<KafkaUser>,
     name: &str,

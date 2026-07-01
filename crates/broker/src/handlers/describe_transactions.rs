@@ -68,6 +68,13 @@ fn topics_for(entry: &TxnEntry) -> Vec<TopicData> {
         .collect()
 }
 
+#[tracing::instrument(
+    name = "handle_describe_transactions",
+    level = "info",
+    skip_all,
+    fields(api = "DescribeTransactions", version, req_bytes = req_bytes.len()),
+    err,
+)]
 pub(crate) async fn handle(
     broker: &Broker,
     version: i16,

@@ -323,6 +323,12 @@ fn resolve_bootstrap_servers(
 /// - `ingress` / `route`: a `ClusterIP` backend Service each, plus an `Ingress`
 ///   (typed) or `OpenShift` `Route` (dynamic) routing the configured hostname to
 ///   that backend over TLS passthrough.
+#[tracing::instrument(
+    level = "debug",
+    skip_all,
+    fields(cluster = %cluster_name, namespace = %namespace, listeners = effective_listeners.len(), brokers = brokers.len()),
+    err,
+)]
 async fn apply_external_services(
     ctx: &Context,
     svc_api: &Api<Service>,
@@ -481,6 +487,7 @@ pub(crate) fn krb5_conf_mount(kafka: &Kafka) -> Option<(String, String)> {
 /// Secret's name (so the `StatefulSet` can mount it), or `None` when no
 /// managed Secret is needed (no OAuth listener, or no trust certs
 /// configured).
+#[tracing::instrument(level = "debug", skip_all, fields(kafka = %kafka.name_any()), err)]
 async fn reconcile_oauth_jwks_trust(
     secret_api: &Api<Secret>,
     kafka: &Kafka,
@@ -525,6 +532,12 @@ async fn reconcile_oauth_jwks_trust(
 /// Server-side apply the managed `{kafka}-oauth-jwks-trust`
 /// Secret with the concatenated PEM bundle under key `ca.crt`. Owner-
 /// ref'd to the parent `Kafka` so deleting the CR cascades the Secret.
+#[tracing::instrument(
+    level = "info",
+    skip_all,
+    fields(kafka = %kafka.name_any(), secret = %managed_name, bytes = bundle.len()),
+    err,
+)]
 async fn upsert_oauth_trust_secret(
     secret_api: &Api<Secret>,
     kafka: &Kafka,
@@ -625,6 +638,12 @@ async fn apply_route(
 /// 404 is intentional: a Pod that hasn't been created yet is not an
 /// error — it surfaces as `PodNotScheduled` in `compute_advertised`.
 #[allow(clippy::type_complexity)]
+#[tracing::instrument(
+    level = "debug",
+    skip_all,
+    fields(cluster = %cluster_name, namespace = %namespace, brokers = brokers.len()),
+    err,
+)]
 async fn read_external_state(
     ctx: &Context,
     svc_api: &Api<Service>,
@@ -722,6 +741,12 @@ fn resolve_addresses_per_broker(
 /// `new_cond`, push `new_cond`, and patch. Preserves all other status
 /// fields (replicas, `cluster_ca`, etc.) so a BYO-CA early-return does
 /// not wipe conditions that were written by a previous reconcile pass.
+#[tracing::instrument(
+    level = "info",
+    skip_all,
+    fields(name = %name, condition = %new_cond.type_, status = %new_cond.status, reason = %new_cond.reason),
+    err,
+)]
 async fn patch_status_with_condition(
     kafka_api: &Api<Kafka>,
     name: &str,
@@ -741,8 +766,35 @@ async fn patch_status_with_condition(
     patch_status::<Kafka, KafkaStatus>(kafka_api, name, status).await
 }
 
-#[allow(clippy::too_many_lines)] // linear pipeline; the three branches (invalid / pending / ready) need direct condition + status binding
+/// Reconcile entry point. Thin wrapper that times the pass, records the
+/// `reconciliations_total{kind,result}` counter + `reconcile_duration_seconds`
+/// histogram, and delegates to [`reconcile_inner`]. Kept separate so the
+/// per-outcome metric classification (ok / error) lives in one place and the
+/// long linear inner body's many early-return sites don't each need to record.
+#[tracing::instrument(
+    skip_all,
+    fields(
+        kind = "Kafka",
+        namespace = %obj.namespace().unwrap_or_else(|| "default".into()),
+        name = %obj.name_any(),
+        generation = ?obj.meta().generation,
+    )
+)]
 pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, ReconcileError> {
+    let started = std::time::Instant::now();
+    let result = reconcile_inner(obj, ctx.clone()).await;
+    let elapsed = started.elapsed().as_secs_f64();
+    let outcome = if result.is_ok() {
+        crate::telemetry::ReconcileResult::Ok
+    } else {
+        crate::telemetry::ReconcileResult::Error
+    };
+    ctx.metrics.record_reconcile("Kafka", outcome, elapsed);
+    result
+}
+
+#[allow(clippy::too_many_lines)] // linear pipeline; the three branches (invalid / pending / ready) need direct condition + status binding
+async fn reconcile_inner(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, ReconcileError> {
     let ns = obj.namespace().unwrap_or_else(|| "default".into());
     let name = obj.name_any();
     tracing::info!(%ns, %name, "reconciling Kafka");
@@ -1491,6 +1543,13 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
 
     // Aggregate + patch our own status.
     let rollup = aggregate_pool_status(pools.iter());
+    // Surface the observed node-pool count for this cluster as a gauge. This is
+    // a coarse ownership/liveness signal (how many pools the parent reconciler
+    // saw this pass), complementing the per-pool `KafkaNodePool` reconciles.
+    ctx.metrics.set_managed_resources(
+        "KafkaNodePool",
+        i64::try_from(rollup.pool_count).unwrap_or(i64::MAX),
+    );
     let (ready, reason, message) = rollup_condition(&rollup);
     let (rolling, rolling_reason, rolling_message) = rolling_condition_from_rollup(&rollup);
     let mut conditions = vec![
@@ -1603,6 +1662,12 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
 /// every pool in parallel — a `KRaft` controller quorum needs all controllers
 /// up together. The owner-ref is applied to every pool every reconcile
 /// regardless, so the request count is unchanged.
+#[tracing::instrument(
+    level = "debug",
+    skip_all,
+    fields(parent = %parent.name_any(), config_hash = %config_hash),
+    err,
+)]
 async fn adopt_pools<'a>(
     pool_api: &Api<KafkaNodePool>,
     parent: &Kafka,
@@ -1745,6 +1810,7 @@ pub(crate) fn pools_converged<'a>(pools: impl IntoIterator<Item = &'a KafkaNodeP
 
 /// Remove one-shot rotation-trigger annotations from the `Kafka` CR
 /// (JSON Merge Patch with `null` values deletes the keys).
+#[tracing::instrument(level = "debug", skip_all, fields(name = %name, keys = keys.len()), err)]
 async fn strip_annotations(
     kafka_api: &Api<Kafka>,
     name: &str,

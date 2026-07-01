@@ -51,8 +51,20 @@ pub struct KafkaStreams {
 #[bon::bon]
 impl KafkaStreams {
     #[builder(start_fn = builder, finish_fn = build)]
-    #[allow(clippy::too_many_lines)] // one-shot constructor: broker I/O setup,
+    #[allow(clippy::too_many_lines)]
+    // one-shot constructor: broker I/O setup,
     // membership join, and the supervisor select-loop (now two IQ channels).
+    #[tracing::instrument(
+        name = "streams.app.start",
+        level = "info",
+        skip_all,
+        fields(
+            application_id = %application_id,
+            processing_guarantee = ?processing_guarantee,
+            member_id = tracing::field::Empty,
+        ),
+        err,
+    )]
     pub async fn start(
         #[builder(into)] bootstrap: String,
         #[builder(into)] application_id: String,
@@ -106,6 +118,7 @@ impl KafkaStreams {
             .build()
             .await?;
         let member_id = membership.member_id().to_string();
+        tracing::Span::current().record("member_id", tracing::field::display(&member_id));
 
         // Supervisor: pump membership events into a StreamThread + poll/commit.
         let shutdown = CancellationToken::new();
@@ -302,6 +315,13 @@ impl KafkaStreams {
     }
 
     /// Stop processing, commit, and leave the group.
+    #[tracing::instrument(
+        name = "streams.app.close",
+        level = "info",
+        skip_all,
+        fields(member_id = %self.member_id),
+        err,
+    )]
     pub async fn close(&mut self) -> Result<(), StreamsClientError> {
         self.shutdown.cancel();
         if let Some(h) = self.handle.take() {

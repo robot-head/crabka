@@ -6,6 +6,7 @@ use arrow::datatypes::SchemaRef;
 use datafusion::catalog::MemTable;
 use datafusion::prelude::{ParquetReadOptions, SessionContext};
 use object_store::ObjectStore;
+use tracing::instrument;
 use url::Url;
 
 use crate::error::{BlockStoreError, Result};
@@ -92,6 +93,19 @@ impl BlockStore {
         Ok((ctx, TABLE_NAME.to_string()))
     }
 
+    #[instrument(
+        level = "debug",
+        skip_all,
+        fields(
+            table = %request.table_name,
+            tenant = %request.tenant,
+            matchers = request.matchers.len(),
+            min_ts = request.min_ts,
+            max_ts = request.max_ts,
+            candidates = tracing::field::Empty,
+        ),
+        err
+    )]
     pub async fn register_scan_table(
         &self,
         ctx: &SessionContext,
@@ -104,6 +118,7 @@ impl BlockStore {
             request.min_ts,
             request.max_ts,
         );
+        tracing::Span::current().record("candidates", candidates.len());
         ctx.register_object_store(&self.base, self.store.clone());
         if candidates.is_empty() {
             let table = MemTable::try_new(request.schema, vec![Vec::new()])?;
@@ -131,6 +146,7 @@ impl BlockStore {
         Ok(true)
     }
 
+    #[instrument(level = "debug", skip_all, fields(keys = keys.len()), err)]
     pub async fn scan_block_keys(
         &self,
         keys: &[String],
@@ -170,6 +186,12 @@ impl BlockStore {
         Ok((ctx, TABLE_NAME.to_string()))
     }
 
+    #[instrument(
+        level = "debug",
+        skip_all,
+        fields(object_key = %object_key, row_groups = row_groups.len()),
+        err
+    )]
     pub async fn scan_block_row_groups(
         &self,
         object_key: &str,

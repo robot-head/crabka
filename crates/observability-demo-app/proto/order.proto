@@ -1,10 +1,19 @@
 syntax = "proto3";
 package demo;
 
+// A retail order flowing through the demo pipeline. Richer than a toy record on
+// purpose: every field becomes a trace-span attribute and/or a metric label
+// dimension so the observability demo shows high-cardinality, cross-service
+// telemetry (produce -> broker -> process) rather than a single counter.
 message Order {
   string order_id = 1;
-  string category = 2;
-  double amount = 3;
-  string currency = 4;
-  int64  ts_ms = 5;
+  string category = 2;         // books, electronics, grocery, toys, garden
+  double amount = 3;           // order value in `currency`; 0.0 for the seeded anomalies
+  string currency = 4;         // USD
+  int64  ts_ms = 5;            // monotonic demo clock (stamped at send time)
+  string region = 6;          // us-east, us-west, eu-west, ap-south
+  string payment_method = 7;   // card, paypal, wire, crypto
+  int32  quantity = 8;         // units in the order (1..=5)
+  string customer_tier = 9;    // free, pro, enterprise
+  string warehouse = 10;       // fulfillment center serving `region`
 }

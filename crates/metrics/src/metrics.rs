@@ -37,6 +37,12 @@ pub struct RouteLabel {
     pub route: String,
 }
 
+/// Per-tenant label for the accepted-series counter family.
+#[derive(Debug, Clone, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct TenantLabel {
+    pub tenant: String,
+}
+
 /// Cheaply-clonable bundle of metric handles. Construct once with
 /// [`ServiceMetrics::new`]; hand out clones (each a single `Arc::clone`) to the
 /// handlers that emit.
@@ -49,6 +55,11 @@ pub struct ServiceMetrics {
     pub ingest_items: Counter,
     pub ingest_duration: Histogram,
     pub wal_append_failures: Counter,
+    /// Accepted series counted per tenant on the ingest path.
+    pub ingest_series: Family<TenantLabel, Counter>,
+    // COMPACTOR role.
+    /// Metric blocks written to object storage by the compactor.
+    pub blocks_compacted: Counter,
     // QUERY (querier) role.
     pub query_requests: Family<RouteStatusLabel, Counter>,
     pub query_duration: Family<RouteLabel, Histogram>,
@@ -67,6 +78,9 @@ impl ServiceMetrics {
             0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0,
         ]);
         let wal_append_failures = Counter::default();
+        let ingest_series: Family<TenantLabel, Counter> = Family::default();
+
+        let blocks_compacted = Counter::default();
 
         let query_requests: Family<RouteStatusLabel, Counter> = Family::default();
         let query_duration: Family<RouteLabel, Histogram> = Family::new_with_constructor(|| {
@@ -99,6 +113,16 @@ impl ServiceMetrics {
             wal_append_failures.clone(),
         );
         registry.register(
+            "ingest_series",
+            "Accepted series on the ingest path, labelled by tenant.",
+            ingest_series.clone(),
+        );
+        registry.register(
+            "blocks_compacted",
+            "Metric blocks written to object storage by the compactor.",
+            blocks_compacted.clone(),
+        );
+        registry.register(
             "query_requests",
             "Query requests handled, labelled by route and outcome status.",
             query_requests.clone(),
@@ -116,6 +140,8 @@ impl ServiceMetrics {
             ingest_items,
             ingest_duration,
             wal_append_failures,
+            ingest_series,
+            blocks_compacted,
             query_requests,
             query_duration,
         }
@@ -134,6 +160,27 @@ impl ServiceMetrics {
         self.ingest_bytes.inc_by(bytes);
         self.ingest_items.inc_by(items);
         self.ingest_duration.observe(secs);
+    }
+
+    /// Record `series` accepted series for `tenant` on the ingest path. Called
+    /// once per accepted push request, after the body decodes to a series count.
+    pub fn record_ingest_series(&self, tenant: &str, series: u64) {
+        if series == 0 {
+            return;
+        }
+        self.ingest_series
+            .get_or_create(&TenantLabel {
+                tenant: tenant.into(),
+            })
+            .inc_by(series);
+    }
+
+    /// Record `blocks` metric blocks written by the compactor in one flush.
+    pub fn record_blocks_compacted(&self, blocks: u64) {
+        if blocks == 0 {
+            return;
+        }
+        self.blocks_compacted.inc_by(blocks);
     }
 
     /// Record one query request outcome on `route` with its latency.
@@ -207,6 +254,8 @@ mod tests {
         m.record_ingest(true, 1024, 5, 0.012);
         m.record_ingest(false, 0, 0, 0.001);
         m.wal_append_failures.inc();
+        m.record_ingest_series("tenant-a", 5);
+        m.record_blocks_compacted(3);
         m.record_query("query", true, 0.05);
         m.record_query("query_range", false, 1.5);
 
@@ -219,6 +268,8 @@ mod tests {
             "crabka_metrics_ingest_items_total",
             "crabka_metrics_ingest_duration_seconds",
             "crabka_metrics_wal_append_failures_total",
+            "crabka_metrics_ingest_series_total",
+            "crabka_metrics_blocks_compacted_total",
             "crabka_metrics_query_requests_total",
             "crabka_metrics_query_duration_seconds",
         ] {
@@ -230,6 +281,10 @@ mod tests {
             "error status label missing"
         );
         assert!(buf.contains("route=\"query\""), "query route label missing");
+        assert!(
+            buf.contains("tenant=\"tenant-a\""),
+            "ingest_series tenant label missing"
+        );
     }
 
     #[test]

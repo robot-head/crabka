@@ -82,6 +82,12 @@ impl PostgresWalSource {
 
     // cargo-mutants: real DB connection; not exercised under unit tests.
     #[cfg_attr(test, mutants::skip)]
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(slot = %config.slot_name, publication = %config.publication_name, schema = %config.schema),
+        err,
+    )]
     pub async fn connect(config: PostgresSourceConfig) -> Result<Self, ConnectError> {
         let catalog = TokioPgCatalog::connect(config.database_url.expose_secret()).await?;
         let database_name = initialize(&catalog, &config).await?;
@@ -107,6 +113,12 @@ impl PostgresWalSource {
         self.pending.len()
     }
 
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(slot = %self.config.slot_name, changes = tracing::field::Empty),
+        err,
+    )]
     async fn fill_pending_from_slot(&mut self) -> Result<(), ConnectError> {
         let Some(catalog) = &self.catalog else {
             return Ok(());
@@ -124,6 +136,7 @@ impl PostgresWalSource {
             )
             .await?;
 
+        tracing::Span::current().record("changes", changes.len());
         for change in changes {
             let lsn = change.lsn.parse::<PgLsn>()?;
 
@@ -241,6 +254,12 @@ impl PostgresWalSource {
 
 #[async_trait]
 impl Source<Bytes, Bytes> for PostgresWalSource {
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(slot = %self.config.slot_name, table = tracing::field::Empty, op = tracing::field::Empty),
+        err,
+    )]
     async fn poll(&mut self) -> Result<Option<ConnectRecord<Bytes, Bytes>>, ConnectError> {
         if self.pending.is_empty() {
             self.fill_pending_from_slot().await?;
@@ -269,6 +288,9 @@ impl Source<Bytes, Bytes> for PostgresWalSource {
                     }
 
                     let diff = self.relation_cache.translate(row)?;
+                    let span = tracing::Span::current();
+                    span.record("table", diff.table.as_str());
+                    span.record("op", operation_header(diff.op));
                     let key = self.encoder.encode_key(&diff.key)?;
                     let value = if diff.op == Operation::Delete {
                         None
@@ -302,6 +324,7 @@ impl Source<Bytes, Bytes> for PostgresWalSource {
             .map(|lsn| lsn.to_source_offset(&self.database_name, &self.config.slot_name))
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(slot = %self.config.slot_name), err)]
     async fn seek(&mut self, offset: SourceOffset) -> Result<(), ConnectError> {
         validate_database(&offset, &self.database_name)?;
         let lsn = PgLsn::from_source_offset(&offset, &self.config.slot_name)?;
@@ -310,6 +333,7 @@ impl Source<Bytes, Bytes> for PostgresWalSource {
         Ok(())
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(slot = %self.config.slot_name), err)]
     async fn acknowledge(&mut self, offset: &SourceOffset) -> Result<(), ConnectError> {
         validate_database(offset, &self.database_name)?;
         let lsn = PgLsn::from_source_offset(offset, &self.config.slot_name)?;
@@ -386,6 +410,12 @@ pub(crate) fn advance_slot_sql() -> &'static str {
 /// name, create + validate the publication (when tables are configured), and
 /// ensure the replication slot. Split out of [`PostgresWalSource::connect`] so
 /// the orchestration is unit-testable against a [`PgCatalog`] mock.
+#[tracing::instrument(
+    level = "info",
+    skip_all,
+    fields(slot = %config.slot_name, publication = %config.publication_name, tables = config.table_names.len()),
+    err,
+)]
 async fn initialize(
     catalog: &dyn PgCatalog,
     config: &PostgresSourceConfig,

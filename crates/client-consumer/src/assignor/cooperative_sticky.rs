@@ -24,6 +24,12 @@ pub type MemberInput = (String, Vec<String>, Vec<(String, i32)>, i32);
 /// mean partitions being moved from a still-active owner are omitted — the next rebalance
 /// (`phase-2`) will place them after the owner revokes.
 #[must_use]
+#[tracing::instrument(
+    name = "consumer.assignor.cooperative_sticky",
+    level = "info",
+    skip_all,
+    fields(members = members.len(), topics = topic_partitions.len())
+)]
 pub fn assign(
     members: &[MemberInput],
     topic_partitions: &HashMap<String, i32>,

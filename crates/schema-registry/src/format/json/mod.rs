@@ -51,6 +51,7 @@ pub fn parse(schema: &str, refs: &[super::ResolvedReference]) -> Result<JsonSche
 /// Confluent JSON Schema compatibility: can a reader using `reader` read data
 /// written with `writer`? Diffs (original = writer, update = reader); rejects if
 /// any difference is backward-incompatible.
+#[tracing::instrument(level = "debug", name = "json.check", skip_all, fields(reader_refs = reader_refs.len(), writer_refs = writer_refs.len(), diffs = tracing::field::Empty))]
 pub fn check(
     reader: &str,
     writer: &str,
@@ -65,6 +66,7 @@ pub fn check(
         writer_s.refs(),
         reader_s.refs(),
     );
+    tracing::Span::current().record("diffs", diffs.len());
     let incompatible: Vec<&diff::Difference> = diffs
         .iter()
         .filter(|d| !compat::is_backward_compatible(&d.kind))

@@ -683,6 +683,12 @@ fn broad_acl(kind: AclResourceKind, name: &str) -> AclRule {
 /// [`issue_broker_cert`] with `base_sans` = the Service DNS names, and SSA's the
 /// Opaque Secret (`tls.crt` / `tls.key`), owner-ref → the gateway. Re-issues
 /// when the stored cert is within its renewal window.
+#[tracing::instrument(
+    level = "info",
+    skip_all,
+    fields(gateway = %gw.name_any(), namespace = %namespace, parent = %parent_name),
+    err,
+)]
 async fn ensure_serving_cert(
     secret_api: &Api<Secret>,
     gw: &KafkaGrpcGateway,
@@ -921,6 +927,7 @@ fn resolve_broker_endpoint(parent: &Kafka, namespace: &str) -> Option<(String, S
 
 /// Patch a single-condition status onto the gateway (preserving the
 /// observed-generation echo).
+#[tracing::instrument(level = "info", skip_all, fields(name = %name, conditions = conditions.len()), err)]
 async fn patch_conditions(
     gw_api: &Api<KafkaGrpcGateway>,
     name: &str,
@@ -942,8 +949,36 @@ async fn patch_conditions(
 /// Reconcile one `KafkaGrpcGateway`. Orchestrates the Design §"Controller flow":
 /// label → parent, version gate, child `KafkaUser` + its client Secret, serving
 /// cert, config Secret (secretRefs resolved), Deployment + Service, status.
-#[allow(clippy::too_many_lines)] // linear 7-step controller flow; each step is independent
+/// Reconcile entry point. Times the pass and records the reconcile
+/// counter/histogram, then delegates to [`reconcile_inner`].
+#[tracing::instrument(
+    level = "info",
+    skip_all,
+    fields(
+        kind = "KafkaGrpcGateway",
+        namespace = %gw.namespace().unwrap_or_else(|| "default".into()),
+        name = %gw.name_any(),
+        generation = ?gw.meta().generation,
+    )
+)]
 pub async fn reconcile(
+    gw: Arc<KafkaGrpcGateway>,
+    ctx: Arc<Context>,
+) -> Result<Action, ReconcileError> {
+    let started = std::time::Instant::now();
+    let result = reconcile_inner(gw, ctx.clone()).await;
+    let outcome = if result.is_ok() {
+        crate::telemetry::ReconcileResult::Ok
+    } else {
+        crate::telemetry::ReconcileResult::Error
+    };
+    ctx.metrics
+        .record_reconcile("KafkaGrpcGateway", outcome, started.elapsed().as_secs_f64());
+    result
+}
+
+#[allow(clippy::too_many_lines)] // linear 7-step controller flow; each step is independent
+async fn reconcile_inner(
     gw: Arc<KafkaGrpcGateway>,
     ctx: Arc<Context>,
 ) -> Result<Action, ReconcileError> {

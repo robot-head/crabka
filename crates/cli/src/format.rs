@@ -382,6 +382,13 @@ fn build_initial_voters(args: &FormatArgs, directory_id: Uuid) -> Result<VoterSe
 
 /// Persist `meta.properties.json` — the broker recovers `directory_id`
 /// from it on every boot (KIP-853 voter identity).
+#[tracing::instrument(
+    level = "debug",
+    name = "cli.write_meta_properties",
+    skip_all,
+    fields(log_dir = %log_dir.display(), %cluster_id, %directory_id),
+    err
+)]
 fn write_meta_properties(
     log_dir: &std::path::Path,
     cluster_id: Uuid,
@@ -414,6 +421,14 @@ struct BootstrapManifest {
 
 // `async` matches the entry point in `main.rs`; the body is sync today
 // (purely fs + crypto) but a real raft-log bootstrap would await tokio I/O.
+// The body yields an `i32` (not a future), so `#[instrument]` is safe here
+// w.r.t. `clippy::async_yields_async`.
+#[tracing::instrument(
+    level = "info",
+    name = "cli.format",
+    skip_all,
+    fields(log_dir = %args.log_dir.display(), standalone = args.standalone)
+)]
 #[allow(clippy::unused_async, clippy::too_many_lines)]
 pub async fn run(args: FormatArgs) -> i32 {
     // Refuse to overwrite a non-empty directory. We treat "exists with
@@ -551,6 +566,13 @@ pub async fn run(args: FormatArgs) -> i32 {
 
 /// Serialize the manifest + records to disk under `log_dir`. Returns the
 /// first I/O or encoding error encountered.
+#[tracing::instrument(
+    level = "debug",
+    name = "cli.write_bootstrap_files",
+    skip_all,
+    fields(log_dir = %log_dir.display(), record_count = records.len()),
+    err
+)]
 fn write_bootstrap_files(
     log_dir: &std::path::Path,
     cluster_id: Uuid,

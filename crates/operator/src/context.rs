@@ -7,7 +7,7 @@ use tokio::sync::Mutex;
 
 use crate::config::OperatorConfig;
 use crate::rebalancer_client::{ConnectRebalancerClient, RebalancerClientLike};
-use crate::telemetry::SharedRegistry;
+use crate::telemetry::{ControllerMetrics, SharedRegistry};
 
 /// Boxed-dyn admin client handle: tests substitute a fake here without
 /// opening a TCP connection, while production code wraps a real
@@ -27,6 +27,9 @@ pub struct Context {
     pub client: Client,
     pub config: Arc<OperatorConfig>,
     pub registry: SharedRegistry,
+    /// Operator-wide controller metrics (reconcile counters/histograms/gauges).
+    /// Cheaply cloneable; the handles are registered against `registry`.
+    pub metrics: ControllerMetrics,
     /// Per-cluster admin-client cache. Keyed by `Kafka` resource name.
     /// Broken connections are replaced lazily on next use.
     pub admin_clients: Arc<Mutex<HashMap<String, AdminClientHandle>>>,
@@ -38,11 +41,17 @@ pub struct Context {
 
 impl Context {
     #[must_use]
-    pub fn new(client: Client, config: OperatorConfig, registry: SharedRegistry) -> Self {
+    pub fn new(
+        client: Client,
+        config: OperatorConfig,
+        registry: SharedRegistry,
+        metrics: ControllerMetrics,
+    ) -> Self {
         Self {
             client,
             config: Arc::new(config),
             registry,
+            metrics,
             admin_clients: Arc::new(Mutex::new(HashMap::new())),
             rebalancer_clients: Arc::new(Mutex::new(HashMap::new())),
         }

@@ -10,6 +10,7 @@ use crate::rest::{
 };
 
 /// GET /schemas/ids/{id}
+#[tracing::instrument(level = "debug", name = "sr.get_by_id", skip_all, fields(schema_id = id, deleted = q.deleted), err)]
 pub async fn get_by_id(
     State(st): State<AppState>,
     Path(id): Path<i32>,
@@ -48,6 +49,7 @@ pub async fn types(State(_st): State<AppState>) -> Response {
 /// GET /schemas/ids/{id}/versions -> [{"subject":..,"version":..}] | 404 when the
 /// id has no qualifying versions (cp returns 40403 Schema Not Found).
 #[allow(clippy::unused_async)]
+#[tracing::instrument(level = "debug", name = "sr.get_by_id_versions", skip_all, fields(schema_id = id, deleted = q.deleted), err)]
 pub async fn get_by_id_versions(
     State(st): State<AppState>,
     Path(id): Path<i32>,
@@ -69,6 +71,7 @@ pub async fn get_by_id_versions(
 }
 
 /// GET /schemas/ids/{id}/schema — return the raw schema string (not JSON-wrapped).
+#[tracing::instrument(level = "debug", name = "sr.get_by_id_schema", skip_all, fields(schema_id = id), err)]
 pub async fn get_by_id_schema(
     State(st): State<AppState>,
     Path(id): Path<i32>,
@@ -83,6 +86,7 @@ pub async fn get_by_id_schema(
 }
 
 /// GET /schemas/ids/{id}/subjects[?deleted=true] — list subjects referencing this id.
+#[tracing::instrument(level = "debug", name = "sr.get_by_id_subjects", skip_all, fields(schema_id = id, deleted = q.deleted), err)]
 pub async fn get_by_id_subjects(
     State(st): State<AppState>,
     Path(id): Path<i32>,
@@ -108,6 +112,7 @@ pub async fn get_by_id_subjects(
 
 /// GET /schemas -> [{subject,version,id,schemaType,schema}]
 #[allow(clippy::unused_async)]
+#[tracing::instrument(level = "debug", name = "sr.list_schemas", skip_all, fields(deleted = q.deleted))]
 pub async fn list_schemas(State(st): State<AppState>, Query(q): Query<DeletedQ>) -> Response {
     let rows = st.store.store.read().all_schemas(q.deleted);
     let arr: Vec<serde_json::Value> = rows

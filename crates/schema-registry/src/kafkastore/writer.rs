@@ -32,6 +32,7 @@ impl SchemaWriter {
     }
 
     /// Produce one keyed `_schemas` record; return the assigned offset.
+    #[tracing::instrument(level = "debug", name = "schema_writer.produce", skip_all, fields(topic = %self.topic, key_len = key.len(), value_len = value.len(), offset = tracing::field::Empty), err)]
     pub async fn produce(&self, key: Vec<u8>, value: Vec<u8>) -> anyhow::Result<i64> {
         let rx = self
             .producer
@@ -45,11 +46,13 @@ impl SchemaWriter {
         let meta = rx
             .await
             .map_err(|_| anyhow::anyhow!("producer dropped ack"))??;
+        tracing::Span::current().record("offset", meta.offset);
         Ok(meta.offset)
     }
 
     /// Produce a tombstone (null value) for `key`; return the assigned offset.
     /// Used for permanent deletes and mode-clears (compaction reclaims the key).
+    #[tracing::instrument(level = "debug", name = "schema_writer.produce_tombstone", skip_all, fields(topic = %self.topic, key_len = key.len(), offset = tracing::field::Empty), err)]
     pub async fn produce_tombstone(&self, key: Vec<u8>) -> anyhow::Result<i64> {
         let rx = self
             .producer
@@ -63,6 +66,7 @@ impl SchemaWriter {
         let meta = rx
             .await
             .map_err(|_| anyhow::anyhow!("producer dropped ack"))??;
+        tracing::Span::current().record("offset", meta.offset);
         Ok(meta.offset)
     }
 }

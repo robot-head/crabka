@@ -26,6 +26,7 @@ crabka-voters = { version = "0.3.8", path = "../voters" }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 crabka-security = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 assert2 = { workspace = true }

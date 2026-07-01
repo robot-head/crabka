@@ -45,6 +45,13 @@ const DEFAULT_RESOURCE_TYPES: [i8; 3] = [
 ];
 
 #[allow(clippy::unused_async)]
+#[tracing::instrument(
+    name = "handle_list_config_resources",
+    level = "info",
+    skip_all,
+    fields(api = "ListConfigResources", version, req_bytes = req_bytes.len()),
+    err,
+)]
 pub(crate) async fn handle(
     broker: &Broker,
     version: i16,

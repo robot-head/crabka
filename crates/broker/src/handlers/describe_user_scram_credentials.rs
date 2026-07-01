@@ -14,6 +14,13 @@ use crate::broker::Broker;
 use crate::codes::{CLUSTER_AUTHORIZATION_FAILED, RESOURCE_NOT_FOUND_USER};
 
 #[allow(clippy::unused_async)]
+#[tracing::instrument(
+    name = "handle_describe_user_scram_credentials",
+    level = "info",
+    skip_all,
+    fields(api = "DescribeUserScramCredentials"),
+    err
+)]
 pub(crate) async fn handle(
     broker: &Broker,
     req: DescribeUserScramCredentialsRequest,

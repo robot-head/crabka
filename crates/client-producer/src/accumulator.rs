@@ -83,6 +83,15 @@ impl Accumulator {
         }
     }
 
+    #[tracing::instrument(
+        level = "trace",
+        skip_all,
+        fields(
+            key_len = key.as_ref().map(bytes::Bytes::len),
+            value_len = value.as_ref().map(bytes::Bytes::len),
+            headers = headers.len(),
+        ),
+    )]
     pub fn try_append(
         &mut self,
         key: Option<Bytes>,

@@ -3960,7 +3960,16 @@ async fn accept_loop(
                             // connection; dropping it releases the global +
                             // per-IP slots.
                             let _conn_guard = conn_guard;
-                            crate::network::dispatch::serve_connection_on_listener(b, stream, s).await;
+                            // `Box::pin` the per-connection handler: the request
+                            // dispatch state machine (68 API handlers, each now
+                            // carrying a tracing span) is a legitimately large
+                            // future that trips `clippy::large_futures` once held
+                            // inline in this spawned task. Boxing moves it to the
+                            // heap (one alloc per long-lived connection — free).
+                            Box::pin(crate::network::dispatch::serve_connection_on_listener(
+                                b, stream, s,
+                            ))
+                            .await;
                         });
                     }
                     Err(e) => {

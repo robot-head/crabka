@@ -201,6 +201,12 @@ pub(crate) struct ReconcileOutcome {
 
 /// Top-level reconcile entrypoint. Pure of any single-impl concrete
 /// type — admin client + I/O writers are passed in as trait objects.
+#[tracing::instrument(
+    level = "info",
+    skip_all,
+    fields(user = %obj.metadata.name.clone().unwrap_or_default()),
+    err,
+)]
 pub(crate) async fn reconcile(
     obj: &KafkaUser,
     auth: &DelegationTokenAuth,

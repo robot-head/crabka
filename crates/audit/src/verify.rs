@@ -228,6 +228,12 @@ fn check_chained(rec: &Record, offset: i64, state: &mut WalkState) -> Result<(),
 /// each `RecordBatch` directly (not via `Log::open` — that path runs
 /// recovery/truncation which would silently mask tail corruption), recomputes
 /// the hash-chain, and validates every checkpoint signature against `trusted`.
+#[tracing::instrument(
+    level = "info",
+    skip_all,
+    fields(dir = %dir.display(), records = tracing::field::Empty, checkpoints = tracing::field::Empty, ok = tracing::field::Empty),
+    err
+)]
 pub fn verify_partition_dir(dir: &Path, trusted: &TrustedKeys) -> Result<VerifyReport, AuditError> {
     let mut segments: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
         .map_err(|e| AuditError::Sink(format!("read dir {}: {e}", dir.display())))?
@@ -256,6 +262,10 @@ pub fn verify_partition_dir(dir: &Path, trusted: &TrustedKeys) -> Result<VerifyR
                     check_chained(rec, offset, &mut state)
                 };
                 if let Err(report) = result {
+                    let span = tracing::Span::current();
+                    span.record("records", report.records);
+                    span.record("checkpoints", report.checkpoints);
+                    span.record("ok", report.ok);
                     return Ok(report);
                 }
             }
@@ -267,6 +277,10 @@ pub fn verify_partition_dir(dir: &Path, trusted: &TrustedKeys) -> Result<VerifyR
         None => state.records,
     };
 
+    let span = tracing::Span::current();
+    span.record("records", state.records);
+    span.record("checkpoints", state.checkpoints);
+    span.record("ok", true);
     Ok(VerifyReport {
         records: state.records,
         checkpoints: state.checkpoints,

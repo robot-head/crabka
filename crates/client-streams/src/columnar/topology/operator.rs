@@ -54,7 +54,26 @@ pub enum BuiltinOp {
     GroupByAgg { keys: Vec<Expr>, aggs: Vec<Expr> },
 }
 
+impl BuiltinOp {
+    /// A cheap static label for tracing (the operator variant name).
+    fn kind_label(&self) -> &'static str {
+        match self {
+            BuiltinOp::Filter(_) => "filter",
+            BuiltinOp::Select(_) => "select",
+            BuiltinOp::WithColumns(_) => "with_columns",
+            BuiltinOp::GroupByAgg { .. } => "group_by_agg",
+        }
+    }
+}
+
 impl ColumnarProcessor for BuiltinOp {
+    #[tracing::instrument(
+        name = "streams.columnar.operator",
+        level = "debug",
+        skip_all,
+        fields(op = self.kind_label(), rows = batch.height()),
+        err,
+    )]
     fn process(&mut self, ctx: &mut ColumnarContext, batch: DataFrame) -> Result<(), BatchError> {
         let lf = batch.lazy();
         let out = match self {

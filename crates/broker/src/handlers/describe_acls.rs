@@ -23,6 +23,13 @@ use crate::codes;
 // DeleteAcls awaits `controller.submit_change`; read-only
 // DescribeAcls itself never suspends.
 #[allow(clippy::unused_async)]
+#[tracing::instrument(
+    name = "handle_describe_acls",
+    level = "info",
+    skip_all,
+    fields(api = "DescribeAcls"),
+    err
+)]
 pub(crate) async fn handle(
     broker: &Broker,
     req: DescribeAclsRequest,

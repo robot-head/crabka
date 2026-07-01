@@ -20,6 +20,13 @@ use crate::error::BrokerError;
 use crate::heartbeat::controller_state::ControllerLivenessState;
 use crate::leader_election::select_replacement_leader_for_shutdown;
 
+#[tracing::instrument(
+    name = "handle_broker_heartbeat",
+    level = "info",
+    skip_all,
+    fields(api = "BrokerHeartbeat", version, req_bytes = req_bytes.len()),
+    err,
+)]
 pub(crate) async fn handle(
     broker: &Broker,
     version: i16,

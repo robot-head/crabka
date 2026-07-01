@@ -142,6 +142,13 @@ pub fn apply_ruler_state_record<S: MetricStore>(
     }
 }
 
+#[tracing::instrument(
+    level = "debug",
+    name = "metrics.ruler_state.replay",
+    skip_all,
+    fields(state_topic = %state_topic, records = records.len()),
+    err
+)]
 pub fn replay_ruler_state_records<S: MetricStore>(
     state: &PrometheusApiState<S>,
     state_topic: &str,
@@ -210,6 +217,13 @@ pub struct WalHeadConsumerLoopSummary {
     pub committed_offsets: Vec<WalHeadPartitionOffset>,
 }
 
+#[tracing::instrument(
+    level = "debug",
+    name = "metrics.wal_head.replay",
+    skip_all,
+    fields(wal_topic = %wal_topic, records = records.len()),
+    err
+)]
 pub fn replay_wal_head_records(
     head: &WalHead,
     wal_topic: &str,
@@ -304,6 +318,13 @@ impl WalHeadConsumerCommit for Consumer {
     }
 }
 
+#[tracing::instrument(
+    level = "debug",
+    name = "metrics.wal_head.poll_once",
+    skip_all,
+    fields(wal_topic = %wal_topic, polled = tracing::field::Empty, replayed = tracing::field::Empty),
+    err
+)]
 pub async fn poll_wal_head_consumer_once<C>(
     consumer: &mut C,
     head: &WalHead,
@@ -324,12 +345,22 @@ where
         })
         .collect::<Vec<_>>();
     let result = replay_wal_head_records(head, wal_topic, &replay_records)?;
+    let span = tracing::Span::current();
+    span.record("polled", result.polled_records);
+    span.record("replayed", result.replayed_records);
     if result.replayed_records > 0 {
         consumer.commit_sync().await?;
     }
     Ok(result)
 }
 
+#[tracing::instrument(
+    level = "debug",
+    name = "metrics.ruler_state.poll_once",
+    skip_all,
+    fields(state_topic = %state_topic, polled = tracing::field::Empty, replayed = tracing::field::Empty),
+    err
+)]
 pub async fn poll_ruler_state_consumer_once<S, C>(
     consumer: &mut C,
     state: &PrometheusApiState<S>,
@@ -354,6 +385,9 @@ where
         })
         .collect::<Vec<_>>();
     let result = replay_ruler_state_records(state, state_topic, &replay_records)?;
+    let span = tracing::Span::current();
+    span.record("polled", result.polled_records);
+    span.record("replayed", result.replayed_records);
     if result.replayed_records > 0 {
         consumer
             .commit_sync()
@@ -735,6 +769,13 @@ fn unix_ms_to_rfc3339(timestamp_ms: i64) -> String {
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "metrics.ruler.evaluate_once",
+    skip_all,
+    fields(tenant = %tenant, eval_time_ms),
+    err
+)]
 #[allow(
     clippy::too_many_arguments,
     reason = "One-shot ruler evaluation wires the API state plus independent sinks for focused tests and runtime reuse."
@@ -919,6 +960,13 @@ impl RefreshingMetricBlockStore {
         }
     }
 
+    #[tracing::instrument(
+        level = "debug",
+        name = "metrics.store.current_store",
+        skip_all,
+        fields(start_ms, end_ms, cold_refreshed = tracing::field::Empty),
+        err
+    )]
     async fn current_store(
         &self,
         start_ms: i64,
@@ -972,6 +1020,7 @@ impl RefreshingMetricBlockStore {
             end_ms,
             cold,
         });
+        tracing::Span::current().record("cold_refreshed", true);
         Ok(merged)
     }
 }
@@ -998,6 +1047,13 @@ fn duration_ms(duration: Duration) -> i64 {
 
 #[async_trait::async_trait]
 impl MetricStore for RefreshingMetricBlockStore {
+    #[tracing::instrument(
+        level = "debug",
+        name = "metrics.store.scan",
+        skip_all,
+        fields(tenant = %tenant, matchers = matchers.len(), start_ms, end_ms),
+        err
+    )]
     async fn scan(
         &self,
         tenant: &str,
@@ -1011,6 +1067,13 @@ impl MetricStore for RefreshingMetricBlockStore {
             .await
     }
 
+    #[tracing::instrument(
+        level = "debug",
+        name = "metrics.store.label_names",
+        skip_all,
+        fields(tenant = %tenant, matchers = matchers.len(), start_ms, end_ms),
+        err
+    )]
     async fn label_names(
         &self,
         tenant: &str,
@@ -1024,6 +1087,13 @@ impl MetricStore for RefreshingMetricBlockStore {
             .await
     }
 
+    #[tracing::instrument(
+        level = "debug",
+        name = "metrics.store.label_values",
+        skip_all,
+        fields(tenant = %tenant, label = %name, matchers = matchers.len(), start_ms, end_ms),
+        err
+    )]
     async fn label_values(
         &self,
         tenant: &str,
@@ -1038,6 +1108,13 @@ impl MetricStore for RefreshingMetricBlockStore {
             .await
     }
 
+    #[tracing::instrument(
+        level = "debug",
+        name = "metrics.store.series",
+        skip_all,
+        fields(tenant = %tenant, matchers = matchers.len(), start_ms, end_ms),
+        err
+    )]
     async fn series(
         &self,
         tenant: &str,
@@ -1051,6 +1128,13 @@ impl MetricStore for RefreshingMetricBlockStore {
             .await
     }
 
+    #[tracing::instrument(
+        level = "debug",
+        name = "metrics.store.exemplars",
+        skip_all,
+        fields(tenant = %tenant, matchers = matchers.len(), start_ms, end_ms),
+        err
+    )]
     async fn exemplars(
         &self,
         tenant: &str,
@@ -1064,6 +1148,13 @@ impl MetricStore for RefreshingMetricBlockStore {
             .await
     }
 
+    #[tracing::instrument(
+        level = "debug",
+        name = "metrics.store.metadata",
+        skip_all,
+        fields(tenant = %tenant, metric = metric.unwrap_or("")),
+        err
+    )]
     async fn metadata(
         &self,
         tenant: &str,
@@ -1075,6 +1166,13 @@ impl MetricStore for RefreshingMetricBlockStore {
             .await
     }
 
+    #[tracing::instrument(
+        level = "debug",
+        name = "metrics.store.cardinality_label_names",
+        skip_all,
+        fields(tenant = %tenant),
+        err
+    )]
     async fn cardinality_label_names(
         &self,
         tenant: &str,
@@ -1085,6 +1183,13 @@ impl MetricStore for RefreshingMetricBlockStore {
             .await
     }
 
+    #[tracing::instrument(
+        level = "debug",
+        name = "metrics.store.cardinality_label_values",
+        skip_all,
+        fields(tenant = %tenant),
+        err
+    )]
     async fn cardinality_label_values(
         &self,
         tenant: &str,
@@ -1095,6 +1200,13 @@ impl MetricStore for RefreshingMetricBlockStore {
             .await
     }
 
+    #[tracing::instrument(
+        level = "debug",
+        name = "metrics.store.cardinality_active_series",
+        skip_all,
+        fields(tenant = %tenant),
+        err
+    )]
     async fn cardinality_active_series(
         &self,
         tenant: &str,
@@ -1105,6 +1217,13 @@ impl MetricStore for RefreshingMetricBlockStore {
             .await
     }
 
+    #[tracing::instrument(
+        level = "debug",
+        name = "metrics.store.tsdb_stats",
+        skip_all,
+        fields(tenant = %tenant),
+        err
+    )]
     async fn tsdb_stats(
         &self,
         tenant: &str,
@@ -1115,6 +1234,13 @@ impl MetricStore for RefreshingMetricBlockStore {
             .await
     }
 
+    #[tracing::instrument(
+        level = "debug",
+        name = "metrics.store.tsdb_blocks",
+        skip_all,
+        fields(tenant = %tenant),
+        err
+    )]
     async fn tsdb_blocks(
         &self,
         tenant: &str,
@@ -1166,6 +1292,13 @@ async fn load_compaction_manifests_filtered(
     load_compaction_manifests_filtered_with_cache(store, manifest_prefix, time_range, None).await
 }
 
+#[tracing::instrument(
+    level = "debug",
+    name = "metrics.manifests.load",
+    skip_all,
+    fields(prefix = %manifest_prefix, manifests = tracing::field::Empty),
+    err
+)]
 async fn load_compaction_manifests_filtered_with_cache(
     store: Arc<dyn ObjectStore>,
     manifest_prefix: &str,
@@ -1214,6 +1347,7 @@ async fn load_compaction_manifests_filtered_with_cache(
         guard.retain(|key, _| live_keys.contains(key));
         guard.extend(fetched);
     }
+    tracing::Span::current().record("manifests", manifests.len());
     Ok(manifests)
 }
 

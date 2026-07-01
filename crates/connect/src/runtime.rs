@@ -331,6 +331,7 @@ impl ConnectorHandle {
     ///
     /// Returns the error the loop failed with, or [`ConnectError::Backend`] if
     /// the loop task panicked.
+    #[tracing::instrument(level = "info", skip_all, err)]
     pub async fn shutdown(mut self) -> Result<(), ConnectError> {
         let _ = self.control.send(Control::Shutdown);
         let join = self.join.take().expect("join handle taken once");
@@ -377,6 +378,7 @@ where
 {
     /// The full lifecycle: seek to the stored checkpoint, run the loop, then
     /// close both ends regardless of how the loop ended.
+    #[tracing::instrument(level = "info", skip_all, err)]
     async fn run(mut self) -> Result<(), ConnectError> {
         let result = self.seek_and_loop().await;
 
@@ -393,6 +395,7 @@ where
         result
     }
 
+    #[tracing::instrument(level = "info", skip_all, err)]
     async fn seek_and_loop(&mut self) -> Result<(), ConnectError> {
         if let Some(offset) = self.checkpoints.load().await? {
             tracing::debug!(?offset, "seeking source to restored checkpoint");
@@ -440,6 +443,12 @@ where
 
     /// Poll one bounded batch and, if non-empty, write + commit + checkpoint it.
     /// Returns whether the batch wrote anything or the source was caught up.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(batch = tracing::field::Empty, caught_up = tracing::field::Empty),
+        err,
+    )]
     async fn run_once(&mut self) -> Result<Progress, ConnectError> {
         let deadline = Instant::now() + self.config.commit_interval;
         let mut batch = Vec::new();
@@ -457,6 +466,10 @@ where
             }
         }
 
+        let span = tracing::Span::current();
+        span.record("batch", batch.len());
+        span.record("caught_up", caught_up);
+
         if !batch.is_empty() {
             self.write_committed(batch).await?;
         }
@@ -471,12 +484,19 @@ where
     /// Write a non-empty batch inside the transactional gate (lazy `begin`),
     /// commit it, persist the source checkpoint, then acknowledge that offset.
     /// Aborts on failure when the sink is transactional.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(records = batch.len(), transactional = tracing::field::Empty),
+        err,
+    )]
     async fn write_committed(
         &mut self,
         batch: Vec<crate::record::ConnectRecord<K, V>>,
     ) -> Result<(), ConnectError> {
         let count = batch.len();
         let transactional = self.sink.supports_transactions();
+        tracing::Span::current().record("transactional", transactional);
 
         // The gate is lazy: only a non-empty batch opens a transaction, so an
         // idle interval never churns an empty txn.
@@ -515,6 +535,7 @@ where
         self.sink.commit().await
     }
 
+    #[tracing::instrument(level = "info", skip_all, err)]
     async fn close_ends(&mut self) -> Result<(), ConnectError> {
         let source_close = self.source.close().await;
         let sink_close = self.sink.close().await;

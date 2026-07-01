@@ -23,6 +23,13 @@ use crate::coordinator::unified::streams::actor::StreamsGroupActorMessage;
 use crate::error::BrokerError;
 use crate::time_util::now_ms;
 
+#[tracing::instrument(
+    name = "handle_streams_group_heartbeat",
+    level = "info",
+    skip_all,
+    fields(api = "StreamsGroupHeartbeat", version, req_bytes = req_bytes.len()),
+    err,
+)]
 pub(crate) async fn handle(
     broker: &Broker,
     version: i16,

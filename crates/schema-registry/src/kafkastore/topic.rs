@@ -13,6 +13,13 @@ const TOPIC_ALREADY_EXISTS: i16 = 36;
 
 /// Create `_schemas` (1 partition, cleanup.policy=compact) if absent and return
 /// its `topic_id`. Idempotent.
+#[tracing::instrument(
+    level = "info",
+    name = "kafkastore.ensure_schemas_topic",
+    skip_all,
+    fields(topic = %cfg.schemas_topic, replicas = cfg.schemas_topic_rf),
+    err
+)]
 pub async fn ensure_schemas_topic(
     cfg: &RegistryConfig,
     security: Option<ClientSecurity>,

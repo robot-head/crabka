@@ -44,6 +44,13 @@ use crate::error::BrokerError;
 use crate::txn::coordinator::OffsetKey;
 use crate::txn::util::now_millis;
 
+#[tracing::instrument(
+    name = "handle_txn_offset_commit",
+    level = "info",
+    skip_all,
+    fields(api = "TxnOffsetCommit", version, req_bytes = req_bytes.len()),
+    err,
+)]
 pub(crate) async fn handle(
     broker: &Broker,
     version: i16,

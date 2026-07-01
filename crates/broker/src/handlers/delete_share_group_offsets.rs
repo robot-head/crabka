@@ -26,6 +26,13 @@ use crate::codes;
 use crate::error::BrokerError;
 use crate::handlers::alter_share_group_offsets::group_is_empty;
 
+#[tracing::instrument(
+    name = "handle_delete_share_group_offsets",
+    level = "info",
+    skip_all,
+    fields(api = "DeleteShareGroupOffsets", version, req_bytes = req_bytes.len()),
+    err,
+)]
 pub(crate) async fn handle(
     broker: &Broker,
     version: i16,

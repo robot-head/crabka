@@ -26,6 +26,13 @@ pub struct VerboseQ {
 }
 
 /// POST /compatibility/subjects/{subject}/versions/{version}
+#[tracing::instrument(
+    level = "debug",
+    name = "sr.compatibility_check",
+    skip_all,
+    fields(subject = %subject, version = %version, verbose = q.verbose, schema_type = tracing::field::Empty, is_compatible = tracing::field::Empty),
+    err
+)]
 pub async fn check(
     State(st): State<AppState>,
     Path((subject, version)): Path<(String, String)>,
@@ -35,6 +42,7 @@ pub async fn check(
     let req: Body =
         serde_json::from_str(&body).map_err(|e| SrError::InvalidSchema(e.to_string()))?;
     let ty = SchemaType::from_wire(req.schema_type.as_deref());
+    tracing::Span::current().record("schema_type", tracing::field::debug(ty));
     let want = parse_version(&version)?;
     let verdict = {
         let snap = st.store.store.read();
@@ -44,6 +52,7 @@ pub async fn check(
         crate::format::parse(ty, &req.schema, &resolved)?;
         compat::check_against_version(&snap, &subject, ty, &req.schema, &resolved, want)?
     };
+    tracing::Span::current().record("is_compatible", verdict.is_compatible);
     if q.verbose {
         Ok(ok_json(&serde_json::json!({
             "is_compatible": verdict.is_compatible,

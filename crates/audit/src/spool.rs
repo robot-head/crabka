@@ -38,6 +38,12 @@ pub struct Spool {
 
 impl Spool {
     /// Open (creating the dir + file if needed) and recover existing contents.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(dir = %dir.display(), max_bytes, count = tracing::field::Empty, bytes = tracing::field::Empty),
+        err
+    )]
     pub fn open(dir: &Path, max_bytes: u64) -> Result<Self, AuditError> {
         std::fs::create_dir_all(dir).map_err(io)?;
         let path = dir.join(SPOOL_FILE);
@@ -67,6 +73,9 @@ impl Spool {
         }
         s.count = u64::try_from(records.len()).unwrap_or(u64::MAX);
         s.bytes = valid_bytes;
+        let span = tracing::Span::current();
+        span.record("count", s.count);
+        span.record("bytes", s.bytes);
         Ok(s)
     }
 
@@ -86,6 +95,12 @@ impl Spool {
     }
 
     /// Append a record. Returns `Ok(false)` if it would exceed `max_bytes`.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(class = ?record.class, value_bytes = record.value.len(), count = self.count),
+        err
+    )]
     pub fn append(&mut self, record: &AuditRecord) -> Result<bool, AuditError> {
         let frame = encode_frame(record);
         let frame_len = u64::try_from(frame.len()).unwrap_or(u64::MAX);
@@ -104,6 +119,12 @@ impl Spool {
     /// immediately after the last complete, successfully-decoded frame (the
     /// "logical length"). A truncated or corrupt tail frame is treated as
     /// end-of-data; `valid_bytes` points to just before that torn frame.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(records = tracing::field::Empty, valid_bytes = tracing::field::Empty),
+        err
+    )]
     fn scan(&self) -> Result<(Vec<AuditRecord>, u64), AuditError> {
         let mut buf = Vec::new();
         {
@@ -128,6 +149,9 @@ impl Spool {
             }
             cur = &cur[4 + len..];
         }
+        let span = tracing::Span::current();
+        span.record("records", out.len());
+        span.record("valid_bytes", valid_bytes);
         Ok((out, valid_bytes))
     }
 
@@ -137,6 +161,7 @@ impl Spool {
     }
 
     /// Replace the spool contents with exactly `remaining`, atomically.
+    #[tracing::instrument(level = "debug", skip_all, fields(remaining = remaining.len()), err)]
     pub fn rewrite(&mut self, remaining: &[AuditRecord]) -> Result<(), AuditError> {
         let tmp = self.path.with_extension("spool.tmp");
         {
@@ -166,6 +191,7 @@ impl Spool {
     }
 
     /// Clear the spool.
+    #[tracing::instrument(level = "debug", skip_all, fields(count = self.count, bytes = self.bytes), err)]
     pub fn truncate(&mut self) -> Result<(), AuditError> {
         self.file.set_len(0).map_err(io)?;
         self.file.seek(SeekFrom::Start(0)).map_err(io)?;
@@ -177,6 +203,7 @@ impl Spool {
 
     /// `(next_seq, head)` implied by the last chained (non-checkpoint) record,
     /// or `None` if the spool has no chained records.
+    #[tracing::instrument(level = "debug", skip_all, fields(count = self.count), err)]
     pub fn resume_point(&self) -> Result<Option<(u64, [u8; 32])>, AuditError> {
         let records = self.read_all()?;
         Ok(records.iter().rev().find_map(resume_from_record))

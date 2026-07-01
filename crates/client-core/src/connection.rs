@@ -82,6 +82,7 @@ struct DispatchItem {
 
 impl Connection {
     /// Connect to `addr`, negotiate API versions, return a usable `Connection`.
+    #[tracing::instrument(level = "debug", skip_all, fields(addr = %addr), err)]
     pub async fn connect(
         addr: SocketAddr,
         options: ConnectionOptions,
@@ -106,6 +107,12 @@ impl Connection {
     ///
     /// # Errors
     /// Propagates [`Self::connect`] / [`Self::connect_secured`] failures.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(addr = %addr, secured = options.security.is_some()),
+        err,
+    )]
     pub async fn connect_with_options(
         addr: SocketAddr,
         options: ConnectionOptions,
@@ -125,6 +132,12 @@ impl Connection {
     /// TCP dial, or [`ClientError::Io`] if the TLS or SASL handshake fails
     /// or the security policy is internally inconsistent (e.g. a TLS
     /// protocol with no TLS config).
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(addr = %addr, protocol = ?security.protocol),
+        err,
+    )]
     pub async fn connect_secured(
         addr: SocketAddr,
         options: ConnectionOptions,
@@ -185,6 +198,7 @@ impl Connection {
     /// handshake run before this call, so the stream is already
     /// authenticated. From here on the connection's normal request /
     /// response framing applies.
+    #[tracing::instrument(level = "debug", skip_all, err)]
     pub async fn from_stream(
         stream: Box<dyn ClientDuplex>,
         options: ConnectionOptions,
@@ -229,9 +243,16 @@ impl Connection {
     /// exited, or `ClientError::Timeout` if no response arrives in time.
     // cargo-mutants: live-broker send path; not unit-testable
     #[cfg_attr(test, mutants::skip)]
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(api_key = R::API_KEY, version = tracing::field::Empty),
+        err,
+    )]
     pub async fn send<R: ProtocolRequest>(&self, req: R) -> Result<R::Response, ClientError> {
         // 1. Negotiate version.
         let version = self.inner.versions.negotiate::<R>()?;
+        tracing::Span::current().record("version", version);
 
         // 2. Allocate correlation ID.
         let corr_id = self.inner.next_corr_id.fetch_add(1, Ordering::Relaxed);
@@ -321,6 +342,7 @@ impl Connection {
     /// configured request timeout.
     // cargo-mutants: live-broker I/O path; not unit-testable
     #[cfg_attr(test, mutants::skip)]
+    #[tracing::instrument(level = "debug", skip_all, fields(api_key, api_version), err)]
     pub async fn raw_request(
         &self,
         api_key: i16,
@@ -518,6 +540,7 @@ fn build_request_header(
 /// This is the bootstrap step inside `connect`: no version table exists yet,
 /// so we cannot use `Connection::send`. Version 0 is guaranteed to be
 /// supported by every broker.
+#[tracing::instrument(level = "debug", skip_all, err)]
 async fn fetch_api_versions(conn: &Connection) -> Result<ApiVersionTable, ClientError> {
     use crabka_protocol::Encode;
     use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;

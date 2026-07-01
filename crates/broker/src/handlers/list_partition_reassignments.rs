@@ -14,6 +14,13 @@ use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
 use crate::codes::CLUSTER_AUTHORIZATION_FAILED;
 
+#[tracing::instrument(
+    name = "handle_list_partition_reassignments",
+    level = "info",
+    skip_all,
+    fields(api = "ListPartitionReassignments"),
+    err
+)]
 pub(crate) async fn handle(
     broker: &Broker,
     req: ListPartitionReassignmentsRequest,

@@ -25,6 +25,13 @@ use crate::error::BrokerError;
 
 const FOLLOWER_WAIT: Duration = Duration::from_secs(30);
 
+#[tracing::instrument(
+    name = "handle_sync_group",
+    level = "info",
+    skip_all,
+    fields(api = "SyncGroup", version, req_bytes = req_bytes.len()),
+    err,
+)]
 pub(crate) async fn handle(
     broker: &Broker,
     version: i16,

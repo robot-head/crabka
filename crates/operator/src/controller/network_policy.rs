@@ -168,6 +168,11 @@ fn to_k8s_peer(p: &NetworkPolicyPeer) -> K8sPeer {
 /// `status.conditions[NetworkPolicyReady].reason == "Available"`,
 /// DELETEs the resource once (404-tolerant). On the next reconcile the
 /// status will carry `reason=Disabled` so the delete won't repeat.
+#[tracing::instrument(
+    level = "debug",
+    skip_all,
+    fields(cluster = %name, namespace = %namespace, inter_broker_port),
+)]
 pub(crate) async fn reconcile_network_policy(
     ctx: &Context,
     owner: &Kafka,

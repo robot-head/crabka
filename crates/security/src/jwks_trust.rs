@@ -26,6 +26,10 @@ pub enum JwksTrustError {
 /// `rustls::ClientConfig` that trusts exactly those certificates. The
 /// returned config has no client auth (the broker does not present a
 /// client cert when fetching the JWKS endpoint).
+// JWKS-endpoint trust-anchor setup. skip_all keeps the loaded certs out of
+// span fields (the PEM path is not secret but adds no useful cardinality here).
+// `err` surfaces IO / parse / rustls failures (Debug).
+#[tracing::instrument(level = "info", skip_all, err)]
 pub fn build_client_config_from_pem(
     path: &Path,
 ) -> Result<Arc<rustls::ClientConfig>, JwksTrustError> {

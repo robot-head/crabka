@@ -5,6 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use futures::StreamExt as _;
 use object_store::path::Path;
 use object_store::{ObjectMeta, ObjectStore, ObjectStoreExt, PutPayload};
+use tracing::instrument;
 
 use crate::error::{BlockStoreError, Result};
 
@@ -40,6 +41,7 @@ fn next_snapshot_key(key: &str) -> Result<String> {
     ))
 }
 
+#[instrument(skip_all, fields(key = %key, len = bytes.len()), err)]
 pub async fn put_index_snapshot(
     store: &Arc<dyn ObjectStore>,
     key: &str,
@@ -63,6 +65,7 @@ pub async fn latest_index_snapshot_path(
         .map(|meta| meta.location))
 }
 
+#[instrument(level = "debug", skip_all, fields(key = %key), err)]
 pub async fn list_index_snapshot_objects(
     store: &Arc<dyn ObjectStore>,
     key: &str,
@@ -83,6 +86,7 @@ pub async fn list_index_snapshot_objects(
     Ok(objects)
 }
 
+#[instrument(level = "debug", skip_all, fields(key = %key, retain), err)]
 async fn prune_old_index_snapshots(
     store: &Arc<dyn ObjectStore>,
     key: &str,

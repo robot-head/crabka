@@ -471,6 +471,10 @@ services:
       CRABKA_DEMO_REGISTRY: http://schema-registry:8081
     depends_on:
       topic-setup: { condition: service_completed_successfully }
+      # The traced consumer now deserialises Order via the registry (to enrich
+      # its processing spans), so it must wait for schema-registry like the
+      # producer/stream roles do.
+      schema-registry: { condition: service_healthy }
 
 volumes:
   broker-data:

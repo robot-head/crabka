@@ -25,6 +25,13 @@ const RESOURCE_TYPE_TOPIC: i8 = 2;
 const RESOURCE_TYPE_BROKER: i8 = 4;
 
 #[allow(clippy::too_many_lines)]
+#[tracing::instrument(
+    name = "handle_alter_configs",
+    level = "info",
+    skip_all,
+    fields(api = "AlterConfigs", version, req_bytes = req_bytes.len()),
+    err,
+)]
 pub(crate) async fn handle(
     broker: &Broker,
     version: i16,

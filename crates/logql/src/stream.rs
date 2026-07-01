@@ -69,6 +69,11 @@ impl StreamQuery {
         self.evaluate_with_fields_and_timestamp(labels, line, initial_fields, Some(timestamp_ns))
     }
 
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(matchers = self.matchers.len(), stages = self.pipeline.len())
+    )]
     fn evaluate_with_fields_and_timestamp(
         &self,
         labels: &Labels,

@@ -67,6 +67,10 @@ pub enum TlsError {
 }
 
 impl TlsConfig {
+    // TLS server-config setup. skip_all keeps the loaded certs/key material out
+    // of span fields; only the non-sensitive client-auth mode is recorded.
+    // `err` surfaces cert/key loading + verifier-build failures (Debug).
+    #[tracing::instrument(level = "info", skip_all, fields(client_auth = ?self.client_auth), err)]
     pub fn build_server_config(&self) -> Result<Arc<rustls::ServerConfig>, TlsError> {
         let certs = load_certs(&self.cert_chain_path)?;
         let key = load_private_key(&self.private_key_path)?;
@@ -112,6 +116,10 @@ impl TlsConfig {
         Ok(Arc::new(cfg))
     }
 
+    // TLS client-config setup (outbound dialer, no client identity). skip_all
+    // keeps loaded trust roots out of span fields. `err` surfaces cert-loading
+    // failures (Debug).
+    #[tracing::instrument(level = "info", skip_all, err)]
     pub fn build_client_config(&self) -> Result<Arc<rustls::ClientConfig>, TlsError> {
         let mut roots = rustls::RootCertStore::empty();
         if let Some(path) = &self.trust_roots_path {
@@ -133,6 +141,10 @@ impl TlsConfig {
     ///
     /// # Errors
     /// Propagates `TlsError` from cert/key loading or rustls config building.
+    // mTLS client-config setup (presents this node's own identity). skip_all
+    // keeps loaded certs/key material out of span fields. `err` surfaces
+    // cert/key loading + config-build failures (Debug).
+    #[tracing::instrument(level = "info", skip_all, err)]
     pub fn build_client_config_with_identity(&self) -> Result<Arc<rustls::ClientConfig>, TlsError> {
         let mut roots = rustls::RootCertStore::empty();
         if let Some(path) = &self.trust_roots_path {

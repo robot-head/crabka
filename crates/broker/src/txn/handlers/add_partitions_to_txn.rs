@@ -42,6 +42,13 @@ use crate::error::BrokerError;
 use crate::txn::state::{TopicPartition, TxnState};
 use crate::txn::util::now_millis;
 
+#[tracing::instrument(
+    name = "handle_add_partitions_to_txn",
+    level = "info",
+    skip_all,
+    fields(api = "AddPartitionsToTxn", version, req_bytes = req_bytes.len()),
+    err,
+)]
 pub(crate) async fn handle(
     broker: &Broker,
     version: i16,

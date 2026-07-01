@@ -114,6 +114,14 @@ impl<C: ClientFacade + ?Sized + 'static> Execution<C> {
 
     /// Drive the state machine to a terminal status. Always clears
     /// throttle before returning.
+    // One span per execution run (info): the whole ApplyThrottle→Submit→Wait→
+    // ClearThrottle lifecycle. Per-phase steps stay as their existing
+    // `info!`/`warn!` events inside the loop (not separate spans).
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(proposal_id = %self.proposal.id, starting_phase = ?self.starting_phase),
+    )]
     #[allow(clippy::too_many_lines)]
     pub async fn run(self) {
         let mut phase = self.starting_phase;

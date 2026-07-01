@@ -165,13 +165,24 @@ pub(crate) fn to_gateway_record(r: crate::pb::Record) -> crate::types::GatewayRe
     }
 }
 
-#[tracing::instrument(skip_all)]
+// RPC request entry (info): one span per Send. `skip_all` keeps the (large)
+// request + identity out of the span; `records` carries the batch size. The
+// per-record produce loop is NOT separately instrumented (tight loop).
+#[tracing::instrument(
+    level = "info",
+    skip_all,
+    fields(records = req.0.records.len()),
+)]
 pub async fn send(
     Extension(state): Extension<Arc<AppState>>,
     principal: Option<Extension<Principal>>,
     peer: Option<Extension<SocketAddr>>,
     req: ConnectRequest<pb::SendRequest>,
 ) -> Result<ConnectResponse<pb::SendResponse>, ConnectError> {
+    // RED signals: count this request as in-flight for its whole lifetime and
+    // time the end-to-end handler latency under the `send` method label. The
+    // guard decrements + observes on drop (covering every return path).
+    let _req = metrics().begin_request("send");
     let msg = req.0;
     // Effective identity: the proxy-injected principal (P4 mTLS / parallel
     // bearer task) or ANONYMOUS; the caller's peer address or the unknown host.

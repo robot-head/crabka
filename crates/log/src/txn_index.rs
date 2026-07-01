@@ -12,6 +12,7 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
 
+use tracing::instrument;
 use zerocopy::byteorder::I64;
 use zerocopy::{BigEndian, FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
@@ -48,6 +49,12 @@ impl TxnIndex {
     /// Open (or recover) a `.txnindex` file at the given path. Reads
     /// the entire file into memory at startup. An empty / missing file
     /// is fine — we treat that as zero aborted transactions.
+    #[instrument(
+        level = "debug",
+        skip_all,
+        fields(path = %path.display(), entries = tracing::field::Empty),
+        err,
+    )]
     pub fn open(path: PathBuf) -> Result<Self, LogError> {
         let mut entries = Vec::new();
         match std::fs::read(&path) {
@@ -74,10 +81,17 @@ impl TxnIndex {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(LogError::Io(e)),
         }
+        tracing::Span::current().record("entries", entries.len());
         Ok(Self { path, entries })
     }
 
     /// Append one aborted-txn entry.
+    #[instrument(
+        level = "debug",
+        skip(self),
+        fields(producer_id = entry.producer_id),
+        err,
+    )]
     pub fn append(&mut self, entry: AbortedTxn) -> Result<(), LogError> {
         let mut f = OpenOptions::new()
             .create(true)

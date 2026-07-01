@@ -253,6 +253,13 @@ impl Consumer {
     /// misconfiguration or persistent error surfaces immediately.
     #[builder(start_fn = builder, finish_fn = build)]
     #[allow(clippy::too_many_lines)]
+    #[tracing::instrument(
+        name = "consumer.start",
+        level = "info",
+        skip_all,
+        fields(group_id = %group_id, client_id = %client_id),
+        err
+    )]
     pub async fn start(
         #[builder(into)] bootstrap: String,
         #[builder(into, default = "crabka-consumer".to_string())] client_id: String,
@@ -371,6 +378,20 @@ impl Consumer {
     /// at the very end of this function (no `.await` follows it), so a
     /// timed-out attempt can never orphan a coordinator task.
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    #[tracing::instrument(
+        name = "consumer.start_once",
+        level = "info",
+        skip_all,
+        fields(
+            group_id = %group_id,
+            coordinator_id = tracing::field::Empty,
+            member_id = tracing::field::Empty,
+            generation = tracing::field::Empty,
+            is_leader = tracing::field::Empty,
+            assigned_partitions = tracing::field::Empty,
+        ),
+        err
+    )]
     async fn start_once(
         bootstrap: String,
         client_id: String,
@@ -409,6 +430,7 @@ impl Consumer {
         //    so it learns the coordinator broker's address (needed by
         //    `client.broker(coordinator_id)` here and by `commit.rs`).
         let coordinator_id = Arc::new(AtomicI32::new(find_coordinator(&client, &group_id).await?));
+        tracing::Span::current().record("coordinator_id", coordinator_id.load(Ordering::Relaxed));
 
         // First JoinGroup uses empty `owned_partitions` + `generation_id=-1`:
         // we've never been in the group before, so we have nothing to claim
@@ -452,6 +474,7 @@ impl Consumer {
         )
         .await?;
         let member_id = first_join_member_id(&r1)?;
+        tracing::Span::current().record("member_id", member_id.as_str());
 
         let cleanup_client = client.clone();
         let cleanup_coordinator_id = Arc::clone(&coordinator_id);
@@ -516,6 +539,8 @@ impl Consumer {
             }
 
             let is_leader = is_group_leader(&r2.leader, &member_id);
+            tracing::Span::current().record("generation", r2.generation_id);
+            tracing::Span::current().record("is_leader", is_leader);
             let assignments_for_sync: Vec<SyncGroupRequestAssignment> = if is_leader {
                 let assignments = match assignor {
                     Assignor::Range => {
@@ -588,6 +613,7 @@ impl Consumer {
                 return Err(ConsumerError::Server(r3.error_code));
             }
             let assigned_partitions = decode_assignment(&r3.assignment);
+            tracing::Span::current().record("assigned_partitions", assigned_partitions.len());
 
             // 5. Fetch existing committed offsets so poll() resumes correctly.
             let mut next_offsets: HashMap<(String, i32), i64> = HashMap::new();
@@ -811,6 +837,13 @@ impl Consumer {
     /// and orphan the real member until its session expires. Cancel + join is
     /// prompt because the coordinator races its in-tick RPCs against the
     /// shutdown token.
+    #[tracing::instrument(
+        name = "consumer.close",
+        level = "info",
+        skip_all,
+        fields(group_id = %self.group_id, member_id = %self.member_id),
+        err
+    )]
     pub async fn close(mut self) -> Result<(), ConsumerError> {
         self.coordinator_shutdown.cancel();
         if let Some(h) = self.coordinator_handle.take() {

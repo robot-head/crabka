@@ -11,10 +11,12 @@ use crate::{
     RegexpParser, StreamQuery, UnwrapExpression,
 };
 
+#[tracing::instrument(level = "info", skip_all, fields(query = %input), err)]
 pub fn parse_query(input: &str) -> Result<StreamQuery, ParseError> {
     Parser::new(input).parse()
 }
 
+#[tracing::instrument(level = "info", skip_all, fields(query = %input), err)]
 pub fn parse_metric_query(input: &str) -> Result<MetricQuery, ParseError> {
     Parser::new(input).parse_metric()
 }

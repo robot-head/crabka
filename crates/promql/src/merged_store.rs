@@ -37,6 +37,13 @@ where
     C: MetricStore,
     H: MetricStore,
 {
+    #[tracing::instrument(
+        name = "promql.merged_scan",
+        level = "debug",
+        skip_all,
+        fields(tenant = %tenant, matchers = matchers.len(), start_ms = start_ms, end_ms = end_ms),
+        err
+    )]
     async fn scan(
         &self,
         tenant: &str,

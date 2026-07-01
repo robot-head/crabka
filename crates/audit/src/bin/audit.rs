@@ -29,6 +29,11 @@ enum Command {
     },
 }
 
+#[tracing::instrument(
+    level = "info",
+    skip_all,
+    fields(command = tracing::field::Empty, partition_dir = tracing::field::Empty, key_id = tracing::field::Empty)
+)]
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
@@ -37,6 +42,13 @@ fn main() -> ExitCode {
             key_id,
             public_key,
         } => {
+            let span = tracing::Span::current();
+            span.record("command", "verify");
+            span.record(
+                "partition_dir",
+                tracing::field::display(partition_dir.display()),
+            );
+            span.record("key_id", tracing::field::display(&key_id));
             let pubkey = match std::fs::read(&public_key) {
                 Ok(b) => b,
                 Err(e) => {

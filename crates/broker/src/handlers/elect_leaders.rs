@@ -38,6 +38,13 @@ const WIRE_ELECTION_UNCLEAN: i8 = 1;
 const OPERATOR_RECOVERY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(25);
 
 #[allow(clippy::too_many_lines)]
+#[tracing::instrument(
+    name = "handle_elect_leaders",
+    level = "info",
+    skip_all,
+    fields(api = "ElectLeaders"),
+    err
+)]
 pub(crate) async fn handle(
     broker: &Broker,
     req: ElectLeadersRequest,

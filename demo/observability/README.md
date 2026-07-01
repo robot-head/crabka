@@ -109,12 +109,26 @@ Actions workflow (Actions → *publish-demo-image* → *Run workflow* → image 
 
 ## What you should see
 
-- **Explore → Crabka Metrics** (Prometheus): `{job="broker"}` — the broker's own metrics.
-- **Explore → Crabka Logs** (Loki): `{service_name="crabka-logs"}`, `{service_name="observability-demo-app"}` — JSON logs.
+- **Explore → Crabka Metrics** (Prometheus): `{job=”broker”}` — the broker's own
+  metrics; `{__name__=~”crabka_demo_.*”}` — the demo app's business metrics
+  (orders by category × region × payment method, order value, per-stage
+  processing latency, outcomes).
+- **Explore → Crabka Logs** (Loki): `{service_name=”broker”}`,
+  `{service_name=~”demo-.*”}` — JSON logs.
 - **Explore → Crabka Traces** (Tempo): TraceQL `{}` — broker + demo-app spans.
+  **Cross-service distributed traces:** search `{ name = “produce_order” }` (or
+  open any `demo-produce` trace) — each traced order is one trace spanning
+  **demo-produce → demo-consume**, carried by a W3C `traceparent` Kafka record
+  header through the broker. The consumer side shows the `process_order` span
+  with its `validate → enrich → fraud_check → fulfill` child stages. The
+  observability services also self-instrument their ingest/compaction: a
+  `*_ingest` span on each distributor and a `*_block_build` / `*_compaction`
+  span on each block-builder/compactor, linked across the WAL so you can see a
+  distributor → broker (WAL) → block-builder trace.
 - **Explore → Crabka Profiles** (Pyroscope): Crabka services — CPU + heap flamegraphs; demo app roles — CPU flamegraphs.
-- The **“Crabka observes Crabka”** dashboard (folder *Crabka*) shows one panel
-  per signal plus querier heap flamegraphs.
+- The **”Crabka observes Crabka”** dashboard (folder *Crabka*) shows one panel
+  per signal plus querier heap flamegraphs; the **”Crabka — Orders Demo”**
+  dashboard visualises the demo pipeline's business metrics.
 
 ## Dashboards & alerts
 
@@ -128,6 +142,10 @@ Provisioned dashboards (folder *Crabka*):
 
 - **Crabka — Overview** — fleet liveness, ingest/query rate and error ratio per
   subsystem, broker throughput.
+- **Crabka — Orders Demo** — the demo pipeline's business metrics
+  (`crabka_demo_*`): orders produced/processed by category × region × payment
+  method, order-value distribution, per-stage processing latency, and
+  fulfilled / fraud-rejected / anomalous outcomes.
 - **Crabka — Runtime Resources** — container CPU, working-set memory, memory
   limit ratio, CPU throttling, and top memory users across Crabka plus Grafana,
   Alloy, cAdvisor, and RustFS.

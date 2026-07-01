@@ -176,6 +176,7 @@ async fn delete_dynamic_if_exists(
     }
 }
 
+#[tracing::instrument(level = "debug", skip_all, fields(cluster = %name, namespace = %namespace))]
 pub(crate) async fn reconcile_metrics(
     ctx: &Context,
     owner: &Kafka,

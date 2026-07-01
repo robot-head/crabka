@@ -66,6 +66,12 @@ impl InternalTopicCheckpointStore {
 
 #[async_trait]
 impl CheckpointStore for InternalTopicCheckpointStore {
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(key = %self.key, positions = offset.position.len()),
+        err,
+    )]
     async fn save(&self, offset: &SourceOffset) -> Result<(), ConnectError> {
         let bytes = serde_json::to_vec(offset).map_err(|e| ConnectError::Offset(e.to_string()))?;
 
@@ -91,6 +97,7 @@ impl CheckpointStore for InternalTopicCheckpointStore {
         Ok(())
     }
 
+    #[tracing::instrument(level = "info", skip_all, fields(key = %self.key), err)]
     async fn load(&self) -> Result<Option<SourceOffset>, ConnectError> {
         let latest = crate::admin_util::read_last_value_for_key(
             &self.target_bootstrap,

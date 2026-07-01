@@ -13,7 +13,9 @@
 use std::sync::Arc;
 
 use prometheus_client::encoding::EncodeLabelSet;
-use prometheus_client::metrics::{counter::Counter, family::Family, histogram::Histogram};
+use prometheus_client::metrics::{
+    counter::Counter, family::Family, gauge::Gauge, histogram::Histogram,
+};
 use prometheus_client::registry::Registry;
 use tokio::sync::Mutex;
 
@@ -41,6 +43,19 @@ pub struct RouteLabel {
     pub route: String,
 }
 
+/// Query-shape label: `type="instant"` or `type="range"`. Distinguishes the
+/// engine-eval latency histogram and the eval-error counter by the kind of
+/// `PromQL` query, independent of the HTTP route (both `query` and, e.g., a
+/// remote-read fanned instant query share `type="instant"`).
+///
+/// The field is the raw identifier `r#type`: the `EncodeLabelSet` derive maps
+/// keyword-raw idents back to their bare form, so this encodes as the label key
+/// `type` (this crate's derive supports only `flatten`, not a `rename` attr).
+#[derive(Debug, Clone, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct QueryTypeLabel {
+    pub r#type: String,
+}
+
 /// Cheaply-clonable bundle of metric handles. Construct once with
 /// [`ServiceMetrics::new`]; hand out clones (each a single `Arc::clone`) to the
 /// handlers that emit.
@@ -56,6 +71,14 @@ pub struct ServiceMetrics {
     // QUERY (querier) role.
     pub query_requests: Family<RouteStatusLabel, Counter>,
     pub query_duration: Family<RouteLabel, Histogram>,
+    /// Pure PromQL-engine evaluation latency (parse + plan + execute), labelled
+    /// by query `type` (`instant`|`range`). Narrower than `query_duration`,
+    /// which spans the whole HTTP handler (param decode, permit wait, encode).
+    pub query_eval_duration: Family<QueryTypeLabel, Histogram>,
+    /// Cumulative engine-eval failures, labelled by query `type`.
+    pub query_errors: Family<QueryTypeLabel, Counter>,
+    /// In-flight `PromQL` queries currently executing in the engine.
+    pub active_queries: Gauge,
 }
 
 impl ServiceMetrics {
@@ -76,6 +99,12 @@ impl ServiceMetrics {
         let query_duration: Family<RouteLabel, Histogram> = Family::new_with_constructor(|| {
             Histogram::new([0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0])
         });
+        let query_eval_duration: Family<QueryTypeLabel, Histogram> =
+            Family::new_with_constructor(|| {
+                Histogram::new([0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0])
+            });
+        let query_errors: Family<QueryTypeLabel, Counter> = Family::default();
+        let active_queries = Gauge::default();
 
         registry.register(
             "ingest_requests",
@@ -112,6 +141,21 @@ impl ServiceMetrics {
             "Query handler latency in seconds, labelled by route.",
             query_duration.clone(),
         );
+        registry.register(
+            "query_eval_duration_seconds",
+            "PromQL engine evaluation latency in seconds (parse+plan+execute), labelled by query type.",
+            query_eval_duration.clone(),
+        );
+        registry.register(
+            "query_errors",
+            "Cumulative PromQL engine evaluation failures, labelled by query type.",
+            query_errors.clone(),
+        );
+        registry.register(
+            "active_queries",
+            "PromQL queries currently executing in the engine.",
+            active_queries.clone(),
+        );
 
         Self {
             registry: Arc::new(Mutex::new(registry)),
@@ -122,6 +166,9 @@ impl ServiceMetrics {
             wal_append_failures,
             query_requests,
             query_duration,
+            query_eval_duration,
+            query_errors,
+            active_queries,
         }
     }
 
@@ -154,6 +201,37 @@ impl ServiceMetrics {
                 route: route.into(),
             })
             .observe(secs);
+    }
+
+    /// Record one `PromQL` engine evaluation: its latency `secs` under
+    /// `query_eval_duration{type}` and, when `ok` is false, a
+    /// `query_errors{type}` increment. `query_type` is `"instant"` or
+    /// `"range"`.
+    pub fn record_eval(&self, query_type: &str, ok: bool, secs: f64) {
+        self.query_eval_duration
+            .get_or_create(&QueryTypeLabel {
+                r#type: query_type.into(),
+            })
+            .observe(secs);
+        if !ok {
+            self.query_errors
+                .get_or_create(&QueryTypeLabel {
+                    r#type: query_type.into(),
+                })
+                .inc();
+        }
+    }
+
+    /// RAII-free in-flight tracking: bump `active_queries` on query entry.
+    /// Pair every call with [`Self::query_finished`].
+    pub fn query_started(&self) {
+        self.active_queries.inc();
+    }
+
+    /// Decrement `active_queries` on query exit. Pairs with
+    /// [`Self::query_started`].
+    pub fn query_finished(&self) {
+        self.active_queries.dec();
     }
 }
 
@@ -218,6 +296,13 @@ mod tests {
         m.record_query("series", true, 0.2);
         m.record_query("labels", true, 0.1);
         m.record_query("label_values", true, 0.1);
+        // Engine-eval metrics: an instant success, a range failure, and some
+        // in-flight tracking so every new metric materializes a sample line.
+        m.record_eval("instant", true, 0.02);
+        m.record_eval("range", false, 1.2);
+        m.query_started();
+        m.query_started();
+        m.query_finished();
 
         let mut buf = String::new();
         let r = m.registry.lock().await;
@@ -230,6 +315,9 @@ mod tests {
             "crabka_metrics_wal_append_failures_total",
             "crabka_metrics_query_requests_total",
             "crabka_metrics_query_duration_seconds",
+            "crabka_metrics_query_eval_duration_seconds",
+            "crabka_metrics_query_errors_total",
+            "crabka_metrics_active_queries",
         ] {
             assert!(buf.contains(needle), "missing {needle} in:\n{buf}");
         }
@@ -241,6 +329,20 @@ mod tests {
         assert!(
             buf.contains("status=\"error\""),
             "error status label missing"
+        );
+        // The `r#type` field must encode as the bare `type` label key.
+        assert!(
+            buf.contains("type=\"instant\""),
+            "instant query type label missing in:\n{buf}"
+        );
+        assert!(
+            buf.contains("type=\"range\""),
+            "range query type label missing in:\n{buf}"
+        );
+        // One `query_started` is still outstanding (2 inc, 1 dec) → gauge == 1.
+        assert!(
+            buf.contains("crabka_metrics_active_queries 1"),
+            "active_queries gauge should read 1 in:\n{buf}"
         );
     }
 

@@ -116,6 +116,19 @@ impl StreamThread {
     /// passed as `txn` (a [`TransactionalProducer`] view), and the first EOS
     /// assignment runs `init_transactions` once (fencing any zombie).
     #[allow(clippy::too_many_lines)]
+    #[tracing::instrument(
+        name = "streams.thread.apply_assignment",
+        level = "info",
+        skip_all,
+        fields(
+            application_id = %self.application_id,
+            guarantee = ?guarantee,
+            active = assignment.active.len(),
+            standby = assignment.standby.len(),
+            warmup = assignment.warmup.len(),
+        ),
+        err,
+    )]
     pub async fn apply_assignment(
         &mut self,
         assignment: &StreamsAssignment,
@@ -257,6 +270,13 @@ impl StreamThread {
     // All EOS-cycle errors are treated as retryable abort+rollback here; the
     // fenced-fatal distinction (a `ProducerFenced` must shut the thread down, not
     // retry) is a follow-up.
+    #[tracing::instrument(
+        name = "streams.thread.abort_and_rollback",
+        level = "info",
+        skip_all,
+        fields(tasks = self.tasks.len()),
+        err,
+    )]
     async fn abort_and_rollback(&mut self) -> Result<(), StreamsClientError> {
         if let Some(txn) = self.txn.as_ref() {
             let _ = txn.abort_transaction().await;
@@ -269,6 +289,13 @@ impl StreamThread {
         Ok(())
     }
 
+    #[tracing::instrument(
+        name = "streams.thread.poll_all",
+        level = "debug",
+        skip_all,
+        fields(guarantee = ?self.guarantee, tasks = self.tasks.len()),
+        err,
+    )]
     pub async fn poll_all(
         &mut self,
         fetcher: &dyn RecordFetcher,
@@ -342,6 +369,13 @@ impl StreamThread {
     /// records the gate is never tripped, so the interval opens no transaction
     /// (and `commit_all` becomes a no-op) — matching the JVM's "gate on records
     /// processed since last commit" behaviour.
+    #[tracing::instrument(
+        name = "streams.thread.eos_begin_and_process",
+        level = "debug",
+        skip_all,
+        fields(tasks = self.tasks.len(), in_txn = self.in_txn),
+        err,
+    )]
     async fn eos_begin_and_process(
         &mut self,
         fetcher: &dyn RecordFetcher,
@@ -372,6 +406,13 @@ impl StreamThread {
     /// `send_offsets_to_transaction`, then `commit_transaction`. Captured so
     /// `commit_all` can turn any `Err` into an abort + rollback. Does NOT clear
     /// pending (the caller does that only on success).
+    #[tracing::instrument(
+        name = "streams.thread.eos_send_offsets_and_commit",
+        level = "debug",
+        skip_all,
+        fields(tasks = self.tasks.len()),
+        err,
+    )]
     async fn eos_send_offsets_and_commit(
         &mut self,
         meta: Option<&StreamsGroupMeta>,
@@ -395,6 +436,13 @@ impl StreamThread {
     /// clear the tasks' pending offsets. Requires `meta` (the streams group
     /// metadata). A no-op when no transaction is open (nothing produced since the
     /// last commit).
+    #[tracing::instrument(
+        name = "streams.thread.commit_all",
+        level = "info",
+        skip_all,
+        fields(guarantee = ?self.guarantee, tasks = self.tasks.len(), in_txn = self.in_txn),
+        err,
+    )]
     pub async fn commit_all(
         &mut self,
         meta: Option<&StreamsGroupMeta>,
@@ -451,6 +499,12 @@ impl StreamThread {
     /// `StreamThread: Sync` — but the graph holds `Box<dyn StateStore>` /
     /// `Box<dyn ErasedNode>` which are `Send` but not `Sync`, so the supervisor's
     /// spawned future would not be `Send`. `&mut self` only needs `Send`.
+    #[tracing::instrument(
+        name = "streams.thread.serve_iq",
+        level = "debug",
+        skip_all,
+        fields(store = %req.store, kind = ?req.kind, tasks = self.tasks.len()),
+    )]
     pub(crate) async fn serve_iq(&mut self, req: IqRequest) {
         let matching: Vec<&dyn crate::store::iq::IqQueryable> = self
             .tasks
@@ -471,6 +525,12 @@ impl StreamThread {
     /// Serve one `IQv2` query: per-partition (no merge). Filters tasks by the
     /// requested partition set, applies the active-only and position-bound
     /// gates, and tags each store's typed result with its partition + position.
+    #[tracing::instrument(
+        name = "streams.thread.serve_iq2",
+        level = "debug",
+        skip_all,
+        fields(store = %req.store, kind = ?req.kind, tasks = self.tasks.len()),
+    )]
     pub(crate) async fn serve_iq2(&mut self, req: crate::runtime::iqv2::dispatch::Iq2Request) {
         use crate::runtime::iqv2::dispatch::Iq2Outcome;
         use crate::runtime::iqv2::request::{PartitionSel, PositionBound};
@@ -540,6 +600,13 @@ impl StreamThread {
     ///
     /// Under EOS, an open transaction is aborted (best-effort) rather than
     /// committed — a fence/shutdown mid-cycle must not leak a half-written txn.
+    #[tracing::instrument(
+        name = "streams.thread.close_all",
+        level = "info",
+        skip_all,
+        fields(guarantee = ?self.guarantee, tasks = self.tasks.len(), in_txn = self.in_txn),
+        err,
+    )]
     pub async fn close_all(
         &mut self,
         meta: Option<&StreamsGroupMeta>,

@@ -343,6 +343,12 @@ pub(crate) struct CaReconcileOutcome {
 /// (`GET key`, `GET cert`, then on create `PATCH key`, `PATCH cert`) plus, only
 /// when a rotation step fires, an extra cert/key `PATCH`.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[tracing::instrument(
+    level = "info",
+    skip_all,
+    fields(cluster = %kafka.name_any(), which = ?which, force_renew, force_replace_key, rollout_converged),
+    err,
+)]
 pub(crate) async fn reconcile_ca(
     secret_api: &Api<Secret>,
     kafka: &Kafka,
@@ -989,6 +995,7 @@ pub fn renew_if_expiring(
 use k8s_openapi::api::core::v1::Event;
 use kube::api::{ListParams, PostParams};
 
+#[tracing::instrument(level = "info", skip_all, fields(namespace = ?namespace), err)]
 pub async fn run_renewal_check(
     client: kube::Client,
     namespace: Option<&str>,
@@ -1011,6 +1018,7 @@ pub async fn run_renewal_check(
     Ok(())
 }
 
+#[tracing::instrument(level = "debug", skip_all, fields(cluster = %kafka.name_any()), err)]
 async fn renew_one(client: &kube::Client, kafka: &Kafka) -> Result<(), ReconcileError> {
     let ns = kafka.meta().namespace.clone().unwrap_or_default();
     let cluster = kafka.name_any();

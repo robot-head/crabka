@@ -29,6 +29,13 @@ const ENDPOINT_TYPE_CONTROLLERS: i8 = 2;
 // `async` for symmetry with other handlers that do await `controller.submit_change`;
 // DescribeCluster is read-only so it never suspends.
 #[allow(clippy::unused_async)]
+#[tracing::instrument(
+    name = "handle_describe_cluster",
+    level = "info",
+    skip_all,
+    fields(api = "DescribeCluster", version, req_bytes = req_bytes.len()),
+    err,
+)]
 pub(crate) async fn handle(
     broker: &Broker,
     version: i16,

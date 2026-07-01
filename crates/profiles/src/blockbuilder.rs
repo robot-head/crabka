@@ -15,8 +15,10 @@ use crabka_pprof::{FunctionRec, LineRec, LocationRec, MappingRec, SymbolDb};
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 use parquet::arrow::ArrowWriter;
+use tracing::Instrument as _;
 
 use crate::error::ProfilesError;
+use crate::metrics::ServiceMetrics;
 use crate::wal::{PROFILES_WAL_TOPIC, ProfileRecord, WalMapping, WalSymbolSet};
 
 pub const STACKTRACE_PARTITION: u64 = 0;
@@ -48,6 +50,11 @@ pub struct BlockBuilderConfig {
     pub flush_records: usize,
     pub flush_max_age: Duration,
     pub poll_timeout: Duration,
+    /// Optional self-instrumentation metrics. When set, the block-builder bumps
+    /// `crabka_profiles_blocks_built_total` by the number of blocks each flush
+    /// wrote. `None` (the default) disables metric emission, keeping the
+    /// block-builder usable without a metrics registry (tests, `run()`).
+    pub metrics: Option<ServiceMetrics>,
 }
 
 impl BlockBuilderConfig {
@@ -61,7 +68,16 @@ impl BlockBuilderConfig {
             flush_records: DEFAULT_FLUSH_RECORDS,
             flush_max_age: DEFAULT_FLUSH_MAX_AGE,
             poll_timeout: Duration::from_millis(500),
+            metrics: None,
         }
+    }
+
+    /// Attach a [`ServiceMetrics`] bundle so the block-builder emits
+    /// `crabka_profiles_blocks_built_total`.
+    #[must_use]
+    pub fn with_metrics(mut self, metrics: ServiceMetrics) -> Self {
+        self.metrics = Some(metrics);
+        self
     }
 }
 
@@ -277,21 +293,48 @@ pub async fn run_with_config(config: BlockBuilderConfig) -> Result<(), ProfilesE
             continue;
         }
         let records = accumulator.take();
-        flush_consumer_records_with_index(
-            &config.store,
-            &mut index,
-            &records,
-            config.flush_records,
-        )
+        // ONE consumer span per poll batch (not per record). Re-parent it onto
+        // the ingest span of a record carrying `traceparent`, stitching the
+        // block-build stage onto the distributed trace that produced the WAL.
+        let build_span = tracing::info_span!(
+            "profiles_block_build",
+            otel.kind = "consumer",
+            crabka.wal.records = records.len(),
+        );
+        if let Some(rec) = records
+            .iter()
+            .find(|rec| rec.headers.iter().any(|h| h.key == "traceparent"))
+        {
+            crabka_telemetry::propagation::set_remote_parent(
+                &build_span,
+                rec.headers
+                    .iter()
+                    .map(|h| (h.key.as_str(), h.value.as_deref().unwrap_or(&[][..]))),
+            );
+        }
+        async {
+            let metas = flush_consumer_records_with_index(
+                &config.store,
+                &mut index,
+                &records,
+                config.flush_records,
+            )
+            .await?;
+            if let Some(metrics) = &config.metrics {
+                metrics.record_blocks_built(metas.len() as u64);
+            }
+            index
+                .save_latest_snapshot(&config.store, &config.index_key)
+                .await
+                .map_err(|err| ProfilesError::Block(err.to_string()))?;
+            consumer
+                .commit_sync()
+                .await
+                .map_err(|err| ProfilesError::Block(format!("consumer commit failed: {err}")))?;
+            Ok::<(), ProfilesError>(())
+        }
+        .instrument(build_span)
         .await?;
-        index
-            .save_latest_snapshot(&config.store, &config.index_key)
-            .await
-            .map_err(|err| ProfilesError::Block(err.to_string()))?;
-        consumer
-            .commit_sync()
-            .await
-            .map_err(|err| ProfilesError::Block(format!("consumer commit failed: {err}")))?;
     }
 }
 
