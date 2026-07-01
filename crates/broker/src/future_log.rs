@@ -415,6 +415,11 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn move_read_chunk_size_is_one_mib() {
+        assert!(MOVE_READ_CHUNK_BYTES == 1024 * 1024);
+    }
+
+    #[test]
     fn move_error_log_dir_not_found_when_target_unknown() {
         // Empty broker — no partitions, no log dirs. `start_move`
         // returns LogDirNotFound before it ever looks at the
