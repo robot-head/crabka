@@ -147,6 +147,7 @@ async fn build_drain_consumer(
     fields(topic = %topic, drained = tracing::field::Empty),
     err,
 )]
+#[allow(clippy::type_complexity)]
 pub async fn read_all(
     bootstrap: &str,
     topic: &str,

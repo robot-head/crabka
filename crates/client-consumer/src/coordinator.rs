@@ -982,6 +982,8 @@ fn build_sync_group_request(
     ),
     err
 )]
+// `#[instrument]` on this async fn surfaces the pre-existing complex tuple return.
+#[allow(clippy::type_complexity)]
 async fn join_and_sync(
     state: &mut CoordinatorState,
     owned: &[(String, i32)],
