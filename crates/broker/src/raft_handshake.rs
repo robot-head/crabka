@@ -451,6 +451,136 @@ mod tests {
 
     use super::*;
     use assert2::assert;
+    use bytes::BufMut;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::time::{Duration, timeout};
+
+    #[derive(Debug)]
+    struct DenyAll;
+
+    impl crate::authorizer::Authorizer for DenyAll {
+        fn authorize(
+            &self,
+            _source: &dyn crate::authorizer::AclSource,
+            _req: &crate::authorizer::AuthorizationRequest<'_>,
+        ) -> crate::authorizer::AuthorizationResult {
+            crate::authorizer::AuthorizationResult::Deny
+        }
+    }
+
+    struct FixedResp(&'static [u8]);
+
+    impl Encode for FixedResp {
+        fn encode<B: BufMut>(
+            &self,
+            buf: &mut B,
+            _version: i16,
+        ) -> Result<(), crabka_protocol::ProtocolError> {
+            buf.put_slice(self.0);
+            Ok(())
+        }
+
+        fn encoded_len(&self, _version: i16) -> usize {
+            self.0.len()
+        }
+    }
+
+    fn request_frame(
+        api_key: i16,
+        api_version: i16,
+        corr_id: i32,
+        client_id: Option<&[u8]>,
+        flexible: bool,
+        body: &[u8],
+    ) -> Vec<u8> {
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&api_key.to_be_bytes());
+        frame.extend_from_slice(&api_version.to_be_bytes());
+        frame.extend_from_slice(&corr_id.to_be_bytes());
+        match client_id {
+            Some(id) => {
+                let len = i16::try_from(id.len()).expect("client id fits i16");
+                frame.extend_from_slice(&len.to_be_bytes());
+                frame.extend_from_slice(id);
+            }
+            None => frame.extend_from_slice(&(-1i16).to_be_bytes()),
+        }
+        if flexible {
+            frame.push(0);
+        }
+        frame.extend_from_slice(body);
+
+        let mut out = Vec::new();
+        let len = u32::try_from(frame.len()).expect("frame fits u32");
+        out.extend_from_slice(&len.to_be_bytes());
+        out.extend_from_slice(&frame);
+        out
+    }
+
+    async fn read_request_from_frame(
+        frame: Vec<u8>,
+    ) -> Result<(i16, i16, i32, Vec<u8>), RaftHandshakeError> {
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        client.write_all(&frame).await.expect("write request frame");
+        read_kafka_request(&mut server).await
+    }
+
+    async fn read_response_frame(stream: &mut tokio::io::DuplexStream) -> Vec<u8> {
+        timeout(Duration::from_secs(1), async {
+            let mut size_buf = [0u8; 4];
+            stream
+                .read_exact(&mut size_buf)
+                .await
+                .expect("response size");
+            let size = u32::from_be_bytes(size_buf) as usize;
+            let mut frame = vec![0u8; size];
+            stream.read_exact(&mut frame).await.expect("response frame");
+            frame
+        })
+        .await
+        .expect("timely response")
+    }
+
+    fn sasl_test_config() -> BrokerRaftHandshake {
+        let mut plain_credentials = HashMap::new();
+        plain_credentials.insert("broker".to_string(), "secret".to_string());
+        BrokerRaftHandshake {
+            tls_acceptor: None,
+            plain_credentials,
+            enabled_sasl_mechanisms: vec![SaslMechanism::Plain],
+            protocol: ListenerProtocol::SaslPlaintext,
+            controller: Arc::new(OnceCell::new()),
+            authorizer: Arc::new(crate::authorizer::AllowAllAuthorizer),
+        }
+    }
+
+    fn sasl_handshake_body() -> Vec<u8> {
+        let mut body = bytes::BytesMut::new();
+        SaslHandshakeRequest {
+            mechanism: "PLAIN".to_string(),
+            ..Default::default()
+        }
+        .encode(&mut body, 1)
+        .expect("encode sasl handshake");
+        body.to_vec()
+    }
+
+    fn sasl_authenticate_body() -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.push(0);
+        payload.extend_from_slice(b"broker");
+        payload.push(0);
+        payload.extend_from_slice(b"secret");
+
+        let mut body = bytes::BytesMut::new();
+        SaslAuthenticateRequest {
+            auth_bytes: bytes::Bytes::from(payload),
+            ..Default::default()
+        }
+        .encode(&mut body, 2)
+        .expect("encode sasl authenticate");
+        body.to_vec()
+    }
 
     #[test]
     fn plaintext_passthrough_short_circuits() {
@@ -467,6 +597,46 @@ mod tests {
         // upgrade-path is exercised end-to-end in integration tests.
         assert!(!cfg.protocol.requires_tls());
         assert!(!cfg.protocol.requires_sasl());
+    }
+
+    #[tokio::test]
+    async fn authorize_cluster_action_denies_when_authorizer_denies() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let controller = Arc::new(
+            crabka_raft::Controller::start(crabka_raft::ControllerConfig::for_tests(
+                1,
+                dir.path().to_path_buf(),
+            ))
+            .await
+            .expect("controller"),
+        );
+        let controller_cell = Arc::new(OnceCell::new());
+        assert!(controller_cell.set(controller.clone()).is_ok());
+
+        let cfg = BrokerRaftHandshake {
+            tls_acceptor: None,
+            plain_credentials: HashMap::new(),
+            enabled_sasl_mechanisms: vec![SaslMechanism::Plain],
+            protocol: ListenerProtocol::SaslPlaintext,
+            controller: controller_cell,
+            authorizer: Arc::new(DenyAll),
+        };
+        let principal = crabka_security::Principal {
+            name: "broker".to_string(),
+            auth_method: crabka_security::AuthMethod::SaslPlain,
+            groups: Vec::new(),
+        };
+        let peer = "127.0.0.1:9092".parse().expect("peer");
+
+        let err = cfg
+            .authorize_cluster_action(&principal, &peer)
+            .expect_err("deny must reject");
+        assert!(matches!(err, RaftHandshakeError::Sasl(msg) if msg.contains("not authorized")));
+
+        drop(cfg);
+        let controller = Arc::try_unwrap(controller)
+            .unwrap_or_else(|_| panic!("controller handle still shared after auth test"));
+        controller.shutdown().await;
     }
 
     #[test]
@@ -486,5 +656,195 @@ mod tests {
         // ApiVersions — response header always v0 per Kafka spec.
         assert!(!is_response_header_flexible(API_KEY_API_VERSIONS, 0));
         assert!(!is_response_header_flexible(API_KEY_API_VERSIONS, 3));
+    }
+
+    #[tokio::test]
+    async fn read_kafka_request_decodes_nonflex_and_flexible_headers() {
+        let nonflex = request_frame(17, 1, 42, None, false, b"plain-body");
+        let decoded = read_request_from_frame(nonflex)
+            .await
+            .expect("nonflex request");
+        assert!(decoded == (17, 1, 42, b"plain-body".to_vec()));
+
+        let flex = request_frame(36, 2, 43, Some(b"c"), true, b"auth-body");
+        let decoded = read_request_from_frame(flex).await.expect("flex request");
+        assert!(decoded == (36, 2, 43, b"auth-body".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn read_kafka_request_rejects_short_and_truncated_headers() {
+        let mut short = Vec::new();
+        short.extend_from_slice(&9u32.to_be_bytes());
+        short.extend_from_slice(&[0; 9]);
+        assert!(matches!(
+            read_request_from_frame(short).await,
+            Err(RaftHandshakeError::Protocol(msg)) if msg.contains("short request header")
+        ));
+
+        let mut truncated_client = Vec::new();
+        truncated_client.extend_from_slice(&12u32.to_be_bytes());
+        truncated_client.extend_from_slice(&17i16.to_be_bytes());
+        truncated_client.extend_from_slice(&1i16.to_be_bytes());
+        truncated_client.extend_from_slice(&7i32.to_be_bytes());
+        truncated_client.extend_from_slice(&3i16.to_be_bytes());
+        truncated_client.extend_from_slice(b"xy");
+        assert!(matches!(
+            read_request_from_frame(truncated_client).await,
+            Err(RaftHandshakeError::Protocol(msg)) if msg.contains("client_id extends past frame")
+        ));
+
+        let missing_tag = request_frame(36, 2, 44, Some(b"c"), false, b"");
+        assert!(matches!(
+            read_request_from_frame(missing_tag).await,
+            Err(RaftHandshakeError::Protocol(msg)) if msg.contains("missing tagged-fields byte")
+        ));
+    }
+
+    #[tokio::test]
+    async fn read_kafka_request_accepts_exact_client_id_end_boundary() {
+        let frame = request_frame(17, 1, 45, Some(b"client"), false, b"");
+        let decoded = read_request_from_frame(frame).await.expect("exact header");
+        assert!(decoded == (17, 1, 45, Vec::new()));
+    }
+
+    #[tokio::test]
+    async fn write_response_uses_expected_header_versions() {
+        let (mut client, mut server) = tokio::io::duplex(128);
+        let writer = tokio::spawn(async move {
+            write_response(
+                &mut server,
+                API_KEY_SASL_AUTHENTICATE,
+                2,
+                77,
+                &FixedResp(&[0xaa, 0xbb]),
+            )
+            .await
+            .expect("write flexible");
+        });
+        let frame = read_response_frame(&mut client).await;
+        writer.await.expect("writer");
+        assert!(&frame[0..4] == &77i32.to_be_bytes());
+        assert!(frame[4] == 0);
+        assert!(&frame[5..] == &[0xaa, 0xbb]);
+
+        let (mut client, mut server) = tokio::io::duplex(128);
+        let writer = tokio::spawn(async move {
+            write_response(
+                &mut server,
+                API_KEY_SASL_HANDSHAKE,
+                1,
+                78,
+                &FixedResp(&[0xcc]),
+            )
+            .await
+            .expect("write nonflex");
+        });
+        let frame = read_response_frame(&mut client).await;
+        writer.await.expect("writer");
+        assert!(&frame[0..4] == &78i32.to_be_bytes());
+        assert!(&frame[4..] == &[0xcc]);
+    }
+
+    #[test]
+    fn api_versions_response_has_expected_frame_shape() {
+        let bytes = build_api_versions_response(99);
+        let size = u32::from_be_bytes(bytes[0..4].try_into().unwrap()) as usize;
+        assert!(size == bytes.len() - 4);
+        assert!(&bytes[4..8] == &99i32.to_be_bytes());
+        assert!(&bytes[8..10] == &0i16.to_be_bytes());
+        assert!(&bytes[10..14] == &3i32.to_be_bytes());
+
+        let mut keys = Vec::new();
+        let mut offset = 14;
+        for _ in 0..3 {
+            keys.push(i16::from_be_bytes(
+                bytes[offset..offset + 2].try_into().unwrap(),
+            ));
+            assert!(&bytes[offset + 2..offset + 4] == &0i16.to_be_bytes());
+            assert!(&bytes[offset + 4..offset + 6] == &2i16.to_be_bytes());
+            offset += 6;
+        }
+        assert!(keys == vec![17, 36, 18]);
+        assert!(&bytes[offset..offset + 4] == &0i32.to_be_bytes());
+        assert!(offset + 4 == bytes.len());
+    }
+
+    #[tokio::test]
+    async fn run_inbound_sasl_allows_api_versions_before_plain_authentication() {
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        let server = tokio::spawn(async move {
+            let cfg = sasl_test_config();
+            run_inbound_sasl(&mut server, &cfg).await
+        });
+
+        client
+            .write_all(&request_frame(
+                API_KEY_API_VERSIONS,
+                0,
+                1,
+                Some(b"c"),
+                false,
+                b"",
+            ))
+            .await
+            .expect("write api versions");
+        let api_versions = read_response_frame(&mut client).await;
+        assert!(&api_versions[0..4] == &1i32.to_be_bytes());
+
+        client
+            .write_all(&request_frame(
+                API_KEY_SASL_HANDSHAKE,
+                1,
+                2,
+                Some(b"c"),
+                false,
+                &sasl_handshake_body(),
+            ))
+            .await
+            .expect("write handshake");
+        let handshake = read_response_frame(&mut client).await;
+        assert!(&handshake[0..4] == &2i32.to_be_bytes());
+        assert!(&handshake[4..6] == &0i16.to_be_bytes());
+
+        client
+            .write_all(&request_frame(
+                API_KEY_SASL_AUTHENTICATE,
+                2,
+                3,
+                Some(b"c"),
+                true,
+                &sasl_authenticate_body(),
+            ))
+            .await
+            .expect("write authenticate");
+        let authenticate = read_response_frame(&mut client).await;
+        assert!(&authenticate[0..4] == &3i32.to_be_bytes());
+        assert!(authenticate[4] == 0);
+        assert!(&authenticate[5..7] == &0i16.to_be_bytes());
+
+        let principal = server.await.expect("server task").expect("authenticated");
+        assert!(principal.name == "broker");
+        assert!(principal.auth_method == crabka_security::AuthMethod::SaslPlain);
+    }
+
+    #[tokio::test]
+    async fn run_inbound_sasl_rejects_disallowed_request_before_authentication() {
+        let (mut client, mut server) = tokio::io::duplex(128);
+        let server = tokio::spawn(async move {
+            let cfg = sasl_test_config();
+            run_inbound_sasl(&mut server, &cfg).await
+        });
+        client
+            .write_all(&request_frame(1, 0, 1, Some(b"c"), false, b""))
+            .await
+            .expect("write forbidden request");
+
+        let err = server
+            .await
+            .expect("server task")
+            .expect_err("pre-auth request rejected");
+        assert!(
+            matches!(err, RaftHandshakeError::Sasl(msg) if msg.contains("pre-auth request api_key=1 rejected"))
+        );
     }
 }

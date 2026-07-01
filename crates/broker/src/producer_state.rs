@@ -398,6 +398,17 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn truncate_drops_dedup_entry_at_exact_offset_boundary() {
+        // Truncating at an entry's last_offset removes that entry: the last
+        // accepted record is no longer below the log end being retained.
+        let s = ProducerState::new();
+        s.commit("t", 0, 1000, 0, 0, 4, /*base_offset*/ 100, 1)
+            .await; // last_offset 104
+        s.truncate("t", 0, 104).await;
+        assert!(s.check("t", 0, 1000, 0, 0, 4).await == Decision::Append);
+    }
+
+    #[tokio::test]
     async fn truncate_unknown_partition_is_noop() {
         let s = ProducerState::new();
         s.truncate("never-seen", 7, 0).await; // must not panic or create state
@@ -495,6 +506,20 @@ mod tests {
         let snap = s.snapshot("t", 0).await;
         assert!(snap.len() == 1);
         assert!(snap[0].0 == 2, "only the recently-active producer survives");
+    }
+
+    #[tokio::test]
+    async fn expire_evicts_entry_at_exact_ttl_boundary() {
+        let s = ProducerState::new();
+        s.commit("t", 0, 1, 0, 0, 0, 0, 0).await;
+        {
+            let h = s.handle("t", 0);
+            h.lock().await.entries.get_mut(&1).unwrap().last_activity_ms = 5_000;
+        }
+
+        let evicted = s.expire_older_than(10_000, 5_000).await;
+        assert!(evicted == 1);
+        assert!(s.snapshot("t", 0).await.is_empty());
     }
 
     #[tokio::test]
