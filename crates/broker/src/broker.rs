@@ -861,7 +861,6 @@ impl BrokerHandle {
         let mut last_offset = 0i64;
         for i in 0..n {
             let batch = crabka_protocol::records::RecordBatch {
-                last_offset_delta: 0,
                 records: vec![crabka_protocol::records::Record {
                     offset_delta: 0,
                     value: Some(bytes::Bytes::from(format!("test-record-{i}").into_bytes())),
@@ -4337,6 +4336,92 @@ mod tests {
         );
     }
 
+    fn metadata_topic_record(topic: &str, topic_id: u128) -> crabka_metadata::MetadataRecord {
+        crabka_metadata::MetadataRecord::V1Topic(crabka_metadata::TopicRecord {
+            name: topic.to_string(),
+            topic_id: uuid::Uuid::from_u128(topic_id),
+            partitions: 1,
+            replication_factor: 1,
+        })
+    }
+
+    fn metadata_partition_record(
+        topic: &str,
+        partition: i32,
+        leader: u64,
+        replicas: &[u64],
+        isr: &[u64],
+        leader_epoch: i32,
+    ) -> crabka_metadata::PartitionRecord {
+        crabka_metadata::PartitionRecord {
+            topic: topic.to_string(),
+            partition,
+            leader,
+            replicas: replicas.to_vec(),
+            isr: isr.to_vec(),
+            leader_epoch,
+            adding_replicas: Vec::new(),
+            removing_replicas: Vec::new(),
+            directories: vec![uuid::Uuid::nil(); replicas.len()],
+            partition_epoch: 0,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn submit_metadata_topic_partition(
+        handle: &BrokerHandle,
+        topic: &str,
+        topic_id: u128,
+        partition: i32,
+        leader: u64,
+        replicas: &[u64],
+        isr: &[u64],
+        leader_epoch: i32,
+    ) {
+        handle
+            .submit_metadata_record_for_test(metadata_topic_record(topic, topic_id))
+            .await
+            .expect("submit topic record");
+        let partition_record =
+            metadata_partition_record(topic, partition, leader, replicas, isr, leader_epoch);
+        handle
+            .submit_metadata_record_for_test(crabka_metadata::MetadataRecord::V1Partition(
+                partition_record.clone(),
+            ))
+            .await
+            .expect("submit partition record");
+
+        let image = handle.controller_image_for_test();
+        assert!(image.topic(topic).is_some());
+        assert!(image.partition(topic, partition) == Some(&partition_record));
+    }
+
+    fn unused_loopback_addr() -> SocketAddr {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve loopback port");
+        listener.local_addr().expect("reserved loopback addr")
+    }
+
+    fn static_voter_test_config(
+        log_dir: &std::path::Path,
+        node_id: u64,
+        listen_addr: SocketAddr,
+        controller_addr: SocketAddr,
+        voters: &[(u64, SocketAddr)],
+    ) -> BrokerConfig {
+        let mut config = BrokerConfig::for_tests(log_dir.to_path_buf());
+        config.broker_id = i32::try_from(node_id).expect("node id fits broker id");
+        config.node_id = node_id;
+        config.listen_addr = listen_addr;
+        config.advertised_listener = listen_addr.to_string();
+        config.controller_listen_addr = controller_addr;
+        config.directory_id = uuid::Uuid::from_u128(u128::from(node_id));
+        config.controller_quorum_voters = voters
+            .iter()
+            .map(|(id, addr)| (*id, addr.to_string()))
+            .collect();
+        config
+    }
+
     #[test]
     fn static_voter_set_keeps_peer_hostnames_for_per_dial_resolution() {
         // Peer endpoint hosts MUST be the configured DNS names, NOT resolved to
@@ -4562,6 +4647,11 @@ mod tests {
 
         assert!(broker.handlers().get(18).is_some());
         assert!(handle.metrics_addr().is_some_and(|addr| addr.port() != 0));
+        assert!(!handle.rlmm_topic_backed_active_for_test());
+        broker.metrics.tiered_storage_rlmm_topic_backed.set(1);
+        assert!(handle.rlmm_topic_backed_active_for_test());
+        broker.metrics.tiered_storage_rlmm_topic_backed.set(2);
+        assert!(!handle.rlmm_topic_backed_active_for_test());
         assert!(!handle.has_partition("missing-mutant-topic", 0).await);
         assert!(
             handle
@@ -4613,40 +4703,83 @@ mod tests {
             ))
             .await
             .expect("submit peer broker registration");
+        assert!(
+            handle
+                .controller_image_for_test()
+                .broker(handle.node_id() + 1)
+                .is_some()
+        );
         handle.wait_until_brokers_registered(2).await;
         assert!(handle.broker_count().await == 2);
 
         let topic = "handle-mutant-topic";
-        handle
-            .submit_metadata_record_for_test(crabka_metadata::MetadataRecord::V1Topic(
-                crabka_metadata::TopicRecord {
-                    name: topic.to_string(),
-                    topic_id: uuid::Uuid::from_u128(0xCAFE),
-                    partitions: 1,
-                    replication_factor: 1,
-                },
-            ))
-            .await
-            .expect("submit topic record");
-        handle
-            .submit_metadata_record_for_test(crabka_metadata::MetadataRecord::V1Partition(
-                crabka_metadata::PartitionRecord {
-                    topic: topic.to_string(),
-                    partition: 0,
-                    leader: handle.node_id(),
-                    replicas: vec![handle.node_id()],
-                    isr: vec![handle.node_id()],
-                    leader_epoch: 1,
-                    adding_replicas: Vec::new(),
-                    removing_replicas: Vec::new(),
-                    directories: vec![uuid::Uuid::nil()],
-                    partition_epoch: 0,
-                },
-            ))
-            .await
-            .expect("submit partition record");
+        let partition_leader = handle.node_id() + 1;
+        let partition_isr = [partition_leader, handle.node_id()];
+        submit_metadata_topic_partition(
+            &handle,
+            topic,
+            0xCAFE,
+            0,
+            partition_leader,
+            &partition_isr,
+            &partition_isr,
+            3,
+        )
+        .await;
         handle.wait_until_partition_present(topic, 0).await;
         assert!(handle.has_partition(topic, 0).await);
+        assert!(handle.partition_leader_for_test(topic, 0) == Some(partition_leader));
+        assert!(handle.partition_isr_for_test(topic, 0) == Some(partition_isr.to_vec()));
+        let observed_partition = handle
+            .partition_record_for_test(topic, 0)
+            .expect("partition record");
+        assert!(observed_partition.topic == topic);
+        assert!(observed_partition.partition == 0);
+        assert!(observed_partition.leader == partition_leader);
+        assert!(observed_partition.isr == partition_isr.to_vec());
+        assert!(observed_partition.leader_epoch == 3);
+        assert!(
+            handle
+                .partition_leader_for_test("missing-mutant-topic", 0)
+                .is_none()
+        );
+        assert!(
+            handle
+                .partition_isr_for_test("missing-mutant-topic", 0)
+                .is_none()
+        );
+        assert!(
+            handle
+                .partition_record_for_test("missing-mutant-topic", 0)
+                .is_none()
+        );
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                handle.wait_until_partition_leader_changed(topic, 0, handle.node_id()),
+            )
+            .await
+            .is_ok()
+        );
+
+        assert!(
+            matches!(
+                broker.controller.read_snapshot_range(0, 1),
+                crabka_raft::SnapshotRange::NoSnapshot
+            ),
+            "test should start without a metadata snapshot"
+        );
+        handle
+            .trigger_snapshot_for_test()
+            .await
+            .expect("trigger metadata snapshot");
+        let crabka_raft::SnapshotRange::Slice(snapshot) =
+            broker.controller.read_snapshot_range(0, 1)
+        else {
+            panic!("trigger_snapshot_for_test should write a readable snapshot");
+        };
+        assert!(snapshot.total_size > 0);
+        assert!(!snapshot.bytes.is_empty());
 
         let local_topic = "handle-local-log-mutant-topic";
         let local_part = local_partition_with_records(dir.path(), local_topic, 0, &[b"a", b"b"]);
@@ -4708,6 +4841,57 @@ mod tests {
             .expect("helper partition log end offset");
         assert!(last_offset >= 2);
         assert!(last_offset + 1 == log_end);
+        let read = helper_part
+            .log
+            .lock()
+            .expect("helper partition log lock")
+            .read(2, 1 << 20)
+            .expect("read helper partition records");
+        assert!(read.start_offset == 2);
+        assert!(!read.batches.is_empty());
+        let records: Vec<_> = read
+            .batches
+            .iter()
+            .flat_map(|batch| batch.records.iter())
+            .collect();
+        assert!(records.len() == 1);
+        assert!(records[0].offset_delta == 0);
+        assert!(
+            records[0].value.as_ref().map(bytes::Bytes::as_ref)
+                == Some(b"test-record-2".as_slice())
+        );
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(75),
+                handle.wait_until_local_log_end_offset(helper_topic, 0, log_end + 1),
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(75),
+                handle.wait_until_local_log_end_offset_eq(helper_topic, 0, log_end + 1),
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                handle.wait_until_local_log_end_offset(helper_topic, 0, log_end),
+            )
+            .await
+            .is_ok()
+        );
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                handle.wait_until_local_log_end_offset_eq(helper_topic, 0, log_end),
+            )
+            .await
+            .is_ok()
+        );
 
         let share_group = "handle-share-summary-mutant-group";
         let share_topic_id = uuid::Uuid::from_u128(0xBEE5);
@@ -4849,6 +5033,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn group_handle_helpers_observe_live_actor_views() {
         let dir = tempfile::tempdir().unwrap();
         let config = BrokerConfig::for_tests(dir.path().to_path_buf());
@@ -4936,12 +5121,107 @@ mod tests {
         assert!(classic.members.len() == 1);
         assert!(classic.members[0].member_id == classic_member_id);
 
+        let created_classic_group_id = "handle-create-classic-group-mutant";
+        assert!(
+            handle
+                .classic_group_inspect_for_test(created_classic_group_id)
+                .await
+                .is_none()
+        );
+        handle.group_create_for_test(created_classic_group_id);
+        let created = handle
+            .classic_group_inspect_for_test(created_classic_group_id)
+            .await
+            .expect("created classic group inspect");
+        assert!(created.group_id == created_classic_group_id);
+        assert!(created.members.is_empty());
+
+        let marked_classic_group_id = "handle-marked-classic-group-mutant";
+        assert!(
+            handle
+                .group_type_for_test(marked_classic_group_id)
+                .is_none()
+        );
+        broker
+            .group_coordinator
+            .mark_classic(marked_classic_group_id);
+        assert!(
+            handle.group_type_for_test(marked_classic_group_id)
+                == Some(crate::coordinator::unified::GroupType::Classic)
+        );
+
         assert_streams_group_helpers_observe_live_actor_view(&broker, &handle).await;
 
         handle.shutdown().await;
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn broker_handle_reports_non_default_node_and_voter_state() {
+        let dir7 = tempfile::tempdir().unwrap();
+        let dir8 = tempfile::tempdir().unwrap();
+        let listen7 = unused_loopback_addr();
+        let listen8 = unused_loopback_addr();
+        let controller7 = unused_loopback_addr();
+        let controller8 = unused_loopback_addr();
+        let voters = [(7, controller7), (8, controller8)];
+
+        let config7 = static_voter_test_config(dir7.path(), 7, listen7, controller7, &voters);
+        let config8 = static_voter_test_config(dir8.path(), 8, listen8, controller8, &voters);
+        let start = Box::pin(tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            async { tokio::try_join!(Broker::start(config7), Broker::start(config8)) },
+        ));
+        let (handle7, handle8) = start
+            .await
+            .expect("two-voter brokers started before timeout")
+            .expect("two-voter broker start");
+
+        let leader = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if let Some(leader) = handle7.controller_leader_id().await
+                    && leader != 0
+                {
+                    return leader;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("two-voter cluster leader");
+        assert!(leader == 7 || leader == 8);
+        handle7.wait_for_image(|img| img.voters().len() == 2).await;
+        handle8.wait_for_image(|img| img.voters().len() == 2).await;
+
+        assert!(handle7.node_id() == 7);
+        assert!(handle8.node_id() == 8);
+        assert!(handle7.controller_leader_id().await == Some(leader));
+        assert!(
+            handle7
+                .quorum_voters_for_test()
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                == [7, 8]
+                    .into_iter()
+                    .collect::<std::collections::BTreeSet<_>>()
+        );
+        assert!(handle7.voter_count_for_test() == 2);
+        assert!(
+            handle7.voter_ids_for_test()
+                == [7, 8]
+                    .into_iter()
+                    .collect::<std::collections::BTreeSet<_>>()
+        );
+
+        // The multi-thread test runtime aborts remaining tasks on exit if raft
+        // shutdown takes longer than the helper assertions above.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::join!(handle7.shutdown(), handle8.shutdown());
+        })
+        .await;
+    }
+
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn wait_helpers_remain_pending_until_their_conditions_are_met() {
         let dir = tempfile::tempdir().unwrap();
         let config = BrokerConfig::for_tests(dir.path().to_path_buf());
@@ -4997,6 +5277,14 @@ mod tests {
         assert!(
             tokio::time::timeout(
                 timeout,
+                handle.wait_until_partition_present("missing-mutant-topic", 0),
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            tokio::time::timeout(
+                timeout,
                 handle.wait_until_partition_leader_changed("missing-mutant-topic", 0, 1),
             )
             .await
@@ -5006,6 +5294,115 @@ mod tests {
             tokio::time::timeout(
                 timeout,
                 handle.wait_until_isr_len("missing-mutant-topic", 0, 1)
+            )
+            .await
+            .is_err()
+        );
+
+        submit_metadata_topic_partition(
+            &handle,
+            "leader-zero-mutant-topic",
+            0xF001,
+            0,
+            0,
+            &[1],
+            &[1],
+            3,
+        )
+        .await;
+        assert!(
+            handle
+                .partition_leader_for_test("leader-zero-mutant-topic", 0)
+                .is_none()
+        );
+        assert!(
+            tokio::time::timeout(
+                timeout,
+                handle.wait_until_partition_leader_changed("leader-zero-mutant-topic", 0, 1),
+            )
+            .await
+            .is_err()
+        );
+
+        submit_metadata_topic_partition(
+            &handle,
+            "leader-excluded-mutant-topic",
+            0xF002,
+            0,
+            2,
+            &[1, 2],
+            &[1, 2],
+            3,
+        )
+        .await;
+        assert!(
+            tokio::time::timeout(
+                timeout,
+                handle.wait_until_partition_leader_changed("leader-excluded-mutant-topic", 0, 2),
+            )
+            .await
+            .is_err()
+        );
+
+        submit_metadata_topic_partition(
+            &handle,
+            "leader-epoch-zero-mutant-topic",
+            0xF003,
+            0,
+            2,
+            &[1, 2],
+            &[1, 2],
+            0,
+        )
+        .await;
+        assert!(
+            tokio::time::timeout(
+                timeout,
+                handle.wait_until_partition_leader_changed("leader-epoch-zero-mutant-topic", 0, 1,),
+            )
+            .await
+            .is_err()
+        );
+
+        submit_metadata_topic_partition(
+            &handle,
+            "leader-epoch-negative-mutant-topic",
+            0xF004,
+            0,
+            2,
+            &[1, 2],
+            &[1, 2],
+            -1,
+        )
+        .await;
+        assert!(
+            tokio::time::timeout(
+                timeout,
+                handle.wait_until_partition_leader_changed(
+                    "leader-epoch-negative-mutant-topic",
+                    0,
+                    1,
+                ),
+            )
+            .await
+            .is_err()
+        );
+
+        submit_metadata_topic_partition(
+            &handle,
+            "isr-len-mutant-topic",
+            0xF005,
+            0,
+            1,
+            &[1, 2],
+            &[1, 2],
+            3,
+        )
+        .await;
+        assert!(
+            tokio::time::timeout(
+                timeout,
+                handle.wait_until_isr_len("isr-len-mutant-topic", 0, 1)
             )
             .await
             .is_err()
