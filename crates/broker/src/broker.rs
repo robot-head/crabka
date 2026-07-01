@@ -3506,11 +3506,24 @@ async fn bootstrap_topic_rlmm(
     let mut backoff = std::time::Duration::from_millis(250);
     let manager = loop {
         metrics.tiered_storage_rlmm_bootstrap_attempts.inc();
+        // Race the attempt against shutdown: `KafkaMetadataEventLog::start`
+        // dials the broker's listener, and a pending TCP connect can take
+        // seconds to fail on some platforms (Windows retransmits SYNs to a
+        // closed loopback port instead of failing fast), so the token must
+        // be honoured mid-attempt, not just between attempts. `biased`
+        // makes an already-cancelled token win before the dial even starts.
+        //
         // KafkaMetadataEventLog::start and TopicBasedRemoteLogMetadataManager::start
         // return different error types, so we handle them with separate match arms.
-        let log = match crabka_remote_storage_topic::KafkaMetadataEventLog::start(log_cfg.clone())
-            .await
-        {
+        let started = tokio::select! {
+            biased;
+            () = shutdown.cancelled() => {
+                tracing::debug!("topic-backed RLMM bootstrap cancelled during attempt");
+                return;
+            }
+            res = crabka_remote_storage_topic::KafkaMetadataEventLog::start(log_cfg.clone()) => res,
+        };
+        let log = match started {
             Ok(l) => l,
             Err(e) => {
                 tracing::warn!(error = %e, backoff_ms = backoff.as_millis(),
@@ -4221,6 +4234,59 @@ mod tests {
         assert!(next_rlmm_backoff(Duration::from_millis(250), max) == Duration::from_millis(500));
         assert!(next_rlmm_backoff(Duration::from_secs(8), max) == max); // 16s capped to 10s
         assert!(next_rlmm_backoff(max, max) == max);
+    }
+
+    #[tokio::test]
+    async fn cancelled_topic_rlmm_bootstrap_attempts_once_without_activating() {
+        // A loopback address with nothing listening: bind to learn a free
+        // port, then drop the listener so the bootstrap's dial cannot
+        // succeed. On Windows such a connect does not fail fast, which is
+        // exactly why the bootstrap must honour the token mid-attempt.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let bootstrap = listener.local_addr().unwrap().to_string();
+        drop(listener);
+
+        let swap = Arc::new(crabka_remote_storage_topic::SwappableRlmm::new(Arc::new(
+            crabka_remote_storage_topic::NotReadyRlmm::new(),
+        )));
+        let snapshot_dir = tempdir().unwrap();
+        let cfg = KafkaSwapKickoff {
+            cfg: crate::config::KafkaRlmmConfig {
+                bootstrap,
+                num_partitions: 1,
+                replication: 1,
+                snapshot_interval: std::time::Duration::from_mins(1),
+                snapshot_dir: snapshot_dir.path().to_path_buf(),
+                security: None,
+            },
+            broker_id: 1,
+        };
+        let metrics = crate::metrics::BrokerMetrics::new();
+        let (_image_tx, image_rx) = tokio::sync::watch::channel(Arc::new(
+            crabka_metadata::MetadataImage::new(uuid::Uuid::from_u128(1)),
+        ));
+        let shutdown = CancellationToken::new();
+        shutdown.cancel();
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            bootstrap_topic_rlmm(
+                swap,
+                cfg,
+                tokio::runtime::Handle::current(),
+                metrics.clone(),
+                7,
+                image_rx,
+                shutdown,
+            ),
+        )
+        .await
+        .expect("cancelled bootstrap should return promptly");
+
+        // One attempt was recorded, but the cancelled token stopped the
+        // dial before anything could activate the topic-backed manager.
+        assert!(metrics.tiered_storage_rlmm_bootstrap_attempts.get() == 1);
+        assert!(metrics.tiered_storage_rlmm_topic_backed.get() == 0);
     }
 
     #[tokio::test]
