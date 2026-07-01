@@ -4255,7 +4255,7 @@ mod tests {
                 bootstrap,
                 num_partitions: 1,
                 replication: 1,
-                snapshot_interval: std::time::Duration::from_secs(60),
+                snapshot_interval: std::time::Duration::from_mins(1),
                 snapshot_dir: snapshot_dir.path().to_path_buf(),
                 security: None,
             },
