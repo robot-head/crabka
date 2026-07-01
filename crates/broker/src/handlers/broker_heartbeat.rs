@@ -138,19 +138,13 @@ fn has_offline_log_dirs(req: &BrokerHeartbeatRequest) -> bool {
 
 fn not_controller_response() -> BrokerHeartbeatResponse {
     BrokerHeartbeatResponse {
-        throttle_time_ms: 0,
         error_code: codes::NOT_CONTROLLER,
-        is_caught_up: false,
-        is_fenced: true,
-        should_shut_down: false,
         ..Default::default()
     }
 }
 
 fn success_response(should_shut_down: bool) -> BrokerHeartbeatResponse {
     BrokerHeartbeatResponse {
-        throttle_time_ms: 0,
-        error_code: codes::NONE,
         is_caught_up: true,
         is_fenced: false,
         should_shut_down,
@@ -160,11 +154,7 @@ fn success_response(should_shut_down: bool) -> BrokerHeartbeatResponse {
 
 fn denied_response_body() -> BrokerHeartbeatResponse {
     BrokerHeartbeatResponse {
-        throttle_time_ms: 0,
         error_code: codes::CLUSTER_AUTHORIZATION_FAILED,
-        is_caught_up: false,
-        is_fenced: true,
-        should_shut_down: false,
         ..Default::default()
     }
 }

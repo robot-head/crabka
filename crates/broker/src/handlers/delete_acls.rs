@@ -218,6 +218,7 @@ mod tests {
     const RESOURCE_TYPE_TOPIC: i8 = 2;
     const PATTERN_TYPE_ANY: i8 = 1;
     const PATTERN_TYPE_LITERAL: i8 = 3;
+    const PATTERN_TYPE_PREFIXED: i8 = 4;
     const OPERATION_ANY: i8 = 1;
     const OPERATION_READ: i8 = 3;
     const OPERATION_WRITE: i8 = 4;
@@ -384,6 +385,12 @@ mod tests {
         assert!(matched.operation == OPERATION_READ);
         assert!(matched.permission_type == PERMISSION_ALLOW);
 
+        let mut prefixed_acl = acl("orders-", "User:bob", AclOperation::Write);
+        prefixed_acl.pattern_type = PatternType::Prefixed;
+        let matched = matching_acl_result(&prefixed_acl);
+        assert!(matched.pattern_type == PATTERN_TYPE_PREFIXED);
+        assert!(matched.operation == OPERATION_WRITE);
+
         let mut results = vec![
             filter_result(codes::NONE, None, vec![matched]),
             filter_result(
@@ -423,6 +430,47 @@ mod tests {
 
         let resources = deleted_acl_resources(&[ok, failed]);
 
+        assert!(resources.len() == 1);
+        assert!(resources[0].resource_type == "Acl");
+        assert!(resources[0].name == "orders");
+    }
+
+    #[test]
+    fn audit_deleted_acls_skips_empty_and_emits_non_empty_admin_event() {
+        let (log, mut rx) = crabka_audit::AuditLog::new(8);
+        let p = principal("admin");
+        let peer = peer();
+        let ctx = test_context(&p, &peer);
+
+        audit_deleted_acls(log.as_ref(), &ctx, Vec::new());
+        assert!(
+            rx.try_recv().is_err(),
+            "empty audit resource list is a no-op"
+        );
+
+        audit_deleted_acls(
+            log.as_ref(),
+            &ctx,
+            vec![crabka_audit::AuditResource {
+                resource_type: "Acl".into(),
+                name: "orders".into(),
+            }],
+        );
+
+        let event = rx.try_recv().expect("admin audit event");
+        let crabka_audit::AuditEvent::AdminOperation {
+            outcome,
+            principal,
+            operation,
+            resources,
+            ..
+        } = event
+        else {
+            panic!("expected AdminOperation");
+        };
+        assert!(outcome == crabka_audit::AuditOutcome::Success);
+        assert!(principal.name == "admin");
+        assert!(operation == "DeleteAcls");
         assert!(resources.len() == 1);
         assert!(resources[0].resource_type == "Acl");
         assert!(resources[0].name == "orders");

@@ -130,14 +130,10 @@ pub(crate) async fn handle(
     {
         tracing::warn!(error = %e, "AlterUserScramCredentials: submit_change failed");
         let msg = format!("submit failed: {e}");
-        for r in user_results.iter_mut().filter(|r| r.error_code == 0) {
-            r.error_code = codes::UNKNOWN_SERVER_ERROR;
-            r.error_message = Some(msg.clone());
-        }
+        apply_submit_error(&mut user_results, &msg);
     }
 
     AlterUserScramCredentialsResponse {
-        throttle_time_ms: 0,
         results: user_results,
         ..Default::default()
     }
@@ -254,8 +250,6 @@ fn wire_to_mech(wire: i8) -> Option<SaslMechanism> {
 fn ok_result(name: String) -> AlterUserScramCredentialsResult {
     AlterUserScramCredentialsResult {
         user: name,
-        error_code: 0,
-        error_message: None,
         ..Default::default()
     }
 }
@@ -266,6 +260,13 @@ fn err_result(name: String, code: i16, msg: &str) -> AlterUserScramCredentialsRe
         error_code: code,
         error_message: Some(msg.to_string()),
         ..Default::default()
+    }
+}
+
+fn apply_submit_error(results: &mut [AlterUserScramCredentialsResult], msg: &str) {
+    for r in results.iter_mut().filter(|r| r.error_code == 0) {
+        r.error_code = codes::UNKNOWN_SERVER_ERROR;
+        r.error_message = Some(msg.to_string());
     }
 }
 
@@ -384,6 +385,27 @@ mod tests {
         assert!(r.user == "alice");
         assert!(r.error_code == 0);
         assert!(r.error_message.is_none());
+    }
+
+    #[test]
+    fn submit_error_rewrites_only_success_rows() {
+        let mut results = vec![
+            ok_result("alice".into()),
+            err_result(
+                "bob".into(),
+                codes::DUPLICATE_RESOURCE,
+                "duplicate resource",
+            ),
+        ];
+
+        apply_submit_error(&mut results, "submit failed: not controller");
+
+        assert!(results[0].user == "alice");
+        assert!(results[0].error_code == codes::UNKNOWN_SERVER_ERROR);
+        assert!(results[0].error_message.as_deref() == Some("submit failed: not controller"));
+        assert!(results[1].user == "bob");
+        assert!(results[1].error_code == codes::DUPLICATE_RESOURCE);
+        assert!(results[1].error_message.as_deref() == Some("duplicate resource"));
     }
 
     #[test]

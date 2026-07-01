@@ -123,8 +123,6 @@ pub(crate) fn handle(
         {
             let resp = ApiVersionsResponse {
                 error_code: codes::INVALID_REQUEST,
-                api_keys: Vec::new(),
-                throttle_time_ms: 0,
                 ..Default::default()
             };
             let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
@@ -139,9 +137,7 @@ pub(crate) fn handle(
         }
 
         let resp = ApiVersionsResponse {
-            error_code: codes::NONE,
             api_keys: crate::api_catalog::supported_apis(),
-            throttle_time_ms: 0,
             // KIP-584 write-side. `supported_features` advertises the
             // broker's `crate::features` table; `finalized_features` + the
             // epoch are read from the live metadata image. A fresh broker

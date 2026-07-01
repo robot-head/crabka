@@ -258,10 +258,7 @@ pub(crate) async fn handle(
         })
         .collect();
     let resp = AlterPartitionReassignmentsResponse {
-        throttle_time_ms: 0,
         allow_replication_factor_change: req.allow_replication_factor_change,
-        error_code: 0,
-        error_message: None,
         responses,
         ..Default::default()
     };
@@ -271,8 +268,6 @@ pub(crate) async fn handle(
 fn ok_row(partition_index: i32) -> ReassignablePartitionResponse {
     ReassignablePartitionResponse {
         partition_index,
-        error_code: 0,
-        error_message: None,
         ..Default::default()
     }
 }
@@ -320,10 +315,7 @@ fn encode_whole_request_error(
         })
         .collect();
     let resp = AlterPartitionReassignmentsResponse {
-        throttle_time_ms: 0,
         allow_replication_factor_change: req.allow_replication_factor_change,
-        error_code: 0,
-        error_message: None,
         responses,
         ..Default::default()
     };

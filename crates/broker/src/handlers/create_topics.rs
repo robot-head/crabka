@@ -106,6 +106,17 @@ fn encode_response<R: Encode>(resp: &R, version: i16) -> Result<Bytes, BrokerErr
     Ok(buf.freeze())
 }
 
+fn should_materialize_locally(
+    replicas: &[crabka_raft::NodeId],
+    node_id: crabka_raft::NodeId,
+) -> bool {
+    replicas.contains(&node_id)
+}
+
+fn is_local_leader(leader: crabka_raft::NodeId, node_id: crabka_raft::NodeId) -> bool {
+    leader == node_id
+}
+
 #[allow(clippy::too_many_lines)]
 #[tracing::instrument(
     name = "handle_create_topics",
@@ -288,45 +299,44 @@ pub(crate) async fn handle(
                     // CreateTopics ack don't race the supervisor.
                     for (p, replicas) in assignments.iter().enumerate() {
                         let p_i32 = i32::try_from(p).unwrap_or(0);
-                        if !replicas.contains(&node_id) {
-                            continue;
-                        }
-                        // Use the same `materialize_partition` helper the
-                        // supervisor uses — its Entry::Vacant gate ensures
-                        // we don't spawn a second writer task when the
-                        // supervisor has already reconciled (the metadata
-                        // watch can fire mid-handler).
-                        if let Err(e) = materialize_partition(
-                            &partitions_map,
-                            &name,
-                            p_i32,
-                            &log_dirs,
-                            &log_config,
-                            &log_dir_status,
-                            &producer_state,
-                        ) {
-                            tracing::error!(
-                                topic = %name, partition = p_i32, error = %e,
-                                "CreateTopics: materialize after quorum commit failed"
-                            );
-                            // Quorum already committed — partition will be
-                            // recovered on next broker restart.
-                            continue;
-                        }
-                        // Mirror what `ReplicatorSupervisor::reconcile` does
-                        // for newly-materialized leader partitions: sync the
-                        // cached leader + epoch, and (when self is leader)
-                        // install the ISR for HW computation. Without this, a
-                        // Produce arriving before the supervisor's
-                        // metadata-watch fires sees `isr.is_empty()`, falls
-                        // into `compute_hw == leader_leo`, and acks=-1 returns
-                        // instantly without waiting for followers.
-                        if let Some(part) = partitions_map.get(&name, p_i32) {
-                            let leader = replicas[0];
-                            part.install_leader_change(leader, 0).await;
-                            if leader == node_id {
-                                // At creation the ISR equals the full replica set.
-                                part.install_isr(replicas, replicas, leader).await;
+                        if should_materialize_locally(replicas, node_id) {
+                            // Use the same `materialize_partition` helper the
+                            // supervisor uses — its Entry::Vacant gate ensures
+                            // we don't spawn a second writer task when the
+                            // supervisor has already reconciled (the metadata
+                            // watch can fire mid-handler).
+                            if let Err(e) = materialize_partition(
+                                &partitions_map,
+                                &name,
+                                p_i32,
+                                &log_dirs,
+                                &log_config,
+                                &log_dir_status,
+                                &producer_state,
+                            ) {
+                                tracing::error!(
+                                    topic = %name, partition = p_i32, error = %e,
+                                    "CreateTopics: materialize after quorum commit failed"
+                                );
+                                // Quorum already committed — partition will be
+                                // recovered on next broker restart.
+                                continue;
+                            }
+                            // Mirror what `ReplicatorSupervisor::reconcile` does
+                            // for newly-materialized leader partitions: sync the
+                            // cached leader + epoch, and (when self is leader)
+                            // install the ISR for HW computation. Without this, a
+                            // Produce arriving before the supervisor's
+                            // metadata-watch fires sees `isr.is_empty()`, falls
+                            // into `compute_hw == leader_leo`, and acks=-1 returns
+                            // instantly without waiting for followers.
+                            if let Some(part) = partitions_map.get(&name, p_i32) {
+                                let leader = replicas[0];
+                                part.install_leader_change(leader, 0).await;
+                                if is_local_leader(leader, node_id) {
+                                    // At creation the ISR equals the full replica set.
+                                    part.install_isr(replicas, replicas, leader).await;
+                                }
                             }
                         }
                     }
@@ -679,6 +689,15 @@ mod handler_tests {
         assert!(resources.len() == 1);
         assert!(resources[0].resource_type == "Topic");
         assert!(resources[0].name == "orders");
+    }
+
+    #[test]
+    fn local_materialization_predicates_track_replica_membership_and_leader() {
+        assert!(should_materialize_locally(&[1, 2], 1));
+        assert!(should_materialize_locally(&[1, 2], 2));
+        assert!(!should_materialize_locally(&[1, 2], 3));
+        assert!(is_local_leader(1, 1));
+        assert!(!is_local_leader(2, 1));
     }
 
     #[tokio::test]

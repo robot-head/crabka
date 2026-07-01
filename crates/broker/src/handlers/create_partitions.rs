@@ -131,6 +131,14 @@ fn encode_response<R: Encode>(resp: &R, version: i16) -> Result<Bytes, BrokerErr
     Ok(buf.freeze())
 }
 
+fn should_materialize_locally(replicas: &[NodeId], node_id: NodeId) -> bool {
+    replicas.contains(&node_id)
+}
+
+fn is_local_leader(leader: NodeId, node_id: NodeId) -> bool {
+    leader == node_id
+}
+
 #[allow(clippy::too_many_lines)]
 #[tracing::instrument(
     name = "handle_create_partitions",
@@ -290,28 +298,27 @@ pub(crate) async fn handle(
                 // Materialize new partitions on local disk where self in replicas.
                 for (i, p) in new_partition_indices.iter().enumerate() {
                     let replicas = &new_assignments[i];
-                    if !replicas.contains(&node_id) {
-                        continue;
-                    }
-                    if let Err(e) = materialize_partition(
-                        &partitions_map,
-                        &t.name,
-                        *p,
-                        &log_dirs,
-                        &log_config,
-                        &log_dir_status,
-                        &producer_state,
-                    ) {
-                        tracing::error!(
-                            topic = %t.name, partition = *p, error = %e,
-                            "CreatePartitions: materialize after quorum commit failed"
-                        );
-                    } else if let Some(part) = partitions_map.get(&t.name, *p) {
-                        let leader = replicas[0];
-                        part.install_leader_change(leader, 0).await;
-                        if leader == node_id {
-                            // At creation the ISR equals the full replica set.
-                            part.install_isr(replicas, replicas, leader).await;
+                    if should_materialize_locally(replicas, node_id) {
+                        if let Err(e) = materialize_partition(
+                            &partitions_map,
+                            &t.name,
+                            *p,
+                            &log_dirs,
+                            &log_config,
+                            &log_dir_status,
+                            &producer_state,
+                        ) {
+                            tracing::error!(
+                                topic = %t.name, partition = *p, error = %e,
+                                "CreatePartitions: materialize after quorum commit failed"
+                            );
+                        } else if let Some(part) = partitions_map.get(&t.name, *p) {
+                            let leader = replicas[0];
+                            part.install_leader_change(leader, 0).await;
+                            if is_local_leader(leader, node_id) {
+                                // At creation the ISR equals the full replica set.
+                                part.install_isr(replicas, replicas, leader).await;
+                            }
                         }
                     }
                 }
@@ -650,6 +657,15 @@ mod tests {
         assert!(resp.results[0].name == "orders");
         assert!(resp.results[0].error_code == codes::INVALID_PARTITIONS);
         assert!(resp.results[0].error_message.as_deref() == Some("bad count"));
+    }
+
+    #[test]
+    fn local_materialization_predicates_track_replica_membership_and_leader() {
+        assert!(should_materialize_locally(&[1, 2], 1));
+        assert!(should_materialize_locally(&[1, 2], 2));
+        assert!(!should_materialize_locally(&[1, 2], 3));
+        assert!(is_local_leader(1, 1));
+        assert!(!is_local_leader(2, 1));
     }
 
     #[tokio::test]

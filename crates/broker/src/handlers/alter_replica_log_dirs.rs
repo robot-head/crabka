@@ -104,7 +104,6 @@ pub(crate) fn handle(
             .collect();
 
         let resp = AlterReplicaLogDirsResponse {
-            throttle_time_ms: 0,
             results,
             ..Default::default()
         };

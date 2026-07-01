@@ -91,7 +91,6 @@ pub(crate) fn handle(
 fn ok_row(group_id: &str) -> DescribedGroup {
     DescribedGroup {
         group_id: group_id.into(),
-        error_code: codes::NONE,
         ..Default::default()
     }
 }

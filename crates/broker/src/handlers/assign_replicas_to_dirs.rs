@@ -43,13 +43,7 @@ pub(crate) fn handle(
         }
 
         let Ok(broker_slot_id) = u64::try_from(req.broker_id) else {
-            return encode_resp(
-                version,
-                &AssignReplicasToDirsResponse {
-                    error_code: codes::NONE,
-                    ..Default::default()
-                },
-            );
+            return encode_resp(version, &AssignReplicasToDirsResponse::default());
         };
         let image = controller.current_image();
         let changes = collect_assignment_changes(&image, broker_slot_id, &req);
@@ -123,7 +117,6 @@ pub(crate) fn build_echo_response(
                         .iter()
                         .map(|p| RespPartData {
                             partition_index: p.partition_index,
-                            error_code: codes::NONE,
                             ..Default::default()
                         })
                         .collect(),
@@ -134,7 +127,6 @@ pub(crate) fn build_echo_response(
         })
         .collect();
     AssignReplicasToDirsResponse {
-        error_code: codes::NONE,
         directories,
         ..Default::default()
     }
@@ -336,6 +328,52 @@ mod tests {
         assert!(partition.partition_index == 7, "{resp:?}");
         assert!(partition.error_code == codes::NONE, "{resp:?}");
 
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_leader_commits_known_directory_assignment() {
+        let (broker_handle, _dir) = start_broker().await;
+        let broker = broker_handle.broker_arc_for_test();
+        wait_for_leader(&broker).await;
+        let dir_uuid = uuid::Uuid::from_u128(0xAA);
+        let topic_uuid = uuid::Uuid::from_u128(0xBB);
+        broker
+            .controller
+            .submit_change(vec![
+                MetadataRecord::V1Topic(TopicRecord {
+                    name: "t".into(),
+                    topic_id: topic_uuid,
+                    partitions: 1,
+                    replication_factor: 1,
+                }),
+                MetadataRecord::V1Partition(PartitionRecord {
+                    topic: "t".into(),
+                    partition: 0,
+                    leader: 1,
+                    replicas: vec![1],
+                    isr: vec![1],
+                    leader_epoch: 0,
+                    adding_replicas: vec![],
+                    removing_replicas: vec![],
+                    directories: vec![uuid::Uuid::nil()],
+                    partition_epoch: 0,
+                }),
+            ])
+            .await
+            .expect("seed partition");
+        let req = request(dir_uuid, topic_uuid, 0);
+
+        let bytes = handle(&broker, VERSION, 9, &req)
+            .await
+            .expect("AssignReplicasToDirs handler");
+        let resp = decode_response(&bytes);
+
+        assert!(resp.error_code == codes::NONE, "{resp:?}");
+        assert!(resp.directories[0].topics[0].partitions[0].error_code == codes::NONE);
+        let image = broker.controller.current_image();
+        let partition = image.partition("t", 0).expect("partition");
+        assert!(partition.directories == vec![dir_uuid]);
         broker_handle.shutdown().await;
     }
 
