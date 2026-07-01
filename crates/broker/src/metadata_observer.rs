@@ -254,6 +254,29 @@ mod tests {
     use tempfile::TempDir;
     use uuid::Uuid;
 
+    #[derive(Clone)]
+    struct RecordingDialer {
+        client_ids: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl OutboundDialer for RecordingDialer {
+        async fn dial(
+            &self,
+            target: NodeId,
+            addr: &str,
+            options: crabka_client_core::ConnectionOptions,
+        ) -> Result<crabka_client_core::Connection, crabka_client_core::ClientError> {
+            self.client_ids
+                .lock()
+                .unwrap()
+                .push(options.client_id.clone());
+            crabka_raft::PlaintextDialer
+                .dial(target, addr, options)
+                .await
+        }
+    }
+
     #[test]
     fn voter_at_wraps_round_robin_by_modulo() {
         let voters = vec![
@@ -271,6 +294,22 @@ mod tests {
         // `3 / 3 == 1` would return the second voter instead.
         assert!(voter_at(&voters, 3).0 == 1);
         assert!(voter_at(&voters, 4).0 == 2);
+    }
+
+    #[tokio::test]
+    async fn cancel_drains_background_task() {
+        let observer = MetadataObserver::start(ObserverConfig {
+            voters: vec![],
+            dialer: Arc::new(crabka_raft::PlaintextDialer),
+            client_id: "cancel-test".into(),
+            cluster_id: Uuid::nil(),
+            max_bytes: 1_048_576,
+            poll_interval: Duration::from_mins(1),
+        });
+
+        observer.cancel().await;
+
+        assert!(observer.task.lock().await.is_none());
     }
 
     #[tokio::test]
@@ -294,10 +333,13 @@ mod tests {
         })])
         .await
         .expect("submit");
+        let client_ids = Arc::new(std::sync::Mutex::new(Vec::new()));
 
         let observer = MetadataObserver::start(ObserverConfig {
             voters: vec![(1, ctrl_addr.to_string())],
-            dialer: Arc::new(crabka_raft::PlaintextDialer),
+            dialer: Arc::new(RecordingDialer {
+                client_ids: client_ids.clone(),
+            }),
             client_id: "test-observer".into(),
             cluster_id: Uuid::nil(),
             max_bytes: 1_048_576,
@@ -316,6 +358,15 @@ mod tests {
             );
             let _ = tokio::time::timeout(Duration::from_millis(200), img_rx.changed()).await;
         }
+
+        assert!(observer.current_image().topic("observed").is_some());
+        assert!(
+            client_ids
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|id| id == "test-observer")
+        );
 
         observer.cancel().await;
         ctrl.shutdown().await;

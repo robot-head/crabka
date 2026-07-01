@@ -334,4 +334,18 @@ mod tests {
         assert!(reg.mark_offline(ghost, "synthetic test"));
         assert!(reg.is_offline(ghost));
     }
+
+    #[test]
+    fn debug_includes_offline_count_and_entries() {
+        let reg = LogDirRegistry::default();
+        let ghost = Path::new("/tmp/crabka-debug-offline-dir");
+        assert!(reg.mark_offline(ghost, "debug reason"));
+
+        let rendered = format!("{reg:?}");
+
+        assert!(rendered.contains("LogDirRegistry"));
+        assert!(rendered.contains("offline_count"));
+        assert!(rendered.contains("debug reason"));
+        assert!(rendered.contains("crabka-debug-offline-dir"));
+    }
 }

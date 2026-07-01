@@ -101,6 +101,11 @@ pub(crate) struct UncleanRecoveryHandle {
 }
 
 impl UncleanRecoveryHandle {
+    #[cfg(test)]
+    pub(crate) fn for_tests(tx: mpsc::Sender<RecoveryJob>) -> Self {
+        Self { tx }
+    }
+
     /// Enqueue a recovery job. Logs (but does not panic) if the manager has
     /// shut down.
     pub(crate) async fn enqueue(&self, job: RecoveryJob) {

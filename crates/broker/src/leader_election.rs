@@ -539,17 +539,23 @@ pub(crate) async fn select_new_leader_for_partition(
 #[cfg(test)]
 mod tests {
     use assert2::assert;
+    use std::collections::BTreeSet;
+    use std::net::SocketAddr;
     use std::sync::Arc;
     use std::time::Duration;
 
     use crabka_metadata::{MetadataImage, MetadataRecord, PartitionRecord, TopicRecord};
+    use tokio::sync::{Mutex, watch};
     use uuid::Uuid;
 
     use super::{
-        ControllerLivenessState, ElectError, ElectionType, select_new_leader_for_partition,
-        select_replacement_leader_for_shutdown,
+        ControllerLivenessState, ElectError, ElectionType, on_broker_dead,
+        select_new_leader_for_partition, select_replacement_leader_for_shutdown,
     };
-    use crabka_raft::NodeId;
+    use crabka_raft::{
+        AddVoter, Node, NodeId, QuorumState, RaftError, ReconfigOutcome, RemoveVoter,
+        SnapshotRange, UpdateVoter,
+    };
 
     fn img_with_partition(
         topic: &str,
@@ -586,6 +592,98 @@ mod tests {
             l.record_heartbeat(n).await;
         }
         Arc::new(l)
+    }
+
+    struct TestMetadataSource {
+        image: Arc<MetadataImage>,
+        leader_tx: watch::Sender<Option<NodeId>>,
+        submitted: Mutex<Vec<Vec<MetadataRecord>>>,
+    }
+
+    impl TestMetadataSource {
+        fn new(image: MetadataImage, leader: Option<NodeId>) -> Self {
+            let (leader_tx, _) = watch::channel(leader);
+            Self {
+                image: Arc::new(image),
+                leader_tx,
+                submitted: Mutex::new(Vec::new()),
+            }
+        }
+
+        async fn submitted_batches(&self) -> Vec<Vec<MetadataRecord>> {
+            self.submitted.lock().await.clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::metadata_source::MetadataSource for TestMetadataSource {
+        fn current_image(&self) -> Arc<MetadataImage> {
+            self.image.clone()
+        }
+
+        fn watch_image(&self) -> watch::Receiver<Arc<MetadataImage>> {
+            let (_, rx) = watch::channel(self.image.clone());
+            rx
+        }
+
+        fn watch_leader(&self) -> watch::Receiver<Option<NodeId>> {
+            self.leader_tx.subscribe()
+        }
+
+        fn quorum_state(&self) -> QuorumState {
+            QuorumState {
+                current_term: 0,
+                last_applied_index: 0,
+                current_leader: *self.leader_tx.borrow(),
+                voters: Vec::new(),
+                voter_nodes: std::collections::BTreeMap::new(),
+                per_voter_matched_index: std::collections::BTreeMap::new(),
+            }
+        }
+
+        async fn submit_change(&self, records: Vec<MetadataRecord>) -> Result<(), RaftError> {
+            self.submitted.lock().await.push(records);
+            Ok(())
+        }
+
+        async fn change_membership(&self, _new_voters: BTreeSet<NodeId>) -> Result<(), RaftError> {
+            unimplemented!("unused in leader_election tests")
+        }
+
+        async fn add_learner(&self, _node_id: NodeId, _node: Node) -> Result<(), RaftError> {
+            unimplemented!("unused in leader_election tests")
+        }
+
+        fn controller_bound_addr(&self) -> SocketAddr {
+            unimplemented!("unused in leader_election tests")
+        }
+
+        fn read_snapshot_range(&self, _position: i64, _max_bytes: i32) -> SnapshotRange {
+            unimplemented!("unused in leader_election tests")
+        }
+
+        async fn trigger_snapshot(&self) -> Result<(), RaftError> {
+            unimplemented!("unused in leader_election tests")
+        }
+
+        async fn add_voter(&self, _req: AddVoter) -> Result<ReconfigOutcome, RaftError> {
+            unimplemented!("unused in leader_election tests")
+        }
+
+        async fn remove_voter(&self, _req: RemoveVoter) -> Result<ReconfigOutcome, RaftError> {
+            unimplemented!("unused in leader_election tests")
+        }
+
+        async fn update_voter(&self, _req: UpdateVoter) -> Result<ReconfigOutcome, RaftError> {
+            unimplemented!("unused in leader_election tests")
+        }
+
+        async fn cancel(&self) {}
+    }
+
+    fn recovery_handle_for_tests() -> crate::unclean_recovery::UncleanRecoveryHandle {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        crate::unclean_recovery::UncleanRecoveryHandle::for_tests(tx)
     }
 
     #[tokio::test]
@@ -801,6 +899,55 @@ mod tests {
         assert!(pr.leader == 2);
         assert!(pr.isr == vec![2, 3]);
         assert!(pr.leader_epoch == 6, "leader_epoch must bump on election");
+        assert!(
+            pr.partition_epoch == 1,
+            "partition_epoch must bump on election"
+        );
+    }
+
+    #[tokio::test]
+    async fn failover_processes_dead_replica_even_when_not_in_isr() {
+        // Synthetic but valid during ISR churn: dead broker is the current
+        // leader/replica, while the ISR already contains only surviving peers.
+        let img = img_with_partition("t", 0, /*leader*/ 1, &[1, 2, 3], &[2, 3]);
+        let l = ControllerLivenessState::new(Duration::from_secs(10));
+        for n in [2u64, 3] {
+            l.record_heartbeat(n).await;
+        }
+
+        let plan = compute_failover_changes(
+            &img,
+            /*dead=*/ 1,
+            &l,
+            &crate::metrics::BrokerMetrics::new(),
+        )
+        .await;
+
+        let pr = one_partition_change(&plan.changes);
+        assert!(pr.leader == 2);
+        assert!(pr.isr == vec![2, 3]);
+    }
+
+    #[tokio::test]
+    async fn failover_ignores_partition_when_dead_broker_is_unrelated() {
+        // Broker 9 is neither a replica nor an ISR member. Even if some other
+        // ISR member is dead, this scan must not rewrite the partition.
+        let img = img_with_partition("t", 0, /*leader*/ 1, &[1, 2, 3], &[1, 2, 3]);
+        let l = ControllerLivenessState::new(Duration::from_secs(10));
+        for n in [1u64, 3] {
+            l.record_heartbeat(n).await;
+        }
+
+        let plan = compute_failover_changes(
+            &img,
+            /*dead=*/ 9,
+            &l,
+            &crate::metrics::BrokerMetrics::new(),
+        )
+        .await;
+
+        assert!(plan.changes.is_empty());
+        assert!(plan.recoveries.is_empty());
     }
 
     #[tokio::test]
@@ -987,6 +1134,33 @@ mod tests {
             pr.leader_epoch == 5,
             "non-leader-change must NOT bump leader_epoch"
         );
+        assert!(pr.partition_epoch == 1);
+    }
+
+    #[tokio::test]
+    async fn on_broker_dead_submits_failover_when_this_controller_is_leader() {
+        let img = img_with_partition("t", 0, /*leader*/ 1, &[1, 2, 3], &[1, 2, 3]);
+        let source = Arc::new(TestMetadataSource::new(img, Some(7)));
+        let controller: Arc<dyn crate::metadata_source::MetadataSource> = source.clone();
+        let liveness = liveness_with_alive(&[2, 3]).await;
+        let recovery = recovery_handle_for_tests();
+
+        on_broker_dead(
+            &controller,
+            7,
+            1,
+            &liveness,
+            &crate::metrics::BrokerMetrics::new(),
+            &recovery,
+        )
+        .await
+        .expect("broker dead handling should submit");
+
+        let batches = source.submitted_batches().await;
+        assert!(batches.len() == 1);
+        let pr = one_partition_change(&batches[0]);
+        assert!(pr.leader == 2);
+        assert!(pr.partition_epoch == 1);
     }
 
     // ── KIP-112: compute_offline_dir_failover_changes ───────────────────────
@@ -1044,6 +1218,7 @@ mod tests {
         assert!(pr.leader == 2);
         assert!(pr.isr == vec![2, 3]);
         assert!(pr.leader_epoch == 6);
+        assert!(pr.partition_epoch == 1);
     }
 
     #[tokio::test]
@@ -1091,6 +1266,7 @@ mod tests {
         assert!(pr.leader == 1);
         assert!(pr.isr == vec![1, 3]);
         assert!(pr.leader_epoch == 5);
+        assert!(pr.partition_epoch == 1);
     }
 
     #[tokio::test]
