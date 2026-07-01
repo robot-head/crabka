@@ -148,8 +148,8 @@ mod tests {
             .with_sampler(Sampler::AlwaysOn)
             .build();
         let tracer = provider.tracer("propagation-test");
-        let subscriber = tracing_subscriber::registry()
-            .with(tracing_opentelemetry::layer().with_tracer(tracer));
+        let subscriber =
+            tracing_subscriber::registry().with(tracing_opentelemetry::layer().with_tracer(tracer));
         tracing::subscriber::with_default(subscriber, f);
     }
 

@@ -717,8 +717,8 @@ mod tests {
             .with_sampler(Sampler::AlwaysOn)
             .build();
         let tracer = provider.tracer("blockbuilder-test");
-        let subscriber = tracing_subscriber::registry()
-            .with(tracing_opentelemetry::layer().with_tracer(tracer));
+        let subscriber =
+            tracing_subscriber::registry().with(tracing_opentelemetry::layer().with_tracer(tracer));
 
         tracing::subscriber::with_default(subscriber, || {
             fn record(headers: Vec<crabka_client_consumer::Header>) -> ConsumerRecord {
@@ -756,7 +756,9 @@ mod tests {
             // The span now belongs to the producer's trace (shares its trace id).
             // A no-op mutant leaves the span in its own fresh trace, so this fails.
             let sc = span.context().span().span_context().clone();
-            assert!(sc.trace_id() == TraceId::from_hex("0af7651916cd43dd8448eb211c80319c").unwrap());
+            assert!(
+                sc.trace_id() == TraceId::from_hex("0af7651916cd43dd8448eb211c80319c").unwrap()
+            );
         });
     }
 
