@@ -69,6 +69,10 @@ pub fn next_epoch(prev: i32) -> i32 {
     if n <= 0 { 1 } else { n }
 }
 
+fn session_id_is_reserved(candidate: i32) -> bool {
+    candidate <= 0
+}
+
 /// (`topic_name`, `topic_id`, partition) — both name and id are kept because
 /// Fetch v ≤ 12 sends only the name, v ≥ 13 sends only the id, and the
 /// cache must resolve regardless of which version the client uses.
@@ -401,10 +405,12 @@ impl FetchSessionCache {
         // 0 (sentinel) and any negative (would round-trip on the wire
         // as a "negative session id" the client rejects) and any
         // id that's already taken (extremely rare — happens only after
-        // 2^31 allocations of overlap).
-        let id = loop {
+        // 2^31 allocations of overlap). The loop is bounded by the number of
+        // live ids it could collide with plus the reserved wrap value and reset.
+        let mut id = None;
+        for _ in 0..guard.sessions.len().saturating_add(3) {
             let candidate = self.next_id.fetch_add(1, Ordering::Relaxed);
-            if candidate <= 0 {
+            if session_id_is_reserved(candidate) {
                 // Wrapped past i32::MAX or hit zero. Reset to 1 and
                 // try again; the next iteration will fetch_add to 2
                 // and store 3.
@@ -412,8 +418,12 @@ impl FetchSessionCache {
                 continue;
             }
             if !guard.sessions.contains_key(&candidate) {
-                break candidate;
+                id = Some(candidate);
+                break;
             }
+        }
+        let Some(id) = id else {
+            return INVALID_SESSION_ID;
         };
 
         let partitions: HashMap<FetchSessionKey, CachedPartitionState> =
@@ -548,6 +558,25 @@ mod tests {
         assert!(b > 0);
         assert!(a != b);
         assert!(cache.len() == 2);
+    }
+
+    #[test]
+    fn is_empty_tracks_session_lifecycle() {
+        let cache = FetchSessionCache::new(10);
+        assert!(cache.is_empty());
+
+        let id = cache.try_allocate(false, "alice".into(), vec![]);
+        assert!(!cache.is_empty());
+
+        cache.close(id);
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn session_id_reserved_predicate_matches_wire_sentinels() {
+        assert!(session_id_is_reserved(INVALID_SESSION_ID));
+        assert!(session_id_is_reserved(FINAL_EPOCH));
+        assert!(!session_id_is_reserved(1));
     }
 
     #[test]
@@ -1032,6 +1061,60 @@ mod tests {
         cache.close(id);
         assert!(cache.len() == 0);
         assert!(cache.total_partitions_cached() == 0);
+    }
+
+    #[test]
+    fn counters_track_large_incremental_add_delta() {
+        let cache = FetchSessionCache::new(10);
+        let mk = |p| {
+            (
+                FetchSessionKey {
+                    topic_name: "t".into(),
+                    topic_id: WireUuid::ZERO,
+                    partition: p,
+                },
+                CachedPartitionState::default(),
+            )
+        };
+        let id = cache.try_allocate(false, "a".into(), vec![mk(0), mk(1)]);
+
+        let r = req(id, 1, vec![topic("t", &[0, 1, 2, 3, 4])], vec![]);
+        assert!(matches!(
+            cache.classify(&r),
+            SessionDecision::Incremental { .. }
+        ));
+
+        assert!(cache.total_partitions_cached() == 5);
+    }
+
+    #[test]
+    fn counters_track_large_incremental_forget_delta() {
+        let cache = FetchSessionCache::new(10);
+        let mk = |p| {
+            (
+                FetchSessionKey {
+                    topic_name: "t".into(),
+                    topic_id: WireUuid::ZERO,
+                    partition: p,
+                },
+                CachedPartitionState::default(),
+            )
+        };
+        let id = cache.try_allocate(false, "a".into(), vec![mk(0), mk(1), mk(2), mk(3), mk(4)]);
+        let forgotten = vec![ForgottenTopic {
+            topic: "t".into(),
+            topic_id: WireUuid::ZERO,
+            partitions: vec![2, 3, 4],
+            ..Default::default()
+        }];
+
+        let r = req(id, 1, vec![], forgotten);
+        assert!(matches!(
+            cache.classify(&r),
+            SessionDecision::Incremental { .. }
+        ));
+
+        assert!(cache.total_partitions_cached() == 2);
     }
 
     #[test]
