@@ -772,6 +772,19 @@ mod tests {
         (supervisor, partitions, reporter, dir)
     }
 
+    #[tokio::test]
+    async fn network_reporter_send_propagates_controller_resolution_errors() {
+        // The real network reporter must surface send_assignments' error
+        // (here: no controller leader elected), not swallow it into Ok(()).
+        let source: Arc<dyn crate::metadata_source::MetadataSource> =
+            Arc::new(StaticMetadataSource::new(MetadataImage::new(Uuid::nil())));
+        let err = NetworkAssignDirsReporter
+            .send(&source, "test", Default::default())
+            .await
+            .expect_err("no controller leader must fail");
+        assert!(err == "no controller leader");
+    }
+
     #[test]
     fn desired_follower_set_includes_followers_excludes_leader_and_non_replicas() {
         let img = image_with(&[

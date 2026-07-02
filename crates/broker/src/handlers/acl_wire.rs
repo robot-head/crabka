@@ -236,6 +236,51 @@ mod tests {
     }
 
     #[test]
+    fn resource_type_filter_collapses_any_and_rejects_unknown() {
+        let cases = [
+            (WIRE_ANY, Ok(None)),
+            (2, Ok(Some(ResourceType::Topic))),
+            (3, Ok(Some(ResourceType::Group))),
+            (4, Ok(Some(ResourceType::Cluster))),
+            (5, Ok(Some(ResourceType::TransactionalId))),
+            (6, Ok(Some(ResourceType::DelegationToken))),
+            (7, Err(WireAclError::UnknownDiscriminant)),
+        ];
+        for (byte, want) in cases {
+            assert!(resource_type_filter(byte) == want, "byte {byte}");
+        }
+    }
+
+    #[test]
+    fn concrete_parsers_distinguish_wildcards_from_unknown_discriminants() {
+        // The wildcard bytes (UNKNOWN/ANY, and MATCH for pattern types) must
+        // report AnyRequiresFilter — a different wire error than a junk
+        // discriminant — and the concrete codes must map, not fall through.
+        let pattern_cases = [
+            (3, Ok(PatternType::Literal)),
+            (4, Ok(PatternType::Prefixed)),
+            (WIRE_UNKNOWN, Err(WireAclError::AnyRequiresFilter)),
+            (WIRE_ANY, Err(WireAclError::AnyRequiresFilter)),
+            (WIRE_PATTERN_MATCH, Err(WireAclError::AnyRequiresFilter)),
+            (5, Err(WireAclError::UnknownDiscriminant)),
+        ];
+        for (byte, want) in pattern_cases {
+            check!(pattern_type_concrete(byte) == want, "pattern byte {byte}");
+        }
+
+        for byte in [WIRE_UNKNOWN, WIRE_ANY] {
+            check!(
+                operation_concrete(byte) == Err(WireAclError::AnyRequiresFilter),
+                "operation byte {byte}"
+            );
+            check!(
+                permission_concrete(byte) == Err(WireAclError::AnyRequiresFilter),
+                "permission byte {byte}"
+            );
+        }
+    }
+
+    #[test]
     fn operation_round_trip_through_wire() {
         for op in [
             AclOperation::All,

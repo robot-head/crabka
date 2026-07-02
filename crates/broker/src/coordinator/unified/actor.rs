@@ -2425,6 +2425,97 @@ mod tests {
         );
     }
 
+    #[test]
+    fn snapshot_seed_pins_full_group_state_including_classic_facade() {
+        use crate::coordinator::unified::persistence_next_gen as p;
+
+        let topic = {
+            let mut b = [0u8; 16];
+            b[15] = 0xEF;
+            crabka_protocol::primitives::uuid::Uuid(b)
+        };
+        let mut state = GroupState::new("g");
+        state.group_epoch = 7;
+        state.target.epoch = 6;
+
+        let mut m = build_member(
+            "m1",
+            &ConsumerGroupHeartbeatRequest {
+                subscribed_topic_names: Some(vec!["t".into()]),
+                rebalance_timeout_ms: 60_000,
+                ..Default::default()
+            },
+            "h",
+            Instant::now(),
+        );
+        m.member_epoch = 7;
+        m.previous_member_epoch = 6;
+        m.assigned_partitions.insert(topic, vec![0, 1]);
+        m.classic = Some(super::super::consumer_state::ClassicMemberFacade {
+            generation_id: 7,
+            supported_protocols: vec![("range".to_string(), bytes::Bytes::from_static(b"meta"))],
+            session_timeout: Duration::from_millis(45_000),
+            last_synced_assignment: bytes::Bytes::from_static(b"assigned"),
+            awaiting_sync: false,
+        });
+        state
+            .target
+            .per_member
+            .insert("m1".to_string(), HashMap::from([(topic, vec![0, 1, 2])]));
+        state.add_or_update_member(m);
+
+        let seed = snapshot_seed(&state);
+
+        let expected = super::super::GroupSeed {
+            group_epoch: 7,
+            target_epoch: 6,
+            members: HashMap::from([(
+                "m1".to_string(),
+                p::MemberMetadataValue {
+                    instance_id: None,
+                    rack_id: None,
+                    client_id: String::new(),
+                    client_host: "h".to_string(),
+                    subscribed_topic_names: vec!["t".to_string()],
+                    subscribed_topic_regex: None,
+                    server_assignor: None,
+                    rebalance_timeout_ms: 60_000,
+                    classic: Some(p::ClassicMemberMetadata {
+                        session_timeout_ms: 45_000,
+                        supported_protocols: vec![(
+                            "range".to_string(),
+                            bytes::Bytes::from_static(b"meta"),
+                        )],
+                        last_synced_assignment: bytes::Bytes::from_static(b"assigned"),
+                    }),
+                },
+            )]),
+            target_per_member: HashMap::from([(
+                "m1".to_string(),
+                p::TargetAssignmentMemberValue {
+                    topic_partitions: vec![p::AssignedTopicPartitions {
+                        topic_id: topic,
+                        partitions: vec![0, 1, 2],
+                    }],
+                },
+            )]),
+            current_per_member: HashMap::from([(
+                "m1".to_string(),
+                p::CurrentMemberAssignmentValue {
+                    member_epoch: 7,
+                    previous_member_epoch: 6,
+                    state: MemberAssignmentState::Stable,
+                    assigned_partitions: vec![p::AssignedTopicPartitions {
+                        topic_id: topic,
+                        partitions: vec![0, 1],
+                    }],
+                    partitions_pending_revocation: vec![],
+                },
+            )]),
+        };
+        assert!(seed == expected);
+    }
+
     // ---------------------------------------------------------------------
     // custom assignor registry
     // ---------------------------------------------------------------------
