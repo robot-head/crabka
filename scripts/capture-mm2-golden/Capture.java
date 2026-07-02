@@ -6,7 +6,7 @@ import org.apache.kafka.common.TopicPartition;
 
 /**
  * Captures golden byte vectors from the real JVM MirrorMaker-2 record codecs
- * (apache/kafka:4.0.0) for Crabka's MM2 byte-exactness proof. Prints one
+ * (mirror.gcr.io/apache/kafka:4.0.0) for Crabka's MM2 byte-exactness proof. Prints one
  * `name=<lowercase-hex>` line per key/value.
  *
  * The three record classes live in connect-mirror-4.0.0.jar:

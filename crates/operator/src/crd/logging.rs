@@ -57,9 +57,13 @@ mod tests {
     #[test]
     fn logging_defaults_type_inline() {
         let lg: Logging = serde_json::from_str("{}").unwrap();
-        assert!(lg.r#type == LoggingType::Inline);
-        assert!(lg.loggers.is_empty());
-        assert!(lg.value_from.is_none());
+        assert!(
+            lg == Logging {
+                r#type: LoggingType::Inline,
+                loggers: BTreeMap::new(),
+                value_from: None,
+            }
+        );
     }
 
     #[test]

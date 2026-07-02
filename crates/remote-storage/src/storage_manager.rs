@@ -139,15 +139,19 @@ pub trait RemoteStorageManager: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::check;
 
     #[test]
     fn index_suffixes_match_kafka() {
         // Filesystem-backed stores key files off these exact suffixes.
-        assert!(IndexType::Offset.suffix() == ".index");
-        assert!(IndexType::Timestamp.suffix() == ".timeindex");
-        assert!(IndexType::ProducerSnapshot.suffix() == ".snapshot");
-        assert!(IndexType::LeaderEpoch.suffix() == ".leader-epoch-checkpoint");
-        assert!(IndexType::Transaction.suffix() == ".txnindex");
+        for (index_type, want) in [
+            (IndexType::Offset, ".index"),
+            (IndexType::Timestamp, ".timeindex"),
+            (IndexType::ProducerSnapshot, ".snapshot"),
+            (IndexType::LeaderEpoch, ".leader-epoch-checkpoint"),
+            (IndexType::Transaction, ".txnindex"),
+        ] {
+            check!(index_type.suffix() == want, "{index_type:?}");
+        }
     }
 }

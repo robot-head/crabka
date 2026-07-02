@@ -800,14 +800,41 @@ mod tests {
 
         collect_tags(&[span()], &mut tag_names, &mut tag_values);
 
-        assert!(tag_names.contains("event:name"));
-        assert!(tag_names.contains("event:timeSinceStart"));
-        assert!(tag_names.contains("link:traceID"));
-        assert!(tag_names.contains("link:spanID"));
-        assert!(tag_values["event:name"].contains("exception"));
-        assert!(tag_values["event:timeSinceStart"].contains("50"));
-        assert!(tag_values["link:traceID"].contains("09090909090909090909090909090909"));
-        assert!(tag_values["link:spanID"].contains("0808080808080808"));
+        assert!(
+            tag_names
+                == BTreeSet::from([
+                    "event:name".to_string(),
+                    "event:timeSinceStart".to_string(),
+                    "link:spanID".to_string(),
+                    "link:traceID".to_string(),
+                    "service.name".to_string(),
+                ])
+        );
+        assert!(
+            tag_values
+                == BTreeMap::from([
+                    (
+                        "event:name".to_string(),
+                        BTreeSet::from(["exception".to_string()])
+                    ),
+                    (
+                        "event:timeSinceStart".to_string(),
+                        BTreeSet::from(["50".to_string()])
+                    ),
+                    (
+                        "link:spanID".to_string(),
+                        BTreeSet::from(["0808080808080808".to_string()])
+                    ),
+                    (
+                        "link:traceID".to_string(),
+                        BTreeSet::from(["09090909090909090909090909090909".to_string()])
+                    ),
+                    (
+                        "service.name".to_string(),
+                        BTreeSet::from(["api".to_string()])
+                    ),
+                ])
+        );
     }
 
     #[test]
@@ -826,10 +853,51 @@ mod tests {
 
         collect_tags(&[span], &mut tag_names, &mut tag_values);
 
-        assert!(tag_names.contains("cache.key"));
-        assert!(tag_names.contains("link.kind"));
-        assert!(tag_values["cache.key"].contains("users"));
-        assert!(tag_values["link.kind"].contains("retry"));
+        assert!(
+            tag_names
+                == BTreeSet::from([
+                    "cache.key".to_string(),
+                    "event:name".to_string(),
+                    "event:timeSinceStart".to_string(),
+                    "link.kind".to_string(),
+                    "link:spanID".to_string(),
+                    "link:traceID".to_string(),
+                    "service.name".to_string(),
+                ])
+        );
+        assert!(
+            tag_values
+                == BTreeMap::from([
+                    (
+                        "cache.key".to_string(),
+                        BTreeSet::from(["users".to_string()])
+                    ),
+                    (
+                        "event:name".to_string(),
+                        BTreeSet::from(["exception".to_string()])
+                    ),
+                    (
+                        "event:timeSinceStart".to_string(),
+                        BTreeSet::from(["50".to_string()])
+                    ),
+                    (
+                        "link.kind".to_string(),
+                        BTreeSet::from(["retry".to_string()])
+                    ),
+                    (
+                        "link:spanID".to_string(),
+                        BTreeSet::from(["0808080808080808".to_string()])
+                    ),
+                    (
+                        "link:traceID".to_string(),
+                        BTreeSet::from(["09090909090909090909090909090909".to_string()])
+                    ),
+                    (
+                        "service.name".to_string(),
+                        BTreeSet::from(["api".to_string()])
+                    ),
+                ])
+        );
     }
 
     #[test]
@@ -842,9 +910,50 @@ mod tests {
 
         collect_tags(&[span], &mut tag_names, &mut tag_values);
 
-        assert!(tag_names.contains("instrumentation:name"));
-        assert!(tag_names.contains("instrumentation:version"));
-        assert!(tag_values["instrumentation:name"].contains("otel-rust"));
-        assert!(tag_values["instrumentation:version"].contains("1.2.3"));
+        assert!(
+            tag_names
+                == BTreeSet::from([
+                    "event:name".to_string(),
+                    "event:timeSinceStart".to_string(),
+                    "instrumentation:name".to_string(),
+                    "instrumentation:version".to_string(),
+                    "link:spanID".to_string(),
+                    "link:traceID".to_string(),
+                    "service.name".to_string(),
+                ])
+        );
+        assert!(
+            tag_values
+                == BTreeMap::from([
+                    (
+                        "event:name".to_string(),
+                        BTreeSet::from(["exception".to_string()])
+                    ),
+                    (
+                        "event:timeSinceStart".to_string(),
+                        BTreeSet::from(["50".to_string()])
+                    ),
+                    (
+                        "instrumentation:name".to_string(),
+                        BTreeSet::from(["otel-rust".to_string()])
+                    ),
+                    (
+                        "instrumentation:version".to_string(),
+                        BTreeSet::from(["1.2.3".to_string()])
+                    ),
+                    (
+                        "link:spanID".to_string(),
+                        BTreeSet::from(["0808080808080808".to_string()])
+                    ),
+                    (
+                        "link:traceID".to_string(),
+                        BTreeSet::from(["09090909090909090909090909090909".to_string()])
+                    ),
+                    (
+                        "service.name".to_string(),
+                        BTreeSet::from(["api".to_string()])
+                    ),
+                ])
+        );
     }
 }

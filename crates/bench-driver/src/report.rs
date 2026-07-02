@@ -949,7 +949,7 @@ mod tests {
     use crate::scenario::{
         Acks, Compression, Disturbance, LoadMode, ModeTag, Sample, Scenario, Throughput, Topology,
     };
-    use assert2::assert;
+    use assert2::{assert, check};
     use tempfile::tempdir;
 
     fn fake_run(stack: Stack, msgs: u64) -> RunOutput {
@@ -1103,9 +1103,10 @@ mod tests {
         )
         .unwrap();
         let md = render_markdown(dir.path(), true).unwrap();
-        assert!(md.contains("small-msg-saturate"));
-        assert!(md.contains("producer msgs/s"));
-        assert!(md.contains("1.50×")); // 600k / 400k
+        // "1.50×" is the ratio 600k / 400k.
+        for needle in ["small-msg-saturate", "producer msgs/s", "1.50×"] {
+            assert!(md.contains(needle), "missing {needle:?} in:\n{md}");
+        }
     }
 
     #[test]
@@ -1129,10 +1130,10 @@ mod tests {
             .unwrap();
         }
         let md = render_markdown(dir.path(), true).unwrap();
-        assert!(md.contains("1.75×"));
-        assert!(md.contains("Runs averaged: crabka=3, kafka=3"));
-        // Multi-run cells carry a coefficient-of-variation marker.
-        assert!(md.contains("±"));
+        // Multi-run cells carry a coefficient-of-variation marker ("±").
+        for needle in ["1.75×", "Runs averaged: crabka=3, kafka=3", "±"] {
+            assert!(md.contains(needle), "missing {needle:?} in:\n{md}");
+        }
     }
 
     #[test]
@@ -1158,11 +1159,15 @@ mod tests {
 
         let md = render_markdown(dir.path(), true).unwrap();
 
-        assert!(md.contains("**Failover comparison:** PASS"));
-        assert!(md.contains("Crabka recovered 1000 ms faster than kafka"));
-        assert!(md.contains("| stack | recovery ms | producer baseline msgs/s | producer min after kill msgs/s | producer rate recovery ms | consumer baseline msgs/s | consumer min after kill msgs/s | consumer rate recovery ms |"));
-        assert!(md.contains("| crabka | 2000 | 10100 | 8000 | 2000 | 9850 | 7200 | 2000 |"));
-        assert!(md.contains("| kafka | 3000 | 10100 | 6000 | 2000 | 9850 | 5400 | 2000 |"));
+        for needle in [
+            "**Failover comparison:** PASS",
+            "Crabka recovered 1000 ms faster than kafka",
+            "| stack | recovery ms | producer baseline msgs/s | producer min after kill msgs/s | producer rate recovery ms | consumer baseline msgs/s | consumer min after kill msgs/s | consumer rate recovery ms |",
+            "| crabka | 2000 | 10100 | 8000 | 2000 | 9850 | 7200 | 2000 |",
+            "| kafka | 3000 | 10100 | 6000 | 2000 | 9850 | 5400 | 2000 |",
+        ] {
+            assert!(md.contains(needle), "missing {needle:?} in:\n{md}");
+        }
     }
 
     #[test]
@@ -1451,10 +1456,15 @@ mod tests {
         )
         .unwrap();
         let html = render_html(dir.path(), true, "Bench").unwrap();
-        assert!(html.contains("<html") && html.contains("Bench"));
-        assert!(html.contains("cdn.plot.ly/plotly-3.0.1"));
-        assert!(html.contains("small-msg-saturate"));
-        assert!(html.contains("Producer throughput"));
+        for needle in [
+            "<html",
+            "Bench",
+            "cdn.plot.ly/plotly-3.0.1",
+            "small-msg-saturate",
+            "Producer throughput",
+        ] {
+            assert!(html.contains(needle), "missing {needle:?} in:\n{html}");
+        }
     }
 
     #[test]
@@ -1474,10 +1484,14 @@ mod tests {
         .unwrap();
         let frag = render_web_fragment(dir.path(), true).unwrap();
         // A fragment, not a full page (no <html> wrapper) but loads plotly.
-        assert!(!frag.contains("<html"));
-        assert!(frag.contains("cdn.plot.ly/plotly-3.0.1"));
-        assert!(frag.contains("Per run"));
-        assert!(frag.contains("small-msg-saturate"));
+        for (needle, want) in [
+            ("<html", false),
+            ("cdn.plot.ly/plotly-3.0.1", true),
+            ("Per run", true),
+            ("small-msg-saturate", true),
+        ] {
+            assert!(frag.contains(needle) == want, "{needle:?} in:\n{frag}");
+        }
     }
 
     #[test]
@@ -1491,11 +1505,11 @@ mod tests {
         .unwrap();
         let csv = render_csv(dir.path(), true).unwrap();
         let lines: Vec<&str> = csv.lines().collect();
-        assert!(lines[0].starts_with("scenario,stack,run_tag,"));
-        assert!(lines.len() == 2); // header + 1 run
+        assert!(lines.len() == 2); // header + 1 run (index guard)
+        check!(lines[0].starts_with("scenario,stack,run_tag,"));
         // run_tag parsed from the filename
-        assert!(lines[1].contains(",run01,"));
-        assert!(lines[1].starts_with("small-msg-saturate,crabka,"));
+        check!(lines[1].contains(",run01,"));
+        check!(lines[1].starts_with("small-msg-saturate,crabka,"));
     }
 
     #[test]
@@ -1540,8 +1554,12 @@ mod tests {
         );
         // 2 samples × 5 client metrics + 1 broker sample × 2 metrics = 12 rows.
         assert!(csv.lines().count() == 1 + 12);
-        assert!(csv.contains(",run03,0,producer_msgs_per_sec,1000.000"));
-        assert!(csv.contains(",run03,0,broker_cpu_cores,2.5000"));
-        assert!(csv.contains(",run03,2000,producer_p99_ms,4.500"));
+        for needle in [
+            ",run03,0,producer_msgs_per_sec,1000.000",
+            ",run03,0,broker_cpu_cores,2.5000",
+            ",run03,2000,producer_p99_ms,4.500",
+        ] {
+            assert!(csv.contains(needle), "missing {needle:?} in:\n{csv}");
+        }
     }
 }

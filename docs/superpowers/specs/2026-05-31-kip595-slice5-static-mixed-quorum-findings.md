@@ -9,7 +9,7 @@ Spike tweak under evaluation: `crates/raft/src/server.rs::api_versions_response_
 
 - **Election cross-impl: YES** — with one small Crabka-side tweak. A single
   static (`controller.quorum.voters`, kraft.version=0) quorum of two Crabka
-  controllers (ids 1, 2) + one `apache/kafka:4.0.0` controller (id 3) elects a
+  controllers (ids 1, 2) + one `mirror.gcr.io/apache/kafka:4.0.0` controller (id 3) elects a
   **Crabka** leader, and the **JVM transitions to `FollowerState(leader=<crabka
   node>)`** — it accepts the Crabka leader over the real KIP-595 wire.
 - **Replication leader→JVM-follower: NO (blocked).** The JVM follower never
@@ -35,7 +35,7 @@ kraft.version=1 (rules out **(C)** for the election milestone). See
 - Crabka voters id 1, 2: in-process (`Broker::start`), real TCP controller
   listeners bound `0.0.0.0:p1` / `0.0.0.0:p2`. They hold the 2/3 majority and
   self-elect immediately.
-- JVM voter id 3: `apache/kafka:4.0.0`, `process.roles=controller`, container
+- JVM voter id 3: `mirror.gcr.io/apache/kafka:4.0.0`, `process.roles=controller`, container
   publishing `-p p3:p3`, dialing Crabka voters via
   `--add-host=host.docker.internal:host-gateway` at `host.docker.internal:p1/p2`.
 - Shared cluster id, shared static 3-voter list, default `metadata.version`

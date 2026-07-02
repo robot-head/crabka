@@ -1,6 +1,6 @@
 use assert2::assert;
 use crabka_broker::{Broker, BrokerConfig};
-use crabka_client_consumer::{AutoOffsetReset, Consumer};
+use crabka_client_consumer::{AutoOffsetReset, Consumer, Header as ConsumerHeader};
 use crabka_client_core::Client;
 use crabka_client_producer::{Header, Producer, ProducerRecord};
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
@@ -73,7 +73,11 @@ async fn consumer_record_carries_headers() {
             break r;
         }
     };
-    assert!(recs[0].headers.len() == 1);
-    assert!(recs[0].headers[0].key == "trace");
-    assert!(recs[0].headers[0].value.as_deref() == Some(b"abc".as_slice()));
+    assert!(
+        recs[0].headers
+            == vec![ConsumerHeader {
+                key: "trace".into(),
+                value: Some("abc".into()),
+            }]
+    );
 }

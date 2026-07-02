@@ -23,8 +23,8 @@ use crate::error::BrokerError;
 
 pub(crate) fn handle(
     broker: &Broker,
-    version: i16,
-    _correlation_id: i32,
+    version: crate::handlers::ApiVersion,
+    _correlation_id: crate::handlers::CorrelationId,
     req_bytes: &[u8],
 ) -> BoxFuture<'static, Result<Bytes, BrokerError>> {
     let req_bytes = req_bytes.to_vec();
@@ -37,25 +37,13 @@ pub(crate) fn handle(
         let is_leader = controller
             .watch_leader()
             .borrow()
-            .is_some_and(|n| n == node_id);
+            .is_some_and(|n| is_controller_leader(Some(n), node_id));
         if !is_leader {
-            return encode_resp(
-                version,
-                &AssignReplicasToDirsResponse {
-                    error_code: codes::NOT_CONTROLLER,
-                    ..Default::default()
-                },
-            );
+            return encode_resp(version, &not_controller_response());
         }
 
         let Ok(broker_slot_id) = u64::try_from(req.broker_id) else {
-            return encode_resp(
-                version,
-                &AssignReplicasToDirsResponse {
-                    error_code: codes::NONE,
-                    ..Default::default()
-                },
-            );
+            return encode_resp(version, &AssignReplicasToDirsResponse::default());
         };
         let image = controller.current_image();
         let changes = collect_assignment_changes(&image, broker_slot_id, &req);
@@ -68,6 +56,17 @@ pub(crate) fn handle(
 
         encode_resp(version, &build_echo_response(&req))
     })
+}
+
+fn is_controller_leader(leader: Option<u64>, node_id: u64) -> bool {
+    leader == Some(node_id)
+}
+
+fn not_controller_response() -> AssignReplicasToDirsResponse {
+    AssignReplicasToDirsResponse {
+        error_code: codes::NOT_CONTROLLER,
+        ..Default::default()
+    }
 }
 
 /// Collect all `MetadataRecord` changes from the directories/topics/partitions
@@ -118,7 +117,6 @@ pub(crate) fn build_echo_response(
                         .iter()
                         .map(|p| RespPartData {
                             partition_index: p.partition_index,
-                            error_code: codes::NONE,
                             ..Default::default()
                         })
                         .collect(),
@@ -129,7 +127,6 @@ pub(crate) fn build_echo_response(
         })
         .collect();
     AssignReplicasToDirsResponse {
-        error_code: codes::NONE,
         directories,
         ..Default::default()
     }
@@ -180,7 +177,10 @@ fn assignment_changes(
     )]
 }
 
-fn encode_resp(version: i16, resp: &AssignReplicasToDirsResponse) -> Result<Bytes, BrokerError> {
+fn encode_resp(
+    version: crate::handlers::ApiVersion,
+    resp: &AssignReplicasToDirsResponse,
+) -> Result<Bytes, BrokerError> {
     let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
     resp.encode(&mut buf, version)?;
     Ok(buf.freeze())
@@ -195,6 +195,211 @@ mod tests {
         DirectoryData as ReqDirData, PartitionData as ReqPartData, TopicData as ReqTopicData,
     };
     use crabka_protocol::primitives::uuid::Uuid as ProtocolUuid;
+
+    use crate::broker::Broker;
+    use crate::config::BrokerConfig;
+
+    const VERSION: i16 = 0;
+
+    fn request(dir_uuid: uuid::Uuid, topic_uuid: uuid::Uuid, partition_index: i32) -> Bytes {
+        let req = AssignReplicasToDirsRequest {
+            broker_id: 1,
+            broker_epoch: -1,
+            directories: vec![ReqDirData {
+                id: ProtocolUuid(dir_uuid.into_bytes()),
+                topics: vec![ReqTopicData {
+                    topic_id: ProtocolUuid(topic_uuid.into_bytes()),
+                    partitions: vec![ReqPartData {
+                        partition_index,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut buf = BytesMut::with_capacity(req.encoded_len(VERSION));
+        req.encode(&mut buf, VERSION)
+            .expect("encode AssignReplicasToDirsRequest");
+        buf.freeze()
+    }
+
+    fn decode_response(bytes: &Bytes) -> AssignReplicasToDirsResponse {
+        let mut cur: &[u8] = bytes.as_ref();
+        let resp = AssignReplicasToDirsResponse::decode(&mut cur, VERSION)
+            .expect("decode AssignReplicasToDirsResponse");
+        assert!(cur.is_empty(), "response decoder consumed all bytes");
+        resp
+    }
+
+    async fn start_broker() -> (crate::broker::BrokerHandle, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
+        let handle = Broker::start(cfg).await.expect("start broker");
+        (handle, dir)
+    }
+
+    async fn wait_for_leader(broker: &Broker) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if broker
+                .controller
+                .watch_leader()
+                .borrow()
+                .is_some_and(|n| n == broker.config.node_id)
+            {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() <= deadline,
+                "broker did not become controller leader"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }
+
+    #[test]
+    fn leader_predicate_matches_current_node_only() {
+        for (leader, want) in [(Some(1), true), (Some(2), false), (None, false)] {
+            assert!(is_controller_leader(leader, 1) == want, "leader {leader:?}");
+        }
+    }
+
+    #[test]
+    fn not_controller_response_preserves_error_code() {
+        let resp = not_controller_response();
+        assert!(resp.error_code == codes::NOT_CONTROLLER, "{resp:?}");
+        assert!(resp.directories.is_empty(), "{resp:?}");
+    }
+
+    #[test]
+    fn encode_resp_preserves_encoded_body() {
+        let req = AssignReplicasToDirsRequest {
+            broker_id: 1,
+            broker_epoch: -1,
+            directories: vec![ReqDirData {
+                id: ProtocolUuid(uuid::Uuid::from_u128(0xAA).into_bytes()),
+                topics: vec![ReqTopicData {
+                    topic_id: ProtocolUuid(uuid::Uuid::from_u128(0xBB).into_bytes()),
+                    partitions: vec![ReqPartData {
+                        partition_index: 3,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let resp = build_echo_response(&req);
+
+        let bytes = encode_resp(VERSION, &resp).expect("encode response");
+        let decoded = decode_response(&bytes);
+
+        let expected = AssignReplicasToDirsResponse {
+            throttle_time_ms: 0,
+            error_code: codes::NONE,
+            directories: vec![RespDirData {
+                id: ProtocolUuid(uuid::Uuid::from_u128(0xAA).into_bytes()),
+                topics: vec![RespTopicData {
+                    topic_id: ProtocolUuid(uuid::Uuid::from_u128(0xBB).into_bytes()),
+                    partitions: vec![RespPartData {
+                        partition_index: 3,
+                        error_code: codes::NONE,
+                        unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+                    }],
+                    unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+                }],
+                unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+            }],
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+        };
+        assert!(decoded == expected, "{decoded:?}");
+    }
+
+    #[tokio::test]
+    async fn handle_leader_echoes_request_shape() {
+        let (broker_handle, _dir) = start_broker().await;
+        let broker = broker_handle.broker_arc_for_test();
+        wait_for_leader(&broker).await;
+        let dir_uuid = uuid::Uuid::from_u128(0xAA);
+        let topic_uuid = uuid::Uuid::from_u128(0xBB);
+        let req = request(dir_uuid, topic_uuid, 7);
+
+        let bytes = handle(&broker, VERSION, 9, &req)
+            .await
+            .expect("AssignReplicasToDirs handler");
+        let resp = decode_response(&bytes);
+
+        let expected = AssignReplicasToDirsResponse {
+            throttle_time_ms: 0,
+            error_code: codes::NONE,
+            directories: vec![RespDirData {
+                id: ProtocolUuid(dir_uuid.into_bytes()),
+                topics: vec![RespTopicData {
+                    topic_id: ProtocolUuid(topic_uuid.into_bytes()),
+                    partitions: vec![RespPartData {
+                        partition_index: 7,
+                        error_code: codes::NONE,
+                        unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+                    }],
+                    unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+                }],
+                unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+            }],
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+        };
+        assert!(resp == expected, "{resp:?}");
+
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_leader_commits_known_directory_assignment() {
+        let (broker_handle, _dir) = start_broker().await;
+        let broker = broker_handle.broker_arc_for_test();
+        wait_for_leader(&broker).await;
+        let dir_uuid = uuid::Uuid::from_u128(0xAA);
+        let topic_uuid = uuid::Uuid::from_u128(0xBB);
+        broker
+            .controller
+            .submit_change(vec![
+                MetadataRecord::V1Topic(TopicRecord {
+                    name: "t".into(),
+                    topic_id: topic_uuid,
+                    partitions: 1,
+                    replication_factor: 1,
+                }),
+                MetadataRecord::V1Partition(PartitionRecord {
+                    topic: "t".into(),
+                    partition: 0,
+                    leader: 1,
+                    replicas: vec![1],
+                    isr: vec![1],
+                    leader_epoch: 0,
+                    adding_replicas: vec![],
+                    removing_replicas: vec![],
+                    directories: vec![uuid::Uuid::nil()],
+                    partition_epoch: 0,
+                }),
+            ])
+            .await
+            .expect("seed partition");
+        let req = request(dir_uuid, topic_uuid, 0);
+
+        let bytes = handle(&broker, VERSION, 9, &req)
+            .await
+            .expect("AssignReplicasToDirs handler");
+        let resp = decode_response(&bytes);
+
+        assert!(resp.error_code == codes::NONE, "{resp:?}");
+        assert!(resp.directories[0].topics[0].partitions[0].error_code == codes::NONE);
+        let image = broker.controller.current_image();
+        let partition = image.partition("t", 0).expect("partition");
+        assert!(partition.directories == vec![dir_uuid]);
+        broker_handle.shutdown().await;
+    }
 
     #[test]
     fn sets_reporting_brokers_directory_slot() {
@@ -223,10 +428,13 @@ mod tests {
         let MetadataRecord::V1PartitionDirAssignment(r) = &changes[0] else {
             panic!("expected V1PartitionDirAssignment")
         };
-        assert!(r.topic == "t");
-        assert!(r.partition == 0);
-        assert!(r.replica == 2);
-        assert!(r.directory == dir);
+        let expected = PartitionDirAssignmentRecord {
+            topic: "t".into(),
+            partition: 0,
+            replica: 2,
+            directory: dir,
+        };
+        assert!(*r == expected);
     }
 
     #[test]
@@ -345,10 +553,13 @@ mod tests {
         };
         // The delta names broker 2's replica of (t, 0) on dir_uuid; on apply it
         // merges only slot 1, leaving slot 0 (broker 1) untouched.
-        assert!(r.topic == "t");
-        assert!(r.partition == 0);
-        assert!(r.replica == 2);
-        assert!(r.directory == dir_uuid);
+        let expected = PartitionDirAssignmentRecord {
+            topic: "t".into(),
+            partition: 0,
+            replica: 2,
+            directory: dir_uuid,
+        };
+        assert!(*r == expected);
     }
 
     #[test]
@@ -415,31 +626,33 @@ mod tests {
 
         let resp = build_echo_response(&req);
 
-        assert!(
-            resp.error_code == 0,
-            "top-level error_code must be NONE (0)"
-        );
-        assert!(resp.directories.len() == 1, "must echo one directory");
-
-        let dir = &resp.directories[0];
-        assert!(dir.id.0 == dir_id_bytes, "directory id must be echoed");
-        assert!(dir.topics.len() == 1, "must echo one topic");
-
-        let topic = &dir.topics[0];
-        assert!(
-            topic.topic_id.0 == topic_id_bytes,
-            "topic id must be echoed"
-        );
-        assert!(topic.partitions.len() == 2, "must echo both partitions");
-
-        for (i, p) in topic.partitions.iter().enumerate() {
-            assert!(
-                p.error_code == 0,
-                "partition {i} error_code must be NONE (0), got {}",
-                p.error_code
-            );
-        }
-        assert!(topic.partitions[0].partition_index == 0);
-        assert!(topic.partitions[1].partition_index == 1);
+        // Mirrors the request directory/topic/partition structure with every
+        // error_code filled with NONE (0).
+        let expected = AssignReplicasToDirsResponse {
+            throttle_time_ms: 0,
+            error_code: 0,
+            directories: vec![RespDirData {
+                id: ProtocolUuid(dir_id_bytes),
+                topics: vec![RespTopicData {
+                    topic_id: ProtocolUuid(topic_id_bytes),
+                    partitions: vec![
+                        RespPartData {
+                            partition_index: 0,
+                            error_code: 0,
+                            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+                        },
+                        RespPartData {
+                            partition_index: 1,
+                            error_code: 0,
+                            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+                        },
+                    ],
+                    unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+                }],
+                unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+            }],
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+        };
+        assert!(resp == expected, "{resp:?}");
     }
 }

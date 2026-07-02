@@ -59,17 +59,17 @@ mod tests {
     #[test]
     fn allocate_returns_monotonic_pids_starting_at_base() {
         let m = ProducerIdManager::new();
-        assert!(m.allocate() == (PID_BASE, 0));
-        assert!(m.allocate() == (PID_BASE + 1, 0));
-        assert!(m.allocate() == (PID_BASE + 2, 0));
+        for want_pid in [PID_BASE, PID_BASE + 1, PID_BASE + 2] {
+            assert!(m.allocate() == (want_pid, 0));
+        }
     }
 
     #[test]
     fn bump_epoch_increments() {
         let m = ProducerIdManager::new();
         let (pid, _) = m.allocate();
-        assert!(m.bump_epoch(pid) == Some(1));
-        assert!(m.bump_epoch(pid) == Some(2));
-        assert!(m.bump_epoch(9999) == None);
+        for (bump_pid, want) in [(pid, Some(1)), (pid, Some(2)), (9999, None)] {
+            assert!(m.bump_epoch(bump_pid) == want, "pid {bump_pid}");
+        }
     }
 }

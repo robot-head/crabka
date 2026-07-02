@@ -169,7 +169,7 @@ pub fn patch_base_offset_and_leader_epoch(buf: &mut [u8], base_offset: i64, lead
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use crabka_compression::CompressionType;
 
     macro_rules! attr_case {
@@ -177,27 +177,27 @@ mod tests {
             #[test]
             fn $name() {
                 let a = Attributes($bits);
-                assert!(
+                check!(
                     a.compression() == $codec,
                     "compression mismatch in {}",
                     stringify!($name)
                 );
-                assert!(
+                check!(
                     a.timestamp_type() == $ts,
                     "timestamp_type mismatch in {}",
                     stringify!($name)
                 );
-                assert!(
+                check!(
                     a.is_transactional() == $txn,
                     "is_transactional mismatch in {}",
                     stringify!($name)
                 );
-                assert!(
+                check!(
                     a.is_control_batch() == $ctrl,
                     "is_control_batch mismatch in {}",
                     stringify!($name)
                 );
-                assert!(
+                check!(
                     a.has_delete_horizon() == $horizon,
                     "has_delete_horizon mismatch in {}",
                     stringify!($name)
@@ -305,10 +305,8 @@ mod tests {
             .with_transactional(true)
             .with_control(false);
 
-        assert!(a.compression() == CompressionType::Snappy);
-        assert!(a.timestamp_type() == TimestampType::LogAppendTime);
-        assert!(a.is_transactional());
-        assert!(!a.is_control_batch());
+        // Snappy = bits 0-2 = 010, LogAppendTime = bit 3, transactional = bit 4.
+        assert!(a == Attributes(0b0000_0000_0001_1010));
     }
 
     #[test]
@@ -338,16 +336,12 @@ mod tests {
             .with_control(true)
             .with_transactional(true)
             .with_delete_horizon(true);
-        assert!(combo.has_delete_horizon());
-        assert!(combo.is_control_batch());
-        assert!(combo.is_transactional());
+        // control = bit 5, transactional = bit 4, delete horizon = bit 6.
+        assert!(combo == Attributes(0b0000_0000_0111_0000));
 
         // Clearing bit 6 leaves the others intact.
         let cleared = combo.with_delete_horizon(false);
-        assert!(!cleared.has_delete_horizon());
-        assert!(cleared.is_control_batch());
-        assert!(cleared.is_transactional());
-        assert!(cleared.0 & Attributes::DELETE_HORIZON_BIT == 0);
+        assert!(cleared == Attributes(0b0000_0000_0011_0000));
     }
 
     /// Build a sample 61-byte header with known values. Reused across the
@@ -421,21 +415,21 @@ mod tests {
 
         // The two stamped fields changed to the expected big-endian values.
         let h = RecordBatchHeader::ref_from_bytes(&buf[..]).unwrap();
-        assert!(h.base_offset.get() == 9_001);
-        assert!(h.partition_leader_epoch.get() == 42);
+        check!(h.base_offset.get() == 9_001);
+        check!(h.partition_leader_epoch.get() == 42);
 
         // The CRC field itself is untouched (no recompute).
-        assert!(&buf[17..21] == &crc_field_before[..]);
+        check!(&buf[17..21] == &crc_field_before[..]);
         // Everything in the CRC-covered region is byte-identical.
-        assert!(&buf[CRC_COVERAGE_START..] == &crc_region_before[..]);
+        check!(&buf[CRC_COVERAGE_START..] == &crc_region_before[..]);
     }
 
     #[test]
     fn crc_coverage_constants_match_field_layout() {
         // base_offset and leader_epoch are entirely below the CRC start;
         // attributes (the first CRC-covered field) begins exactly at 21.
-        assert!(BASE_OFFSET_RANGE.end <= CRC_COVERAGE_START);
-        assert!(LEADER_EPOCH_RANGE.end <= CRC_COVERAGE_START);
-        assert!(CRC_COVERAGE_START == 21);
+        check!(BASE_OFFSET_RANGE.end <= CRC_COVERAGE_START);
+        check!(LEADER_EPOCH_RANGE.end <= CRC_COVERAGE_START);
+        check!(CRC_COVERAGE_START == 21);
     }
 }

@@ -721,11 +721,14 @@ mod tests {
         s.register("av-value", SchemaType::Avro, &av("B"), &[], None)
             .unwrap();
         let vs = s.versions_schemas("av-value");
-        assert_eq!(vs.len(), 2);
-        assert!(matches!(vs[0].0, SchemaType::Avro));
-        assert!(vs[0].1.contains("\"A\""));
-        assert!(vs[1].1.contains("\"B\""));
-        assert!(s.versions_schemas("missing").is_empty());
+        assert_eq!(
+            vs,
+            vec![
+                (SchemaType::Avro, av("A"), vec![]),
+                (SchemaType::Avro, av("B"), vec![]),
+            ]
+        );
+        assert_eq!(s.versions_schemas("missing"), vec![]);
     }
 
     #[test]

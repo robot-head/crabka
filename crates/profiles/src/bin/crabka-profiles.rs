@@ -320,7 +320,7 @@ fn spawn_wal_tail(cli: &Cli, hot: WalTailProfileStore) {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+    use assert2::{assert, check};
     use clap::Parser;
 
     use super::*;
@@ -528,10 +528,23 @@ overrides:
 
         let overrides = load_profiles_limits_overrides_config(Some(&path)).unwrap();
 
-        assert!(overrides.for_tenant("tenant-a").max_query_length_secs == 30);
-        assert!(overrides.for_tenant("tenant-a").max_flamegraph_nodes_max == 512);
-        // An unlisted tenant inherits the process default query-length cap.
         assert!(
+            *overrides.for_tenant("tenant-a")
+                == crabka_profiles::limits::Limits {
+                    ingestion_rate_profiles_per_sec: 10_000.0,
+                    ingestion_burst_profiles: 10_000,
+                    max_series: 0,
+                    max_label_name_length: 1024,
+                    max_label_value_length: 2048,
+                    max_label_names_per_series: 40,
+                    max_flamegraph_nodes_default: 2048,
+                    max_flamegraph_nodes_max: 512,
+                    max_query_length_secs: 30,
+                    max_session_id_cardinality: 0,
+                }
+        );
+        // An unlisted tenant inherits the process default query-length cap.
+        check!(
             overrides.for_tenant("tenant-b").max_query_length_secs
                 == crabka_profiles::limits::DEFAULT_MAX_QUERY_LENGTH_SECS
         );

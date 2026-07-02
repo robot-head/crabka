@@ -22,7 +22,7 @@ pub(crate) use crabka_metadata::metadata_version::SHARE_VERSION_FEATURE as SHARE
 pub(crate) use crabka_metadata::metadata_version::STREAMS_VERSION_FEATURE as STREAMS_VERSION;
 
 /// One row of the `ApiVersions.supported_features` advertisement.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SupportedFeature {
     pub name: &'static str,
     pub min_version: i16,
@@ -107,17 +107,23 @@ mod tests {
 
     #[test]
     fn supported_features_include_metadata_version() {
-        let f = lookup(METADATA_VERSION).expect("metadata.version supported");
-        assert!(f.min_version == METADATA_VERSION_MIN);
-        assert!(f.max_version == METADATA_VERSION_MAX);
+        let expected = SupportedFeature {
+            name: METADATA_VERSION,
+            min_version: METADATA_VERSION_MIN,
+            max_version: METADATA_VERSION_MAX,
+        };
+        assert!(lookup(METADATA_VERSION) == Some(expected));
         assert!(lookup("not.a.feature").is_none());
     }
 
     #[test]
     fn share_version_is_supported() {
-        let f = lookup(SHARE_VERSION).expect("share.version supported");
-        assert!(f.min_version == 0);
-        assert!(f.max_version == 1);
+        let expected = SupportedFeature {
+            name: SHARE_VERSION,
+            min_version: 0,
+            max_version: 1,
+        };
+        assert!(lookup(SHARE_VERSION) == Some(expected));
         // Advertised via the registry-derived supported-feature table.
         assert!(
             supported_features()
@@ -128,9 +134,12 @@ mod tests {
 
     #[test]
     fn streams_version_is_supported() {
-        let f = lookup(STREAMS_VERSION).expect("streams.version supported");
-        assert!(f.min_version == 0);
-        assert!(f.max_version == 1);
+        let expected = SupportedFeature {
+            name: STREAMS_VERSION,
+            min_version: 0,
+            max_version: 1,
+        };
+        assert!(lookup(STREAMS_VERSION) == Some(expected));
         // Advertised via the registry-derived supported-feature table.
         assert!(
             supported_features()
@@ -153,10 +162,15 @@ mod tests {
             name: METADATA_VERSION.to_string(),
             level: 10,
         }));
-        assert!(
-            require_feature(&image, METADATA_VERSION, 11) == Err(crate::codes::UNSUPPORTED_VERSION)
-        );
-        assert!(require_feature(&image, METADATA_VERSION, 10).is_ok());
-        assert!(require_feature(&image, METADATA_VERSION, 7).is_ok());
+        for (required_level, want) in [
+            (11, Err(crate::codes::UNSUPPORTED_VERSION)),
+            (10, Ok(())),
+            (7, Ok(())),
+        ] {
+            assert!(
+                require_feature(&image, METADATA_VERSION, required_level) == want,
+                "level {required_level}"
+            );
+        }
     }
 }

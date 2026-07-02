@@ -5,7 +5,7 @@ use support::oracle;
 use bytes::BytesMut;
 use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
 use crabka_protocol::owned::api_versions_response::{ApiVersion, ApiVersionsResponse};
-use crabka_protocol::{Decode, Encode};
+use crabka_protocol::{Decode, Encode, UnknownTaggedFields};
 use serde_json::json;
 
 fn rust_encode<T: Encode>(t: &T, version: i16) -> Vec<u8> {
@@ -123,7 +123,20 @@ fn apiversions_response_decode_matches_java() {
         }),
     );
     let decoded: ApiVersionsResponse = rust_decode(&java, 3);
-    assert!(decoded.api_keys.len() == 1);
-    assert!(decoded.api_keys[0].api_key == 18);
-    assert!(decoded.throttle_time_ms == 0);
+    let expected = ApiVersionsResponse {
+        error_code: 0,
+        api_keys: vec![ApiVersion {
+            api_key: 18,
+            min_version: 0,
+            max_version: 3,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }],
+        throttle_time_ms: 0,
+        supported_features: vec![],
+        finalized_features_epoch: -1,
+        finalized_features: vec![],
+        zk_migration_ready: false,
+        unknown_tagged_fields: UnknownTaggedFields::default(),
+    };
+    assert!(decoded == expected);
 }

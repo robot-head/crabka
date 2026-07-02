@@ -199,7 +199,7 @@ Each consumes the Batch 0 shared-store + merge helper and adds its
 
 - **JVM ground truth:** new `tests/jvm-capture/src/main/java/crabka/capture/
   CogroupBehavior.java`, cross-validated byte-for-byte vs a live
-  apache/kafka:4.1.0 broker, emitting behavioral goldens + topology JSON for all
+  mirror.gcr.io/apache/kafka:4.1.0 broker, emitting behavioral goldens + topology JSON for all
   four variants, each with single-input and 2-input cogroups (and at least one
   key-changing input to exercise the repartition path).
 - **Wire-topology goldens:** `tests/testdata/golden/dsl/cogroup*.topology.json`;

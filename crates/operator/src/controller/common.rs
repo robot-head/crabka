@@ -797,7 +797,7 @@ pub(crate) fn parse_quantity(s: &str) -> Result<i128, &'static str> {
 #[cfg(test)]
 mod config_hash_tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
 
     #[test]
     fn config_hash_is_truncated_sha256_hex() {
@@ -1044,13 +1044,12 @@ mod config_hash_tests {
 
         let cm = render_configmap(&k, &listeners, &per_broker, "PLAIN", None, None, None).unwrap();
         let data = cm.data.unwrap();
-        assert!(data.contains_key("broker-0.toml"));
-        assert!(data.contains_key("broker-1.toml"));
-        assert!(data["broker-0.toml"].contains("demo-0.svc"));
-        assert!(data["broker-1.toml"].contains("demo-1.svc"));
-        // The old broker.env / broker.properties keys are dropped.
-        assert!(!data.contains_key("broker.env"));
-        assert!(!data.contains_key("broker.properties"));
+        // Exactly one toml key per broker; the old broker.env /
+        // broker.properties keys are dropped.
+        let keys: Vec<&str> = data.keys().map(String::as_str).collect();
+        assert!(keys == ["broker-0.toml", "broker-1.toml"]);
+        check!(data["broker-0.toml"].contains("demo-0.svc"));
+        check!(data["broker-1.toml"].contains("demo-1.svc"));
     }
 
     #[test]
@@ -1244,16 +1243,24 @@ mod parse_quantity_tests {
 
     #[test]
     fn quantity_parse_binary_suffixes() {
-        assert!(parse_quantity("1Ki").unwrap() == 1024);
-        assert!(parse_quantity("512Mi").unwrap() == 512 * 1024 * 1024);
-        assert!(parse_quantity("10Gi").unwrap() == 10 * 1024 * 1024 * 1024);
+        for (input, want) in [
+            ("1Ki", 1024),
+            ("512Mi", 512 * 1024 * 1024),
+            ("10Gi", 10 * 1024 * 1024 * 1024),
+        ] {
+            assert!(parse_quantity(input).unwrap() == want, "case {input:?}");
+        }
     }
 
     #[test]
     fn quantity_parse_decimal_suffixes() {
-        assert!(parse_quantity("1K").unwrap() == 1_000);
-        assert!(parse_quantity("500M").unwrap() == 500_000_000);
-        assert!(parse_quantity("10G").unwrap() == 10_000_000_000);
+        for (input, want) in [
+            ("1K", 1_000),
+            ("500M", 500_000_000),
+            ("10G", 10_000_000_000),
+        ] {
+            assert!(parse_quantity(input).unwrap() == want, "case {input:?}");
+        }
     }
 
     #[test]
@@ -1269,19 +1276,17 @@ mod parse_quantity_tests {
 
     #[test]
     fn quantity_parse_rejects_garbage() {
-        assert!(parse_quantity("").is_err());
-        assert!(parse_quantity("banana").is_err());
-        assert!(parse_quantity("1.5x").is_err());
-        assert!(parse_quantity("Gi").is_err());
-        // No scientific notation:
-        assert!(parse_quantity("1e3").is_err());
+        // "1e3" pins that scientific notation is rejected.
+        for input in ["", "banana", "1.5x", "Gi", "1e3"] {
+            assert!(parse_quantity(input).is_err(), "case {input:?}");
+        }
     }
 
     #[test]
     fn quantity_parse_zero_and_negative_are_errors() {
-        assert!(parse_quantity("0").is_err());
-        assert!(parse_quantity("0Gi").is_err());
-        assert!(parse_quantity("-10Gi").is_err());
+        for input in ["0", "0Gi", "-10Gi"] {
+            assert!(parse_quantity(input).is_err(), "case {input:?}");
+        }
     }
 }
 
@@ -1290,7 +1295,7 @@ mod cluster_object_tests {
     use super::*;
     use crate::controller::listeners::AdvertisedAddress;
     use crate::crd::{KafkaSpec, Listener, ListenerType};
-    use assert2::assert;
+    use assert2::{assert, check};
 
     fn test_kafka() -> Kafka {
         let mut k = Kafka::new(
@@ -1334,10 +1339,10 @@ mod cluster_object_tests {
             .iter()
             .find(|p| p.name.as_deref() == Some("controller"))
             .expect("controller port must be present");
-        assert!(controller.port == CONTROLLER_PORT);
-        assert!(controller.port == 9093);
+        check!(controller.port == CONTROLLER_PORT);
+        check!(controller.port == 9093);
         // Original broker port is preserved.
-        assert!(ports.iter().any(|p| p.port == BROKER_PORT));
+        check!(ports.iter().any(|p| p.port == BROKER_PORT));
     }
 
     fn internal_listener(name: &str, port: i32) -> Listener {

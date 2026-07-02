@@ -330,3 +330,229 @@ fn encode_err_all(
     let empty: std::collections::HashSet<String> = std::collections::HashSet::new();
     encode_resp(version, &build_response(req, code, &empty))
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use assert2::{assert, check};
+    use crabka_log::{Log, LogConfig};
+    use crabka_protocol::owned::txn_offset_commit_request::{
+        TxnOffsetCommitRequestPartition, TxnOffsetCommitRequestTopic,
+    };
+    use crabka_protocol::owned::txn_offset_commit_response::TxnOffsetCommitResponse;
+
+    use super::*;
+    use crate::partition_registry::PartitionRegistry;
+
+    fn request() -> TxnOffsetCommitRequest {
+        TxnOffsetCommitRequest {
+            transactional_id: "tid".into(),
+            group_id: "group-a".into(),
+            producer_id: 47,
+            producer_epoch: 5,
+            topics: vec![TxnOffsetCommitRequestTopic {
+                name: "orders".into(),
+                partitions: vec![
+                    TxnOffsetCommitRequestPartition {
+                        partition_index: 2,
+                        committed_offset: 103,
+                        committed_leader_epoch: 7,
+                        committed_metadata: Some("first".into()),
+                        ..Default::default()
+                    },
+                    TxnOffsetCommitRequestPartition {
+                        partition_index: 3,
+                        committed_offset: 107,
+                        committed_leader_epoch: 8,
+                        committed_metadata: Some("second".into()),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn open_offsets_partition(registry: &PartitionRegistry, log_dir: &Path) {
+        let part_dir = crate::log_dir::partition_dir(log_dir, OFFSETS_TOPIC, OFFSETS_PARTITION);
+        std::fs::create_dir_all(&part_dir).expect("create offsets partition dir");
+        let log = Log::open(&part_dir, LogConfig::default()).expect("open offsets log");
+        let part = crate::broker::spawn_partition(
+            OFFSETS_TOPIC.to_string(),
+            OFFSETS_PARTITION,
+            log_dir.to_path_buf(),
+            log,
+            crate::log_dir_status::LogDirRegistry::default(),
+            Arc::new(crate::producer_state::ProducerState::new()),
+        );
+        registry.insert(OFFSETS_TOPIC.to_string(), OFFSETS_PARTITION, part);
+    }
+
+    fn decode_response(bytes: &Bytes, version: i16) -> TxnOffsetCommitResponse {
+        let mut cur: &[u8] = bytes.as_ref();
+        let resp = TxnOffsetCommitResponse::decode(&mut cur, version).expect("decode response");
+        assert!(cur.is_empty(), "response decoder consumed all bytes");
+        resp
+    }
+
+    fn assert_response_rows(resp: &TxnOffsetCommitResponse, code: i16) {
+        let expected = TxnOffsetCommitResponse {
+            throttle_time_ms: 0,
+            topics: vec![TxnOffsetCommitResponseTopic {
+                name: "orders".into(),
+                partitions: vec![
+                    TxnOffsetCommitResponsePartition {
+                        partition_index: 2,
+                        error_code: code,
+                        unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+                    },
+                    TxnOffsetCommitResponsePartition {
+                        partition_index: 3,
+                        error_code: code,
+                        unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+                    },
+                ],
+                unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+            }],
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+        };
+        assert!(*resp == expected);
+    }
+
+    #[test]
+    fn build_response_preserves_topic_partition_rows_and_error_codes() {
+        let req = request();
+        let resp = build_response(&req, codes::GROUP_AUTHORIZATION_FAILED, &HashSet::new());
+
+        assert_response_rows(&resp, codes::GROUP_AUTHORIZATION_FAILED);
+    }
+
+    #[test]
+    fn build_response_overrides_denied_topics_with_topic_authorization_error() {
+        let req = request();
+        let denied = HashSet::from(["orders".to_string()]);
+
+        let resp = build_response(&req, codes::NONE, &denied);
+
+        assert_response_rows(&resp, codes::TOPIC_AUTHORIZATION_FAILED);
+    }
+
+    #[test]
+    fn encode_resp_round_trips_non_empty_response() {
+        let req = request();
+        let resp = build_response(&req, codes::INVALID_TXN_STATE, &HashSet::new());
+
+        let bytes = encode_resp(5, &resp).expect("encode response");
+        assert!(!bytes.is_empty());
+        let decoded = decode_response(&bytes, 5);
+
+        assert_response_rows(&decoded, codes::INVALID_TXN_STATE);
+    }
+
+    #[test]
+    fn encode_err_all_round_trips_rows_for_whole_request_error() {
+        let req = request();
+
+        let bytes = encode_err_all(5, &req, codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED)
+            .expect("encode all-error response");
+        assert!(!bytes.is_empty());
+        let decoded = decode_response(&bytes, 5);
+
+        assert_response_rows(&decoded, codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED);
+    }
+
+    #[tokio::test]
+    async fn append_txn_batch_writes_transactional_batch_and_buffers_entries() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let registry = Arc::new(PartitionRegistry::new());
+        open_offsets_partition(&registry, dir.path());
+        let req = request();
+
+        let entries = append_txn_batch(&req, &registry, 12_345, &HashSet::new())
+            .await
+            .expect("append batch");
+
+        // `OffsetEntry` has no `PartialEq`, so project each row into a tuple
+        // covering the key plus every `OffsetEntry` field.
+        let rows: Vec<(&str, i32, i64, i32, &str, i64)> = entries
+            .iter()
+            .map(|((topic, partition), e)| {
+                (
+                    topic.as_str(),
+                    *partition,
+                    e.offset,
+                    e.leader_epoch,
+                    e.metadata.as_str(),
+                    e.commit_timestamp_ms,
+                )
+            })
+            .collect();
+        assert!(
+            rows == vec![
+                ("orders", 2, 103, 7, "first", 12_345),
+                ("orders", 3, 107, 8, "second", 12_345),
+            ]
+        );
+
+        let part = registry
+            .get(OFFSETS_TOPIC, OFFSETS_PARTITION)
+            .expect("offsets partition");
+        let log = part.log.lock().expect("lock offsets log");
+        let read = log.read(0, 1024 * 1024).expect("read offsets log");
+        assert!(read.batches.len() == 1);
+        let batch = &read.batches[0];
+        check!(batch.attributes.is_transactional());
+        check!(batch.max_timestamp == 12_345);
+        check!(batch.producer_id == 47);
+        check!(batch.producer_epoch == 5);
+        check!(batch.last_offset_delta == 1);
+        let record_rows: Vec<_> = batch
+            .records
+            .iter()
+            .map(|r| {
+                (
+                    r.offset_delta,
+                    r.timestamp_delta,
+                    r.key.is_some(),
+                    r.value.is_some(),
+                )
+            })
+            .collect();
+        assert!(record_rows == vec![(0, 0, true, true), (1, 0, true, true)]);
+    }
+
+    #[tokio::test]
+    async fn append_txn_batch_skips_denied_topics_without_appending() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let registry = Arc::new(PartitionRegistry::new());
+        open_offsets_partition(&registry, dir.path());
+        let req = request();
+        let denied = HashSet::from(["orders".to_string()]);
+
+        let entries = append_txn_batch(&req, &registry, 12_345, &denied)
+            .await
+            .expect("all denied succeeds");
+
+        assert!(entries.is_empty());
+        let part = registry
+            .get(OFFSETS_TOPIC, OFFSETS_PARTITION)
+            .expect("offsets partition");
+        let log = part.log.lock().expect("lock offsets log");
+        let read = log.read(0, 1024 * 1024).expect("read offsets log");
+        assert!(read.batches.is_empty());
+    }
+
+    #[tokio::test]
+    async fn append_txn_batch_returns_not_coordinator_when_offsets_partition_missing() {
+        let registry = Arc::new(PartitionRegistry::new());
+        let err = append_txn_batch(&request(), &registry, 12_345, &HashSet::new())
+            .await
+            .expect_err("missing offsets partition");
+
+        assert!(err == codes::NOT_COORDINATOR);
+    }
+}

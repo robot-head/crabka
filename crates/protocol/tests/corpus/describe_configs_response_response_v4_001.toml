@@ -3,4 +3,4 @@ version = 4
 direction = "response"
 source_kafka_version = "4.3.0"
 synthetic = false
-description = "DescribeConfigsResponse v4 captured from apache/kafka:4.3.0 client traffic"
+description = "DescribeConfigsResponse v4 captured from mirror.gcr.io/apache/kafka:4.3.0 client traffic"

@@ -7,14 +7,14 @@
 //! cargo test -p crabka-client-core --test integration -- --ignored --nocapture
 //! ```
 //!
-//! Each test spins up a fresh `confluentinc/cp-kafka:6.1.1` container and
+//! Each test spins up a fresh `mirror.gcr.io/confluentinc/cp-kafka:6.1.1` container and
 //! tears it down when the test exits.
 //!
 //! ## Why the Confluent image (and not `apache/kafka-native`)?
 //!
 //! `testcontainers-modules` v0.10 ships two Kafka modules: `apache` (using the
 //! `apache/kafka-native:3.8.0` `KRaft` image) and `confluent` (using
-//! `confluentinc/cp-kafka:6.1.1`). The `apache` module wires up advertised
+//! `mirror.gcr.io/confluentinc/cp-kafka:6.1.1`). The `apache` module wires up advertised
 //! listeners through a clever chicken-and-egg trick: the container's `cmd`
 //! polls for a `testcontainers_start.sh` file that `exec_after_start` writes
 //! once the mapped host port is known. In CI this races: the broker's TCP
@@ -44,7 +44,7 @@
 // Skip compilation on Windows runners where testcontainers + Docker reliability
 // is poor. On Linux CI the tests run via the `client-core-integration` job.
 
-use assert2::assert;
+use assert2::{assert, check};
 use std::time::Duration;
 
 use testcontainers::runners::AsyncRunner;
@@ -147,14 +147,14 @@ async fn api_versions_against_real_broker() {
         .await
         .expect("ApiVersions failed");
 
-    assert!(
+    check!(
         resp.error_code == 0,
         "ApiVersions returned error: {}",
         resp.error_code
     );
-    assert!(!resp.api_keys.is_empty(), "broker advertised no APIs");
+    check!(!resp.api_keys.is_empty(), "broker advertised no APIs");
     // ApiVersions (key 18) is always present in any modern Kafka broker.
-    assert!(
+    check!(
         resp.api_keys.iter().any(|k| k.api_key == 18),
         "ApiVersions key 18 not found in response"
     );

@@ -662,24 +662,25 @@ mod tests {
 
     #[test]
     fn apply_complete_abort_records_prev_only_on_a_pid_roll() {
+        use assert2::check;
         // No roll: same pid, epoch bumped → prev untouched.
         let mut e = entry(1000, -1);
         e.state = TxnState::PrepareAbort;
         e.producer_epoch = 4;
         apply_complete_abort(&mut e, 1000, 5, 42);
-        assert!(e.state == TxnState::CompleteAbort);
-        assert!(e.producer_id == 1000);
-        assert!(e.producer_epoch == 5);
-        assert!(e.prev_producer_id == -1, "no roll must not set prev");
-        assert!(e.last_update_ms == 42);
+        check!(e.state == TxnState::CompleteAbort);
+        check!(e.producer_id == 1000);
+        check!(e.producer_epoch == 5);
+        check!(e.prev_producer_id == -1, "no roll must not set prev");
+        check!(e.last_update_ms == 42);
 
         // Roll: fresh pid at epoch 0 → prior pid recorded as prev.
         let mut rolled = entry(1000, -1);
         rolled.state = TxnState::PrepareAbort;
         apply_complete_abort(&mut rolled, 2000, 0, 43);
-        assert!(rolled.producer_id == 2000);
-        assert!(rolled.producer_epoch == 0);
-        assert!(
+        check!(rolled.producer_id == 2000);
+        check!(rolled.producer_epoch == 0);
+        check!(
             rolled.prev_producer_id == 1000,
             "roll must record prior pid"
         );

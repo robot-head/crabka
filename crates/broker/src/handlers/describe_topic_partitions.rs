@@ -270,13 +270,17 @@ mod tests {
 
     #[test]
     fn is_internal_topic_matches_known_internal_names() {
-        assert!(is_internal_topic("__consumer_offsets"));
-        assert!(is_internal_topic("__transaction_state"));
-        assert!(is_internal_topic("__remote_log_metadata"));
-        assert!(!is_internal_topic("foo"));
-        assert!(!is_internal_topic("_foo"));
-        assert!(!is_internal_topic("__user_topic"));
-        // No accidental prefix matching.
-        assert!(!is_internal_topic("__consumer_offsets-2"));
+        for (name, want) in [
+            ("__consumer_offsets", true),
+            ("__transaction_state", true),
+            ("__remote_log_metadata", true),
+            ("foo", false),
+            ("_foo", false),
+            ("__user_topic", false),
+            // No accidental prefix matching.
+            ("__consumer_offsets-2", false),
+        ] {
+            assert!(is_internal_topic(name) == want, "{name}");
+        }
     }
 }

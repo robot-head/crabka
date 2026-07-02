@@ -18,6 +18,14 @@ use crate::codes;
 use crate::error::BrokerError;
 use crate::handlers::context::TelemetryContext;
 
+/// Max allowed decompressed:compressed expansion ratio for a client-metrics
+/// payload (decompression-bomb guard).
+const MAX_DECOMPRESSION_RATIO: usize = 100;
+/// Floor on the decompressed-output bound, so tiny pushes still decompress.
+const DECOMPRESSED_OUTPUT_FLOOR: usize = 16 * 1024 * 1024;
+/// Hard ceiling on decompressed client-metrics output.
+const DECOMPRESSED_OUTPUT_CEILING: usize = 1024 * 1024 * 1024;
+
 #[allow(clippy::unused_async)] // signature symmetry with other inline-intercept handlers
 #[tracing::instrument(
     name = "handle_push_telemetry",
@@ -63,13 +71,12 @@ pub(crate) async fn handle(
             // instance and drops those metrics (best-effort, matches Kafka).
             let ct = codec.expect("authorize_push guarantees a supported codec on Accept");
             // Bound decompressed output to guard against a decompression bomb
-            // in the client-metrics payload: ≤100x the compressed size, with a
-            // 16 MiB floor and a 1 GiB ceiling.
+            // in the client-metrics payload.
             let max_output = req
                 .metrics
                 .len()
-                .saturating_mul(100)
-                .clamp(16 * 1024 * 1024, 1024 * 1024 * 1024);
+                .saturating_mul(MAX_DECOMPRESSION_RATIO)
+                .clamp(DECOMPRESSED_OUTPUT_FLOOR, DECOMPRESSED_OUTPUT_CEILING);
             match crabka_compression::decompress(ct, &req.metrics, max_output) {
                 Ok(raw) => match otlp::decode_metrics(&raw) {
                     Ok(md) => {
@@ -169,4 +176,203 @@ fn flatten_for_prometheus(
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert2::assert;
+    use assert2::check;
+    use bytes::{Bytes, BytesMut};
+    use crabka_compression::CompressionType;
+    use crabka_protocol::owned::push_telemetry_response;
+    use crabka_protocol::primitives::uuid::Uuid as ProtoUuid;
+    use opentelemetry_proto::tonic::metrics::v1::{
+        Gauge, Histogram, HistogramDataPoint, Metric, MetricsData, NumberDataPoint,
+        ResourceMetrics, ScopeMetrics, Sum, metric, number_data_point,
+    };
+    use uuid::Uuid;
+
+    fn number_point(value: number_data_point::Value) -> NumberDataPoint {
+        NumberDataPoint {
+            value: Some(value),
+            ..Default::default()
+        }
+    }
+
+    fn metrics_data(metrics: Vec<Metric>) -> MetricsData {
+        MetricsData {
+            resource_metrics: vec![ResourceMetrics {
+                scope_metrics: vec![ScopeMetrics {
+                    metrics,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        }
+    }
+
+    fn encode_request(req: &PushTelemetryRequest) -> Bytes {
+        let version = push_telemetry_response::MAX_VERSION;
+        let mut buf = BytesMut::with_capacity(req.encoded_len(version));
+        req.encode(&mut buf, version).expect("encode request");
+        buf.freeze()
+    }
+
+    fn decode_response(bytes: &Bytes) -> PushTelemetryResponse {
+        let version = push_telemetry_response::MAX_VERSION;
+        let mut cur: &[u8] = bytes.as_ref();
+        let resp = PushTelemetryResponse::decode(&mut cur, version).expect("decode response");
+        assert!(cur.is_empty(), "response decoder consumed all bytes");
+        resp
+    }
+
+    async fn start_broker() -> (crate::broker::BrokerHandle, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let cfg = crate::config::BrokerConfig::for_tests(dir.path().to_path_buf());
+        let handle = crate::broker::Broker::start(cfg)
+            .await
+            .expect("start broker");
+        (handle, dir)
+    }
+
+    #[tokio::test]
+    async fn handle_preserves_reject_response_fields_for_unknown_instance() {
+        let (broker_handle, _dir) = start_broker().await;
+        let broker = broker_handle.broker_arc_for_test();
+        let ctx = TelemetryContext {
+            client_id: "client-a",
+            peer: &"127.0.0.1:9092".parse().unwrap(),
+            software_name: "test-client",
+            software_version: "1.0.0",
+        };
+        let req = PushTelemetryRequest {
+            client_instance_id: ProtoUuid([9; 16]),
+            subscription_id: 12,
+            terminating: false,
+            compression_type: i8::try_from(CompressionType::Gzip.as_attribute_bits()).unwrap(),
+            metrics: Bytes::from_static(b"payload"),
+            ..Default::default()
+        };
+
+        let resp = handle(
+            &broker,
+            push_telemetry_response::MAX_VERSION,
+            7,
+            &encode_request(&req),
+            &ctx,
+        )
+        .await
+        .expect("handle");
+        let resp = decode_response(&resp);
+
+        assert!(resp.throttle_time_ms == 0);
+        assert!(resp.error_code == codes::INVALID_REQUEST);
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_accept_path_preserves_success_response_fields() {
+        let (broker_handle, _dir) = start_broker().await;
+        let broker = broker_handle.broker_arc_for_test();
+        let instance = Uuid::from_u128(0x1234);
+        let peer = "127.0.0.1:9092".parse().unwrap();
+        let ctx = TelemetryContext {
+            client_id: "client-a",
+            peer: &peer,
+            software_name: "test-client",
+            software_version: "1.0.0",
+        };
+        let assignment = broker.client_metrics.manager.assign(
+            &crabka_metadata::MetadataImage::new(Uuid::nil()),
+            &crate::client_metrics::manager::ClientAttributes {
+                client_instance_id: instance,
+                client_id: ctx.client_id.to_string(),
+                software_name: ctx.software_name.to_string(),
+                software_version: ctx.software_version.to_string(),
+                source_address: ctx.peer.ip().to_string(),
+                source_port: ctx.peer.port(),
+            },
+        );
+        let compressed = crabka_compression::compress(CompressionType::Gzip, b"not-otlp")
+            .expect("compress telemetry payload");
+        let req = PushTelemetryRequest {
+            client_instance_id: ProtoUuid(*instance.as_bytes()),
+            subscription_id: assignment.subscription_id,
+            terminating: false,
+            compression_type: i8::try_from(CompressionType::Gzip.as_attribute_bits()).unwrap(),
+            metrics: compressed,
+            ..Default::default()
+        };
+
+        let resp = handle(
+            &broker,
+            push_telemetry_response::MAX_VERSION,
+            7,
+            &encode_request(&req),
+            &ctx,
+        )
+        .await
+        .expect("handle");
+        let resp = decode_response(&resp);
+
+        assert!(resp.throttle_time_ms == 0);
+        assert!(resp.error_code == codes::NONE);
+        broker_handle.shutdown().await;
+    }
+
+    #[test]
+    fn flatten_for_prometheus_preserves_gauge_sum_and_histogram_points() {
+        let md = metrics_data(vec![
+            Metric {
+                name: "cpu.utilization".into(),
+                data: Some(metric::Data::Gauge(Gauge {
+                    data_points: vec![number_point(number_data_point::Value::AsDouble(0.75))],
+                })),
+                ..Default::default()
+            },
+            Metric {
+                name: "requests.total".into(),
+                data: Some(metric::Data::Sum(Sum {
+                    data_points: vec![number_point(number_data_point::Value::AsInt(42))],
+                    ..Default::default()
+                })),
+                ..Default::default()
+            },
+            Metric {
+                name: "latency.ms".into(),
+                data: Some(metric::Data::Histogram(Histogram {
+                    data_points: vec![HistogramDataPoint {
+                        count: 3,
+                        sum: Some(9.5),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                })),
+                ..Default::default()
+            },
+        ]);
+
+        let points = flatten_for_prometheus(&md, "instance-1", "client-a");
+
+        assert!(points.len() == 4, "{points:?}");
+        check!(
+            points[0].client_instance_id.as_str() == "instance-1",
+            "{points:?}"
+        );
+        check!(points[0].client_id.as_str() == "client-a", "{points:?}");
+        let cases = [
+            (0usize, "cpu.utilization", 0.75f64),
+            (1, "requests.total", 42.0),
+            (2, "latency.ms_count", 3.0),
+            (3, "latency.ms_sum", 9.5),
+        ];
+        for (idx, metric, value) in cases {
+            assert!(points[idx].metric == metric, "point {idx}: {points:?}");
+            assert!(
+                (points[idx].value - value).abs() < f64::EPSILON,
+                "point {idx}: {points:?}"
+            );
+        }
+    }
 }

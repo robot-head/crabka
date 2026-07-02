@@ -12,6 +12,7 @@
 //! (an as-of(150) read of the table yields 10 → 11, an as-of(250) read yields
 //! 20 → 21), so a wrong as-of timestamp would surface as a wrong value.
 
+use assert2::check;
 use crabka_client_streams::dsl::StreamsBuilder;
 use crabka_client_streams::{Consumed, I64Serde, Materialized, Produced, StringSerde};
 use serde::Deserialize;
@@ -635,15 +636,15 @@ fn table_table_versioned_no_extra_changelog_wire() {
         2,
         "expected exactly the two table-source changelogs; got {changelogs:?}"
     );
-    assert!(
+    check!(
         changelogs.iter().any(|n| n.contains("va")),
         "expected a 'va' changelog; got {changelogs:?}"
     );
-    assert!(
+    check!(
         changelogs.iter().any(|n| n.contains("vb")),
         "expected a 'vb' changelog; got {changelogs:?}"
     );
-    assert!(
+    check!(
         !changelogs.iter().any(|n| n.contains("Buffer")),
         "the out-of-order gate must not introduce a Buffer changelog; got {changelogs:?}"
     );

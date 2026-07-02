@@ -236,7 +236,7 @@ impl<C: BrokerConnector> BrokerPool<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[tokio::test]
@@ -259,8 +259,8 @@ mod tests {
         .await;
         assert!(pool.by_addr.contains_key(&1));
         assert!(pool.by_addr.contains_key(&2));
-        assert!(*pool.by_addr.get(&1).unwrap() == "127.0.0.1:9092".parse().unwrap());
-        assert!(*pool.by_addr.get(&2).unwrap() == "127.0.0.1:9093".parse().unwrap());
+        check!(*pool.by_addr.get(&1).unwrap() == "127.0.0.1:9092".parse().unwrap());
+        check!(*pool.by_addr.get(&2).unwrap() == "127.0.0.1:9093".parse().unwrap());
     }
 
     #[tokio::test]
@@ -407,9 +407,9 @@ mod tests {
 
         // Cached under the synthetic bootstrap id; a second call does not redial.
         let again = pool.bootstrap_connection().await.unwrap();
-        assert!(Arc::ptr_eq(&boot, &again));
-        assert!(dials.load(Ordering::Relaxed) == 2);
-        assert!(pool.by_id.contains_key(&BOOTSTRAP_ID));
+        check!(Arc::ptr_eq(&boot, &again));
+        check!(dials.load(Ordering::Relaxed) == 2);
+        check!(pool.by_id.contains_key(&BOOTSTRAP_ID));
     }
 
     #[tokio::test]

@@ -485,7 +485,7 @@ async fn write_batches(
 mod tests {
     use std::sync::Arc;
 
-    use assert2::assert;
+    use assert2::{assert, check};
     use crabka_blockstore::{BlockIndex, Labels};
     use crabka_pprof::{EngineOpts, FlameEngine};
     use object_store::ObjectStore;
@@ -542,9 +542,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(fg.total == 12);
-        assert!(fg.names.iter().any(|name| name == "main"));
-        assert!(fg.names.iter().any(|name| name == "worker"));
+        check!(fg.total == 12);
+        for name in ["main", "worker"] {
+            check!(fg.names.iter().any(|frame| frame == name));
+        }
     }
 
     #[tokio::test]
@@ -712,9 +713,13 @@ mod tests {
         let sources = [1_u64 << 32, 2_u64 << 32, 3_u64 << 32];
         let map = destination_partitions(1, &sources).unwrap();
         let base = 2_u64 << 32;
-        assert!(map[&(1_u64 << 32)] == base);
-        assert!(map[&(2_u64 << 32)] == (base | 1));
-        assert!(map[&(3_u64 << 32)] == (base | 2));
+        assert!(
+            map == BTreeMap::from([
+                (1_u64 << 32, base),
+                (2_u64 << 32, base | 1),
+                (3_u64 << 32, base | 2),
+            ])
+        );
         let dests: BTreeSet<u64> = map.values().copied().collect();
         assert!(dests.len() == 3);
     }

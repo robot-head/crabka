@@ -46,27 +46,47 @@ use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 
 use crate::codes;
 
+/// A KIP-227 fetch session id as carried on the wire (`FetchRequest.session_id`).
+/// `0` ([`INVALID_SESSION_ID`]) means "no session"; valid ids are strictly
+/// positive.
+pub type FetchSessionId = i32;
+
+/// A KIP-227 fetch session epoch as carried on the wire
+/// (`FetchRequest.session_epoch`). `0` ([`INITIAL_EPOCH`]) opens a session,
+/// `-1` ([`FINAL_EPOCH`]) closes one; valid incremental epochs are strictly
+/// positive.
+pub type FetchSessionEpoch = i32;
+
 /// Wire sentinel: "no session". A request with `session_id == 0` and
 /// `session_epoch == -1` is a sessionless full fetch; a response with
 /// `session_id == 0` tells the client that no session was allocated.
-pub const INVALID_SESSION_ID: i32 = 0;
+pub const INVALID_SESSION_ID: FetchSessionId = 0;
 
 /// Wire sentinel: "open a new session". A request with `session_id == 0`
 /// and `session_epoch == 0` asks the broker to allocate a new session.
-pub const INITIAL_EPOCH: i32 = 0;
+pub const INITIAL_EPOCH: FetchSessionEpoch = 0;
 
 /// Wire sentinel: "no session" / "close session". On a request with
 /// `session_id == 0`, `FINAL_EPOCH` means a sessionless full fetch. On
 /// a request with `session_id != 0`, it means close the named session.
-pub const FINAL_EPOCH: i32 = -1;
+pub const FINAL_EPOCH: FetchSessionEpoch = -1;
+
+/// The first id the allocator hands out. Ids count up from here: `0` is
+/// reserved as [`INVALID_SESSION_ID`] and negative ids never go on the wire
+/// (clients reject them).
+const FIRST_SESSION_ID: FetchSessionId = 1;
 
 /// Compute the epoch the broker expects on the next request after a
 /// successful incremental fetch. Wraps from `i32::MAX` back to `1`,
 /// skipping the two reserved sentinels (`0` = INITIAL, `-1` = FINAL).
 #[must_use]
-pub fn next_epoch(prev: i32) -> i32 {
+pub fn next_epoch(prev: FetchSessionEpoch) -> FetchSessionEpoch {
     let n = prev.wrapping_add(1);
     if n <= 0 { 1 } else { n }
+}
+
+fn session_id_is_reserved(candidate: FetchSessionId) -> bool {
+    candidate <= 0
 }
 
 /// (`topic_name`, `topic_id`, partition) — both name and id are kept because
@@ -100,11 +120,11 @@ pub struct CachedPartitionState {
 }
 
 pub struct FetchSession {
-    pub id: i32,
+    pub id: FetchSessionId,
     /// The epoch the *next* incremental request must carry. Initialized
     /// to `1` on allocation and bumped after each successful incremental
     /// fetch.
-    pub next_epoch: i32,
+    pub next_epoch: FetchSessionEpoch,
     pub privileged: bool,
     pub creator_principal: String,
     pub partitions: HashMap<FetchSessionKey, CachedPartitionState>,
@@ -129,23 +149,23 @@ pub enum SessionDecision {
     /// updates/new entries and `forgotten_topics_data` removed). Response
     /// only contains partitions whose state has changed.
     Incremental {
-        session_id: i32,
+        session_id: FetchSessionId,
         /// Already-incremented; goes nowhere on the wire (response has no
         /// epoch field) — but the cache uses it as the *next* expected
         /// epoch for the following request.
-        new_epoch: i32,
+        new_epoch: FetchSessionEpoch,
         partitions: Vec<(FetchSessionKey, CachedPartitionState)>,
     },
     /// `(session_id!=0, epoch=-1)` — serve from `req.topics` like a
     /// sessionless fetch, then drop the cached session.
-    Close { session_id: i32 },
+    Close { session_id: FetchSessionId },
     /// Protocol violation — emit an empty response with this top-level
     /// `error_code` and `session_id = 0`.
     Error { code: i16 },
 }
 
 struct Inner {
-    sessions: HashMap<i32, FetchSession>,
+    sessions: HashMap<FetchSessionId, FetchSession>,
 }
 
 pub struct FetchSessionCache {
@@ -224,9 +244,9 @@ impl FetchSessionCache {
             inner: Mutex::new(Inner {
                 sessions: HashMap::new(),
             }),
-            // Id allocation starts at 1 — id 0 is reserved as the
-            // INVALID_SESSION_ID sentinel.
-            next_id: AtomicI32::new(1),
+            // Id allocation starts at FIRST_SESSION_ID — id 0 is reserved
+            // as the INVALID_SESSION_ID sentinel.
+            next_id: AtomicI32::new(FIRST_SESSION_ID),
             max_slots,
             evictions: AtomicU64::new(0),
             num_sessions: AtomicUsize::new(0),
@@ -368,7 +388,7 @@ impl FetchSessionCache {
         privileged: bool,
         creator_principal: String,
         partitions: Vec<(FetchSessionKey, CachedPartitionState)>,
-    ) -> i32 {
+    ) -> FetchSessionId {
         if self.max_slots == 0 {
             return INVALID_SESSION_ID;
         }
@@ -379,7 +399,7 @@ impl FetchSessionCache {
             // otherwise (only when the caller is itself privileged) the
             // LRU session of any kind. Non-privileged callers cannot
             // evict privileged sessions — they fall back to sessionless.
-            let victim: Option<i32> = guard
+            let victim: Option<FetchSessionId> = guard
                 .sessions
                 .iter()
                 .filter(|(_, s)| if privileged { true } else { !s.privileged })
@@ -401,19 +421,25 @@ impl FetchSessionCache {
         // 0 (sentinel) and any negative (would round-trip on the wire
         // as a "negative session id" the client rejects) and any
         // id that's already taken (extremely rare — happens only after
-        // 2^31 allocations of overlap).
-        let id = loop {
+        // 2^31 allocations of overlap). The loop is bounded by the number of
+        // live ids it could collide with plus the reserved wrap value and reset.
+        let mut id = None;
+        for _ in 0..guard.sessions.len().saturating_add(3) {
             let candidate = self.next_id.fetch_add(1, Ordering::Relaxed);
-            if candidate <= 0 {
-                // Wrapped past i32::MAX or hit zero. Reset to 1 and
-                // try again; the next iteration will fetch_add to 2
-                // and store 3.
-                self.next_id.store(1, Ordering::Relaxed);
+            if session_id_is_reserved(candidate) {
+                // Wrapped past i32::MAX or hit zero. Reset to the first
+                // allocatable id and try again; the next iteration will
+                // fetch_add to 2 and store 3.
+                self.next_id.store(FIRST_SESSION_ID, Ordering::Relaxed);
                 continue;
             }
             if !guard.sessions.contains_key(&candidate) {
-                break candidate;
+                id = Some(candidate);
+                break;
             }
+        }
+        let Some(id) = id else {
+            return INVALID_SESSION_ID;
         };
 
         let partitions: HashMap<FetchSessionKey, CachedPartitionState> =
@@ -421,8 +447,8 @@ impl FetchSessionCache {
         let session = FetchSession {
             id,
             // Client's first incremental request after a new-session
-            // allocation must carry epoch=1.
-            next_epoch: 1,
+            // allocation must carry the epoch after INITIAL (i.e. 1).
+            next_epoch: next_epoch(INITIAL_EPOCH),
             privileged,
             creator_principal,
             partitions,
@@ -443,7 +469,7 @@ impl FetchSessionCache {
     /// were filtered).
     pub fn finalize_incremental(
         &self,
-        session_id: i32,
+        session_id: FetchSessionId,
         sent: &[(FetchSessionKey, CachedPartitionState)],
     ) {
         let mut guard = self.inner.lock().expect("poisoned");
@@ -465,7 +491,7 @@ impl FetchSessionCache {
     /// Drop the session. Called when the request is `Close` (existing
     /// session, epoch=-1) or after the handler decides to forcibly
     /// invalidate the session.
-    pub fn close(&self, session_id: i32) {
+    pub fn close(&self, session_id: FetchSessionId) {
         let mut guard = self.inner.lock().expect("poisoned");
         if let Some(session) = guard.sessions.remove(&session_id) {
             self.num_sessions.fetch_sub(1, Ordering::Relaxed);
@@ -482,7 +508,7 @@ mod fetch_session_model;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use crabka_protocol::owned::fetch_request::{FetchPartition, FetchTopic, ForgottenTopic};
 
     fn req(
@@ -519,10 +545,10 @@ mod tests {
 
     #[test]
     fn next_epoch_wraps_skipping_sentinels() {
-        assert!(next_epoch(0) == 1);
-        assert!(next_epoch(1) == 2);
-        assert!(next_epoch(i32::MAX) == 1);
-        assert!(next_epoch(-1) == 1);
+        let cases = [(0, 1), (1, 2), (i32::MAX, 1), (-1, 1)];
+        for (epoch, want) in cases {
+            assert!(next_epoch(epoch) == want, "epoch {epoch}");
+        }
     }
 
     #[test]
@@ -544,10 +570,33 @@ mod tests {
         let cache = FetchSessionCache::new(10);
         let a = cache.try_allocate(false, "alice".into(), vec![]);
         let b = cache.try_allocate(false, "alice".into(), vec![]);
-        assert!(a > 0);
-        assert!(b > 0);
-        assert!(a != b);
-        assert!(cache.len() == 2);
+        // Id allocation starts at 1 and increments monotonically.
+        check!(a == 1);
+        check!(b == 2);
+        check!(cache.len() == 2);
+    }
+
+    #[test]
+    fn is_empty_tracks_session_lifecycle() {
+        let cache = FetchSessionCache::new(10);
+        assert!(cache.is_empty());
+
+        let id = cache.try_allocate(false, "alice".into(), vec![]);
+        assert!(!cache.is_empty());
+
+        cache.close(id);
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn session_id_reserved_predicate_matches_wire_sentinels() {
+        let cases = [(INVALID_SESSION_ID, true), (FINAL_EPOCH, true), (1, false)];
+        for (session_id, want) in cases {
+            assert!(
+                session_id_is_reserved(session_id) == want,
+                "session_id {session_id}"
+            );
+        }
     }
 
     #[test]
@@ -557,6 +606,18 @@ mod tests {
         cache.next_id.store(0, Ordering::Relaxed);
         let id = cache.try_allocate(false, "alice".into(), vec![]);
         assert!(id > 0);
+    }
+
+    #[test]
+    fn allocate_skips_existing_session_id_collision() {
+        let cache = FetchSessionCache::new(10);
+        let first = cache.try_allocate(false, "alice".into(), vec![]);
+
+        cache.next_id.store(first, Ordering::Relaxed);
+        let second = cache.try_allocate(false, "bob".into(), vec![]);
+
+        assert!(second == first + 1);
+        assert!(cache.len() == 2);
     }
 
     #[test]
@@ -650,9 +711,9 @@ mod tests {
                 new_epoch,
                 partitions,
             } => {
-                assert!(session_id == id);
-                assert!(new_epoch == 2);
-                assert!(partitions.len() == 2);
+                check!(session_id == id);
+                check!(new_epoch == 2);
+                check!(partitions.len() == 2);
             }
             other => panic!("expected Incremental, got {other:?}"),
         }
@@ -715,12 +776,29 @@ mod tests {
         let SessionDecision::Incremental { partitions, .. } = cache.classify(&r) else {
             panic!("expected Incremental");
         };
-        assert!(partitions.len() == 1, "no duplicate entry created");
-        let (k, s) = &partitions[0];
-        assert!(k.topic_name == "t", "cached name preserved");
-        assert!(k.topic_id == tid);
-        assert!(s.fetch_offset == 42, "fetch_offset updated");
-        assert!(s.max_bytes == 2048, "max_bytes updated");
+        // No duplicate entry created; the cached (fully-resolved) key is
+        // preserved and its desired state updated in place.
+        let expected = vec![(
+            FetchSessionKey {
+                topic_name: "t".into(),
+                topic_id: tid,
+                partition: 0,
+            },
+            CachedPartitionState {
+                fetch_offset: 42,
+                last_fetched_epoch: -1,
+                current_leader_epoch: -1,
+                max_bytes: 2048,
+                log_start_offset: -1,
+                last_high_watermark: 0,
+                last_last_stable_offset: 0,
+                last_log_start_offset: 0,
+                last_preferred_read_replica: 0,
+                last_aborted_txns_hash: 0,
+                last_error_code: 0,
+            },
+        )];
+        assert!(partitions == expected);
     }
 
     #[test]
@@ -766,10 +844,27 @@ mod tests {
         let SessionDecision::Incremental { partitions, .. } = cache.classify(&r) else {
             panic!("expected Incremental");
         };
-        assert!(partitions.len() == 1);
-        let (_, s) = &partitions[0];
-        assert!(s.fetch_offset == 99);
-        assert!(s.max_bytes == 4096);
+        let expected = vec![(
+            FetchSessionKey {
+                topic_name: "t".into(),
+                topic_id: tid,
+                partition: 0,
+            },
+            CachedPartitionState {
+                fetch_offset: 99,
+                last_fetched_epoch: -1,
+                current_leader_epoch: -1,
+                max_bytes: 4096,
+                log_start_offset: -1,
+                last_high_watermark: 0,
+                last_last_stable_offset: 0,
+                last_log_start_offset: 0,
+                last_preferred_read_replica: 0,
+                last_aborted_txns_hash: 0,
+                last_error_code: 0,
+            },
+        )];
+        assert!(partitions == expected);
     }
 
     #[test]
@@ -812,14 +907,96 @@ mod tests {
         let r = req(id, 1, vec![], forgotten);
         match cache.classify(&r) {
             SessionDecision::Incremental { partitions, .. } => {
-                assert!(partitions.len() == 2);
-                let parts: Vec<i32> = partitions.iter().map(|(k, _)| k.partition).collect();
-                assert!(parts.contains(&0));
-                assert!(parts.contains(&2));
-                assert!(!parts.contains(&1));
+                let mut parts: Vec<i32> = partitions.iter().map(|(k, _)| k.partition).collect();
+                parts.sort_unstable();
+                assert!(parts == vec![0, 2]);
             }
             other => panic!("expected Incremental, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn forgotten_topic_name_drops_only_matching_topic_partition() {
+        let mut partitions = HashMap::from([
+            (
+                FetchSessionKey {
+                    topic_name: "t".into(),
+                    topic_id: WireUuid::ZERO,
+                    partition: 0,
+                },
+                CachedPartitionState::default(),
+            ),
+            (
+                FetchSessionKey {
+                    topic_name: "u".into(),
+                    topic_id: WireUuid::ZERO,
+                    partition: 0,
+                },
+                CachedPartitionState::default(),
+            ),
+        ]);
+        let forgotten = vec![ForgottenTopic {
+            topic: "t".into(),
+            topic_id: WireUuid::ZERO,
+            partitions: vec![0],
+            ..Default::default()
+        }];
+
+        apply_incremental(&mut partitions, &forgotten, &[]);
+
+        assert!(!partitions.contains_key(&FetchSessionKey {
+            topic_name: "t".into(),
+            topic_id: WireUuid::ZERO,
+            partition: 0,
+        }));
+        assert!(partitions.contains_key(&FetchSessionKey {
+            topic_name: "u".into(),
+            topic_id: WireUuid::ZERO,
+            partition: 0,
+        }));
+    }
+
+    #[test]
+    fn forgotten_topic_id_drops_only_matching_topic_partition() {
+        let tid = WireUuid([1u8; 16]);
+        let other_tid = WireUuid([2u8; 16]);
+        let mut partitions = HashMap::from([
+            (
+                FetchSessionKey {
+                    topic_name: "t".into(),
+                    topic_id: tid,
+                    partition: 0,
+                },
+                CachedPartitionState::default(),
+            ),
+            (
+                FetchSessionKey {
+                    topic_name: "u".into(),
+                    topic_id: other_tid,
+                    partition: 0,
+                },
+                CachedPartitionState::default(),
+            ),
+        ]);
+        let forgotten = vec![ForgottenTopic {
+            topic: String::new(),
+            topic_id: tid,
+            partitions: vec![0],
+            ..Default::default()
+        }];
+
+        apply_incremental(&mut partitions, &forgotten, &[]);
+
+        assert!(!partitions.contains_key(&FetchSessionKey {
+            topic_name: "t".into(),
+            topic_id: tid,
+            partition: 0,
+        }));
+        assert!(partitions.contains_key(&FetchSessionKey {
+            topic_name: "u".into(),
+            topic_id: other_tid,
+            partition: 0,
+        }));
     }
 
     #[test]
@@ -834,9 +1011,9 @@ mod tests {
         assert!(cache.evictions_total() == 1);
         // `a` (oldest) was evicted; `b` and `c` remain.
         let g = cache.inner.lock().unwrap();
-        assert!(!g.sessions.contains_key(&a));
-        assert!(g.sessions.contains_key(&b));
-        assert!(g.sessions.contains_key(&c));
+        let mut ids: Vec<i32> = g.sessions.keys().copied().collect();
+        ids.sort_unstable();
+        assert!(!ids.contains(&a) && ids == vec![b, c]);
     }
 
     #[test]
@@ -846,9 +1023,9 @@ mod tests {
         assert!(p > 0);
         // Cache full, only session is privileged. Consumer alloc refused.
         let c = cache.try_allocate(false, "consumer".into(), vec![]);
-        assert!(c == INVALID_SESSION_ID);
-        assert!(cache.evictions_total() == 0);
-        assert!(cache.len() == 1);
+        check!(c == INVALID_SESSION_ID);
+        check!(cache.evictions_total() == 0);
+        check!(cache.len() == 1);
     }
 
     #[test]
@@ -857,9 +1034,10 @@ mod tests {
         let p1 = cache.try_allocate(true, "f1".into(), vec![]);
         std::thread::sleep(std::time::Duration::from_millis(2));
         let p2 = cache.try_allocate(true, "f2".into(), vec![]);
-        assert!(p2 > 0);
-        assert!(cache.len() == 1);
-        assert!(cache.evictions_total() == 1);
+        // p2 gets the next monotonic id (p1 + 1) after evicting p1.
+        check!(p2 == p1 + 1);
+        check!(cache.len() == 1);
+        check!(cache.evictions_total() == 1);
         let g = cache.inner.lock().unwrap();
         assert!(!g.sessions.contains_key(&p1));
         assert!(g.sessions.contains_key(&p2));
@@ -948,6 +1126,60 @@ mod tests {
         cache.close(id);
         assert!(cache.len() == 0);
         assert!(cache.total_partitions_cached() == 0);
+    }
+
+    #[test]
+    fn counters_track_large_incremental_add_delta() {
+        let cache = FetchSessionCache::new(10);
+        let mk = |p| {
+            (
+                FetchSessionKey {
+                    topic_name: "t".into(),
+                    topic_id: WireUuid::ZERO,
+                    partition: p,
+                },
+                CachedPartitionState::default(),
+            )
+        };
+        let id = cache.try_allocate(false, "a".into(), vec![mk(0), mk(1)]);
+
+        let r = req(id, 1, vec![topic("t", &[0, 1, 2, 3, 4])], vec![]);
+        assert!(matches!(
+            cache.classify(&r),
+            SessionDecision::Incremental { .. }
+        ));
+
+        assert!(cache.total_partitions_cached() == 5);
+    }
+
+    #[test]
+    fn counters_track_large_incremental_forget_delta() {
+        let cache = FetchSessionCache::new(10);
+        let mk = |p| {
+            (
+                FetchSessionKey {
+                    topic_name: "t".into(),
+                    topic_id: WireUuid::ZERO,
+                    partition: p,
+                },
+                CachedPartitionState::default(),
+            )
+        };
+        let id = cache.try_allocate(false, "a".into(), vec![mk(0), mk(1), mk(2), mk(3), mk(4)]);
+        let forgotten = vec![ForgottenTopic {
+            topic: "t".into(),
+            topic_id: WireUuid::ZERO,
+            partitions: vec![2, 3, 4],
+            ..Default::default()
+        }];
+
+        let r = req(id, 1, vec![], forgotten);
+        assert!(matches!(
+            cache.classify(&r),
+            SessionDecision::Incremental { .. }
+        ));
+
+        assert!(cache.total_partitions_cached() == 2);
     }
 
     #[test]

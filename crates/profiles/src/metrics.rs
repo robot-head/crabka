@@ -274,7 +274,7 @@ async fn export(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt as _;
@@ -306,19 +306,14 @@ mod tests {
         ] {
             assert!(buf.contains(needle), "missing {needle} in:\n{buf}");
         }
-        assert!(
-            buf.contains("tenant=\"tenant-a\""),
-            "tenant label missing in:\n{buf}"
-        );
-        assert!(buf.contains("status=\"ok\""), "ok status label missing");
-        assert!(
-            buf.contains("status=\"error\""),
-            "error status label missing"
-        );
-        assert!(
-            buf.contains("route=\"select_series\""),
-            "route label missing"
-        );
+        for label in [
+            "tenant=\"tenant-a\"",
+            "status=\"ok\"",
+            "status=\"error\"",
+            "route=\"select_series\"",
+        ] {
+            check!(buf.contains(label), "label {label} missing");
+        }
     }
 
     #[tokio::test]

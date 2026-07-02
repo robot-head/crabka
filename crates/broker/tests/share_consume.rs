@@ -21,7 +21,7 @@
 //! - a record that exhausts `max_delivery_attempts` is archived (poison pill);
 //! - the share-session epoch state machine rejects stale / unknown epochs.
 
-use assert2::assert;
+use assert2::{assert, check};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -478,17 +478,17 @@ async fn consume_accept_restart() {
 
         // First fetch (epoch 0 opens the session): acquire offsets 0..2.
         let row = fetch_until_acquired(&client, "g1", &member, tid, 0, 0).await;
-        assert!(
+        check!(
             acquired_count(&row) == 3,
             "must acquire all 3 offsets, got {:?}",
             row.acquired_records
         );
-        assert!(
+        check!(
             row.acquired_records.iter().all(|r| r.delivery_count == 1),
             "first delivery_count must be 1, got {:?}",
             row.acquired_records
         );
-        assert!(
+        check!(
             row.records.is_some(),
             "acquired records must carry record bytes"
         );

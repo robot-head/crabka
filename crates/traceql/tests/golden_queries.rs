@@ -147,9 +147,13 @@ fn span_ids(resp: &SearchResponse) -> Vec<u8> {
 
 #[tokio::test]
 async fn selector_queries_match_hand_computed_traces() {
-    assert!(trace_ids(&query("{ .http.method = \"GET\" }").await) == vec![1]);
-    assert!(trace_ids(&query("{ span:duration > 150 }").await) == vec![1]);
-    assert!(trace_ids(&query("{ .name =~ \"po.*\" }").await) == vec![1]);
+    for (q, want) in [
+        ("{ .http.method = \"GET\" }", vec![1]),
+        ("{ span:duration > 150 }", vec![1]),
+        ("{ .name =~ \"po.*\" }", vec![1]),
+    ] {
+        assert!(trace_ids(&query(q).await) == want, "query: {q}");
+    }
 }
 
 #[tokio::test]
@@ -160,11 +164,15 @@ async fn single_span_and_differs_from_inter_brace_and() {
 
 #[tokio::test]
 async fn structural_operators_return_right_hand_spans() {
-    assert!(span_ids(&query("{ .svc = \"a\" } >> { .svc = \"c\" }").await) == vec![4]);
-    assert!(span_ids(&query("{ .svc = \"c\" } << { .svc = \"a\" }").await) == vec![1]);
-    assert!(span_ids(&query("{ .svc = \"a\" } > { .svc = \"b\" }").await) == vec![2, 3]);
-    assert!(span_ids(&query("{ .svc = \"c\" } < { .svc = \"b\" }").await) == vec![2]);
-    assert!(span_ids(&query("{ .svc = \"b\" } ~ { .svc = \"b\" }").await) == vec![2, 3]);
+    for (q, want) in [
+        ("{ .svc = \"a\" } >> { .svc = \"c\" }", vec![4]),
+        ("{ .svc = \"c\" } << { .svc = \"a\" }", vec![1]),
+        ("{ .svc = \"a\" } > { .svc = \"b\" }", vec![2, 3]),
+        ("{ .svc = \"c\" } < { .svc = \"b\" }", vec![2]),
+        ("{ .svc = \"b\" } ~ { .svc = \"b\" }", vec![2, 3]),
+    ] {
+        assert!(span_ids(&query(q).await) == want, "query: {q}");
+    }
 }
 
 #[tokio::test]

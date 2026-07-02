@@ -42,6 +42,35 @@ use crate::share_coordinator::state::SharePartitionState;
 /// In-memory map key: `(group_id, topic_id, partition)`.
 type ShareStateKey3 = (String, uuid::Uuid, i32);
 
+/// KIP-932 share-group state epoch: bumped on (re-)initialization (e.g.
+/// `AlterShareGroupOffsets`); a write or initialize carrying an older epoch is
+/// fenced with `FENCED_STATE_EPOCH`.
+pub(crate) type StateEpoch = i32;
+
+/// Leader epoch of the share-partition leader that issued a state write; a
+/// stale value is fenced with `FENCED_LEADER_EPOCH`.
+pub(crate) type LeaderEpoch = i32;
+
+/// Index of a `__share_group_state` partition (the coordinator-topic partition
+/// a share key hashes to) — distinct from the data-topic partition index.
+pub(crate) type StatePartitionIndex = i32;
+
+/// Kafka wire error code (see [`crate::codes`]) returned per partition when a
+/// state-machine operation fails.
+pub(crate) type ShareErrorCode = i16;
+
+/// `(state_epoch, leader_epoch, start_offset, delivery_complete_count)` as
+/// returned by [`ShareCoordinator::read_summary`].
+pub(crate) type ShareStateSummary = (StateEpoch, LeaderEpoch, i64, i32);
+
+/// `start_offset` sentinel meaning "no persisted share state": tells the
+/// share-partition leader to initialize delivery from scratch (KIP-932).
+pub(crate) const UNINITIALIZED_START_OFFSET: i64 = -1;
+
+/// Read-chunk budget in bytes per `read_log` call while replaying
+/// `__share_group_state` partitions during recovery.
+const RECOVERY_READ_MAX_BYTES: usize = 1 << 20;
+
 /// Per-broker share-state coordinator. Constructed in `Broker::start` and
 /// shared via `Arc` with the share-state wire handlers.
 pub(crate) struct ShareCoordinator {
@@ -50,7 +79,7 @@ pub(crate) struct ShareCoordinator {
     /// Live in-memory state: `(group, topicId, partition)` → locked state.
     state: DashMap<ShareStateKey3, Arc<Mutex<SharePartitionState>>>,
     /// Set of `__share_group_state` partition indices this broker leads.
-    leader_partitions: RwLock<HashSet<i32>>,
+    leader_partitions: RwLock<HashSet<StatePartitionIndex>>,
     config: ShareCoordinatorConfig,
 }
 
@@ -83,11 +112,20 @@ impl ShareCoordinator {
     }
 
     /// Returns `true` if this broker leads `__share_group_state`-`state_partition`.
-    pub(crate) async fn is_leader(&self, state_partition: i32) -> bool {
+    pub(crate) async fn is_leader(&self, state_partition: StatePartitionIndex) -> bool {
         self.leader_partitions
             .read()
             .await
             .contains(&state_partition)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn lead_all_partitions_for_test(&self) {
+        let mut set = HashSet::new();
+        for p in 0..bootstrap::NUM_PARTITIONS {
+            set.insert(p);
+        }
+        *self.leader_partitions.write().await = set;
     }
 
     /// Returns the `__share_group_state` partition index responsible for the
@@ -98,7 +136,7 @@ impl ShareCoordinator {
         group: &str,
         topic_id: &uuid::Uuid,
         partition: i32,
-    ) -> i32 {
+    ) -> StatePartitionIndex {
         partition_for_share_key(
             group,
             topic_id,
@@ -121,9 +159,9 @@ impl ShareCoordinator {
         group: &str,
         topic_id: uuid::Uuid,
         partition: i32,
-        state_epoch: i32,
+        state_epoch: StateEpoch,
         start_offset: i64,
-    ) -> Result<(), i16> {
+    ) -> Result<(), ShareErrorCode> {
         let map_key = (group.to_string(), topic_id, partition);
         let state_partition = self.state_partition_for(group, &topic_id, partition);
 
@@ -180,12 +218,12 @@ impl ShareCoordinator {
         group: &str,
         topic_id: uuid::Uuid,
         partition: i32,
-        state_epoch: i32,
-        leader_epoch: i32,
+        state_epoch: StateEpoch,
+        leader_epoch: LeaderEpoch,
         start_offset: i64,
         delivery_complete_count: i32,
         batches: Vec<StateBatch>,
-    ) -> Result<(), i16> {
+    ) -> Result<(), ShareErrorCode> {
         let map_key = (group.to_string(), topic_id, partition);
         let state_partition = self.state_partition_for(group, &topic_id, partition);
 
@@ -281,7 +319,7 @@ impl ShareCoordinator {
         group: &str,
         topic_id: uuid::Uuid,
         partition: i32,
-    ) -> Option<(i32, i32, i64, i32)> {
+    ) -> Option<ShareStateSummary> {
         let map_key = (group.to_string(), topic_id, partition);
         let handle = self.state.get(&map_key)?.value().clone();
         let st = handle.lock().await;
@@ -304,7 +342,7 @@ impl ShareCoordinator {
         group: &str,
         topic_id: uuid::Uuid,
         partition: i32,
-    ) -> Result<(), i16> {
+    ) -> Result<(), ShareErrorCode> {
         let map_key = (group.to_string(), topic_id, partition);
         let state_partition = self.state_partition_for(group, &topic_id, partition);
         let key = ShareStateKey {
@@ -332,7 +370,7 @@ impl ShareCoordinator {
     /// locally, or the underlying append error if `produce_batch` fails.
     async fn persist_record(
         &self,
-        state_partition: i32,
+        state_partition: StatePartitionIndex,
         key: ShareStateKey,
         value: Option<Bytes>,
     ) -> Result<i64, BrokerError> {
@@ -361,7 +399,7 @@ impl ShareCoordinator {
     /// current `log_start_offset`, trims the log up to it. Every retained key
     /// keeps its latest snapshot, so the trim is safe. Errors are logged and
     /// swallowed — pruning never fails a write.
-    async fn maybe_prune(&self, state_partition: i32) {
+    async fn maybe_prune(&self, state_partition: StatePartitionIndex) {
         let Some(part) = self.partitions.get(bootstrap::TOPIC, state_partition) else {
             return;
         };
@@ -417,7 +455,7 @@ impl ShareCoordinator {
     /// the in-memory state map. Assumes `leader_partitions` is already
     /// populated (via `refresh_leader_partitions`).
     async fn replay_led_partitions(&self) {
-        let local_partitions: Vec<i32> = self
+        let local_partitions: Vec<StatePartitionIndex> = self
             .leader_partitions
             .read()
             .await
@@ -432,7 +470,7 @@ impl ShareCoordinator {
 
             let mut offset = part.log_start_offset();
             loop {
-                let out = match part.read_log(offset, 1 << 20) {
+                let out = match part.read_log(offset, RECOVERY_READ_MAX_BYTES) {
                     Ok(o) => o,
                     Err(e) => {
                         warn!(
@@ -536,7 +574,7 @@ impl ShareCoordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use std::path::Path;
     use tempfile::tempdir;
 
@@ -599,10 +637,8 @@ mod tests {
         let st = coord.read("g", tid, 0).await.expect("present");
         assert!(st.state_epoch == 5);
         assert!(st.start_offset == 100);
-        let (se, _le, so, dcc) = coord.read_summary("g", tid, 0).await.expect("present");
-        assert!(se == 5);
-        assert!(so == 100);
-        assert!(dcc == 0);
+        let summary = coord.read_summary("g", tid, 0).await.expect("present");
+        assert!(summary == (5, 0, 100, 0));
     }
 
     #[tokio::test]
@@ -631,16 +667,14 @@ mod tests {
             .unwrap();
 
         let st = coord.read("g", tid, 0).await.expect("present");
-        assert!(st.start_offset == 50);
-        assert!(st.leader_epoch == 2);
-        assert!(st.delivery_complete_count == 7);
-        assert!(st.state_batches == vec![batch(50, 59)]);
+        check!(st.state_epoch == 1);
+        check!(st.leader_epoch == 2);
+        check!(st.start_offset == 50);
+        check!(st.delivery_complete_count == 7);
+        check!(st.state_batches == vec![batch(50, 59)]);
 
-        let (se, le, so, dcc) = coord.read_summary("g", tid, 0).await.expect("present");
-        assert!(se == 1);
-        assert!(le == 2);
-        assert!(so == 50);
-        assert!(dcc == 7);
+        let summary = coord.read_summary("g", tid, 0).await.expect("present");
+        assert!(summary == (1, 2, 50, 7));
     }
 
     #[tokio::test]
@@ -746,10 +780,10 @@ mod tests {
         recovered.replay_led_partitions().await;
 
         let st = recovered.read("g", tid, 0).await.expect("recovered");
-        assert!(st.state_epoch == 2);
-        assert!(st.leader_epoch == 3);
-        assert!(st.start_offset == 20);
-        assert!(st.delivery_complete_count == 4);
-        assert!(st.state_batches == vec![batch(20, 29)]);
+        check!(st.state_epoch == 2);
+        check!(st.leader_epoch == 3);
+        check!(st.start_offset == 20);
+        check!(st.delivery_complete_count == 4);
+        check!(st.state_batches == vec![batch(20, 29)]);
     }
 }

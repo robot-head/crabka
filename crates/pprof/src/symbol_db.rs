@@ -473,7 +473,7 @@ fn drop_go_type_parameters(input: &str) -> Cow<'_, str> {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+    use assert2::{assert, check};
 
     use super::*;
 
@@ -514,9 +514,9 @@ mod tests {
         let mut db = SymbolDb::new();
         let name = db.intern_string("name");
 
-        assert!(db.string(0) == "");
-        assert!(name == 1);
-        assert!(db.string(name) == "name");
+        check!(db.string(0) == "");
+        check!(name == 1);
+        check!(db.string(name) == "name");
     }
 
     #[test]
@@ -533,9 +533,9 @@ mod tests {
         let id = db.intern_stacktrace(0, &[a, b]);
         let part = db.partitions.get(&0).unwrap();
 
-        assert!(id == 1);
-        assert!(part.nodes[0].parent == -1);
-        assert!(part.nodes[1].parent == 0);
+        check!(id == 1);
+        check!(part.nodes[0].parent == -1);
+        check!(part.nodes[1].parent == 0);
     }
 
     #[test]
@@ -566,13 +566,13 @@ mod tests {
         // with it (which would borrow node 0's root frame) — it gets the sentinel.
         let first = db.intern_stacktrace(0, &[a]);
         let empty = db.intern_stacktrace(0, &[]);
-        assert!(first == 0);
-        assert!(empty == EMPTY_STACKTRACE_ID);
-        assert!(empty != first);
-        assert!(db.resolve(0, empty).is_empty());
-        assert!(db.raw_locations(0, empty).is_empty());
+        check!(first == 0);
+        check!(empty == EMPTY_STACKTRACE_ID);
+        check!(empty != first);
+        check!(db.resolve(0, empty).is_empty());
+        check!(db.raw_locations(0, empty).is_empty());
         // The real stack still resolves to its single frame.
-        assert!(db.resolve(0, first).len() == 1);
+        check!(db.resolve(0, first).len() == 1);
     }
 
     #[test]
@@ -708,9 +708,9 @@ mod tests {
         let id = db.intern_stacktrace(0, &[a, b, c]);
         let bytes = db.encode();
         let mut back = SymbolDb::decode(&bytes).unwrap();
-        assert!(back.resolve(0, id) == db.resolve(0, id));
-        assert!(back.intern_string("a") == db.intern_string("a"));
-        assert!(back.intern_stacktrace(0, &[a, b, c]) == id);
+        check!(back.resolve(0, id) == db.resolve(0, id));
+        check!(back.intern_string("a") == db.intern_string("a"));
+        check!(back.intern_stacktrace(0, &[a, b, c]) == id);
     }
 
     #[test]

@@ -213,6 +213,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn exact_threshold_submits_imbalanced_set() {
+        // 10 imbalanced out of 100 is exactly 10%; threshold 10% should submit.
+        let mock = MockController::new(img_with_n_partitions(10, 90), true);
+        let liveness = liveness_all_alive().await;
+        let cfg = AutoRebalanceConfig {
+            check_interval: Duration::from_mins(5),
+            imbalance_threshold_pct: 10,
+        };
+        rebalance_tick(&mock, &liveness, &cfg).await;
+        assert!(mock.submitted.lock().unwrap().len() == 10);
+    }
+
+    #[tokio::test]
     async fn zero_imbalance_does_not_submit_empty_batch() {
         // Every partition is already balanced (leader == preferred). Even
         // with threshold 0% the tick must NOT call submit_change: an empty
@@ -251,5 +264,38 @@ mod tests {
                 _ => panic!("unexpected record type"),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn run_submits_when_controller_is_leader() {
+        let controller = Arc::new(MockController::new(img_with_n_partitions(1, 0), true));
+        let controller_for_run: Arc<dyn ControllerLike> = controller.clone();
+        let liveness = Arc::new(liveness_all_alive().await);
+        let shutdown = CancellationToken::new();
+        let task = tokio::spawn(run(
+            controller_for_run,
+            liveness,
+            AutoRebalanceConfig {
+                check_interval: Duration::from_millis(10),
+                imbalance_threshold_pct: 0,
+            },
+            shutdown.clone(),
+        ));
+
+        tokio::time::timeout(Duration::from_millis(500), async {
+            while controller
+                .submit_calls
+                .load(std::sync::atomic::Ordering::SeqCst)
+                == 0
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("leader auto-rebalance loop should submit");
+
+        shutdown.cancel();
+        task.await.unwrap();
+        assert!(!controller.submitted.lock().unwrap().is_empty());
     }
 }

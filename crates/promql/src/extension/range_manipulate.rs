@@ -520,7 +520,7 @@ mod tests {
     use arrow::array::{Array, DictionaryArray, Float64Array, Int64Array, StringArray};
     use arrow::compute::concat_batches;
     use arrow::datatypes::{DataType, Field, Int64Type, Schema};
-    use assert2::assert;
+    use assert2::{assert, check};
     use datafusion::datasource::memory::MemorySourceConfig;
     use datafusion::physical_plan::collect;
     use datafusion::prelude::SessionContext;
@@ -612,9 +612,9 @@ mod tests {
     fn extended_schema_layout_matches_contract() {
         let schema = build_extended_range_schema(&series_schema(), "timestamp", "value");
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
-        assert!(names == vec!["job", "timestamp", "timestamp_range", "value_range"]);
-        assert!(schema.field_with_name("timestamp").unwrap().data_type() == &DataType::Int64);
-        assert!(schema.field_with_name("job").unwrap().data_type() == &DataType::Utf8);
+        check!(names == vec!["job", "timestamp", "timestamp_range", "value_range"]);
+        check!(schema.field_with_name("timestamp").unwrap().data_type() == &DataType::Int64);
+        check!(schema.field_with_name("job").unwrap().data_type() == &DataType::Utf8);
         // The range columns are dictionaries of lists.
         assert!(matches!(
             schema
@@ -672,15 +672,15 @@ mod tests {
             .as_any()
             .downcast_ref::<Int64Array>()
             .unwrap();
-        assert!((0..eval.len()).map(|i| eval.value(i)).collect::<Vec<_>>() == vec![60, 90, 120]);
+        check!((0..eval.len()).map(|i| eval.value(i)).collect::<Vec<_>>() == vec![60, 90, 120]);
 
         let ts_cells = timestamp_cells(&out, "timestamp_range");
         let val_cells = value_cells(&out, "value_range");
         // (0, 60]  -> 25, 50            (0 excluded: 60-60=0, left-open)
         // (30, 90] -> 50, 75
         // (60, 120]-> 75, 100
-        assert!(ts_cells == vec![vec![25, 50], vec![50, 75], vec![75, 100]]);
-        assert!(val_cells == vec![vec![1.0, 2.0], vec![2.0, 3.0], vec![3.0, 4.0]]);
+        check!(ts_cells == vec![vec![25, 50], vec![50, 75], vec![75, 100]]);
+        check!(val_cells == vec![vec![1.0, 2.0], vec![2.0, 3.0], vec![3.0, 4.0]]);
 
         // Labels carried through, one row per eval step.
         let job = out
@@ -689,8 +689,8 @@ mod tests {
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
-        assert!(job.len() == 3);
-        assert!((0..job.len()).all(|i| job.value(i) == "a"));
+        check!(job.len() == 3);
+        check!((0..job.len()).all(|i| job.value(i) == "a"));
     }
 
     #[tokio::test]

@@ -1,5 +1,5 @@
 use arrow::array::{Array, Int64Array, StringArray};
-use assert2::assert;
+use assert2::{assert, check};
 use crabka_blockstore::{
     SCOL_ROOT_SPAN_NAME, SCOL_TRACE_ID, SCOL_TRACE_START_NANO, span_block_schema,
 };
@@ -52,10 +52,10 @@ fn assembles_recent_trace_by_id() {
     store.ingest(record("tenant-b", span([1; 16], 9, 5)));
 
     let trace = store.trace_by_id("tenant-a", &[1; 16]);
-    assert!(trace.iter().map(|span| span.span_id).collect::<Vec<_>>() == vec![[1; 8], [2; 8]]);
-    assert!(store.trace_by_id("tenant-a", &[2; 16]).len() == 1);
-    assert!(store.trace_by_id("tenant-b", &[1; 16]).len() == 1);
-    assert!(store.trace_by_id("missing", &[1; 16]).is_empty());
+    check!(trace.iter().map(|span| span.span_id).collect::<Vec<_>>() == vec![[1; 8], [2; 8]]);
+    check!(store.trace_by_id("tenant-a", &[2; 16]).len() == 1);
+    check!(store.trace_by_id("tenant-b", &[1; 16]).len() == 1);
+    check!(store.trace_by_id("missing", &[1; 16]).is_empty());
 }
 
 #[test]
@@ -96,10 +96,10 @@ async fn live_source_exposes_trace_spans_and_tags() {
         .await
         .unwrap()
         .unwrap();
-    assert!(trace.root_service_name == "api");
-    assert!(trace.root_trace_name == "span-1");
-    assert!(trace.spans.len() == 2);
-    assert!(
+    check!(trace.root_service_name == "api");
+    check!(trace.root_trace_name == "span-1");
+    check!(trace.spans.len() == 2);
+    check!(
         trace.spans[0].attributes
             == vec![("http.method".into(), TraceqlAttrValue::Str("GET".into()))]
     );
@@ -289,9 +289,9 @@ async fn live_source_batches_filter_by_time_range() {
     store.ingest(record("tenant-a", span([1; 16], 2, 200)));
 
     let batches = store.span_batches("tenant-a", 0, 100).await.unwrap();
-    assert!(batches.len() == 1);
-    assert!(batches[0].num_rows() == 1);
-    assert!(store.block_builder_frontier_ns("tenant-a") == 200);
+    check!(batches.len() == 1);
+    check!(batches[0].num_rows() == 1);
+    check!(store.block_builder_frontier_ns("tenant-a") == 200);
 }
 
 #[tokio::test]

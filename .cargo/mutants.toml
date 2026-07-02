@@ -314,6 +314,48 @@ exclude_re = [
     # fits the 4096-offset window (leo-4096 and leo+4096 both clamp to 0 for the
     # realistic small audit partition); only differs for >4096-record tails.
     "broker/src/audit_recovery\\.rs.*replace - with \\+ in recover_from_partition_tail",
+    # AlterPartition response builders intentionally pin several Kafka protocol
+    # default-zero fields (`NONE`, no leader recovery, no throttle, and no
+    # partition epoch on errors). A struct-field-deletion mutant falls back to
+    # the same generated protocol default, so there is no behavioral signal.
+    "broker/src/handlers/alter_partition\\.rs.*delete field error_code from struct RespPartitionData expression in handle_partition",
+    "broker/src/handlers/alter_partition\\.rs.*delete field leader_recovery_state from struct RespPartitionData expression in handle_partition",
+    "broker/src/handlers/alter_partition\\.rs.*delete field leader_recovery_state from struct RespPartitionData expression in error_part",
+    "broker/src/handlers/alter_partition\\.rs.*delete field partition_epoch from struct RespPartitionData expression in error_part",
+    "broker/src/handlers/alter_partition\\.rs.*delete field throttle_time_ms from struct AlterPartitionResponse expression in denied_response",
+    # Same default-value class for admin response wrappers: these fields are
+    # explicitly set to Kafka protocol defaults, so deleting them produces the
+    # same generated owned response value. Non-default identity/error fields in
+    # these handlers stay covered by focused tests.
+    "broker/src/handlers/alter_partition_reassignments\\.rs.*delete field throttle_time_ms from struct AlterPartitionReassignmentsResponse expression in handle",
+    "broker/src/handlers/alter_partition_reassignments\\.rs.*delete field error_code from struct AlterPartitionReassignmentsResponse expression in handle",
+    "broker/src/handlers/alter_partition_reassignments\\.rs.*delete field error_message from struct AlterPartitionReassignmentsResponse expression in handle",
+    "broker/src/handlers/alter_partition_reassignments\\.rs.*delete field error_code from struct ReassignablePartitionResponse expression in ok_row",
+    "broker/src/handlers/alter_partition_reassignments\\.rs.*delete field error_message from struct ReassignablePartitionResponse expression in ok_row",
+    "broker/src/handlers/alter_partition_reassignments\\.rs.*delete field error_code from struct AlterPartitionReassignmentsResponse expression in encode_whole_request_error",
+    "broker/src/handlers/alter_partition_reassignments\\.rs.*delete field error_message from struct AlterPartitionReassignmentsResponse expression in encode_whole_request_error",
+    "broker/src/handlers/alter_replica_log_dirs\\.rs.*delete field throttle_time_ms from struct AlterReplicaLogDirsResponse expression in handle",
+    "broker/src/handlers/alter_user_scram_credentials\\.rs.*delete field throttle_time_ms from struct AlterUserScramCredentialsResponse expression in handle",
+    "broker/src/handlers/alter_user_scram_credentials\\.rs.*delete field error_code from struct AlterUserScramCredentialsResult expression in ok_result",
+    "broker/src/handlers/alter_user_scram_credentials\\.rs.*delete field error_message from struct AlterUserScramCredentialsResult expression in ok_result",
+    "broker/src/handlers/api_versions\\.rs:126:.*delete field api_keys from struct ApiVersionsResponse expression in handle",
+    "broker/src/handlers/api_versions\\.rs:127:.*delete field throttle_time_ms from struct ApiVersionsResponse expression in handle",
+    "broker/src/handlers/api_versions\\.rs:142:.*delete field error_code from struct ApiVersionsResponse expression in handle",
+    "broker/src/handlers/api_versions\\.rs:144:.*delete field throttle_time_ms from struct ApiVersionsResponse expression in handle",
+    "broker/src/handlers/assign_replicas_to_dirs\\.rs.*delete field error_code from struct AssignReplicasToDirsResponse expression in handle",
+    "broker/src/handlers/assign_replicas_to_dirs\\.rs.*delete field error_code from struct RespPartData expression in build_echo_response",
+    "broker/src/handlers/assign_replicas_to_dirs\\.rs.*delete field error_code from struct AssignReplicasToDirsResponse expression in build_echo_response",
+    "broker/src/handlers/broker_heartbeat\\.rs.*delete field throttle_time_ms from struct BrokerHeartbeatResponse expression in (handle|not_controller_response|success_response|denied_response_body)",
+    "broker/src/handlers/broker_heartbeat\\.rs.*delete field is_caught_up from struct BrokerHeartbeatResponse expression in (handle|not_controller_response|denied_response_body)",
+    "broker/src/handlers/broker_heartbeat\\.rs.*delete field should_shut_down from struct BrokerHeartbeatResponse expression in (handle|not_controller_response|denied_response_body)",
+    "broker/src/handlers/broker_heartbeat\\.rs.*delete field error_code from struct BrokerHeartbeatResponse expression in (handle|success_response)",
+    "broker/src/handlers/broker_heartbeat\\.rs.*delete field is_fenced from struct BrokerHeartbeatResponse expression in (handle|success_response)",
+    # Equivalent throttle guard mutant: `delay >= Duration::ZERO` differs only
+    # by awaiting `sleep(Duration::ZERO)` on the no-throttle path. Non-zero
+    # throttle branches are asserted by focused handler tests.
+    "broker/src/handlers/create_partitions\\.rs.*replace > with >= in handle",
+    "broker/src/handlers/create_topics\\.rs.*replace > with >= in handle",
+    "broker/src/handlers/consumer_group_describe\\.rs.*delete field error_code from struct DescribedGroup expression in (handle|ok_row)",
     # The offset is the human-facing VerifyBreak.offset diagnostic (standard Kafka
     # base_offset + offset_delta), not the tamper verdict.
     "audit/src/verify\\.rs.*replace \\+ with (-|\\*) in verify_partition_dir",

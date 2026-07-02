@@ -199,3 +199,281 @@ pub(crate) async fn group_is_empty(
         Err(_) => true,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert2::assert;
+    use crabka_protocol::UnknownTaggedFields;
+    use crabka_protocol::owned::alter_share_group_offsets_request::{
+        AlterShareGroupOffsetsRequestPartition, AlterShareGroupOffsetsRequestTopic,
+    };
+    use crabka_protocol::owned::alter_share_group_offsets_response;
+    use crabka_protocol::owned::share_group_heartbeat_request::ShareGroupHeartbeatRequest;
+    use crabka_security::{AuthMethod, Principal};
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    use crate::authorizer::{AuthorizationRequest, Authorizer};
+    use crate::config::BrokerConfig;
+    use crate::coordinator::unified::share::actor::ShareGroupActorMessage;
+
+    #[derive(Debug)]
+    struct DenyAll;
+
+    impl Authorizer for DenyAll {
+        fn authorize(
+            &self,
+            _source: &dyn crabka_authz::AclSource,
+            _req: &AuthorizationRequest<'_>,
+        ) -> AuthorizationResult {
+            AuthorizationResult::Deny
+        }
+    }
+
+    fn request(
+        group_id: &str,
+        topic_name: &str,
+        partitions: &[i32],
+    ) -> AlterShareGroupOffsetsRequest {
+        AlterShareGroupOffsetsRequest {
+            group_id: group_id.into(),
+            topics: vec![AlterShareGroupOffsetsRequestTopic {
+                topic_name: topic_name.into(),
+                partitions: partitions
+                    .iter()
+                    .map(|partition_index| AlterShareGroupOffsetsRequestPartition {
+                        partition_index: *partition_index,
+                        start_offset: 42,
+                        ..Default::default()
+                    })
+                    .collect(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn encode_request(req: &AlterShareGroupOffsetsRequest) -> Bytes {
+        let version = alter_share_group_offsets_response::MAX_VERSION;
+        let mut buf = BytesMut::with_capacity(req.encoded_len(version));
+        req.encode(&mut buf, version).expect("encode request");
+        buf.freeze()
+    }
+
+    fn decode_response(bytes: &Bytes) -> AlterShareGroupOffsetsResponse {
+        let version = alter_share_group_offsets_response::MAX_VERSION;
+        let mut cur: &[u8] = bytes.as_ref();
+        let resp =
+            AlterShareGroupOffsetsResponse::decode(&mut cur, version).expect("decode response");
+        assert!(cur.is_empty(), "response decoder consumed all bytes");
+        resp
+    }
+
+    fn test_context<'a>(
+        principal: &'a Principal,
+        peer: &'a SocketAddr,
+    ) -> crate::handlers::RequestContext<'a> {
+        crate::handlers::RequestContext {
+            principal,
+            peer,
+            client_id: "admin-client",
+            sendfile_capable: false,
+            connection_listener_name: "PLAINTEXT",
+        }
+    }
+
+    async fn start_broker(
+        authorizer: Arc<dyn Authorizer>,
+        share_enabled: bool,
+    ) -> (crate::broker::BrokerHandle, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
+        cfg.authorizer = authorizer;
+        cfg.share_group.enable = share_enabled;
+        let handle = Broker::start(cfg).await.expect("start broker");
+        (handle, dir)
+    }
+
+    fn principal() -> Principal {
+        Principal {
+            name: "alice".into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn encode_top_level_preserves_error_fields() {
+        let resp = encode_top_level(
+            alter_share_group_offsets_response::MAX_VERSION,
+            codes::UNSUPPORTED_VERSION,
+        )
+        .expect("encode");
+        let resp = decode_response(&resp);
+
+        let expected = AlterShareGroupOffsetsResponse {
+            throttle_time_ms: 0,
+            error_code: codes::UNSUPPORTED_VERSION,
+            error_message: None,
+            responses: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
+    }
+
+    #[tokio::test]
+    async fn handle_error_scenarios_preserve_expected_rows() {
+        type Case<'a> = (
+            &'a str,
+            Arc<dyn Authorizer>,
+            bool,
+            &'a str,
+            Vec<i32>,
+            AlterShareGroupOffsetsResponse,
+        );
+        let version = alter_share_group_offsets_response::MAX_VERSION;
+        let cases: Vec<Case<'_>> = vec![
+            (
+                "disabled feature returns top-level unsupported version",
+                Arc::new(crate::authorizer::AllowAllAuthorizer),
+                false,
+                "missing",
+                vec![0],
+                AlterShareGroupOffsetsResponse {
+                    throttle_time_ms: 0,
+                    error_code: codes::UNSUPPORTED_VERSION,
+                    error_message: None,
+                    responses: Vec::new(),
+                    unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                },
+            ),
+            (
+                "denied group returns top-level authorization failure",
+                Arc::new(DenyAll),
+                true,
+                "missing",
+                vec![0],
+                AlterShareGroupOffsetsResponse {
+                    throttle_time_ms: 0,
+                    error_code: codes::GROUP_AUTHORIZATION_FAILED,
+                    error_message: None,
+                    responses: Vec::new(),
+                    unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                },
+            ),
+            (
+                "unknown topic preserves topic and partition fields",
+                Arc::new(crate::authorizer::AllowAllAuthorizer),
+                true,
+                "missing-topic",
+                vec![3, 5],
+                AlterShareGroupOffsetsResponse {
+                    throttle_time_ms: 0,
+                    error_code: codes::NONE,
+                    error_message: None,
+                    responses: vec![AlterShareGroupOffsetsResponseTopic {
+                        topic_name: "missing-topic".into(),
+                        topic_id: Uuid::default(),
+                        partitions: vec![
+                            AlterShareGroupOffsetsResponsePartition {
+                                partition_index: 3,
+                                error_code: codes::UNKNOWN_TOPIC_OR_PARTITION,
+                                error_message: None,
+                                unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                            },
+                            AlterShareGroupOffsetsResponsePartition {
+                                partition_index: 5,
+                                error_code: codes::UNKNOWN_TOPIC_OR_PARTITION,
+                                error_message: None,
+                                unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                            },
+                        ],
+                        unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                    }],
+                    unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                },
+            ),
+        ];
+        for (case, authorizer, share_enabled, topic_name, partitions, expected) in cases {
+            let (broker_handle, _dir) = start_broker(authorizer, share_enabled).await;
+            let broker = broker_handle.broker_arc_for_test();
+            let principal = principal();
+            let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+            let ctx = test_context(&principal, &peer);
+            let req_bytes = encode_request(&request("g1", topic_name, &partitions));
+
+            let resp = handle(&broker, version, 1, &req_bytes, &ctx)
+                .await
+                .expect("handle");
+            let resp = decode_response(&resp);
+
+            assert!(resp == expected, "case: {case}");
+            broker_handle.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn group_is_empty_distinguishes_absent_and_live_share_groups() {
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer), true).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let coordinator = broker.group_coordinator.clone();
+
+        assert!(group_is_empty(Some(&coordinator), "absent").await);
+
+        coordinator.mark_share("busy");
+        let actor = coordinator.get_or_create_share("busy");
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        actor
+            .tx
+            .send(ShareGroupActorMessage::Heartbeat {
+                request: ShareGroupHeartbeatRequest {
+                    group_id: "busy".into(),
+                    member_id: "member-1".into(),
+                    member_epoch: 0,
+                    subscribed_topic_names: Some(Vec::new()),
+                    ..Default::default()
+                },
+                client_host: "127.0.0.1".into(),
+                reply: tx,
+            })
+            .await
+            .expect("send heartbeat");
+        let resp = rx.await.expect("heartbeat response");
+        assert!(resp.error_code == codes::NONE, "{resp:?}");
+
+        assert!(!group_is_empty(Some(&coordinator), "busy").await);
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn reset_partition_bumps_existing_state_epoch_and_start_offset() {
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer), true).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let persister = broker
+            .group_coordinator
+            .share_persister()
+            .cloned()
+            .expect("share persister");
+        let topic_id = uuid::Uuid::from_u128(0xABCD);
+
+        persister
+            .initialize("g-reset", topic_id, 0, 4, 10)
+            .await
+            .expect("seed share state");
+        reset_partition(&persister, "g-reset", topic_id, 0, 33)
+            .await
+            .expect("reset partition");
+        let state = persister
+            .read_state("g-reset", topic_id, 0)
+            .await
+            .expect("read state")
+            .expect("state present");
+
+        assert!(state.state_epoch == 5);
+        assert!(state.start_offset == 33);
+        broker_handle.shutdown().await;
+    }
+}

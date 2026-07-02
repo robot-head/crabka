@@ -4,7 +4,7 @@
 //! `crabka-rebalancer` (the `FakeRebalancerClient`) and assert both the
 //! Connect-RPC sequence and the kube-side status / annotation patches.
 
-use assert2::assert;
+use assert2::{assert, check};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -111,10 +111,10 @@ async fn new_rebalance_creates_proposal() {
     assert!(fake.calls() == vec![RebalCall::CreateProposal(vec!["RackAware".into()])]);
 
     let body = status_patch_body(&state.take_observed(), "demo");
-    assert!(body["status"]["conditions"][0]["type"] == "ProposalReady");
-    assert!(body["status"]["sessionId"] == "p-new");
-    assert!(body["status"]["optimizationResult"]["replicaMovements"] == 2);
-    assert!(body["status"]["observedGeneration"] == 1);
+    check!(body["status"]["conditions"][0]["type"] == "ProposalReady");
+    check!(body["status"]["sessionId"] == "p-new");
+    check!(body["status"]["optimizationResult"]["replicaMovements"] == 2);
+    check!(body["status"]["observedGeneration"] == 1);
 }
 
 /// `approve` on a `ProposalReady` proposal → `ExecuteProposal` (with the

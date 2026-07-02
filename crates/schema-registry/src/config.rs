@@ -64,7 +64,7 @@ impl std::fmt::Debug for BearerAuthConfig {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthzConfig {
     pub enabled: bool,
     pub super_users: HashSet<String>,
@@ -83,17 +83,18 @@ impl Default for AuthzConfig {
 #[cfg(test)]
 mod tests {
     use super::SecurityConfig;
+    use assert2::check;
 
     #[test]
     fn default_security_is_fully_open() {
         let s = SecurityConfig::default();
-        assert!(!s.require_auth);
-        assert!(s.realm.is_empty());
-        assert!(s.basic.is_none());
-        assert!(s.bearer.is_none());
-        assert!(s.tls.is_none());
-        assert!(s.authz.is_none());
-        assert!(s.client.is_none());
+        check!(!s.require_auth);
+        check!(s.realm.is_empty());
+        check!(s.basic.is_none());
+        check!(s.bearer.is_none());
+        check!(s.tls.is_none());
+        check!(s.authz.is_none());
+        check!(s.client.is_none());
     }
 
     #[test]

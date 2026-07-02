@@ -449,17 +449,23 @@ mod tests {
         ];
         let html = render_html(&runs, "Crabka vs Strimzi");
 
-        // Valid page that loads the matching plotly.js and embeds real figures.
-        assert!(html.contains("<html"));
-        assert!(html.contains("cdn.plot.ly/plotly-3.0.1"));
-        assert!(html.contains("Plotly.newPlot"));
-        assert!(html.contains("Crabka vs Strimzi"));
-        // Both scenarios and both stacks are represented.
-        assert!(html.contains("small-msg") && html.contains("fan-out"));
-        assert!(html.contains("crabka") && html.contains("kafka"));
-        // A headline bar metric and a time-series chart are present.
-        assert!(html.contains("Producer throughput"));
-        assert!(html.contains("seconds into run"));
+        // Valid page that loads the matching plotly.js and embeds real figures,
+        // represents both scenarios and both stacks, and carries a headline bar
+        // metric plus a time-series chart.
+        for needle in [
+            "<html",
+            "cdn.plot.ly/plotly-3.0.1",
+            "Plotly.newPlot",
+            "Crabka vs Strimzi",
+            "small-msg",
+            "fan-out",
+            "crabka",
+            "kafka",
+            "Producer throughput",
+            "seconds into run",
+        ] {
+            assert!(html.contains(needle), "missing {needle:?}");
+        }
     }
 
     #[test]
@@ -513,16 +519,22 @@ mod tests {
             ),
         ];
         let html = render_web_fragment(&tagged);
-        assert!(html.contains("cdn.plot.ly/plotly-3.0.1"));
-        assert!(html.contains("Plotly.newPlot"));
-        assert!(html.contains("Per run"));
-        assert!(html.contains("small-msg"));
-        assert!(html.contains("Throughput"));
-        assert!(html.contains("Broker CPU"));
-        assert!(html.contains("Broker memory"));
-        // Bold mean line is labelled with the run count.
-        assert!(html.contains("mean of 2"));
-        assert!(html.contains("crabka") && html.contains("kafka"));
+        // Loads plotly, charts throughput/CPU/memory per run for both stacks,
+        // and labels the bold mean line with the run count ("mean of 2").
+        for needle in [
+            "cdn.plot.ly/plotly-3.0.1",
+            "Plotly.newPlot",
+            "Per run",
+            "small-msg",
+            "Throughput",
+            "Broker CPU",
+            "Broker memory",
+            "mean of 2",
+            "crabka",
+            "kafka",
+        ] {
+            assert!(html.contains(needle), "missing {needle:?}");
+        }
     }
 
     #[test]

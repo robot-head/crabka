@@ -13,7 +13,7 @@
 //! so the first `Initialize` may briefly return a coordinator-not-ready code; the
 //! `*_ready` helpers retry, exactly as a real client would.
 
-use assert2::assert;
+use assert2::{assert, check};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -266,13 +266,13 @@ async fn persister_round_trip() {
 
     // Read full state.
     let r = read_state(&client, "g1", tid, 0).await;
-    assert!(r.error_code == 0, "read error: {}", r.error_code);
-    assert!(
+    check!(r.error_code == 0, "read error: {}", r.error_code);
+    check!(
         r.start_offset == 5,
         "SPSO must be 5, got {}",
         r.start_offset
     );
-    assert!(
+    check!(
         r.state_batches
             .iter()
             .any(|b| b.first_offset == 5 && b.last_offset == 9),
@@ -282,18 +282,18 @@ async fn persister_round_trip() {
 
     // Summary matches.
     let s = read_summary(&client, "g1", tid, 0).await;
-    assert!(s.error_code == 0, "summary error: {}", s.error_code);
-    assert!(
+    check!(s.error_code == 0, "summary error: {}", s.error_code);
+    check!(
         s.start_offset == 5,
         "summary SPSO 5, got {}",
         s.start_offset
     );
-    assert!(
+    check!(
         s.state_epoch == 0,
         "summary state_epoch 0, got {}",
         s.state_epoch
     );
-    assert!(
+    check!(
         s.delivery_complete_count == 2,
         "summary DCC 2, got {}",
         s.delivery_complete_count

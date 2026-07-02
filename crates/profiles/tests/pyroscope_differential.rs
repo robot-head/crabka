@@ -32,6 +32,8 @@ use testcontainers::{GenericImage, ImageExt};
 use tokio::sync::oneshot;
 
 const TENANT: &str = "tenant-a";
+/// Pyroscope HTTP port inside the container.
+const PYROSCOPE_HTTP_PORT: u16 = 4040;
 const PROFILE_ENV: &str = "pprofdiff";
 const PROFILE_TYPE: &str = "goroutines:goroutine:count:goroutine:count";
 const SELECTOR: &str = r#"{env="pprofdiff"}"#;
@@ -63,11 +65,11 @@ impl WalSink for CapturingSink {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker and the grafana/pyroscope image"]
+#[ignore = "requires Docker and the mirror.gcr.io/grafana/pyroscope image"]
 async fn real_pyroscope_render_matches_crabka_after_identical_ingest() -> TestResult {
     let client = reqwest::Client::new();
     let pyroscope = start_pyroscope().await?;
-    let pyroscope_base = mapped_base_url(&pyroscope, 4040).await?;
+    let pyroscope_base = mapped_base_url(&pyroscope, PYROSCOPE_HTTP_PORT).await?;
     wait_for_http_ok(&client, &pyroscope_base, &["/ready"]).await?;
     let gzipped_pprof = fetch_goroutine_pprof(&client, &pyroscope_base).await?;
 
@@ -112,10 +114,17 @@ async fn real_pyroscope_render_matches_crabka_after_identical_ingest() -> TestRe
     )
     .await?;
 
-    assert!(flame_ticks(&pyroscope_render).is_some_and(|ticks| ticks > 0));
-    assert!(flame_ticks(&crabka_render).is_some_and(|ticks| ticks > 0));
-    assert!(flame_names(&pyroscope_render).contains("runtime/pprof.profileWriter"));
-    assert!(flame_names(&crabka_render).contains("runtime/pprof.profileWriter"));
+    let cases = [("pyroscope", &pyroscope_render), ("crabka", &crabka_render)];
+    for (backend, render) in cases {
+        assert!(
+            flame_ticks(render).is_some_and(|ticks| ticks > 0),
+            "{backend} render must report positive ticks"
+        );
+        assert!(
+            flame_names(render).contains("runtime/pprof.profileWriter"),
+            "{backend} render must contain runtime/pprof.profileWriter"
+        );
+    }
     assert_flamebearer_equal(&pyroscope_render, &crabka_render)?;
 
     assert_profile_types_match(&client, &pyroscope_base, &crabka.querier_base).await?;
@@ -164,12 +173,12 @@ async fn real_pyroscope_render_matches_crabka_after_identical_ingest() -> TestRe
 /// extra/missing top-level fields. It always prints both raw bodies under
 /// `--nocapture` so the deviation (if any) is quotable.
 #[tokio::test]
-#[ignore = "requires Docker and the grafana/pyroscope image"]
+#[ignore = "requires Docker and the mirror.gcr.io/grafana/pyroscope image"]
 #[allow(clippy::too_many_lines)]
 async fn real_pyroscope_series_and_stats_match_crabka_after_identical_ingest() -> TestResult {
     let client = reqwest::Client::new();
     let pyroscope = start_pyroscope().await?;
-    let pyroscope_base = mapped_base_url(&pyroscope, 4040).await?;
+    let pyroscope_base = mapped_base_url(&pyroscope, PYROSCOPE_HTTP_PORT).await?;
     wait_for_http_ok(&client, &pyroscope_base, &["/ready"]).await?;
     let gzipped_pprof = fetch_goroutine_pprof(&client, &pyroscope_base).await?;
 
@@ -655,7 +664,7 @@ fn json_number_repr(value: &Value) -> Option<&'static str> {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker and the grafana/grafana image"]
+#[ignore = "requires Docker and the mirror.gcr.io/grafana/grafana image"]
 async fn grafana_accepts_pyroscope_datasource_pointing_at_crabka() -> TestResult {
     let client = reqwest::Client::new();
     let sink = CapturingSink::default();
@@ -739,24 +748,28 @@ async fn grafana_accepts_pyroscope_datasource_pointing_at_crabka() -> TestResult
 
 async fn start_pyroscope() -> TestResult<testcontainers::ContainerAsync<GenericImage>> {
     let tag = std::env::var("CRABKA_PYROSCOPE_IMAGE_TAG").unwrap_or_else(|_| "latest".to_string());
-    Ok(GenericImage::new("grafana/pyroscope".to_string(), tag)
-        .with_exposed_port(4040.tcp())
-        .with_wait_for(WaitFor::seconds(3))
-        .start()
-        .await?)
+    Ok(
+        GenericImage::new("mirror.gcr.io/grafana/pyroscope".to_string(), tag)
+            .with_exposed_port(PYROSCOPE_HTTP_PORT.tcp())
+            .with_wait_for(WaitFor::seconds(3))
+            .start()
+            .await?,
+    )
 }
 
 async fn start_grafana() -> TestResult<testcontainers::ContainerAsync<GenericImage>> {
     let tag = std::env::var("CRABKA_GRAFANA_IMAGE_TAG").unwrap_or_else(|_| "latest".to_string());
-    Ok(GenericImage::new("grafana/grafana".to_string(), tag)
-        .with_exposed_port(3000.tcp())
-        .with_wait_for(WaitFor::seconds(5))
-        .with_env_var("GF_SECURITY_ADMIN_PASSWORD", "admin")
-        // Let the container reach the in-process Crabka querier on the host via
-        // host.docker.internal (host-gateway mapping; works on Docker Desktop + Linux).
-        .with_host("host.docker.internal", Host::HostGateway)
-        .start()
-        .await?)
+    Ok(
+        GenericImage::new("mirror.gcr.io/grafana/grafana".to_string(), tag)
+            .with_exposed_port(3000.tcp())
+            .with_wait_for(WaitFor::seconds(5))
+            .with_env_var("GF_SECURITY_ADMIN_PASSWORD", "admin")
+            // Let the container reach the in-process Crabka querier on the host via
+            // host.docker.internal (host-gateway mapping; works on Docker Desktop + Linux).
+            .with_host("host.docker.internal", Host::HostGateway)
+            .start()
+            .await?,
+    )
 }
 
 async fn mapped_base_url(
@@ -972,26 +985,20 @@ async fn assert_profile_types_contain(
                 .and_then(Value::as_str)
                 == Some(PROFILE_TYPE)
             {
-                assert_eq!(
-                    profile_type.get("name").and_then(Value::as_str),
-                    Some("goroutines")
-                );
-                assert_eq!(
-                    profile_type.get("sampleType").and_then(Value::as_str),
-                    Some("goroutine")
-                );
-                assert_eq!(
-                    profile_type.get("sampleUnit").and_then(Value::as_str),
-                    Some("count")
-                );
-                assert_eq!(
-                    profile_type.get("periodType").and_then(Value::as_str),
-                    Some("goroutine")
-                );
-                assert_eq!(
-                    profile_type.get("periodUnit").and_then(Value::as_str),
-                    Some("count")
-                );
+                let field_cases = [
+                    ("name", "goroutines"),
+                    ("sampleType", "goroutine"),
+                    ("sampleUnit", "count"),
+                    ("periodType", "goroutine"),
+                    ("periodUnit", "count"),
+                ];
+                for (field, expected) in field_cases {
+                    assert_eq!(
+                        profile_type.get(field).and_then(Value::as_str),
+                        Some(expected),
+                        "profile type field `{field}`"
+                    );
+                }
             }
         })
         .filter_map(|value| {
@@ -2221,7 +2228,7 @@ async fn querier_echoes_proto_content_type_for_proto_requests() -> TestResult {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker and the grafana/grafana image"]
+#[ignore = "requires Docker and the mirror.gcr.io/grafana/grafana image"]
 async fn grafana_renders_crabka_profiles_end_to_end() -> TestResult {
     let client = reqwest::Client::new();
 
@@ -2293,17 +2300,15 @@ async fn grafana_renders_crabka_profiles_end_to_end() -> TestResult {
             positive && names.contains(FUNC_WORK)
         })
         .await?;
-    assert!(
-        names_a.contains(FUNC_WORK),
-        "Grafana query did not return {FUNC_WORK}: {names_a:?}"
-    );
-    assert!(
-        names_a.contains(FUNC_HOT),
-        "Grafana query did not return {FUNC_HOT}: {names_a:?}"
-    );
+    for func in [FUNC_WORK, FUNC_HOT] {
+        assert!(
+            names_a.contains(func),
+            "Grafana query must return {func}: {names_a:?}"
+        );
+    }
     assert!(
         positive_a,
-        "Grafana query returned no positive sample value"
+        "Grafana query must return a positive sample value: {names_a:?}"
     );
 
     // 5. Multi-tenant isolation THROUGH Grafana: tenant-b's datasource must not see any of

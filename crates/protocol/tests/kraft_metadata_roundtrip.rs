@@ -1,4 +1,4 @@
-//! Byte-identity: decode every record/batch in real `apache/kafka:4.0.0`
+//! Byte-identity: decode every record/batch in real `mirror.gcr.io/apache/kafka:4.0.0`
 //! metadata logs + bootstrap.checkpoint through the generated record types +
 //! the `KraftMetadataRecord` envelope, re-encode, and assert the bytes are
 //! unchanged.

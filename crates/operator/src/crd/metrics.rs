@@ -54,9 +54,13 @@ mod tests {
     #[test]
     fn metrics_config_defaults_type_prometheus() {
         let cfg: MetricsConfig = serde_json::from_str("{}").unwrap();
-        assert!(cfg.r#type == MetricsType::Prometheus);
-        assert!(cfg.pod_monitor.is_none());
-        assert!(cfg.service_monitor.is_none());
+        assert!(
+            cfg == MetricsConfig {
+                r#type: MetricsType::Prometheus,
+                pod_monitor: None,
+                service_monitor: None,
+            }
+        );
     }
 
     #[test]

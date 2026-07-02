@@ -3,7 +3,7 @@
 //! JVM differential / interop test for KIP-932 share groups.
 //!
 //! Drives a REAL Apache Kafka 4.x `kafka-console-share-consumer.sh`
-//! (a `KafkaShareConsumer` under the hood) inside an `apache/kafka:4.1.0`
+//! (a `KafkaShareConsumer` under the hood) inside an `mirror.gcr.io/apache/kafka:4.1.0`
 //! container against an in-process Crabka broker running on the host. This
 //! exercises Crabka's share-group wire protocol end-to-end against the real
 //! JVM client:
@@ -47,7 +47,7 @@ const BOOTSTRAP: &str = "host.docker.internal:9092";
 const LISTEN: &str = "0.0.0.0:9092";
 /// Official Apache Kafka image. Ships KIP-932 share groups (GA in 4.x) plus
 /// the `kafka-console-share-consumer.sh` / `kafka-share-groups.sh` tools.
-const KAFKA_IMAGE: &str = "apache/kafka:4.1.0";
+const KAFKA_IMAGE: &str = "mirror.gcr.io/apache/kafka:4.1.0";
 const SHARE_CONSUMER: &str = "/opt/kafka/bin/kafka-console-share-consumer.sh";
 const SHARE_GROUPS: &str = "/opt/kafka/bin/kafka-share-groups.sh";
 

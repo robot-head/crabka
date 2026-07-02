@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use assert2::assert;
+use assert2::{assert, check};
 use crabka_traces::frontend::QueryFrontend;
 use crabka_traces::frontend::backend::{MockQuerier, SearchPartial, TracePartial};
 use crabka_traces::frontend::config::FrontendConfig;
@@ -87,9 +87,9 @@ async fn server_round_trips_search_and_echo() {
         .unwrap();
     assert!(resp.status().is_success());
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert!(body["traces"][0]["traceID"] == "01".repeat(16));
-    assert!(body["metrics"]["completedJobs"] == 1);
-    assert!(body["metrics"]["totalBlocks"] == 1);
+    check!(body["traces"][0]["traceID"] == "01".repeat(16));
+    check!(body["metrics"]["completedJobs"] == 1);
+    check!(body["metrics"]["totalBlocks"] == 1);
 }
 
 #[tokio::test]

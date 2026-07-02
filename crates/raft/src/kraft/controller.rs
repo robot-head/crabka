@@ -2305,7 +2305,7 @@ fn load_checkpoint_by_id(dir: &std::path::Path, end_offset: i64, epoch: i32) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use std::time::Duration as StdDuration;
 
     use crate::kraft::transport::NullPeerSender;
@@ -2541,67 +2541,99 @@ mod tests {
 
     #[test]
     fn heartbeat_period_is_one_third_of_election_timeout_with_floor() {
-        assert!(heartbeat_period(1000) == Duration::from_millis(333));
-        assert!(heartbeat_period(120) == Duration::from_millis(40));
-        assert!(heartbeat_period(2) == Duration::from_millis(1));
-        assert!(heartbeat_period(0) == Duration::from_millis(1));
+        for (timeout_ms, want_ms) in [(1000, 333), (120, 40), (2, 1), (0, 1)] {
+            assert!(
+                heartbeat_period(timeout_ms) == Duration::from_millis(want_ms),
+                "timeout_ms {timeout_ms}"
+            );
+        }
     }
 
     #[test]
     fn election_timer_only_starts_non_leader_voters() {
-        assert!(election_timer_starts_election(true, false));
-        assert!(!election_timer_starts_election(true, true));
-        assert!(!election_timer_starts_election(false, false));
-        assert!(!election_timer_starts_election(false, true));
+        for (is_voter, is_leader, want) in [
+            (true, false, true),
+            (true, true, false),
+            (false, false, false),
+            (false, true, false),
+        ] {
+            assert!(
+                election_timer_starts_election(is_voter, is_leader) == want,
+                "is_voter {is_voter}, is_leader {is_leader}"
+            );
+        }
     }
 
     #[test]
     fn following_leader_for_role_reports_followed_leader_only() {
-        assert!(
-            following_leader_for_role(&Role::Follower {
-                leader_id: 7,
-                fetch_deadline: SimInstant(10),
-            }) == Some(7)
-        );
-        assert!(
-            following_leader_for_role(&Role::Observer {
-                leader_id: Some(9),
-                fetch_deadline: SimInstant(10),
-            }) == Some(9)
-        );
-        assert!(
-            following_leader_for_role(&Role::Observer {
-                leader_id: None,
-                fetch_deadline: SimInstant(10),
-            })
-            .is_none()
-        );
-        assert!(
-            following_leader_for_role(&Role::Leader {
-                replicas: std::collections::BTreeMap::new(),
-                high_watermark: 0,
-                epoch_start_offset: 0,
-            })
-            .is_none()
-        );
+        for (role, want) in [
+            (
+                Role::Follower {
+                    leader_id: 7,
+                    fetch_deadline: SimInstant(10),
+                },
+                Some(7),
+            ),
+            (
+                Role::Observer {
+                    leader_id: Some(9),
+                    fetch_deadline: SimInstant(10),
+                },
+                Some(9),
+            ),
+            (
+                Role::Observer {
+                    leader_id: None,
+                    fetch_deadline: SimInstant(10),
+                },
+                None,
+            ),
+            (
+                Role::Leader {
+                    replicas: std::collections::BTreeMap::new(),
+                    high_watermark: 0,
+                    epoch_start_offset: 0,
+                },
+                None,
+            ),
+        ] {
+            assert!(following_leader_for_role(&role) == want, "role {role:?}");
+        }
     }
 
     #[test]
     fn fetch_records_are_served_only_by_clean_leader_fetches() {
-        assert!(should_serve_fetch_records(false, false, true));
-        assert!(!should_serve_fetch_records(true, false, true));
-        assert!(!should_serve_fetch_records(false, true, true));
-        assert!(!should_serve_fetch_records(false, false, false));
+        for (has_snapshot, has_divergence, is_leader, want) in [
+            (false, false, true, true),
+            (true, false, true, false),
+            (false, true, true, false),
+            (false, false, false, false),
+        ] {
+            assert!(
+                should_serve_fetch_records(has_snapshot, has_divergence, is_leader) == want,
+                "has_snapshot {has_snapshot}, has_divergence {has_divergence}, is_leader {is_leader}"
+            );
+        }
     }
 
     #[test]
     fn leadership_loss_detection_handles_stepdown_and_epoch_bump() {
-        assert!(should_fail_waiters_on_leadership_change(true, false, 3, 3));
-        assert!(should_fail_waiters_on_leadership_change(true, true, 3, 4));
-        assert!(!should_fail_waiters_on_leadership_change(true, true, 3, 3));
-        assert!(!should_fail_waiters_on_leadership_change(
-            false, false, 3, 4
-        ));
+        for (was_leader, is_leader, held_epoch, current_epoch, want) in [
+            (true, false, 3, 3, true),
+            (true, true, 3, 4, true),
+            (true, true, 3, 3, false),
+            (false, false, 3, 4, false),
+        ] {
+            assert!(
+                should_fail_waiters_on_leadership_change(
+                    was_leader,
+                    is_leader,
+                    held_epoch,
+                    current_epoch
+                ) == want,
+                "was_leader {was_leader}, is_leader {is_leader}, epochs {held_epoch}->{current_epoch}"
+            );
+        }
     }
 
     #[test]
@@ -2613,117 +2645,198 @@ mod tests {
 
     #[test]
     fn submit_offset_helpers_use_base_plus_blob_count() {
-        assert!(assigned_record_offset(9, 0) == 9);
-        assert!(assigned_record_offset(9, 3) == 12);
-        assert!(submit_waiter_need_offset(9, 3) == 12);
-        assert!(submit_waiter_need_offset(9, 0) == 9);
+        for (base, count, want) in [(9, 0, 9), (9, 3, 12)] {
+            assert!(
+                assigned_record_offset(base, count) == want,
+                "assigned_record_offset({base}, {count})"
+            );
+            assert!(
+                submit_waiter_need_offset(base, usize::try_from(count).unwrap()) == want,
+                "submit_waiter_need_offset({base}, {count})"
+            );
+        }
     }
 
     #[test]
     fn append_result_must_match_previous_log_end_and_advance_log() {
-        assert!(append_result_is_consistent(4, 4, 5));
-        assert!(!append_result_is_consistent(4, -1, 5));
-        assert!(!append_result_is_consistent(4, 5, 5));
-        assert!(!append_result_is_consistent(4, 4, 4));
+        for (expected_base, returned_base, log_end_after, want) in [
+            (4, 4, 5, true),
+            (4, -1, 5, false),
+            (4, 5, 5, false),
+            (4, 4, 4, false),
+        ] {
+            assert!(
+                append_result_is_consistent(expected_base, returned_base, log_end_after) == want,
+                "expected_base {expected_base}, returned_base {returned_base}, log_end_after {log_end_after}"
+            );
+        }
         assert!(validate_append_result("test", 4, 4, 5).is_ok());
         assert!(validate_append_result("test", 4, -1, 4).is_err());
     }
 
     #[test]
     fn single_voter_majority_detection_is_exact() {
-        assert!(is_single_voter_majority(1));
-        assert!(!is_single_voter_majority(0));
-        assert!(!is_single_voter_majority(2));
+        for (majority, want) in [(1, true), (0, false), (2, false)] {
+            assert!(
+                is_single_voter_majority(majority) == want,
+                "majority {majority}"
+            );
+        }
     }
 
     #[test]
     fn apply_window_includes_only_newly_committed_batch_bases() {
-        assert!(batch_base_in_apply_window(5, 5, 6));
-        assert!(batch_base_in_apply_window(6, 5, 8));
-        assert!(!batch_base_in_apply_window(4, 5, 8));
-        assert!(!batch_base_in_apply_window(8, 5, 8));
+        for (base_offset, prev_hwm, applied_hwm, want) in [
+            (5, 5, 6, true),
+            (6, 5, 8, true),
+            (4, 5, 8, false),
+            (8, 5, 8, false),
+        ] {
+            assert!(
+                batch_base_in_apply_window(base_offset, prev_hwm, applied_hwm) == want,
+                "base_offset {base_offset}, prev_hwm {prev_hwm}, applied_hwm {applied_hwm}"
+            );
+        }
     }
 
     #[test]
     fn snapshot_threshold_uses_positive_hwm_delta_from_last_snapshot() {
-        assert!(committed_records_since_snapshot(10, 4) == 6);
-        assert!(committed_records_since_snapshot(4, 10) == 0);
-        assert!(snapshot_interval_reached(3, 3));
-        assert!(snapshot_interval_reached(4, 3));
-        assert!(!snapshot_interval_reached(2, 3));
+        for (hwm, last_snapshot_end, want) in [(10, 4, 6), (4, 10, 0)] {
+            assert!(
+                committed_records_since_snapshot(hwm, last_snapshot_end) == want,
+                "hwm {hwm}, last_snapshot_end {last_snapshot_end}"
+            );
+        }
+        for (advanced, interval, want) in [(3, 3, true), (4, 3, true), (2, 3, false)] {
+            assert!(
+                snapshot_interval_reached(advanced, interval) == want,
+                "advanced {advanced}, interval {interval}"
+            );
+        }
     }
 
     #[test]
     fn expected_hwm_after_advance_is_monotonic_and_clamped_to_log_end() {
-        assert!(expected_hwm_after_advance(2, 5, 4) == 4);
-        assert!(expected_hwm_after_advance(2, 1, 4) == 2);
-        assert!(expected_hwm_after_advance(2, 3, 4) == 3);
-        assert!(hwm_advanced_as_expected(4, 4));
-        assert!(hwm_advanced_as_expected(5, 4));
-        assert!(!hwm_advanced_as_expected(3, 4));
+        for (prev_hwm, new_hwm, log_end, want) in [(2, 5, 4, 4), (2, 1, 4, 2), (2, 3, 4, 3)] {
+            assert!(
+                expected_hwm_after_advance(prev_hwm, new_hwm, log_end) == want,
+                "prev_hwm {prev_hwm}, new_hwm {new_hwm}, log_end {log_end}"
+            );
+        }
+        for (applied_hwm, expected_hwm, want) in [(4, 4, true), (5, 4, true), (3, 4, false)] {
+            assert!(
+                hwm_advanced_as_expected(applied_hwm, expected_hwm) == want,
+                "applied_hwm {applied_hwm}, expected_hwm {expected_hwm}"
+            );
+        }
     }
 
     #[test]
     fn waiter_resolution_requires_hwm_to_reach_need_offset() {
-        assert!(hwm_reaches_waiter(5, 5));
-        assert!(hwm_reaches_waiter(6, 5));
-        assert!(!hwm_reaches_waiter(4, 5));
+        for (hwm, need_offset, want) in [(5, 5, true), (6, 5, true), (4, 5, false)] {
+            assert!(
+                hwm_reaches_waiter(hwm, need_offset) == want,
+                "hwm {hwm}, need_offset {need_offset}"
+            );
+        }
     }
 
     #[test]
     fn metadata_fetch_window_is_committed_half_open_range() {
-        assert!(metadata_fetch_offset_in_committed_window(0, 1));
-        assert!(metadata_fetch_offset_in_committed_window(4, 5));
-        assert!(!metadata_fetch_offset_in_committed_window(-1, 5));
-        assert!(!metadata_fetch_offset_in_committed_window(5, 5));
+        for (fetch_offset, hwm, want) in [(0, 1, true), (4, 5, true), (-1, 5, false), (5, 5, false)]
+        {
+            assert!(
+                metadata_fetch_offset_in_committed_window(fetch_offset, hwm) == want,
+                "fetch_offset {fetch_offset}, hwm {hwm}"
+            );
+        }
         assert!(fetch_batch_committed_before_hwm(4, 5));
         assert!(!fetch_batch_committed_before_hwm(5, 5));
     }
 
     #[test]
     fn fetch_record_offsets_are_inside_log_window_only() {
-        assert!(fetch_offset_has_records(0, 1));
-        assert!(fetch_offset_has_records(4, 5));
-        assert!(!fetch_offset_has_records(-1, 5));
-        assert!(!fetch_offset_has_records(5, 5));
+        for (fetch_offset, log_end, want) in
+            [(0, 1, true), (4, 5, true), (-1, 5, false), (5, 5, false)]
+        {
+            assert!(
+                fetch_offset_has_records(fetch_offset, log_end) == want,
+                "fetch_offset {fetch_offset}, log_end {log_end}"
+            );
+        }
     }
 
     #[test]
     fn fetch_epoch_uses_installed_snapshot_epoch_only_at_empty_boundary() {
-        assert!(fetch_epoch_for_request(Some(7), 10, 10, 3) == 7);
-        assert!(fetch_epoch_for_request(Some(7), 10, 11, 3) == 3);
-        assert!(fetch_epoch_for_request(None, 10, 10, 3) == 3);
+        for (installed, log_start, log_end, last_epoch, want) in [
+            (Some(7), 10, 10, 3, 7),
+            (Some(7), 10, 11, 3, 3),
+            (None, 10, 10, 3, 3),
+        ] {
+            assert!(
+                fetch_epoch_for_request(installed, log_start, log_end, last_epoch) == want,
+                "installed {installed:?}, log {log_start}..{log_end}"
+            );
+        }
     }
 
     #[test]
     fn fetch_batch_classifier_separates_duplicate_append_and_gap() {
-        assert!(classify_fetch_batch(4, 5) == FetchBatchDisposition::AlreadyPresent);
-        assert!(classify_fetch_batch(5, 5) == FetchBatchDisposition::Append);
-        assert!(classify_fetch_batch(6, 5) == FetchBatchDisposition::Gap);
+        for (base_offset, log_end, want) in [
+            (4, 5, FetchBatchDisposition::AlreadyPresent),
+            (5, 5, FetchBatchDisposition::Append),
+            (6, 5, FetchBatchDisposition::Gap),
+        ] {
+            assert!(
+                classify_fetch_batch(base_offset, log_end) == want,
+                "base_offset {base_offset}, log_end {log_end}"
+            );
+        }
     }
 
     #[test]
     fn snapshot_fetch_hint_starts_only_for_future_non_duplicate_snapshots() {
-        assert!(should_start_snapshot_fetch((11, 2), 10, None));
-        assert!(!should_start_snapshot_fetch((10, 2), 10, None));
-        assert!(!should_start_snapshot_fetch((11, 2), 10, Some((11, 2))));
-        assert!(should_start_snapshot_fetch((12, 2), 10, Some((11, 2))));
+        for (snapshot_id, log_end, in_flight, want) in [
+            ((11, 2), 10, None, true),
+            ((10, 2), 10, None, false),
+            ((11, 2), 10, Some((11, 2)), false),
+            ((12, 2), 10, Some((11, 2)), true),
+        ] {
+            assert!(
+                should_start_snapshot_fetch(snapshot_id, log_end, in_flight) == want,
+                "snapshot_id {snapshot_id:?}, log_end {log_end}, in_flight {in_flight:?}"
+            );
+        }
     }
 
     #[test]
     fn snapshot_fetch_response_is_invalid_unless_success_from_active_leader() {
-        assert!(!snapshot_fetch_response_invalid(0, 2, 2));
-        assert!(snapshot_fetch_response_invalid(1, 2, 2));
-        assert!(snapshot_fetch_response_invalid(0, 3, 2));
-        assert!(snapshot_fetch_response_invalid(1, 3, 2));
+        for (error_code, response_epoch, current_epoch, want) in [
+            (0, 2, 2, false),
+            (1, 2, 2, true),
+            (0, 3, 2, true),
+            (1, 3, 2, true),
+        ] {
+            assert!(
+                snapshot_fetch_response_invalid(error_code, response_epoch, current_epoch) == want,
+                "error_code {error_code}, response_epoch {response_epoch}, current_epoch {current_epoch}"
+            );
+        }
     }
 
     #[test]
     fn checkpoint_id_ordering_prefers_higher_offset_then_epoch_without_equal_replacement() {
-        assert!(checkpoint_id_is_newer((11, 1), (10, 9)));
-        assert!(checkpoint_id_is_newer((10, 9), (10, 2)));
-        assert!(!checkpoint_id_is_newer((10, 2), (10, 9)));
-        assert!(!checkpoint_id_is_newer((10, 9), (10, 9)));
+        for (candidate, current, want) in [
+            ((11, 1), (10, 9), true),
+            ((10, 9), (10, 2), true),
+            ((10, 2), (10, 9), false),
+            ((10, 9), (10, 9), false),
+        ] {
+            assert!(
+                checkpoint_id_is_newer(candidate, current) == want,
+                "candidate {candidate:?}, current {current:?}"
+            );
+        }
     }
 
     #[test]
@@ -2740,10 +2853,10 @@ mod tests {
             .expect("read appended leader-change");
         assert!(batches.len() == 1);
         let batch = &batches[0];
-        assert!(batch.base_offset == start);
-        assert!(batch.partition_leader_epoch == 4);
-        assert!(batch.attributes.is_control_batch());
-        assert!(batch.records.len() == 1);
+        check!(batch.base_offset == start);
+        check!(batch.partition_leader_epoch == 4);
+        check!(batch.attributes.is_control_batch());
+        check!(batch.records.len() == 1);
     }
 
     #[test]
@@ -2754,19 +2867,19 @@ mod tests {
 
         let batch = leader_change_batch(7, 2, &[1, 2, 3]);
 
-        assert!(batch.partition_leader_epoch == 7);
-        assert!(batch.attributes.is_control_batch());
-        assert!(batch.last_offset_delta == 0);
+        check!(batch.partition_leader_epoch == 7);
+        check!(batch.attributes.is_control_batch());
+        check!(batch.last_offset_delta == 0);
         assert!(batch.records.len() == 1);
         let record = &batch.records[0];
-        assert!(record.offset_delta == 0);
-        assert!(record.key.as_ref() == Some(&control_record_key(ControlRecordType::LeaderChange)));
+        check!(record.offset_delta == 0);
+        check!(record.key.as_ref() == Some(&control_record_key(ControlRecordType::LeaderChange)));
         let value = record.value.as_ref().expect("leader change value");
         let mut cur: &[u8] = value;
         let decoded = LeaderChangeMessage::decode(&mut cur, 0).expect("decode leader change");
-        assert!(cur.is_empty());
-        assert!(decoded.version == 0);
-        assert!(decoded.leader_id == 2);
+        check!(cur.is_empty());
+        check!(decoded.version == 0);
+        check!(decoded.leader_id == 2);
         let voters: Vec<i32> = decoded.voters.iter().map(|v| v.voter_id).collect();
         let granting_voters: Vec<i32> =
             decoded.granting_voters.iter().map(|v| v.voter_id).collect();
@@ -2809,9 +2922,9 @@ mod tests {
         engine.on_submit_change(topic_record("direct"), reply);
 
         assert!(matches!(rx.try_recv(), Ok(Ok(()))));
-        assert!(engine.image.topic("direct").is_some());
-        assert!(engine.log.hwm() == engine.log.log_end_offset());
-        assert!(engine.commit_waiters.is_empty());
+        check!(engine.image.topic("direct").is_some());
+        check!(engine.log.hwm() == engine.log.log_end_offset());
+        check!(engine.commit_waiters.is_empty());
     }
 
     #[test]
@@ -2888,7 +3001,7 @@ mod tests {
             Err(oneshot::error::TryRecvError::Empty)
         ));
         assert!(engine.commit_waiters.len() == 1);
-        assert!(engine.commit_waiters[0].need_offset == 6);
+        check!(engine.commit_waiters[0].need_offset == 6);
     }
 
     #[test]
@@ -2920,7 +3033,7 @@ mod tests {
             Err(oneshot::error::TryRecvError::Empty)
         ));
         assert!(engine.commit_waiters.len() == 1);
-        assert!(engine.commit_waiters[0].need_offset == 6);
+        check!(engine.commit_waiters[0].need_offset == 6);
     }
 
     #[test]
@@ -2931,9 +3044,9 @@ mod tests {
 
         engine.on_event(Event::ElectionTimeout);
 
-        assert!(*leader_rx.borrow_and_update() == Some(1));
-        assert!(quorum_rx.borrow().leader_id == Some(1));
-        assert!(quorum_rx.borrow().log_end_offset == engine.log.log_end_offset());
+        check!(*leader_rx.borrow_and_update() == Some(1));
+        check!(quorum_rx.borrow().leader_id == Some(1));
+        check!(quorum_rx.borrow().log_end_offset == engine.log.log_end_offset());
     }
 
     #[tokio::test]
@@ -2989,8 +3102,8 @@ mod tests {
         let slice = engine.metadata_fetch_slice(0, MAX_APPLY_BYTES);
         let decoded = decode_batches(&slice.records).expect("decode fetch slice");
         assert!(decoded.len() == 1);
-        assert!(decoded[0].base_offset == 0);
-        assert!(slice.high_watermark == 1);
+        check!(decoded[0].base_offset == 0);
+        check!(slice.high_watermark == 1);
     }
 
     #[tokio::test]
@@ -3541,12 +3654,12 @@ mod tests {
             .expect("C did not hang")
             .expect("join");
 
-        assert!(ra.is_ok(), "A (first valid) should commit: {ra:?}");
+        check!(ra.is_ok(), "A (first valid) should commit: {ra:?}");
         assert!(
             matches!(rb, Err(RaftError::Metadata(_))),
             "B (duplicate) should be rejected: {rb:?}"
         );
-        assert!(
+        check!(
             rc.is_ok(),
             "C (distinct valid) must NOT bleed B's rejection: {rc:?}"
         );
@@ -3619,13 +3732,13 @@ mod tests {
         let loaded = load_quorum_state(dir.path(), cid, &voter_set(&[1, 2, 3]))
             .unwrap()
             .expect("present");
-        assert!(loaded.leader_epoch == 5);
+        check!(loaded.leader_epoch == 5);
         // Leadership is volatile (Raft persists only currentTerm + votedFor):
         // `leader_id` is deliberately cleared on load so a restarted ex-leader
         // re-discovers the current leader instead of trusting stale state.
-        assert!(loaded.leader_id.is_none());
-        assert!(loaded.voted_key.map(|k| k.id) == Some(3));
-        assert!(loaded.cluster_id == cid);
+        check!(loaded.leader_id.is_none());
+        check!(loaded.voted_key.map(|k| k.id) == Some(3));
+        check!(loaded.cluster_id == cid);
     }
 
     #[test]
@@ -3711,9 +3824,12 @@ mod tests {
 
         retain_latest_checkpoint(&cp_dir);
 
-        assert!(load_checkpoint_by_id(&cp_dir, 6, 1).is_some());
-        assert!(load_checkpoint_by_id(&cp_dir, 5, 1).is_none());
-        assert!(load_checkpoint_by_id(&cp_dir, 6, 0).is_none());
+        for (end_offset, epoch, want_present) in [(6, 1, true), (5, 1, false), (6, 0, false)] {
+            assert!(
+                load_checkpoint_by_id(&cp_dir, end_offset, epoch).is_some() == want_present,
+                "checkpoint {end_offset}-{epoch}"
+            );
+        }
         let entries: Vec<_> = std::fs::read_dir(&cp_dir)
             .expect("read checkpoint dir")
             .collect::<Result<Vec<_>, _>>()

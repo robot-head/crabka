@@ -18,7 +18,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use crate::error::BrokerError;
 
 /// Discriminator returned by [`parse_key`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Key {
     /// `(group_id, topic, partition)` — what offset was committed.
     OffsetCommit {
@@ -92,7 +92,7 @@ pub fn encode_key(key: &Key) -> Bytes {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OffsetCommitValue {
     pub offset: i64,
     pub leader_epoch: i32,
@@ -152,7 +152,7 @@ impl OffsetCommitValue {
 // offsets (k0/k1) are persisted today. Bootstrap *decodes* k2 records, and the
 // migration code writes them on conversion. Retained per the
 // B1 merge; allow until those slices wire the write path.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
 pub struct GroupMetadataValue {
     pub protocol_type: String,
@@ -163,7 +163,7 @@ pub struct GroupMetadataValue {
     pub members: Vec<MemberMetadata>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemberMetadata {
     pub member_id: String,
     pub group_instance_id: Option<String>,
@@ -382,10 +382,7 @@ mod tests {
         };
         let encoded = v.encode_value();
         let decoded = OffsetCommitValue::decode_value(&encoded).unwrap();
-        assert!(decoded.offset == 42);
-        assert!(decoded.leader_epoch == 0);
-        assert!(decoded.metadata == "meta");
-        assert!(decoded.commit_timestamp_ms == 1_000_000);
+        assert!(decoded == v);
     }
 
     #[test]
@@ -409,28 +406,20 @@ mod tests {
         };
         let encoded = v.encode_value();
         let decoded = GroupMetadataValue::decode_value(&encoded).unwrap();
-        assert!(decoded.members.len() == 1);
-        assert!(decoded.members[0].member_id == "m1");
-        assert!(decoded.members[0].subscription.as_ref() == b"sub");
+        assert!(decoded == v);
     }
 
     #[test]
     fn parse_key_offset_commit_v1() {
         let key = OffsetCommitValue::encode_key("grp", "topic", 7);
-        match parse_key(&key).unwrap() {
-            Key::OffsetCommit {
-                group_id,
-                topic,
-                partition,
-            } => {
-                assert!(group_id == "grp");
-                assert!(topic == "topic");
-                assert!(partition == 7);
-            }
-            k @ (Key::GroupMetadata { .. } | Key::NextGen(_) | Key::Share(_) | Key::Streams(_)) => {
-                panic!("expected OffsetCommit, got {k:?}")
-            }
-        }
+        assert!(
+            parse_key(&key).unwrap()
+                == Key::OffsetCommit {
+                    group_id: "grp".to_string(),
+                    topic: "topic".to_string(),
+                    partition: 7,
+                }
+        );
     }
 
     #[test]

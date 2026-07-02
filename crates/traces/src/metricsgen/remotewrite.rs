@@ -458,27 +458,35 @@ mod tests {
             .unwrap();
         let request = TestWriteRequest::decode(decoded.as_slice()).unwrap();
 
-        assert!(request.timeseries.len() == 1);
-        let ts = &request.timeseries[0];
-        assert!(ts.samples.len() == 1);
-        assert!((ts.samples[0].value - 7.0).abs() < f64::EPSILON);
-        assert!(ts.samples[0].timestamp == 1_234);
-        assert!(ts.labels.iter().any(
-            |label| label.name == "__name__" && label.value == "traces_spanmetrics_calls_total"
-        ));
-        assert!(
-            ts.labels
-                .iter()
-                .any(|label| label.name == "service" && label.value == "api")
-        );
-        assert!(ts.exemplars.len() == 1);
-        assert!((ts.exemplars[0].value - 0.042).abs() < f64::EPSILON);
-        assert!(ts.exemplars[0].timestamp == 1_235);
-        assert!(
-            ts.exemplars[0]
-                .labels
-                .iter()
-                .any(|label| label.name == "trace_id" && label.value == "0abc")
+        assert_eq!(
+            request,
+            TestWriteRequest {
+                timeseries: vec![TestTimeSeries {
+                    labels: vec![
+                        TestLabel {
+                            name: "__name__".into(),
+                            value: "traces_spanmetrics_calls_total".into(),
+                        },
+                        TestLabel {
+                            name: "service".into(),
+                            value: "api".into(),
+                        },
+                    ],
+                    samples: vec![TestSample {
+                        value: 7.0,
+                        timestamp: 1_234,
+                    }],
+                    exemplars: vec![TestExemplar {
+                        labels: vec![TestLabel {
+                            name: "trace_id".into(),
+                            value: "0abc".into(),
+                        }],
+                        value: 0.042,
+                        timestamp: 1_235,
+                    }],
+                    histograms: vec![],
+                }],
+            }
         );
     }
 
@@ -494,15 +502,19 @@ mod tests {
 
         let out = to_timeseries(&[s]);
 
-        assert!(out.len() == 1);
-        assert!(has_label(
-            &out[0],
-            "__name__",
-            "traces_spanmetrics_calls_total"
-        ));
-        assert!(has_label(&out[0], "service", "api"));
-        assert!((out[0].value - 3.0).abs() < 1e-9);
-        assert!(out[0].timestamp_ms == 1_000);
+        assert_eq!(
+            out,
+            vec![WireTimeSeries {
+                labels: vec![
+                    ("__name__".into(), "traces_spanmetrics_calls_total".into()),
+                    ("service".into(), "api".into()),
+                ],
+                value: 3.0,
+                timestamp_ms: 1_000,
+                exemplars: vec![],
+                native_histogram: None,
+            }]
+        );
     }
 
     #[test]
@@ -589,28 +601,46 @@ mod tests {
             .unwrap();
         let request = TestWriteRequest::decode(decoded.as_slice()).unwrap();
 
-        assert!(request.timeseries.len() == 1);
-        let ts = &request.timeseries[0];
-        assert!(ts.samples.is_empty());
-        assert!(ts.histograms.len() == 1);
-        assert!(ts.exemplars.len() == 1);
-        assert!(
-            ts.labels.iter().any(
-                |label| label.name == "__name__" && label.value == "traces_spanmetrics_latency"
-            )
+        assert_eq!(
+            request,
+            TestWriteRequest {
+                timeseries: vec![TestTimeSeries {
+                    labels: vec![
+                        TestLabel {
+                            name: "__name__".into(),
+                            value: "traces_spanmetrics_latency".into(),
+                        },
+                        TestLabel {
+                            name: "service".into(),
+                            value: "api".into(),
+                        },
+                    ],
+                    samples: vec![],
+                    exemplars: vec![TestExemplar {
+                        labels: vec![TestLabel {
+                            name: "trace_id".into(),
+                            value: "abc".into(),
+                        }],
+                        value: 0.12,
+                        timestamp: 1_235,
+                    }],
+                    histograms: vec![TestHistogram {
+                        count_float: 4.5,
+                        sum: 0.25,
+                        schema: 8,
+                        zero_threshold: 0.001,
+                        zero_count_float: 1.5,
+                        positive_spans: vec![TestBucketSpan {
+                            offset: -2,
+                            length: 2,
+                        }],
+                        positive_counts: vec![2.0, 1.0],
+                        reset_hint: TestResetHint::No as i32,
+                        timestamp: 1_234,
+                    }],
+                }],
+            }
         );
-        let histogram = &ts.histograms[0];
-        assert!((histogram.count_float - 4.5).abs() < f64::EPSILON);
-        assert!((histogram.sum - 0.25).abs() < f64::EPSILON);
-        assert!(histogram.schema == 8);
-        assert!((histogram.zero_threshold - 0.001).abs() < f64::EPSILON);
-        assert!((histogram.zero_count_float - 1.5).abs() < f64::EPSILON);
-        assert!(histogram.positive_spans.len() == 1);
-        assert!(histogram.positive_spans[0].offset == -2);
-        assert!(histogram.positive_spans[0].length == 2);
-        assert!(histogram.positive_counts == vec![2.0, 1.0]);
-        assert!(histogram.reset_hint == TestResetHint::No as i32);
-        assert!(histogram.timestamp == 1_234);
     }
 
     #[test]

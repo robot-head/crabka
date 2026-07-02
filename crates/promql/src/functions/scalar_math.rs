@@ -436,68 +436,82 @@ mod tests {
 
     #[test]
     fn unary_matches_rust_f64() {
-        assert!(bits_eq(run(ScalarMathOp::Abs, &[], &[-3.0])[0], 3.0));
-        assert!(bits_eq(run(ScalarMathOp::Sqrt, &[], &[4.0])[0], 2.0));
-        // sqrt(negative) -> NaN, preserved (not dropped).
-        assert!(run(ScalarMathOp::Sqrt, &[], &[-1.0])[0].is_nan());
-        // ln(0) -> -inf, ln(negative) -> NaN.
-        assert!(bits_eq(
-            run(ScalarMathOp::Ln, &[], &[0.0])[0],
-            f64::NEG_INFINITY
-        ));
-        assert!(run(ScalarMathOp::Ln, &[], &[-1.0])[0].is_nan());
-        assert!(bits_eq(run(ScalarMathOp::Log2, &[], &[8.0])[0], 3.0));
+        // `bits_eq` treats any-NaN == any-NaN, so NaN expectations
+        // (sqrt/ln of a negative, preserved rather than dropped) sit in the
+        // same table as the exact cases; ln(0) -> -inf.
+        for (op, input, want) in [
+            (ScalarMathOp::Abs, -3.0, 3.0),
+            (ScalarMathOp::Sqrt, 4.0, 2.0),
+            (ScalarMathOp::Sqrt, -1.0, f64::NAN),
+            (ScalarMathOp::Ln, 0.0, f64::NEG_INFINITY),
+            (ScalarMathOp::Ln, -1.0, f64::NAN),
+            (ScalarMathOp::Log2, 8.0, 3.0),
+        ] {
+            let got = run(op, &[], &[input])[0];
+            assert!(
+                bits_eq(got, want),
+                "case {op:?}({input}): got {got}, want {want}"
+            );
+        }
     }
 
     #[test]
     fn sgn_handles_nan_and_signed_zero() {
-        assert!(bits_eq(run(ScalarMathOp::Sgn, &[], &[5.0])[0], 1.0));
-        assert!(bits_eq(run(ScalarMathOp::Sgn, &[], &[-5.0])[0], -1.0));
-        assert!(bits_eq(run(ScalarMathOp::Sgn, &[], &[0.0])[0], 0.0));
-        // -0.0 is neither > 0 nor < 0, so sgn(-0.0) = 0.0.
-        assert!(bits_eq(run(ScalarMathOp::Sgn, &[], &[-0.0])[0], 0.0));
-        assert!(run(ScalarMathOp::Sgn, &[], &[f64::NAN])[0].is_nan());
+        // -0.0 is neither > 0 nor < 0, so sgn(-0.0) = 0.0 (positive zero,
+        // pinned by the bit comparison); sgn(NaN) stays NaN.
+        for (input, want) in [
+            (5.0, 1.0),
+            (-5.0, -1.0),
+            (0.0, 0.0),
+            (-0.0, 0.0),
+            (f64::NAN, f64::NAN),
+        ] {
+            let got = run(ScalarMathOp::Sgn, &[], &[input])[0];
+            assert!(
+                bits_eq(got, want),
+                "case sgn({input}): got {got}, want {want}"
+            );
+        }
     }
 
     #[test]
     fn round_matches_interpreter_half_up() {
         // .5 rounds up (toward +inf), matching `round_to_nearest`.
-        assert!(bits_eq(run(ScalarMathOp::Round, &[1.0], &[2.5])[0], 3.0));
-        assert!(bits_eq(run(ScalarMathOp::Round, &[1.0], &[-2.5])[0], -2.0));
-        // to_nearest = 5.
-        assert!(bits_eq(run(ScalarMathOp::Round, &[5.0], &[12.0])[0], 10.0));
-        assert!(bits_eq(run(ScalarMathOp::Round, &[5.0], &[13.0])[0], 15.0));
+        for (to_nearest, value, want) in [
+            (1.0, 2.5, 3.0),
+            (1.0, -2.5, -2.0),
+            (5.0, 12.0, 10.0),
+            (5.0, 13.0, 15.0),
+        ] {
+            let got = run(ScalarMathOp::Round, &[to_nearest], &[value])[0];
+            assert!(
+                bits_eq(got, want),
+                "case round({value}, to_nearest={to_nearest}): got {got}, want {want}"
+            );
+        }
     }
 
     #[test]
     fn clamp_family_bounds_values() {
-        assert!(bits_eq(
-            run(ScalarMathOp::ClampMin, &[0.0], &[-3.0])[0],
-            0.0
-        ));
-        assert!(bits_eq(run(ScalarMathOp::ClampMin, &[0.0], &[3.0])[0], 3.0));
-        assert!(bits_eq(
-            run(ScalarMathOp::ClampMax, &[10.0], &[42.0])[0],
-            10.0
-        ));
-        assert!(bits_eq(
-            run(ScalarMathOp::Clamp, &[0.0, 100.0], &[150.0])[0],
-            100.0
-        ));
-        assert!(bits_eq(
-            run(ScalarMathOp::Clamp, &[0.0, 100.0], &[-5.0])[0],
-            0.0
-        ));
-        assert!(bits_eq(
-            run(ScalarMathOp::ClampMin, &[0.0], &[-0.0])[0],
-            -0.0
-        ));
-        assert!(bits_eq(
-            run(ScalarMathOp::ClampMax, &[-0.0], &[0.0])[0],
-            0.0
-        ));
-        // A NaN bound yields NaN.
-        assert!(run(ScalarMathOp::ClampMin, &[f64::NAN], &[3.0])[0].is_nan());
+        // Signed zeros pass through unclamped (pinned by the bit comparison);
+        // a NaN bound yields NaN.
+        let cases: &[(ScalarMathOp, &[f64], f64, f64)] = &[
+            (ScalarMathOp::ClampMin, &[0.0], -3.0, 0.0),
+            (ScalarMathOp::ClampMin, &[0.0], 3.0, 3.0),
+            (ScalarMathOp::ClampMax, &[10.0], 42.0, 10.0),
+            (ScalarMathOp::Clamp, &[0.0, 100.0], 150.0, 100.0),
+            (ScalarMathOp::Clamp, &[0.0, 100.0], -5.0, 0.0),
+            (ScalarMathOp::ClampMin, &[0.0], -0.0, -0.0),
+            (ScalarMathOp::ClampMax, &[-0.0], 0.0, 0.0),
+            (ScalarMathOp::ClampMin, &[f64::NAN], 3.0, f64::NAN),
+        ];
+        for &(op, bounds, value, want) in cases {
+            let got = run(op, bounds, &[value])[0];
+            assert!(
+                bits_eq(got, want),
+                "case {op:?}(bounds={bounds:?}, value={value}): got {got}, want {want}"
+            );
+        }
     }
 
     #[test]
@@ -530,8 +544,8 @@ mod tests {
 
     #[test]
     fn nan_value_flows_through() {
-        assert!(run(ScalarMathOp::Sin, &[], &[f64::NAN])[0].is_nan());
-        assert!(run(ScalarMathOp::Abs, &[], &[f64::NAN])[0].is_nan());
-        assert!(run(ScalarMathOp::Ceil, &[], &[f64::NAN])[0].is_nan());
+        for op in [ScalarMathOp::Sin, ScalarMathOp::Abs, ScalarMathOp::Ceil] {
+            assert!(run(op, &[], &[f64::NAN])[0].is_nan(), "case {op:?}");
+        }
     }
 }

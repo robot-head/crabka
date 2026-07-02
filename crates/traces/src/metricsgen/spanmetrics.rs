@@ -256,7 +256,7 @@ fn duration_as_f64(duration_ns: i64) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+    use assert2::{assert, check};
 
     use super::*;
     use crate::metricsgen::config::MetricsGenConfig;
@@ -349,17 +349,14 @@ mod tests {
         let size_x = find(&out, "traces_spanmetrics_size_total", "GET /x");
         assert!(matches!(size_x.sample, SeriesSample::Counter(c) if (c - 250.0).abs() < 1e-9));
 
-        let labels = &calls_x.labels;
-        assert!(labels.iter().any(|(k, v)| k == "service" && v == "api"));
-        assert!(
-            labels
-                .iter()
-                .any(|(k, v)| k == "span_kind" && v == "SPAN_KIND_SERVER")
-        );
-        assert!(
-            labels
-                .iter()
-                .any(|(k, v)| k == "status_code" && v == "STATUS_CODE_OK")
+        assert_eq!(
+            calls_x.labels,
+            vec![
+                ("service".to_string(), "api".to_string()),
+                ("span_kind".to_string(), "SPAN_KIND_SERVER".to_string()),
+                ("span_name".to_string(), "GET /x".to_string()),
+                ("status_code".to_string(), "STATUS_CODE_OK".to_string()),
+            ]
         );
 
         let calls_y = find(&out, "traces_spanmetrics_calls_total", "GET /y");
@@ -507,12 +504,12 @@ mod tests {
         // never sees a spurious counter reset), and the latency histogram count
         // stays cumulative too.
         let third = reg.drain(3_000);
-        assert!(!third.is_empty());
-        assert!(matches!(
+        check!(!third.is_empty());
+        check!(matches!(
             find(&third, "traces_spanmetrics_calls_total", "GET /x").sample,
             SeriesSample::Counter(c) if (c - 2.0).abs() < 1e-9
         ));
-        assert!(matches!(
+        check!(matches!(
             find(&third, "traces_spanmetrics_latency", "GET /x").sample,
             SeriesSample::ClassicHistogram { count, .. } if (count - 2.0).abs() < 1e-9
         ));

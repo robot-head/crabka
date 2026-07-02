@@ -49,6 +49,7 @@ fn list_reassignments_request() -> ListPartitionReassignmentsRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::check;
     use std::time::Duration;
 
     #[test]
@@ -75,8 +76,8 @@ mod tests {
             .await
             .expect("client build does not connect");
 
-        assert!(fetch_metadata(&client).await.is_err());
-        assert!(fetch_describe_cluster(&client).await.is_err());
-        assert!(fetch_list_reassignments(&client).await.is_err());
+        check!(fetch_metadata(&client).await.is_err());
+        check!(fetch_describe_cluster(&client).await.is_err());
+        check!(fetch_list_reassignments(&client).await.is_err());
     }
 }

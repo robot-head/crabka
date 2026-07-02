@@ -430,16 +430,16 @@ impl KafkaUserQuotas {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use kube::CustomResourceExt as _;
 
     #[test]
     fn crd_metadata_is_correct() {
         let crd = KafkaUser::crd();
-        assert!(crd.spec.group == "crabka.io");
-        assert!(crd.spec.names.kind == "KafkaUser");
-        assert!(crd.spec.names.plural == "kafkausers");
-        assert!(
+        check!(crd.spec.group == "crabka.io");
+        check!(crd.spec.names.kind == "KafkaUser");
+        check!(crd.spec.names.plural == "kafkausers");
+        check!(
             crd.spec
                 .names
                 .short_names
@@ -447,8 +447,8 @@ mod tests {
                 .is_some_and(|v| v.contains(&"ku".to_string())),
             "expected shortname `ku`",
         );
-        assert!(crd.spec.versions.len() == 1);
-        assert!(crd.spec.versions[0].name == "v1alpha1");
+        check!(crd.spec.versions.len() == 1);
+        check!(crd.spec.versions[0].name == "v1alpha1");
     }
 
     #[test]
@@ -481,10 +481,14 @@ mod tests {
             },
         );
         let json = serde_json::to_string(&ku).unwrap();
-        assert!(json.contains("\"type\":\"scram-sha-512\""), "got: {json}");
-        assert!(json.contains("\"iterations\":16384"), "got: {json}");
-        assert!(json.contains("\"type\":\"simple\""), "got: {json}");
-        assert!(json.contains("\"name\":\"orders\""), "got: {json}");
+        for want in [
+            "\"type\":\"scram-sha-512\"",
+            "\"iterations\":16384",
+            "\"type\":\"simple\"",
+            "\"name\":\"orders\"",
+        ] {
+            assert!(json.contains(want), "case {want:?}; got: {json}");
+        }
         let back: KafkaUser = serde_json::from_str(&json).unwrap();
         assert!(back.spec == ku.spec);
     }
@@ -510,9 +514,18 @@ mod tests {
             "operations":["Read"]
         }"#;
         let rule: AclRule = serde_json::from_str(json).unwrap();
-        assert!(rule.host == "*");
-        assert!(rule.permission == AclPermission::Allow);
-        assert!(rule.resource.pattern_type == AclPatternType::Literal);
+        assert!(
+            rule == AclRule {
+                resource: AclResource {
+                    kind: AclResourceKind::Topic,
+                    name: "orders".to_string(),
+                    pattern_type: AclPatternType::Literal,
+                },
+                operations: vec![AclOp::Read],
+                host: "*".to_string(),
+                permission: AclPermission::Allow,
+            }
+        );
     }
 
     #[test]
@@ -551,9 +564,9 @@ mod tests {
     fn status_omits_optional_fields_when_unset() {
         let status = KafkaUserStatus::default();
         let j = serde_json::to_string(&status).unwrap();
-        assert!(!j.contains("observedGeneration"), "got: {j}");
-        assert!(!j.contains("username"), "got: {j}");
-        assert!(!j.contains("secret"), "got: {j}");
+        for absent in ["observedGeneration", "username", "secret"] {
+            assert!(!j.contains(absent), "case {absent:?}; got: {j}");
+        }
         // `scramSha512` + `quotasInSync` are plain bools — serde emits them.
         assert!(j.contains("\"scramSha512\":false"), "got: {j}");
         assert!(j.contains("\"quotasInSync\":false"), "got: {j}");
@@ -576,9 +589,9 @@ mod tests {
             controller_mutation_rate: None,
         };
         let m = q.to_quota_map();
-        assert!(m.len() == 2);
-        assert!((m["producer_byte_rate"] - 1_048_576.0).abs() < f64::EPSILON);
-        assert!((m["request_percentage"] - 25.0).abs() < f64::EPSILON);
+        check!(m.len() == 2);
+        check!((m["producer_byte_rate"] - 1_048_576.0).abs() < f64::EPSILON);
+        check!((m["request_percentage"] - 25.0).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -601,10 +614,14 @@ mod tests {
             "controllerMutationRate": 10.5
         }"#;
         let q: KafkaUserQuotas = serde_json::from_str(json).unwrap();
-        assert!(q.producer_byte_rate == Some(1_048_576));
-        assert!(q.consumer_byte_rate == Some(2_097_152));
-        assert!(q.request_percentage == Some(55));
-        assert!(q.controller_mutation_rate == Some(10.5));
+        assert!(
+            q == KafkaUserQuotas {
+                producer_byte_rate: Some(1_048_576),
+                consumer_byte_rate: Some(2_097_152),
+                request_percentage: Some(55),
+                controller_mutation_rate: Some(10.5),
+            }
+        );
     }
 
     #[test]
@@ -701,9 +718,9 @@ mod tests {
             ..Default::default()
         };
         let j = serde_json::to_string(&status).unwrap();
-        assert!(!j.contains("tlsCertNotAfter"), "got: {j}");
-        assert!(!j.contains("tlsPrincipal"), "got: {j}");
-        assert!(j.contains("\"tls\":false"), "got: {j}");
+        check!(!j.contains("tlsCertNotAfter"), "got: {j}");
+        check!(!j.contains("tlsPrincipal"), "got: {j}");
+        check!(j.contains("\"tls\":false"), "got: {j}");
     }
 
     #[test]
@@ -715,9 +732,9 @@ mod tests {
             ..Default::default()
         };
         let v = serde_json::to_value(&status).unwrap();
-        assert!(v.get("tls") == Some(&serde_json::Value::Bool(true)));
-        assert!(v.get("tlsCertNotAfter").and_then(|x| x.as_str()) == Some("2027-05-19T00:00:00Z"));
-        assert!(v.get("tlsPrincipal").and_then(|x| x.as_str()) == Some("User:CN=alice"));
+        check!(v.get("tls") == Some(&serde_json::Value::Bool(true)));
+        check!(v.get("tlsCertNotAfter").and_then(|x| x.as_str()) == Some("2027-05-19T00:00:00Z"));
+        check!(v.get("tlsPrincipal").and_then(|x| x.as_str()) == Some("User:CN=alice"));
     }
 
     #[test]
@@ -751,9 +768,13 @@ mod tests {
             }),
         };
         let j = serde_json::to_string(&spec).unwrap();
-        assert!(j.contains("\"type\":\"tls-external\""), "got: {j}");
-        assert!(j.contains("\"name\":\"orders\""), "got: {j}");
-        assert!(j.contains("\"producerByteRate\":1048576"), "got: {j}");
+        for want in [
+            "\"type\":\"tls-external\"",
+            "\"name\":\"orders\"",
+            "\"producerByteRate\":1048576",
+        ] {
+            assert!(j.contains(want), "case {want:?}; got: {j}");
+        }
         let back: KafkaUserSpec = serde_json::from_str(&j).unwrap();
         assert!(back == spec);
     }
@@ -762,9 +783,13 @@ mod tests {
     fn tls_external_minimum_spec_parses() {
         let json = r#"{"authentication":{"type":"tls-external"}}"#;
         let spec: KafkaUserSpec = serde_json::from_str(json).unwrap();
-        assert!(spec.authentication == Authentication::TlsExternal);
-        assert!(spec.authorization.is_none());
-        assert!(spec.quotas.is_none());
+        assert!(
+            spec == KafkaUserSpec {
+                authentication: Authentication::TlsExternal,
+                authorization: None,
+                quotas: None,
+            }
+        );
     }
 
     #[test]
@@ -802,9 +827,13 @@ spec:
         let Authentication::DelegationToken(dt) = user.spec.authentication else {
             panic!("expected DelegationToken variant");
         };
-        assert!(dt.renewers == vec!["User:bob", "User:carol"]);
-        assert!(dt.max_lifetime_ms == Some(86_400_000));
-        assert!(dt.renew_before_expiry_ms == Some(7_200_000));
+        assert!(
+            dt == DelegationTokenAuth {
+                renewers: vec!["User:bob".to_string(), "User:carol".to_string()],
+                max_lifetime_ms: Some(86_400_000),
+                renew_before_expiry_ms: Some(7_200_000),
+            }
+        );
     }
 
     #[test]
@@ -822,8 +851,12 @@ spec:
         let Authentication::DelegationToken(dt) = user.spec.authentication else {
             panic!("expected DelegationToken variant");
         };
-        assert!(dt.renewers.is_empty());
-        assert!(dt.max_lifetime_ms.is_none());
-        assert!(dt.renew_before_expiry_ms.is_none());
+        assert!(
+            dt == DelegationTokenAuth {
+                renewers: vec![],
+                max_lifetime_ms: None,
+                renew_before_expiry_ms: None,
+            }
+        );
     }
 }

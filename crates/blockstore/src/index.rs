@@ -673,7 +673,7 @@ fn matcher_matches_empty(matcher: &LabelMatcher) -> Result<bool> {
 mod tests {
     use std::collections::BTreeSet;
 
-    use assert2::assert;
+    use assert2::{assert, check};
 
     use super::*;
     use crate::block::BlockMeta;
@@ -820,10 +820,10 @@ mod tests {
         assert!(names == vec!["app".to_string(), "env".to_string()]);
         let mut envs = idx.label_values("t", "env");
         envs.sort();
-        assert!(envs == vec!["dev".to_string(), "prod".to_string()]);
+        check!(envs == vec!["dev".to_string(), "prod".to_string()]);
 
-        assert!(idx.label_names("t") == vec!["app".to_string(), "env".to_string()]);
-        assert!(idx.label_values("t", "env") == vec!["dev".to_string(), "prod".to_string()]);
+        check!(idx.label_names("t") == vec!["app".to_string(), "env".to_string()]);
+        check!(idx.label_values("t", "env") == vec!["dev".to_string(), "prod".to_string()]);
     }
 
     #[test]
@@ -1250,21 +1250,20 @@ mod tests {
         let idx = seed();
         let api_prod = labels(&[("app", "api"), ("env", "prod")]).fingerprint();
         let api_dev = labels(&[("app", "api"), ("env", "dev")]).fingerprint();
-        let got = idx.series_for_fingerprints("t", &BTreeSet::from([api_prod, api_dev]), &[]);
-        assert!(got.len() == 2);
-        for series in &got {
-            assert!(!series.is_empty());
-            assert!(series.iter().any(|(k, _)| k == "app"));
-            assert!(series.iter().any(|(k, _)| k == "env"));
-        }
-        assert!(got.contains(&vec![
-            ("app".to_string(), "api".to_string()),
-            ("env".to_string(), "prod".to_string()),
-        ]));
-        assert!(got.contains(&vec![
-            ("app".to_string(), "api".to_string()),
-            ("env".to_string(), "dev".to_string()),
-        ]));
+        let mut got = idx.series_for_fingerprints("t", &BTreeSet::from([api_prod, api_dev]), &[]);
+        got.sort();
+        assert!(
+            got == vec![
+                vec![
+                    ("app".to_string(), "api".to_string()),
+                    ("env".to_string(), "dev".to_string()),
+                ],
+                vec![
+                    ("app".to_string(), "api".to_string()),
+                    ("env".to_string(), "prod".to_string()),
+                ],
+            ]
+        );
     }
 
     #[test]
@@ -1303,17 +1302,21 @@ mod tests {
             fingerprints: vec![],
         });
 
-        // Window covering both → combined min/max across them.
-        assert!(idx.block_time_bounds("t", 0, 1_000) == Some((10, 350)));
-
-        // Window covering only b1 → exactly b1's bounds (kills Some((x,y)) stubs).
-        assert!(idx.block_time_bounds("t", 0, 150) == Some((10, 100)));
-
-        // Window that overlaps nothing → None.
-        assert!(idx.block_time_bounds("t", 500, 600) == None);
-
-        // Unknown tenant → None.
-        assert!(idx.block_time_bounds("nope", 0, 1_000) == None);
+        for (tenant, min_ts, max_ts, want) in [
+            // Window covering both → combined min/max across them.
+            ("t", 0, 1_000, Some((10, 350))),
+            // Window covering only b1 → exactly b1's bounds (kills Some((x,y)) stubs).
+            ("t", 0, 150, Some((10, 100))),
+            // Window that overlaps nothing → None.
+            ("t", 500, 600, None),
+            // Unknown tenant → None.
+            ("nope", 0, 1_000, None),
+        ] {
+            assert!(
+                idx.block_time_bounds(tenant, min_ts, max_ts) == want,
+                "bounds for ({tenant}, {min_ts}, {max_ts})"
+            );
+        }
     }
 
     #[test]
@@ -1328,16 +1331,23 @@ mod tests {
             fingerprints: vec![],
         });
 
-        // Touch the block's max at the window's min: b.min_ts(100) <= max_ts(200)
-        // && b.max_ts(200) >= min_ts(200). `<=`→`>` or `>=`→`<` would drop it.
-        assert!(idx.block_time_bounds("t", 200, 300) == Some((100, 200)));
-        // Touch the block's min at the window's max.
-        assert!(idx.block_time_bounds("t", 0, 100) == Some((100, 200)));
-        // A window entirely above the block: with `&&`→`||` this would wrongly
-        // include the block (one side still true), so demand None here.
-        assert!(idx.block_time_bounds("t", 300, 400) == None);
-        // A window entirely below the block: the other side is the true one.
-        assert!(idx.block_time_bounds("t", 0, 50) == None);
+        for (min_ts, max_ts, want) in [
+            // Touch the block's max at the window's min: b.min_ts(100) <= max_ts(200)
+            // && b.max_ts(200) >= min_ts(200). `<=`→`>` or `>=`→`<` would drop it.
+            (200, 300, Some((100, 200))),
+            // Touch the block's min at the window's max.
+            (0, 100, Some((100, 200))),
+            // A window entirely above the block: with `&&`→`||` this would wrongly
+            // include the block (one side still true), so demand None here.
+            (300, 400, None),
+            // A window entirely below the block: the other side is the true one.
+            (0, 50, None),
+        ] {
+            assert!(
+                idx.block_time_bounds("t", min_ts, max_ts) == want,
+                "bounds for window ({min_ts}, {max_ts})"
+            );
+        }
     }
 
     #[test]
@@ -1362,13 +1372,27 @@ mod tests {
 
         let mut blocks = idx.all_blocks_unscoped();
         blocks.sort_by(|a, b| a.object_key.cmp(&b.object_key));
-        assert!(blocks.len() == 2);
-        assert!(blocks[0].object_key == "b1.parquet");
-        assert!(blocks[0].tenant == "t");
-        assert!(blocks[0].row_count == 7);
-        assert!(blocks[1].object_key == "b2.parquet");
-        assert!(blocks[1].tenant == "u");
-        assert!(blocks[1].max_ts == 9);
+        assert!(
+            blocks
+                == vec![
+                    BlockMeta {
+                        tenant: "t".to_string(),
+                        object_key: "b1.parquet".to_string(),
+                        min_ts: 0,
+                        max_ts: 100,
+                        row_count: 7,
+                        fingerprints: vec![],
+                    },
+                    BlockMeta {
+                        tenant: "u".to_string(),
+                        object_key: "b2.parquet".to_string(),
+                        min_ts: 5,
+                        max_ts: 9,
+                        row_count: 3,
+                        fingerprints: vec![],
+                    },
+                ]
+        );
 
         // Tenant-scoped `all_blocks` returns only that tenant's blocks.
         let t_blocks = idx.all_blocks("t");

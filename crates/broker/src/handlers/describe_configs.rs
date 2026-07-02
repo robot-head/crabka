@@ -44,6 +44,10 @@ const RESOURCE_TYPE_TOPIC: i8 = 2;
 const RESOURCE_TYPE_BROKER: i8 = 4;
 const RESOURCE_TYPE_CLIENT_METRICS: i8 = 16;
 
+/// `ConfigDef.Type::UNKNOWN` wire byte — Crabka doesn't report typed config
+/// metadata, matching brokers that predate KIP-226's typed responses.
+const CONFIG_TYPE_UNKNOWN: i8 = 0;
+
 /// Produce a `DescribeConfigsResourceResult` for a single `(key, value)` pair.
 fn make_entry(key: &str, value: &str, config_source: i8) -> DescribeConfigsResourceResult {
     DescribeConfigsResourceResult {
@@ -53,7 +57,7 @@ fn make_entry(key: &str, value: &str, config_source: i8) -> DescribeConfigsResou
         config_source,
         is_sensitive: false,
         synonyms: Vec::new(),
-        config_type: 0,
+        config_type: CONFIG_TYPE_UNKNOWN,
         documentation: None,
         ..Default::default()
     }
@@ -166,7 +170,7 @@ fn resource_authz_failure(
         ),
         RESOURCE_TYPE_BROKER => (
             ResourceType::Cluster,
-            "kafka-cluster",
+            crate::handlers::acl_wire::CLUSTER_RESOURCE_NAME,
             codes::CLUSTER_AUTHORIZATION_FAILED,
         ),
         _ => return None,
@@ -261,9 +265,13 @@ pub(crate) async fn handle(
 #[cfg(test)]
 mod tests {
     use assert2::assert;
+    use crabka_protocol::UnknownTaggedFields;
     use std::collections::BTreeMap;
 
     use crabka_metadata::{BrokerConfigRecord, MetadataImage, MetadataRecord};
+    use crabka_protocol::owned::describe_configs_response::{
+        DescribeConfigsResourceResult, DescribeConfigsResult,
+    };
     use uuid::Uuid;
 
     /// Build a minimal `MetadataImage` with one broker config entry.
@@ -297,6 +305,97 @@ mod tests {
     }
 
     #[test]
+    fn make_entry_preserves_wire_metadata_fields() {
+        let entry = super::make_entry(
+            "leader.replication.throttled.rate",
+            "1024",
+            super::CONFIG_SOURCE_DYNAMIC_BROKER,
+        );
+
+        let expected = DescribeConfigsResourceResult {
+            name: "leader.replication.throttled.rate".to_string(),
+            value: Some("1024".to_string()),
+            read_only: false,
+            config_source: super::CONFIG_SOURCE_DYNAMIC_BROKER,
+            is_sensitive: false,
+            synonyms: Vec::new(),
+            config_type: 0,
+            documentation: None,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(entry == expected);
+    }
+
+    #[test]
+    fn topic_describe_one_preserves_result_and_filtered_config_fields() {
+        use crabka_metadata::TopicConfigRecord;
+
+        let mut img = MetadataImage::new(Uuid::nil());
+        let mut overrides = BTreeMap::new();
+        overrides.insert("cleanup.policy".to_string(), "compact".to_string());
+        overrides.insert("retention.ms".to_string(), "60000".to_string());
+        img.apply(&MetadataRecord::V1TopicConfig(TopicConfigRecord {
+            topic: "orders".into(),
+            overrides,
+        }));
+        let result = super::describe_one(
+            &img,
+            crabka_protocol::owned::describe_configs_request::DescribeConfigsResource {
+                resource_type: super::RESOURCE_TYPE_TOPIC,
+                resource_name: "orders".into(),
+                configuration_keys: Some(vec!["cleanup.policy".into()]),
+                ..Default::default()
+            },
+        );
+
+        let expected = DescribeConfigsResult {
+            error_code: crate::codes::NONE,
+            error_message: None,
+            resource_type: super::RESOURCE_TYPE_TOPIC,
+            resource_name: "orders".to_string(),
+            configs: vec![DescribeConfigsResourceResult {
+                name: "cleanup.policy".to_string(),
+                value: Some("compact".to_string()),
+                read_only: false,
+                config_source: super::CONFIG_SOURCE_DYNAMIC_TOPIC,
+                is_sensitive: false,
+                synonyms: Vec::new(),
+                config_type: 0,
+                documentation: None,
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            }],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(result == expected);
+    }
+
+    #[test]
+    fn broker_describe_one_rejects_non_numeric_resource_name_with_fields() {
+        let img = MetadataImage::new(Uuid::nil());
+        let result = super::describe_one(
+            &img,
+            crabka_protocol::owned::describe_configs_request::DescribeConfigsResource {
+                resource_type: super::RESOURCE_TYPE_BROKER,
+                resource_name: "not-a-number".into(),
+                configuration_keys: None,
+                ..Default::default()
+            },
+        );
+
+        let expected = DescribeConfigsResult {
+            error_code: crate::codes::INVALID_REQUEST,
+            error_message: Some(
+                "resource_name `not-a-number` is not a valid broker id".to_string(),
+            ),
+            resource_type: super::RESOURCE_TYPE_BROKER,
+            resource_name: "not-a-number".to_string(),
+            configs: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(result == expected);
+    }
+
+    #[test]
     fn broker_resource_key_filter_applied() {
         let mut img = MetadataImage::new(Uuid::nil());
         img.apply(&MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
@@ -317,9 +416,13 @@ mod tests {
             .filter(|(k, _)| key_filter.iter().any(|f| f == k))
             .collect();
 
-        assert!(filtered.len() == 1);
-        assert!(filtered.contains_key("leader.replication.throttled.rate"));
-        assert!(!filtered.contains_key("follower.replication.throttled.rate"));
+        let expected: BTreeMap<String, String> = [(
+            "leader.replication.throttled.rate".to_string(),
+            "512".to_string(),
+        )]
+        .into_iter()
+        .collect();
+        assert!(filtered == expected);
     }
 
     #[test]
@@ -357,16 +460,17 @@ mod tests {
         assert_eq!(res.error_code, crate::codes::NONE);
         let by_name: std::collections::HashMap<_, _> =
             res.configs.iter().map(|c| (c.name.as_str(), c)).collect();
-        assert_eq!(by_name["metrics"].value.as_deref(), Some("a."));
-        assert_eq!(
-            by_name["metrics"].config_source,
-            super::CONFIG_SOURCE_CLIENT_METRICS
-        );
-        assert_eq!(by_name["interval.ms"].value.as_deref(), Some("300000"));
-        assert_eq!(
-            by_name["interval.ms"].config_source,
-            super::CONFIG_SOURCE_DEFAULT
-        );
+        let cases = [
+            ("metrics", Some("a."), super::CONFIG_SOURCE_CLIENT_METRICS),
+            ("interval.ms", Some("300000"), super::CONFIG_SOURCE_DEFAULT),
+        ];
+        for (key, want_value, want_source) in cases {
+            assert!(
+                (by_name[key].value.as_deref(), by_name[key].config_source)
+                    == (want_value, want_source),
+                "key {key}"
+            );
+        }
     }
 
     fn anon() -> crabka_security::Principal {
@@ -396,7 +500,15 @@ mod tests {
             "t".into(),
             crate::codes::TOPIC_AUTHORIZATION_FAILED,
         );
-        assert!(res.error_code == crate::codes::TOPIC_AUTHORIZATION_FAILED);
+        let expected = DescribeConfigsResult {
+            error_code: crate::codes::TOPIC_AUTHORIZATION_FAILED,
+            error_message: Some("authorization failed".to_string()),
+            resource_type: super::RESOURCE_TYPE_TOPIC,
+            resource_name: "t".to_string(),
+            configs: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(res == expected);
     }
 
     #[test]

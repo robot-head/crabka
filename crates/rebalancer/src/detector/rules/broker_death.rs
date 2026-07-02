@@ -63,7 +63,7 @@ impl Rule for BrokerDeath {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+    use assert2::{assert, check};
     use std::time::Duration;
 
     use super::*;
@@ -156,8 +156,8 @@ mod tests {
         };
         let hits = BrokerDeath.evaluate(&ctx);
         assert!(hits.len() == 1);
-        assert!(hits[0].key == AnomalyKey::Broker(3));
-        assert!(hits[0].severity == AnomalySeverity::Critical);
+        check!(hits[0].key == AnomalyKey::Broker(3));
+        check!(hits[0].severity == AnomalySeverity::Critical);
     }
 
     #[test]

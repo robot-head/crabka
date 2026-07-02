@@ -517,7 +517,7 @@ mod tests {
     use crate::metrics::RebalancerMetrics;
     use crate::model::proposal::{Movement, Proposal, ProposalSummary};
     use crate::scraper::UsageStore;
-    use assert2::assert;
+    use assert2::{assert, check};
     use async_trait::async_trait;
     use std::sync::Arc;
     use std::time::Duration;
@@ -707,9 +707,9 @@ mod tests {
         .expect("execute proposal");
 
         let proposal = resp.0.proposal.expect("proposal in response");
-        assert!(proposal.status == i32::from(pb::ProposalStatus::Executing));
-        assert!(proposal.started_at_ms >= before);
-        assert!(proposal.throttle_bytes_per_sec == 12345);
+        check!(proposal.status == i32::from(pb::ProposalStatus::Executing));
+        check!(proposal.started_at_ms >= before);
+        check!(proposal.throttle_bytes_per_sec == 12345);
 
         if let Some(handle) = state.executor.in_flight.lock().await.take() {
             handle.cancel.cancel();
@@ -744,13 +744,17 @@ mod tests {
     #[test]
     fn anomaly_kind_to_proto_covers_all_variants() {
         use crate::detector::AnomalyKind;
-        assert!(anomaly_kind_to_proto(AnomalyKind::BrokerDeath) == pb::AnomalyKind::BrokerDeath);
-        assert!(
-            anomaly_kind_to_proto(AnomalyKind::UnderReplicatedPartitions)
-                == pb::AnomalyKind::UnderReplicatedPartitions
-        );
-        assert!(anomaly_kind_to_proto(AnomalyKind::DiskPressure) == pb::AnomalyKind::DiskPressure);
-        assert!(anomaly_kind_to_proto(AnomalyKind::SlowBroker) == pb::AnomalyKind::SlowBroker);
+        for (kind, want) in [
+            (AnomalyKind::BrokerDeath, pb::AnomalyKind::BrokerDeath),
+            (
+                AnomalyKind::UnderReplicatedPartitions,
+                pb::AnomalyKind::UnderReplicatedPartitions,
+            ),
+            (AnomalyKind::DiskPressure, pb::AnomalyKind::DiskPressure),
+            (AnomalyKind::SlowBroker, pb::AnomalyKind::SlowBroker),
+        ] {
+            assert!(anomaly_kind_to_proto(kind) == want);
+        }
     }
 
     #[test]
@@ -786,20 +790,29 @@ mod tests {
 
         let proto = anomaly_to_proto(&anomaly);
 
-        assert!(proto.id == "a1");
-        assert!(proto.kind == i32::from(pb::AnomalyKind::SlowBroker));
-        assert!(proto.severity == i32::from(pb::AnomalySeverity::Critical));
-        assert!(proto.detected_at_ms == 10);
-        assert!(proto.last_seen_at_ms == 20);
-        assert!(proto.resolved_at_ms == 30);
-        assert!(proto.triggered_proposal_id.as_deref() == Some("p1"));
-        assert!(proto.mute_until_ms == 40);
-        assert!(proto.details == "slow");
-        assert!(matches!(
-            proto.key.and_then(|k| k.inner),
-            Some(pb::anomaly_key::Inner::BrokerPartition(key))
-                if key.broker == 7 && key.topic == "orders" && key.partition == 3
-        ));
+        assert!(
+            proto
+                == pb::Anomaly {
+                    id: "a1".into(),
+                    kind: i32::from(pb::AnomalyKind::SlowBroker),
+                    key: Some(pb::AnomalyKey {
+                        inner: Some(pb::anomaly_key::Inner::BrokerPartition(
+                            pb::BrokerPartitionKey {
+                                broker: 7,
+                                topic: "orders".into(),
+                                partition: 3,
+                            }
+                        )),
+                    }),
+                    severity: i32::from(pb::AnomalySeverity::Critical),
+                    detected_at_ms: 10,
+                    last_seen_at_ms: 20,
+                    resolved_at_ms: 30,
+                    triggered_proposal_id: Some("p1".into()),
+                    mute_until_ms: 40,
+                    details: "slow".into(),
+                }
+        );
     }
 
     #[test]

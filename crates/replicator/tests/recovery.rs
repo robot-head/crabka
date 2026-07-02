@@ -11,6 +11,7 @@
 
 mod common;
 
+use assert2::check;
 use std::collections::{BTreeMap, HashSet};
 use std::time::Duration;
 
@@ -148,11 +149,11 @@ async fn restart_resumes_with_no_gap() {
     //     in-flight batch at shutdown, so the count stays close to 20 and well
     //     under 30. We allow a small at-least-once boundary re-delivery (a few
     //     records), but not a wholesale reprocess of the 10 pre-crash records.
-    assert!(
+    check!(
         total >= 20,
         "expected at least 20 records on target after restart, got {total}"
     );
-    assert!(
+    check!(
         total < 30,
         "target re-read the whole pre-crash batch (total {total} >= 30) — \
          restart did NOT resume from the checkpoint"
@@ -160,7 +161,7 @@ async fn restart_resumes_with_no_gap() {
     // Bound the duplicates tightly: at-least-once permits the in-flight batch to
     // re-deliver, not ~10 records. The runtime commits in 500ms intervals over a
     // 10-record source, so at most a handful straddle the shutdown boundary.
-    assert!(
+    check!(
         duplicates <= 5,
         "too many duplicates after restart ({duplicates}) — expected a small \
          boundary re-delivery, not a full re-read of the first batch"

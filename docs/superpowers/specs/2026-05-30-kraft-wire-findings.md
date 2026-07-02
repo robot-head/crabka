@@ -1,7 +1,7 @@
-# KRaft wire findings (apache/kafka:4.0.0) — Slice 0 capture
+# KRaft wire findings (mirror.gcr.io/apache/kafka:4.0.0) — Slice 0 capture
 
 Date: 2026-05-30
-Source: pure-JVM KRaft cluster (`apache/kafka:4.0.0`): a combined controller+broker
+Source: pure-JVM KRaft cluster (`mirror.gcr.io/apache/kafka:4.0.0`): a combined controller+broker
 leader (`jvm-kraft`, node 1) + a broker-only observer (`jvm-obs`, node 2) on a shared
 docker network. tcpdump sidecar in the controller's net namespace captured port 9093;
 `kafka-dump-log`/`kafka-metadata-shell` decoded the on-disk artifacts. Raw request
@@ -135,18 +135,18 @@ recording each addition here.
 
 ## Surprises / notes
 
-- tshark 4.x bundled Kafka dissector mis-decodes apache/kafka:4.0.0 flexible requests
+- tshark 4.x bundled Kafka dissector mis-decodes mirror.gcr.io/apache/kafka:4.0.0 flexible requests
   (reported Fetch as "Unknown api 63"); parse raw payload bytes instead.
 - The combined leader node never sends Fetch over the wire (it's the leader; appends
   locally). You need a separate observer node to capture the Raft Fetch.
 - The node must resolve its own advertised/voter hostname — run with
   `--hostname <name>` matching `controller.quorum.voters`, or it crash-loops on
   `UnknownHostException`.
-- Data dir for `apache/kafka:4.0.0` is `/tmp/kafka-logs`.
+- Data dir for `mirror.gcr.io/apache/kafka:4.0.0` is `/tmp/kafka-logs`.
 
 ## Spike result (validated 2026-05-30)
 
-Decode-only success confirmed against a live `apache/kafka:4.0.0` broker observer
+Decode-only success confirmed against a live `mirror.gcr.io/apache/kafka:4.0.0` broker observer
 (`crates/broker/tests/kraft_spike_jvm.rs`, Docker-gated). The Crabka controller
 served real `ApiVersions` v4 + `Fetch` v17 and replayed the captured 284-byte
 bootstrap log (offsets 0–5) embedded via `include_bytes!`. The JVM observer's own

@@ -384,6 +384,7 @@ pub struct RemotePartitionDeleteMetadata {
 mod tests {
     use super::*;
     use assert2::assert;
+    use assert2::check;
     use std::collections::HashSet;
 
     fn tp() -> TopicIdPartition {
@@ -439,10 +440,14 @@ mod tests {
         use RemoteLogSegmentState::{
             CopySegmentFinished, CopySegmentStarted, DeleteSegmentFinished, DeleteSegmentStarted,
         };
-        assert!(CopySegmentStarted.is_valid_transition(CopySegmentFinished));
-        assert!(CopySegmentStarted.is_valid_transition(DeleteSegmentStarted));
-        assert!(CopySegmentFinished.is_valid_transition(DeleteSegmentStarted));
-        assert!(DeleteSegmentStarted.is_valid_transition(DeleteSegmentFinished));
+        for (from, to) in [
+            (CopySegmentStarted, CopySegmentFinished),
+            (CopySegmentStarted, DeleteSegmentStarted),
+            (CopySegmentFinished, DeleteSegmentStarted),
+            (DeleteSegmentStarted, DeleteSegmentFinished),
+        ] {
+            check!(from.is_valid_transition(to), "{from:?} -> {to:?}");
+        }
     }
 
     #[test]
@@ -451,12 +456,16 @@ mod tests {
             CopySegmentFinished, CopySegmentStarted, DeleteSegmentFinished, DeleteSegmentStarted,
         };
         // No backward / skipping / same-state transitions.
-        assert!(!CopySegmentStarted.is_valid_transition(CopySegmentStarted));
-        assert!(!CopySegmentStarted.is_valid_transition(DeleteSegmentFinished));
-        assert!(!CopySegmentFinished.is_valid_transition(CopySegmentStarted));
-        assert!(!CopySegmentFinished.is_valid_transition(CopySegmentFinished));
-        assert!(!DeleteSegmentStarted.is_valid_transition(CopySegmentFinished));
-        assert!(!DeleteSegmentFinished.is_valid_transition(DeleteSegmentStarted));
+        for (from, to) in [
+            (CopySegmentStarted, CopySegmentStarted),
+            (CopySegmentStarted, DeleteSegmentFinished),
+            (CopySegmentFinished, CopySegmentStarted),
+            (CopySegmentFinished, CopySegmentFinished),
+            (DeleteSegmentStarted, CopySegmentFinished),
+            (DeleteSegmentFinished, DeleteSegmentStarted),
+        ] {
+            check!(!from.is_valid_transition(to), "{from:?} -> {to:?}");
+        }
     }
 
     #[test]
@@ -515,13 +524,13 @@ mod tests {
             broker_id: 2,
         };
         let finished = started.with_update(&update).unwrap();
-        assert!(finished.state() == RemoteLogSegmentState::CopySegmentFinished);
-        assert!(finished.event_timestamp_ms() == 789);
-        assert!(finished.broker_id() == 2);
-        assert!(finished.custom_metadata() == Some(&CustomMetadata(vec![1, 2, 3])));
+        check!(finished.state() == RemoteLogSegmentState::CopySegmentFinished);
+        check!(finished.event_timestamp_ms() == 789);
+        check!(finished.broker_id() == 2);
+        check!(finished.custom_metadata() == Some(&CustomMetadata(vec![1, 2, 3])));
         // Untouched fields survive.
-        assert!(finished.start_offset() == 0);
-        assert!(finished.end_offset() == 10);
+        check!(finished.start_offset() == 0);
+        check!(finished.end_offset() == 10);
     }
 
     #[test]
@@ -631,30 +640,19 @@ mod tests {
         use RemotePartitionDeleteState::{
             DeletePartitionFinished, DeletePartitionMarked, DeletePartitionStarted,
         };
-        assert!(RemotePartitionDeleteState::is_valid_transition(
-            None,
-            DeletePartitionMarked
-        ));
-        assert!(RemotePartitionDeleteState::is_valid_transition(
-            Some(DeletePartitionMarked),
-            DeletePartitionStarted
-        ));
-        assert!(RemotePartitionDeleteState::is_valid_transition(
-            Some(DeletePartitionStarted),
-            DeletePartitionFinished
-        ));
-        // Invalid: skipping, restarting, or marking twice.
-        assert!(!RemotePartitionDeleteState::is_valid_transition(
-            None,
-            DeletePartitionStarted
-        ));
-        assert!(!RemotePartitionDeleteState::is_valid_transition(
-            Some(DeletePartitionMarked),
-            DeletePartitionMarked
-        ));
-        assert!(!RemotePartitionDeleteState::is_valid_transition(
-            Some(DeletePartitionFinished),
-            DeletePartitionStarted
-        ));
+        for (from, to, want) in [
+            (None, DeletePartitionMarked, true),
+            (Some(DeletePartitionMarked), DeletePartitionStarted, true),
+            (Some(DeletePartitionStarted), DeletePartitionFinished, true),
+            // Invalid: skipping, restarting, or marking twice.
+            (None, DeletePartitionStarted, false),
+            (Some(DeletePartitionMarked), DeletePartitionMarked, false),
+            (Some(DeletePartitionFinished), DeletePartitionStarted, false),
+        ] {
+            check!(
+                RemotePartitionDeleteState::is_valid_transition(from, to) == want,
+                "{from:?} -> {to:?}"
+            );
+        }
     }
 }

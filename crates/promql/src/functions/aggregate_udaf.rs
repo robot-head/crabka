@@ -222,54 +222,75 @@ mod tests {
 
     #[test]
     fn ignores_nan_in_mixed_group() {
-        // min/max are taken over the non-NaN values.
-        assert!(bits_eq(
-            float(run(Extremum::Min, &[f64::NAN, 3.0, 1.0, f64::NAN])),
-            1.0
-        ));
-        assert!(bits_eq(
-            float(run(Extremum::Max, &[f64::NAN, 3.0, 1.0, f64::NAN])),
-            3.0
-        ));
-        // NaN appearing first then non-NaN still yields the non-NaN extremum.
-        assert!(bits_eq(float(run(Extremum::Min, &[f64::NAN, 5.0])), 5.0));
-        assert!(bits_eq(float(run(Extremum::Max, &[f64::NAN, 5.0])), 5.0));
+        // min/max are taken over the non-NaN values; NaN appearing first then
+        // non-NaN still yields the non-NaN extremum.
+        for (extremum, samples, want) in [
+            (Extremum::Min, &[f64::NAN, 3.0, 1.0, f64::NAN][..], 1.0),
+            (Extremum::Max, &[f64::NAN, 3.0, 1.0, f64::NAN][..], 3.0),
+            (Extremum::Min, &[f64::NAN, 5.0][..], 5.0),
+            (Extremum::Max, &[f64::NAN, 5.0][..], 5.0),
+        ] {
+            assert!(
+                bits_eq(float(run(extremum, samples)), want),
+                "case {extremum:?} over {samples:?}"
+            );
+        }
     }
 
     #[test]
     fn all_nan_group_yields_nan() {
-        assert!(float(run(Extremum::Min, &[f64::NAN, f64::NAN])).is_nan());
-        assert!(float(run(Extremum::Max, &[f64::NAN, f64::NAN])).is_nan());
         // A single NaN sample is still NaN (seen, never displaced).
-        assert!(float(run(Extremum::Min, &[f64::NAN])).is_nan());
-        assert!(float(run(Extremum::Max, &[f64::NAN])).is_nan());
+        for (extremum, samples) in [
+            (Extremum::Min, &[f64::NAN, f64::NAN][..]),
+            (Extremum::Max, &[f64::NAN, f64::NAN][..]),
+            (Extremum::Min, &[f64::NAN][..]),
+            (Extremum::Max, &[f64::NAN][..]),
+        ] {
+            assert!(
+                float(run(extremum, samples)).is_nan(),
+                "case {extremum:?} over {samples:?}"
+            );
+        }
     }
 
     #[test]
     fn handles_infinities() {
         assert!(float(run(Extremum::Min, &[f64::INFINITY, 1.0, f64::NEG_INFINITY])).is_infinite());
-        assert!(bits_eq(
-            float(run(Extremum::Min, &[1.0, f64::NEG_INFINITY])),
-            f64::NEG_INFINITY
-        ));
-        assert!(bits_eq(
-            float(run(Extremum::Max, &[1.0, f64::INFINITY])),
-            f64::INFINITY
-        ));
-        assert!(bits_eq(
-            float(run(Extremum::Max, &[f64::NEG_INFINITY, f64::NAN])),
-            f64::NEG_INFINITY
-        ));
+        for (extremum, samples, want) in [
+            (
+                Extremum::Min,
+                &[1.0, f64::NEG_INFINITY][..],
+                f64::NEG_INFINITY,
+            ),
+            (Extremum::Max, &[1.0, f64::INFINITY][..], f64::INFINITY),
+            (
+                Extremum::Max,
+                &[f64::NEG_INFINITY, f64::NAN][..],
+                f64::NEG_INFINITY,
+            ),
+        ] {
+            assert!(
+                bits_eq(float(run(extremum, samples)), want),
+                "case {extremum:?} over {samples:?}"
+            );
+        }
     }
 
     #[test]
     fn signed_zero_keeps_first_seen() {
         // `0.0 {>,<} -0.0` is false, so the first-observed zero is retained,
         // matching Prometheus and the interpreter.
-        assert!(bits_eq(float(run(Extremum::Min, &[0.0, -0.0])), 0.0));
-        assert!(bits_eq(float(run(Extremum::Min, &[-0.0, 0.0])), -0.0));
-        assert!(bits_eq(float(run(Extremum::Max, &[0.0, -0.0])), 0.0));
-        assert!(bits_eq(float(run(Extremum::Max, &[-0.0, 0.0])), -0.0));
+        for (extremum, samples, want) in [
+            (Extremum::Min, [0.0, -0.0], 0.0),
+            (Extremum::Min, [-0.0, 0.0], -0.0),
+            (Extremum::Max, [0.0, -0.0], 0.0),
+            (Extremum::Max, [-0.0, 0.0], -0.0),
+        ] {
+            assert!(
+                bits_eq(float(run(extremum, &samples)), want),
+                "case {extremum:?} over {samples:?}"
+            );
+        }
     }
 
     #[test]

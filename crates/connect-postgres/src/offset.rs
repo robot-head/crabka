@@ -117,9 +117,9 @@ mod tests {
         );
         match PgLsn::from_source_offset(&offset, "slot_b").expect_err("slot mismatch") {
             PostgresConnectError::Offset(message) => {
-                assert!(message.contains("does not match expected slot"));
-                assert!(message.contains("slot_a"));
-                assert!(message.contains("slot_b"));
+                for needle in ["does not match expected slot", "slot_a", "slot_b"] {
+                    assert!(message.contains(needle), "missing {needle:?} in {message}");
+                }
             }
             error => panic!("expected offset error, got {error:?}"),
         }

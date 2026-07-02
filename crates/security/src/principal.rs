@@ -134,11 +134,18 @@ mod tests {
 
     #[test]
     fn from_sasl_mapping() {
-        assert!(AuthMethod::from_sasl(SaslMechanism::Plain) == AuthMethod::SaslPlain);
-        assert!(AuthMethod::from_sasl(SaslMechanism::ScramSha256) == AuthMethod::SaslScramSha256);
-        assert!(AuthMethod::from_sasl(SaslMechanism::ScramSha512) == AuthMethod::SaslScramSha512);
-        assert!(AuthMethod::from_sasl(SaslMechanism::OAuthBearer) == AuthMethod::SaslOAuthBearer);
-        assert!(AuthMethod::from_sasl(SaslMechanism::Gssapi) == AuthMethod::SaslGssapi);
+        for (mechanism, want) in [
+            (SaslMechanism::Plain, AuthMethod::SaslPlain),
+            (SaslMechanism::ScramSha256, AuthMethod::SaslScramSha256),
+            (SaslMechanism::ScramSha512, AuthMethod::SaslScramSha512),
+            (SaslMechanism::OAuthBearer, AuthMethod::SaslOAuthBearer),
+            (SaslMechanism::Gssapi, AuthMethod::SaslGssapi),
+        ] {
+            assert!(
+                AuthMethod::from_sasl(mechanism) == want,
+                "case {mechanism:?}"
+            );
+        }
     }
 
     #[test]

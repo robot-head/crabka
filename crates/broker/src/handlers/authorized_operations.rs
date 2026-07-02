@@ -348,15 +348,19 @@ mod tests {
         // discriminants. If `operation_to_wire` ever drifts from
         // Kafka's `AclOperation.code()`, the wire field would become
         // unintelligible to JVM clients.
-        assert!(bit(AclOperation::Read) == 1 << 3);
-        assert!(bit(AclOperation::Write) == 1 << 4);
-        assert!(bit(AclOperation::Create) == 1 << 5);
-        assert!(bit(AclOperation::Delete) == 1 << 6);
-        assert!(bit(AclOperation::Alter) == 1 << 7);
-        assert!(bit(AclOperation::Describe) == 1 << 8);
-        assert!(bit(AclOperation::ClusterAction) == 1 << 9);
-        assert!(bit(AclOperation::DescribeConfigs) == 1 << 10);
-        assert!(bit(AclOperation::AlterConfigs) == 1 << 11);
-        assert!(bit(AclOperation::IdempotentWrite) == 1 << 12);
+        for (op, want) in [
+            (AclOperation::Read, 1 << 3),
+            (AclOperation::Write, 1 << 4),
+            (AclOperation::Create, 1 << 5),
+            (AclOperation::Delete, 1 << 6),
+            (AclOperation::Alter, 1 << 7),
+            (AclOperation::Describe, 1 << 8),
+            (AclOperation::ClusterAction, 1 << 9),
+            (AclOperation::DescribeConfigs, 1 << 10),
+            (AclOperation::AlterConfigs, 1 << 11),
+            (AclOperation::IdempotentWrite, 1 << 12),
+        ] {
+            assert!(bit(op) == want, "{op:?}");
+        }
     }
 }

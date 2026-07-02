@@ -147,6 +147,7 @@ impl From<RecordsError> for LegacyRecordsError {
 mod tests {
     use super::*;
     use assert2::assert;
+    use assert2::check;
     use bytes::Bytes;
     use crabka_protocol::records::{Record, RecordBatch};
 
@@ -198,11 +199,11 @@ mod tests {
         assert!(round.base_offset == 1000);
         assert!(round.records.len() == 3);
         for (i, r) in round.records.iter().enumerate() {
-            assert!(r.offset_delta == i as i32);
-            assert!(r.key == v2.records[i].key);
-            assert!(r.value == v2.records[i].value);
-            assert!(r.timestamp_delta == v2.records[i].timestamp_delta);
-            assert!(r.headers.is_empty(), "headers dropped in down-conversion");
+            check!(r.offset_delta == i as i32);
+            check!(r.key == v2.records[i].key);
+            check!(r.value == v2.records[i].value);
+            check!(r.timestamp_delta == v2.records[i].timestamp_delta);
+            check!(r.headers.is_empty(), "headers dropped in down-conversion");
         }
     }
 
@@ -238,8 +239,8 @@ mod tests {
         let legacy_bytes = v2_to_legacy(&v2, Magic::V1).unwrap();
         let round = legacy_to_v2(&legacy_bytes).unwrap();
         assert!(round.records.len() == 3);
-        assert!(round.records[2].value == Some(Bytes::from_static(b"3")));
-        assert!(round.records[2].key == None);
+        check!(round.records[2].value == Some(Bytes::from_static(b"3")));
+        check!(round.records[2].key == None);
     }
 
     #[test]
@@ -299,12 +300,12 @@ mod tests {
     #[test]
     fn up_convert_empty_set_returns_sentinels() {
         let rb = legacy_to_v2(&[]).unwrap();
-        assert!(rb.records.is_empty());
-        assert!(rb.base_offset == 0);
-        assert!(rb.partition_leader_epoch == -1);
-        assert!(rb.producer_id == -1);
-        assert!(rb.producer_epoch == -1);
-        assert!(rb.base_sequence == -1);
+        check!(rb.records.is_empty());
+        check!(rb.base_offset == 0);
+        check!(rb.partition_leader_epoch == -1);
+        check!(rb.producer_id == -1);
+        check!(rb.producer_epoch == -1);
+        check!(rb.base_sequence == -1);
     }
 
     #[test]
@@ -324,10 +325,10 @@ mod tests {
         let v2 = v2_batch(CompressionType::None);
         let legacy_bytes = v2_to_legacy(&v2, Magic::V1).unwrap();
         let round = legacy_to_v2(&legacy_bytes).unwrap();
-        assert!(round.last_offset_delta == 2);
-        assert!(round.partition_leader_epoch == -1);
-        assert!(round.producer_id == -1);
-        assert!(round.producer_epoch == -1);
-        assert!(round.base_sequence == -1);
+        check!(round.last_offset_delta == 2);
+        check!(round.partition_leader_epoch == -1);
+        check!(round.producer_id == -1);
+        check!(round.producer_epoch == -1);
+        check!(round.base_sequence == -1);
     }
 }

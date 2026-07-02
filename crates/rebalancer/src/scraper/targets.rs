@@ -58,11 +58,22 @@ mod tests {
     #[test]
     fn well_formed_entries_parse() {
         let out = parse_targets("1:broker1:9100,2:broker2:9100,3:broker3:9100").unwrap();
-        assert!(out.len() == 3);
-        assert!(out[0].broker_id == 1);
-        assert!(out[0].addr == "broker1:9100");
-        assert!(out[2].broker_id == 3);
-        assert!(out[2].addr == "broker3:9100");
+        assert!(
+            out == vec![
+                ScrapeTarget {
+                    broker_id: 1,
+                    addr: "broker1:9100".into(),
+                },
+                ScrapeTarget {
+                    broker_id: 2,
+                    addr: "broker2:9100".into(),
+                },
+                ScrapeTarget {
+                    broker_id: 3,
+                    addr: "broker3:9100".into(),
+                },
+            ]
+        );
     }
 
     #[test]
@@ -221,27 +232,21 @@ mod target_source_tests {
         };
         let mut out = src.current();
         out.sort_by_key(|t| t.broker_id);
-        assert!(out.len() == 3);
         assert!(
-            out[0]
-                == ScrapeTarget {
+            out == vec![
+                ScrapeTarget {
                     broker_id: 1,
-                    addr: "broker1:9404".into()
-                }
-        );
-        assert!(
-            out[1]
-                == ScrapeTarget {
+                    addr: "broker1:9404".into(),
+                },
+                ScrapeTarget {
                     broker_id: 2,
-                    addr: "broker2:9404".into()
-                }
-        );
-        assert!(
-            out[2]
-                == ScrapeTarget {
+                    addr: "broker2:9404".into(),
+                },
+                ScrapeTarget {
                     broker_id: 3,
-                    addr: "broker3:9404".into()
-                }
+                    addr: "broker3:9404".into(),
+                },
+            ]
         );
     }
 
@@ -280,10 +285,9 @@ mod target_source_tests {
 
     #[test]
     fn empty_host_warning_is_emitted_once_per_broker_id() {
-        let id = 1_000_002;
-        assert!(should_warn_empty_host(id));
-        assert!(!should_warn_empty_host(id));
-        assert!(should_warn_empty_host(id + 1));
+        for (broker_id, want) in [(1_000_002, true), (1_000_002, false), (1_000_003, true)] {
+            assert!(should_warn_empty_host(broker_id) == want);
+        }
     }
 
     #[test]

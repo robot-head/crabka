@@ -12,7 +12,7 @@
 //! 3. `controller_mutation_rate_throttles_delete_topics` — Pre-create topic with 10
 //!    partitions; set rate=2.0 for alice; alice deletes; assert throttle_time_ms > 0.
 
-use assert2::assert;
+use assert2::{assert, check};
 use std::io;
 use std::net::SocketAddr;
 
@@ -393,15 +393,15 @@ async fn controller_mutation_rate_throttles_create_topics() {
     let (throttle_ms, err_code) =
         drive_create_topics_sasl(addr, "alice", "alice-secret", "throttled-topic", 10).await;
     let elapsed = started.elapsed();
-    assert!(
+    check!(
         err_code == 0,
         "create-topics should succeed (alice has Cluster Create ACL)"
     );
-    assert!(
+    check!(
         throttle_ms > 0,
         "expected throttle_time_ms > 0, got {throttle_ms}"
     );
-    assert!(
+    check!(
         elapsed >= std::time::Duration::from_millis(800),
         "expected >=800ms wall delay, got {elapsed:?}"
     );

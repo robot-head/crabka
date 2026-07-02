@@ -1014,7 +1014,7 @@ fn named_stats(values: BTreeMap<String, usize>) -> Vec<NamedTsdbStat> {
 mod tests {
     use arrow::array::AsArray;
     use arrow::datatypes::Int64Type;
-    use assert2::assert;
+    use assert2::{assert, check};
     use crabka_blockstore::{LabelMatcher, Labels, MatchOp};
     use crabka_metrics::{
         BucketSpan, NativeHistogram, ResetHint, SamplePayload, WalExemplar, WalRecord,
@@ -1194,10 +1194,12 @@ mod tests {
             .expect("matchers");
         let fp = labels.fingerprint();
 
-        assert!(!row_matches(fp, &labels, 999, &matchers, 1_000, 2_000));
-        assert!(row_matches(fp, &labels, 1_000, &matchers, 1_000, 2_000));
-        assert!(row_matches(fp, &labels, 2_000, &matchers, 1_000, 2_000));
-        assert!(!row_matches(fp, &labels, 2_001, &matchers, 1_000, 2_000));
+        for (ts_ms, want) in [(999, false), (1_000, true), (2_000, true), (2_001, false)] {
+            assert!(
+                row_matches(fp, &labels, ts_ms, &matchers, 1_000, 2_000) == want,
+                "case {ts_ms}"
+            );
+        }
 
         let mismatch =
             prepare_matchers(&[LabelMatcher::new("job", MatchOp::Eq, "worker")]).expect("matchers");
@@ -1266,13 +1268,13 @@ mod tests {
         let QueryResult::InstantVector(vector) = result else {
             panic!("expected vector");
         };
-        assert!(vector[0].value == SampleValue::Float(1.0));
-        assert!(store.metadata("tenant-a", Some("up")).await.unwrap()[0].help == "Target health.");
-        assert!(
+        check!(vector[0].value == SampleValue::Float(1.0));
+        check!(store.metadata("tenant-a", Some("up")).await.unwrap()[0].help == "Target health.");
+        check!(
             store.exemplars("tenant-a", &[], 0, 10_000).await.unwrap()[0].labels
                 == lbls(&[("trace_id", "abc")])
         );
-        assert!(
+        check!(
             store
                 .scan("tenant-a", &[], 0, 10_000)
                 .await
@@ -1355,8 +1357,8 @@ mod tests {
         store.record_offset(0, 9);
 
         let head = WalHead::from_store(store);
-        assert!(head.retention_ms() == 12_345);
-        assert!(
+        check!(head.retention_ms() == 12_345);
+        check!(
             head.watermarks().get(&0)
                 == Some(&PartitionWatermark {
                     low_water_offset: 7,
@@ -1369,40 +1371,40 @@ mod tests {
             .label_names("tenant-a", &matchers, 0, 5_000)
             .await
             .unwrap();
-        assert!(names == vec!["__name__".to_string(), "job".to_string()]);
+        check!(names == vec!["__name__".to_string(), "job".to_string()]);
         let jobs = head
             .label_values("tenant-a", "job", &matchers, 0, 5_000)
             .await
             .unwrap();
-        assert!(jobs == vec!["api".to_string(), "worker".to_string()]);
-        assert!(
+        check!(jobs == vec!["api".to_string(), "worker".to_string()]);
+        check!(
             head.exemplars("tenant-a", &matchers, 0, 5_000)
                 .await
                 .unwrap()[0]
                 .labels
                 == lbls(&[("trace_id", "abc")])
         );
-        assert!(head.metadata("tenant-a", Some("up")).await.unwrap()[0].help == "Target health.");
-        assert!(
+        check!(head.metadata("tenant-a", Some("up")).await.unwrap()[0].help == "Target health.");
+        check!(
             head.cardinality_active_series("tenant-a")
                 .await
                 .unwrap()
                 .len()
                 == 3
         );
-        assert!(
+        check!(
             head.cardinality_label_names("tenant-a").await.unwrap()
                 == expected_label_name_cardinality()
         );
-        assert!(
+        check!(
             head.cardinality_label_values("tenant-a").await.unwrap()
                 == expected_label_value_cardinality()
         );
         let stats = head.tsdb_stats("tenant-a").await.unwrap();
-        assert!(stats.head_stats.num_series == 3);
-        assert!(stats.head_stats.num_samples == 3);
-        assert!(stats.series_count_by_metric_name == expected_metric_name_stats());
-        assert!(head.tsdb_blocks("tenant-a").await.unwrap()[0].id == "block-a");
+        check!(stats.head_stats.num_series == 3);
+        check!(stats.head_stats.num_samples == 3);
+        check!(stats.series_count_by_metric_name == expected_metric_name_stats());
+        check!(head.tsdb_blocks("tenant-a").await.unwrap()[0].id == "block-a");
     }
 
     #[tokio::test]
@@ -1691,16 +1693,16 @@ mod tests {
             .scan("t", &matchers, i64::MIN, i64::MAX)
             .await
             .unwrap();
-        assert!(count_rows(&result, result.float_table.as_ref().unwrap()).await == 1);
-        assert!(count_rows(&result, result.histogram_table.as_ref().unwrap()).await == 1);
+        check!(count_rows(&result, result.float_table.as_ref().unwrap()).await == 1);
+        check!(count_rows(&result, result.histogram_table.as_ref().unwrap()).await == 1);
         let exemplars = store
             .exemplars("t", &matchers, i64::MIN, i64::MAX)
             .await
             .unwrap();
-        assert!(exemplars.len() == 1);
-        assert!(exemplars[0].labels == lbls(&[("trace_id", "new")]));
+        check!(exemplars.len() == 1);
+        check!(exemplars[0].labels == lbls(&[("trace_id", "new")]));
         let stale_matchers = [LabelMatcher::new("job", MatchOp::Eq, "old")];
-        assert!(
+        check!(
             store
                 .series("t", &stale_matchers, i64::MIN, i64::MAX)
                 .await
@@ -1740,17 +1742,17 @@ mod tests {
     async fn store_cardinality_and_tsdb_stats_include_float_and_hist_series() {
         let (store, _) = store_with_float_and_hist_series();
 
-        assert!(
+        check!(
             store.cardinality_label_names("tenant-a").await.unwrap()
                 == expected_label_name_cardinality()
         );
-        assert!(
+        check!(
             store.cardinality_label_values("tenant-a").await.unwrap()
                 == expected_label_value_cardinality()
         );
 
         let stats = store.tsdb_stats("tenant-a").await.unwrap();
-        assert!(
+        check!(
             stats.head_stats
                 == TsdbHeadStats {
                     num_series: 3,
@@ -1760,9 +1762,9 @@ mod tests {
                     max_time: 3_000,
                 }
         );
-        assert!(stats.label_value_count_by_label_name == expected_label_value_count_stats());
-        assert!(stats.memory_in_bytes_by_label_name == expected_label_memory_stats());
-        assert!(stats.series_count_by_label_value_pair == expected_label_pair_stats());
+        check!(stats.label_value_count_by_label_name == expected_label_value_count_stats());
+        check!(stats.memory_in_bytes_by_label_name == expected_label_memory_stats());
+        check!(stats.series_count_by_label_value_pair == expected_label_pair_stats());
     }
 
     #[test]
@@ -1787,14 +1789,22 @@ mod tests {
         head.apply_wal_record_at(&record(20), 0, 6);
         head.apply_wal_record_at(&record(30), 1, 100);
 
-        // High water is the latest applied offset per partition.
-        assert!(head.high_water_offset(0) == Some(6));
-        assert!(head.high_water_offset(1) == Some(100));
-        // Low water is the first applied offset per partition.
-        assert!(head.low_water_offset(0) == Some(5));
-        assert!(head.low_water_offset(1) == Some(100));
-        // Untracked partition stays empty.
-        assert!(head.high_water_offset(2).is_none());
+        // High water is the latest applied offset per partition, low water the
+        // first; untracked partitions stay empty.
+        for (partition, want_high, want_low) in [
+            (0, Some(6), Some(5)),
+            (1, Some(100), Some(100)),
+            (2, None, None),
+        ] {
+            assert!(
+                head.high_water_offset(partition) == want_high,
+                "high water case {partition}"
+            );
+            assert!(
+                head.low_water_offset(partition) == want_low,
+                "low water case {partition}"
+            );
+        }
 
         // Pruning does not move offsets (they track ingestion, not retention).
         head.prune(i64::MAX);

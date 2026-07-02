@@ -1298,6 +1298,7 @@ fn should_prime_missing_partition(seen: bool) -> bool {
 mod retry_tests {
     use super::*;
     use assert2::assert;
+    use crabka_protocol::UnknownTaggedFields;
     use std::io;
     use std::net::SocketAddr;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1317,9 +1318,14 @@ mod retry_tests {
     fn find_coordinator_request_populates_legacy_and_batched_group_keys() {
         let req = build_find_coordinator_request("group-a".into());
 
-        assert!(req.key == "group-a");
-        assert!(req.key_type == 0);
-        assert!(req.coordinator_keys == vec!["group-a"]);
+        assert!(
+            req == FindCoordinatorRequest {
+                key: "group-a".into(),
+                key_type: 0,
+                coordinator_keys: vec!["group-a".into()],
+                unknown_tagged_fields: UnknownTaggedFields(vec![]),
+            }
+        );
     }
 
     #[test]
@@ -1328,15 +1334,19 @@ mod retry_tests {
         let one: HashMap<String, i32> = [("logs".to_string(), 1)].into_iter().collect();
         let three: HashMap<String, i32> = [("logs".to_string(), 3)].into_iter().collect();
 
-        // Cold-start race: topic absent at join, created later -> growth -> rejoin.
-        assert!(subscribed_topics_grew(&empty, &one));
-        // Topic gained partitions -> rejoin to (re)distribute them.
-        assert!(subscribed_topics_grew(&one, &three));
-        // Steady state: unchanged -> no spurious rejoin.
-        assert!(!subscribed_topics_grew(&one, &one));
-        // A topic shrinking/disappearing is not "growth" -> no rejoin.
-        assert!(!subscribed_topics_grew(&three, &one));
-        assert!(!subscribed_topics_grew(&one, &empty));
+        for (known, current, expected) in [
+            // Cold-start race: topic absent at join, created later -> growth -> rejoin.
+            (&empty, &one, true),
+            // Topic gained partitions -> rejoin to (re)distribute them.
+            (&one, &three, true),
+            // Steady state: unchanged -> no spurious rejoin.
+            (&one, &one, false),
+            // A topic shrinking/disappearing is not "growth" -> no rejoin.
+            (&three, &one, false),
+            (&one, &empty, false),
+        ] {
+            assert!(subscribed_topics_grew(known, current) == expected);
+        }
     }
 
     #[test]
@@ -1385,17 +1395,25 @@ mod retry_tests {
 
     #[test]
     fn next_backoff_doubles_until_cap() {
-        assert!(
-            next_backoff(Duration::from_millis(100), Duration::from_secs(1))
-                == Duration::from_millis(200)
-        );
-        assert!(
-            next_backoff(Duration::from_millis(800), Duration::from_secs(1))
-                == Duration::from_secs(1)
-        );
-        assert!(
-            next_backoff(Duration::from_secs(1), Duration::from_secs(1)) == Duration::from_secs(1)
-        );
+        for (backoff, max_backoff, expected) in [
+            (
+                Duration::from_millis(100),
+                Duration::from_secs(1),
+                Duration::from_millis(200),
+            ),
+            (
+                Duration::from_millis(800),
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+            ),
+            (
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+            ),
+        ] {
+            assert!(next_backoff(backoff, max_backoff) == expected);
+        }
     }
 
     #[test]
@@ -1406,20 +1424,35 @@ mod retry_tests {
             Some("instance-a".into()),
         );
 
-        assert!(req.group_id == "group-a");
-        assert!(req.member_id == "member-a");
-        assert!(req.members.len() == 1);
-        assert!(req.members[0].member_id == "member-a");
-        assert!(req.members[0].group_instance_id.as_deref() == Some("instance-a"));
+        assert!(
+            req == LeaveGroupRequest {
+                group_id: "group-a".into(),
+                member_id: "member-a".into(),
+                members: vec![MemberIdentity {
+                    member_id: "member-a".into(),
+                    group_instance_id: Some("instance-a".into()),
+                    reason: None,
+                    unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                }],
+                unknown_tagged_fields: UnknownTaggedFields(vec![]),
+            }
+        );
     }
 
     #[test]
     fn revoked_commit_helpers_preserve_filter_boundaries_and_request_fields() {
-        assert!(should_commit_revoked_offset(true, 1));
-        assert!(!should_commit_revoked_offset(false, 1));
-        assert!(!should_commit_revoked_offset(true, 0));
-        assert!(!should_commit_revoked_offset(true, -1));
-        assert!(!should_commit_revoked_offset(true, i64::MAX));
+        for (is_revoked, next_offset, expected) in [
+            (true, 1, true),
+            (false, 1, false),
+            (true, 0, false),
+            (true, -1, false),
+            (true, i64::MAX, false),
+        ] {
+            assert!(
+                should_commit_revoked_offset(is_revoked, next_offset) == expected,
+                "is_revoked: {is_revoked}, next_offset: {next_offset}"
+            );
+        }
 
         let topics = build_commit_topics(
             HashMap::from([(("topic-a".to_string(), 2), (42, 7))]),
@@ -1433,11 +1466,17 @@ mod retry_tests {
             topics.clone(),
         );
 
-        assert!(req.group_id == "group-a");
-        assert!(req.generation_id_or_member_epoch == 3);
-        assert!(req.member_id == "member-a");
-        assert!(req.group_instance_id.as_deref() == Some("instance-a"));
-        assert!(req.topics == topics);
+        assert!(
+            req == OffsetCommitRequest {
+                group_id: "group-a".into(),
+                generation_id_or_member_epoch: 3,
+                member_id: "member-a".into(),
+                group_instance_id: Some("instance-a".into()),
+                retention_time_ms: -1,
+                topics,
+                unknown_tagged_fields: UnknownTaggedFields(vec![]),
+            }
+        );
         assert!(UNKNOWN_EPOCH == -1);
     }
 
@@ -1453,15 +1492,23 @@ mod retry_tests {
             vec![1, 2, 3].into(),
         );
 
-        assert!(req.group_id == "group-a");
-        assert!(req.protocol_type == "consumer");
-        assert!(req.member_id == "member-a");
-        assert!(req.group_instance_id.as_deref() == Some("instance-a"));
-        assert!(req.session_timeout_ms == 10_000);
-        assert!(req.rebalance_timeout_ms == 30_000);
-        assert!(req.protocols.len() == 1);
-        assert!(req.protocols[0].name == "range");
-        assert!(req.protocols[0].metadata == vec![1, 2, 3]);
+        assert!(
+            req == JoinGroupRequest {
+                group_id: "group-a".into(),
+                session_timeout_ms: 10_000,
+                rebalance_timeout_ms: 30_000,
+                member_id: "member-a".into(),
+                group_instance_id: Some("instance-a".into()),
+                protocol_type: "consumer".into(),
+                protocols: vec![JoinGroupRequestProtocol {
+                    name: "range".into(),
+                    metadata: vec![1, 2, 3].into(),
+                    unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                }],
+                reason: None,
+                unknown_tagged_fields: UnknownTaggedFields(vec![]),
+            }
+        );
     }
 
     #[test]
@@ -1485,13 +1532,18 @@ mod retry_tests {
             vec![assignment.clone()],
         );
 
-        assert!(req.group_id == "group-a");
-        assert!(req.generation_id == 7);
-        assert!(req.member_id == "member-a");
-        assert!(req.group_instance_id.as_deref() == Some("instance-a"));
-        assert!(req.protocol_type == Some("consumer".into()));
-        assert!(req.protocol_name == Some("range".into()));
-        assert!(req.assignments == vec![assignment]);
+        assert!(
+            req == SyncGroupRequest {
+                group_id: "group-a".into(),
+                generation_id: 7,
+                member_id: "member-a".into(),
+                group_instance_id: Some("instance-a".into()),
+                protocol_type: Some("consumer".into()),
+                protocol_name: Some("range".into()),
+                assignments: vec![assignment],
+                unknown_tagged_fields: UnknownTaggedFields(vec![]),
+            }
+        );
     }
 
     #[test]
@@ -1503,34 +1555,59 @@ mod retry_tests {
             Some("instance-a".into()),
         );
 
-        assert!(req.group_id == "group-a");
-        assert!(req.generation_id == 42);
-        assert!(req.member_id == "member-a");
-        assert!(req.group_instance_id.as_deref() == Some("instance-a"));
+        assert!(
+            req == HeartbeatRequest {
+                group_id: "group-a".into(),
+                generation_id: 42,
+                member_id: "member-a".into(),
+                group_instance_id: Some("instance-a".into()),
+                unknown_tagged_fields: UnknownTaggedFields(vec![]),
+            }
+        );
     }
 
     #[test]
     fn prime_offset_helpers_preserve_committed_and_reset_boundaries() {
-        assert!(starting_offset(12, AutoOffsetReset::Earliest) == 12);
-        assert!(starting_offset(0, AutoOffsetReset::Latest) == 0);
-        assert!(starting_offset(-1, AutoOffsetReset::Earliest) == 0);
-        assert!(starting_offset(-1, AutoOffsetReset::Latest) == i64::MAX);
-        assert!(starting_offset(-1, AutoOffsetReset::None) == i64::MAX);
-        assert!(reset_starting_offset(AutoOffsetReset::Earliest) == 0);
-        assert!(reset_starting_offset(AutoOffsetReset::Latest) == i64::MAX);
-        assert!(reset_starting_offset(AutoOffsetReset::None) == i64::MAX);
+        for (committed, reset, expected) in [
+            (12, AutoOffsetReset::Earliest, 12),
+            (0, AutoOffsetReset::Latest, 0),
+            (-1, AutoOffsetReset::Earliest, 0),
+            (-1, AutoOffsetReset::Latest, i64::MAX),
+            (-1, AutoOffsetReset::None, i64::MAX),
+        ] {
+            assert!(
+                starting_offset(committed, reset) == expected,
+                "committed: {committed}, reset: {reset:?}"
+            );
+        }
+
+        for (reset, expected) in [
+            (AutoOffsetReset::Earliest, 0),
+            (AutoOffsetReset::Latest, i64::MAX),
+            (AutoOffsetReset::None, i64::MAX),
+        ] {
+            assert!(reset_starting_offset(reset) == expected, "reset: {reset:?}");
+        }
+
         assert!(should_prime_missing_partition(false));
         assert!(!should_prime_missing_partition(true));
     }
 
     #[test]
     fn heartbeat_outcome_classifies_success_rejoin_and_transient_errors() {
-        assert!(heartbeat_outcome(0) == HeartbeatOutcome::Ok);
-        assert!(heartbeat_outcome(27) == HeartbeatOutcome::NeedRejoin);
-        assert!(heartbeat_outcome(22) == HeartbeatOutcome::NeedRejoin);
-        assert!(heartbeat_outcome(25) == HeartbeatOutcome::RejoinFromScratch);
-        assert!(heartbeat_outcome(14) == HeartbeatOutcome::Transient);
-        assert!(heartbeat_outcome(99) == HeartbeatOutcome::Transient);
+        for (error_code, expected) in [
+            (0, HeartbeatOutcome::Ok),
+            (27, HeartbeatOutcome::NeedRejoin),
+            (22, HeartbeatOutcome::NeedRejoin),
+            (25, HeartbeatOutcome::RejoinFromScratch),
+            (14, HeartbeatOutcome::Transient),
+            (99, HeartbeatOutcome::Transient),
+        ] {
+            assert!(
+                heartbeat_outcome(error_code) == expected,
+                "error_code: {error_code}"
+            );
+        }
     }
 
     #[tokio::test(start_paused = true)]
@@ -1685,7 +1762,7 @@ mod find_coordinator_parse_tests {
 #[cfg(test)]
 mod refind_tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use std::sync::atomic::AtomicUsize;
 
     struct Resp {
@@ -1721,10 +1798,10 @@ mod refind_tests {
         )
         .await
         .unwrap();
-        assert!(r.error_code == 0);
-        assert!(calls.load(Ordering::SeqCst) == 1);
+        check!(r.error_code == 0);
+        check!(calls.load(Ordering::SeqCst) == 1);
         // Coordinator cell untouched — no re-find on success.
-        assert!(coord.load(Ordering::Relaxed) == 5);
+        check!(coord.load(Ordering::Relaxed) == 5);
     }
 
     // A non-retriable broker code (e.g. UNKNOWN_MEMBER_ID 25) is returned to the
@@ -1751,9 +1828,9 @@ mod refind_tests {
         )
         .await
         .unwrap();
-        assert!(r.error_code == 25);
-        assert!(calls.load(Ordering::SeqCst) == 1);
-        assert!(coord.load(Ordering::Relaxed) == 2);
+        check!(r.error_code == 25);
+        check!(calls.load(Ordering::SeqCst) == 1);
+        check!(coord.load(Ordering::Relaxed) == 2);
     }
 
     #[tokio::test(start_paused = true)]

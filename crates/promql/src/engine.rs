@@ -11520,7 +11520,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::Arc;
 
-    use assert2::assert;
+    use assert2::{assert, check};
     use crabka_blockstore::Labels;
     use crabka_metrics::{BucketSpan, NativeHistogram, ResetHint};
 
@@ -11905,12 +11905,12 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(result, QueryResult::RangeMatrix(_)));
-        assert!(
+        check!(
             scans.load(Ordering::SeqCst) == 2,
             "store scans should collapse to one float + one histogram union scan, got {}",
             scans.load(Ordering::SeqCst)
         );
-        assert!(
+        check!(
             series_calls.load(Ordering::SeqCst) == 1,
             "series resolution should be cached across steps, got {}",
             series_calls.load(Ordering::SeqCst)
@@ -12107,10 +12107,10 @@ mod tests {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert!(samples.len() == 1);
-        assert!(samples[0].labels.get("target") == Some("api/a"));
-        assert!(samples[0].labels.get("zone") == Some("us-east-1a"));
-        assert!(approx_eq(float_value(&samples[0].value), 1.0));
+        check!(samples.len() == 1);
+        check!(samples[0].labels.get("target") == Some("api/a"));
+        check!(samples[0].labels.get("zone") == Some("us-east-1a"));
+        check!(approx_eq(float_value(&samples[0].value), 1.0));
     }
 
     #[tokio::test]
@@ -12136,10 +12136,10 @@ mod tests {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert!(samples.len() == 1);
-        assert!(samples[0].labels.get("host") == Some("api-1"));
-        assert!(samples[0].labels.get("instance") == Some("api-1:9100"));
-        assert!(approx_eq(float_value(&samples[0].value), 1.0));
+        check!(samples.len() == 1);
+        check!(samples[0].labels.get("host") == Some("api-1"));
+        check!(samples[0].labels.get("instance") == Some("api-1:9100"));
+        check!(approx_eq(float_value(&samples[0].value), 1.0));
     }
 
     #[tokio::test]
@@ -12173,9 +12173,9 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        assert!(values.contains(&("low".to_string(), 0.0)));
-        assert!(values.contains(&("mid".to_string(), 7.0)));
-        assert!(values.contains(&("high".to_string(), 10.0)));
+        check!(values.contains(&("low".to_string(), 0.0)));
+        check!(values.contains(&("mid".to_string(), 7.0)));
+        check!(values.contains(&("high".to_string(), 10.0)));
     }
 
     #[tokio::test]
@@ -12206,20 +12206,20 @@ mod tests {
         let QueryResult::InstantVector(max_samples) = max_result else {
             panic!("expected vector");
         };
-        assert!(min_samples.len() == 3);
-        assert!(max_samples.len() == 3);
-        assert!(min_samples.iter().any(|sample| {
+        check!(min_samples.len() == 3);
+        check!(max_samples.len() == 3);
+        check!(min_samples.iter().any(|sample| {
             sample.labels.get("case") == Some("below") && approx_eq(float_value(&sample.value), 0.0)
         }));
-        assert!(min_samples.iter().any(|sample| {
+        check!(min_samples.iter().any(|sample| {
             sample.labels.get("case") == Some("above")
                 && approx_eq(float_value(&sample.value), 20.0)
         }));
-        assert!(max_samples.iter().any(|sample| {
+        check!(max_samples.iter().any(|sample| {
             sample.labels.get("case") == Some("below")
                 && approx_eq(float_value(&sample.value), -5.0)
         }));
-        assert!(max_samples.iter().any(|sample| {
+        check!(max_samples.iter().any(|sample| {
             sample.labels.get("case") == Some("above")
                 && approx_eq(float_value(&sample.value), 10.0)
         }));
@@ -12613,10 +12613,10 @@ mod tests {
             let QueryResult::InstantVector(samples) = result else {
                 panic!("expected vector");
             };
-            assert!(samples.len() == 1);
-            assert!(samples[0].labels.get("__name__").is_none());
-            assert!(samples[0].labels.get("case") == Some("leap"));
-            assert!(approx_eq(float_value(&samples[0].value), expected));
+            check!(samples.len() == 1);
+            check!(samples[0].labels.get("__name__").is_none());
+            check!(samples[0].labels.get("case") == Some("leap"));
+            check!(approx_eq(float_value(&samples[0].value), expected));
         }
     }
 
@@ -12697,10 +12697,10 @@ mod tests {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert!(samples.len() == 1);
-        assert!(samples[0].labels.get("job") == Some("api"));
-        assert!(samples[0].ts_ms == 20_000);
-        assert!(approx_eq(float_value(&samples[0].value), 2.0));
+        check!(samples.len() == 1);
+        check!(samples[0].labels.get("job") == Some("api"));
+        check!(samples[0].ts_ms == 20_000);
+        check!(approx_eq(float_value(&samples[0].value), 2.0));
     }
 
     #[tokio::test]
@@ -12735,9 +12735,9 @@ mod tests {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert!(samples.len() == 1);
-        assert!(samples[0].ts_ms == 60_000);
-        assert!(approx_eq(float_value(&samples[0].value), 1.0));
+        check!(samples.len() == 1);
+        check!(samples[0].ts_ms == 60_000);
+        check!(approx_eq(float_value(&samples[0].value), 1.0));
     }
 
     #[tokio::test]
@@ -12772,9 +12772,9 @@ mod tests {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert!(samples.len() == 1);
-        assert!(samples[0].ts_ms == 60_000);
-        assert!(approx_eq(float_value(&samples[0].value), 1.0));
+        check!(samples.len() == 1);
+        check!(samples[0].ts_ms == 60_000);
+        check!(approx_eq(float_value(&samples[0].value), 1.0));
     }
 
     #[tokio::test]
@@ -12809,9 +12809,9 @@ mod tests {
             let QueryResult::InstantVector(samples) = result else {
                 panic!("expected vector");
             };
-            assert!(samples.len() == 1);
-            assert!(samples[0].ts_ms == 60_000);
-            assert!(approx_eq(float_value(&samples[0].value), 1.0));
+            check!(samples.len() == 1);
+            check!(samples[0].ts_ms == 60_000);
+            check!(approx_eq(float_value(&samples[0].value), 1.0));
         }
     }
 
@@ -12846,9 +12846,9 @@ mod tests {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert!(samples.len() == 1);
-        assert!(samples[0].labels.get("job") == Some("api"));
-        assert!(approx_eq(float_value(&samples[0].value), 1.0));
+        check!(samples.len() == 1);
+        check!(samples[0].labels.get("job") == Some("api"));
+        check!(approx_eq(float_value(&samples[0].value), 1.0));
     }
 
     #[tokio::test]
@@ -12892,9 +12892,9 @@ mod tests {
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        assert!(approx_eq(values_by_job["api"], 1.0));
-        assert!(approx_eq(values_by_job["web"], 2.0));
-        assert!(!values_by_job.contains_key("db"));
+        check!(approx_eq(values_by_job["api"], 1.0));
+        check!(approx_eq(values_by_job["web"], 2.0));
+        check!(!values_by_job.contains_key("db"));
     }
 
     #[tokio::test]
@@ -12957,9 +12957,9 @@ mod tests {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert!(samples.len() == 1);
-        assert!(samples[0].labels.is_empty());
-        assert!(approx_eq(float_value(&samples[0].value), 3.0));
+        check!(samples.len() == 1);
+        check!(samples[0].labels.is_empty());
+        check!(approx_eq(float_value(&samples[0].value), 3.0));
     }
 
     #[tokio::test]
@@ -12998,9 +12998,9 @@ mod tests {
             .iter()
             .find(|sample| sample.labels.get("job") == Some("api"))
             .expect("api group");
-        assert!(api.labels.get("__name__").is_none());
-        assert!(api.labels.get("instance").is_none());
-        assert!(approx_eq(float_value(&api.value), 3.0));
+        check!(api.labels.get("__name__").is_none());
+        check!(api.labels.get("instance").is_none());
+        check!(approx_eq(float_value(&api.value), 3.0));
         let web = samples
             .iter()
             .find(|sample| sample.labels.get("job") == Some("web"))
@@ -13100,10 +13100,10 @@ mod tests {
         let QueryResult::InstantVector(stddev_samples) = stddev else {
             panic!("expected vector");
         };
-        assert!(stdvar_samples.len() == 1);
-        assert!(stddev_samples.len() == 1);
-        assert!(approx_eq(float_value(&stdvar_samples[0].value), 4.0));
-        assert!(approx_eq(float_value(&stddev_samples[0].value), 2.0));
+        check!(stdvar_samples.len() == 1);
+        check!(stddev_samples.len() == 1);
+        check!(approx_eq(float_value(&stdvar_samples[0].value), 4.0));
+        check!(approx_eq(float_value(&stddev_samples[0].value), 2.0));
     }
 
     /// M16: `stdvar`/`stddev` over a large-offset close-valued group must not
@@ -13134,9 +13134,9 @@ mod tests {
         };
         assert!(stdvar.len() == 1);
         let value = float_value(&stdvar[0].value);
-        assert!(!value.is_nan(), "stdvar must be finite, got NaN");
-        assert!(value > 0.0, "stdvar must be positive, got {value}");
-        assert!(approx_eq(value, 2.0 / 3.0), "stdvar == 2/3, got {value}");
+        check!(!value.is_nan(), "stdvar must be finite, got NaN");
+        check!(value > 0.0, "stdvar must be positive, got {value}");
+        check!(approx_eq(value, 2.0 / 3.0), "stdvar == 2/3, got {value}");
     }
 
     /// M17: `avg` of very-large-magnitude samples must not overflow the running
@@ -13197,13 +13197,13 @@ mod tests {
         else {
             panic!("expected vector");
         };
-        assert!(samples.len() == 1);
-        assert!(
+        check!(samples.len() == 1);
+        check!(
             samples[0].labels.get("v") == Some("+Inf"),
             "count_values must render +Inf, got {:?}",
             samples[0].labels.get("v")
         );
-        assert!(approx_eq(float_value(&samples[0].value), 2.0));
+        check!(approx_eq(float_value(&samples[0].value), 2.0));
     }
 
     #[tokio::test]
@@ -13292,18 +13292,18 @@ mod tests {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert!(samples.len() == 2);
-        assert!(samples.iter().all(|sample| {
+        check!(samples.len() == 2);
+        check!(samples.iter().all(|sample| {
             sample.labels.get("__name__").is_none()
                 && sample.labels.get("job") == Some("api")
                 && sample.labels.get("histogram").is_some()
         }));
-        assert!(
+        check!(
             samples
                 .iter()
                 .any(|sample| approx_eq(float_value(&sample.value), 2.0))
         );
-        assert!(
+        check!(
             samples
                 .iter()
                 .any(|sample| approx_eq(float_value(&sample.value), 1.0))
@@ -13331,13 +13331,13 @@ mod tests {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert!(samples.len() == 2);
-        assert!(samples.iter().any(|sample| {
+        check!(samples.len() == 2);
+        check!(samples.iter().any(|sample| {
             sample.labels.get("__name__") == Some("memory_bytes")
                 && sample.labels.get("instance") == Some("b")
                 && approx_eq(float_value(&sample.value), 3.0)
         }));
-        assert!(samples.iter().any(|sample| {
+        check!(samples.iter().any(|sample| {
             sample.labels.get("__name__") == Some("memory_bytes")
                 && sample.labels.get("instance") == Some("c")
                 && approx_eq(float_value(&sample.value), 2.0)
@@ -13365,13 +13365,13 @@ mod tests {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert!(samples.len() == 2);
-        assert!(samples.iter().any(|sample| {
+        check!(samples.len() == 2);
+        check!(samples.iter().any(|sample| {
             sample.labels.get("__name__") == Some("memory_bytes")
                 && sample.labels.get("instance") == Some("a")
                 && approx_eq(float_value(&sample.value), 1.0)
         }));
-        assert!(samples.iter().any(|sample| {
+        check!(samples.iter().any(|sample| {
             sample.labels.get("__name__") == Some("memory_bytes")
                 && sample.labels.get("instance") == Some("c")
                 && approx_eq(float_value(&sample.value), 2.0)
@@ -13408,14 +13408,14 @@ mod tests {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert!(samples.len() == 2);
-        assert!(samples.iter().any(|sample| {
+        check!(samples.len() == 2);
+        check!(samples.iter().any(|sample| {
             sample.labels.get("__name__") == Some("memory_bytes")
                 && sample.labels.get("job") == Some("api")
                 && sample.labels.get("instance") == Some("b")
                 && approx_eq(float_value(&sample.value), 3.0)
         }));
-        assert!(samples.iter().any(|sample| {
+        check!(samples.iter().any(|sample| {
             sample.labels.get("__name__") == Some("memory_bytes")
                 && sample.labels.get("job") == Some("worker")
                 && sample.labels.get("instance") == Some("c")
@@ -13457,14 +13457,14 @@ mod tests {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert!(samples.len() == 2);
-        assert!(samples.iter().any(|sample| {
+        check!(samples.len() == 2);
+        check!(samples.iter().any(|sample| {
             sample.labels.get("__name__") == Some("memory_bytes")
                 && sample.labels.get("job") == Some("api")
                 && sample.labels.get("instance") == Some("b")
                 && approx_eq(float_value(&sample.value), 1.0)
         }));
-        assert!(samples.iter().any(|sample| {
+        check!(samples.iter().any(|sample| {
             sample.labels.get("__name__") == Some("memory_bytes")
                 && sample.labels.get("job") == Some("worker")
                 && sample.labels.get("instance") == Some("d")
@@ -13612,14 +13612,14 @@ mod tests {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert!(samples.len() == 2);
-        assert!(samples.iter().any(|sample| {
+        check!(samples.len() == 2);
+        check!(samples.iter().any(|sample| {
             sample.labels.get("__name__") == Some("memory_bytes")
                 && sample.labels.get("job") == Some("api")
                 && sample.labels.get("instance") == Some("c")
                 && approx_eq(float_value(&sample.value), 3.0)
         }));
-        assert!(samples.iter().any(|sample| {
+        check!(samples.iter().any(|sample| {
             sample.labels.get("__name__") == Some("memory_bytes")
                 && sample.labels.get("job") == Some("worker")
                 && sample.labels.get("instance") == Some("d")
@@ -13716,10 +13716,10 @@ mod tests {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert!(samples.len() == 1);
-        assert!(samples[0].labels.get("__name__").is_none());
-        assert!(samples[0].labels.get("job") == Some("api"));
-        assert!(approx_eq(float_value(&samples[0].value), 3.0));
+        check!(samples.len() == 1);
+        check!(samples[0].labels.get("__name__").is_none());
+        check!(samples[0].labels.get("job") == Some("api"));
+        check!(approx_eq(float_value(&samples[0].value), 3.0));
     }
 
     #[tokio::test]
@@ -14130,11 +14130,11 @@ mod tests {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert!(samples.len() == 1);
-        assert!(samples[0].labels.get("__name__").is_none());
-        assert!(samples[0].labels.get("le").is_none());
-        assert!(samples[0].labels.get("job") == Some("api"));
-        assert!(approx_eq(float_value(&samples[0].value), 0.25));
+        check!(samples.len() == 1);
+        check!(samples[0].labels.get("__name__").is_none());
+        check!(samples[0].labels.get("le").is_none());
+        check!(samples[0].labels.get("job") == Some("api"));
+        check!(approx_eq(float_value(&samples[0].value), 0.25));
     }
 
     #[cfg(not(feature = "experimental-functions"))]
@@ -14193,9 +14193,9 @@ mod tests {
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        assert!(approx_eq(*values.get("0.5").expect("p50 sample"), 0.25));
-        assert!(approx_eq(*values.get("0.9").expect("p90 sample"), 0.37));
-        assert!(samples.iter().all(|sample| {
+        check!(approx_eq(*values.get("0.5").expect("p50 sample"), 0.25));
+        check!(approx_eq(*values.get("0.9").expect("p90 sample"), 0.37));
+        check!(samples.iter().all(|sample| {
             sample.labels.get("__name__").is_none()
                 && sample.labels.get("job") == Some("api")
                 && sample.labels.get("le").is_none()
@@ -14231,10 +14231,10 @@ mod tests {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert!(samples.len() == 1);
-        assert!(samples[0].labels.get("__name__").is_none());
-        assert!(samples[0].labels.get("job") == Some("api"));
-        assert!(approx_eq(
+        check!(samples.len() == 1);
+        check!(samples[0].labels.get("__name__").is_none());
+        check!(samples[0].labels.get("job") == Some("api"));
+        check!(approx_eq(
             float_value(&samples[0].value),
             2_f64.powf(1.0 / 3.0)
         ));
@@ -14269,10 +14269,10 @@ mod tests {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert!(samples.len() == 1);
-        assert!(samples[0].labels.get("__name__").is_none());
-        assert!(samples[0].labels.get("job") == Some("api"));
-        assert!(approx_eq(float_value(&samples[0].value), 0.75));
+        check!(samples.len() == 1);
+        check!(samples[0].labels.get("__name__").is_none());
+        check!(samples[0].labels.get("job") == Some("api"));
+        check!(approx_eq(float_value(&samples[0].value), 0.75));
     }
 
     #[tokio::test]
@@ -14290,10 +14290,10 @@ mod tests {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert!(samples.len() == 1);
-        assert!(samples[0].labels.get("__name__").is_none());
-        assert!(samples[0].labels.get("job") == Some("api"));
-        assert!(approx_eq(float_value(&samples[0].value), 4.0));
+        check!(samples.len() == 1);
+        check!(samples[0].labels.get("__name__").is_none());
+        check!(samples[0].labels.get("job") == Some("api"));
+        check!(approx_eq(float_value(&samples[0].value), 4.0));
     }
 
     #[tokio::test]
@@ -14311,9 +14311,9 @@ mod tests {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert!(samples.len() == 1);
-        assert!(samples[0].labels.get("job") == Some("api"));
-        assert!(approx_eq(float_value(&samples[0].value), 10.0));
+        check!(samples.len() == 1);
+        check!(samples[0].labels.get("job") == Some("api"));
+        check!(approx_eq(float_value(&samples[0].value), 10.0));
     }
 
     #[tokio::test]
@@ -14331,9 +14331,9 @@ mod tests {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert!(samples.len() == 1);
-        assert!(samples[0].labels.get("job") == Some("api"));
-        assert!(approx_eq(float_value(&samples[0].value), 2.5));
+        check!(samples.len() == 1);
+        check!(samples[0].labels.get("job") == Some("api"));
+        check!(approx_eq(float_value(&samples[0].value), 2.5));
     }
 
     #[tokio::test]
@@ -14411,10 +14411,10 @@ mod tests {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert!(samples.len() == 1);
-        assert!(samples[0].labels.get("__name__").is_none());
-        assert!(samples[0].labels.get("job") == Some("api"));
-        assert!(approx_eq(
+        check!(samples.len() == 1);
+        check!(samples[0].labels.get("__name__").is_none());
+        check!(samples[0].labels.get("job") == Some("api"));
+        check!(approx_eq(
             float_value(&samples[0].value),
             0.099_384_473_924_297_3
         ));
@@ -14449,10 +14449,10 @@ mod tests {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert!(samples.len() == 1);
-        assert!(samples[0].labels.get("__name__").is_none());
-        assert!(samples[0].labels.get("job") == Some("api"));
-        assert!(approx_eq(
+        check!(samples.len() == 1);
+        check!(samples[0].labels.get("__name__").is_none());
+        check!(samples[0].labels.get("job") == Some("api"));
+        check!(approx_eq(
             float_value(&samples[0].value),
             0.099_384_473_924_297_3_f64.sqrt()
         ));
@@ -14579,10 +14579,10 @@ mod tests {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert!(samples.len() == 1);
-        assert!(samples[0].labels.is_empty());
-        assert!(samples[0].ts_ms == 10_000);
-        assert!(approx_eq(float_value(&samples[0].value), 6.0));
+        check!(samples.len() == 1);
+        check!(samples[0].labels.is_empty());
+        check!(samples[0].ts_ms == 10_000);
+        check!(approx_eq(float_value(&samples[0].value), 6.0));
     }
 
     #[tokio::test]
@@ -14604,10 +14604,10 @@ mod tests {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert!(samples.len() == 1);
-        assert!(samples[0].labels.get("__name__").is_none());
-        assert!(samples[0].labels.get("job") == Some("api"));
-        assert!(approx_eq(float_value(&samples[0].value), 2.0));
+        check!(samples.len() == 1);
+        check!(samples[0].labels.get("__name__").is_none());
+        check!(samples[0].labels.get("job") == Some("api"));
+        check!(approx_eq(float_value(&samples[0].value), 2.0));
     }
 
     #[tokio::test]
@@ -14629,10 +14629,10 @@ mod tests {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert!(samples.len() == 1);
-        assert!(samples[0].labels.get("__name__").is_none());
-        assert!(samples[0].labels.get("job") == Some("api"));
-        assert!(approx_eq(
+        check!(samples.len() == 1);
+        check!(samples[0].labels.get("__name__").is_none());
+        check!(samples[0].labels.get("job") == Some("api"));
+        check!(approx_eq(
             float_value(&samples[0].value),
             std::f64::consts::FRAC_PI_2
         ));
@@ -14669,10 +14669,10 @@ mod tests {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert!(samples.len() == 1);
-        assert!(samples[0].labels.get("__name__").is_none());
-        assert!(samples[0].labels.get("x") == Some("1"));
-        assert!(approx_eq(float_value(&samples[0].value), 15.0));
+        check!(samples.len() == 1);
+        check!(samples[0].labels.get("__name__").is_none());
+        check!(samples[0].labels.get("x") == Some("1"));
+        check!(approx_eq(float_value(&samples[0].value), 15.0));
     }
 
     #[tokio::test]
@@ -14710,22 +14710,15 @@ mod tests {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert!(samples.len() == 2);
-        assert!(
-            samples
-                .iter()
-                .all(|sample| sample.labels.get("__name__").is_none())
-        );
-        assert!(
-            samples
-                .iter()
-                .all(|sample| sample.labels.get("__type__").is_none())
-        );
-        assert!(
-            samples
-                .iter()
-                .all(|sample| sample.labels.get("__unit__").is_none())
-        );
+        check!(samples.len() == 2);
+        for name in ["__name__", "__type__", "__unit__"] {
+            check!(
+                samples
+                    .iter()
+                    .all(|sample| sample.labels.get(name).is_none()),
+                "{name} must be dropped"
+            );
+        }
     }
 
     #[tokio::test]
@@ -14764,10 +14757,10 @@ mod tests {
             })
             .collect::<BTreeMap<_, _>>();
         assert_eq!(values.len(), 3);
-        assert!(approx_eq(values["matched"], 13.0));
-        assert!(approx_eq(values["left-only"], 7.0));
-        assert!(approx_eq(values["right-only"], 5.0));
-        assert!(samples.iter().all(|sample| {
+        check!(approx_eq(values["matched"], 13.0));
+        check!(approx_eq(values["left-only"], 7.0));
+        check!(approx_eq(values["right-only"], 5.0));
+        check!(samples.iter().all(|sample| {
             let label_names = sample
                 .labels
                 .iter()
@@ -14875,11 +14868,11 @@ mod tests {
         let QueryResult::InstantVector(samples) = bool_result else {
             panic!("expected vector");
         };
-        assert!(samples.len() == 1);
-        assert!(samples[0].labels.get("__name__").is_none());
-        assert!(samples[0].labels.get("job").is_none());
-        assert!(samples[0].labels.get("x") == Some("1"));
-        assert!(approx_eq(float_value(&samples[0].value), 0.0));
+        check!(samples.len() == 1);
+        check!(samples[0].labels.get("__name__").is_none());
+        check!(samples[0].labels.get("job").is_none());
+        check!(samples[0].labels.get("x") == Some("1"));
+        check!(approx_eq(float_value(&samples[0].value), 0.0));
 
         let invalid = engine
             .query_instant("tenant-a", "a > bool on (x) b", 10_000)
@@ -14989,9 +14982,9 @@ mod tests {
         };
         assert!(samples.len() == 2);
         for sample in samples {
-            assert!(sample.labels.get("__name__").is_none());
-            assert!(sample.labels.get("job") == Some("api"));
-            assert!(sample.labels.get("region") == Some("east"));
+            check!(sample.labels.get("__name__").is_none());
+            check!(sample.labels.get("job") == Some("api"));
+            check!(sample.labels.get("region") == Some("east"));
         }
     }
 
@@ -15152,13 +15145,13 @@ mod tests {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert!(samples.len() == 1);
-        assert!(samples[0].labels.get("__name__") == Some("http_requests_total"));
-        assert!(samples[0].labels.get("job") == Some("api"));
-        assert!(samples[0].labels.get("instance") == Some("a"));
-        assert!(samples[0].labels.get("region") == Some("east"));
-        assert!(samples[0].labels.get("cluster") == Some("prod"));
-        assert!(approx_eq(float_value(&samples[0].value), 7.0));
+        check!(samples.len() == 1);
+        check!(samples[0].labels.get("__name__") == Some("http_requests_total"));
+        check!(samples[0].labels.get("job") == Some("api"));
+        check!(samples[0].labels.get("instance") == Some("a"));
+        check!(samples[0].labels.get("region") == Some("east"));
+        check!(samples[0].labels.get("cluster") == Some("prod"));
+        check!(approx_eq(float_value(&samples[0].value), 7.0));
     }
 
     #[tokio::test]
@@ -15429,15 +15422,15 @@ mod tests {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert!(samples.len() == 2);
-        assert!(samples.iter().any(|sample| {
+        check!(samples.len() == 2);
+        check!(samples.iter().any(|sample| {
             sample.labels.get("__name__").is_none()
                 && sample.labels.get("job") == Some("api")
                 && sample.labels.get("region") == Some("east")
                 && sample.labels.get("instance") == Some("a")
                 && approx_eq(float_value(&sample.value), 10.0)
         }));
-        assert!(samples.iter().any(|sample| {
+        check!(samples.iter().any(|sample| {
             sample.labels.get("__name__").is_none()
                 && sample.labels.get("job") == Some("api")
                 && sample.labels.get("region") == Some("east")
@@ -15465,9 +15458,9 @@ mod tests {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert!(samples.len() == 1);
-        assert!(samples[0].labels.get("__name__").is_none());
-        assert!(approx_eq(float_value(&samples[0].value), 1.0));
+        check!(samples.len() == 1);
+        check!(samples[0].labels.get("__name__").is_none());
+        check!(approx_eq(float_value(&samples[0].value), 1.0));
     }
 
     #[tokio::test]
@@ -15503,11 +15496,11 @@ mod tests {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert!(samples.len() == 1);
-        assert!(samples[0].labels.get("__name__") == Some("up"));
-        assert!(samples[0].labels.get("instance") == Some("b"));
-        assert!(samples[0].labels.get("job") == Some("api"));
-        assert!(approx_eq(float_value(&samples[0].value), 2.0));
+        check!(samples.len() == 1);
+        check!(samples[0].labels.get("__name__") == Some("up"));
+        check!(samples[0].labels.get("instance") == Some("b"));
+        check!(samples[0].labels.get("job") == Some("api"));
+        check!(approx_eq(float_value(&samples[0].value), 2.0));
     }
 
     #[tokio::test]
@@ -15538,12 +15531,12 @@ mod tests {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert!(samples.len() == 1);
-        assert!(samples[0].labels.get("__name__").is_none());
-        assert!(samples[0].labels.get("__type__").is_none());
-        assert!(samples[0].labels.get("__unit__").is_none());
-        assert!(samples[0].labels.get("instance") == Some("a"));
-        assert!(approx_eq(float_value(&samples[0].value), 11.0));
+        check!(samples.len() == 1);
+        check!(samples[0].labels.get("__name__").is_none());
+        check!(samples[0].labels.get("__type__").is_none());
+        check!(samples[0].labels.get("__unit__").is_none());
+        check!(samples[0].labels.get("instance") == Some("a"));
+        check!(approx_eq(float_value(&samples[0].value), 11.0));
     }
 
     #[tokio::test]
@@ -15557,10 +15550,10 @@ mod tests {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert!(samples.len() == 1);
-        assert!(samples[0].labels.get("__name__") == Some("up"));
-        assert!(samples[0].labels.get("instance") == Some("a"));
-        assert!(approx_eq(float_value(&samples[0].value), 1.0));
+        check!(samples.len() == 1);
+        check!(samples[0].labels.get("__name__") == Some("up"));
+        check!(samples[0].labels.get("instance") == Some("a"));
+        check!(approx_eq(float_value(&samples[0].value), 1.0));
     }
 
     #[tokio::test]
@@ -15574,16 +15567,16 @@ mod tests {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert!(samples.len() == 3);
-        assert!(samples.iter().any(|sample| {
+        check!(samples.len() == 3);
+        check!(samples.iter().any(|sample| {
             sample.labels.get("__name__") == Some("up")
                 && sample.labels.get("instance") == Some("a")
         }));
-        assert!(samples.iter().any(|sample| {
+        check!(samples.iter().any(|sample| {
             sample.labels.get("__name__") == Some("up")
                 && sample.labels.get("instance") == Some("b")
         }));
-        assert!(samples.iter().any(|sample| {
+        check!(samples.iter().any(|sample| {
             sample.labels.get("__name__") == Some("target_info")
                 && sample.labels.get("instance") == Some("c")
                 && sample.labels.get("region") == Some("east")
@@ -15618,10 +15611,10 @@ mod tests {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert!(samples.len() == 1);
-        assert!(samples[0].labels.get("__name__").is_none());
-        assert!(samples[0].labels.get("job") == Some("api"));
-        assert!(approx_eq(float_value(&samples[0].value), 5.0 / 300.0));
+        check!(samples.len() == 1);
+        check!(samples[0].labels.get("__name__").is_none());
+        check!(samples[0].labels.get("job") == Some("api"));
+        check!(approx_eq(float_value(&samples[0].value), 5.0 / 300.0));
     }
 
     #[tokio::test]
@@ -15658,12 +15651,16 @@ mod tests {
         let QueryResult::RangeMatrix(series) = result else {
             panic!("expected matrix");
         };
-        assert!(series.len() == 1);
-        assert!(series[0].samples.len() == 2);
-        assert!(series[0].samples[0].0 == 240_000);
-        assert!(approx_eq(float_value(&series[0].samples[0].1), 4.0 / 300.0));
-        assert!(series[0].samples[1].0 == 300_000);
-        assert!(approx_eq(float_value(&series[0].samples[1].1), 5.0 / 300.0));
+        check!(series.len() == 1);
+        check!(series[0].samples.len() == 2);
+        for (sample, (want_ts, want)) in series[0]
+            .samples
+            .iter()
+            .zip([(240_000, 4.0 / 300.0), (300_000, 5.0 / 300.0)])
+        {
+            check!(sample.0 == want_ts);
+            check!(approx_eq(float_value(&sample.1), want), "at ts {want_ts}");
+        }
     }
 
     #[tokio::test]
@@ -15774,10 +15771,10 @@ mod tests {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert!(samples.len() == 1);
-        assert!(samples[0].labels.get("__name__").is_none());
-        assert!(samples[0].labels.get("job") == Some("api"));
-        assert!(approx_eq(float_value(&samples[0].value), 2.0));
+        check!(samples.len() == 1);
+        check!(samples[0].labels.get("__name__").is_none());
+        check!(samples[0].labels.get("job") == Some("api"));
+        check!(approx_eq(float_value(&samples[0].value), 2.0));
     }
 
     #[tokio::test]
@@ -15807,10 +15804,10 @@ mod tests {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert!(samples.len() == 1);
-        assert!(samples[0].labels.get("__name__").is_none());
-        assert!(samples[0].labels.get("job") == Some("api"));
-        assert!(approx_eq(float_value(&samples[0].value), 2.0));
+        check!(samples.len() == 1);
+        check!(samples[0].labels.get("__name__").is_none());
+        check!(samples[0].labels.get("job") == Some("api"));
+        check!(approx_eq(float_value(&samples[0].value), 2.0));
     }
 
     #[tokio::test]
@@ -15884,10 +15881,10 @@ mod tests {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert!(samples.len() == 1);
-        assert!(samples[0].labels.get("__name__").is_none());
-        assert!(samples[0].labels.get("job") == Some("api"));
-        assert!(approx_eq(float_value(&samples[0].value), 2.0 / 60.0));
+        check!(samples.len() == 1);
+        check!(samples[0].labels.get("__name__").is_none());
+        check!(samples[0].labels.get("job") == Some("api"));
+        check!(approx_eq(float_value(&samples[0].value), 2.0 / 60.0));
     }
 
     #[tokio::test]
@@ -15915,10 +15912,10 @@ mod tests {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert!(samples.len() == 1);
-        assert!(samples[0].labels.get("__name__").is_none());
-        assert!(samples[0].labels.get("job") == Some("api"));
-        assert!(approx_eq(float_value(&samples[0].value), 7.0));
+        check!(samples.len() == 1);
+        check!(samples[0].labels.get("__name__").is_none());
+        check!(samples[0].labels.get("job") == Some("api"));
+        check!(approx_eq(float_value(&samples[0].value), 7.0));
     }
 
     #[cfg(not(feature = "experimental-functions"))]
@@ -16045,10 +16042,10 @@ mod tests {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert!(samples.len() == 1);
-        assert!(samples[0].labels.get("__name__").is_none());
-        assert!(samples[0].labels.get("job") == Some("api"));
-        assert!(approx_eq(float_value(&samples[0].value), 17.625));
+        check!(samples.len() == 1);
+        check!(samples[0].labels.get("__name__").is_none());
+        check!(samples[0].labels.get("job") == Some("api"));
+        check!(approx_eq(float_value(&samples[0].value), 17.625));
     }
 
     #[cfg(feature = "experimental-functions")]
@@ -16143,10 +16140,10 @@ mod tests {
             let QueryResult::InstantVector(samples) = result else {
                 panic!("expected vector");
             };
-            assert!(samples.len() == 1, "{query}");
-            assert!(samples[0].labels.get("__name__").is_none(), "{query}");
-            assert!(samples[0].labels.get("job") == Some("api"), "{query}");
-            assert!(
+            check!(samples.len() == 1, "{query}");
+            check!(samples[0].labels.get("__name__").is_none(), "{query}");
+            check!(samples[0].labels.get("job") == Some("api"), "{query}");
+            check!(
                 approx_eq(float_value(&samples[0].value), expected),
                 "{query}"
             );
@@ -16183,10 +16180,10 @@ mod tests {
             let QueryResult::InstantVector(samples) = result else {
                 panic!("expected vector");
             };
-            assert!(samples.len() == 1, "{query}");
-            assert!(samples[0].labels.get("__name__").is_none(), "{query}");
-            assert!(samples[0].labels.get("job") == Some("api"), "{query}");
-            assert!(
+            check!(samples.len() == 1, "{query}");
+            check!(samples[0].labels.get("__name__").is_none(), "{query}");
+            check!(samples[0].labels.get("job") == Some("api"), "{query}");
+            check!(
                 approx_eq(float_value(&samples[0].value), expected),
                 "{query}"
             );
@@ -16225,10 +16222,10 @@ mod tests {
             let QueryResult::InstantVector(samples) = result else {
                 panic!("expected vector");
             };
-            assert!(samples.len() == 1);
-            assert!(samples[0].labels.get("__name__").is_none());
-            assert!(samples[0].labels.get("job") == Some("api"));
-            assert!(approx_eq(float_value(&samples[0].value), expected));
+            check!(samples.len() == 1);
+            check!(samples[0].labels.get("__name__").is_none());
+            check!(samples[0].labels.get("job") == Some("api"));
+            check!(approx_eq(float_value(&samples[0].value), expected));
         }
     }
 
@@ -16255,11 +16252,11 @@ mod tests {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert!(samples.len() == 1);
-        assert!(samples[0].labels.get("__name__").is_none());
-        assert!(samples[0].labels.get("job") == Some("worker"));
-        assert!(samples[0].labels.get("instance").is_none());
-        assert!(approx_eq(float_value(&samples[0].value), 1.0));
+        check!(samples.len() == 1);
+        check!(samples[0].labels.get("__name__").is_none());
+        check!(samples[0].labels.get("job") == Some("worker"));
+        check!(samples[0].labels.get("instance").is_none());
+        check!(approx_eq(float_value(&samples[0].value), 1.0));
     }
 
     #[tokio::test]
@@ -16273,9 +16270,9 @@ mod tests {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert!(samples.len() == 1);
-        assert!(samples[0].labels.is_empty());
-        assert!(approx_eq(float_value(&samples[0].value), 1.0));
+        check!(samples.len() == 1);
+        check!(samples[0].labels.is_empty());
+        check!(approx_eq(float_value(&samples[0].value), 1.0));
     }
 
     #[tokio::test]
@@ -16301,10 +16298,10 @@ mod tests {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert!(samples.len() == 1);
-        assert!(samples[0].labels.get("__name__").is_none());
-        assert!(samples[0].labels.get("job") == Some("api"));
-        assert!(approx_eq(float_value(&samples[0].value), 1.0));
+        check!(samples.len() == 1);
+        check!(samples[0].labels.get("__name__").is_none());
+        check!(samples[0].labels.get("job") == Some("api"));
+        check!(approx_eq(float_value(&samples[0].value), 1.0));
     }
 
     #[tokio::test]
@@ -16322,9 +16319,9 @@ mod tests {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert!(samples.len() == 1);
-        assert!(samples[0].labels.is_empty());
-        assert!(approx_eq(float_value(&samples[0].value), 1.0));
+        check!(samples.len() == 1);
+        check!(samples[0].labels.is_empty());
+        check!(approx_eq(float_value(&samples[0].value), 1.0));
     }
 
     #[tokio::test]
@@ -16389,11 +16386,11 @@ mod tests {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert!(samples.len() == 1);
-        assert!(samples[0].labels.get("__name__").is_none());
-        assert!(samples[0].labels.get("job") == Some("api"));
-        assert!(samples[0].ts_ms == 120_000);
-        assert!(approx_eq(float_value(&samples[0].value), 60.0));
+        check!(samples.len() == 1);
+        check!(samples[0].labels.get("__name__").is_none());
+        check!(samples[0].labels.get("job") == Some("api"));
+        check!(samples[0].ts_ms == 120_000);
+        check!(approx_eq(float_value(&samples[0].value), 60.0));
     }
 
     #[tokio::test]
@@ -16431,10 +16428,10 @@ mod tests {
             let QueryResult::InstantVector(samples) = result else {
                 panic!("expected vector");
             };
-            assert!(samples.len() == 1);
-            assert!(samples[0].labels.get("__name__").is_none());
-            assert!(samples[0].labels.get("job") == Some("api"));
-            assert!(approx_eq(float_value(&samples[0].value), expected));
+            check!(samples.len() == 1);
+            check!(samples[0].labels.get("__name__").is_none());
+            check!(samples[0].labels.get("job") == Some("api"));
+            check!(approx_eq(float_value(&samples[0].value), expected));
         }
     }
 
@@ -16473,10 +16470,10 @@ mod tests {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert!(samples.len() == 1);
-        assert!(samples[0].labels.get("__name__").is_none());
-        assert!(samples[0].labels.get("job") == Some("api"));
-        assert!(approx_eq(float_value(&samples[0].value), -3.5));
+        check!(samples.len() == 1);
+        check!(samples[0].labels.get("__name__").is_none());
+        check!(samples[0].labels.get("job") == Some("api"));
+        check!(approx_eq(float_value(&samples[0].value), -3.5));
     }
 
     #[tokio::test]
@@ -16507,17 +16504,17 @@ mod tests {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert!(samples.len() == 1);
-        assert!(samples[0].labels.get("__name__").is_none());
-        assert!(samples[0].labels.get("job") == Some("api"));
+        check!(samples.len() == 1);
+        check!(samples[0].labels.get("__name__").is_none());
+        check!(samples[0].labels.get("job") == Some("api"));
         let SampleValue::Histogram(histogram) = &samples[0].value else {
             panic!("expected histogram");
         };
-        assert!(histogram.reset_hint == ResetHint::Gauge);
-        assert!(approx_eq(histogram.count, -4.0));
-        assert!(approx_eq(histogram.sum, -10.0));
-        assert!(approx_eq(histogram.zero_count, -1.0));
-        assert!(
+        check!(histogram.reset_hint == ResetHint::Gauge);
+        check!(approx_eq(histogram.count, -4.0));
+        check!(approx_eq(histogram.sum, -10.0));
+        check!(approx_eq(histogram.zero_count, -1.0));
+        check!(
             histogram
                 .positive_counts
                 .iter()
@@ -16548,11 +16545,11 @@ mod tests {
         let QueryResult::RangeMatrix(series) = result else {
             panic!("expected matrix");
         };
-        assert!(series.len() == 1);
-        assert!(series[0].samples.len() == 3);
-        assert!(series[0].samples[0].0 == 60_000);
-        assert!(series[0].samples[2].0 == 180_000);
-        assert!(series[0].samples.iter().all(|(_, value)| {
+        check!(series.len() == 1);
+        check!(series[0].samples.len() == 3);
+        check!(series[0].samples[0].0 == 60_000);
+        check!(series[0].samples[2].0 == 180_000);
+        check!(series[0].samples.iter().all(|(_, value)| {
             let SampleValue::Float(value) = value else {
                 return false;
             };
@@ -16576,14 +16573,17 @@ mod tests {
         let QueryResult::RangeMatrix(series) = result else {
             panic!("expected matrix");
         };
-        assert!(series.len() == 1);
-        assert!(series[0].samples.len() == 3);
-        assert!(series[0].samples[0].0 == 0);
-        assert!(approx_eq(float_value(&series[0].samples[0].1), 0.0));
-        assert!(series[0].samples[1].0 == 60_000);
-        assert!(approx_eq(float_value(&series[0].samples[1].1), 1.0));
-        assert!(series[0].samples[2].0 == 120_000);
-        assert!(approx_eq(float_value(&series[0].samples[2].1), 2.0));
+        check!(series.len() == 1);
+        check!(series[0].samples.len() == 3);
+        for (sample, (want_ts, want)) in
+            series[0]
+                .samples
+                .iter()
+                .zip([(0, 0.0), (60_000, 1.0), (120_000, 2.0)])
+        {
+            check!(sample.0 == want_ts);
+            check!(approx_eq(float_value(&sample.1), want), "at ts {want_ts}");
+        }
     }
 
     #[tokio::test]
@@ -16603,12 +16603,16 @@ mod tests {
         let QueryResult::RangeMatrix(series) = result else {
             panic!("expected matrix");
         };
-        assert!(series.len() == 1);
-        assert!(series[0].samples.len() == 2);
-        assert!(series[0].samples[0].0 == 60_000);
-        assert!(approx_eq(float_value(&series[0].samples[0].1), 1.0));
-        assert!(series[0].samples[1].0 == 120_000);
-        assert!(approx_eq(float_value(&series[0].samples[1].1), 2.0));
+        check!(series.len() == 1);
+        check!(series[0].samples.len() == 2);
+        for (sample, (want_ts, want)) in series[0]
+            .samples
+            .iter()
+            .zip([(60_000, 1.0), (120_000, 2.0)])
+        {
+            check!(sample.0 == want_ts);
+            check!(approx_eq(float_value(&sample.1), want), "at ts {want_ts}");
+        }
     }
 
     #[tokio::test]
@@ -16632,16 +16636,19 @@ mod tests {
         let QueryResult::RangeMatrix(series) = result else {
             panic!("expected matrix");
         };
-        assert!(series.len() == 1);
-        assert!(series[0].labels.get("__name__").is_none());
-        assert!(series[0].labels.get("job") == Some("api"));
-        assert!(series[0].samples.len() == 3);
-        assert!(series[0].samples[0].0 == 0);
-        assert!(approx_eq(float_value(&series[0].samples[0].1), 2.0));
-        assert!(series[0].samples[1].0 == 60_000);
-        assert!(approx_eq(float_value(&series[0].samples[1].1), 4.0));
-        assert!(series[0].samples[2].0 == 120_000);
-        assert!(approx_eq(float_value(&series[0].samples[2].1), 6.0));
+        check!(series.len() == 1);
+        check!(series[0].labels.get("__name__").is_none());
+        check!(series[0].labels.get("job") == Some("api"));
+        check!(series[0].samples.len() == 3);
+        for (sample, (want_ts, want)) in
+            series[0]
+                .samples
+                .iter()
+                .zip([(0, 2.0), (60_000, 4.0), (120_000, 6.0)])
+        {
+            check!(sample.0 == want_ts);
+            check!(approx_eq(float_value(&sample.1), want), "at ts {want_ts}");
+        }
     }
 
     #[tokio::test]
@@ -16671,12 +16678,13 @@ mod tests {
         let QueryResult::RangeMatrix(series) = result else {
             panic!("expected matrix");
         };
-        assert!(series.len() == 1);
-        assert!(series[0].samples.len() == 4);
-        assert!(series[0].samples[0].0 == 0);
-        assert!(series[0].samples[1].0 == 30_000);
-        assert!(series[0].samples[2].0 == 60_000);
-        assert!(series[0].samples[3].0 == 90_000);
+        check!(series.len() == 1);
+        let timestamps = series[0]
+            .samples
+            .iter()
+            .map(|(ts_ms, _)| *ts_ms)
+            .collect::<Vec<_>>();
+        check!(timestamps == [0, 30_000, 60_000, 90_000]);
     }
 
     #[tokio::test]
@@ -16737,10 +16745,10 @@ mod tests {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert!(samples.len() == 1);
-        assert!(samples[0].labels.get("__name__").is_none());
-        assert!(samples[0].labels.get("job") == Some("api"));
-        assert!(approx_eq(float_value(&samples[0].value), 5.0));
+        check!(samples.len() == 1);
+        check!(samples[0].labels.get("__name__").is_none());
+        check!(samples[0].labels.get("job") == Some("api"));
+        check!(approx_eq(float_value(&samples[0].value), 5.0));
     }
 
     /// Compare two `RangeMatrix` results for the range parity test, bit-exact on
@@ -20531,11 +20539,11 @@ mod tests {
         else {
             panic!("expected vector for min");
         };
-        assert!(
+        check!(
             sample_by_group(&min_samples, "hist").is_none(),
             "min: all-histogram group must be absent (histograms ignored), got: {min_samples:?}"
         );
-        assert!(
+        check!(
             approx_eq(
                 float_value(
                     &sample_by_group(&min_samples, "float")
@@ -20546,7 +20554,7 @@ mod tests {
             ),
             "min: g=float must be 2"
         );
-        assert!(
+        check!(
             approx_eq(
                 float_value(
                     &sample_by_group(&min_samples, "mixed")
@@ -21194,18 +21202,12 @@ mod tests {
             .iter()
             .map(|s| (s.labels.get("job").unwrap(), float_value(&s.value)))
             .collect();
-        assert!(
-            by_job[&"api"].to_bits() == 30.0_f64.to_bits(),
-            "timestamp api row"
-        );
-        assert!(
-            by_job[&"db"].to_bits() == 60.0_f64.to_bits(),
-            "timestamp db row"
-        );
-        assert!(
-            by_job[&"nan"].to_bits() == 45.0_f64.to_bits(),
-            "timestamp keeps NaN row"
-        );
+        for (job, want) in [("api", 30.0_f64), ("db", 60.0), ("nan", 45.0)] {
+            check!(
+                by_job[&job].to_bits() == want.to_bits(),
+                "timestamp {job} row"
+            );
+        }
     }
 
     /// Corpus green-through-the-public-entry-points guard.

@@ -8,7 +8,7 @@
 
 use crate::share_coordinator::persistence::{ShareSnapshotValue, ShareUpdateValue, StateBatch};
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SharePartitionState {
     pub state_epoch: i32,
     pub leader_epoch: i32,
@@ -107,14 +107,19 @@ mod tests {
             state_batches: vec![batch(30, 39)],
         });
 
-        assert!(s.start_offset == 20);
-        assert!(s.leader_epoch == 4);
-        assert!(s.delivery_complete_count == 7);
         // batch(0,9) and batch(10,19) dropped (last_offset < 20); batch(20,29)
         // retained; batch(30,39) added.
-        let firsts: Vec<i64> = s.state_batches.iter().map(|b| b.first_offset).collect();
-        assert!(firsts == vec![20, 30]);
-        assert!(s.updates_since_snapshot == 1);
+        let expected = SharePartitionState {
+            state_epoch: 2,
+            leader_epoch: 4,
+            start_offset: 20,
+            delivery_complete_count: 7,
+            state_batches: vec![batch(20, 29), batch(30, 39)],
+            snapshot_epoch: 1,
+            last_snapshot_offset: 0,
+            updates_since_snapshot: 1,
+        };
+        assert!(s == expected);
     }
 
     #[test]
@@ -170,8 +175,14 @@ mod tests {
             ..Default::default()
         };
         let snap = s.to_snapshot();
-        assert!(snap.snapshot_epoch == 5);
-        assert!(snap.start_offset == 10);
-        assert!(snap.state_batches == s.state_batches);
+        let expected = ShareSnapshotValue {
+            snapshot_epoch: 5,
+            state_epoch: 1,
+            leader_epoch: 0,
+            start_offset: 10,
+            delivery_complete_count: 0,
+            state_batches: vec![batch(10, 19)],
+        };
+        assert!(snap == expected);
     }
 }

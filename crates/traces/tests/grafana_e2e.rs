@@ -11,7 +11,7 @@
 //!     datasource proxy -> `PromQL` result).
 //!
 //! It is ignored by default because it pulls and runs upstream Docker images
-//! (`grafana/grafana`, `prom/prometheus`). Run explicitly with:
+//! (`mirror.gcr.io/grafana/grafana`, `mirror.gcr.io/prom/prometheus`). Run explicitly with:
 //!
 //! `cargo test -p crabka-traces --test grafana_e2e -- --ignored --nocapture`
 //!
@@ -49,7 +49,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use assert2::assert;
+use assert2::{assert, check};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use base64::Engine as _;
@@ -100,6 +100,13 @@ struct TraceByIdResponse {
 
 const TENANT: &str = "tenant-a";
 const DOCKER_HOST_ALIAS: &str = "host.testcontainers.internal";
+/// Grafana HTTP port inside the container.
+const GRAFANA_HTTP_PORT: u16 = 3000;
+/// Prometheus HTTP port inside the container.
+const PROM_HTTP_PORT: u16 = 9090;
+/// Grafana admin username AND password (set via `GF_SECURITY_ADMIN_PASSWORD`,
+/// used as basic-auth on every Grafana API call).
+const GRAFANA_ADMIN: &str = "admin";
 const GRAFANA_TEMPO_DATASOURCE_UID: &str = "crabka-traces";
 const GRAFANA_PROM_DATASOURCE_UID: &str = "crabka-service-graph";
 /// `< 5` spans in the "big" trace -> forces a PARTIAL trace-by-id response.
@@ -690,41 +697,55 @@ fn assert_all_doors_present(records: &[SpanRecord]) {
     // D3 (Zipkin): serviceName -> resource, error tag -> ERROR status,
     // µs -> ns conversion, trace-id pass-through.
     let zipkin = by_name("zipkin op");
-    assert!(zipkin.span.trace_id == [0x33; 16]);
-    assert!(zipkin.span.start_ns == 1_000_000);
-    assert!(zipkin.span.duration_ns == 2_000_000);
-    assert!(zipkin.span.status.as_i32() == 2, "zipkin error -> ERROR");
-    assert!(resource_attr(&zipkin.span, "service.name") == Some("zipkin-svc"));
-
-    // D4 (Jaeger binary thrift): process.service_name -> resource service.name,
-    // error tag -> ERROR status (binary decode path).
-    let binary = by_name("GET /binary");
-    assert!(resource_attr(&binary.span, "service.name") == Some("checkout"));
-    assert!(
-        binary.span.status.as_i32() == 2,
-        "jaeger binary error -> ERROR"
+    check!(
+        zipkin.span.trace_id == [0x33; 16],
+        "zipkin decode fidelity (trace-id pass-through)"
+    );
+    check!(
+        zipkin.span.start_ns == 1_000_000,
+        "zipkin decode fidelity (start µs -> ns conversion)"
+    );
+    check!(
+        zipkin.span.duration_ns == 2_000_000,
+        "zipkin decode fidelity (duration µs -> ns conversion)"
+    );
+    check!(
+        zipkin.span.status.as_i32() == 2,
+        "zipkin decode fidelity (error tag -> ERROR status)"
+    );
+    check!(
+        resource_attr(&zipkin.span, "service.name") == Some("zipkin-svc"),
+        "zipkin decode fidelity (serviceName -> resource)"
     );
 
-    // D5 (OTLP gRPC): resource service.name from the independent gRPC OTLP body.
-    let otlp_grpc = by_name("otlp grpc op");
-    assert!(resource_attr(&otlp_grpc.span, "service.name") == Some("grpc-otlp-svc"));
-
-    // D6 (Jaeger gRPC): process.service_name -> resource, error bool -> ERROR.
-    let jaeger_grpc = by_name("jaeger grpc op");
-    assert!(resource_attr(&jaeger_grpc.span, "service.name") == Some("jaeger-grpc-svc"));
-    assert!(
-        jaeger_grpc.span.status.as_i32() == 2,
-        "jaeger gRPC error -> ERROR"
-    );
-
-    // D7 (Jaeger compact thrift): the compact decode path (shared with the UDP
-    // datagram receiver). process.service_name -> resource, error -> ERROR.
-    let compact = by_name("compact thrift op");
-    assert!(resource_attr(&compact.span, "service.name") == Some("compact-svc"));
-    assert!(
-        compact.span.status.as_i32() == 2,
-        "jaeger compact error -> ERROR"
-    );
+    // Per-door decode fidelity: process/resource service.name mapping, plus
+    // (where expected) error tag/bool -> ERROR status (`Some(2)`).
+    let cases = [
+        // D4 (Jaeger binary thrift): process.service_name -> resource
+        // service.name, error tag -> ERROR status (binary decode path).
+        ("GET /binary", "checkout", Some(2)),
+        // D5 (OTLP gRPC): resource service.name from the independent gRPC OTLP
+        // body (no error expectation).
+        ("otlp grpc op", "grpc-otlp-svc", None),
+        // D6 (Jaeger gRPC): process.service_name -> resource, error bool -> ERROR.
+        ("jaeger grpc op", "jaeger-grpc-svc", Some(2)),
+        // D7 (Jaeger compact thrift): the compact decode path (shared with the
+        // UDP datagram receiver). process.service_name -> resource, error -> ERROR.
+        ("compact thrift op", "compact-svc", Some(2)),
+    ];
+    for (name, service, error_status) in cases {
+        let record = by_name(name);
+        assert!(
+            resource_attr(&record.span, "service.name") == Some(service),
+            "door span {name:?} service.name"
+        );
+        if let Some(expected) = error_status {
+            assert!(
+                record.span.status.as_i32() == expected,
+                "door span {name:?}: error -> ERROR"
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -886,33 +907,37 @@ async fn start_crabka_querier(records: &[SpanRecord]) -> TestResult<CrabkaPair> 
 
 async fn start_grafana() -> TestResult<ContainerAsync<GenericImage>> {
     let tag = std::env::var("CRABKA_GRAFANA_IMAGE_TAG").unwrap_or_else(|_| "latest".into());
-    Ok(GenericImage::new("grafana/grafana".to_string(), tag)
-        .with_exposed_port(3000.tcp())
-        .with_wait_for(WaitFor::seconds(5))
-        .with_env_var("GF_SECURITY_ADMIN_PASSWORD", "admin")
-        .with_host(DOCKER_HOST_ALIAS, Host::HostGateway)
-        .start()
-        .await?)
+    Ok(
+        GenericImage::new("mirror.gcr.io/grafana/grafana".to_string(), tag)
+            .with_exposed_port(GRAFANA_HTTP_PORT.tcp())
+            .with_wait_for(WaitFor::seconds(5))
+            .with_env_var("GF_SECURITY_ADMIN_PASSWORD", GRAFANA_ADMIN)
+            .with_host(DOCKER_HOST_ALIAS, Host::HostGateway)
+            .start()
+            .await?,
+    )
 }
 
 async fn start_prometheus() -> TestResult<ContainerAsync<GenericImage>> {
     let tag = std::env::var("CRABKA_PROM_IMAGE_TAG").unwrap_or_else(|_| "latest".into());
-    Ok(GenericImage::new("prom/prometheus".to_string(), tag)
-        .with_exposed_port(9090.tcp())
-        .with_wait_for(WaitFor::message_on_stderr(
-            "Server is ready to receive web requests",
-        ))
-        .with_copy_to(
-            CopyTargetOptions::new("/etc/prometheus/prometheus.yml").with_mode(0o644),
-            CopyDataSource::Data(PROM_CONFIG.as_bytes().to_vec()),
-        )
-        .with_cmd([
-            "--web.enable-remote-write-receiver",
-            "--config.file=/etc/prometheus/prometheus.yml",
-            "--storage.tsdb.retention.time=1h",
-        ])
-        .start()
-        .await?)
+    Ok(
+        GenericImage::new("mirror.gcr.io/prom/prometheus".to_string(), tag)
+            .with_exposed_port(PROM_HTTP_PORT.tcp())
+            .with_wait_for(WaitFor::message_on_stderr(
+                "Server is ready to receive web requests",
+            ))
+            .with_copy_to(
+                CopyTargetOptions::new("/etc/prometheus/prometheus.yml").with_mode(0o644),
+                CopyDataSource::Data(PROM_CONFIG.as_bytes().to_vec()),
+            )
+            .with_cmd([
+                "--web.enable-remote-write-receiver",
+                "--config.file=/etc/prometheus/prometheus.yml",
+                "--storage.tsdb.retention.time=1h",
+            ])
+            .start()
+            .await?,
+    )
 }
 
 async fn mapped_base_url(
@@ -944,7 +969,7 @@ async fn wait_for_http_ok(client: &reqwest::Client, base: &str, paths: &[&str]) 
 async fn get_json(client: &reqwest::Client, url: &str) -> TestResult<JsonValue> {
     let resp = client
         .get(url)
-        .basic_auth("admin", Some("admin"))
+        .basic_auth(GRAFANA_ADMIN, Some(GRAFANA_ADMIN))
         .send()
         .await?;
     let status = resp.status();
@@ -960,7 +985,7 @@ async fn get_json(client: &reqwest::Client, url: &str) -> TestResult<JsonValue> 
 async fn get_text(client: &reqwest::Client, url: &str) -> TestResult<(ReqwestStatusCode, String)> {
     let resp = client
         .get(url)
-        .basic_auth("admin", Some("admin"))
+        .basic_auth(GRAFANA_ADMIN, Some(GRAFANA_ADMIN))
         .send()
         .await?;
     let status = resp.status();
@@ -1085,7 +1110,7 @@ async fn grafana_e2e_full_surface() -> TestResult {
 
     // ----- §4: Grafana + Tempo datasource + every Tempo endpoint. -----
     let grafana = start_grafana().await?;
-    let grafana_base = mapped_base_url(&grafana, 3000).await?;
+    let grafana_base = mapped_base_url(&grafana, GRAFANA_HTTP_PORT).await?;
     wait_for_http_ok(&client, &grafana_base, &["/api/health"]).await?;
 
     let tempo_ds = json!({
@@ -1100,7 +1125,7 @@ async fn grafana_e2e_full_surface() -> TestResult {
     });
     client
         .post(format!("{grafana_base}/api/datasources"))
-        .basic_auth("admin", Some("admin"))
+        .basic_auth(GRAFANA_ADMIN, Some(GRAFANA_ADMIN))
         .json(&tempo_ds)
         .send()
         .await?
@@ -1117,20 +1142,19 @@ async fn grafana_e2e_full_surface() -> TestResult {
         format!("{grafana_base}/api/datasources/proxy/uid/{GRAFANA_TEMPO_DATASOURCE_UID}/{path}")
     };
 
-    // E1 — /api/echo.
-    let (status, body) = get_text(&client, &proxy("api/echo")).await?;
-    assert!(status == ReqwestStatusCode::OK);
-    assert!(body == "echo");
-
-    // E2 — /ready.
-    let (status, body) = get_text(&client, &proxy("ready")).await?;
-    assert!(status == ReqwestStatusCode::OK);
-    assert!(body == "ready");
-
-    // E3 — /status (alias of /ready).
-    let (status, body) = get_text(&client, &proxy("status")).await?;
-    assert!(status == ReqwestStatusCode::OK);
-    assert!(body == "ready");
+    // E1 — /api/echo; E2 — /ready; E3 — /status (alias of /ready).
+    let cases = [
+        ("api/echo", "echo"), // E1
+        ("ready", "ready"),   // E2
+        ("status", "ready"),  // E3
+    ];
+    for (path, expected_body) in cases {
+        let (status, body) = get_text(&client, &proxy(path)).await?;
+        assert!(
+            (status, body.as_str()) == (ReqwestStatusCode::OK, expected_body),
+            "endpoint {path:?}"
+        );
+    }
 
     // E4 — trace-by-id, Trace A: COMPLETE, all 4 spans, root span present. The
     // in-process store groups a trace under its single root service, so the
@@ -1141,12 +1165,16 @@ async fn grafana_e2e_full_surface() -> TestResult {
         &proxy(&format!("api/v2/traces/{TRACE_A_HEX}?{range}")),
     )
     .await?;
-    assert!(trace_a["status"].as_str() == Some("COMPLETE"));
-    assert!(trace_a["message"].as_str() == Some(""));
-    assert!(
-        trace_a["trace"]["resourceSpans"]
-            .as_array()
-            .is_some_and(|spans| spans.len() == 1),
+    check!(
+        trace_a["status"].as_str() == Some("COMPLETE"),
+        "expected a COMPLETE trace: {trace_a}"
+    );
+    check!(
+        trace_a["message"].as_str() == Some(""),
+        "expected an empty message on the COMPLETE trace: {trace_a}"
+    );
+    check!(
+        trace_a["trace"]["resourceSpans"].as_array().map(Vec::len) == Some(1),
         "expected one resourceSpan (root service): {trace_a}"
     );
     let trace_a_spans = trace_a["trace"]["resourceSpans"]
@@ -1339,11 +1367,17 @@ async fn grafana_e2e_full_surface() -> TestResult {
             "missing scope {required}: {tags}"
         );
     }
-    let resource_tags = scope_tags(&tags, "resource");
-    assert!(resource_tags.contains(&"service.name".to_string()));
-    let intrinsic_tags = scope_tags(&tags, "intrinsic");
-    assert!(intrinsic_tags.contains(&"span:name".to_string()));
-    assert!(intrinsic_tags.contains(&"span:duration".to_string()));
+    let cases = [
+        ("resource", "service.name"),
+        ("intrinsic", "span:name"),
+        ("intrinsic", "span:duration"),
+    ];
+    for (scope, tag) in cases {
+        assert!(
+            scope_tags(&tags, scope).contains(&tag.to_string()),
+            "missing {scope} tag {tag}: {tags}"
+        );
+    }
 
     // E14 — v2 tags scoped to resource only.
     let tags = get_json(
@@ -1600,9 +1634,9 @@ async fn grafana_e2e_full_surface() -> TestResult {
 
     // ----- §5: Service Graph full loop through real Prometheus. -----
     let prom = start_prometheus().await?;
-    let prom_mapped = mapped_base_url(&prom, 9090).await?;
+    let prom_mapped = mapped_base_url(&prom, PROM_HTTP_PORT).await?;
     wait_for_http_ok(&client, &prom_mapped, &["/-/ready"]).await?;
-    let prom_port = prom.get_host_port_ipv4(9090).await?;
+    let prom_port = prom.get_host_port_ipv4(PROM_HTTP_PORT).await?;
     let rw_url = format!("{prom_mapped}/api/v1/write");
 
     // Drive the real metrics-generator chain: EdgeStore -> SeriesPayload ->
@@ -1651,7 +1685,7 @@ async fn grafana_e2e_full_surface() -> TestResult {
     });
     client
         .post(format!("{grafana_base}/api/datasources"))
-        .basic_auth("admin", Some("admin"))
+        .basic_auth(GRAFANA_ADMIN, Some(GRAFANA_ADMIN))
         .json(&prom_ds)
         .send()
         .await?
@@ -1677,17 +1711,17 @@ async fn grafana_e2e_full_surface() -> TestResult {
     )
     .await?;
     let edge = &result["data"]["result"][0];
-    assert!(
+    check!(
         edge["value"][1].as_str() == Some("1"),
-        "edge request total: {result}"
+        "service-graph request_total edge total: {result}"
     );
-    assert!(
+    check!(
         edge["metric"]["client"].as_str() == Some("checkout-frontend"),
-        "edge client label: {result}"
+        "service-graph request_total edge client label: {result}"
     );
-    assert!(
+    check!(
         edge["metric"]["server"].as_str() == Some("cart-backend"),
-        "edge server label: {result}"
+        "service-graph request_total edge server label: {result}"
     );
 
     // The server-side latency histogram fan-out also reached Prometheus.

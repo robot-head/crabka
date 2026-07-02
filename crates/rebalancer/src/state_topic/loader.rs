@@ -174,9 +174,12 @@ mod tests {
     use super::*;
     use assert2::assert;
     use bytes::Bytes;
+    use crabka_protocol::UnknownTaggedFields;
+    use crabka_protocol::owned::fetch_request::ReplicaState;
     use crabka_protocol::owned::fetch_response::{
         FetchResponse, FetchableTopicResponse, PartitionData,
     };
+    use crabka_protocol::primitives::uuid::Uuid;
     use crabka_protocol::records::{Record, RecordBatch, RecordsPayload};
     use std::time::Duration;
 
@@ -207,23 +210,51 @@ mod tests {
     #[test]
     fn fetch_request_targets_state_topic_partition_with_consumer_limits() {
         let req = fetch_request("__crabka_state", 123);
-        assert!(req.replica_id == -1);
-        assert!(req.max_wait_ms == 0);
-        assert!(req.min_bytes == 0);
-        assert!(req.max_bytes == 1_048_576);
-        assert!(req.topics.len() == 1);
-        assert!(req.topics[0].topic == "__crabka_state");
-        assert!(req.topics[0].partitions.len() == 1);
-        assert!(req.topics[0].partitions[0].partition == 0);
-        assert!(req.topics[0].partitions[0].fetch_offset == 123);
-        assert!(req.topics[0].partitions[0].partition_max_bytes == 1_048_576);
+        assert!(
+            req == FetchRequest {
+                replica_id: -1,
+                max_wait_ms: 0,
+                min_bytes: 0,
+                max_bytes: 1_048_576,
+                isolation_level: 0,
+                session_id: 0,
+                session_epoch: -1,
+                topics: vec![FetchTopic {
+                    topic: "__crabka_state".into(),
+                    topic_id: Uuid([0; 16]),
+                    partitions: vec![FetchPartition {
+                        partition: 0,
+                        current_leader_epoch: -1,
+                        fetch_offset: 123,
+                        last_fetched_epoch: -1,
+                        log_start_offset: -1,
+                        partition_max_bytes: 1_048_576,
+                        replica_directory_id: Uuid([0; 16]),
+                        high_watermark: i64::MAX,
+                        unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                    }],
+                    unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                }],
+                forgotten_topics_data: vec![],
+                rack_id: String::new(),
+                cluster_id: None,
+                replica_state: ReplicaState {
+                    replica_id: -1,
+                    replica_epoch: -1,
+                    unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                },
+                unknown_tagged_fields: UnknownTaggedFields(vec![]),
+            }
+        );
     }
 
     #[test]
     fn should_mark_loaded_only_at_quiet_threshold_before_loaded() {
-        assert!(!should_mark_loaded(4, false));
-        assert!(should_mark_loaded(5, false));
-        assert!(!should_mark_loaded(5, true));
+        for (quiet_polls, is_loaded, want) in
+            [(4, false, false), (5, false, true), (5, true, false)]
+        {
+            assert!(should_mark_loaded(quiet_polls, is_loaded) == want);
+        }
     }
 
     #[test]
@@ -304,9 +335,21 @@ mod tests {
 
         let records = fetched_records_from_response(&fetch_response(0, Some(payload))).unwrap();
 
-        assert!(records.len() == 2);
-        assert!(records[0].0 == 10);
-        assert!(records[1].0 == 12);
+        assert!(
+            records
+                == vec![
+                    (
+                        10,
+                        Some(STATE_KEY.as_bytes().to_vec()),
+                        Some(b"one".to_vec())
+                    ),
+                    (
+                        12,
+                        Some(STATE_KEY.as_bytes().to_vec()),
+                        Some(b"two".to_vec())
+                    ),
+                ]
+        );
     }
 
     #[tokio::test]

@@ -339,7 +339,7 @@ HTTP responder.
 ### 4.6 Kind e2e (1)
 
 `kind-opa-authorization`:
-- Apply the `openpolicyagent/opa:0.65.0` container as a Deployment with
+- Apply the `mirror.gcr.io/openpolicyagent/opa:0.65.0` container as a Deployment with
   a hardcoded Rego policy allowing only `User:alice` to write to topic
   `permitted-topic`.
 - Apply a Kafka cluster with

@@ -621,7 +621,7 @@ fn ns_to_seconds(ns: i64) -> f64 {
 mod tests {
     use std::time::Duration;
 
-    use assert2::assert;
+    use assert2::{assert, check};
 
     use super::*;
     use crate::metricsgen::config::MetricsGenConfig;
@@ -731,26 +731,19 @@ mod tests {
             .iter()
             .find(|s| s.name == "traces_service_graph_request_total")
             .unwrap();
-        assert!(
-            req.labels
-                .iter()
-                .any(|(k, v)| k == "client" && v == "frontend")
+        assert_eq!(
+            req.labels,
+            [
+                ("client".to_string(), "frontend".to_string()),
+                ("connection_type".to_string(), "unset".to_string()),
+                ("server".to_string(), "backend".to_string()),
+            ]
         );
-        assert!(
-            req.labels
-                .iter()
-                .any(|(k, v)| k == "server" && v == "backend")
-        );
-        assert!(
-            req.labels
-                .iter()
-                .any(|(k, v)| k == "connection_type" && v == "unset")
-        );
-        assert!(
+        check!(
             (histogram_sum(&out, "traces_service_graph_request_client_seconds") - 0.010).abs()
                 < 1e-9
         );
-        assert!(
+        check!(
             (histogram_sum(&out, "traces_service_graph_request_server_seconds") - 0.008).abs()
                 < 1e-9
         );
@@ -780,24 +773,16 @@ mod tests {
         assert!(store.record_span(&server, 1) == RecordOutcome::Completed);
 
         let out = store.drain(1_000);
-        assert!(
-            (histogram_bucket_value(&out, "traces_service_graph_request_client_seconds", 0.008)
-                - 0.0)
-                .abs()
-                < 1e-9
-        );
-        assert!(
-            (histogram_bucket_value(&out, "traces_service_graph_request_client_seconds", 0.016)
-                - 1.0)
-                .abs()
-                < 1e-9
-        );
-        assert!(
-            (histogram_bucket_value(&out, "traces_service_graph_request_server_seconds", 0.008)
-                - 1.0)
-                .abs()
-                < 1e-9
-        );
+        for (name, le, want) in [
+            ("traces_service_graph_request_client_seconds", 0.008, 0.0),
+            ("traces_service_graph_request_client_seconds", 0.016, 1.0),
+            ("traces_service_graph_request_server_seconds", 0.008, 1.0),
+        ] {
+            check!(
+                (histogram_bucket_value(&out, name, le) - want).abs() < 1e-9,
+                "case {name} le={le}"
+            );
+        }
     }
 
     #[test]
@@ -874,10 +859,10 @@ mod tests {
             StatusCode::Ok,
             1,
         );
-        assert!(store.record_span(&client, 0) == RecordOutcome::Recorded);
+        check!(store.record_span(&client, 0) == RecordOutcome::Recorded);
 
-        assert!(store.expire(5_000_000_000) == 0);
-        assert!(store.expire(10_000_000_000) == 1);
+        check!(store.expire(5_000_000_000) == 0);
+        check!(store.expire(10_000_000_000) == 1);
 
         let out = store.drain(1_000);
         assert!((counter(&out, "traces_service_graph_unpaired_spans_total") - 1.0).abs() < 1e-9);
@@ -1099,15 +1084,16 @@ mod tests {
 
         let out = store.drain(1_000);
         let labels = labels_for(&out, "traces_service_graph_request_total");
-        assert!(
-            labels
-                .iter()
-                .any(|(k, v)| k == "connection_type" && v == "virtual_node")
-        );
         // peer.service ("db-proxy") backfilled into the server label even though
         // the real server span ("backend") already set it on the create path.
-        assert!(labels.iter().any(|(k, v)| k == "server" && v == "db-proxy"));
-        assert!(labels.iter().any(|(k, v)| k == "client" && v == "frontend"));
+        assert_eq!(
+            labels,
+            [
+                ("client".to_string(), "frontend".to_string()),
+                ("connection_type".to_string(), "virtual_node".to_string()),
+                ("server".to_string(), "db-proxy".to_string()),
+            ]
+        );
     }
 
     #[test]
@@ -1145,18 +1131,18 @@ mod tests {
 
         let out = store.drain(1_000);
         let labels = labels_for(&out, "traces_service_graph_request_total");
-        assert!(
-            labels
-                == [
-                    ("client".to_string(), "publisher".to_string()),
-                    (
-                        "connection_type".to_string(),
-                        "messaging_system".to_string(),
-                    ),
-                    ("server".to_string(), "worker".to_string()),
-                ]
+        assert_eq!(
+            labels,
+            [
+                ("client".to_string(), "publisher".to_string()),
+                (
+                    "connection_type".to_string(),
+                    "messaging_system".to_string(),
+                ),
+                ("server".to_string(), "worker".to_string()),
+            ]
         );
-        assert!(
+        check!(
             (histogram_sum(
                 &out,
                 "traces_service_graph_request_messaging_system_seconds"
@@ -1164,7 +1150,7 @@ mod tests {
                 .abs()
                 < 1e-9
         );
-        assert!(
+        check!(
             (histogram_count(
                 &out,
                 "traces_service_graph_request_messaging_system_seconds"

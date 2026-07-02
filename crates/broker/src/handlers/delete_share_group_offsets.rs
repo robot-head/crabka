@@ -167,3 +167,188 @@ fn encode_top_level(version: i16, error_code: i16) -> Result<Bytes, BrokerError>
     resp.encode(&mut buf, version)?;
     Ok(buf.freeze())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert2::assert;
+    use crabka_protocol::UnknownTaggedFields;
+    use crabka_protocol::owned::delete_share_group_offsets_request::DeleteShareGroupOffsetsRequestTopic;
+    use crabka_protocol::owned::delete_share_group_offsets_response;
+    use crabka_security::{AuthMethod, Principal};
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    use crate::authorizer::{AuthorizationRequest, Authorizer};
+    use crate::config::BrokerConfig;
+
+    #[derive(Debug)]
+    struct DenyAll;
+
+    impl Authorizer for DenyAll {
+        fn authorize(
+            &self,
+            _source: &dyn crabka_authz::AclSource,
+            _req: &AuthorizationRequest<'_>,
+        ) -> AuthorizationResult {
+            AuthorizationResult::Deny
+        }
+    }
+
+    fn request(group_id: &str, topics: &[&str]) -> DeleteShareGroupOffsetsRequest {
+        DeleteShareGroupOffsetsRequest {
+            group_id: group_id.into(),
+            topics: topics
+                .iter()
+                .map(|topic_name| DeleteShareGroupOffsetsRequestTopic {
+                    topic_name: (*topic_name).into(),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    fn encode_request(req: &DeleteShareGroupOffsetsRequest) -> Bytes {
+        let version = delete_share_group_offsets_response::MAX_VERSION;
+        let mut buf = BytesMut::with_capacity(req.encoded_len(version));
+        req.encode(&mut buf, version).expect("encode request");
+        buf.freeze()
+    }
+
+    fn decode_response(bytes: &Bytes) -> DeleteShareGroupOffsetsResponse {
+        let version = delete_share_group_offsets_response::MAX_VERSION;
+        let mut cur: &[u8] = bytes.as_ref();
+        let resp =
+            DeleteShareGroupOffsetsResponse::decode(&mut cur, version).expect("decode response");
+        assert!(cur.is_empty(), "response decoder consumed all bytes");
+        resp
+    }
+
+    fn test_context<'a>(
+        principal: &'a Principal,
+        peer: &'a SocketAddr,
+    ) -> crate::handlers::RequestContext<'a> {
+        crate::handlers::RequestContext {
+            principal,
+            peer,
+            client_id: "admin-client",
+            sendfile_capable: false,
+            connection_listener_name: "PLAINTEXT",
+        }
+    }
+
+    async fn start_broker(
+        authorizer: Arc<dyn Authorizer>,
+        share_enabled: bool,
+    ) -> (crate::broker::BrokerHandle, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
+        cfg.authorizer = authorizer;
+        cfg.share_group.enable = share_enabled;
+        let handle = Broker::start(cfg).await.expect("start broker");
+        (handle, dir)
+    }
+
+    fn principal() -> Principal {
+        Principal {
+            name: "alice".into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn encode_top_level_preserves_error_fields() {
+        let resp = encode_top_level(
+            delete_share_group_offsets_response::MAX_VERSION,
+            codes::UNSUPPORTED_VERSION,
+        )
+        .expect("encode");
+        let resp = decode_response(&resp);
+
+        let expected = DeleteShareGroupOffsetsResponse {
+            throttle_time_ms: 0,
+            error_code: codes::UNSUPPORTED_VERSION,
+            error_message: None,
+            responses: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
+    }
+
+    #[tokio::test]
+    async fn handle_error_scenarios_preserve_expected_rows() {
+        type Case<'a> = (
+            &'a str,
+            Arc<dyn Authorizer>,
+            bool,
+            Vec<&'a str>,
+            DeleteShareGroupOffsetsResponse,
+        );
+        let version = delete_share_group_offsets_response::MAX_VERSION;
+        let cases: Vec<Case<'_>> = vec![
+            (
+                "disabled feature returns top-level unsupported version",
+                Arc::new(crate::authorizer::AllowAllAuthorizer),
+                false,
+                vec!["missing"],
+                DeleteShareGroupOffsetsResponse {
+                    throttle_time_ms: 0,
+                    error_code: codes::UNSUPPORTED_VERSION,
+                    error_message: None,
+                    responses: Vec::new(),
+                    unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                },
+            ),
+            (
+                "denied group returns top-level authorization failure",
+                Arc::new(DenyAll),
+                true,
+                vec!["missing"],
+                DeleteShareGroupOffsetsResponse {
+                    throttle_time_ms: 0,
+                    error_code: codes::GROUP_AUTHORIZATION_FAILED,
+                    error_message: None,
+                    responses: Vec::new(),
+                    unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                },
+            ),
+            (
+                "unknown topic preserves topic fields",
+                Arc::new(crate::authorizer::AllowAllAuthorizer),
+                true,
+                vec!["missing-topic"],
+                DeleteShareGroupOffsetsResponse {
+                    throttle_time_ms: 0,
+                    error_code: codes::NONE,
+                    error_message: None,
+                    responses: vec![DeleteShareGroupOffsetsResponseTopic {
+                        topic_name: "missing-topic".into(),
+                        topic_id: Uuid::default(),
+                        error_code: codes::UNKNOWN_TOPIC_OR_PARTITION,
+                        error_message: None,
+                        unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                    }],
+                    unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                },
+            ),
+        ];
+        for (case, authorizer, share_enabled, topics, expected) in cases {
+            let (broker_handle, _dir) = start_broker(authorizer, share_enabled).await;
+            let broker = broker_handle.broker_arc_for_test();
+            let principal = principal();
+            let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+            let ctx = test_context(&principal, &peer);
+            let req_bytes = encode_request(&request("g1", &topics));
+
+            let resp = handle(&broker, version, 1, &req_bytes, &ctx)
+                .await
+                .expect("handle");
+            let resp = decode_response(&resp);
+
+            assert!(resp == expected, "case: {case}");
+            broker_handle.shutdown().await;
+        }
+    }
+}

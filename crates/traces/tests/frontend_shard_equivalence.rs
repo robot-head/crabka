@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use assert2::assert;
+use assert2::{assert, check};
 use crabka_traces::frontend::QueryFrontend;
 use crabka_traces::frontend::backend::{MockQuerier, SearchPartial};
 use crabka_traces::frontend::config::FrontendConfig;
@@ -91,23 +91,23 @@ async fn sharded_search_equals_unsharded() {
 
     let resp = qf.search("t1", "{ }", 0, 300, 20, 10).await.unwrap();
 
-    assert!(qf.backend_ref().search_calls().len() == 4);
+    check!(qf.backend_ref().search_calls().len() == 4);
     // Unsharded baseline: trace 01 (spans 01,02 reunioned) + trace 02 (span 03).
-    assert!(resp.traces.len() == 2);
+    check!(resp.traces.len() == 2);
     // Newest-first: trace 02 starts at 150, trace 01 at min(50,40)=40.
-    assert!(resp.traces[0].trace_id == "02");
-    assert!(resp.traces[1].trace_id == "01");
+    check!(resp.traces[0].trace_id == "02");
+    check!(resp.traces[1].trace_id == "01");
     let t1_spans: usize = resp.traces[1]
         .span_sets
         .iter()
         .map(|ss| ss.spans.len())
         .sum();
-    assert!(t1_spans == 2);
+    check!(t1_spans == 2);
     // metrics: 4 total jobs, 4 completed, 2 blocks, bytes summed = 600.
-    assert!(resp.metrics.total_jobs == 4);
-    assert!(resp.metrics.completed_jobs == 4);
-    assert!(resp.metrics.total_blocks == 2);
-    assert!(resp.metrics.inspected_bytes == 600);
+    check!(resp.metrics.total_jobs == 4);
+    check!(resp.metrics.completed_jobs == 4);
+    check!(resp.metrics.total_blocks == 2);
+    check!(resp.metrics.inspected_bytes == 600);
 }
 
 #[tokio::test]

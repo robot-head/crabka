@@ -96,7 +96,7 @@ async fn grafana_loki_datasource_queries_crabka_querier_proxy() {
     let http = reqwest::Client::new();
     wait_for_crabka_ready(&http, querier_addr).await;
 
-    let grafana = GenericImage::new("grafana/grafana", "11.5.2")
+    let grafana = GenericImage::new("mirror.gcr.io/grafana/grafana", "11.5.2")
         .with_exposed_port(GRAFANA_PORT.tcp())
         .with_wait_for(WaitFor::seconds(5))
         .with_env_var("GF_SECURITY_ADMIN_USER", GRAFANA_USER)

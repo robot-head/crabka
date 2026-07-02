@@ -263,8 +263,13 @@ mod tests {
         .encode_v0(&mut exact);
         let mut cur: &[u8] = &exact;
         let decoded = CrabkaMetadataFetchRequest::decode_v0(&mut cur).unwrap();
-        assert!(decoded.fetch_offset == 9);
-        assert!(decoded.max_bytes == 512);
+        assert!(
+            decoded
+                == CrabkaMetadataFetchRequest {
+                    fetch_offset: 9,
+                    max_bytes: 512,
+                }
+        );
         assert!(cur.is_empty());
     }
 

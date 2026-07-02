@@ -29,7 +29,7 @@ coherently throughout.
 
 Per CLAUDE.md, **Kafka compatibility is the constraint that matters**: where the
 classic and next-gen models differ, this follows Apache Kafka 4.0, verified
-empirically against `apache/kafka:4.0.0` rather than the wiki.
+empirically against `mirror.gcr.io/apache/kafka:4.0.0` rather than the wiki.
 
 ## What already exists (slices B + C)
 
@@ -56,7 +56,7 @@ convert-then-serve instead, and persist + replay the flip.
 ## Trigger semantics (Kafka-faithful)
 
 The group **type is re-evaluated after every membership change**, not on a single
-RPC. The precise rules (to be confirmed empirically against `apache/kafka:4.0.0`):
+RPC. The precise rules (to be confirmed empirically against `mirror.gcr.io/apache/kafka:4.0.0`):
 
 - **A consumer-type group can host classic members.** A classic `JoinGroup`
   arriving at a consumer group does **not** downgrade it — the member joins as a
@@ -251,7 +251,7 @@ New test in `crates/broker/tests/jvm_consumer_group_next_gen.rs`, single-broker
 control-plane (runs locally on the Mac per project memory — consumer coordination
 is control-plane, no inter-broker replication), `#[ignore = "requires Docker"]`.
 
-A real `cp-kafka:7.4.0` **classic** consumer and a real `apache/kafka:4.0.0`
+A real `cp-kafka:7.4.0` **classic** consumer and a real `mirror.gcr.io/apache/kafka:4.0.0`
 **`group.protocol=consumer`** consumer in the **same** group under
 `policy=bidirectional`, on a 2+-partition topic. Assert both hold disjoint
 partitions covering the whole topic; then roll one direction and back, asserting
@@ -281,7 +281,7 @@ k2-tombstone-on-upgrade are carried forward unchanged.
 ## Open questions — resolve empirically during implementation (per CLAUDE.md)
 
 - Exact rejection error code when an upgrade is refused (non-convertible /
-  `policy ∈ {disabled, downgrade}`): confirm against `apache/kafka:4.0.0`.
+  `policy ∈ {disabled, downgrade}`): confirm against `mirror.gcr.io/apache/kafka:4.0.0`.
 - Precise downgrade trigger boundary (last-consumer-member-leaves vs. any
   membership re-evaluation) and whether Kafka downgrades a group that *never* held
   a classic member: confirm empirically.

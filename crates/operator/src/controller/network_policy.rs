@@ -478,8 +478,17 @@ mod tests {
         let listeners = vec![internal_listener("PLAIN", 9092, None)];
         let np = render_network_policy(&test_kafka(), &listeners, 9092, false).unwrap();
         let refs = np.metadata.owner_references.as_ref().unwrap();
-        assert!(refs.len() == 1);
-        assert!(refs[0].kind == "Kafka");
-        assert!(refs[0].controller == Some(true));
+        assert!(
+            refs == &vec![
+                k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference {
+                    api_version: "crabka.io/v1alpha1".into(),
+                    block_owner_deletion: Some(true),
+                    controller: Some(true),
+                    kind: "Kafka".into(),
+                    name: "demo".into(),
+                    uid: "00000000-0000-0000-0000-000000000001".into(),
+                }
+            ]
+        );
     }
 }

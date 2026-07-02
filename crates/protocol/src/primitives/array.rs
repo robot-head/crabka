@@ -225,9 +225,9 @@ mod tests {
     fn array_len_prefix_len_flex() {
         // len=0 → varint(1) = 1 byte; len=126 → varint(127) = 1 byte;
         // len=127 → varint(128) = 2 bytes.
-        assert!(array_len_prefix_len(0, true) == 1);
-        assert!(array_len_prefix_len(126, true) == 1);
-        assert!(array_len_prefix_len(127, true) == 2);
+        for (len, want) in [(0, 1), (126, 1), (127, 2)] {
+            assert!(array_len_prefix_len(len, true) == want);
+        }
     }
 
     #[test]

@@ -212,8 +212,9 @@ fn broker_err(api: &'static str, code: i16, message: Option<String>) -> AdminErr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use bytes::Bytes;
+    use crabka_protocol::UnknownTaggedFields;
     use crabka_protocol::owned::describe_delegation_token_response::{
         DescribeDelegationTokenResponse, DescribedDelegationToken, DescribedDelegationTokenRenewer,
     };
@@ -234,16 +235,28 @@ mod tests {
             &["User:bob".to_string(), "carol".to_string()],
             60_000,
         );
-        assert!(req.owner_principal_type.as_deref() == Some("User"));
-        assert!(req.owner_principal_name.as_deref() == Some("alice"));
-        assert!(req.max_lifetime_ms == 60_000);
-        assert!(req.renewers.len() == 2);
-        // "User:bob" → type=User, name=bob
-        assert!(req.renewers[0].principal_type == "User");
-        assert!(req.renewers[0].principal_name == "bob");
-        // "carol" → default type=User, name=carol
-        assert!(req.renewers[1].principal_type == "User");
-        assert!(req.renewers[1].principal_name == "carol");
+        assert!(
+            req == CreateDelegationTokenRequest {
+                owner_principal_type: Some("User".to_string()),
+                owner_principal_name: Some("alice".to_string()),
+                renewers: vec![
+                    // "User:bob" → type=User, name=bob
+                    CreatableRenewers {
+                        principal_type: "User".to_string(),
+                        principal_name: "bob".to_string(),
+                        unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                    },
+                    // "carol" → default type=User, name=carol
+                    CreatableRenewers {
+                        principal_type: "User".to_string(),
+                        principal_name: "carol".to_string(),
+                        unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                    },
+                ],
+                max_lifetime_ms: 60_000,
+                unknown_tagged_fields: UnknownTaggedFields(vec![]),
+            }
+        );
     }
 
     // ── build_renew_delegation_token / build_expire_delegation_token ─
@@ -271,16 +284,29 @@ mod tests {
     #[test]
     fn build_describe_owner_filter_sets_single_entry() {
         let req = build_describe_owner_filter("User:alice");
-        let owners = req.owners.as_ref().expect("owners filter populated");
-        assert!(owners.len() == 1);
-        assert!(owners[0].principal_type == "User");
-        assert!(owners[0].principal_name == "alice");
+        assert!(
+            req == DescribeDelegationTokenRequest {
+                owners: Some(vec![DescribeDelegationTokenOwner {
+                    principal_type: "User".to_string(),
+                    principal_name: "alice".to_string(),
+                    unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                }]),
+                unknown_tagged_fields: UnknownTaggedFields(vec![]),
+            }
+        );
 
         // Bare-name default-type=User path.
         let req2 = build_describe_owner_filter("solo");
-        let owners2 = req2.owners.as_ref().unwrap();
-        assert!(owners2[0].principal_type == "User");
-        assert!(owners2[0].principal_name == "solo");
+        assert!(
+            req2 == DescribeDelegationTokenRequest {
+                owners: Some(vec![DescribeDelegationTokenOwner {
+                    principal_type: "User".to_string(),
+                    principal_name: "solo".to_string(),
+                    unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                }]),
+                unknown_tagged_fields: UnknownTaggedFields(vec![]),
+            }
+        );
     }
 
     // ── parse_describe_delegation_tokens ─────────────────────────────
@@ -311,18 +337,23 @@ mod tests {
             ..Default::default()
         };
         let out = parse_describe_delegation_tokens(resp).expect("ok response");
-        assert!(out.len() == 1);
-        let t = &out[0];
-        assert!(t.token_id == "tok-1");
-        assert!(t.owner.principal_type == "User");
-        assert!(t.owner.name == "alice");
-        assert!(t.hmac == vec![0xde, 0xad, 0xbe, 0xef]);
-        assert!(t.issue_timestamp_ms == 1_000);
-        assert!(t.expiry_timestamp_ms == 2_000);
-        assert!(t.max_timestamp_ms == 9_000);
-        assert!(t.renewers.len() == 1);
-        assert!(t.renewers[0].principal_type == "User");
-        assert!(t.renewers[0].name == "bob");
+        assert!(
+            out == vec![DelegationToken {
+                token_id: "tok-1".to_string(),
+                owner: KafkaPrincipal {
+                    principal_type: "User".to_string(),
+                    name: "alice".to_string(),
+                },
+                hmac: vec![0xde, 0xad, 0xbe, 0xef],
+                issue_timestamp_ms: 1_000,
+                expiry_timestamp_ms: 2_000,
+                max_timestamp_ms: 9_000,
+                renewers: vec![KafkaPrincipal {
+                    principal_type: "User".to_string(),
+                    name: "bob".to_string(),
+                }],
+            }]
+        );
     }
 
     // ── broker_err ─────────────────────────────────────────────────────
@@ -346,14 +377,14 @@ mod tests {
                 name,
                 message,
             } => {
-                assert!(api == "CreateDelegationToken");
-                assert!(code == 65);
+                check!(api == "CreateDelegationToken");
+                check!(code == 65);
                 // 65 is not in `kafka_error_name`'s match table yet, so
                 // it falls through to "UNKNOWN" — locking that behavior
                 // so a later edit to the table doesn't silently change
                 // the surfaced name.
-                assert!(name == "UNKNOWN");
-                assert!(message.as_deref() == Some("not super-user"));
+                check!(name == "UNKNOWN");
+                check!(message.as_deref() == Some("not super-user"));
             }
             other => panic!("expected AdminError::Broker, got {other:?}"),
         }

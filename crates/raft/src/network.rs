@@ -307,12 +307,16 @@ mod tests {
 
     #[test]
     fn api_version_for_matches_kip595_codecs() {
-        assert!(api_version_for(api_key::VOTE) == 2);
-        assert!(api_version_for(api_key::BEGIN_QUORUM_EPOCH) == 1);
-        assert!(api_version_for(api_key::END_QUORUM_EPOCH) == 1);
-        assert!(api_version_for(api_key::FETCH_SNAPSHOT) == 1);
-        assert!(api_version_for(api_key::FETCH) == 17);
-        assert!(api_version_for(-123) == 0);
+        for (key, want) in [
+            (api_key::VOTE, 2),
+            (api_key::BEGIN_QUORUM_EPOCH, 1),
+            (api_key::END_QUORUM_EPOCH, 1),
+            (api_key::FETCH_SNAPSHOT, 1),
+            (api_key::FETCH, 17),
+            (-123, 0),
+        ] {
+            assert!(api_version_for(key) == want, "api_key {key}");
+        }
     }
 
     #[tokio::test]
@@ -351,10 +355,15 @@ mod tests {
             .await
             .expect("server observed request")
             .expect("server sent request details");
-        assert!(observed.0 == api_key::VOTE);
-        assert!(observed.1 == 2);
-        assert!(observed.2 == "raft-client");
-        assert!(observed.3 == Bytes::from_static(b"vote-body"));
+        assert!(
+            observed
+                == (
+                    api_key::VOTE,
+                    2,
+                    "raft-client".to_string(),
+                    Bytes::from_static(b"vote-body"),
+                )
+        );
 
         server.await.unwrap();
     }

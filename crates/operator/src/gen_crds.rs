@@ -43,39 +43,46 @@ mod tests {
     fn writes_kafka_pool_topic_and_user_crd_files() {
         let dir = tempdir().unwrap();
         write_all(dir.path()).unwrap();
-        let kf = dir.path().join("crabka.io_kafkas.yaml");
-        let pf = dir.path().join("crabka.io_kafkanodepools.yaml");
-        let tf = dir.path().join("crabka.io_kafkatopics.yaml");
-        let uf = dir.path().join("crabka.io_kafkausers.yaml");
-        let rf = dir.path().join("crabka.io_kafkarebalances.yaml");
-        let gf = dir.path().join("crabka.io_kafkagrpcgateways.yaml");
-        assert!(kf.exists());
-        assert!(pf.exists());
-        assert!(tf.exists());
-        assert!(uf.exists());
-        assert!(rf.exists());
-        assert!(gf.exists());
-        let kafka = std::fs::read_to_string(&kf).unwrap();
-        assert!(kafka.contains("plural: kafkas"));
-        let pool = std::fs::read_to_string(&pf).unwrap();
-        assert!(pool.contains("plural: kafkanodepools"));
-        assert!(pool.contains("- knp"));
-        let topic = std::fs::read_to_string(&tf).unwrap();
-        assert!(topic.contains("plural: kafkatopics"));
-        assert!(topic.contains("- kt"));
-        let user = std::fs::read_to_string(&uf).unwrap();
-        assert!(user.contains("plural: kafkausers"));
-        assert!(user.contains("- ku"));
-        let rebalance = std::fs::read_to_string(&rf).unwrap();
-        assert!(rebalance.contains("plural: kafkarebalances"));
-        assert!(rebalance.contains("- kr"));
-        let gateway = std::fs::read_to_string(&gf).unwrap();
-        assert!(gateway.contains("plural: kafkagrpcgateways"));
-        assert!(gateway.contains("- kgg"));
-        let sf = dir.path().join("crabka.io_schemaregistries.yaml");
-        assert!(sf.exists());
-        let sr = std::fs::read_to_string(&sf).unwrap();
-        assert!(sr.contains("plural: schemaregistries"));
-        assert!(sr.contains("- sr"));
+        for (file, plural, short_name) in [
+            ("crabka.io_kafkas.yaml", "plural: kafkas", None),
+            (
+                "crabka.io_kafkanodepools.yaml",
+                "plural: kafkanodepools",
+                Some("- knp"),
+            ),
+            (
+                "crabka.io_kafkatopics.yaml",
+                "plural: kafkatopics",
+                Some("- kt"),
+            ),
+            (
+                "crabka.io_kafkausers.yaml",
+                "plural: kafkausers",
+                Some("- ku"),
+            ),
+            (
+                "crabka.io_kafkarebalances.yaml",
+                "plural: kafkarebalances",
+                Some("- kr"),
+            ),
+            (
+                "crabka.io_kafkagrpcgateways.yaml",
+                "plural: kafkagrpcgateways",
+                Some("- kgg"),
+            ),
+            (
+                "crabka.io_schemaregistries.yaml",
+                "plural: schemaregistries",
+                Some("- sr"),
+            ),
+        ] {
+            let path = dir.path().join(file);
+            assert!(path.exists(), "case {file:?}");
+            let yaml = std::fs::read_to_string(&path).unwrap();
+            assert!(yaml.contains(plural), "case {file:?}");
+            if let Some(short) = short_name {
+                assert!(yaml.contains(short), "case {file:?}");
+            }
+        }
     }
 }

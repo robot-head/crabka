@@ -1,7 +1,7 @@
 # capture-mm2-golden
 
 Captures golden byte vectors from the **real JVM MirrorMaker-2 record codecs**
-(`apache/kafka:4.0.0`) for Crabka's MM2 byte-exactness proof, and writes them to
+(`mirror.gcr.io/apache/kafka:4.0.0`) for Crabka's MM2 byte-exactness proof, and writes them to
 `crates/replicator/tests/fixtures/mm2_serde_golden.json`.
 
 The committed fixture is the source of truth consumed by the Rust test
@@ -34,13 +34,13 @@ FIXED constants (must match `Capture.java` and `mm2_golden_jvm.rs`):
 
 ## Reproduce
 
-`apache/kafka:4.0.0` ships only a JRE (no `javac`), so extract the Kafka jars
+`mirror.gcr.io/apache/kafka:4.0.0` ships only a JRE (no `javac`), so extract the Kafka jars
 from that image and compile + run against them with a local JDK 17 (or newer).
 The MM2 classes live in `connect-mirror-4.0.0.jar` under `/opt/kafka/libs`.
 
 ```bash
 # 1. extract the Kafka libs out of the image (do NOT commit them)
-cid="$(docker create apache/kafka:4.0.0)"
+cid="$(docker create mirror.gcr.io/apache/kafka:4.0.0)"
 docker cp "$cid:/opt/kafka/libs" ./scripts/capture-mm2-golden/libs
 docker rm "$cid"
 

@@ -1,6 +1,6 @@
 //! Integration tests for listener authentication wiring — SCRAM-SHA-512, SCRAM-SHA-256, mTLS, and `NodePort` SAN injection.
 
-use assert2::assert;
+use assert2::{assert, check};
 use std::sync::Arc;
 
 use crabka_operator::controller::kafka::reconcile;
@@ -88,18 +88,16 @@ async fn scram_sha_512_internal_listener_renders_sasl_ssl() {
     let observed = state.take_observed();
     let toml = extract_broker0_toml(&observed, "c1");
 
-    assert!(
-        toml.contains("protocol = \"SaslSsl\""),
-        "expected protocol = \"SaslSsl\" for SCRAM-SHA-512 with TLS;\n{toml}"
-    );
-    assert!(
-        toml.contains("tls_config = {"),
-        "expected tls_config inline table;\n{toml}"
-    );
-    assert!(
-        toml.contains("sasl_config = { enabled_mechanisms = [\"SCRAM-SHA-512\"] }"),
-        "expected SCRAM-SHA-512 mechanism;\n{toml}"
-    );
+    for needle in [
+        "protocol = \"SaslSsl\"",
+        "tls_config = {",
+        "sasl_config = { enabled_mechanisms = [\"SCRAM-SHA-512\"] }",
+    ] {
+        assert!(
+            toml.contains(needle),
+            "expected {needle:?} for SCRAM-SHA-512 with TLS;\n{toml}"
+        );
+    }
 }
 
 // ── test 2 ────────────────────────────────────────────────────────────────────
@@ -126,18 +124,16 @@ async fn mtls_internal_listener_renders_client_auth_required() {
     let observed = state.take_observed();
     let toml = extract_broker0_toml(&observed, "c2");
 
-    assert!(
-        toml.contains("protocol = \"Ssl\""),
-        "mTLS listener must render protocol = \"Ssl\";\n{toml}"
-    );
-    assert!(
-        toml.contains("client_ca_path = \"/etc/crabka/clients-ca/ca.crt\""),
-        "mTLS listener must include client_ca_path;\n{toml}"
-    );
-    assert!(
-        toml.contains("client_auth = \"Required\""),
-        "mTLS listener must include client_auth = \"Required\";\n{toml}"
-    );
+    for needle in [
+        "protocol = \"Ssl\"",
+        "client_ca_path = \"/etc/crabka/clients-ca/ca.crt\"",
+        "client_auth = \"Required\"",
+    ] {
+        assert!(
+            toml.contains(needle),
+            "mTLS listener must render {needle:?};\n{toml}"
+        );
+    }
 }
 
 // ── test 3 ────────────────────────────────────────────────────────────────────
@@ -255,13 +251,13 @@ async fn listener_mtls_requires_tls_validation_error_surfaces_status() {
         .iter()
         .find(|c| c["type"] == "ListenersValid")
         .unwrap_or_else(|| panic!("ListenersValid present; body = {body}"));
-    assert!(valid["status"] == "False", "body = {body}");
-    assert!(
+    check!(valid["status"] == "False", "body = {body}");
+    check!(
         valid["reason"] == "ListenerMtlsRequiresTransportTls",
         "body = {body}"
     );
 
-    assert!(state.remaining_rules() == 0);
+    check!(state.remaining_rules() == 0);
 }
 
 // ── test 6 ────────────────────────────────────────────────────────────────────

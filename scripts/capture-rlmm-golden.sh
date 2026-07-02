@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Captures golden byte vectors from the real JVM `RemoteLogMetadataSerde`
-# (apache/kafka:4.0.0) for Crabka's RLMM byte-exactness proof and writes them
+# (mirror.gcr.io/apache/kafka:4.0.0) for Crabka's RLMM byte-exactness proof and writes them
 # to crates/remote-storage-topic/tests/fixtures/rlmm_golden.json.
 #
 # The committed fixture is the source of truth consumed by the Rust test
@@ -9,9 +9,9 @@
 # the provenance and lets anyone reproduce the vectors.
 #
 # Provenance / mechanics:
-#   - apache/kafka:4.0.0 ships only a JRE (no javac/javap), so we extract the
+#   - mirror.gcr.io/apache/kafka:4.0.0 ships only a JRE (no javac/javap), so we extract the
 #     Kafka jars from that image and compile + run scripts/capture-rlmm/Capture.java
-#     against them using a JDK image (eclipse-temurin:21-jdk).
+#     against them using a JDK image (mirror.gcr.io/library/eclipse-temurin:21-jdk).
 #   - Capture.java constructs each event with the FIXED constants documented in
 #     that file and in jvm_serde_golden.rs, calls
 #     `new RemoteLogMetadataSerde().serialize(obj)`, and prints `name=<hex>`.
@@ -20,11 +20,11 @@
 #   ./scripts/capture-rlmm-golden.sh            # prints captured hex lines
 #   ./scripts/capture-rlmm-golden.sh --write    # also rewrites the JSON fixture
 #
-# Requirements: docker, with apache/kafka:4.0.0 and eclipse-temurin:21-jdk pulled.
+# Requirements: docker, with mirror.gcr.io/apache/kafka:4.0.0 and mirror.gcr.io/library/eclipse-temurin:21-jdk pulled.
 set -euo pipefail
 
-KAFKA_IMAGE="apache/kafka:4.0.0"
-JDK_IMAGE="eclipse-temurin:21-jdk"
+KAFKA_IMAGE="mirror.gcr.io/apache/kafka:4.0.0"
+JDK_IMAGE="mirror.gcr.io/library/eclipse-temurin:21-jdk"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CAPTURE_DIR="$REPO_ROOT/scripts/capture-rlmm"

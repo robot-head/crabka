@@ -1,7 +1,7 @@
 //! Asserts our Protobuf framing (magic+id+message-index+body) matches bytes
 //! captured from Confluent's `ProtobufSerializer`. The golden in
 //! `testdata/schema_serde/protobuf/order.hex` was captured against
-//! `confluentinc/cp-schema-registry` (schema id 2; top-level message-index is
+//! `mirror.gcr.io/confluentinc/cp-schema-registry` (schema id 2; top-level message-index is
 //! the single `0x00` byte) via `tests/schema-serde-capture/run.sh`.
 
 use assert2::check;

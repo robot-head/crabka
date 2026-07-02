@@ -195,6 +195,7 @@ impl<K> Suppressed<K> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::check;
 
     #[test]
     fn buffer_config_caps_and_overflow() {
@@ -205,9 +206,9 @@ mod tests {
         assert!(!strict.is_emit_early());
         let eager = BufferConfig::max_records(5); // eager
         assert_eq!(eager.record_cap(), Some(5));
-        assert!(eager.is_emit_early());
-        assert!(!eager.shut_down_when_full().is_emit_early());
-        assert!(
+        check!(eager.is_emit_early());
+        check!(!eager.shut_down_when_full().is_emit_early());
+        check!(
             BufferConfig::unbounded()
                 .emit_early_when_full()
                 .is_emit_early()

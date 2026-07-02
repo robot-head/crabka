@@ -10,12 +10,16 @@ use crabka_protocol::owned::describe_client_quotas_response::{
     DescribeClientQuotasResponse, EntityData, EntryData, ValueData,
 };
 
+use super::acl_wire::CLUSTER_RESOURCE_NAME;
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
-use crate::codes::CLUSTER_AUTHORIZATION_FAILED;
+use crate::codes::{CLUSTER_AUTHORIZATION_FAILED, NONE};
 
+/// Wire `match_type`: entity name must equal `match_` exactly (KIP-546 `EXACT`).
 const MATCH_TYPE_EXACT: i8 = 0;
+/// Wire `match_type`: only the default (unnamed) entity matches (KIP-546 `DEFAULT`).
 const MATCH_TYPE_DEFAULT: i8 = 1;
+/// Wire `match_type`: any entity of the given type matches (KIP-546 `ANY`).
 const MATCH_TYPE_ANY: i8 = 2;
 
 #[allow(clippy::unused_async)]
@@ -39,7 +43,7 @@ pub(crate) async fn handle(
             principal: ctx.principal,
             host: ctx.peer,
             resource_type: ResourceType::Cluster,
-            resource_name: "kafka-cluster",
+            resource_name: CLUSTER_RESOURCE_NAME,
             operation: crabka_metadata::AclOperation::Describe,
         },
     );
@@ -82,7 +86,7 @@ pub(crate) async fn handle(
 
     let resp = DescribeClientQuotasResponse {
         throttle_time_ms: 0,
-        error_code: 0,
+        error_code: NONE,
         error_message: None,
         entries: Some(entries),
         ..Default::default()
@@ -130,6 +134,31 @@ fn encode_response<R: Encode>(
 mod tests {
     use super::*;
     use assert2::assert;
+    use assert2::check;
+    use crabka_metadata::{ClientQuotaRecord, MetadataRecord, QuotaEntity};
+    use crabka_protocol::Decode;
+    use crabka_security::{AuthMethod, Principal};
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    use crate::authorizer::{AuthorizationRequest, Authorizer};
+    use crate::broker::{Broker, BrokerHandle};
+    use crate::config::BrokerConfig;
+
+    const VERSION: i16 = 1;
+
+    #[derive(Debug)]
+    struct DenyAll;
+
+    impl Authorizer for DenyAll {
+        fn authorize(
+            &self,
+            _source: &dyn crabka_authz::AclSource,
+            _req: &AuthorizationRequest<'_>,
+        ) -> AuthorizationResult {
+            AuthorizationResult::Deny
+        }
+    }
 
     fn comp(entity_type: &str, match_type: i8, m: Option<&str>) -> ComponentData {
         ComponentData {
@@ -145,6 +174,80 @@ mod tests {
             .into_iter()
             .map(|(t, n)| (t.into(), n.map(Into::into)))
             .collect()
+    }
+
+    fn request(components: Vec<ComponentData>, strict: bool) -> DescribeClientQuotasRequest {
+        DescribeClientQuotasRequest {
+            components,
+            strict,
+            ..Default::default()
+        }
+    }
+
+    fn decode_response(bytes: &Bytes) -> DescribeClientQuotasResponse {
+        let mut cur: &[u8] = bytes.as_ref();
+        let resp =
+            DescribeClientQuotasResponse::decode(&mut cur, VERSION).expect("decode response");
+        assert!(cur.is_empty(), "response decoder consumed all bytes");
+        resp
+    }
+
+    fn test_context<'a>(
+        principal: &'a Principal,
+        peer: &'a SocketAddr,
+    ) -> crate::handlers::RequestContext<'a> {
+        crate::handlers::RequestContext {
+            principal,
+            peer,
+            client_id: "admin-client",
+            sendfile_capable: false,
+            connection_listener_name: "PLAINTEXT",
+        }
+    }
+
+    fn principal(name: &str) -> Principal {
+        Principal {
+            name: name.into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        }
+    }
+
+    fn peer() -> SocketAddr {
+        "127.0.0.1:9092".parse().unwrap()
+    }
+
+    async fn start_broker(authorizer: Arc<dyn Authorizer>) -> (BrokerHandle, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
+        cfg.audit_enabled = false;
+        cfg.authorizer = authorizer;
+        let handle = Broker::start(cfg).await.expect("start broker");
+        (handle, dir)
+    }
+
+    async fn seed_quota(
+        handle: &BrokerHandle,
+        entity: Vec<(&str, Option<&str>)>,
+        key: &str,
+        value: f64,
+    ) {
+        handle
+            .broker_arc_for_test()
+            .controller
+            .submit_change(vec![MetadataRecord::V1ClientQuota(ClientQuotaRecord {
+                entity: entity
+                    .into_iter()
+                    .map(|(entity_type, entity_name)| QuotaEntity {
+                        entity_type: entity_type.into(),
+                        entity_name: entity_name.map(Into::into),
+                    })
+                    .collect(),
+                config_key: key.into(),
+                config_value: Some(value),
+            })])
+            .await
+            .expect("seed quota");
     }
 
     #[test]
@@ -180,5 +283,126 @@ mod tests {
         let filter = vec![comp("user", MATCH_TYPE_ANY, None)];
         assert!(entity_matches_filter(&stored1, &filter, true));
         assert!(entity_matches_filter(&stored2, &filter, true));
+    }
+
+    #[tokio::test]
+    async fn denied_response_preserves_error_fields() {
+        let (broker_handle, _dir) = start_broker(Arc::new(DenyAll)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let p = principal("alice");
+        let peer = peer();
+        let ctx = test_context(&p, &peer);
+
+        let bytes = handle(
+            &broker,
+            request(vec![comp("user", MATCH_TYPE_EXACT, Some("alice"))], true),
+            &ctx,
+            VERSION,
+        )
+        .await
+        .expect("handle");
+        let resp = decode_response(&bytes);
+
+        let expected = DescribeClientQuotasResponse {
+            throttle_time_ms: 0,
+            error_code: CLUSTER_AUTHORIZATION_FAILED,
+            error_message: Some("describe-client-quotas denied".into()),
+            entries: None,
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+        };
+        assert!(resp == expected, "{resp:?}");
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_returns_matching_quota_entry_fields() {
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer)).await;
+        seed_quota(
+            &broker_handle,
+            vec![("client-id", Some("app-1")), ("user", Some("alice"))],
+            "producer_byte_rate",
+            2048.0,
+        )
+        .await;
+        seed_quota(
+            &broker_handle,
+            vec![("user", Some("bob"))],
+            "consumer_byte_rate",
+            512.0,
+        )
+        .await;
+        let broker = broker_handle.broker_arc_for_test();
+        let p = principal("admin");
+        let peer = peer();
+        let ctx = test_context(&p, &peer);
+
+        let bytes = handle(
+            &broker,
+            request(vec![comp("user", MATCH_TYPE_EXACT, Some("alice"))], false),
+            &ctx,
+            VERSION,
+        )
+        .await
+        .expect("handle");
+        let resp = decode_response(&bytes);
+
+        check!(resp.throttle_time_ms == 0, "{resp:?}");
+        check!(resp.error_code == 0, "{resp:?}");
+        check!(resp.error_message == None, "{resp:?}");
+        let entries = resp.entries.expect("entries");
+        assert!(entries.len() == 1, "{entries:?}");
+        let entry = &entries[0];
+        assert!(entry.entity.len() == 2, "{entry:?}");
+        let by_type: std::collections::HashMap<_, _> = entry
+            .entity
+            .iter()
+            .map(|e| (e.entity_type.as_str(), e.entity_name.as_deref()))
+            .collect();
+        check!(
+            by_type.get("client-id") == Some(&Some("app-1")),
+            "{entry:?}"
+        );
+        check!(by_type.get("user") == Some(&Some("alice")), "{entry:?}");
+        check!(entry.values.len() == 1, "{entry:?}");
+        check!(
+            entry.values[0].key.as_str() == "producer_byte_rate",
+            "{entry:?}"
+        );
+        check!(
+            (entry.values[0].value - 2048.0).abs() < f64::EPSILON,
+            "{entry:?}"
+        );
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn successful_empty_match_uses_some_empty_entries() {
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let p = principal("admin");
+        let peer = peer();
+        let ctx = test_context(&p, &peer);
+
+        let bytes = handle(
+            &broker,
+            request(vec![comp("user", MATCH_TYPE_EXACT, Some("missing"))], true),
+            &ctx,
+            VERSION,
+        )
+        .await
+        .expect("handle");
+        let resp = decode_response(&bytes);
+
+        let expected = DescribeClientQuotasResponse {
+            throttle_time_ms: 0,
+            error_code: 0,
+            error_message: None,
+            entries: Some(Vec::new()),
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+        };
+        assert!(resp == expected);
+        broker_handle.shutdown().await;
     }
 }

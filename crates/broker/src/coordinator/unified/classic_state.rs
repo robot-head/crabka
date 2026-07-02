@@ -470,7 +470,7 @@ mod classic_state_model;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
 
     fn sample_member(id: &str) -> Member {
         Member::new(
@@ -511,10 +511,10 @@ mod tests {
         g.add_member(sample_member("m1"));
         g.add_member(sample_member("m2"));
         g.complete_rebalance("range");
-        assert!(g.generation_id == 1);
-        assert!(g.leader_id.as_deref() == Some("m1"));
-        assert!(g.protocol_name.as_deref() == Some("range"));
-        assert!(g.state == GroupState::CompletingRebalance);
+        check!(g.generation_id == 1);
+        check!(g.leader_id.as_deref() == Some("m1"));
+        check!(g.protocol_name.as_deref() == Some("range"));
+        check!(g.state == GroupState::CompletingRebalance);
     }
 
     #[test]
@@ -556,20 +556,20 @@ mod tests {
         // Rejoin with the same instance id but a fresh `member_id` (the
         // client restarted; KIP-394 bootstrap gave it a new id).
         let outcome = g.add_member(static_member("m2", "inst-a"));
-        assert!(
+        check!(
             outcome
                 == AddMemberOutcome::StaticRejoin {
                     prior_member_id: "m1".into()
                 }
         );
         // State preserved: no rebalance kicked off.
-        assert!(g.state == GroupState::Stable);
-        assert!(g.members.len() == 1);
+        check!(g.state == GroupState::Stable);
+        check!(g.members.len() == 1);
         // New member inherited the prior assignment.
-        assert!(g.members.contains_key("m2"));
-        assert!(g.members["m2"].assignment.as_deref() == Some(b"assignment-bytes" as &[u8]));
+        check!(g.members.contains_key("m2"));
+        check!(g.members["m2"].assignment.as_deref() == Some(b"assignment-bytes" as &[u8]));
         // Index repointed.
-        assert!(g.current_member_id_for_instance("inst-a") == Some("m2"));
+        check!(g.current_member_id_for_instance("inst-a") == Some("m2"));
     }
 
     #[test]
@@ -583,11 +583,11 @@ mod tests {
         g.state = GroupState::Stable;
 
         let dropped = g.expire_dead_members(Instant::now());
-        assert!(dropped.is_empty(), "static member must NOT be expired");
-        assert!(g.state == GroupState::Stable);
-        assert!(g.members.contains_key("m1"));
+        check!(dropped.is_empty(), "static member must NOT be expired");
+        check!(g.state == GroupState::Stable);
+        check!(g.members.contains_key("m1"));
         // Index entry retained.
-        assert!(g.current_member_id_for_instance("inst-a") == Some("m1"));
+        check!(g.current_member_id_for_instance("inst-a") == Some("m1"));
     }
 
     #[test]
@@ -602,9 +602,9 @@ mod tests {
         g.state = GroupState::Stable;
 
         let dropped = g.expire_dead_members(Instant::now());
-        assert!(dropped == vec!["dyn-1".to_string()]);
-        assert!(g.state == GroupState::PreparingRebalance);
-        assert!(g.members.contains_key("static-1"));
+        check!(dropped == vec!["dyn-1".to_string()]);
+        check!(g.state == GroupState::PreparingRebalance);
+        check!(g.members.contains_key("static-1"));
     }
 
     #[test]
@@ -737,12 +737,12 @@ mod tests {
 
         let dropped = g.expire_dead_members(Instant::now());
 
-        assert!(dropped == vec!["m1".to_string()]);
-        assert!(g.state == GroupState::Empty);
-        assert!(g.leader_id.is_none());
-        assert!(g.protocol_name.is_none());
-        assert!(g.rebalance_deadline.is_none());
-        assert!(g.joined_this_round.is_empty());
-        assert!(!g.rebalance_from_empty);
+        check!(dropped == vec!["m1".to_string()]);
+        check!(g.state == GroupState::Empty);
+        check!(g.leader_id.is_none());
+        check!(g.protocol_name.is_none());
+        check!(g.rebalance_deadline.is_none());
+        check!(g.joined_this_round.is_empty());
+        check!(!g.rebalance_from_empty);
     }
 }

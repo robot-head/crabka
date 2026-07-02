@@ -13,18 +13,20 @@ use std::time::Instant;
 
 use crabka_raft::NodeId;
 
-#[derive(Debug, Clone, Copy)]
+use crate::partition::LogOffset;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct FollowerStats {
-    pub(crate) leo: i64,
+    pub(crate) leo: LogOffset,
     pub(crate) last_fetch: Instant,
     pub(crate) last_caught_up: Instant,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ReplicaState {
     pub(crate) isr: HashSet<NodeId>,
     pub(crate) per_follower: HashMap<NodeId, FollowerStats>,
-    pub(crate) hw: i64,
+    pub(crate) hw: LogOffset,
     pub(crate) current_leader_epoch: i32,
 }
 
@@ -79,24 +81,10 @@ impl ReplicaState {
     pub(crate) fn update_follower_leo(
         &mut self,
         follower: NodeId,
-        follower_leo: i64,
-        leader_leo: i64,
+        follower_leo: LogOffset,
+        leader_leo: LogOffset,
         now: Instant,
-    ) -> i64 {
-        if !self.isr.contains(&follower) {
-            // Track stats so isr_maintenance can expand back when caught up.
-            let stats = self.per_follower.entry(follower).or_insert(FollowerStats {
-                leo: 0,
-                last_fetch: now,
-                last_caught_up: now,
-            });
-            stats.last_fetch = now;
-            stats.leo = follower_leo.min(leader_leo);
-            if stats.leo >= leader_leo {
-                stats.last_caught_up = now;
-            }
-            return self.recompute_hw_for_leader_append(leader_leo);
-        }
+    ) -> LogOffset {
         let clamped = follower_leo.min(leader_leo);
         let stats = self.per_follower.entry(follower).or_insert(FollowerStats {
             leo: 0,
@@ -112,24 +100,16 @@ impl ReplicaState {
         self.hw
     }
 
-    pub(crate) fn recompute_hw_for_leader_append(&mut self, leader_leo: i64) -> i64 {
+    pub(crate) fn recompute_hw_for_leader_append(&mut self, leader_leo: LogOffset) -> LogOffset {
         self.hw = self.compute_hw(leader_leo);
         self.hw
     }
 
-    fn compute_hw(&self, leader_leo: i64) -> i64 {
-        if self.isr.is_empty() {
-            return leader_leo;
-        }
-        let mut min_leo = leader_leo;
-        for follower in &self.isr {
-            if let Some(stats) = self.per_follower.get(follower)
-                && stats.leo < min_leo
-            {
-                min_leo = stats.leo;
-            }
-        }
-        min_leo
+    fn compute_hw(&self, leader_leo: LogOffset) -> LogOffset {
+        self.isr
+            .iter()
+            .filter_map(|follower| self.per_follower.get(follower).map(|stats| stats.leo))
+            .fold(leader_leo, i64::min)
     }
 }
 
@@ -150,19 +130,34 @@ mod tests {
     #[test]
     fn new_state_has_zero_hw_and_empty_membership() {
         let s = fresh();
-        assert!(s.hw == 0);
-        assert!(s.isr.is_empty());
-        assert!(s.per_follower.is_empty());
+        let expected = ReplicaState {
+            isr: HashSet::new(),
+            per_follower: HashMap::new(),
+            hw: 0,
+            current_leader_epoch: 0,
+        };
+        assert!(s == expected);
     }
 
     #[test]
     fn install_isr_seeds_non_leader_followers_at_zero() {
         let mut s = fresh();
-        s.install_isr(&[1, 2, 3], &[1, 2, 3], 1, now());
-        assert!(s.isr == [1, 2, 3].into_iter().collect());
-        assert!(s.per_follower.get(&2).map(|f| f.leo) == Some(0));
-        assert!(s.per_follower.get(&3).map(|f| f.leo) == Some(0));
-        assert!(!s.per_follower.contains_key(&1));
+        let t = now();
+        s.install_isr(&[1, 2, 3], &[1, 2, 3], 1, t);
+        let seeded = FollowerStats {
+            leo: 0,
+            last_fetch: t,
+            last_caught_up: t,
+        };
+        // Only the non-leader followers (2 and 3) are seeded; the leader (1)
+        // gets no per_follower entry.
+        let expected = ReplicaState {
+            isr: [1, 2, 3].into_iter().collect(),
+            per_follower: [(2, seeded), (3, seeded)].into_iter().collect(),
+            hw: 0,
+            current_leader_epoch: 0,
+        };
+        assert!(s == expected);
     }
 
     #[test]
@@ -208,12 +203,12 @@ mod tests {
     fn hw_advances_when_trailing_follower_catches_up() {
         let mut s = fresh();
         s.install_isr(&[1, 2, 3], &[1, 2, 3], 1, now());
-        let hw1 = s.update_follower_leo(2, 50, 100, now());
-        assert!(hw1 == 0);
-        let hw2 = s.update_follower_leo(3, 75, 100, now());
-        assert!(hw2 == 50);
-        let hw3 = s.update_follower_leo(2, 80, 100, now());
-        assert!(hw3 == 75);
+        // Ordered steps over shared state: (follower, follower_leo, expected_hw).
+        let steps = [(2, 50, 0), (3, 75, 50), (2, 80, 75)];
+        for (follower, leo, expected_hw) in steps {
+            let hw = s.update_follower_leo(follower, leo, 100, now());
+            assert!(hw == expected_hw, "step: follower {follower} leo {leo}");
+        }
     }
 
     #[test]
@@ -229,8 +224,8 @@ mod tests {
     fn non_isr_follower_leo_update_uses_leader_path() {
         let mut s = fresh();
         s.install_isr(&[1, 2], &[1, 2], 1, now());
-        // Node 3 is not in ISR. Its report falls through to
-        // recompute_hw_for_leader_append. per_follower[2] = 0 from
+        // Node 3 is not in ISR. Its progress is tracked for possible
+        // re-admission, but it is excluded from HW; per_follower[2] = 0 from
         // install, so HW = min(100, 0) = 0.
         let hw = s.update_follower_leo(3, 999, 100, now());
         assert!(hw == 0);
@@ -291,6 +286,28 @@ mod tests {
         s.update_follower_leo(2, 10, 10, t2);
         let lag2 = s.per_follower.get(&2).unwrap().last_caught_up;
         assert!(lag2 > lag);
+    }
+
+    #[test]
+    fn non_isr_follower_refreshes_last_caught_up_only_when_caught_up() {
+        let mut s = fresh();
+        let t0 = Instant::now();
+        s.install_isr(&[1, 2, 3], &[1, 2, 3], 1, t0);
+
+        let t_caught_in_isr = t0 + Duration::from_millis(10);
+        s.update_follower_leo(3, 10, 10, t_caught_in_isr);
+        assert!(s.per_follower.get(&3).unwrap().last_caught_up == t_caught_in_isr);
+
+        s.install_isr(&[1, 2], &[1, 2, 3], 1, t_caught_in_isr);
+        let t_lagging = t_caught_in_isr + Duration::from_millis(10);
+        s.update_follower_leo(3, 9, 10, t_lagging);
+        let lagging = s.per_follower.get(&3).unwrap();
+        assert!(lagging.last_fetch == t_lagging);
+        assert!(lagging.last_caught_up == t_caught_in_isr);
+
+        let t_caught_out_of_isr = t_lagging + Duration::from_millis(10);
+        s.update_follower_leo(3, 10, 10, t_caught_out_of_isr);
+        assert!(s.per_follower.get(&3).unwrap().last_caught_up == t_caught_out_of_isr);
     }
 }
 

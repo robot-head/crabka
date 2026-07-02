@@ -200,7 +200,7 @@ impl ExecutionPlan for SeriesDivideExec {
 mod tests {
     use arrow::array::{Array, Int64Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
-    use assert2::assert;
+    use assert2::{assert, check};
     use datafusion::catalog::MemTable;
     use datafusion::datasource::memory::MemorySourceConfig;
     use datafusion::logical_expr::{Extension, UserDefinedLogicalNodeCore, col};
@@ -247,27 +247,33 @@ mod tests {
             input: input.clone(),
         };
 
-        assert!(UserDefinedLogicalNodeCore::name(&node) == "SeriesDivide");
+        check!(UserDefinedLogicalNodeCore::name(&node) == "SeriesDivide");
         let plan = LogicalPlan::Extension(Extension {
             node: Arc::new(node),
         });
         let explain = format!("{plan}");
-        assert!(explain.starts_with("PromSeriesDivide: tags=[\"job\"]"));
-        assert!(explain.contains("TableScan: leaf projection=[job, timestamp]"));
+        check!(explain.starts_with("PromSeriesDivide: tags=[\"job\"]"));
+        check!(explain.contains("TableScan: leaf projection=[job, timestamp]"));
 
         let node = SeriesDivide {
             tag_columns: vec!["job".to_string()],
             input: input.clone(),
         };
-        assert!(
+        check!(
             node.with_exprs_and_inputs(vec![col("job")], vec![input.clone()])
                 .is_err()
         );
-        assert!(node.with_exprs_and_inputs(vec![], vec![]).is_err());
+        check!(node.with_exprs_and_inputs(vec![], vec![]).is_err());
         let rewritten = node
-            .with_exprs_and_inputs(vec![], vec![input])
+            .with_exprs_and_inputs(vec![], vec![input.clone()])
             .expect("valid rewrite");
-        assert!(rewritten.tag_columns == vec!["job"]);
+        assert!(
+            rewritten
+                == SeriesDivide {
+                    tag_columns: vec!["job".to_string()],
+                    input,
+                }
+        );
     }
 
     #[test]
@@ -278,16 +284,16 @@ mod tests {
             Arc::clone(&input),
         ));
 
-        assert!(exec.name() == "SeriesDivideExec");
+        check!(exec.name() == "SeriesDivideExec");
         let display = format!(
             "{}",
             DisplayableExecutionPlan::new(exec.as_ref()).indent(false)
         );
-        assert!(display.starts_with("PromSeriesDivideExec: tags=[\"job\"]"));
-        assert!(display.contains("DataSourceExec: partitions=1"));
-        assert!(exec.maintains_input_order() == vec![true]);
-        assert!(Arc::clone(&exec).with_new_children(vec![]).is_err());
-        assert!(
+        check!(display.starts_with("PromSeriesDivideExec: tags=[\"job\"]"));
+        check!(display.contains("DataSourceExec: partitions=1"));
+        check!(exec.maintains_input_order() == vec![true]);
+        check!(Arc::clone(&exec).with_new_children(vec![]).is_err());
+        check!(
             Arc::clone(&exec)
                 .with_new_children(vec![input])
                 .expect("valid child rewrite")

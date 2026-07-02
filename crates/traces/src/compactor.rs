@@ -813,6 +813,7 @@ fn insert_tag_value(
 
 #[cfg(test)]
 mod tests {
+    use assert2::check;
     use crabka_blockstore::BlockIndex;
     use object_store::memory::InMemory;
 
@@ -939,18 +940,18 @@ mod tests {
 
         let batches = read_block(store, "compacted.parquet").await.unwrap();
         let batch = &batches[0];
-        assert!(batch.num_rows() == 2);
+        check!(batch.num_rows() == 2);
         let trace_start = int64_column(batch, SCOL_TRACE_START_NANO).unwrap();
         let trace_duration = int64_column(batch, SCOL_TRACE_DURATION_NANOS).unwrap();
         let service = string_column(batch, SCOL_ROOT_SERVICE_NAME).unwrap();
         let root_name = string_column(batch, SCOL_ROOT_SPAN_NAME).unwrap();
         for row in 0..batch.num_rows() {
             // min start across both blocks, and span to the latest end.
-            assert!(trace_start.value(row) == 800);
-            assert!(trace_duration.value(row) == 300); // max(1100, 850) - 800
+            check!(trace_start.value(row) == 800);
+            check!(trace_duration.value(row) == 300); // max(1100, 850) - 800
             // root is the true (no-parent) span, consistent across every row.
-            assert!(service.value(row) == "api");
-            assert!(root_name.value(row) == "GET /");
+            check!(service.value(row) == "api");
+            check!(root_name.value(row) == "GET /");
         }
     }
 
@@ -972,8 +973,8 @@ mod tests {
         let tenant_b = index.candidate_blocks("tenant-b", 0, 2_000);
         assert!(tenant_a.len() == 1);
         assert!(tenant_b.len() == 1);
-        assert!(tenant_a[0].contains("traces/tenant-a/"));
-        assert!(tenant_b[0].contains("traces/tenant-b/"));
+        check!(tenant_a[0].contains("traces/tenant-a/"));
+        check!(tenant_b[0].contains("traces/tenant-b/"));
     }
 
     async fn write_indexed_block(
@@ -1053,36 +1054,31 @@ mod tests {
         .unwrap();
 
         let names = index.tag_names("tenant", 0, 2_000);
-        assert!(names.contains(&"service.name".to_string()));
-        assert!(names.contains(&"env".to_string()));
-        assert!(names.contains(&"instrumentation:name".to_string()));
-        assert!(names.contains(&"event:name".to_string()));
-        assert!(names.contains(&"event:timeSinceStart".to_string()));
-        assert!(names.contains(&"cache.key".to_string()));
-        assert!(names.contains(&"link:traceID".to_string()));
-        assert!(names.contains(&"link:spanID".to_string()));
-        assert!(names.contains(&"link.kind".to_string()));
-        assert!(index.tag_values("tenant", "service.name", 0, 2_000) == vec!["api".to_string()]);
-        assert!(index.tag_values("tenant", "env", 0, 2_000) == vec!["prod".to_string()]);
-        assert!(
-            index.tag_values("tenant", "instrumentation:name", 0, 2_000)
-                == vec!["otel-rust".to_string()]
-        );
-        assert!(
-            index.tag_values("tenant", "event:name", 0, 2_000) == vec!["exception".to_string()]
-        );
-        assert!(
-            index.tag_values("tenant", "event:timeSinceStart", 0, 2_000) == vec!["50".to_string()]
-        );
-        assert!(index.tag_values("tenant", "cache.key", 0, 2_000) == vec!["users".to_string()]);
-        assert!(
-            index.tag_values("tenant", "link:traceID", 0, 2_000)
-                == vec!["09090909090909090909090909090909".to_string()]
-        );
-        assert!(
-            index.tag_values("tenant", "link:spanID", 0, 2_000)
-                == vec!["0808080808080808".to_string()]
-        );
-        assert!(index.tag_values("tenant", "link.kind", 0, 2_000) == vec!["retry".to_string()]);
+        for name in [
+            "service.name",
+            "env",
+            "instrumentation:name",
+            "event:name",
+            "event:timeSinceStart",
+            "cache.key",
+            "link:traceID",
+            "link:spanID",
+            "link.kind",
+        ] {
+            check!(names.contains(&name.to_string()));
+        }
+        for (tag, want) in [
+            ("service.name", "api"),
+            ("env", "prod"),
+            ("instrumentation:name", "otel-rust"),
+            ("event:name", "exception"),
+            ("event:timeSinceStart", "50"),
+            ("cache.key", "users"),
+            ("link:traceID", "09090909090909090909090909090909"),
+            ("link:spanID", "0808080808080808"),
+            ("link.kind", "retry"),
+        ] {
+            check!(index.tag_values("tenant", tag, 0, 2_000) == vec![want.to_string()]);
+        }
     }
 }

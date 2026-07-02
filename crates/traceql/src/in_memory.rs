@@ -1316,7 +1316,7 @@ fn child_count_for(nested_sets: &[NestedSet], idx: usize) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use datafusion::arrow::array::AsArray;
 
     use crate::result::{AttrValue, EventRef, LinkRef};
@@ -1392,11 +1392,33 @@ mod tests {
         let mut s = InMemorySpanStore::new();
         s.push_trace("t", "svc", "op", vec![span(1, None, "root", vec![])]);
         let got = s.trace_by_id("t", &[7; 16]).await.unwrap().unwrap();
-        assert!(got.trace_id == [7; 16]);
-        assert!(got.root_service_name == "svc");
-        assert!(got.root_trace_name == "op");
-        assert!(got.spans.len() == 1);
-        assert!(got.spans[0].name == "root");
+        assert!(
+            got == TraceSpans {
+                trace_id: [7; 16],
+                root_service_name: "svc".into(),
+                root_trace_name: "op".into(),
+                resource_attributes: vec![("service.name".into(), AttrValue::Str("svc".into()))],
+                spans: vec![SpanRef {
+                    span_id: [1; 8],
+                    parent_span_id: None,
+                    name: "root".into(),
+                    kind: 0,
+                    nested_set_left: 1,
+                    nested_set_right: 2,
+                    nested_set_parent: -1,
+                    start_time_unix_nano: 1000,
+                    duration_nanos: 5,
+                    status_code: 0,
+                    status_message: String::new(),
+                    instrumentation_name: String::new(),
+                    instrumentation_version: String::new(),
+                    resource_attributes: Vec::new(),
+                    attributes: Vec::new(),
+                    events: Vec::new(),
+                    links: Vec::new(),
+                }],
+            }
+        );
         assert!(s.trace_by_id("t", &[9; 16]).await.unwrap().is_none());
     }
 
@@ -1416,13 +1438,25 @@ mod tests {
         );
 
         let got = s.tag_names("t", None, 0, 10_000).await.unwrap();
-        assert!(got.len() == 3);
-        assert!(got[0].scope == TagScope::Resource);
-        assert!(got[0].tags == vec!["service.name"]);
-        assert!(got[1].scope == TagScope::Span);
-        assert!(got[1].tags == vec!["svc"]);
-        assert!(got[2].scope == TagScope::Intrinsic);
-        assert!(got[2].tags == INTRINSIC_TAGS);
+        assert!(
+            got == vec![
+                ScopedTag {
+                    scope: TagScope::Resource,
+                    tags: vec!["service.name".into()],
+                },
+                ScopedTag {
+                    scope: TagScope::Span,
+                    tags: vec!["svc".into()],
+                },
+                ScopedTag {
+                    scope: TagScope::Intrinsic,
+                    tags: INTRINSIC_TAGS
+                        .iter()
+                        .map(|tag| (*tag).to_string())
+                        .collect(),
+                },
+            ]
+        );
     }
 
     #[tokio::test]
@@ -1443,9 +1477,15 @@ mod tests {
             .tag_names("t", Some(TagScope::Instrumentation), 0, 10_000)
             .await
             .unwrap();
-        assert!(got.len() == 1);
-        assert!(got[0].scope == TagScope::Instrumentation);
-        assert!(got[0].tags == vec!["instrumentation:name", "instrumentation:version"]);
+        assert!(
+            got == vec![ScopedTag {
+                scope: TagScope::Instrumentation,
+                tags: vec![
+                    "instrumentation:name".into(),
+                    "instrumentation:version".into()
+                ],
+            }]
+        );
     }
 
     #[tokio::test]
@@ -1468,80 +1508,54 @@ mod tests {
             .tag_names("t", Some(TagScope::Event), 0, 10_000)
             .await
             .unwrap();
-        assert!(event_names.len() == 1);
-        assert!(event_names[0].scope == TagScope::Event);
-        assert!(event_names[0].tags == vec!["cache.key", "event:name", "event:timeSinceStart"]);
+        assert!(
+            event_names
+                == vec![ScopedTag {
+                    scope: TagScope::Event,
+                    tags: vec![
+                        "cache.key".into(),
+                        "event:name".into(),
+                        "event:timeSinceStart".into()
+                    ],
+                }]
+        );
 
         let link_names = s
             .tag_names("t", Some(TagScope::Link), 0, 10_000)
             .await
             .unwrap();
-        assert!(link_names.len() == 1);
-        assert!(link_names[0].scope == TagScope::Link);
-        assert!(link_names[0].tags == vec!["link.kind", "link:spanID", "link:traceID"]);
+        assert!(
+            link_names
+                == vec![ScopedTag {
+                    scope: TagScope::Link,
+                    tags: vec![
+                        "link.kind".into(),
+                        "link:spanID".into(),
+                        "link:traceID".into()
+                    ],
+                }]
+        );
 
-        assert!(
-            s.tag_values("t", "event:name", 0, 10_000).await.unwrap()
-                == vec![TypedValue {
-                    type_: "string".into(),
-                    value: "exception".into(),
-                }]
-        );
-        assert!(
-            s.tag_values("t", "event:timeSinceStart", 0, 10_000)
-                .await
-                .unwrap()
-                == vec![TypedValue {
-                    type_: "duration".into(),
-                    value: "50".into(),
-                }]
-        );
-        assert!(
-            s.tag_values("t", "cache.key", 0, 10_000).await.unwrap()
-                == vec![TypedValue {
-                    type_: "string".into(),
-                    value: "users".into(),
-                }]
-        );
-        assert!(
-            s.tag_values("t", "event.cache.key", 0, 10_000)
-                .await
-                .unwrap()
-                == vec![TypedValue {
-                    type_: "string".into(),
-                    value: "users".into(),
-                }]
-        );
-        assert!(
-            s.tag_values("t", "link:traceID", 0, 10_000).await.unwrap()
-                == vec![TypedValue {
-                    type_: "string".into(),
-                    value: "09090909090909090909090909090909".into(),
-                }]
-        );
-        assert!(
-            s.tag_values("t", "link:spanID", 0, 10_000).await.unwrap()
-                == vec![TypedValue {
-                    type_: "string".into(),
-                    value: "0808080808080808".into(),
-                }]
-        );
-        assert!(
-            s.tag_values("t", "link.kind", 0, 10_000).await.unwrap()
-                == vec![TypedValue {
-                    type_: "string".into(),
-                    value: "retry".into(),
-                }]
-        );
-        assert!(
-            s.tag_values("t", "link.link.kind", 0, 10_000)
-                .await
-                .unwrap()
-                == vec![TypedValue {
-                    type_: "string".into(),
-                    value: "retry".into(),
-                }]
-        );
+        let cases = [
+            ("event:name", "string", "exception"),
+            ("event:timeSinceStart", "duration", "50"),
+            ("cache.key", "string", "users"),
+            ("event.cache.key", "string", "users"),
+            ("link:traceID", "string", "09090909090909090909090909090909"),
+            ("link:spanID", "string", "0808080808080808"),
+            ("link.kind", "string", "retry"),
+            ("link.link.kind", "string", "retry"),
+        ];
+        for (tag, type_, value) in cases {
+            let got = s.tag_values("t", tag, 0, 10_000).await.unwrap();
+            assert!(
+                got == vec![TypedValue {
+                    type_: type_.into(),
+                    value: value.into(),
+                }],
+                "tag {tag}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1553,27 +1567,27 @@ mod tests {
             .tag_names("t", Some(TagScope::Intrinsic), 0, 10_000)
             .await
             .unwrap();
-        assert!(got.len() == 1);
-        assert!(got[0].scope == TagScope::Intrinsic);
         assert!(
-            got[0].tags
-                == vec![
-                    "span:childCount",
-                    "span:duration",
-                    "span:id",
-                    "span:kind",
-                    "span:name",
-                    "span:parentID",
-                    "span:nestedSetLeft",
-                    "span:nestedSetParent",
-                    "span:nestedSetRight",
-                    "span:status",
-                    "span:statusMessage",
-                    "trace:duration",
-                    "trace:id",
-                    "trace:rootName",
-                    "trace:rootService",
-                ]
+            got == vec![ScopedTag {
+                scope: TagScope::Intrinsic,
+                tags: vec![
+                    "span:childCount".into(),
+                    "span:duration".into(),
+                    "span:id".into(),
+                    "span:kind".into(),
+                    "span:name".into(),
+                    "span:parentID".into(),
+                    "span:nestedSetLeft".into(),
+                    "span:nestedSetParent".into(),
+                    "span:nestedSetRight".into(),
+                    "span:status".into(),
+                    "span:statusMessage".into(),
+                    "trace:duration".into(),
+                    "trace:id".into(),
+                    "trace:rootName".into(),
+                    "trace:rootService".into(),
+                ],
+            }]
         );
     }
 
@@ -1768,10 +1782,10 @@ mod tests {
             .as_primitive::<datafusion::arrow::datatypes::Float64Type>()
             .value(0)
             == 0.5;
-        assert!(ratio_ok);
-        assert!(batch.column(2).as_boolean().value(0));
-        assert!(batch.column(3).as_string::<i32>().value(0) == "kaboom");
-        assert!(
+        check!(ratio_ok);
+        check!(batch.column(2).as_boolean().value(0));
+        check!(batch.column(3).as_string::<i32>().value(0) == "kaboom");
+        check!(
             batch
                 .column(4)
                 .as_primitive::<datafusion::arrow::datatypes::Int64Type>()
@@ -1790,163 +1804,76 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(
-        clippy::too_many_lines,
-        reason = "exhaustive per-intrinsic matcher test"
-    )]
     async fn intrinsic_matchers_match_each_intrinsic() {
-        // String intrinsics.
-        assert!(
-            scan_matches(&[matcher(
-                MatchScope::Intrinsic,
+        // trace:id and span:id are hex strings. Nested-set left/right are
+        // >= 0; a root span's nestedSetParent is -1 (Tempo's no-parent
+        // sentinel), so it matches < 0 — the same predicate Grafana's Traces
+        // Drilldown uses to find roots.
+        let cases = [
+            // String intrinsics.
+            (
                 "span:name",
                 MatchCmp::Eq,
                 MatchValue::Str("checkout".into()),
-            )])
-            .await
-                == 1
-        );
-        assert!(
-            scan_matches(&[matcher(
-                MatchScope::Intrinsic,
+            ),
+            (
                 "span:statusMessage",
                 MatchCmp::Eq,
                 MatchValue::Str("boom".into()),
-            )])
-            .await
-                == 1
-        );
-        assert!(
-            scan_matches(&[matcher(
-                MatchScope::Intrinsic,
+            ),
+            (
                 "trace:rootService",
                 MatchCmp::Eq,
                 MatchValue::Str("checkout".into()),
-            )])
-            .await
-                == 1
-        );
-        assert!(
-            scan_matches(&[matcher(
-                MatchScope::Intrinsic,
+            ),
+            (
                 "trace:rootName",
                 MatchCmp::Eq,
                 MatchValue::Str("POST /pay".into()),
-            )])
-            .await
-                == 1
-        );
-        // trace:id and span:id are hex strings.
-        assert!(
-            scan_matches(&[matcher(
-                MatchScope::Intrinsic,
+            ),
+            (
                 "trace:id",
                 MatchCmp::Eq,
                 MatchValue::Str("07070707070707070707070707070707".into()),
-            )])
-            .await
-                == 1
-        );
-        assert!(
-            scan_matches(&[matcher(
-                MatchScope::Intrinsic,
+            ),
+            (
                 "span:id",
                 MatchCmp::Eq,
                 MatchValue::Str("0101010101010101".into()),
-            )])
-            .await
-                == 1
-        );
-        // span:parentID present.
-        assert!(
-            scan_matches(&[matcher(
-                MatchScope::Intrinsic,
+            ),
+            // span:parentID present.
+            (
                 "span:parentID",
                 MatchCmp::Eq,
                 MatchValue::Str("0202020202020202".into()),
-            )])
-            .await
-                == 1
-        );
-        // Numeric / duration intrinsics.
-        assert!(
-            scan_matches(&[matcher(
-                MatchScope::Intrinsic,
-                "span:duration",
-                MatchCmp::Gt,
-                MatchValue::Int(1_000_000),
-            )])
-            .await
-                == 1
-        );
-        assert!(
-            scan_matches(&[matcher(
-                MatchScope::Intrinsic,
-                "trace:duration",
-                MatchCmp::Gte,
-                MatchValue::Int(0),
-            )])
-            .await
-                == 1
-        );
-        assert!(
-            scan_matches(&[matcher(
-                MatchScope::Intrinsic,
-                "span:childCount",
-                MatchCmp::Gte,
-                MatchValue::Int(0),
-            )])
-            .await
-                == 1
-        );
-        // Nested-set intrinsics. left/right are >= 0; a root span's
-        // nestedSetParent is -1 (Tempo's no-parent sentinel), so it matches < 0
-        // — the same predicate Grafana's Traces Drilldown uses to find roots.
-        for key in ["span:nestedSetLeft", "span:nestedSetRight"] {
-            assert!(
-                scan_matches(&[matcher(
-                    MatchScope::Intrinsic,
-                    key,
-                    MatchCmp::Gte,
-                    MatchValue::Int(0),
-                )])
-                .await
-                    == 1,
-                "nested-set intrinsic {key} should match"
-            );
-        }
-        assert!(
-            scan_matches(&[matcher(
-                MatchScope::Intrinsic,
-                "span:nestedSetParent",
-                MatchCmp::Lt,
-                MatchValue::Int(0),
-            )])
-            .await
-                == 1,
-            "root span nestedSetParent should match < 0"
-        );
-        // Instrumentation intrinsics.
-        assert!(
-            scan_matches(&[matcher(
-                MatchScope::Intrinsic,
+            ),
+            // Numeric / duration intrinsics.
+            ("span:duration", MatchCmp::Gt, MatchValue::Int(1_000_000)),
+            ("trace:duration", MatchCmp::Gte, MatchValue::Int(0)),
+            ("span:childCount", MatchCmp::Gte, MatchValue::Int(0)),
+            // Nested-set intrinsics.
+            ("span:nestedSetLeft", MatchCmp::Gte, MatchValue::Int(0)),
+            ("span:nestedSetRight", MatchCmp::Gte, MatchValue::Int(0)),
+            ("span:nestedSetParent", MatchCmp::Lt, MatchValue::Int(0)),
+            // Instrumentation intrinsics.
+            (
                 "instrumentation:name",
                 MatchCmp::Eq,
                 MatchValue::Str("tracer".into()),
-            )])
-            .await
-                == 1
-        );
-        assert!(
-            scan_matches(&[matcher(
-                MatchScope::Intrinsic,
+            ),
+            (
                 "instrumentation:version",
                 MatchCmp::Eq,
                 MatchValue::Str("1.2.3".into()),
-            )])
-            .await
-                == 1
-        );
+            ),
+        ];
+        for (key, op, value) in cases {
+            let desc = format!("{key} {op:?} {value:?}");
+            assert!(
+                scan_matches(&[matcher(MatchScope::Intrinsic, key, op, value)]).await == 1,
+                "intrinsic {desc} should match"
+            );
+        }
     }
 
     #[tokio::test]
@@ -2332,149 +2259,69 @@ mod tests {
 
     #[tokio::test]
     async fn tag_values_cover_trace_and_span_intrinsics() {
-        assert!(
-            tag_values_for("trace:duration").await
-                == vec![TypedValue {
-                    type_: "duration".into(),
-                    value: "5000000".into(),
-                }]
-        );
-        assert!(
-            tag_values_for("trace:id").await
-                == vec![TypedValue {
-                    type_: "string".into(),
-                    value: "07070707070707070707070707070707".into(),
-                }]
-        );
-        assert!(
-            tag_values_for("trace:rootName").await
-                == vec![TypedValue {
-                    type_: "string".into(),
-                    value: "POST /pay".into(),
-                }]
-        );
-        assert!(
-            tag_values_for("trace:rootService").await
-                == vec![TypedValue {
-                    type_: "string".into(),
-                    value: "checkout".into(),
-                }]
-        );
-        assert!(
-            tag_values_for("span:duration").await
-                == vec![TypedValue {
-                    type_: "duration".into(),
-                    value: "5000000".into(),
-                }]
-        );
-        assert!(
-            tag_values_for("span:id").await
-                == vec![TypedValue {
-                    type_: "string".into(),
-                    value: "0101010101010101".into(),
-                }]
-        );
-        assert!(
-            tag_values_for("span:kind").await
-                == vec![TypedValue {
-                    type_: "int".into(),
-                    value: "2".into(),
-                }]
-        );
-        assert!(
-            tag_values_for("span:name").await
-                == vec![TypedValue {
-                    type_: "string".into(),
-                    value: "checkout".into(),
-                }]
-        );
-        assert!(
-            tag_values_for("span:parentID").await
-                == vec![TypedValue {
-                    type_: "string".into(),
-                    value: "0202020202020202".into(),
-                }]
-        );
-        assert!(
-            tag_values_for("span:status").await
-                == vec![TypedValue {
-                    type_: "int".into(),
-                    value: "2".into(),
-                }]
-        );
-        assert!(
-            tag_values_for("span:statusMessage").await
-                == vec![TypedValue {
-                    type_: "string".into(),
-                    value: "boom".into(),
-                }]
-        );
-        assert!(
-            tag_values_for("instrumentation:name").await
-                == vec![TypedValue {
-                    type_: "string".into(),
-                    value: "tracer".into(),
-                }]
-        );
-        assert!(
-            tag_values_for("instrumentation:version").await
-                == vec![TypedValue {
-                    type_: "string".into(),
-                    value: "1.2.3".into(),
-                }]
-        );
+        for (tag, type_, value) in [
+            ("trace:duration", "duration", "5000000"),
+            ("trace:id", "string", "07070707070707070707070707070707"),
+            ("trace:rootName", "string", "POST /pay"),
+            ("trace:rootService", "string", "checkout"),
+            ("span:duration", "duration", "5000000"),
+            ("span:id", "string", "0101010101010101"),
+            ("span:kind", "int", "2"),
+            ("span:name", "string", "checkout"),
+            ("span:parentID", "string", "0202020202020202"),
+            ("span:status", "int", "2"),
+            ("span:statusMessage", "string", "boom"),
+            ("instrumentation:name", "string", "tracer"),
+            ("instrumentation:version", "string", "1.2.3"),
+        ] {
+            assert!(
+                tag_values_for(tag).await
+                    == vec![TypedValue {
+                        type_: type_.into(),
+                        value: value.into(),
+                    }],
+                "tag {tag}"
+            );
+        }
     }
 
     #[tokio::test]
     async fn tag_values_cover_nested_set_intrinsics() {
-        assert!(
-            tag_values_for("span:nestedSetLeft").await
-                == vec![TypedValue {
-                    type_: "int".into(),
-                    value: "1".into(),
-                }]
-        );
-        assert!(
-            tag_values_for("span:nestedSetRight").await
-                == vec![TypedValue {
-                    type_: "int".into(),
-                    value: "2".into(),
-                }]
-        );
-        assert!(
-            tag_values_for("span:nestedSetParent").await
-                == vec![TypedValue {
-                    type_: "int".into(),
-                    value: "-1".into(), // root: Tempo nestedSetParent sentinel
-                }]
-        );
+        for (tag, value) in [
+            ("span:nestedSetLeft", "1"),
+            ("span:nestedSetRight", "2"),
+            // root: Tempo nestedSetParent sentinel
+            ("span:nestedSetParent", "-1"),
+        ] {
+            assert!(
+                tag_values_for(tag).await
+                    == vec![TypedValue {
+                        type_: "int".into(),
+                        value: value.into(),
+                    }],
+                "tag {tag}"
+            );
+        }
     }
 
     #[tokio::test]
     async fn tag_values_cover_typed_span_attributes() {
         // Int, Float, and Bool span attributes round-trip through
         // typed_value_parts with the right type tags.
-        assert!(
-            tag_values_for(".http.status").await
-                == vec![TypedValue {
-                    type_: "int".into(),
-                    value: "500".into(),
-                }]
-        );
-        assert!(
-            tag_values_for(".ratio").await
-                == vec![TypedValue {
-                    type_: "float".into(),
-                    value: "0.5".into(),
-                }]
-        );
-        assert!(
-            tag_values_for(".ok").await
-                == vec![TypedValue {
-                    type_: "bool".into(),
-                    value: "true".into(),
-                }]
-        );
+        for (tag, type_, value) in [
+            (".http.status", "int", "500"),
+            (".ratio", "float", "0.5"),
+            (".ok", "bool", "true"),
+        ] {
+            assert!(
+                tag_values_for(tag).await
+                    == vec![TypedValue {
+                        type_: type_.into(),
+                        value: value.into(),
+                    }],
+                "tag {tag}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -2509,14 +2356,14 @@ mod tests {
         s.push_trace("t", "svc", "op", vec![span(1, None, "root", vec![])]);
         // The trace starts at 1000ns; a window entirely after it returns nothing.
         let r = s.scan("t", &[], 2000, 5000).await.unwrap();
-        assert!(row_count(&r).await == 0);
-        assert!(
+        check!(row_count(&r).await == 0);
+        check!(
             s.tag_values("t", ".svc", 2000, 5000)
                 .await
                 .unwrap()
                 .is_empty()
         );
-        assert!(s.tag_names("t", None, 2000, 5000).await.unwrap().is_empty());
+        check!(s.tag_names("t", None, 2000, 5000).await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -2909,24 +2756,16 @@ mod tests {
         }];
         let trace = stored_trace_with(sp);
 
-        assert!(intrinsic(
-            &trace,
-            "event:timeSinceStart",
-            MatchCmp::Neq,
-            MatchValue::Nil
-        ));
-        assert!(intrinsic(
-            &trace,
-            "event:timeSinceStart",
-            MatchCmp::Eq,
-            MatchValue::Int(50)
-        ));
-        assert!(!intrinsic(
-            &trace,
-            "event:timeSinceStart",
-            MatchCmp::Eq,
-            MatchValue::Int(51)
-        ));
+        for (cmp, value, want) in [
+            (MatchCmp::Neq, MatchValue::Nil, true),
+            (MatchCmp::Eq, MatchValue::Int(50), true),
+            (MatchCmp::Eq, MatchValue::Int(51), false),
+        ] {
+            assert!(
+                intrinsic(&trace, "event:timeSinceStart", cmp, value.clone()) == want,
+                "case {cmp:?} {value:?}"
+            );
+        }
 
         let empty = stored_trace_with(span(1, None, "root", vec![]));
         assert!(!intrinsic(
@@ -2947,45 +2786,40 @@ mod tests {
         }];
         let trace = stored_trace_with(sp);
 
-        // link:traceID presence + value.
-        assert!(intrinsic(
-            &trace,
-            "link:traceID",
-            MatchCmp::Neq,
-            MatchValue::Nil
-        ));
-        assert!(intrinsic(
-            &trace,
-            "link:traceID",
-            MatchCmp::Eq,
-            MatchValue::Str("09090909090909090909090909090909".into())
-        ));
-        assert!(!intrinsic(
-            &trace,
-            "link:traceID",
-            MatchCmp::Eq,
-            MatchValue::Str("00000000000000000000000000000000".into())
-        ));
-
-        // link:spanID presence + value.
-        assert!(intrinsic(
-            &trace,
-            "link:spanID",
-            MatchCmp::Neq,
-            MatchValue::Nil
-        ));
-        assert!(intrinsic(
-            &trace,
-            "link:spanID",
-            MatchCmp::Eq,
-            MatchValue::Str("0808080808080808".into())
-        ));
-        assert!(!intrinsic(
-            &trace,
-            "link:spanID",
-            MatchCmp::Eq,
-            MatchValue::Str("0000000000000000".into())
-        ));
+        // Presence + value probes for both link intrinsics.
+        for (tag, cmp, value, want) in [
+            ("link:traceID", MatchCmp::Neq, MatchValue::Nil, true),
+            (
+                "link:traceID",
+                MatchCmp::Eq,
+                MatchValue::Str("09090909090909090909090909090909".into()),
+                true,
+            ),
+            (
+                "link:traceID",
+                MatchCmp::Eq,
+                MatchValue::Str("00000000000000000000000000000000".into()),
+                false,
+            ),
+            ("link:spanID", MatchCmp::Neq, MatchValue::Nil, true),
+            (
+                "link:spanID",
+                MatchCmp::Eq,
+                MatchValue::Str("0808080808080808".into()),
+                true,
+            ),
+            (
+                "link:spanID",
+                MatchCmp::Eq,
+                MatchValue::Str("0000000000000000".into()),
+                false,
+            ),
+        ] {
+            assert!(
+                intrinsic(&trace, tag, cmp, value.clone()) == want,
+                "case {tag} {cmp:?} {value:?}"
+            );
+        }
 
         // No links: presence is false (other side of the `!`).
         let empty = stored_trace_with(span(1, None, "root", vec![]));
@@ -3011,114 +2845,60 @@ mod tests {
         sp.instrumentation_version = "1.2.3".into();
         let trace = stored_trace_with(sp);
 
-        // trace:rootService / trace:rootName / trace:duration distinct values
-        // (each arm differs from the `_ => true` fallthrough).
-        assert!(intrinsic(
-            &trace,
-            "trace:rootService",
-            MatchCmp::Eq,
-            MatchValue::Str("rootsvc".into())
-        ));
-        assert!(!intrinsic(
-            &trace,
-            "trace:rootService",
-            MatchCmp::Eq,
-            MatchValue::Str("nope".into())
-        ));
-        assert!(intrinsic(
-            &trace,
-            "trace:rootName",
-            MatchCmp::Eq,
-            MatchValue::Str("rootname".into())
-        ));
-        assert!(!intrinsic(
-            &trace,
-            "trace:rootName",
-            MatchCmp::Eq,
-            MatchValue::Str("nope".into())
-        ));
-        assert!(intrinsic(
-            &trace,
-            "trace:duration",
-            MatchCmp::Eq,
-            MatchValue::Int(1234)
-        ));
-        assert!(!intrinsic(
-            &trace,
-            "trace:duration",
-            MatchCmp::Eq,
-            MatchValue::Int(5)
-        ));
-
-        // statusMessage arm.
-        assert!(intrinsic(
-            &trace,
-            "span:statusMessage",
-            MatchCmp::Eq,
-            MatchValue::Str("boom".into())
-        ));
-        assert!(!intrinsic(
-            &trace,
-            "span:statusMessage",
-            MatchCmp::Eq,
-            MatchValue::Str("nope".into())
-        ));
-
-        // instrumentation:name / instrumentation:version arms.
-        assert!(intrinsic(
-            &trace,
-            "instrumentation:name",
-            MatchCmp::Eq,
-            MatchValue::Str("tracer".into())
-        ));
-        assert!(!intrinsic(
-            &trace,
-            "instrumentation:name",
-            MatchCmp::Eq,
-            MatchValue::Str("nope".into())
-        ));
-        assert!(intrinsic(
-            &trace,
-            "instrumentation:version",
-            MatchCmp::Eq,
-            MatchValue::Str("1.2.3".into())
-        ));
-        assert!(!intrinsic(
-            &trace,
-            "instrumentation:version",
-            MatchCmp::Eq,
-            MatchValue::Str("9.9.9".into())
-        ));
+        // Each intrinsic arm gets a matching and a non-matching value (each
+        // arm differs from the `_ => true` fallthrough).
+        for (tag, value, want) in [
+            ("trace:rootService", MatchValue::Str("rootsvc".into()), true),
+            ("trace:rootService", MatchValue::Str("nope".into()), false),
+            ("trace:rootName", MatchValue::Str("rootname".into()), true),
+            ("trace:rootName", MatchValue::Str("nope".into()), false),
+            ("trace:duration", MatchValue::Int(1234), true),
+            ("trace:duration", MatchValue::Int(5), false),
+            ("span:statusMessage", MatchValue::Str("boom".into()), true),
+            ("span:statusMessage", MatchValue::Str("nope".into()), false),
+            (
+                "instrumentation:name",
+                MatchValue::Str("tracer".into()),
+                true,
+            ),
+            (
+                "instrumentation:name",
+                MatchValue::Str("nope".into()),
+                false,
+            ),
+            (
+                "instrumentation:version",
+                MatchValue::Str("1.2.3".into()),
+                true,
+            ),
+            (
+                "instrumentation:version",
+                MatchValue::Str("9.9.9".into()),
+                false,
+            ),
+        ] {
+            assert!(
+                intrinsic(&trace, tag, MatchCmp::Eq, value.clone()) == want,
+                "case {tag} {value:?}"
+            );
+        }
     }
 
     #[test]
     fn intrinsic_matches_nested_set_left_and_right_arms() {
         let trace = stored_trace_with(span(1, None, "root", vec![]));
         // nested set is { left: 1, right: 2, parent_id: 0 }.
-        assert!(intrinsic(
-            &trace,
-            "span:nestedSetLeft",
-            MatchCmp::Eq,
-            MatchValue::Int(1)
-        ));
-        assert!(!intrinsic(
-            &trace,
-            "span:nestedSetLeft",
-            MatchCmp::Eq,
-            MatchValue::Int(2)
-        ));
-        assert!(intrinsic(
-            &trace,
-            "span:nestedSetRight",
-            MatchCmp::Eq,
-            MatchValue::Int(2)
-        ));
-        assert!(!intrinsic(
-            &trace,
-            "span:nestedSetRight",
-            MatchCmp::Eq,
-            MatchValue::Int(1)
-        ));
+        for (tag, value, want) in [
+            ("span:nestedSetLeft", 1, true),
+            ("span:nestedSetLeft", 2, false),
+            ("span:nestedSetRight", 2, true),
+            ("span:nestedSetRight", 1, false),
+        ] {
+            assert!(
+                intrinsic(&trace, tag, MatchCmp::Eq, MatchValue::Int(value)) == want,
+                "case {tag} {value}"
+            );
+        }
     }
 
     #[test]
@@ -3149,11 +2929,18 @@ mod tests {
 
     #[test]
     fn present_value_matches_eq_nil_is_false_neq_nil_is_true() {
-        // A PRESENT value: `= nil` must be false, `!= nil` must be true.
-        assert!(present_value_matches(MatchCmp::Eq, &MatchValue::Nil) == Some(false));
-        assert!(present_value_matches(MatchCmp::Neq, &MatchValue::Nil) == Some(true));
-        // Non-nil comparisons defer to the typed path.
-        assert!(present_value_matches(MatchCmp::Eq, &MatchValue::Int(1)).is_none());
+        // A PRESENT value: `= nil` must be false, `!= nil` must be true;
+        // non-nil comparisons defer to the typed path (None).
+        for (cmp, value, want) in [
+            (MatchCmp::Eq, MatchValue::Nil, Some(false)),
+            (MatchCmp::Neq, MatchValue::Nil, Some(true)),
+            (MatchCmp::Eq, MatchValue::Int(1), None),
+        ] {
+            assert!(
+                present_value_matches(cmp, &value) == want,
+                "case {cmp:?} {value:?}"
+            );
+        }
     }
 
     #[test]

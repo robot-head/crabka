@@ -168,10 +168,91 @@ pub(crate) async fn compute_reassignment_progress(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use crabka_metadata::{BrokerRegistrationRecord, MetadataImage, MetadataRecord, TopicRecord};
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
     use uuid::Uuid;
+
+    struct MockReassignmentController {
+        is_leader: AtomicBool,
+        current: Mutex<Arc<MetadataImage>>,
+        image_tx: watch::Sender<Arc<MetadataImage>>,
+        submitted: Mutex<Vec<Vec<MetadataRecord>>>,
+    }
+
+    impl MockReassignmentController {
+        fn new(is_leader: bool, image: Arc<MetadataImage>) -> Self {
+            let (image_tx, _) = watch::channel(image.clone());
+            Self {
+                is_leader: AtomicBool::new(is_leader),
+                current: Mutex::new(image),
+                image_tx,
+                submitted: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn publish(&self, image: Arc<MetadataImage>) {
+            *self.current.lock().expect("current image mutex poisoned") = image.clone();
+            self.image_tx
+                .send(image)
+                .expect("run loop is watching image");
+        }
+
+        fn submitted_len(&self) -> usize {
+            self.submitted
+                .lock()
+                .expect("submitted mutex poisoned")
+                .len()
+        }
+
+        fn submissions(&self) -> Vec<Vec<MetadataRecord>> {
+            self.submitted
+                .lock()
+                .expect("submitted mutex poisoned")
+                .clone()
+        }
+    }
+
+    #[async_trait]
+    impl ReassignmentController for MockReassignmentController {
+        fn is_leader(&self) -> bool {
+            self.is_leader.load(Ordering::SeqCst)
+        }
+
+        fn current_image(&self) -> Arc<MetadataImage> {
+            self.current
+                .lock()
+                .expect("current image mutex poisoned")
+                .clone()
+        }
+
+        fn watch_image(&self) -> watch::Receiver<Arc<MetadataImage>> {
+            self.image_tx.subscribe()
+        }
+
+        async fn submit_change(&self, records: Vec<MetadataRecord>) -> Result<(), String> {
+            self.submitted
+                .lock()
+                .expect("submitted mutex poisoned")
+                .push(records);
+            Ok(())
+        }
+    }
+
+    async fn wait_for_submission_count(controller: &MockReassignmentController, count: usize) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if controller.submitted_len() >= count {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("reassignment run loop did not submit expected records");
+    }
 
     fn img(
         replicas: &[NodeId],
@@ -308,9 +389,10 @@ mod tests {
         let updates = compute_reassignment_progress(&image, &l).await;
         assert!(updates.len() == 1);
         let pr = first_partition(&updates[0]);
-        assert!(pr.replicas == vec![1, 3]);
         // Slot 0 → broker 1 → dA; slot 1 → broker 3 → dC (NOT dB).
-        assert!(pr.directories == vec![da, dc]);
+        check!(pr.replicas == vec![1, 3]);
+        check!(pr.directories == vec![da, dc]);
+        check!(pr.partition_epoch == 1);
     }
 
     #[tokio::test]
@@ -320,20 +402,62 @@ mod tests {
         let updates = compute_reassignment_progress(&img, &l).await;
         assert!(updates.len() == 1);
         let pr = first_partition(&updates[0]);
-        assert!(pr.replicas == vec![1, 3]);
-        assert!(pr.adding_replicas == Vec::<NodeId>::new());
-        assert!(pr.removing_replicas == Vec::<NodeId>::new());
-        assert!(pr.isr == vec![1, 3]);
-        assert!(pr.leader == 1); // unchanged
-        assert!(pr.leader_epoch == 5); // unchanged (leader didn't change)
+        // leader and leader_epoch are unchanged (leader didn't change).
+        check!(pr.replicas == vec![1, 3]);
+        check!(pr.adding_replicas == Vec::<NodeId>::new());
+        check!(pr.removing_replicas == Vec::<NodeId>::new());
+        check!(pr.isr == vec![1, 3]);
+        check!(pr.leader == 1);
+        check!(pr.leader_epoch == 5);
+        check!(pr.partition_epoch == 1);
     }
 
     #[tokio::test]
-    async fn wait_when_adding_not_in_isr() {
-        let img = img(&[1, 2, 3], &[1, 2], &[3], &[2], 1);
-        let l = liveness(&[1, 2, 3]).await;
-        let updates = compute_reassignment_progress(&img, &l).await;
-        assert!(updates.is_empty(), "should wait; got {updates:?}");
+    async fn no_update_emitted_when_waiting_idle_or_no_alive_target() {
+        // (case, replicas, isr, adding, removing, leader, alive) — every case
+        // should wait / stay idle: compute_reassignment_progress emits nothing.
+        let cases = [
+            // Adding replica 3 not yet in ISR → wait.
+            (
+                "adding_not_in_isr",
+                vec![1, 2, 3],
+                vec![1, 2],
+                vec![3],
+                vec![2],
+                1,
+                vec![1, 2, 3],
+            ),
+            // leader=2, removing=[2]; only target replicas {1,3} in isr but
+            // none alive (only 2 alive) — wait.
+            (
+                "leader_handoff_no_alive_target_replica",
+                vec![1, 2, 3],
+                vec![1, 2, 3],
+                vec![3],
+                vec![2],
+                2,
+                vec![2],
+            ),
+            // No reassignment in flight → idle partition emits no update.
+            (
+                "idle_partition",
+                vec![1, 2, 3],
+                vec![1, 2, 3],
+                vec![],
+                vec![],
+                1,
+                vec![1, 2, 3],
+            ),
+        ];
+        for (case, replicas, isr, adding, removing, leader, alive) in cases {
+            let img = img(&replicas, &isr, &adding, &removing, leader);
+            let l = liveness(&alive).await;
+            let updates = compute_reassignment_progress(&img, &l).await;
+            assert!(
+                updates.is_empty(),
+                "case {case}: should wait; got {updates:?}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -345,28 +469,58 @@ mod tests {
         assert!(updates.len() == 1);
         let pr = first_partition(&updates[0]);
         assert!(pr.leader == 1 || pr.leader == 3, "leader was {}", pr.leader);
-        assert!(pr.leader_epoch == 6); // bumped
-        // Replica set unchanged — completion happens next tick.
-        assert!(pr.adding_replicas == vec![3]);
-        assert!(pr.removing_replicas == vec![2]);
+        // leader_epoch bumped; replica set unchanged — completion happens
+        // next tick.
+        check!(pr.leader_epoch == 6);
+        check!(pr.partition_epoch == 1);
+        check!(pr.adding_replicas == vec![3]);
+        check!(pr.removing_replicas == vec![2]);
     }
 
     #[tokio::test]
-    async fn leader_handoff_skipped_if_no_alive_target_replica() {
-        // leader=2, removing=[2]; only target replicas {1,3} in isr but
-        // none alive — wait.
-        let img = img(&[1, 2, 3], &[1, 2, 3], &[3], &[2], 2);
-        let l = liveness(&[2]).await; // only 2 alive
-        let updates = compute_reassignment_progress(&img, &l).await;
-        assert!(updates.is_empty());
+    async fn run_submits_ready_reassignment_on_image_change() {
+        let initial = img(&[1], &[1], &[], &[], 1);
+        let controller = Arc::new(MockReassignmentController::new(true, initial));
+        let l = Arc::new(liveness(&[1, 2, 3]).await);
+        let shutdown = CancellationToken::new();
+        let task_controller: Arc<dyn ReassignmentController> = controller.clone();
+        let task = tokio::spawn(run(task_controller, l, shutdown.clone()));
+
+        tokio::task::yield_now().await;
+        controller.publish(img(&[1, 2, 3], &[1, 2, 3], &[3], &[2], 1));
+        wait_for_submission_count(&controller, 1).await;
+
+        shutdown.cancel();
+        task.await.expect("reassignment task panicked");
+        let submissions = controller.submissions();
+        assert!(submissions.len() == 1);
+        assert!(submissions[0].len() == 1);
+        let pr = first_partition(&submissions[0][0]);
+        assert!(pr.replicas == vec![1, 3]);
+        assert!(pr.partition_epoch == 1);
     }
 
     #[tokio::test]
-    async fn idle_partition_emits_no_update() {
-        let img = img(&[1, 2, 3], &[1, 2, 3], &[], &[], 1);
-        let l = liveness(&[1, 2, 3]).await;
-        let updates = compute_reassignment_progress(&img, &l).await;
-        assert!(updates.is_empty());
+    async fn run_skips_ready_reassignment_when_not_leader() {
+        let initial = img(&[1], &[1], &[], &[], 1);
+        let controller = Arc::new(MockReassignmentController::new(false, initial));
+        let l = Arc::new(liveness(&[1, 2, 3]).await);
+        let shutdown = CancellationToken::new();
+        let task_controller: Arc<dyn ReassignmentController> = controller.clone();
+        let task = tokio::spawn(run(task_controller, l, shutdown.clone()));
+
+        tokio::task::yield_now().await;
+        controller.publish(img(&[1, 2, 3], &[1, 2, 3], &[3], &[2], 1));
+        let observed = tokio::time::timeout(
+            Duration::from_millis(100),
+            wait_for_submission_count(&controller, 1),
+        )
+        .await;
+
+        shutdown.cancel();
+        task.await.expect("reassignment task panicked");
+        assert!(observed.is_err(), "non-leader must not submit changes");
+        assert!(controller.submitted_len() == 0);
     }
 
     #[tokio::test]

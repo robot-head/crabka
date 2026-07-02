@@ -1,6 +1,6 @@
 //! Asserts our JSON framing/body matches bytes captured from Confluent's
 //! `JSONSerializer`. The golden in `testdata/schema_serde/json/order.hex` was
-//! captured against `confluentinc/cp-schema-registry` (schema id 3) via
+//! captured against `mirror.gcr.io/confluentinc/cp-schema-registry` (schema id 3) via
 //! `tests/schema-serde-capture/run.sh`. Confluent emits compact JSON
 //! (`{"id":"o-1","total":9.5}`, no spaces, declaration field order) — which
 //! matches `serde_json`'s compact output, so the frames are byte-identical.

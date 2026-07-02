@@ -127,12 +127,19 @@ mod tests {
 
     #[test]
     fn interval_bounds_enforced() {
-        assert!(validate("interval.ms", "300000").is_ok());
-        assert!(validate("interval.ms", "100").is_ok());
-        assert!(validate("interval.ms", "3600000").is_ok());
-        assert!(validate("interval.ms", "99").is_err());
-        assert!(validate("interval.ms", "3600001").is_err());
-        assert!(validate("interval.ms", "not-a-number").is_err());
+        for (value, ok) in [
+            ("300000", true),
+            ("100", true),
+            ("3600000", true),
+            ("99", false),
+            ("3600001", false),
+            ("not-a-number", false),
+        ] {
+            assert!(
+                validate("interval.ms", value).is_ok() == ok,
+                "interval.ms={value}"
+            );
+        }
     }
 
     #[test]
@@ -142,30 +149,29 @@ mod tests {
 
     #[test]
     fn match_selectors_validated() {
-        assert!(validate("match", "client_id=my-app.*").is_ok());
-        assert!(
-            validate(
-                "match",
-                "client_software_name=apache-kafka-java,client_id=svc-.*"
-            )
-            .is_ok()
-        );
-        assert!(validate("match", "client_foo=x").is_err());
-        assert!(validate("match", "client_id").is_err());
-        assert!(validate("match", "client_id=[unclosed").is_err());
+        for (value, ok) in [
+            ("client_id=my-app.*", true),
+            (
+                "client_software_name=apache-kafka-java,client_id=svc-.*",
+                true,
+            ),
+            ("client_foo=x", false),
+            ("client_id", false),
+            ("client_id=[unclosed", false),
+        ] {
+            assert!(validate("match", value).is_ok() == ok, "match={value}");
+        }
     }
 
     #[test]
     fn metrics_list_accepts_star_and_prefixes() {
-        assert!(validate("metrics", "*").is_ok());
-        assert!(
-            validate(
-                "metrics",
-                "org.apache.kafka.consumer.,org.apache.kafka.producer."
-            )
-            .is_ok()
-        );
-        assert!(validate("metrics", "").is_ok());
+        for value in [
+            "*",
+            "org.apache.kafka.consumer.,org.apache.kafka.producer.",
+            "",
+        ] {
+            assert!(validate("metrics", value).is_ok(), "metrics={value}");
+        }
     }
 
     #[test]

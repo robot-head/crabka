@@ -47,7 +47,7 @@ just -f bench/justfile bench-ci
 
 This:
 1. Builds the bench-driver OCI image via melange/apko.
-2. Creates a `crabka-bench` KinD cluster (`kindest/node:v1.30.0`).
+2. Creates a `crabka-bench` KinD cluster (`mirror.gcr.io/kindest/node:v1.30.0`).
 3. Installs Strimzi (`1.0.0`, running Apache Kafka `4.2.0`) + Crabka + a minimal Prometheus.
 4. Runs `small-msg-saturate` and `fixed-rate-latency` against both
    stacks at 1 broker / RF=1.

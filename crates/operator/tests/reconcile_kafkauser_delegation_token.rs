@@ -16,7 +16,7 @@
 //! broker-side act-as wire path is covered by `crabka_broker`'s own
 //! integration tests.
 
-use assert2::assert;
+use assert2::{assert, check};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -189,11 +189,12 @@ async fn delegation_token_user_reconcile_creates_secret_and_status() {
         )),
         _ => None,
     });
-    let (owner, renewers, max_lifetime_ms) =
-        create_call.expect("CreateDelegationToken must have been issued");
-    assert!(owner == "alice", "owner principal name (no User: prefix)");
-    assert!(renewers == vec!["User:bob".to_string()]);
-    assert!(max_lifetime_ms == -1, "unset spec field → broker default");
+    // Owner principal name carries no `User:` prefix; unset
+    // spec.max_lifetime_ms → -1 (broker default).
+    assert!(
+        create_call == Some(("alice".to_string(), vec!["User:bob".to_string()], -1_i64,)),
+        "CreateDelegationToken must have been issued with these exact args",
+    );
 
     // ── Secret PATCH body: four KIP-48 keys ────────────────────────
     let observed = state.take_observed();
@@ -345,17 +346,17 @@ async fn delegation_token_user_reconcile_renews_when_within_threshold() {
         .iter()
         .filter(|c| matches!(c, RecordedCall::CreateDelegationToken { .. }))
         .count();
-    assert!(
+    check!(
         creates == 1,
         "expected exactly one Create call, got: {calls:?}"
     );
 
     // ── Expiry monotonically advances (or holds at `max_timestamp_ms`).
-    assert!(
+    check!(
         second_expiry >= first_expiry,
         "renew must not move expiry backwards: first={first_expiry}, second={second_expiry}",
     );
-    assert!(
+    check!(
         second_expiry <= first_max,
         "renew must not exceed max_timestamp_ms: second={second_expiry}, max={first_max}",
     );

@@ -2,7 +2,7 @@
 //! consume the *same* bytes as the real JVM MM2 classes.
 //!
 //! The golden vectors in `tests/fixtures/mm2_serde_golden.json` were captured
-//! from `apache/kafka:4.0.0`'s
+//! from `mirror.gcr.io/apache/kafka:4.0.0`'s
 //! `org.apache.kafka.connect.mirror.{Heartbeat,Checkpoint,OffsetSync}`
 //! by `scripts/capture-mm2-golden/Capture.java` (see that directory's README
 //! for how to reproduce). The fixture is the committed source of truth; the

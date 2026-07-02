@@ -95,7 +95,7 @@ impl FromIterator<(String, String)> for Labels {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
 
     #[test]
     fn fingerprint_is_order_independent() {
@@ -143,10 +143,10 @@ mod tests {
         let mut l = Labels::new();
         assert!(l.is_empty());
         l.insert("app", "api");
-        assert!(!l.is_empty());
-        assert!(l.get("app") == Some("api"));
-        assert!(l.get("missing") == None);
-        assert!(l.len() == 1);
+        check!(!l.is_empty());
+        check!(l.get("app") == Some("api"));
+        check!(l.get("missing") == None);
+        check!(l.len() == 1);
         l.insert("env", "prod");
         assert!(l.len() == 2);
         let pairs = l
@@ -165,8 +165,10 @@ mod tests {
         .into_iter()
         .collect::<Labels>();
 
-        assert!(labels.len() == 2);
-        assert!(labels.get("app") == Some("api"));
-        assert!(labels.get("env") == Some("prod"));
+        let pairs = labels
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect::<Vec<_>>();
+        assert!(pairs == vec![("app", "api"), ("env", "prod")]);
     }
 }

@@ -121,9 +121,33 @@ mod tests {
             assert!(child.left > root.left);
             assert!(child.right < root.right);
         }
-        assert!(ns[2].left > ns[1].left);
-        assert!(ns[2].right < ns[1].right);
-        assert!(!(ns[3].left > ns[1].left && ns[3].right < ns[1].right));
+        // Pre-order intervals: span 3 nests inside span 2, while the sibling
+        // span 4 falls outside span 2's interval.
+        assert_eq!(
+            ns,
+            vec![
+                NestedSet {
+                    left: 1,
+                    right: 8,
+                    parent_id: -1
+                },
+                NestedSet {
+                    left: 2,
+                    right: 5,
+                    parent_id: 1
+                },
+                NestedSet {
+                    left: 3,
+                    right: 4,
+                    parent_id: 2
+                },
+                NestedSet {
+                    left: 6,
+                    right: 7,
+                    parent_id: 1
+                },
+            ]
+        );
     }
 
     #[test]

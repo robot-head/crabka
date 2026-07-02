@@ -1088,7 +1088,7 @@ fn validate_range(start_ms: i64, end_ms: i64) -> Result<(), ProfileError> {
 mod tests {
     use std::sync::Arc;
 
-    use assert2::assert;
+    use assert2::{assert, check};
 
     use super::*;
     use crate::{FunctionRec, InMemoryProfileStore, LineRec, LocationRec, SeriesAgg};
@@ -1299,9 +1299,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(diff.left_ticks == 10);
-        assert!(diff.right_ticks == 15);
-        assert!(diff.names.iter().any(|name| name == "b"));
+        check!(diff.left_ticks == 10);
+        check!(diff.right_ticks == 15);
+        check!(diff.names.iter().any(|name| name == "b"));
     }
 
     #[tokio::test]
@@ -1485,9 +1485,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(fg.names.iter().any(|name| name == "alpha"));
-        assert!(fg.names.iter().any(|name| name == "beta"));
-        assert!(fg.total == 12);
+        check!(fg.names.iter().any(|name| name == "alpha"));
+        check!(fg.names.iter().any(|name| name == "beta"));
+        check!(fg.total == 12);
     }
 
     #[tokio::test]
@@ -1497,9 +1497,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(fg.total == 18);
-        assert!(fg.levels[0].values == vec![0, 18, 0, 0]);
-        assert!(self_value_for(&fg, "work") == 15);
+        check!(fg.total == 18);
+        check!(fg.levels[0].values == vec![0, 18, 0, 0]);
+        check!(self_value_for(&fg, "work") == 15);
     }
 
     #[tokio::test]
@@ -1509,10 +1509,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(fg.total == 15);
-        assert!(fg.names[0] == "total");
-        assert!(self_value_for(&fg, "work") == 15);
-        assert!(!fg.names.iter().any(|name| name == "other"));
+        check!(fg.total == 15);
+        check!(fg.names[0] == "total");
+        check!(self_value_for(&fg, "work") == 15);
+        check!(!fg.names.iter().any(|name| name == "other"));
     }
 
     #[tokio::test]
@@ -1530,9 +1530,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(fg.total == 15);
-        assert!(fg.names.iter().any(|name| name == "work"));
-        assert!(!fg.names.iter().any(|name| name == "other"));
+        check!(fg.total == 15);
+        check!(fg.names.iter().any(|name| name == "work"));
+        check!(!fg.names.iter().any(|name| name == "other"));
     }
 
     #[tokio::test]
@@ -1549,10 +1549,10 @@ mod tests {
             .select_merge_stacktraces_grouped("tenant-a", PT, "{}", 0, 60_000, 16, &service_group)
             .await
             .unwrap();
-        assert!(has_name(&grouped_default, "api"));
-        assert!(has_name(&grouped_default, "other"));
-        assert!(has_name(&grouped_limited, "api"));
-        assert!(!has_name(&grouped_limited, "other"));
+        check!(has_name(&grouped_default, "api"));
+        check!(has_name(&grouped_default, "other"));
+        check!(has_name(&grouped_limited, "api"));
+        check!(!has_name(&grouped_limited, "other"));
 
         let selected_default = engine
             .select_merge_stacktraces_with_stack_trace_selector(
@@ -1577,9 +1577,9 @@ mod tests {
             .select_merge_stacktraces_sharded("tenant-a", PT, "{}", &[(0, 0), (30_000, 30_000)], 16)
             .await
             .unwrap();
-        assert!(has_name(&sharded_default, "other"));
-        assert!(has_name(&sharded_default, "main"));
-        assert!(!has_name(&sharded_limited, "other"));
+        check!(has_name(&sharded_default, "other"));
+        check!(has_name(&sharded_default, "main"));
+        check!(!has_name(&sharded_limited, "other"));
 
         let selected_sharded_default = engine
             .select_merge_stacktraces_with_stack_trace_selector_sharded(
@@ -1603,9 +1603,9 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(has_name(&selected_sharded_default, "other"));
-        assert!(has_name(&selected_sharded_default, "main"));
-        assert!(!has_name(&selected_sharded_limited, "other"));
+        check!(has_name(&selected_sharded_default, "other"));
+        check!(has_name(&selected_sharded_default, "main"));
+        check!(!has_name(&selected_sharded_limited, "other"));
     }
 
     #[tokio::test]
@@ -1652,10 +1652,10 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(has_name(&span_default, "other"));
-        assert!(!has_name(&span_limited, "other"));
-        assert!(has_name(&span_sharded_default, "other"));
-        assert!(!has_name(&span_sharded_limited, "other"));
+        check!(has_name(&span_default, "other"));
+        check!(!has_name(&span_limited, "other"));
+        check!(has_name(&span_sharded_default, "other"));
+        check!(!has_name(&span_sharded_limited, "other"));
     }
 
     #[tokio::test]
@@ -1675,12 +1675,12 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(!bytes_contain(&tree_default, "cold_leaf"));
-        assert!(bytes_contain(&tree_default, "other"));
-        assert!(bytes_contain(&tree_default, "main"));
-        assert!(bytes_contain(&tree_limited, "main"));
-        assert!(bytes_contain(&tree_limited, "cold_leaf"));
-        assert!(!bytes_contain(&tree_limited, "other"));
+        check!(!bytes_contain(&tree_default, "cold_leaf"));
+        check!(bytes_contain(&tree_default, "other"));
+        check!(bytes_contain(&tree_default, "main"));
+        check!(bytes_contain(&tree_limited, "main"));
+        check!(bytes_contain(&tree_limited, "cold_leaf"));
+        check!(!bytes_contain(&tree_limited, "other"));
 
         let sharded_tree_default = engine
             .select_merge_stacktraces_tree_with_stack_trace_selector_sharded(
@@ -1704,10 +1704,10 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(bytes_contain(&sharded_tree_default, "other"));
-        assert!(bytes_contain(&sharded_tree_default, "main"));
-        assert!(bytes_contain(&sharded_tree, "cold_leaf"));
-        assert!(!bytes_contain(&sharded_tree, "other"));
+        check!(bytes_contain(&sharded_tree_default, "other"));
+        check!(bytes_contain(&sharded_tree_default, "main"));
+        check!(bytes_contain(&sharded_tree, "cold_leaf"));
+        check!(!bytes_contain(&sharded_tree, "other"));
 
         let profile_default = engine
             .select_merge_profile_with_max_nodes_and_stack_trace_selector(
@@ -1721,11 +1721,11 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(decoded_profile_total(&profile_default) == 15);
-        assert!(decoded_profile_total(&profile_limited) == 15);
-        assert!(decoded_profile_has_string(&profile_default, "other"));
-        assert!(decoded_profile_has_string(&profile_default, "main"));
-        assert!(!decoded_profile_has_string(&profile_limited, "other"));
+        check!(decoded_profile_total(&profile_default) == 15);
+        check!(decoded_profile_total(&profile_limited) == 15);
+        check!(decoded_profile_has_string(&profile_default, "other"));
+        check!(decoded_profile_has_string(&profile_default, "main"));
+        check!(!decoded_profile_has_string(&profile_limited, "other"));
 
         let span_tree_default = engine
             .select_merge_span_profile_tree("tenant-a", PT, "{}", &[111], 0, 60_000, 0)
@@ -1735,9 +1735,9 @@ mod tests {
             .select_merge_span_profile_tree("tenant-a", PT, "{}", &[111], 0, 60_000, 16)
             .await
             .unwrap();
-        assert!(bytes_contain(&span_tree_default, "other"));
-        assert!(bytes_contain(&span_tree_default, "main"));
-        assert!(!bytes_contain(&span_tree_limited, "other"));
+        check!(bytes_contain(&span_tree_default, "other"));
+        check!(bytes_contain(&span_tree_default, "main"));
+        check!(!bytes_contain(&span_tree_limited, "other"));
 
         let span_tree_sharded_default = engine
             .select_merge_span_profile_tree_sharded(
@@ -1761,10 +1761,10 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(bytes_contain(&span_tree_sharded_default, "other"));
-        assert!(bytes_contain(&span_tree_sharded_default, "main"));
-        assert!(bytes_contain(&span_tree_sharded, "cold_leaf"));
-        assert!(!bytes_contain(&span_tree_sharded, "other"));
+        check!(bytes_contain(&span_tree_sharded_default, "other"));
+        check!(bytes_contain(&span_tree_sharded_default, "main"));
+        check!(bytes_contain(&span_tree_sharded, "cold_leaf"));
+        check!(!bytes_contain(&span_tree_sharded, "other"));
     }
 
     #[tokio::test]
@@ -1881,8 +1881,8 @@ mod tests {
             .unwrap();
 
         assert!(got.len() == 1);
-        assert!(got[0].labels == vec![("service".to_string(), "api".to_string())]);
-        assert!(got[0].heatmap.counts.iter().flatten().sum::<u64>() == 1);
+        check!(got[0].labels == vec![("service".to_string(), "api".to_string())]);
+        check!(got[0].heatmap.counts.iter().flatten().sum::<u64>() == 1);
     }
 
     fn series_fixture() -> FlameEngine<InMemoryProfileStore> {
@@ -1959,10 +1959,18 @@ mod tests {
             .unwrap();
         got.sort_by(|left, right| left.labels.cmp(&right.labels));
 
-        assert!(got[0].labels == vec![("service".to_string(), "api".to_string())]);
-        assert!(got[0].points == vec![(0, 100.0), (15_000, 50.0)]);
-        assert!(got[1].labels == vec![("service".to_string(), "web".to_string())]);
-        assert!(got[1].points == vec![(0, 7.0)]);
+        assert!(
+            got == vec![
+                Series {
+                    labels: vec![("service".to_string(), "api".to_string())],
+                    points: vec![(0, 100.0), (15_000, 50.0)],
+                },
+                Series {
+                    labels: vec![("service".to_string(), "web".to_string())],
+                    points: vec![(0, 7.0)],
+                },
+            ]
+        );
     }
 
     #[tokio::test]
@@ -2062,9 +2070,17 @@ mod tests {
             .unwrap();
         got.sort_by(|left, right| left.labels.cmp(&right.labels));
 
-        assert!(got[0].labels == vec![("service".to_string(), "api".to_string())]);
-        assert!(got[0].points == vec![(0, 100.0), (15_000, 50.0)]);
-        assert!(got[1].labels == vec![("service".to_string(), "web".to_string())]);
-        assert!(got[1].points == vec![(0, 7.0)]);
+        assert!(
+            got == vec![
+                Series {
+                    labels: vec![("service".to_string(), "api".to_string())],
+                    points: vec![(0, 100.0), (15_000, 50.0)],
+                },
+                Series {
+                    labels: vec![("service".to_string(), "web".to_string())],
+                    points: vec![(0, 7.0)],
+                },
+            ]
+        );
     }
 }

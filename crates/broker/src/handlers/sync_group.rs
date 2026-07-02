@@ -23,6 +23,10 @@ use crate::codes;
 use crate::coordinator::unified::actor::GroupActorMessage;
 use crate::error::BrokerError;
 
+/// Upper bound on how long a follower's `SyncGroup` is parked waiting for the
+/// leader's call to install assignments before giving up with
+/// `REBALANCE_IN_PROGRESS`. Matches Kafka's default group rebalance timeout
+/// order of magnitude so a healthy leader always beats the deadline.
 const FOLLOWER_WAIT: Duration = Duration::from_secs(30);
 
 #[tracing::instrument(
@@ -34,8 +38,8 @@ const FOLLOWER_WAIT: Duration = Duration::from_secs(30);
 )]
 pub(crate) async fn handle(
     broker: &Broker,
-    version: i16,
-    _correlation_id: i32,
+    version: crate::handlers::ApiVersion,
+    _correlation_id: crate::handlers::CorrelationId,
     req_bytes: &[u8],
     ctx: &crate::handlers::RequestContext<'_>,
 ) -> Result<Bytes, BrokerError> {
@@ -83,7 +87,6 @@ pub(crate) async fn handle(
         let resp = SyncGroupResponse {
             error_code: result.error_code,
             assignment: result.assignment,
-            throttle_time_ms: 0,
             protocol_type: result.protocol_type,
             protocol_name: result.protocol_name,
             ..Default::default()
@@ -113,15 +116,13 @@ fn group_read_denied(
 }
 
 fn encode_err(
-    version: i16,
-    code: i16,
+    version: crate::handlers::ApiVersion,
+    code: crate::handlers::ErrorCode,
     protocol_type: Option<String>,
     protocol_name: Option<String>,
 ) -> Result<Bytes, BrokerError> {
     let resp = SyncGroupResponse {
         error_code: code,
-        assignment: Bytes::new(),
-        throttle_time_ms: 0,
         protocol_type,
         protocol_name,
         ..Default::default()
@@ -129,7 +130,10 @@ fn encode_err(
     encode(version, &resp)
 }
 
-fn encode(version: i16, resp: &SyncGroupResponse) -> Result<Bytes, BrokerError> {
+fn encode(
+    version: crate::handlers::ApiVersion,
+    resp: &SyncGroupResponse,
+) -> Result<Bytes, BrokerError> {
     let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
     resp.encode(&mut buf, version)?;
     Ok(buf.freeze())
@@ -139,11 +143,144 @@ fn encode(version: i16, resp: &SyncGroupResponse) -> Result<Bytes, BrokerError> 
 mod tests {
     use super::*;
     use assert2::assert;
+    use crabka_protocol::owned::join_group_request::{JoinGroupRequest, JoinGroupRequestProtocol};
+    use crabka_protocol::owned::join_group_response::{self, JoinGroupResponse};
+    use crabka_protocol::owned::sync_group_request::{
+        SyncGroupRequest, SyncGroupRequestAssignment,
+    };
+    use crabka_protocol::owned::sync_group_response::{self, SyncGroupResponse};
+    use crabka_security::{AuthMethod, Principal};
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    use crate::authorizer::{AuthorizationRequest, Authorizer};
+    use crate::broker::{Broker, BrokerHandle};
+    use crate::config::BrokerConfig;
+
+    const GROUP: &str = "sync-group-unit";
+    const PROTOCOL_TYPE: &str = "consumer";
+    const PROTOCOL_NAME: &str = "range";
+
+    #[derive(Debug)]
+    struct DenyAll;
+
+    impl Authorizer for DenyAll {
+        fn authorize(
+            &self,
+            _source: &dyn crabka_authz::AclSource,
+            _req: &AuthorizationRequest<'_>,
+        ) -> AuthorizationResult {
+            AuthorizationResult::Deny
+        }
+    }
+
+    fn encode_request<R: Encode>(req: &R, version: i16) -> Bytes {
+        let mut buf = BytesMut::with_capacity(req.encoded_len(version));
+        req.encode(&mut buf, version).expect("encode request");
+        buf.freeze()
+    }
+
+    fn decode_join(bytes: &Bytes) -> JoinGroupResponse {
+        let version = join_group_response::MAX_VERSION;
+        let mut cur: &[u8] = bytes.as_ref();
+        let resp = JoinGroupResponse::decode(&mut cur, version).expect("decode JoinGroupResponse");
+        assert!(cur.is_empty(), "JoinGroup decoder consumed all bytes");
+        resp
+    }
+
+    fn decode_sync(bytes: &Bytes) -> SyncGroupResponse {
+        let version = sync_group_response::MAX_VERSION;
+        let mut cur: &[u8] = bytes.as_ref();
+        let resp = SyncGroupResponse::decode(&mut cur, version).expect("decode SyncGroupResponse");
+        assert!(cur.is_empty(), "SyncGroup decoder consumed all bytes");
+        resp
+    }
+
+    fn principal() -> Principal {
+        Principal {
+            name: "alice".into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        }
+    }
+
+    fn context<'a>(
+        principal: &'a Principal,
+        peer: &'a SocketAddr,
+    ) -> crate::handlers::RequestContext<'a> {
+        crate::handlers::RequestContext {
+            principal,
+            peer,
+            client_id: "sync-group-client",
+            sendfile_capable: false,
+            connection_listener_name: "PLAINTEXT",
+        }
+    }
+
+    async fn start_broker(authorizer: Arc<dyn Authorizer>) -> (BrokerHandle, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
+        cfg.audit_enabled = false;
+        cfg.authorizer = authorizer;
+        let handle = Broker::start(cfg).await.expect("start broker");
+        (handle, dir)
+    }
+
+    async fn bootstrap_member(
+        broker: &Broker,
+        ctx: &crate::handlers::RequestContext<'_>,
+    ) -> (String, i32) {
+        let version = join_group_response::MAX_VERSION;
+        let join = |member_id: String| JoinGroupRequest {
+            group_id: GROUP.into(),
+            protocol_type: PROTOCOL_TYPE.into(),
+            member_id,
+            session_timeout_ms: 30_000,
+            rebalance_timeout_ms: 1_500,
+            protocols: vec![JoinGroupRequestProtocol {
+                name: PROTOCOL_NAME.into(),
+                metadata: Bytes::new(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let r1 = crate::handlers::join_group::handle(
+            broker,
+            version,
+            1,
+            &encode_request(&join(String::new()), version),
+            ctx,
+        )
+        .await
+        .expect("JoinGroup bootstrap");
+        let r1 = decode_join(&r1);
+        assert!(r1.error_code == codes::MEMBER_ID_REQUIRED, "{r1:?}");
+        assert!(!r1.member_id.is_empty());
+
+        let r2 = crate::handlers::join_group::handle(
+            broker,
+            version,
+            2,
+            &encode_request(&join(r1.member_id.clone()), version),
+            ctx,
+        )
+        .await
+        .expect("JoinGroup rejoin");
+        let r2 = decode_join(&r2);
+        assert!(
+            (
+                r2.error_code,
+                r2.protocol_type.as_deref(),
+                r2.protocol_name.as_deref()
+            ) == (codes::NONE, Some(PROTOCOL_TYPE), Some(PROTOCOL_NAME)),
+            "{r2:?}"
+        );
+        (r2.member_id, r2.generation_id)
+    }
 
     #[test]
     fn group_read_denied_yields_group_authorization_failed() {
-        use crabka_protocol::owned::sync_group_response::{self, SyncGroupResponse};
-
         let authorizer =
             crate::authorizer::SimpleAclAuthorizer::new(std::collections::HashSet::new());
         let image = crabka_metadata::MetadataImage::new(uuid::Uuid::nil());
@@ -172,5 +309,103 @@ mod tests {
         let mut cur: &[u8] = &bytes;
         let resp = SyncGroupResponse::decode(&mut cur, sync_group_response::MAX_VERSION).unwrap();
         assert!(resp.error_code == codes::GROUP_AUTHORIZATION_FAILED);
+    }
+
+    #[test]
+    fn encode_err_preserves_empty_assignment_and_kip559_protocol_fields() {
+        let bytes = encode_err(
+            sync_group_response::MAX_VERSION,
+            codes::UNKNOWN_MEMBER_ID,
+            Some(PROTOCOL_TYPE.into()),
+            Some(PROTOCOL_NAME.into()),
+        )
+        .expect("encode error");
+        let resp = decode_sync(&bytes);
+
+        let expected = SyncGroupResponse {
+            throttle_time_ms: 0,
+            error_code: codes::UNKNOWN_MEMBER_ID,
+            protocol_type: Some(PROTOCOL_TYPE.into()),
+            protocol_name: Some(PROTOCOL_NAME.into()),
+            assignment: Bytes::new(),
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+        };
+        assert!(resp == expected);
+    }
+
+    #[tokio::test]
+    async fn handle_denies_group_read_and_preserves_error_response_shape() {
+        let version = sync_group_response::MAX_VERSION;
+        let (broker_handle, _dir) = start_broker(Arc::new(DenyAll)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let principal = principal();
+        let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+        let ctx = context(&principal, &peer);
+        let req = SyncGroupRequest {
+            group_id: GROUP.into(),
+            member_id: "member-a".into(),
+            generation_id: 1,
+            protocol_type: Some(PROTOCOL_TYPE.into()),
+            protocol_name: Some(PROTOCOL_NAME.into()),
+            ..Default::default()
+        };
+
+        let resp = handle(&broker, version, 3, &encode_request(&req, version), &ctx)
+            .await
+            .expect("SyncGroup");
+        let resp = decode_sync(&resp);
+
+        let expected = SyncGroupResponse {
+            throttle_time_ms: 0,
+            error_code: codes::GROUP_AUTHORIZATION_FAILED,
+            protocol_type: None,
+            protocol_name: None,
+            assignment: Bytes::new(),
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+        };
+        assert!(resp == expected, "{resp:?}");
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_success_preserves_assignment_and_kip559_protocol_fields() {
+        let version = sync_group_response::MAX_VERSION;
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let principal = principal();
+        let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+        let ctx = context(&principal, &peer);
+        let (member_id, generation_id) = bootstrap_member(&broker, &ctx).await;
+        let assignment = Bytes::from_static(b"assignment-payload");
+        let req = SyncGroupRequest {
+            group_id: GROUP.into(),
+            generation_id,
+            member_id: member_id.clone(),
+            protocol_type: Some(PROTOCOL_TYPE.into()),
+            protocol_name: Some(PROTOCOL_NAME.into()),
+            assignments: vec![SyncGroupRequestAssignment {
+                member_id,
+                assignment: assignment.clone(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let resp = handle(&broker, version, 3, &encode_request(&req, version), &ctx)
+            .await
+            .expect("SyncGroup");
+        let resp = decode_sync(&resp);
+
+        let expected = SyncGroupResponse {
+            throttle_time_ms: 0,
+            error_code: codes::NONE,
+            protocol_type: Some(PROTOCOL_TYPE.into()),
+            protocol_name: Some(PROTOCOL_NAME.into()),
+            assignment,
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+        };
+        assert!(resp == expected, "{resp:?}");
+        broker_handle.shutdown().await;
     }
 }

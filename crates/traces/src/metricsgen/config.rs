@@ -23,7 +23,7 @@ pub const DEFAULT_LATENCY_BUCKETS_NS: &[f64] = &[
 ];
 
 /// Metrics-generator runtime configuration.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MetricsGenConfig {
     #[serde(rename = "collection_interval_secs", with = "secs")]
@@ -76,20 +76,26 @@ mod secs {
 mod tests {
     use std::time::Duration;
 
-    use assert2::assert;
-
     use super::*;
 
     #[test]
     fn defaults_match_tempo() {
         let c = MetricsGenConfig::default();
-        assert!(c.collection_interval == Duration::from_secs(15));
-        assert!(c.edge_ttl == Duration::from_secs(10));
-        assert!(c.edge_store_max_items == 10_000);
-        assert!(!c.enable_target_info);
-        assert!(!c.enable_status_message);
-        assert!(c.max_exemplars_per_series == 0);
-        assert!(!c.histogram_buckets_ns.is_empty());
+        assert_eq!(
+            c,
+            MetricsGenConfig {
+                collection_interval: Duration::from_secs(15),
+                histogram_buckets_ns: DEFAULT_LATENCY_BUCKETS_NS.to_vec(),
+                latency_native_schema: 8,
+                max_exemplars_per_series: 0,
+                edge_ttl: Duration::from_secs(10),
+                edge_store_max_items: 10_000,
+                enable_target_info: false,
+                enable_status_message: false,
+                enable_messaging_system_latency: false,
+                remote_write_url: "http://localhost:9009/api/v1/push".to_string(),
+            }
+        );
     }
 
     #[test]
@@ -97,8 +103,20 @@ mod tests {
         let c: MetricsGenConfig =
             serde_yaml::from_str("collection_interval_secs: 30\nmax_exemplars_per_series: 5\n")
                 .unwrap();
-        assert!(c.collection_interval == Duration::from_secs(30));
-        assert!(c.max_exemplars_per_series == 5);
-        assert!(c.edge_store_max_items == 10_000);
+        assert_eq!(
+            c,
+            MetricsGenConfig {
+                collection_interval: Duration::from_secs(30),
+                histogram_buckets_ns: DEFAULT_LATENCY_BUCKETS_NS.to_vec(),
+                latency_native_schema: 8,
+                max_exemplars_per_series: 5,
+                edge_ttl: Duration::from_secs(10),
+                edge_store_max_items: 10_000,
+                enable_target_info: false,
+                enable_status_message: false,
+                enable_messaging_system_latency: false,
+                remote_write_url: "http://localhost:9009/api/v1/push".to_string(),
+            }
+        );
     }
 }

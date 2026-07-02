@@ -1,11 +1,12 @@
 //! Reconcile-level tests for the `KafkaUser` controller.
 
-use assert2::assert;
+use assert2::{assert, check};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crabka_client_admin::{
-    AclEntry, AclOperation, PatternType, PermissionType, QuotaOp, ResourceType, UserQuotaConfig,
+    AclEntry, AclEntryFilter, AclOperation, PatternType, PermissionType, QuotaOp, ResourceType,
+    UserQuotaConfig,
 };
 use crabka_operator::controller::user::reconcile;
 use crabka_operator::crd::user::TlsAuth;
@@ -292,18 +293,32 @@ async fn first_reconcile_provisions_scram_and_acls() {
             _ => None,
         })
         .expect("CreateAcls must have been issued");
-    assert!(create.len() == 2, "two ops fan out into two ACL entries");
-    let ops: Vec<AclOperation> = create.iter().map(|e| e.operation).collect();
-    assert!(ops.contains(&AclOperation::Read));
-    assert!(ops.contains(&AclOperation::Describe));
-    for e in &create {
-        assert!(e.resource_type == ResourceType::Topic);
-        assert!(e.resource_name == "orders");
-        assert!(e.pattern_type == PatternType::Literal);
-        assert!(e.principal == "User:alice");
-        assert!(e.host == "*");
-        assert!(e.permission_type == PermissionType::Allow);
-    }
+    // Two ops fan out into two ACL entries; the BTreeSet diff hands
+    // them to CreateAcls in Ord order (Read before Describe).
+    assert!(
+        create
+            == vec![
+                AclEntry {
+                    resource_type: ResourceType::Topic,
+                    resource_name: "orders".into(),
+                    pattern_type: PatternType::Literal,
+                    principal: "User:alice".into(),
+                    host: "*".into(),
+                    operation: AclOperation::Read,
+                    permission_type: PermissionType::Allow,
+                },
+                AclEntry {
+                    resource_type: ResourceType::Topic,
+                    resource_name: "orders".into(),
+                    pattern_type: PatternType::Literal,
+                    principal: "User:alice".into(),
+                    host: "*".into(),
+                    operation: AclOperation::Describe,
+                    permission_type: PermissionType::Allow,
+                },
+            ],
+        "two ops fan out into two ACL entries",
+    );
 
     // Status patch lands Ready=True.
     let observed = state.take_observed();
@@ -315,11 +330,11 @@ async fn first_reconcile_provisions_scram_and_acls() {
         })
         .expect("status PATCH must have been captured");
     let body: serde_json::Value = serde_json::from_slice(status.body()).unwrap();
-    assert!(body["status"]["conditions"][0]["status"] == "True");
-    assert!(body["status"]["conditions"][0]["reason"] == "Ready");
-    assert!(body["status"]["username"] == USER);
-    assert!(body["status"]["secret"] == USER);
-    assert!(body["status"]["scramSha512"] == true);
+    check!(body["status"]["conditions"][0]["status"] == "True");
+    check!(body["status"]["conditions"][0]["reason"] == "Ready");
+    check!(body["status"]["username"] == USER);
+    check!(body["status"]["secret"] == USER);
+    check!(body["status"]["scramSha512"] == true);
 }
 
 /// Reconcile with existing matching ACLs → no `CreateAcls` /
@@ -438,13 +453,21 @@ async fn deletes_orphan_acls() {
             _ => None,
         })
         .expect("DeleteAcls must have been issued");
-    assert!(delete.len() == 1);
-    assert!(delete[0].resource_name.as_deref() == Some("secrets"));
-
     // The reconciler scoped the delete by every axis (no broad filter
     // collapsing into "delete everything for this principal").
-    assert!(delete[0].operation.is_some());
-    assert!(delete[0].permission_type.is_some());
+    assert!(
+        delete
+            == vec![AclEntryFilter {
+                resource_type: Some(ResourceType::Topic),
+                resource_name: Some("secrets".into()),
+                pattern_type: Some(PatternType::Literal),
+                principal: Some("User:alice".into()),
+                host: Some("*".into()),
+                operation: Some(AclOperation::Read),
+                permission_type: Some(PermissionType::Allow),
+            }],
+        "delete must be one filter scoped by every axis of the orphan entry",
+    );
 
     // Verify the store is empty after the reconcile completed.
     let store = fake_for_assert.lock().await.acls.lock().unwrap().clone();
@@ -817,11 +840,18 @@ async fn first_reconcile_tls_provisions_certs_and_acls() {
             _ => None,
         })
         .expect("CreateAcls must have been issued");
-    assert!(create.len() == 1);
-    assert!(create[0].principal == "User:CN=alice");
-    assert!(create[0].resource_type == ResourceType::Topic);
-    assert!(create[0].resource_name == "orders");
-    assert!(create[0].operation == AclOperation::Read);
+    assert!(
+        create
+            == vec![AclEntry {
+                resource_type: ResourceType::Topic,
+                resource_name: "orders".into(),
+                pattern_type: PatternType::Literal,
+                principal: "User:CN=alice".into(),
+                host: "*".into(),
+                operation: AclOperation::Read,
+                permission_type: PermissionType::Allow,
+            }]
+    );
 
     // Verify all four PATCH paths landed.
     let observed = state.take_observed();
@@ -830,25 +860,25 @@ async fn first_reconcile_tls_provisions_certs_and_acls() {
         .filter(|r| r.method() == Method::PATCH)
         .map(|r| r.uri().to_string())
         .collect();
-    assert!(
+    check!(
         patches
             .iter()
             .any(|u| u.contains(&format!("/secrets/{CLUSTER}-clients-ca-cert"))),
         "expected PATCH on clients-ca-cert Secret: {patches:?}",
     );
-    assert!(
+    check!(
         patches.iter().any(
             |u| u.contains(&format!("/secrets/{CLUSTER}-clients-ca")) && !u.contains("ca-cert")
         ),
         "expected PATCH on clients-ca key Secret: {patches:?}",
     );
-    assert!(
+    check!(
         patches
             .iter()
             .any(|u| u.contains(&format!("/secrets/{USER}"))),
         "expected PATCH on per-user Secret: {patches:?}",
     );
-    assert!(
+    check!(
         patches
             .iter()
             .any(|u| u.contains(&format!("/kafkausers/{USER}/status"))),

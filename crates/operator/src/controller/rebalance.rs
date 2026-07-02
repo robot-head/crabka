@@ -151,6 +151,7 @@ pub fn decide(
 }
 
 /// The resolved status outcome of a reconcile pass.
+#[derive(Debug, PartialEq)]
 struct Outcome {
     state: RebalanceState,
     reason: String,
@@ -784,20 +785,42 @@ mod tests {
     #[test]
     fn create_computed_becomes_proposal_ready() {
         let o = Outcome::from_create(&proposal("p1", ProposalStatus::Computed));
-        assert!(o.state == RebalanceState::ProposalReady);
-        assert!(o.new_session.as_deref() == Some("p1"));
-        assert!(o.advance_generation);
-        let opt = o.new_optimization.unwrap();
-        assert!(opt.replica_movements == 3);
-        assert!(opt.goals == vec!["RackAware"]);
+        assert!(
+            o == Outcome {
+                state: RebalanceState::ProposalReady,
+                reason: "ProposalReady".into(),
+                message: "proposal p1 computed: 3 replica / 1 leader movements".into(),
+                requeue: Duration::from_mins(5),
+                new_session: Some("p1".into()),
+                new_optimization: Some(OptimizationResult {
+                    replica_movements: 3,
+                    leader_movements: 1,
+                    max_replicas_before: 9,
+                    max_replicas_after: 6,
+                    max_leaders_before: 5,
+                    max_leaders_after: 3,
+                    goals: vec!["RackAware".into()],
+                }),
+                advance_generation: true,
+            }
+        );
     }
 
     #[test]
     fn poll_executing_stays_rebalancing_with_short_requeue() {
         let o = Outcome::from_execute_or_poll(&proposal("p", ProposalStatus::Executing));
-        assert!(o.state == RebalanceState::Rebalancing);
-        assert!(o.requeue == POLL_INTERVAL);
-        assert!(o.new_session.is_none(), "poll must not rewrite session");
+        // `new_session: None` — poll must not rewrite the session.
+        assert!(
+            o == Outcome {
+                state: RebalanceState::Rebalancing,
+                reason: "Rebalancing".into(),
+                message: "executing proposal p".into(),
+                requeue: Duration::from_secs(10),
+                new_session: None,
+                new_optimization: None,
+                advance_generation: false,
+            }
+        );
     }
 
     #[test]

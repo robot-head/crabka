@@ -258,7 +258,7 @@ fn render_default(v: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use serde_json::json;
 
     #[test]
@@ -274,10 +274,14 @@ mod tests {
             }
         });
         let md = render_field_table(&schema);
-        assert!(md.contains("| `name` | string | yes |"));
-        assert!(md.contains("The thing's name."));
-        assert!(md.contains("| `replicas` | integer | no | `3` |"));
-        assert!(md.contains("`nested.enabled`"));
+        for needle in [
+            "| `name` | string | yes |",
+            "The thing's name.",
+            "| `replicas` | integer | no | `3` |",
+            "`nested.enabled`",
+        ] {
+            assert!(md.contains(needle), "missing {needle:?} in {md}");
+        }
     }
 
     #[test]
@@ -316,14 +320,18 @@ mod tests {
             }
         });
         let md = render_field_table(&schema);
-        // type-array collapses to its non-null member
-        assert!(md.contains("| `broker_id` | integer | no |"), "{md}");
-        assert!(md.contains("| `rack` | string | no |"), "{md}");
-        // anyOf [$ref, null] resolves to the referenced object and recurses
-        assert!(md.contains("| `tls` | object | no |"), "{md}");
-        assert!(md.contains("| `tls.cert` | string | yes |"), "{md}");
-        // array of $ref renders as an object-element array
-        assert!(md.contains("| `listeners` | array<object> | no |"), "{md}");
+        for needle in [
+            // type-array collapses to its non-null member
+            "| `broker_id` | integer | no |",
+            "| `rack` | string | no |",
+            // anyOf [$ref, null] resolves to the referenced object and recurses
+            "| `tls` | object | no |",
+            "| `tls.cert` | string | yes |",
+            // array of $ref renders as an object-element array
+            "| `listeners` | array<object> | no |",
+        ] {
+            assert!(md.contains(needle), "missing {needle:?} in {md}");
+        }
     }
 
     /// A self-referential `$def` (a property that `$ref`s back to its own def)
@@ -410,17 +418,17 @@ mod tests {
         });
         let md = render_sectioned_field_table(&schema);
         // Scalars are grouped under a single General section...
-        assert!(md.contains("## General"), "{md}");
-        assert!(md.contains("| `broker_id` | integer | yes |"), "{md}");
-        assert!(md.contains("| `log_dir` | string | no |"), "{md}");
+        check!(md.contains("## General"), "{md}");
+        check!(md.contains("| `broker_id` | integer | yes |"), "{md}");
+        check!(md.contains("| `log_dir` | string | no |"), "{md}");
         // ...objects get their own captioned section with the field's blurb...
-        assert!(md.contains("## tls"), "{md}");
-        assert!(md.contains("Server TLS config."), "{md}");
+        check!(md.contains("## tls"), "{md}");
+        check!(md.contains("Server TLS config."), "{md}");
         // ...whose rows are relative to the subtree (no leading `tls.` prefix).
-        assert!(md.contains("| `cert` | string | yes |"), "{md}");
-        assert!(!md.contains("`tls.cert`"), "{md}");
+        check!(md.contains("| `cert` | string | yes |"), "{md}");
+        check!(!md.contains("`tls.cert`"), "{md}");
         // Sections are separated by a horizontal rule.
-        assert!(md.contains("\n---\n"), "{md}");
+        check!(md.contains("\n---\n"), "{md}");
     }
 
     #[test]

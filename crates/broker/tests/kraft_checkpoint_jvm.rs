@@ -11,7 +11,7 @@ use std::process::Command;
 use assert2::assert;
 use crabka_protocol::records::metadata::checkpoint::build_bootstrap_checkpoint;
 
-const KAFKA_IMAGE: &str = "apache/kafka:4.0.0";
+const KAFKA_IMAGE: &str = "mirror.gcr.io/apache/kafka:4.0.0";
 
 #[test]
 #[ignore = "requires Docker"]
@@ -50,25 +50,21 @@ fn jvm_dump_log_parses_crabka_bootstrap_checkpoint() {
         String::from_utf8_lossy(&out.stderr)
     );
     eprintln!("{text}");
-    assert!(out.status.success(), "kafka-dump-log failed: {text}");
-    assert!(
-        text.contains("SnapshotHeader"),
-        "missing SnapshotHeader: {text}"
-    );
-    assert!(
-        text.contains("FEATURE_LEVEL_RECORD"),
-        "missing feature records: {text}"
-    );
-    assert!(
-        text.contains("metadata.version"),
-        "missing metadata.version feature: {text}"
-    );
-    assert!(
-        text.contains("SnapshotFooter"),
-        "missing SnapshotFooter: {text}"
-    );
-    assert!(
-        !text.contains("isvalid: false"),
-        "a batch failed CRC validation: {text}"
-    );
+    assert!(out.status.success(), "kafka-dump-log must succeed: {text}");
+    // (needle, expected presence in the dump-log output)
+    let cases = [
+        ("SnapshotHeader", true),
+        ("FEATURE_LEVEL_RECORD", true),
+        ("metadata.version", true),
+        ("SnapshotFooter", true),
+        // `isvalid: false` would mean a batch failed CRC validation.
+        ("isvalid: false", false),
+    ];
+    for (needle, expected) in cases {
+        assert!(
+            text.contains(needle) == expected,
+            "kafka-dump-log output must {} {needle:?}: {text}",
+            if expected { "contain" } else { "not contain" },
+        );
+    }
 }

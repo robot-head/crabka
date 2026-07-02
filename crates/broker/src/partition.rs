@@ -27,6 +27,11 @@ use tokio::task::JoinHandle;
 use crate::error::BrokerError;
 use crate::replica_state::ReplicaState;
 
+/// Absolute record offset within a partition's log (base offset, log end
+/// offset, high watermark, truncation points, …). Alias only — clarifies
+/// which `i64`s in signatures are offsets vs. timestamps or counts.
+pub type LogOffset = i64;
+
 /// The records to append for a single produce job — either the producer's
 /// verbatim wire bytes (zero-copy passthrough fast path) or a fully owned,
 /// decoded [`RecordBatch`] (the fallback path used when passthrough is
@@ -54,7 +59,7 @@ pub struct ProduceJob {
     pub data: ProduceData,
     /// Oneshot for the writer to report success (base offset assigned)
     /// or failure back to the handler.
-    pub ack: oneshot::Sender<Result<i64, BrokerError>>,
+    pub ack: oneshot::Sender<Result<LogOffset, BrokerError>>,
 }
 
 /// All message kinds the partition's writer task accepts.
@@ -76,7 +81,7 @@ pub enum WriterMessage {
     /// Truncate the log so no records at offset `>= offset` remain. Used
     /// by the replicator's `OFFSET_OUT_OF_RANGE` recovery path.
     Truncate {
-        offset: i64,
+        offset: LogOffset,
         ack: oneshot::Sender<Result<(), BrokerError>>,
     },
     /// Drop every segment and recreate the active segment at `new_base`.
@@ -85,7 +90,7 @@ pub enum WriterMessage {
     /// follower must move its own `log_start` *forward* past records it
     /// never saw, which `Truncate` can't do.
     ResetTo {
-        new_base: i64,
+        new_base: LogOffset,
         ack: oneshot::Sender<Result<(), BrokerError>>,
     },
     /// Atomically swap the partition's `LogConfig`. The writer task
@@ -109,8 +114,8 @@ pub enum WriterMessage {
     /// `new_start` falls between segment boundaries — Kafka semantics).
     /// Used by the `DeleteRecords` handler.
     TrimToOffset {
-        new_start: i64,
-        ack: tokio::sync::oneshot::Sender<Result<i64, BrokerError>>,
+        new_start: LogOffset,
+        ack: tokio::sync::oneshot::Sender<Result<LogOffset, BrokerError>>,
     },
     /// Test-only: shift the in-memory `log_start_offset` without
     /// physically truncating segments. Simulates retention-driven
@@ -118,7 +123,7 @@ pub enum WriterMessage {
     /// replication integration test.
     #[cfg(any(test, feature = "test-helpers"))]
     TestSetLogStart {
-        new_start: i64,
+        new_start: LogOffset,
         ack: oneshot::Sender<Result<(), BrokerError>>,
     },
     /// Atomically swap the partition's `Log` to a future log that has
@@ -204,7 +209,7 @@ impl Partition {
     /// panicked). The caller treats that as "not making progress" and the
     /// writer-died path eventually surfaces a clearer error.
     #[must_use]
-    pub fn log_end_offset(&self) -> i64 {
+    pub fn log_end_offset(&self) -> LogOffset {
         match self.log.lock() {
             Ok(g) => g.log_end_offset(),
             Err(_) => 0,
@@ -219,7 +224,7 @@ impl Partition {
     /// panicked). The caller treats that as "not making progress" and the
     /// writer-died path eventually surfaces a clearer error.
     #[must_use]
-    pub fn lso(&self) -> i64 {
+    pub fn lso(&self) -> LogOffset {
         match self.log.lock() {
             Ok(g) => g.lso(),
             Err(_) => 0,
@@ -278,7 +283,7 @@ impl Partition {
     /// `>= offset`. Used by the replicator's `OFFSET_OUT_OF_RANGE`
     /// recovery path and the KIP-320 in-band `diverging_epoch` truncation
     /// path (which passes the leader's epoch boundary, not just 0).
-    pub async fn truncate_to(&self, offset: i64) -> Result<(), BrokerError> {
+    pub async fn truncate_to(&self, offset: LogOffset) -> Result<(), BrokerError> {
         let (ack_tx, ack_rx) = oneshot::channel();
         self.writer_tx
             .send(WriterMessage::Truncate {
@@ -294,7 +299,7 @@ impl Partition {
 
     /// Drop every segment and recreate the active segment at `new_base`.
     /// Goes through the writer task so it stays ordered with appends.
-    pub async fn reset_to(&self, new_base: i64) -> Result<(), BrokerError> {
+    pub async fn reset_to(&self, new_base: LogOffset) -> Result<(), BrokerError> {
         let (ack_tx, ack_rx) = oneshot::channel();
         self.writer_tx
             .send(WriterMessage::ResetTo {
@@ -315,7 +320,7 @@ impl Partition {
     ///
     /// Returns `BrokerError` if the writer is dead, the ack is dropped,
     /// or the underlying `Log::trim_to_offset` fails (negative offset).
-    pub async fn trim_to_offset(&self, new_start: i64) -> Result<i64, BrokerError> {
+    pub async fn trim_to_offset(&self, new_start: LogOffset) -> Result<LogOffset, BrokerError> {
         let (ack_tx, ack_rx) = oneshot::channel();
         self.writer_tx
             .send(WriterMessage::TrimToOffset {
@@ -349,7 +354,7 @@ impl Partition {
     /// Returns 0 if the log mutex is poisoned (i.e. the writer task panicked).
     /// Used by `TxnCoordinator::recover` to seed the replay scan offset.
     #[must_use]
-    pub(crate) fn log_start_offset(&self) -> i64 {
+    pub(crate) fn log_start_offset(&self) -> LogOffset {
         match self.log.lock() {
             Ok(g) => g.log_start_offset(),
             Err(_) => 0,
@@ -362,7 +367,7 @@ impl Partition {
     /// Locks the `Arc<Mutex<Log>>` briefly. Returns an empty `Vec` if
     /// the mutex is poisoned.
     #[must_use]
-    pub fn aborted_in_range(&self, start: i64, end: i64) -> Vec<AbortedTxn> {
+    pub fn aborted_in_range(&self, start: LogOffset, end: LogOffset) -> Vec<AbortedTxn> {
         match self.log.lock() {
             Ok(g) => g.aborted_in_range(start, end),
             Err(_) => Vec::new(),
@@ -381,7 +386,7 @@ impl Partition {
     /// (e.g. `offset < log_start_offset()`).
     pub(crate) fn read_log(
         &self,
-        offset: i64,
+        offset: LogOffset,
         max_bytes: usize,
     ) -> Result<ReadOutput, BrokerError> {
         self.log
@@ -401,7 +406,7 @@ impl Partition {
     ///
     /// Returns [`BrokerError::Txn`] if the writer task is dead or the ack
     /// channel closes before the writer replies.
-    pub(crate) async fn produce_batch(&self, batch: RecordBatch) -> Result<i64, BrokerError> {
+    pub(crate) async fn produce_batch(&self, batch: RecordBatch) -> Result<LogOffset, BrokerError> {
         let (ack_tx, ack_rx) = oneshot::channel();
         self.writer_tx
             .send(WriterMessage::Produce(ProduceJob {
@@ -418,7 +423,7 @@ impl Partition {
     /// Cached High Watermark. Awaits `replica_state` cooperatively so it
     /// doesn't block tokio worker threads.
     #[must_use]
-    pub async fn high_watermark(&self) -> i64 {
+    pub async fn high_watermark(&self) -> LogOffset {
         self.replica_state.lock().await.hw
     }
 
@@ -428,7 +433,7 @@ impl Partition {
     /// replicated yet) and only advances `hw` (HW is monotonic). Fires
     /// `hw_advance_notify` when it advances so a consumer parked at the old HW
     /// wakes.
-    pub async fn set_follower_hw(&self, reported_hw: i64) {
+    pub async fn set_follower_hw(&self, reported_hw: LogOffset) {
         let log_end = self.log_end_offset();
         let new_hw = reported_hw.min(log_end);
         let advanced = {
@@ -526,7 +531,7 @@ impl Partition {
     /// the target.
     pub async fn await_hw_at_least(
         &self,
-        target_offset: i64,
+        target_offset: LogOffset,
         deadline: std::time::Instant,
     ) -> Result<(), HwTimeout> {
         loop {
@@ -583,7 +588,7 @@ impl Partition {
     /// `new_start`. Goes through the writer task to maintain the
     /// single-writer invariant on the underlying `Log`.
     #[cfg(any(test, feature = "test-helpers"))]
-    pub async fn test_set_log_start(&self, new_start: i64) -> Result<(), BrokerError> {
+    pub async fn test_set_log_start(&self, new_start: LogOffset) -> Result<(), BrokerError> {
         let (ack_tx, ack_rx) = oneshot::channel();
         self.writer_tx
             .send(WriterMessage::TestSetLogStart {
@@ -612,12 +617,106 @@ impl std::fmt::Debug for Partition {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+    use assert2::{assert, check};
     use std::sync::atomic::{AtomicI32, AtomicU64};
 
     use super::*;
     use crabka_log::LogConfig;
     use tempfile::tempdir;
+
+    fn test_partition(hw_advance_notify: Arc<Notify>) -> (Partition, tempfile::TempDir) {
+        let dir = tempdir().expect("tempdir");
+        let log = Log::open(dir.path(), LogConfig::default()).expect("open log");
+        let (tx, _rx) = mpsc::channel::<WriterMessage>(1);
+        let writer = tokio::spawn(async {});
+        let p = Partition {
+            topic: "t".into(),
+            partition_id: 0,
+            log_dir: Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
+            log: Arc::new(Mutex::new(log)),
+            writer_tx: tx,
+            append_notify: Arc::new(Notify::new()),
+            replica_state: Arc::new(tokio::sync::Mutex::new(
+                crate::replica_state::ReplicaState::new(),
+            )),
+            hw_advance_notify,
+            current_leader: Arc::new(AtomicU64::new(0)),
+            current_leader_epoch: Arc::new(AtomicI32::new(0)),
+            _writer_handle: Arc::new(writer),
+        };
+        (p, dir)
+    }
+
+    fn test_partition_with_writer() -> (Partition, tempfile::TempDir) {
+        let dir = tempdir().expect("tempdir");
+        let log = Arc::new(Mutex::new(
+            Log::open(dir.path(), LogConfig::default()).expect("open log"),
+        ));
+        let log_dir = Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf()));
+        let (tx, rx) = mpsc::channel::<WriterMessage>(8);
+        let append_notify = Arc::new(Notify::new());
+        let replica_state = Arc::new(tokio::sync::Mutex::new(
+            crate::replica_state::ReplicaState::new(),
+        ));
+        let hw_advance_notify = Arc::new(Notify::new());
+        let writer = tokio::spawn(crate::partition_writer::run(
+            "t".to_string(),
+            0,
+            log.clone(),
+            log_dir.clone(),
+            rx,
+            append_notify.clone(),
+            replica_state.clone(),
+            hw_advance_notify.clone(),
+            crate::log_dir_status::LogDirRegistry::default(),
+            Arc::new(crate::producer_state::ProducerState::new()),
+        ));
+        let p = Partition {
+            topic: "t".into(),
+            partition_id: 0,
+            log_dir,
+            log,
+            writer_tx: tx,
+            append_notify,
+            replica_state,
+            hw_advance_notify,
+            current_leader: Arc::new(AtomicU64::new(0)),
+            current_leader_epoch: Arc::new(AtomicI32::new(0)),
+            _writer_handle: Arc::new(writer),
+        };
+        (p, dir)
+    }
+
+    fn append_records(p: &Partition, count: i32) {
+        use crabka_protocol::records::{Attributes, Record, RecordBatch};
+
+        let mut batch = RecordBatch {
+            base_offset: 0,
+            partition_leader_epoch: -1,
+            attributes: Attributes::default(),
+            last_offset_delta: count - 1,
+            base_timestamp: 1_700_000_000,
+            max_timestamp: 1_700_000_000,
+            producer_id: -1,
+            producer_epoch: -1,
+            base_sequence: -1,
+            records: (0..count)
+                .map(|i| Record {
+                    attributes: 0,
+                    offset_delta: i,
+                    timestamp_delta: 0,
+                    key: None,
+                    value: Some(bytes::Bytes::from_static(b"v")),
+                    headers: vec![],
+                })
+                .collect(),
+        };
+        p.log
+            .lock()
+            .expect("log mutex")
+            .append(&mut batch)
+            .expect("append");
+    }
 
     #[test]
     fn partition_is_clone_and_send() {
@@ -650,11 +749,17 @@ mod tests {
             _writer_handle: Arc::new(writer),
         };
         let s = format!("{p:?}");
-        assert!(s.contains("topic"));
-        assert!(s.contains("partition_id"));
-        // The mutex/log internals must NOT appear in Debug output.
-        assert!(!s.contains("Mutex"));
-        assert!(!s.contains("segments"));
+        // topic/partition_id appear; the mutex/log internals must NOT appear
+        // in Debug output.
+        let cases = [
+            ("topic", true),
+            ("partition_id", true),
+            ("Mutex", false),
+            ("segments", false),
+        ];
+        for (needle, expected) in cases {
+            assert!(s.contains(needle) == expected, "needle {needle:?} in {s:?}");
+        }
     }
 
     #[tokio::test]
@@ -709,9 +814,103 @@ mod tests {
         };
         p.install_isr(&[1, 2, 3], &[1, 2, 3], 1).await;
         let st = p.replica_state.lock().await;
-        assert!(st.isr.len() == 3);
-        assert!(st.isr.contains(&1) && st.isr.contains(&2) && st.isr.contains(&3));
-        assert!(st.per_follower.get(&2).map(|f| f.leo) == Some(0));
+        check!(st.isr == [1, 2, 3].into_iter().collect());
+        check!(st.per_follower.get(&2).map(|f| f.leo) == Some(0));
+    }
+
+    #[tokio::test]
+    async fn install_isr_notifies_when_high_watermark_advances() {
+        let hw_advance_notify = Arc::new(Notify::new());
+        let (p, _td) = test_partition(hw_advance_notify.clone());
+        append_records(&p, 3);
+        assert!(p.high_watermark().await == 0);
+
+        let waiter = hw_advance_notify.notified();
+        tokio::pin!(waiter);
+        assert!(
+            futures_util::poll!(&mut waiter).is_pending(),
+            "waiter registers on first poll"
+        );
+
+        p.install_isr(&[1], &[1], 1).await;
+
+        assert!(p.high_watermark().await == 3);
+        assert!(
+            futures_util::poll!(&mut waiter).is_ready(),
+            "notify should fire when ISR install advances HW"
+        );
+    }
+
+    #[tokio::test]
+    async fn install_isr_same_high_watermark_does_not_notify() {
+        let hw_advance_notify = Arc::new(Notify::new());
+        let (p, _td) = test_partition(hw_advance_notify.clone());
+        append_records(&p, 2);
+        p.install_isr(&[1], &[1], 1).await;
+        assert!(p.high_watermark().await == 2);
+
+        let waiter = hw_advance_notify.notified();
+        tokio::pin!(waiter);
+        assert!(
+            futures_util::poll!(&mut waiter).is_pending(),
+            "waiter registers on first poll"
+        );
+
+        p.install_isr(&[1], &[1], 1).await;
+
+        assert!(p.high_watermark().await == 2);
+        assert!(
+            futures_util::poll!(&mut waiter).is_pending(),
+            "unchanged HW must not wake waiters"
+        );
+    }
+
+    #[tokio::test]
+    async fn install_leader_change_clears_followers() {
+        // (new_leader, new_epoch, seeded_follower_leo):
+        // first case changes only the leader, second only the epoch —
+        // either change alone must clear follower state.
+        let cases = [(2u64, 0i32, 11i64), (0, 9, 17)];
+        for (leader, epoch, seeded_leo) in cases {
+            let (p, _td) = test_partition(Arc::new(Notify::new()));
+            p.install_isr(&[1, 2], &[1, 2], 1).await;
+            {
+                let mut st = p.replica_state.lock().await;
+                st.per_follower.get_mut(&2).expect("follower").leo = seeded_leo;
+            }
+
+            p.install_leader_change(leader, epoch).await;
+
+            assert!(
+                p.current_leader.load(Ordering::Acquire) == leader,
+                "case ({leader}, {epoch})"
+            );
+            assert!(
+                p.current_leader_epoch.load(Ordering::Acquire) == epoch,
+                "case ({leader}, {epoch})"
+            );
+            let st = p.replica_state.lock().await;
+            assert!(st.per_follower.is_empty(), "case ({leader}, {epoch})");
+            assert!(st.current_leader_epoch == epoch, "case ({leader}, {epoch})");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_set_leader_epoch_updates_cached_epoch() {
+        let (p, _td) = test_partition(Arc::new(Notify::new()));
+
+        p.test_set_leader_epoch(6);
+
+        assert!(p.current_leader_epoch.load(Ordering::Acquire) == 6);
+    }
+
+    #[tokio::test]
+    async fn test_set_log_start_updates_log_start_through_writer() {
+        let (p, _td) = test_partition_with_writer();
+
+        p.test_set_log_start(5).await.expect("set log start");
+
+        assert!(p.log_start_offset() == 5);
     }
 
     #[tokio::test]
@@ -848,6 +1047,28 @@ mod tests {
         // reported_hw below current HW: no regression.
         p.set_follower_hw(1).await;
         assert!(p.high_watermark().await == 3);
+    }
+
+    #[tokio::test]
+    async fn set_follower_hw_same_high_watermark_does_not_notify() {
+        let hw_advance_notify = Arc::new(Notify::new());
+        let (p, _td) = test_partition(hw_advance_notify.clone());
+        assert!(p.high_watermark().await == 0);
+
+        let waiter = hw_advance_notify.notified();
+        tokio::pin!(waiter);
+        assert!(
+            futures_util::poll!(&mut waiter).is_pending(),
+            "waiter registers on first poll"
+        );
+
+        p.set_follower_hw(0).await;
+
+        assert!(p.high_watermark().await == 0);
+        assert!(
+            futures_util::poll!(&mut waiter).is_pending(),
+            "unchanged HW must not wake waiters"
+        );
     }
 
     #[tokio::test]

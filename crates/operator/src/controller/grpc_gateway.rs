@@ -1212,6 +1212,8 @@ mod tests {
         TelemetrySpec,
     };
     use assert2::assert;
+    use assert2::check;
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
 
     fn empty_spec() -> KafkaGrpcGatewaySpec {
         KafkaGrpcGatewaySpec {
@@ -1251,9 +1253,15 @@ mod tests {
         .unwrap();
         assert!(dep.metadata.name.as_deref() == Some("gw"));
         let owner = &dep.metadata.owner_references.as_ref().unwrap()[0];
-        assert!(owner.kind == "KafkaGrpcGateway");
-        assert!(owner.name == "gw");
-        assert!(owner.controller == Some(true));
+        let expected = OwnerReference {
+            api_version: "crabka.io/v1alpha1".into(),
+            block_owner_deletion: Some(true),
+            controller: Some(true),
+            kind: "KafkaGrpcGateway".into(),
+            name: "gw".into(),
+            uid: "gw-uid".into(),
+        };
+        assert!(*owner == expected);
     }
 
     #[test]
@@ -1314,41 +1322,19 @@ mod tests {
         let pod = dep.spec.unwrap().template.spec.unwrap();
         let args = pod.containers[0].args.as_ref().expect("args");
         let joined = args.join(" ");
-        assert!(
-            joined.contains("--broker-tls-cert=/etc/crabka-gw/broker-client/user.crt"),
-            "args: {joined}"
-        );
-        assert!(
-            joined.contains("--broker-tls-key=/etc/crabka-gw/broker-client/user.key"),
-            "args: {joined}"
-        );
-        assert!(
-            joined.contains("--broker-tls-ca=/etc/crabka-gw/cluster-ca/ca.crt"),
-            "args: {joined}"
-        );
-        assert!(
-            joined.contains(
-                "--broker-tls-server-name=demo-broker-headless.default.svc.cluster.local"
-            ),
-            "args: {joined}"
-        );
-        // Serving-side flags reference the right CA bundles.
-        assert!(
-            joined.contains("--tls-client-ca=/etc/crabka-gw/clients-ca/ca.crt"),
-            "args: {joined}"
-        );
-        assert!(
-            joined.contains("--tls-trust-roots=/etc/crabka-gw/cluster-ca/ca.crt"),
-            "args: {joined}"
-        );
-        assert!(
-            joined.contains("--tls-cert=/etc/crabka-gw/serving/tls.crt"),
-            "args: {joined}"
-        );
-        assert!(
-            joined.contains("--bootstrap-servers=demo-broker-headless"),
-            "args: {joined}"
-        );
+        for want in [
+            "--broker-tls-cert=/etc/crabka-gw/broker-client/user.crt",
+            "--broker-tls-key=/etc/crabka-gw/broker-client/user.key",
+            "--broker-tls-ca=/etc/crabka-gw/cluster-ca/ca.crt",
+            "--broker-tls-server-name=demo-broker-headless.default.svc.cluster.local",
+            // Serving-side flags reference the right CA bundles.
+            "--tls-client-ca=/etc/crabka-gw/clients-ca/ca.crt",
+            "--tls-trust-roots=/etc/crabka-gw/cluster-ca/ca.crt",
+            "--tls-cert=/etc/crabka-gw/serving/tls.crt",
+            "--bootstrap-servers=demo-broker-headless",
+        ] {
+            assert!(joined.contains(want), "missing {want}; args: {joined}");
+        }
     }
 
     #[test]
@@ -1445,10 +1431,14 @@ mod tests {
                 .find(|e| e.name == n)
                 .and_then(|e| e.value.clone())
         };
-        assert!(by_name("CRABKA_OTLP_ENABLED").as_deref() == Some("true"));
-        assert!(by_name("CRABKA_OTLP_ENDPOINT").as_deref() == Some("http://otel:4317"));
-        assert!(by_name("CRABKA_OTLP_PROTOCOL").as_deref() == Some("http/protobuf"));
-        assert!(by_name("CRABKA_OTLP_SAMPLE_RATIO").as_deref() == Some("0.5"));
+        for (name, want) in [
+            ("CRABKA_OTLP_ENABLED", "true"),
+            ("CRABKA_OTLP_ENDPOINT", "http://otel:4317"),
+            ("CRABKA_OTLP_PROTOCOL", "http/protobuf"),
+            ("CRABKA_OTLP_SAMPLE_RATIO", "0.5"),
+        ] {
+            assert!(by_name(name).as_deref() == Some(want), "env {name}");
+        }
     }
 
     #[test]
@@ -1473,11 +1463,11 @@ mod tests {
     fn child_kafkauser_is_tls_with_broad_acls() {
         let gw = gateway_fixture("gw", "demo");
         let user = child_kafkauser(&gw, "demo").unwrap();
-        assert!(user.metadata.name.as_deref() == Some("gw-broker"));
+        check!(user.metadata.name.as_deref() == Some("gw-broker"));
         // TLS auth.
         assert!(matches!(user.spec.authentication, Authentication::Tls(_)));
         // crabka.io/cluster label links it to the parent.
-        assert!(
+        check!(
             user.metadata
                 .labels
                 .as_ref()
@@ -1486,7 +1476,7 @@ mod tests {
                 == Some("demo")
         );
         // Owner-ref → the gateway CR.
-        assert!(user.metadata.owner_references.as_ref().unwrap()[0].kind == "KafkaGrpcGateway");
+        check!(user.metadata.owner_references.as_ref().unwrap()[0].kind == "KafkaGrpcGateway");
         // Broad ALLOW ACLs over Topic/Group/TransactionalId/Cluster.
         let Some(Authorization::Simple(authz)) = &user.spec.authorization else {
             panic!("expected simple authorization");
@@ -1553,42 +1543,32 @@ mod tests {
         let data = secret.data.unwrap();
 
         let webhooks_toml = String::from_utf8(data["webhooks.toml"].0.clone()).unwrap();
-        assert!(
-            webhooks_toml.contains("name = \"orders\""),
-            "{webhooks_toml}"
-        );
-        assert!(
-            webhooks_toml.contains("target_topic = \"raw-orders\""),
-            "{webhooks_toml}"
-        );
-        // The resolved HMAC secret was injected (never present in the CR).
-        assert!(
-            webhooks_toml.contains("secret = \"WEBHOOK-HMAC\""),
-            "{webhooks_toml}"
-        );
-        assert!(
-            webhooks_toml.contains("signature_prefix = \"sha256=\""),
-            "{webhooks_toml}"
-        );
+        for want in [
+            "name = \"orders\"",
+            "target_topic = \"raw-orders\"",
+            // The resolved HMAC secret was injected (never present in the CR).
+            "secret = \"WEBHOOK-HMAC\"",
+            "signature_prefix = \"sha256=\"",
+        ] {
+            assert!(
+                webhooks_toml.contains(want),
+                "missing {want} in {webhooks_toml}"
+            );
+        }
 
         let outbound_toml = String::from_utf8(data["outbound.toml"].0.clone()).unwrap();
-        assert!(
-            outbound_toml.contains("name = \"processed\""),
-            "{outbound_toml}"
-        );
-        assert!(
-            outbound_toml.contains("target_url = \"https://hooks.example.com/deliver\""),
-            "{outbound_toml}"
-        );
-        assert!(
-            outbound_toml.contains("signing_secret = \"SIGN-HMAC\""),
-            "{outbound_toml}"
-        );
-        // allowed_targets derived from the target_url host.
-        assert!(
-            outbound_toml.contains("hooks.example.com"),
-            "{outbound_toml}"
-        );
+        for want in [
+            "name = \"processed\"",
+            "target_url = \"https://hooks.example.com/deliver\"",
+            "signing_secret = \"SIGN-HMAC\"",
+            // allowed_targets derived from the target_url host.
+            "hooks.example.com",
+        ] {
+            assert!(
+                outbound_toml.contains(want),
+                "missing {want} in {outbound_toml}"
+            );
+        }
 
         // The owner-ref points at the gateway.
         assert!(secret.metadata.owner_references.as_ref().unwrap()[0].name == "gw");
@@ -1658,18 +1638,20 @@ mod tests {
 
     #[test]
     fn reqwest_url_parse_strips_port_and_path() {
-        assert!(
-            reqwest_url_parse("https://h.example.com:8443/a/b?x=1")
-                == Ok(("https".into(), "h.example.com".into()))
-        );
-        assert!(
-            reqwest_url_parse("http://h.example.com")
-                == Ok(("http".into(), "h.example.com".into()))
-        );
-        assert!(
-            reqwest_url_parse("https://user@h.example.com/x")
-                == Ok(("https".into(), "h.example.com".into()))
-        );
+        for (input, scheme, host) in [
+            (
+                "https://h.example.com:8443/a/b?x=1",
+                "https",
+                "h.example.com",
+            ),
+            ("http://h.example.com", "http", "h.example.com"),
+            ("https://user@h.example.com/x", "https", "h.example.com"),
+        ] {
+            assert!(
+                reqwest_url_parse(input) == Ok((scheme.into(), host.into())),
+                "case {input}"
+            );
+        }
         assert!(reqwest_url_parse("not-a-url").is_err());
     }
 
@@ -1743,22 +1725,20 @@ mod tests {
             .args
             .unwrap();
         let joined = args.join(" ");
-        assert!(joined.contains("--authz=simple"), "{joined}");
-        assert!(
-            joined.contains("--authz-super-users=User:admin,User:ops"),
-            "{joined}"
-        );
-        assert!(joined.contains("--acl-refresh-secs=42"), "{joined}");
-        assert!(joined.contains("--bearer=unsecured"), "{joined}");
-        assert!(
-            joined.contains("--bearer-principal-claim=email"),
-            "{joined}"
-        );
-        assert!(joined.contains("--dedup-topic=gw-dedup"), "{joined}");
-        assert!(joined.contains("--dedup-partitions=16"), "{joined}");
-        assert!(joined.contains("--dedup-window-ms=123"), "{joined}");
-        assert!(joined.contains("--dedup-txn-id-prefix=pfx"), "{joined}");
-        assert!(joined.contains("--tls-client-auth=optional"), "{joined}");
+        for want in [
+            "--authz=simple",
+            "--authz-super-users=User:admin,User:ops",
+            "--acl-refresh-secs=42",
+            "--bearer=unsecured",
+            "--bearer-principal-claim=email",
+            "--dedup-topic=gw-dedup",
+            "--dedup-partitions=16",
+            "--dedup-window-ms=123",
+            "--dedup-txn-id-prefix=pfx",
+            "--tls-client-auth=optional",
+        ] {
+            assert!(joined.contains(want), "missing {want}; args: {joined}");
+        }
     }
 
     // ── resolve_broker_endpoint ───────────────────────────────

@@ -72,8 +72,10 @@ jobs:
             --source-dir . --signing-key melange.rsa \
             --arch x86_64 --runner docker \
             --cache-dir "$PWD/.melange-cache" --out-dir packages/
-          for image in crabka-operator crabka-broker bench-driver; do
-            apko build "packaging/apko/${image}.yaml" \
+          for spec in crabka-operator:crabka-operator crabka-broker:crabka-broker bench-driver:crabka-bench-driver; do
+            recipe="${spec%%:*}"
+            image="${spec#*:}"
+            apko build "packaging/apko/${recipe}.yaml" \
               "${image}:e2e" "${image}.tar" \
               --arch x86_64 \
               --repository-append "$PWD/packages" \
@@ -85,15 +87,15 @@ jobs:
         with:
           cluster_name: crabka-bench
           version: v0.24.0
-          node_image: kindest/node:v1.30.0
+          node_image: mirror.gcr.io/kindest/node:v1.30.0
 
       - name: Load images into kind
         run: |
           set -e
-          for recipe in crabka-operator crabka-broker bench-driver; do
-            docker load -i "${recipe}.tar" 2>&1 | tee /tmp/load.log
+          for image in crabka-operator crabka-broker crabka-bench-driver; do
+            docker load -i "${image}.tar" 2>&1 | tee /tmp/load.log
             loaded=$(sed -n 's/^Loaded image: //p' /tmp/load.log | head -1)
-            want="${recipe}:e2e"
+            want="${image}:e2e"
             if [ "$loaded" != "$want" ]; then docker tag "$loaded" "$want"; fi
             kind load docker-image "$want" --name crabka-bench
           done
@@ -121,7 +123,7 @@ jobs:
 
       - name: Run benchmark matrix
         env:
-          BENCH_DRIVER_IMAGE: bench-driver:e2e
+          BENCH_DRIVER_IMAGE: crabka-bench-driver:e2e
           BENCH_TOPOLOGY: ${{ github.event.inputs.topology || '1broker-rf1' }}
           BENCH_SCENARIOS: ${{ github.event.inputs.scenarios || 'small-msg-saturate fixed-rate-latency' }}
         run: |

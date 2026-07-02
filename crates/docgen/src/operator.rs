@@ -71,7 +71,7 @@ fn page<K: CustomResourceExt>() -> CrdPage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     #[test]
     fn kafka_page_has_spec_fields() {
         let pages = crd_pages();
@@ -79,20 +79,20 @@ mod tests {
             .iter()
             .find(|p| p.slug == "kafka")
             .expect("kafka page");
-        assert!(kafka.title == "Kafka");
-        assert!(
+        check!(kafka.title == "Kafka");
+        check!(
             kafka
                 .body
                 .contains("| Field | Type | Required | Default | Description |")
         );
         // Guard against render_field_table silently producing an empty table:
         // a concrete, stable field from the Kafka CRD spec must be present.
-        assert!(
+        check!(
             kafka.body.contains("| `kafkaVersion` |"),
             "expected kafkaVersion field in kafka spec table:\n{}",
             kafka.body
         );
-        assert!(pages.len() == 6);
+        check!(pages.len() == 6);
         let slugs: Vec<&str> = pages.iter().map(|p| p.slug.as_str()).collect();
         for e in [
             "kafka",

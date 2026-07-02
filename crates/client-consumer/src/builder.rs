@@ -57,6 +57,7 @@ use crabka_protocol::{Decode, Encode, UnknownTaggedFields};
 const SUBSCRIPTION_WIRE_VERSION: i16 = 3;
 const ASSIGNMENT_WIRE_VERSION: i16 = 3;
 
+#[derive(PartialEq)]
 pub(crate) struct DecodedSubscription {
     pub topics: Vec<String>,
     pub owned: Vec<(String, i32)>,
@@ -199,19 +200,24 @@ mod tests {
 
     #[test]
     fn peek_version_requires_two_bytes() {
-        assert!(peek_version(&[]) == 0);
-        assert!(peek_version(&[0x7f]) == 0);
-        assert!(peek_version(&[0, 3]) == 3);
+        for (bytes, want) in [(&[][..], 0), (&[0x7f][..], 0), (&[0, 3][..], 3)] {
+            assert!(peek_version(bytes) == want);
+        }
     }
 
     #[test]
     fn decode_subscription_short_or_malformed_payload_uses_empty_fallback() {
         for payload in [&[][..], &[0x7f][..], &[0, 3][..]] {
             let decoded = decode_subscription(payload);
-            assert!(decoded.topics.is_empty());
-            assert!(decoded.owned.is_empty());
-            assert!(decoded.generation_id == -1);
-            assert!(decoded.rack_id == None);
+            assert!(
+                decoded
+                    == DecodedSubscription {
+                        topics: Vec::new(),
+                        owned: Vec::new(),
+                        generation_id: -1,
+                        rack_id: None,
+                    }
+            );
         }
     }
 
@@ -233,10 +239,15 @@ mod tests {
     fn subscription_empty_round_trip() {
         let s = encode_subscription(&[], &[], -1, None);
         let decoded = decode_subscription(&s);
-        assert!(decoded.topics.is_empty());
-        assert!(decoded.owned.is_empty());
-        assert!(decoded.generation_id == -1);
-        assert!(decoded.rack_id == None);
+        assert!(
+            decoded
+                == DecodedSubscription {
+                    topics: Vec::new(),
+                    owned: Vec::new(),
+                    generation_id: -1,
+                    rack_id: None,
+                }
+        );
     }
 
     #[test]
@@ -272,20 +283,30 @@ mod tests {
         buf.put_i32(0); // owned_partitions empty (v1)
         let payload = buf.freeze();
         let decoded = decode_subscription(&payload);
-        assert!(decoded.topics == vec!["t1"]);
-        assert!(decoded.owned.is_empty());
-        assert!(decoded.generation_id == -1);
-        assert!(decoded.rack_id == None);
+        assert!(
+            decoded
+                == DecodedSubscription {
+                    topics: vec!["t1".to_string()],
+                    owned: Vec::new(),
+                    generation_id: -1,
+                    rack_id: None,
+                }
+        );
     }
 
     #[test]
     fn assignment_round_trip() {
         let s = encode_assignment(&[("t".into(), 0), ("t".into(), 1), ("u".into(), 0)]);
-        let decoded = decode_assignment(&s);
-        assert!(decoded.contains(&("t".into(), 0)));
-        assert!(decoded.contains(&("t".into(), 1)));
-        assert!(decoded.contains(&("u".into(), 0)));
-        assert!(decoded.len() == 3);
+        let mut decoded = decode_assignment(&s);
+        decoded.sort();
+        assert!(
+            decoded
+                == vec![
+                    ("t".to_string(), 0),
+                    ("t".to_string(), 1),
+                    ("u".to_string(), 0)
+                ]
+        );
     }
 
     #[test]

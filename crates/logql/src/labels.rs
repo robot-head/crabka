@@ -418,6 +418,8 @@ pub enum LabelSelectionMatcher {
 
 #[cfg(test)]
 mod tests {
+    use assert2::check;
+
     use super::*;
 
     fn labels(pairs: &[(&str, &str)]) -> Labels {
@@ -445,9 +447,9 @@ mod tests {
 
         assert_eq!(expression.label(), "size");
         assert_eq!(expression.conversion(), UnwrapConversion::Bytes);
-        assert!(UnwrapExpression::new("").is_err());
-        assert!(UnwrapExpression::bytes("").is_err());
-        assert!(UnwrapExpression::duration("").is_err());
+        check!(UnwrapExpression::new("").is_err());
+        check!(UnwrapExpression::bytes("").is_err());
+        check!(UnwrapExpression::duration("").is_err());
     }
 
     #[test]
@@ -520,18 +522,28 @@ mod tests {
         let exact = LabelSelection::equal("status", "500").unwrap();
         let regex = LabelSelection::regex("app", "api|worker").unwrap();
         let fields = labels(&[("app", "api"), ("status", "500")]);
+        let wrong_status = labels(&[("status", "200")]);
+        let frontend = labels(&[("app", "frontend")]);
 
-        assert!(!bare.matches(&fields));
-        assert!(exact.matches(&fields));
-        assert!(!exact.matches(&labels(&[("status", "200")])));
-        assert!(regex.matches(&fields));
-        assert!(!regex.matches(&labels(&[("app", "frontend")])));
+        for (selection, candidate, expected) in [
+            (&bare, &fields, false),
+            (&exact, &fields, true),
+            (&exact, &wrong_status, false),
+            (&regex, &fields, true),
+            (&regex, &frontend, false),
+        ] {
+            assert_eq!(
+                selection.matches(candidate),
+                expected,
+                "{selection:?} against {candidate:?}"
+            );
+        }
     }
 
     #[test]
     fn label_selection_validation_rejects_empty_names_and_invalid_regex() {
-        assert!(LabelSelection::name("").is_err());
-        assert!(LabelSelection::equal("", "value").is_err());
-        assert!(LabelSelection::regex("app", "[").is_err());
+        check!(LabelSelection::name("").is_err());
+        check!(LabelSelection::equal("", "value").is_err());
+        check!(LabelSelection::regex("app", "[").is_err());
     }
 }

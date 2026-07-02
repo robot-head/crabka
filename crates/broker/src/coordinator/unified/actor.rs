@@ -38,6 +38,39 @@ use super::offsets_log::OffsetsLog;
 use super::persistence_next_gen::MemberAssignmentState;
 use super::reconciler::{self, ReconcileInput};
 
+/// A Kafka wire `error_code` value, as carried in response `error_code`
+/// fields. The values live in [`crate::codes`].
+pub type ErrorCode = i16;
+
+/// Capacity of a group actor's mpsc mailbox. Senders back-pressure (await)
+/// once this many messages are queued unprocessed.
+const ACTOR_MAILBOX_CAPACITY: usize = 64;
+
+/// Cadence of the kind-agnostic session-expiry tick inside `actor_loop`.
+/// Expiry compares `last_seen` against each member's session timeout, so the
+/// tick rate only bounds detection latency, never the outcome.
+const SESSION_EXPIRY_TICK_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Fallback session timeout (30 s, in ms) used when a persisted or requested
+/// classic `session_timeout_ms` can't be represented in the target type.
+const FALLBACK_SESSION_TIMEOUT_MS: u64 = 30_000;
+
+/// [`FALLBACK_SESSION_TIMEOUT_MS`] as the persisted/wire `i32` field.
+#[allow(clippy::cast_possible_truncation)]
+const FALLBACK_SESSION_TIMEOUT_MS_I32: i32 = FALLBACK_SESSION_TIMEOUT_MS as i32;
+
+/// Fallback rebalance timeout (60 s, in ms) used when a persisted or requested
+/// `rebalance_timeout_ms` can't be represented in the target type.
+const FALLBACK_REBALANCE_TIMEOUT_MS: u64 = 60_000;
+
+/// [`FALLBACK_REBALANCE_TIMEOUT_MS`] as the persisted/wire `i32` field.
+#[allow(clippy::cast_possible_truncation)]
+const FALLBACK_REBALANCE_TIMEOUT_MS_I32: i32 = FALLBACK_REBALANCE_TIMEOUT_MS as i32;
+
+/// Fallback `heartbeat_interval_ms` (5 s — the KIP-848 default heartbeat
+/// interval) reported when the configured interval overflows the wire `i32`.
+const FALLBACK_HEARTBEAT_INTERVAL_MS: i32 = 5_000;
+
 /// Which protocol an actor's `Group` speaks. Fixed at spawn; exposed on the
 /// handle so the coordinator can route/reject cross-protocol RPCs and filter
 /// admin views without messaging the actor.
@@ -64,7 +97,7 @@ pub enum GroupActorMessage {
         /// The request's `generation_id_or_member_epoch` field; interpreted as the
         /// consumer `member_epoch` or the classic generation per the live kind.
         generation_or_epoch: i32,
-        reply: oneshot::Sender<Result<(), i16>>,
+        reply: oneshot::Sender<Result<(), ErrorCode>>,
     },
     Describe {
         reply: oneshot::Sender<DescribeView>,
@@ -82,7 +115,7 @@ pub enum GroupActorMessage {
     },
     ClassicHeartbeat {
         req: HeartbeatRequest,
-        reply: oneshot::Sender<i16>,
+        reply: oneshot::Sender<ErrorCode>,
     },
     ClassicLeave {
         req: LeaveGroupRequest,
@@ -130,7 +163,7 @@ pub enum GroupActorMessage {
 /// for the wire version. Mirrors the fields of `JoinGroupResponse`.
 #[derive(Debug, Default, Clone)]
 pub struct JoinResult {
-    pub error_code: i16,
+    pub error_code: ErrorCode,
     pub generation_id: i32,
     pub protocol_type: Option<String>,
     pub protocol_name: Option<String>,
@@ -149,7 +182,7 @@ pub struct JoinResultMember {
 /// Structured `SyncGroup` result handed back to the handler.
 #[derive(Debug, Default, Clone)]
 pub struct SyncResult {
-    pub error_code: i16,
+    pub error_code: ErrorCode,
     pub assignment: Bytes,
     pub protocol_type: Option<String>,
     pub protocol_name: Option<String>,
@@ -295,7 +328,7 @@ impl GroupActorHandle {
         offsets_log: Arc<dyn OffsetsLog>,
         coordinator: Arc<super::GroupCoordinator>,
     ) -> Self {
-        let (tx, rx) = mpsc::channel(64);
+        let (tx, rx) = mpsc::channel(ACTOR_MAILBOX_CAPACITY);
         let task = tokio::spawn(actor_loop(
             group_id,
             kind,
@@ -347,7 +380,7 @@ async fn actor_loop(
     // `last_seen`-vs-`session_timeout` comparison, so ticking once a second
     // (rather than on the heartbeat interval for consumer groups) only changes
     // how often we check, never the outcome.
-    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    let mut tick = tokio::time::interval(SESSION_EXPIRY_TICK_INTERVAL);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         let deadline = classic_deadline(&group);
@@ -390,7 +423,7 @@ async fn actor_loop(
                                 }
                                 *group.kind_mut() = GroupKind::Consumer(new_state);
                             } else {
-                                // TODO(kip-848): confirm against apache/kafka:4.0.0 — an
+                                // TODO(kip-848): confirm against mirror.gcr.io/apache/kafka:4.0.0 — an
                                 // un-upgradable/disallowed classic group appears to surface as
                                 // GROUP_ID_NOT_FOUND to a ConsumerGroupHeartbeat.
                                 let _ = reply.send(ConsumerGroupHeartbeatResponse {
@@ -439,7 +472,7 @@ async fn actor_loop(
                         }
                     }
                     GroupActorMessage::ValidateCommit { member_id, group_instance_id, generation_or_epoch, reply } => {
-                        let result: Result<(), i16> = if let Some(s) = group.as_consumer() {
+                        let result: Result<(), ErrorCode> = if let Some(s) = group.as_consumer() {
                             s.validate_commit_decision(&member_id, generation_or_epoch)
                         } else if let Some(s) = group.as_classic() {
                             match classic_ops::validate_commit(s, &member_id, group_instance_id.as_deref(), generation_or_epoch) {
@@ -871,7 +904,7 @@ async fn handle_session_tick(
 /// every member's k5/k7/k8, and write the classic k2 `GroupMetadata`. Returns `Ok(true)` if a flip
 /// happened, `Ok(false)` if the conditions weren't met, `Err` on a log-write
 /// failure (the caller exits the actor loop).
-// TODO(kip-848): confirm exact downgrade trigger boundary against apache/kafka:4.0.0
+// TODO(kip-848): confirm exact downgrade trigger boundary against mirror.gcr.io/apache/kafka:4.0.0
 async fn maybe_downgrade(
     group: &mut Group,
     config: &NextGenConfig,
@@ -951,7 +984,7 @@ fn apply_seed(state: &mut GroupState, seed: super::GroupSeed) {
             generation_id: group_generation,
             supported_protocols: c.supported_protocols.clone(),
             session_timeout: Duration::from_millis(
-                u64::try_from(c.session_timeout_ms.max(0)).unwrap_or(30_000),
+                u64::try_from(c.session_timeout_ms.max(0)).unwrap_or(FALLBACK_SESSION_TIMEOUT_MS),
             ),
             last_synced_assignment: c.last_synced_assignment.clone(),
             awaiting_sync: true,
@@ -967,7 +1000,8 @@ fn apply_seed(state: &mut GroupState, seed: super::GroupSeed) {
             compiled_regex: None,
             server_assignor: meta.server_assignor,
             rebalance_timeout: Duration::from_millis(
-                u64::try_from(meta.rebalance_timeout_ms.max(0)).unwrap_or(60_000),
+                u64::try_from(meta.rebalance_timeout_ms.max(0))
+                    .unwrap_or(FALLBACK_REBALANCE_TIMEOUT_MS),
             ),
             member_epoch: 0,
             previous_member_epoch: 0,
@@ -1036,10 +1070,12 @@ async fn classic_join_hosted(
         .iter()
         .map(|p| (p.name.clone(), p.metadata.clone()))
         .collect();
-    let session_timeout =
-        Duration::from_millis(u64::try_from(req.session_timeout_ms.max(0)).unwrap_or(30_000));
-    let rebalance_timeout =
-        Duration::from_millis(u64::try_from(req.rebalance_timeout_ms.max(0)).unwrap_or(60_000));
+    let session_timeout = Duration::from_millis(
+        u64::try_from(req.session_timeout_ms.max(0)).unwrap_or(FALLBACK_SESSION_TIMEOUT_MS),
+    );
+    let rebalance_timeout = Duration::from_millis(
+        u64::try_from(req.rebalance_timeout_ms.max(0)).unwrap_or(FALLBACK_REBALANCE_TIMEOUT_MS),
+    );
 
     let state = group
         .as_consumer_mut()
@@ -1360,7 +1396,7 @@ fn build_member(
         compiled_regex: None,
         server_assignor: req.server_assignor.clone(),
         rebalance_timeout: Duration::from_millis(
-            u64::try_from(req.rebalance_timeout_ms.max(0)).unwrap_or(60_000),
+            u64::try_from(req.rebalance_timeout_ms.max(0)).unwrap_or(FALLBACK_REBALANCE_TIMEOUT_MS),
         ),
         member_epoch: 0,
         previous_member_epoch: 0,
@@ -1373,7 +1409,7 @@ fn build_member(
 }
 
 fn base_resp(
-    error_code: i16,
+    error_code: ErrorCode,
     member_epoch: i32,
     config: &NextGenConfig,
 ) -> ConsumerGroupHeartbeatResponse {
@@ -1381,12 +1417,12 @@ fn base_resp(
         error_code,
         member_epoch,
         heartbeat_interval_ms: i32::try_from(config.heartbeat_interval.as_millis())
-            .unwrap_or(5_000),
+            .unwrap_or(FALLBACK_HEARTBEAT_INTERVAL_MS),
         ..Default::default()
     }
 }
 
-fn error_resp(error_code: i16, config: &NextGenConfig) -> ConsumerGroupHeartbeatResponse {
+fn error_resp(error_code: ErrorCode, config: &NextGenConfig) -> ConsumerGroupHeartbeatResponse {
     base_resp(error_code, 0, config)
 }
 
@@ -1611,7 +1647,8 @@ fn classic_member_metadata(
     m.classic
         .as_ref()
         .map(|f| super::persistence_next_gen::ClassicMemberMetadata {
-            session_timeout_ms: i32::try_from(f.session_timeout.as_millis()).unwrap_or(30_000),
+            session_timeout_ms: i32::try_from(f.session_timeout.as_millis())
+                .unwrap_or(FALLBACK_SESSION_TIMEOUT_MS_I32),
             supported_protocols: f.supported_protocols.clone(),
             last_synced_assignment: f.last_synced_assignment.clone(),
         })
@@ -1640,7 +1677,8 @@ pub(crate) fn snapshot_seed(state: &super::consumer_state::GroupState) -> super:
             subscribed_topic_names: m.subscribed_topic_names.iter().cloned().collect(),
             subscribed_topic_regex: m.subscribed_topic_regex.clone(),
             server_assignor: m.server_assignor.clone(),
-            rebalance_timeout_ms: i32::try_from(m.rebalance_timeout.as_millis()).unwrap_or(60_000),
+            rebalance_timeout_ms: i32::try_from(m.rebalance_timeout.as_millis())
+                .unwrap_or(FALLBACK_REBALANCE_TIMEOUT_MS_I32),
             classic: classic_member_metadata(m),
         };
         members.insert(mid.clone(), mm);
@@ -1729,7 +1767,7 @@ fn snapshot_pending_after_change(
                     subscribed_topic_regex: m.subscribed_topic_regex.clone(),
                     server_assignor: m.server_assignor.clone(),
                     rebalance_timeout_ms: i32::try_from(m.rebalance_timeout.as_millis())
-                        .unwrap_or(60_000),
+                        .unwrap_or(FALLBACK_REBALANCE_TIMEOUT_MS_I32),
                     classic: classic_member_metadata(m),
                 }),
             ));
@@ -1804,8 +1842,10 @@ pub(crate) fn classic_group_metadata_record(
             group_instance_id: m.group_instance_id.clone(),
             client_id: m.client_id.clone(),
             client_host: m.host.clone(),
-            rebalance_timeout_ms: i32::try_from(m.rebalance_timeout.as_millis()).unwrap_or(60_000),
-            session_timeout_ms: i32::try_from(m.session_timeout.as_millis()).unwrap_or(30_000),
+            rebalance_timeout_ms: i32::try_from(m.rebalance_timeout.as_millis())
+                .unwrap_or(FALLBACK_REBALANCE_TIMEOUT_MS_I32),
+            session_timeout_ms: i32::try_from(m.session_timeout.as_millis())
+                .unwrap_or(FALLBACK_SESSION_TIMEOUT_MS_I32),
             subscription: m.protocol_metadata.clone(),
             assignment: m.assignment.clone().unwrap_or_default(),
         })
@@ -1860,7 +1900,7 @@ pub(crate) async fn validate_group_commit(
     member_id: &str,
     generation_or_epoch: i32,
     group_instance_id: Option<&str>,
-) -> Option<i16> {
+) -> Option<ErrorCode> {
     let (tx, rx) = oneshot::channel();
     if handle
         .tx
@@ -1896,7 +1936,7 @@ mod consumer_group_composition_model;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
 
     use crate::coordinator::unified::GroupCoordinator;
     use crate::coordinator::unified::config::NextGenConfig;
@@ -1983,10 +2023,10 @@ mod tests {
 
         drain_removed_classic_waiters(&["m1".to_string()], &mut joiners, &mut followers);
 
-        assert!(joiners.is_empty());
-        assert!(followers.is_empty());
-        assert!(join_rx.await.unwrap().error_code == codes::UNKNOWN_MEMBER_ID);
-        assert!(sync_rx.await.unwrap().error_code == codes::UNKNOWN_MEMBER_ID);
+        check!(joiners.is_empty());
+        check!(followers.is_empty());
+        check!(join_rx.await.unwrap().error_code == codes::UNKNOWN_MEMBER_ID);
+        check!(sync_rx.await.unwrap().error_code == codes::UNKNOWN_MEMBER_ID);
     }
 
     /// A coordinator whose metadata image holds one topic `t` with `partitions`
@@ -2088,18 +2128,13 @@ mod tests {
             .await
             .unwrap();
         let resp = rx.await.unwrap();
-        assert!(resp.error_code == 0, "client-id first-join must succeed");
-        assert!(
-            resp.member_id.as_deref() == Some("client-uuid-1"),
-            "response must echo the client-supplied member id"
-        );
-        assert!(resp.member_epoch >= 1, "epoch must advance off 0 on join");
-        // The client-id first-join takes the same flush path as the empty-id case
-        // and persists exactly one batch.
-        assert!(
-            log.batches().await.len() == 1,
-            "client-id first join writes exactly one batch"
-        );
+        // The join must succeed, echo the client-supplied member id, and
+        // advance the epoch off 0. The client-id first-join takes the same
+        // flush path as the empty-id case and persists exactly one batch.
+        check!(resp.error_code == 0);
+        check!(resp.member_id.as_deref() == Some("client-uuid-1"));
+        check!(resp.member_epoch >= 1);
+        check!(log.batches().await.len() == 1);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2390,6 +2425,97 @@ mod tests {
         );
     }
 
+    #[test]
+    fn snapshot_seed_pins_full_group_state_including_classic_facade() {
+        use crate::coordinator::unified::persistence_next_gen as p;
+
+        let topic = {
+            let mut b = [0u8; 16];
+            b[15] = 0xEF;
+            crabka_protocol::primitives::uuid::Uuid(b)
+        };
+        let mut state = GroupState::new("g");
+        state.group_epoch = 7;
+        state.target.epoch = 6;
+
+        let mut m = build_member(
+            "m1",
+            &ConsumerGroupHeartbeatRequest {
+                subscribed_topic_names: Some(vec!["t".into()]),
+                rebalance_timeout_ms: 60_000,
+                ..Default::default()
+            },
+            "h",
+            Instant::now(),
+        );
+        m.member_epoch = 7;
+        m.previous_member_epoch = 6;
+        m.assigned_partitions.insert(topic, vec![0, 1]);
+        m.classic = Some(super::super::consumer_state::ClassicMemberFacade {
+            generation_id: 7,
+            supported_protocols: vec![("range".to_string(), bytes::Bytes::from_static(b"meta"))],
+            session_timeout: Duration::from_secs(45),
+            last_synced_assignment: bytes::Bytes::from_static(b"assigned"),
+            awaiting_sync: false,
+        });
+        state
+            .target
+            .per_member
+            .insert("m1".to_string(), HashMap::from([(topic, vec![0, 1, 2])]));
+        state.add_or_update_member(m);
+
+        let seed = snapshot_seed(&state);
+
+        let expected = super::super::GroupSeed {
+            group_epoch: 7,
+            target_epoch: 6,
+            members: HashMap::from([(
+                "m1".to_string(),
+                p::MemberMetadataValue {
+                    instance_id: None,
+                    rack_id: None,
+                    client_id: String::new(),
+                    client_host: "h".to_string(),
+                    subscribed_topic_names: vec!["t".to_string()],
+                    subscribed_topic_regex: None,
+                    server_assignor: None,
+                    rebalance_timeout_ms: 60_000,
+                    classic: Some(p::ClassicMemberMetadata {
+                        session_timeout_ms: 45_000,
+                        supported_protocols: vec![(
+                            "range".to_string(),
+                            bytes::Bytes::from_static(b"meta"),
+                        )],
+                        last_synced_assignment: bytes::Bytes::from_static(b"assigned"),
+                    }),
+                },
+            )]),
+            target_per_member: HashMap::from([(
+                "m1".to_string(),
+                p::TargetAssignmentMemberValue {
+                    topic_partitions: vec![p::AssignedTopicPartitions {
+                        topic_id: topic,
+                        partitions: vec![0, 1, 2],
+                    }],
+                },
+            )]),
+            current_per_member: HashMap::from([(
+                "m1".to_string(),
+                p::CurrentMemberAssignmentValue {
+                    member_epoch: 7,
+                    previous_member_epoch: 6,
+                    state: MemberAssignmentState::Stable,
+                    assigned_partitions: vec![p::AssignedTopicPartitions {
+                        topic_id: topic,
+                        partitions: vec![0, 1],
+                    }],
+                    partitions_pending_revocation: vec![],
+                },
+            )]),
+        };
+        assert!(seed == expected);
+    }
+
     // ---------------------------------------------------------------------
     // custom assignor registry
     // ---------------------------------------------------------------------
@@ -2515,10 +2641,10 @@ mod tests {
 
         // Admin surface lists/describes the classic group, then deletes it (empty).
         let listed = coord.list_groups().await;
-        assert!(listed.iter().any(|s| s.group_id == "g"));
-        assert!(coord.describe_group("g").await.is_some());
-        assert!(coord.delete_group("g").await.is_ok());
-        assert!(coord.describe_group("g").await.is_none());
+        check!(listed.iter().any(|s| s.group_id == "g"));
+        check!(coord.describe_group("g").await.is_some());
+        check!(coord.delete_group("g").await == Ok(()));
+        check!(coord.describe_group("g").await.is_none());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2754,18 +2880,13 @@ mod tests {
             .await
             .unwrap();
         let describe = rx.await.unwrap();
-        assert!(describe.members.len() == 2);
-        assert!(
-            describe.members.iter().any(|m| m.is_classic),
-            "the hosted classic member must survive the upgrade"
-        );
-        assert!(
-            describe.members.iter().any(|m| !m.is_classic),
-            "the new native consumer member must be present"
-        );
-
-        // The upgrade batch tombstoned the classic k2 GroupMetadata record.
-        assert!(log.has_classic_group_metadata_tombstone("g").await);
+        // The hosted classic member must survive the upgrade, the new native
+        // consumer member must be present, and the upgrade batch tombstoned
+        // the classic k2 GroupMetadata record.
+        check!(describe.members.len() == 2);
+        check!(describe.members.iter().any(|m| m.is_classic));
+        check!(describe.members.iter().any(|m| !m.is_classic));
+        check!(log.has_classic_group_metadata_tombstone("g").await);
     }
 
     // ── KIP-848: serving hosted classic members off the reconciler ─────
@@ -2961,9 +3082,9 @@ mod tests {
         // 2. JoinGroup (rejoin of the existing member, unchanged subscription):
         //    success, server-assigned single-member view at group_epoch, self leader.
         let join = classic_join(&handle, "m-classic", "t").await;
-        assert!(join.error_code == codes::NONE);
-        assert!(join.leader == "m-classic");
-        assert!(join.member_id == "m-classic");
+        check!(join.error_code == codes::NONE);
+        check!(join.leader.as_str() == "m-classic");
+        check!(join.member_id.as_str() == "m-classic");
         // Generation equals the group epoch (read it back from Describe).
         let (tx, rx) = tokio::sync::oneshot::channel();
         handle
@@ -3140,24 +3261,17 @@ mod tests {
             .describe_group("g")
             .await
             .expect("group downgraded to classic");
-        // Only the hosted classic member remains; the departed native member
-        // is gone.
-        assert!(
-            snap.members.len() == 1,
-            "exactly the hosted classic member must remain after downgrade"
-        );
-        assert!(
-            snap.members.iter().any(|m| m.member_id == "m-classic"),
-            "the hosted classic member must survive the downgrade"
-        );
-
-        // The downgrade batch tombstoned the next-gen k3 GroupMetadata record.
-        assert!(log.has_next_gen_group_metadata_tombstone("g").await);
-        // ...and the group-level k6 TargetAssignmentMetadata record, which would
-        // otherwise survive log compaction and resurrect the group as next-gen.
-        assert!(log.has_next_gen_target_metadata_tombstone("g").await);
-        // ...and wrote a classic k2 GroupMetadata (non-tombstone) for "g".
-        assert!(log_has_classic_group_metadata_write(&log, "g").await);
+        // Exactly the hosted classic member remains (the departed native
+        // member is gone), and the downgrade batch tombstoned the next-gen k3
+        // GroupMetadata record AND the group-level k6 TargetAssignmentMetadata
+        // record (which would otherwise survive log compaction and resurrect
+        // the group as next-gen), and wrote a classic k2 GroupMetadata
+        // (non-tombstone) for "g".
+        check!(snap.members.len() == 1);
+        check!(snap.members.iter().any(|m| m.member_id == "m-classic"));
+        check!(log.has_next_gen_group_metadata_tombstone("g").await);
+        check!(log.has_next_gen_target_metadata_tombstone("g").await);
+        check!(log_has_classic_group_metadata_write(&log, "g").await);
     }
 
     /// KIP-848 admin coherence: after an in-place UPGRADE the group is
@@ -3184,32 +3298,22 @@ mod tests {
             .describe_group("g")
             .await
             .expect("describe must surface an upgraded consumer group");
-        assert!(snap.group_id == "g");
         // The hosted classic member survives the upgrade and is reported.
-        assert!(
-            !snap.members.is_empty(),
-            "an upgraded consumer group must report its members"
-        );
-        assert!(
-            snap.members.iter().any(|m| m.member_id == "m-classic"),
-            "the hosted classic member must appear in the describe snapshot"
-        );
         // KIP-848 next-gen consumer groups report protocol_type "consumer".
-        assert!(snap.protocol_type.as_deref() == Some("consumer"));
-        // The assignment is projected from the member's reconciler target, so an
-        // assigned hosted-classic member has non-empty assignment bytes.
-        assert!(
+        // The assignment is projected from the member's reconciler target, so
+        // an assigned hosted-classic member has non-empty assignment bytes.
+        // generation_id mirrors the group epoch (the next-gen analogue of a
+        // classic group's generation) and must have advanced off 0.
+        check!(snap.group_id.as_str() == "g");
+        check!(!snap.members.is_empty());
+        check!(snap.members.iter().any(|m| m.member_id == "m-classic"));
+        check!(snap.protocol_type.as_deref() == Some("consumer"));
+        check!(
             snap.members
                 .iter()
-                .any(|m| m.member_id == "m-classic" && !m.assignment.is_empty()),
-            "the assigned hosted classic member must carry a translated assignment"
+                .any(|m| m.member_id == "m-classic" && !m.assignment.is_empty())
         );
-        // generation_id mirrors the group epoch (the next-gen analogue of a
-        // classic group's generation).
-        assert!(
-            snap.generation_id >= 1,
-            "an upgraded group's generation must have advanced off 0"
-        );
+        check!(snap.generation_id >= 1);
 
         // `list_groups` produces the wire `group_type="classic"` rows; an
         // upgraded (consumer-kind) group is NOT a classic row, so it does not
@@ -3701,13 +3805,13 @@ mod tests {
         // round-trip guarantees the downgrade completed. The lone hosted classic
         // member keeps it non-empty.
         let view = classic_inspect(&handle).await;
-        assert!(view.members.iter().any(|m| m.member_id == "m-classic"));
+        check!(view.members.iter().any(|m| m.member_id == "m-classic"));
 
         // The spawn-time kind is the stale `Consumer`; delete must not consult
         // it. A non-empty downgraded (live-classic) group reports `NonEmpty`,
         // NOT `NotFound` — proving delete sees it as classic.
-        assert!(handle.kind == GroupKindTag::Consumer);
-        assert!(
+        check!(handle.kind == GroupKindTag::Consumer);
+        check!(
             coord.delete_group("g").await == Err(crate::coordinator::DeleteGroupError::NonEmpty),
             "a downgraded non-empty group must report NonEmpty (seen as classic), \
              not the stale-handle.kind NotFound"
@@ -3756,26 +3860,21 @@ mod tests {
         // not consult it — it must run the consumer epoch fence.
         assert!(handle.kind == GroupKindTag::Classic);
 
-        // STALE epoch (< current) → STALE_MEMBER_EPOCH.
-        let stale = validate_commit(&handle, &native, current_epoch - 1).await;
-        assert!(
-            stale == Err(codes::STALE_MEMBER_EPOCH),
-            "an upgraded group must run the consumer epoch fence (stale); got {stale:?}"
-        );
-
-        // FENCED epoch (> current) → FENCED_MEMBER_EPOCH.
-        let fenced = validate_commit(&handle, &native, current_epoch + 1).await;
-        assert!(
-            fenced == Err(codes::FENCED_MEMBER_EPOCH),
-            "an upgraded group must run the consumer epoch fence (fenced); got {fenced:?}"
-        );
-
-        // The current epoch is accepted.
-        let ok = validate_commit(&handle, &native, current_epoch).await;
-        assert!(
-            ok == Ok(()),
-            "the current epoch must be accepted; got {ok:?}"
-        );
+        let cases = [
+            // STALE epoch (< current) → STALE_MEMBER_EPOCH.
+            (current_epoch - 1, Err(codes::STALE_MEMBER_EPOCH), "stale"),
+            // FENCED epoch (> current) → FENCED_MEMBER_EPOCH.
+            (current_epoch + 1, Err(codes::FENCED_MEMBER_EPOCH), "fenced"),
+            // The current epoch is accepted.
+            (current_epoch, Ok(()), "current"),
+        ];
+        for (epoch, want, label) in cases {
+            let got = validate_commit(&handle, &native, epoch).await;
+            assert!(
+                got == want,
+                "an upgraded group must run the consumer epoch fence ({label}, epoch {epoch}); got {got:?}"
+            );
+        }
     }
 
     #[test]
@@ -3800,12 +3899,11 @@ mod tests {
             ..Default::default()
         };
         let step = step_heartbeat(&mut group, &config, &metadata, &req, "", Instant::now());
-        assert!(step.response.error_code == 0);
-        assert!(
-            step.response.member_epoch == 1,
-            "first join advances to group epoch 1"
-        );
-        assert!(group.target.per_member["m1"][&topic_id] == vec![0, 1]);
-        assert!(!step.pending.is_empty(), "first join must persist records");
+        // First join succeeds, advances to group epoch 1, targets all
+        // partitions of "t", and must persist records.
+        check!(step.response.error_code == 0);
+        check!(step.response.member_epoch == 1);
+        check!(group.target.per_member["m1"][&topic_id].clone() == vec![0, 1]);
+        check!(!step.pending.is_empty());
     }
 }

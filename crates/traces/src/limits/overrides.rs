@@ -111,9 +111,18 @@ overrides:
         let provider = OverridesProvider::from_yaml(YAML).unwrap();
         let tenant_a = provider.for_tenant("tenant-a");
 
-        assert!((tenant_a.ingestion_rate_spans_per_sec - 500.0).abs() < f64::EPSILON);
-        assert!(tenant_a.max_spans_per_trace == 1000);
-        assert!(tenant_a.max_attribute_bytes == Limits::default().max_attribute_bytes);
+        // Overridden fields take the yaml values; the rest keep the defaults.
+        assert_eq!(
+            *tenant_a,
+            Limits {
+                ingestion_rate_spans_per_sec: 500.0,
+                ingestion_burst_spans: 100_000,
+                max_traces_per_search: 1000,
+                max_spans_per_trace: 1000,
+                max_attribute_bytes: 2048,
+                max_search_duration_secs: 0,
+            }
+        );
     }
 
     #[test]

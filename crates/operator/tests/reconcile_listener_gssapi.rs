@@ -27,7 +27,7 @@
 //! check, the rendered TOML landing in the ConfigMap, and the mounts
 //! landing on the StatefulSet.
 
-use assert2::assert;
+use assert2::{assert, check};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -418,20 +418,19 @@ async fn gssapi_listener_renders_gssapi_toml_block_and_mechanism() {
     );
 
     let toml = extract_broker0_toml(&observed, "c1");
-    assert!(toml.contains("[gssapi]"), "TOML: {toml}");
-    assert!(
-        toml.contains("keytab_path = \"/etc/crabka/gssapi-keytab/keytab\""),
-        "TOML: {toml}"
-    );
-    assert!(
-        toml.contains("sasl_config = { enabled_mechanisms = [\"GSSAPI\"] }"),
-        "TOML: {toml}"
-    );
-    // No inter-broker block: the synthesized inter-broker listener is not gssapi.
-    assert!(
-        !toml.contains("[inter_broker_credentials]"),
-        "no inter-broker block without interBrokerKerberos; TOML: {toml}"
-    );
+    // `[inter_broker_credentials]` must be absent: the synthesized inter-broker
+    // listener is not gssapi, and there is no interBrokerKerberos.
+    for (needle, want) in [
+        ("[gssapi]", true),
+        ("keytab_path = \"/etc/crabka/gssapi-keytab/keytab\"", true),
+        ("sasl_config = { enabled_mechanisms = [\"GSSAPI\"] }", true),
+        ("[inter_broker_credentials]", false),
+    ] {
+        assert!(
+            toml.contains(needle) == want,
+            "needle {needle:?}, want present = {want}; TOML: {toml}"
+        );
+    }
 }
 
 // ── test 1b: happy path — StatefulSet mounts the gssapi-keytab volume ───────
@@ -473,17 +472,9 @@ async fn gssapi_listener_statefulset_mounts_keytab_volume() {
         kt_vol["secret"]["secretName"] == KEYTAB_SECRET_NAME,
         "keytab volume sources the user's Secret; body = {body}"
     );
-    let kt_items = kt_vol["secret"]["items"]
-        .as_array()
-        .unwrap_or_else(|| panic!("projected items present; body = {body}"));
     assert!(
-        kt_items.len() == 1,
-        "exactly one projected item; body = {body}"
-    );
-    assert!(kt_items[0]["key"] == KEYTAB_KEY, "body = {body}");
-    assert!(
-        kt_items[0]["path"] == "keytab",
-        "item pinned to fixed `keytab` path; body = {body}"
+        kt_vol["secret"]["items"] == serde_json::json!([{ "key": KEYTAB_KEY, "path": "keytab" }]),
+        "exactly one projected item, pinned to the fixed `keytab` path; body = {body}"
     );
 
     // Broker-container volumeMount at the canonical keytab dir.
@@ -564,13 +555,14 @@ async fn inter_broker_gssapi_renders_inter_broker_credentials_block() {
     let observed = state.take_observed();
     let toml = extract_broker0_toml(&observed, "c3");
 
-    assert!(toml.contains("[inter_broker_credentials]"), "TOML: {toml}");
-    assert!(toml.contains("type = \"gssapi\""), "TOML: {toml}");
-    assert!(
-        toml.contains("client_principal = \"kafka@EXAMPLE.COM\""),
-        "TOML: {toml}"
-    );
-    assert!(toml.contains("kdc_url = \"tcp://kdc:88\""), "TOML: {toml}");
+    for needle in [
+        "[inter_broker_credentials]",
+        "type = \"gssapi\"",
+        "client_principal = \"kafka@EXAMPLE.COM\"",
+        "kdc_url = \"tcp://kdc:88\"",
+    ] {
+        assert!(toml.contains(needle), "missing {needle:?}; TOML: {toml}");
+    }
 }
 
 // ── test 5: cross-crate contract — round-trip through the real broker parser ─
@@ -654,34 +646,29 @@ async fn rendered_gssapi_toml_round_trips_through_broker_file_config() {
 
     // [gssapi] survives the round trip with every field intact.
     let g = bc.gssapi.expect("bc.gssapi must be Some after round trip");
-    assert!(g.service_name == "kafka");
-    assert!(
+    check!(g.service_name == "kafka");
+    check!(
         g.principal_to_local_rules.len() == 2,
         "both auth_to_local rules must parse through"
     );
-    assert!(g.realm == Some("EXAMPLE.COM".into()));
-    assert!(g.kdc == Some("tcp://kdc:88".into()));
-    assert!(g.keytab_path == std::path::PathBuf::from("/etc/crabka/gssapi-keytab/keytab"));
+    check!(g.realm == Some("EXAMPLE.COM".into()));
+    check!(g.kdc == Some("tcp://kdc:88".into()));
+    check!(g.keytab_path == std::path::PathBuf::from("/etc/crabka/gssapi-keytab/keytab"));
 
     // [inter_broker_credentials] survives as the Gssapi variant with the
     // shared client principal, service name, KDC URL, and keytab path.
-    match bc
+    let creds = bc
         .inter_broker_credentials
-        .expect("bc.inter_broker_credentials must be Some after round trip")
-    {
-        crabka_broker::config::InterBrokerCredentials::Gssapi {
-            keytab_path,
-            client_principal,
-            service_name,
-            kdc_url,
-        } => {
-            assert!(client_principal == "kafka@EXAMPLE.COM");
-            assert!(service_name == "kafka");
-            assert!(kdc_url == "tcp://kdc:88");
-            assert!(keytab_path == std::path::PathBuf::from("/etc/crabka/gssapi-keytab/keytab"));
-        }
-        other => panic!("expected InterBrokerCredentials::Gssapi, got {other:?}"),
-    }
+        .expect("bc.inter_broker_credentials must be Some after round trip");
+    assert!(
+        creds
+            == crabka_broker::config::InterBrokerCredentials::Gssapi {
+                keytab_path: std::path::PathBuf::from("/etc/crabka/gssapi-keytab/keytab"),
+                client_principal: "kafka@EXAMPLE.COM".into(),
+                service_name: "kafka".into(),
+                kdc_url: "tcp://kdc:88".into(),
+            }
+    );
 }
 
 // ── test 4: krb5.conf → krb5-conf volume/mount + KRB5_CONFIG env ────────────

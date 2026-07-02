@@ -53,32 +53,28 @@ pub(crate) async fn handle(
             principal: ctx.principal,
             host: ctx.peer,
             resource_type: ResourceType::Cluster,
-            resource_name: "kafka-cluster",
+            resource_name: crate::handlers::acl_wire::CLUSTER_RESOURCE_NAME,
             operation: AclOperation::Alter,
         },
     );
     if allow == AuthorizationResult::Deny {
-        let resp = UnregisterBrokerResponse {
-            error_code: codes::CLUSTER_AUTHORIZATION_FAILED,
-            error_message: Some("unregister-broker denied".into()),
-            throttle_time_ms: 0,
-            ..Default::default()
-        };
+        let resp = response(
+            codes::CLUSTER_AUTHORIZATION_FAILED,
+            Some("unregister-broker denied".into()),
+        );
         return encode_resp(version, &resp);
     }
 
     // The request broker_id is signed but node ids are non-negative;
     // refuse negatives up front rather than silently `as u64`.
     if req.broker_id < 0 {
-        let resp = UnregisterBrokerResponse {
-            error_code: codes::INVALID_REQUEST,
-            error_message: Some(format!(
+        let resp = response(
+            codes::INVALID_REQUEST,
+            Some(format!(
                 "broker_id must be non-negative, got {}",
                 req.broker_id
             )),
-            throttle_time_ms: 0,
-            ..Default::default()
-        };
+        );
         return encode_resp(version, &resp);
     }
 
@@ -88,12 +84,10 @@ pub(crate) async fn handle(
     // matching JVM's `BrokerIdNotRegisteredException → INVALID_REQUEST`
     // surface.
     if image.broker(node_id).is_none() {
-        let resp = UnregisterBrokerResponse {
-            error_code: codes::INVALID_REQUEST,
-            error_message: Some(format!("broker {node_id} is not registered")),
-            throttle_time_ms: 0,
-            ..Default::default()
-        };
+        let resp = response(
+            codes::INVALID_REQUEST,
+            Some(format!("broker {node_id} is not registered")),
+        );
         return encode_resp(version, &resp);
     }
 
@@ -101,26 +95,226 @@ pub(crate) async fn handle(
     // idempotent (the `apply` arm calls `brokers.remove`).
     let record = MetadataRecord::V1UnregisterBroker(UnregisterBrokerRecord { node_id });
     if let Err(e) = broker.controller.submit_change(vec![record]).await {
-        let resp = UnregisterBrokerResponse {
-            error_code: codes::UNKNOWN_SERVER_ERROR,
-            error_message: Some(format!("controller submit failed: {e}")),
-            throttle_time_ms: 0,
-            ..Default::default()
-        };
+        let resp = response(
+            codes::UNKNOWN_SERVER_ERROR,
+            Some(format!("controller submit failed: {e}")),
+        );
         return encode_resp(version, &resp);
     }
 
-    let resp = UnregisterBrokerResponse {
-        error_code: codes::NONE,
-        error_message: None,
-        throttle_time_ms: 0,
-        ..Default::default()
-    };
+    let resp = response(codes::NONE, None);
     encode_resp(version, &resp)
+}
+
+fn response(error_code: i16, error_message: Option<String>) -> UnregisterBrokerResponse {
+    UnregisterBrokerResponse {
+        error_code,
+        error_message,
+        ..Default::default()
+    }
 }
 
 fn encode_resp(version: i16, resp: &UnregisterBrokerResponse) -> Result<Bytes, BrokerError> {
     let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
     resp.encode(&mut buf, version)?;
     Ok(buf.freeze())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert2::assert;
+    use crabka_protocol::owned::unregister_broker_response::{self, UnregisterBrokerResponse};
+    use crabka_security::{AuthMethod, Principal};
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    use crate::authorizer::{AuthorizationRequest, Authorizer};
+    use crate::broker::{Broker, BrokerHandle};
+    use crate::config::BrokerConfig;
+
+    #[derive(Debug)]
+    struct DenyAll;
+
+    impl Authorizer for DenyAll {
+        fn authorize(
+            &self,
+            _source: &dyn crabka_authz::AclSource,
+            _req: &AuthorizationRequest<'_>,
+        ) -> AuthorizationResult {
+            AuthorizationResult::Deny
+        }
+    }
+
+    fn encode_request(req: &UnregisterBrokerRequest, version: i16) -> Bytes {
+        let mut buf = BytesMut::with_capacity(req.encoded_len(version));
+        req.encode(&mut buf, version).expect("encode request");
+        buf.freeze()
+    }
+
+    fn decode_response(bytes: &Bytes) -> UnregisterBrokerResponse {
+        let version = unregister_broker_response::MAX_VERSION;
+        let mut cur: &[u8] = bytes.as_ref();
+        let resp = UnregisterBrokerResponse::decode(&mut cur, version).expect("decode response");
+        assert!(cur.is_empty(), "response decoder consumed all bytes");
+        resp
+    }
+
+    fn principal() -> Principal {
+        Principal {
+            name: "admin".into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        }
+    }
+
+    fn context<'a>(
+        principal: &'a Principal,
+        peer: &'a SocketAddr,
+    ) -> crate::handlers::RequestContext<'a> {
+        crate::handlers::RequestContext {
+            principal,
+            peer,
+            client_id: "unregister-client",
+            sendfile_capable: false,
+            connection_listener_name: "PLAINTEXT",
+        }
+    }
+
+    async fn start_broker(authorizer: Arc<dyn Authorizer>) -> (BrokerHandle, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
+        cfg.audit_enabled = false;
+        cfg.authorizer = authorizer;
+        let handle = Broker::start(cfg).await.expect("start broker");
+        (handle, dir)
+    }
+
+    #[test]
+    fn response_preserves_error_fields_and_throttle() {
+        let resp = response(codes::UNKNOWN_SERVER_ERROR, Some("submit failed".into()));
+
+        let expected = UnregisterBrokerResponse {
+            throttle_time_ms: 0,
+            error_code: codes::UNKNOWN_SERVER_ERROR,
+            error_message: Some("submit failed".into()),
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
+    }
+
+    #[tokio::test]
+    async fn handle_denies_cluster_alter_with_message_and_throttle() {
+        let version = unregister_broker_response::MAX_VERSION;
+        let (broker_handle, _dir) = start_broker(Arc::new(DenyAll)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let principal = principal();
+        let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+        let ctx = context(&principal, &peer);
+        let req = UnregisterBrokerRequest {
+            broker_id: 1,
+            ..Default::default()
+        };
+
+        let resp = handle(&broker, version, 1, &encode_request(&req, version), &ctx)
+            .await
+            .expect("handle");
+        let resp = decode_response(&resp);
+
+        let expected = UnregisterBrokerResponse {
+            throttle_time_ms: 0,
+            error_code: codes::CLUSTER_AUTHORIZATION_FAILED,
+            error_message: Some("unregister-broker denied".into()),
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected, "{resp:?}");
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_rejects_negative_broker_id_before_casting() {
+        let version = unregister_broker_response::MAX_VERSION;
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let principal = principal();
+        let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+        let ctx = context(&principal, &peer);
+        let req = UnregisterBrokerRequest {
+            broker_id: -1,
+            ..Default::default()
+        };
+
+        let resp = handle(&broker, version, 1, &encode_request(&req, version), &ctx)
+            .await
+            .expect("handle");
+        let resp = decode_response(&resp);
+
+        let expected = UnregisterBrokerResponse {
+            throttle_time_ms: 0,
+            error_code: codes::INVALID_REQUEST,
+            error_message: Some("broker_id must be non-negative, got -1".into()),
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected, "{resp:?}");
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_treats_zero_as_non_negative_unknown_broker() {
+        let version = unregister_broker_response::MAX_VERSION;
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let principal = principal();
+        let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+        let ctx = context(&principal, &peer);
+        let req = UnregisterBrokerRequest {
+            broker_id: 0,
+            ..Default::default()
+        };
+
+        let resp = handle(&broker, version, 1, &encode_request(&req, version), &ctx)
+            .await
+            .expect("handle");
+        let resp = decode_response(&resp);
+
+        let expected = UnregisterBrokerResponse {
+            throttle_time_ms: 0,
+            error_code: codes::INVALID_REQUEST,
+            error_message: Some("broker 0 is not registered".into()),
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected, "{resp:?}");
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_unregisters_registered_broker_with_success_shape() {
+        let version = unregister_broker_response::MAX_VERSION;
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let principal = principal();
+        let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+        let ctx = context(&principal, &peer);
+        let req = UnregisterBrokerRequest {
+            broker_id: 1,
+            ..Default::default()
+        };
+
+        let resp = handle(&broker, version, 1, &encode_request(&req, version), &ctx)
+            .await
+            .expect("handle");
+        let resp = decode_response(&resp);
+
+        let expected = UnregisterBrokerResponse {
+            throttle_time_ms: 0,
+            error_code: codes::NONE,
+            error_message: None,
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected, "{resp:?}");
+        broker_handle.shutdown().await;
+    }
 }

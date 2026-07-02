@@ -21,14 +21,14 @@ pub struct CreateTopicSpec {
     pub configs: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateTopicOutcome {
     pub name: String,
     pub topic_id: Option<Uuid>,
     pub error: Option<KafkaError>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeleteTopicOutcome {
     pub name: String,
     pub error: Option<KafkaError>,
@@ -40,19 +40,19 @@ pub struct CreatePartitionsOp {
     pub new_total_count: i32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreatePartitionsOutcome {
     pub name: String,
     pub error: Option<KafkaError>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TopicMetadata {
     pub controller_id: i32,
     pub topics: Vec<TopicMetadataEntry>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopicMetadataEntry {
     pub name: String,
     pub topic_id: Option<Uuid>,
@@ -325,6 +325,7 @@ fn error_if(code: i16, message: Option<String>) -> Option<KafkaError> {
 mod tests {
     use super::*;
     use assert2::assert;
+    use crabka_protocol::UnknownTaggedFields;
     use std::collections::BTreeMap;
 
     #[test]
@@ -338,16 +339,25 @@ mod tests {
             }],
             5_000,
         );
-        assert!(req.topics.len() == 1);
-        let t = &req.topics[0];
-        assert!(t.name == "foo");
-        assert!(t.num_partitions == 3);
-        assert!(t.replication_factor == 1);
-        assert!(t.configs.len() == 1);
-        assert!(t.configs[0].name == "retention.ms");
-        assert!(t.configs[0].value.as_deref() == Some("60000"));
-        assert!(req.timeout_ms == 5_000);
-        assert!(!req.validate_only);
+        assert!(
+            req == CreateTopicsRequest {
+                topics: vec![CreatableTopic {
+                    name: "foo".to_string(),
+                    num_partitions: 3,
+                    replication_factor: 1,
+                    assignments: vec![],
+                    configs: vec![CreatableTopicConfig {
+                        name: "retention.ms".to_string(),
+                        value: Some("60000".to_string()),
+                        unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                    }],
+                    unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                }],
+                timeout_ms: 5_000,
+                validate_only: false,
+                unknown_tagged_fields: UnknownTaggedFields(vec![]),
+            }
+        );
     }
 
     #[test]
@@ -358,9 +368,13 @@ mod tests {
     #[test]
     fn error_if_nonzero_carries_name() {
         let e = error_if(36, Some("dup".into())).unwrap();
-        assert!(e.code == 36);
-        assert!(e.name == "TOPIC_ALREADY_EXISTS");
-        assert!(e.message.as_deref() == Some("dup"));
+        assert!(
+            e == KafkaError {
+                code: 36,
+                name: "TOPIC_ALREADY_EXISTS",
+                message: Some("dup".to_string()),
+            }
+        );
     }
 
     // ── NOT_CONTROLLER retry predicate ─────────────────────────────
@@ -506,13 +520,31 @@ mod tests {
             ..Default::default()
         };
         let md = parse_metadata(resp);
-        assert!(md.topics.len() == 2);
-        assert!(md.topics[0].name == "ok-topic");
-        assert!(md.topics[0].error.is_none());
-        assert!(md.topics[1].name == "missing");
-        let err = md.topics[1].error.as_ref().expect("error expected");
-        assert!(err.code == 3);
-        assert!(err.name == "UNKNOWN_TOPIC_OR_PARTITION");
+        assert!(
+            md == TopicMetadata {
+                controller_id: -1,
+                topics: vec![
+                    TopicMetadataEntry {
+                        name: "ok-topic".to_string(),
+                        topic_id: None,
+                        partition_count: 0,
+                        replication_factor: 0,
+                        error: None,
+                    },
+                    TopicMetadataEntry {
+                        name: "missing".to_string(),
+                        topic_id: None,
+                        partition_count: 0,
+                        replication_factor: 0,
+                        error: Some(KafkaError {
+                            code: 3,
+                            name: "UNKNOWN_TOPIC_OR_PARTITION",
+                            message: None,
+                        }),
+                    },
+                ],
+            }
+        );
     }
 
     #[test]
@@ -578,19 +610,26 @@ mod tests {
             ..Default::default()
         };
         let outcomes = parse_create_topics(resp);
-        assert!(outcomes.len() == 2);
-        assert!(outcomes[0].name == "ok");
-        assert!(outcomes[0].error.is_none());
         assert!(
-            outcomes[0].topic_id.is_some(),
-            "non-zero uuid should map to Some"
+            outcomes
+                == vec![
+                    CreateTopicOutcome {
+                        name: "ok".to_string(),
+                        // Non-zero uuid maps to Some.
+                        topic_id: Some(Uuid::from_bytes([7; 16])),
+                        error: None,
+                    },
+                    CreateTopicOutcome {
+                        name: "dup".to_string(),
+                        topic_id: None,
+                        error: Some(KafkaError {
+                            code: 36,
+                            name: "TOPIC_ALREADY_EXISTS",
+                            message: Some("already there".to_string()),
+                        }),
+                    },
+                ]
         );
-
-        assert!(outcomes[1].name == "dup");
-        let err = outcomes[1].error.as_ref().expect("error expected");
-        assert!(err.code == 36);
-        assert!(err.name == "TOPIC_ALREADY_EXISTS");
-        assert!(err.message.as_deref() == Some("already there"));
     }
 
     // ── parse_delete_topics ────────────────────────────────────────────
@@ -617,15 +656,24 @@ mod tests {
             ..Default::default()
         };
         let outs = parse_delete_topics(resp);
-        assert!(outs.len() == 2);
-        // `name: None` falls through to `unwrap_or_default()` → empty string.
-        assert!(outs[0].name == String::new());
-        assert!(outs[0].error.is_none());
-        assert!(outs[1].name == "named");
-        let err = outs[1].error.as_ref().expect("error expected");
-        assert!(err.code == 3);
-        assert!(err.name == "UNKNOWN_TOPIC_OR_PARTITION");
-        assert!(err.message.as_deref() == Some("nope"));
+        assert!(
+            outs == vec![
+                DeleteTopicOutcome {
+                    // `name: None` falls through to `unwrap_or_default()`
+                    // → empty string.
+                    name: String::new(),
+                    error: None,
+                },
+                DeleteTopicOutcome {
+                    name: "named".to_string(),
+                    error: Some(KafkaError {
+                        code: 3,
+                        name: "UNKNOWN_TOPIC_OR_PARTITION",
+                        message: Some("nope".to_string()),
+                    }),
+                },
+            ]
+        );
     }
 
     // ── parse_create_partitions ────────────────────────────────────────
@@ -653,13 +701,21 @@ mod tests {
             ..Default::default()
         };
         let outs = parse_create_partitions(resp);
-        assert!(outs.len() == 2);
-        assert!(outs[0].name == "ok");
-        assert!(outs[0].error.is_none());
-        assert!(outs[1].name == "bad");
-        let err = outs[1].error.as_ref().expect("error expected");
-        assert!(err.code == 37);
-        assert!(err.name == "INVALID_PARTITIONS");
-        assert!(err.message.as_deref() == Some("bad count"));
+        assert!(
+            outs == vec![
+                CreatePartitionsOutcome {
+                    name: "ok".to_string(),
+                    error: None,
+                },
+                CreatePartitionsOutcome {
+                    name: "bad".to_string(),
+                    error: Some(KafkaError {
+                        code: 37,
+                        name: "INVALID_PARTITIONS",
+                        message: Some("bad count".to_string()),
+                    }),
+                },
+            ]
+        );
     }
 }

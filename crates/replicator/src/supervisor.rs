@@ -226,6 +226,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use assert2::assert;
+    use assert2::check;
 
     use super::*;
     use crate::config::{
@@ -234,13 +235,17 @@ mod tests {
 
     #[test]
     fn is_internal_excludes_kafka_and_replicator_topics() {
-        assert!(is_internal("__consumer_offsets"));
-        assert!(is_internal("heartbeats"));
-        assert!(is_internal("crabka-replicator-offsets"));
-        assert!(is_internal("us-east.eu-west.checkpoints.internal"));
-        assert!(is_internal("mm2-offset-syncs.us-east.internal"));
-        assert!(!is_internal("orders"));
-        assert!(!is_internal("telemetry.cpu"));
+        for (topic, want) in [
+            ("__consumer_offsets", true),
+            ("heartbeats", true),
+            ("crabka-replicator-offsets", true),
+            ("us-east.eu-west.checkpoints.internal", true),
+            ("mm2-offset-syncs.us-east.internal", true),
+            ("orders", false),
+            ("telemetry.cpu", false),
+        ] {
+            check!(is_internal(topic) == want, "topic={topic:?}");
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

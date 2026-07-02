@@ -20,7 +20,7 @@
 //! - Describe of an unknown topic returns UNKNOWN_TOPIC_OR_PARTITION per
 //!   partition.
 
-use assert2::assert;
+use assert2::{assert, check};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -438,24 +438,24 @@ async fn describe_reflects_spso_after_consume() {
     // Let the persister land the advanced SPSO durably.
     let group = describe_until(&client, "g1", "t", vec![0], 3).await;
     let part = &group.topics[0].partitions[0];
-    assert!(
+    check!(
         group.error_code == NONE,
         "group error: {}",
         group.error_code
     );
-    assert!(group.topics[0].topic_name == "t");
-    assert!(
+    check!(group.topics[0].topic_name == "t");
+    check!(
         part.error_code == NONE,
         "partition error: {}",
         part.error_code
     );
-    assert!(
+    check!(
         part.start_offset == 3,
         "SPSO must be 3 after Accept of 0..2, got {}",
         part.start_offset
     );
     // HWM is 3 (3 produced), SPSO is 3, partition is local ⇒ lag 0.
-    assert!(
+    check!(
         part.lag == 0,
         "lag must be 0 (HWM 3 − SPSO 3), got {}",
         part.lag
@@ -633,17 +633,17 @@ async fn delete_removes_topic() {
         })
         .await
         .expect("DeleteShareGroupOffsets");
-    assert!(
+    check!(
         resp.error_code == NONE,
         "delete top-level error: {}",
         resp.error_code
     );
-    assert!(
+    check!(
         resp.responses[0].topic_name == "t",
         "delete response topic name mismatch: {}",
         resp.responses[0].topic_name
     );
-    assert!(
+    check!(
         resp.responses[0].error_code == NONE,
         "delete per-topic error: {}",
         resp.responses[0].error_code

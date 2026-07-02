@@ -129,4 +129,22 @@ mod tests {
         assert!(ids.id_for(a.path()) != ids.id_for(b.path()));
         assert!(ids.entries().len() == 2);
     }
+
+    #[test]
+    fn ids_for_returns_requested_known_dirs_in_order() {
+        let a = tempdir().unwrap();
+        let b = tempdir().unwrap();
+        let unknown = tempdir().unwrap();
+        let ids = LogDirIds::resolve(&[a.path().to_path_buf(), b.path().to_path_buf()]);
+        let a_id = ids.id_for(a.path()).expect("a id");
+        let b_id = ids.id_for(b.path()).expect("b id");
+
+        let selected = ids.ids_for(&[
+            b.path().to_path_buf(),
+            unknown.path().to_path_buf(),
+            a.path().to_path_buf(),
+        ]);
+
+        assert!(selected == vec![b_id, a_id]);
+    }
 }

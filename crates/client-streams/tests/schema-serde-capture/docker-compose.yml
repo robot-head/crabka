@@ -2,7 +2,7 @@
 # tests. Not used by CI — run manually via ./run.sh when Docker is available.
 services:
   kafka:
-    image: confluentinc/cp-kafka:7.7.1
+    image: mirror.gcr.io/confluentinc/cp-kafka:7.7.1
     hostname: kafka
     environment:
       KAFKA_NODE_ID: 1
@@ -19,7 +19,7 @@ services:
       CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
 
   schema-registry:
-    image: confluentinc/cp-schema-registry:7.7.1
+    image: mirror.gcr.io/confluentinc/cp-schema-registry:7.7.1
     hostname: schema-registry
     depends_on: [kafka]
     ports: ["8081:8081"]
@@ -29,7 +29,7 @@ services:
       SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
 
   capture:
-    image: python:3.12-slim
+    image: mirror.gcr.io/library/python:3.12-slim
     depends_on: [schema-registry]
     volumes:
       - ./capture.py:/capture.py:ro

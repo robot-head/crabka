@@ -18,7 +18,7 @@
 //! (the SASL listener startup is fine on Windows, but keeping
 //! the gate uniform avoids one-off CI matrix surprises).
 
-use assert2::assert;
+use assert2::{assert, check};
 use std::io;
 use std::net::SocketAddr;
 
@@ -245,19 +245,19 @@ async fn create_acls_super_user_can_provision_and_describe() {
         describe_resp.resources
     );
     let resource = &describe_resp.resources[0];
-    assert!(resource.resource_type == RESOURCE_TYPE_TOPIC);
-    assert!(resource.resource_name == "foo");
-    assert!(resource.pattern_type == PATTERN_TYPE_LITERAL);
+    check!(resource.resource_type == RESOURCE_TYPE_TOPIC);
+    check!(resource.resource_name == "foo");
+    check!(resource.pattern_type == PATTERN_TYPE_LITERAL);
     assert!(
         resource.acls.len() == 1,
         "expected exactly one ACL description, got {:?}",
         resource.acls
     );
     let acl = &resource.acls[0];
-    assert!(acl.principal == "User:alice");
-    assert!(acl.host == "*");
-    assert!(acl.operation == OPERATION_READ);
-    assert!(acl.permission_type == PERMISSION_ALLOW);
+    check!(acl.principal == "User:alice");
+    check!(acl.host == "*");
+    check!(acl.operation == OPERATION_READ);
+    check!(acl.permission_type == PERMISSION_ALLOW);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -350,9 +350,9 @@ async fn delete_acls_removes_matching() {
         matching.len() == 1,
         "exactly one ACL must match the precise filter, got {matching:?}"
     );
-    assert!(matching[0].resource_name == "foo");
-    assert!(matching[0].operation == OPERATION_READ);
-    assert!(matching[0].error_code == 0);
+    check!(matching[0].resource_name == "foo");
+    check!(matching[0].operation == OPERATION_READ);
+    check!(matching[0].error_code == 0);
 
     // Describe — only the Write-on-bar binding should remain.
     let describe_resp =

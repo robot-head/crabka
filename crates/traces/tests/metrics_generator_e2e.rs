@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use assert2::assert;
+use assert2::{assert, check};
 use crabka_traces::metricsgen::{
     MetricsGenConfig, MetricsGenService, MockClock, MockRemoteWriteSink, MockSpanSource, SpanKind,
     SpanRecord, StatusCode,
@@ -98,15 +98,15 @@ async fn metrics_generator_end_to_end_red_and_service_graph() {
         .iter()
         .find(|s| s.name == "traces_service_graph_request_total")
         .unwrap();
-    assert!(
+    check!(
         edge.labels
             .iter()
             .any(|(k, v)| k == "client" && v == "frontend")
     );
-    assert!(
+    check!(
         edge.labels
             .iter()
             .any(|(k, v)| k == "server" && v == "checkout")
     );
-    assert!(source.commits() == 1);
+    check!(source.commits() == 1);
 }

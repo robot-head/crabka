@@ -12,7 +12,7 @@ use crabka_protocol::owned::list_partition_reassignments_response::{
 
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
-use crate::codes::CLUSTER_AUTHORIZATION_FAILED;
+use crate::codes::{CLUSTER_AUTHORIZATION_FAILED, NONE};
 
 #[tracing::instrument(
     name = "handle_list_partition_reassignments",
@@ -34,7 +34,7 @@ pub(crate) async fn handle(
             principal: ctx.principal,
             host: ctx.peer,
             resource_type: ResourceType::Cluster,
-            resource_name: "kafka-cluster",
+            resource_name: crate::handlers::acl_wire::CLUSTER_RESOURCE_NAME,
             operation: crabka_metadata::AclOperation::Describe,
         },
     );
@@ -93,7 +93,7 @@ pub(crate) async fn handle(
         .collect();
     let resp = ListPartitionReassignmentsResponse {
         throttle_time_ms: 0,
-        error_code: 0,
+        error_code: NONE,
         error_message: None,
         topics,
         ..Default::default()
@@ -110,4 +110,182 @@ fn encode_response<R: Encode>(
         crate::error::BrokerError::Replication(format!("encode ListPartitionReassignments: {e}"))
     })?;
     Ok(Bytes::from(body))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert2::assert;
+    use crabka_metadata::{MetadataRecord, TopicRecord};
+    use crabka_protocol::Decode;
+    use crabka_protocol::owned::list_partition_reassignments_request::ListPartitionReassignmentsTopics;
+    use crabka_security::{AuthMethod, Principal};
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+    use uuid::Uuid;
+
+    use crate::authorizer::Authorizer;
+    use crate::broker::{Broker, BrokerHandle};
+    use crate::config::BrokerConfig;
+
+    const VERSION: i16 = crabka_protocol::owned::list_partition_reassignments_response::MAX_VERSION;
+
+    #[derive(Debug)]
+    struct DenyAll;
+
+    impl Authorizer for DenyAll {
+        fn authorize(
+            &self,
+            _source: &dyn crabka_authz::AclSource,
+            _req: &AuthorizationRequest<'_>,
+        ) -> AuthorizationResult {
+            AuthorizationResult::Deny
+        }
+    }
+
+    fn decode_response(bytes: &Bytes) -> ListPartitionReassignmentsResponse {
+        let mut cur: &[u8] = bytes.as_ref();
+        let resp = ListPartitionReassignmentsResponse::decode(&mut cur, VERSION).expect("decode");
+        assert!(cur.is_empty(), "response decoder consumed all bytes");
+        resp
+    }
+
+    fn principal(name: &str) -> Principal {
+        Principal {
+            name: name.into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        }
+    }
+
+    fn peer() -> SocketAddr {
+        "127.0.0.1:9092".parse().unwrap()
+    }
+
+    fn test_context<'a>(
+        principal: &'a Principal,
+        peer: &'a SocketAddr,
+    ) -> crate::handlers::RequestContext<'a> {
+        crate::handlers::RequestContext {
+            principal,
+            peer,
+            client_id: "admin-client",
+            sendfile_capable: false,
+            connection_listener_name: "PLAINTEXT",
+        }
+    }
+
+    async fn start_broker(authorizer: Arc<dyn Authorizer>) -> (BrokerHandle, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
+        cfg.audit_enabled = false;
+        cfg.authorizer = authorizer;
+        let handle = Broker::start(cfg).await.expect("start broker");
+        (handle, dir)
+    }
+
+    async fn seed_reassignments(handle: &BrokerHandle) {
+        handle
+            .broker_arc_for_test()
+            .controller
+            .submit_change(vec![
+                MetadataRecord::V1Topic(TopicRecord {
+                    name: "orders-add".into(),
+                    topic_id: Uuid::from_u128(1),
+                    partitions: 1,
+                    replication_factor: 2,
+                }),
+                MetadataRecord::V1Partition(PartitionRecord {
+                    topic: "orders-add".into(),
+                    partition: 0,
+                    leader: 1,
+                    replicas: vec![1, 2, 3],
+                    isr: vec![1, 2],
+                    leader_epoch: 4,
+                    adding_replicas: vec![3],
+                    removing_replicas: vec![],
+                    directories: vec![Uuid::nil(), Uuid::nil(), Uuid::nil()],
+                    partition_epoch: 8,
+                }),
+            ])
+            .await
+            .expect("seed reassignments");
+    }
+
+    #[tokio::test]
+    async fn denied_response_preserves_error_fields() {
+        let (broker_handle, _dir) = start_broker(Arc::new(DenyAll)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let p = principal("alice");
+        let peer = peer();
+        let ctx = test_context(&p, &peer);
+
+        let bytes = handle(
+            &broker,
+            ListPartitionReassignmentsRequest::default(),
+            &ctx,
+            VERSION,
+        )
+        .await
+        .expect("handle");
+        let resp = decode_response(&bytes);
+
+        let expected = ListPartitionReassignmentsResponse {
+            throttle_time_ms: 0,
+            error_code: CLUSTER_AUTHORIZATION_FAILED,
+            error_message: Some("list-reassignment denied".to_string()),
+            topics: vec![],
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+        };
+        assert!(resp == expected);
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn filtered_success_response_preserves_topic_and_partition_fields() {
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer)).await;
+        seed_reassignments(&broker_handle).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let p = principal("admin");
+        let peer = peer();
+        let ctx = test_context(&p, &peer);
+
+        let bytes = handle(
+            &broker,
+            ListPartitionReassignmentsRequest {
+                topics: Some(vec![ListPartitionReassignmentsTopics {
+                    name: "orders-add".into(),
+                    partition_indexes: vec![],
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            },
+            &ctx,
+            VERSION,
+        )
+        .await
+        .expect("handle");
+        let resp = decode_response(&bytes);
+
+        let expected = ListPartitionReassignmentsResponse {
+            throttle_time_ms: 0,
+            error_code: 0,
+            error_message: None,
+            topics: vec![OngoingTopicReassignment {
+                name: "orders-add".to_string(),
+                partitions: vec![OngoingPartitionReassignment {
+                    partition_index: 0,
+                    replicas: vec![1, 2, 3],
+                    adding_replicas: vec![3],
+                    removing_replicas: vec![],
+                    unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+                }],
+                unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+            }],
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+        };
+        assert!(resp == expected, "{resp:?}");
+        broker_handle.shutdown().await;
+    }
 }

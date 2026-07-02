@@ -1,5 +1,5 @@
 //! KIP-516: `OffsetCommit` v10 / `OffsetFetch` v8+ by `topic_id`.
-use assert2::assert;
+use assert2::{assert, check};
 mod support;
 
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
@@ -98,9 +98,9 @@ async fn offset_commit_and_fetch_by_topic_id_round_trip() {
         .find(|t| t.topic_id == id)
         .expect("topic by id");
     let part = t.partitions.first().expect("partition 0");
-    assert!(part.committed_offset == 42);
-    assert!(part.error_code == 0);
-    assert!(t.topic_id == id); // id echoed
+    check!(part.committed_offset == 42);
+    check!(part.error_code == 0);
+    check!(t.topic_id == id); // id echoed
 }
 
 #[tokio::test]

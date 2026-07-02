@@ -316,7 +316,7 @@ async fn boot_stack() -> Stack {
 
     // ---- 1. Real Loki ----
     let loki = start_container_with_retry("start Loki", || {
-        GenericImage::new("grafana/loki", LOKI_IMAGE_TAG)
+        GenericImage::new("mirror.gcr.io/grafana/loki", LOKI_IMAGE_TAG)
             .with_exposed_port(LOKI_PORT.tcp())
             .with_wait_for(WaitFor::seconds(2))
     })
@@ -416,7 +416,7 @@ async fn boot_stack() -> Stack {
     );
 
     let grafana = start_container_with_retry("start Grafana", || {
-        GenericImage::new("grafana/grafana", GRAFANA_IMAGE_TAG)
+        GenericImage::new("mirror.gcr.io/grafana/grafana", GRAFANA_IMAGE_TAG)
             .with_exposed_port(GRAFANA_PORT.tcp())
             // Container-level wait is just a short settle; real readiness is the
             // `/api/health` == 200 poll below (robust across Grafana log-stream/text changes).
@@ -792,7 +792,7 @@ const METRIC_QUERIES: &[(&str, &str)] = &[
     ("offset", r#"count_over_time({app="api"}[5m] offset 1m)"#),
 ];
 
-// KNOWN DIVERGENCES (surfaced by this suite, 2026-06-22) — crabka vs grafana/loki:3.4.2.
+// KNOWN DIVERGENCES (surfaced by this suite, 2026-06-22) — crabka vs mirror.gcr.io/grafana/loki:3.4.2.
 // Excluded from the green corpus above and reported as real crabka findings:
 //
 //  1. `topk`/`bottomk` reject a nested *vector-aggregation* argument, e.g.

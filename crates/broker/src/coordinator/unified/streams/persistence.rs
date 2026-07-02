@@ -798,7 +798,7 @@ impl PendingStreamsRecords {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
 
     /// Split a freshly encoded key into its leading version and the remaining
     /// body, mirroring how `__consumer_offsets` keys are dispatched on the
@@ -1046,8 +1046,6 @@ mod tests {
         };
         let decoded = StreamsGroupTargetAssignmentMemberValue::decode(&v.encode()).unwrap();
         assert!(decoded == v);
-        assert!(decoded.active.len() == 3);
-        assert!(decoded.active.get("1").unwrap().is_empty());
     }
 
     #[test]
@@ -1065,9 +1063,9 @@ mod tests {
         pending.member_metadata.push(("m1".into(), None)); // tombstone
         let batch = pending.into_batch("g1", 123);
         // group_metadata + topology + one member tombstone = 3 records.
-        assert!(batch.records.len() == 3);
-        assert!(batch.max_timestamp == 123);
-        assert!(batch.last_offset_delta == 2);
+        check!(batch.records.len() == 3);
+        check!(batch.max_timestamp == 123);
+        check!(batch.last_offset_delta == 2);
         // The tombstone record carries a null value.
         let tombstone = batch.records.iter().find(|r| r.value.is_none()).unwrap();
         assert!(tombstone.key.is_some());

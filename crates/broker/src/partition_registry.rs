@@ -122,7 +122,7 @@ impl PartitionRegistry {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+    use assert2::{assert, check};
     use std::path::Path;
     use std::sync::Arc;
 
@@ -152,16 +152,16 @@ mod tests {
     async fn insert_get_contains_remove() {
         let dir = tempdir().unwrap();
         let reg = PartitionRegistry::new();
-        assert!(reg.arcs().is_empty());
-        assert!(reg.arcs().len() == 0);
-        assert!(reg.get("t", 0).is_none());
-        assert!(!reg.contains("t", 0));
+        check!(reg.arcs().is_empty());
+        check!(reg.arcs().len() == 0);
+        check!(reg.get("t", 0).is_none());
+        check!(!reg.contains("t", 0));
 
         let p = fixture_partition(dir.path(), "t", 0);
-        assert!(reg.insert("t".to_string(), 0, Arc::clone(&p)).is_none());
-        assert!(reg.contains("t", 0));
-        assert!(!reg.arcs().is_empty());
-        assert!(reg.arcs().len() == 1);
+        check!(reg.insert("t".to_string(), 0, Arc::clone(&p)).is_none());
+        check!(reg.contains("t", 0));
+        check!(!reg.arcs().is_empty());
+        check!(reg.arcs().len() == 1);
 
         let got = reg.get("t", 0).expect("present");
         assert!(Arc::ptr_eq(&got, &p));
@@ -175,10 +175,35 @@ mod tests {
         assert!(reg.arcs().len() == 1);
 
         let removed = reg.remove("t", 0).expect("removed");
-        assert!(Arc::ptr_eq(&removed, &p2));
-        assert!(reg.remove("t", 0).is_none());
-        assert!(!reg.contains("t", 0));
-        assert!(reg.arcs().is_empty());
+        check!(Arc::ptr_eq(&removed, &p2));
+        check!(reg.remove("t", 0).is_none());
+        check!(!reg.contains("t", 0));
+        check!(reg.arcs().is_empty());
+    }
+
+    #[tokio::test]
+    async fn partitions_of_and_len_track_topics_and_removals() {
+        let dir = tempdir().unwrap();
+        let reg = PartitionRegistry::new();
+        assert!(reg.partitions_of("missing").is_empty());
+        assert!(reg.len() == 0);
+
+        reg.insert("a".to_string(), 2, fixture_partition(dir.path(), "a", 2));
+        reg.insert("a".to_string(), 4, fixture_partition(dir.path(), "a", 4));
+        reg.insert("b".to_string(), 7, fixture_partition(dir.path(), "b", 7));
+
+        let mut a_parts = reg.partitions_of("a");
+        a_parts.sort_unstable();
+        check!(a_parts == vec![2, 4]);
+        check!(reg.partitions_of("b") == vec![7]);
+        check!(reg.len() == 3);
+
+        let removed = reg.remove("a", 2).expect("removed");
+        drop(removed);
+
+        check!(reg.partitions_of("a") == vec![4]);
+        check!(reg.partitions_of("missing") == Vec::<i32>::new());
+        check!(reg.len() == 2);
     }
 
     #[tokio::test]

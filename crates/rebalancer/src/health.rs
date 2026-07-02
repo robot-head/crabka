@@ -70,7 +70,7 @@ pub fn new_registry() -> Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use axum::body::Body;
     use axum::http::Request;
     use tower::ServiceExt;
@@ -149,18 +149,18 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(resp.status() == StatusCode::OK);
+        check!(resp.status() == StatusCode::OK);
         let ct = resp
             .headers()
             .get("content-type")
             .unwrap()
             .to_str()
             .unwrap();
-        assert!(ct.starts_with("application/openmetrics-text"));
+        check!(ct.starts_with("application/openmetrics-text"));
         let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
             .await
             .unwrap();
         let s = std::str::from_utf8(&body).unwrap();
-        assert!(s.contains("# EOF"));
+        check!(s.contains("# EOF"));
     }
 }

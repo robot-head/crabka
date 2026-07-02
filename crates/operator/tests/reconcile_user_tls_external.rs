@@ -3,11 +3,13 @@
 //! the bare-name principal `User:<metadata.name>` but for whom the
 //! operator creates no Secret and issues no cert.
 
-use assert2::assert;
+use assert2::{assert, check};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crabka_client_admin::{QuotaOp, ResourceType};
+use crabka_client_admin::{
+    AclEntry, AclOperation, PatternType, PermissionType, QuotaOp, ResourceType,
+};
 use crabka_operator::controller::user::reconcile;
 use crabka_operator::crd::{
     AclOp, AclPatternType, AclPermission, AclResource, AclResourceKind, AclRule, Authentication,
@@ -227,15 +229,33 @@ async fn tls_external_user_reconciles_acls_under_bare_name_principal() {
             _ => None,
         })
         .expect("CreateAcls must have been issued");
-    assert!(create.len() == 2, "Read+Describe fan out: {create:?}");
-    for e in &create {
-        assert!(
-            e.principal == "User:alice",
-            "tls-external must use bare-name principal, got: {e:?}"
-        );
-        assert!(e.resource_type == ResourceType::Topic);
-        assert!(e.resource_name == "orders");
-    }
+    // Read+Describe fan out into two entries (the BTreeSet diff hands
+    // them over in Ord order: Read before Describe), each under the
+    // bare-name principal `User:alice`.
+    assert!(
+        create
+            == vec![
+                AclEntry {
+                    resource_type: ResourceType::Topic,
+                    resource_name: "orders".into(),
+                    pattern_type: PatternType::Literal,
+                    principal: "User:alice".into(),
+                    host: "*".into(),
+                    operation: AclOperation::Read,
+                    permission_type: PermissionType::Allow,
+                },
+                AclEntry {
+                    resource_type: ResourceType::Topic,
+                    resource_name: "orders".into(),
+                    pattern_type: PatternType::Literal,
+                    principal: "User:alice".into(),
+                    host: "*".into(),
+                    operation: AclOperation::Describe,
+                    permission_type: PermissionType::Allow,
+                },
+            ],
+        "tls-external must fan Read+Describe out under the bare-name principal",
+    );
 }
 
 /// 3. `AlterClientQuotas` for a `tls-external` user keys by the bare
@@ -319,16 +339,16 @@ async fn tls_external_user_status_reports_external_true_and_tls_principal_and_no
         .expect("status PATCH must have been captured");
     let body: serde_json::Value = serde_json::from_slice(status.body()).unwrap();
     let s = &body["status"];
-    assert!(s["conditions"][0]["status"] == "True");
-    assert!(s["conditions"][0]["reason"] == "Ready");
-    assert!(s["external"] == true, "external must be true: {body}");
-    assert!(
+    check!(s["conditions"][0]["status"] == "True");
+    check!(s["conditions"][0]["reason"] == "Ready");
+    check!(s["external"] == true, "external must be true: {body}");
+    check!(
         s["tlsPrincipal"] == "User:alice",
         "tlsPrincipal must pin the bare-name principal: {body}"
     );
-    assert!(s["secret"] == serde_json::Value::Null, "no Secret: {body}");
-    assert!(s["scramSha512"] == false, "no SCRAM: {body}");
-    assert!(s["tls"] == false, "no operator-issued TLS cert: {body}");
+    check!(s["secret"] == serde_json::Value::Null, "no Secret: {body}");
+    check!(s["scramSha512"] == false, "no SCRAM: {body}");
+    check!(s["tls"] == false, "no operator-issued TLS cert: {body}");
 }
 
 /// 5. A minimal `tls-external` user (no authorization, no quotas)
@@ -348,25 +368,25 @@ async fn tls_external_user_with_no_authorization_and_no_quotas_still_reaches_rea
     reconcile(Arc::new(ku), ctx).await.unwrap();
 
     let calls = fake_for_assert.lock().await.calls();
-    assert!(
+    check!(
         calls
             .iter()
             .any(|c| matches!(c, RecordedCall::DescribeAcls(_))),
         "DescribeAcls expected even when spec declares no ACLs: {calls:?}",
     );
-    assert!(
+    check!(
         !calls
             .iter()
             .any(|c| matches!(c, RecordedCall::CreateAcls(_))),
         "no CreateAcls expected when spec declares no ACLs: {calls:?}",
     );
-    assert!(
+    check!(
         !calls
             .iter()
             .any(|c| matches!(c, RecordedCall::DescribeUserQuotas(_))),
         "no DescribeUserQuotas expected when spec.quotas is None: {calls:?}",
     );
-    assert!(
+    check!(
         !calls
             .iter()
             .any(|c| matches!(c, RecordedCall::AlterUserQuotas { .. })),
@@ -386,9 +406,9 @@ async fn tls_external_user_with_no_authorization_and_no_quotas_still_reaches_rea
         })
         .expect("status PATCH must have been captured");
     let body: serde_json::Value = serde_json::from_slice(status.body()).unwrap();
-    assert!(body["status"]["conditions"][0]["status"] == "True");
-    assert!(body["status"]["conditions"][0]["reason"] == "Ready");
-    assert!(body["status"]["external"] == true);
+    check!(body["status"]["conditions"][0]["status"] == "True");
+    check!(body["status"]["conditions"][0]["reason"] == "Ready");
+    check!(body["status"]["external"] == true);
 }
 
 /// 6. Finalizer cleanup for a `tls-external` user must not call

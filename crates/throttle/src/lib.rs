@@ -186,7 +186,7 @@ mod tests {
     use std::sync::mpsc::RecvTimeoutError;
     use std::time::Duration;
 
-    use assert2::assert;
+    use assert2::{assert, check};
 
     use super::*;
 
@@ -218,11 +218,18 @@ mod tests {
 
     #[test]
     fn plan_consume_grants_and_caps() {
-        assert!(plan_consume(100, 0, 1000, 50) == (50, 50));
-        assert!(plan_consume(100, 0, 1000, 200) == (100, 0));
-        assert!(plan_consume(900, 500, 1000, 200) == (200, 800));
-        assert!(plan_consume(0, 0, 1000, 100) == (0, 0));
-        assert!(plan_consume(u64::MAX, u64::MAX, 1000, 1000) == (1000, 0));
+        for ((available, refill, burst, requested), want) in [
+            ((100, 0, 1000, 50), (50, 50)),
+            ((100, 0, 1000, 200), (100, 0)),
+            ((900, 500, 1000, 200), (200, 800)),
+            ((0, 0, 1000, 100), (0, 0)),
+            ((u64::MAX, u64::MAX, 1000, 1000), (1000, 0)),
+        ] {
+            assert!(
+                plan_consume(available, refill, burst, requested) == want,
+                "plan_consume({available}, {refill}, {burst}, {requested})"
+            );
+        }
     }
 
     #[test]
@@ -242,9 +249,9 @@ mod tests {
     fn independent_burst_can_exceed_rate() {
         let b = Arc::new(TokenBucket::new());
         b.set_rate_with_burst(100, 1000);
-        assert!(b.rate() == 100);
-        assert!(b.burst() == 1000);
-        assert!(try_consume_with_timeout(&b, 500) == 500);
+        check!(b.rate() == 100);
+        check!(b.burst() == 1000);
+        check!(try_consume_with_timeout(&b, 500) == 500);
     }
 
     #[test]

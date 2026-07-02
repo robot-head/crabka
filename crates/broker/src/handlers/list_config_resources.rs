@@ -73,7 +73,7 @@ pub(crate) async fn handle(
             principal: ctx.principal,
             host: ctx.peer,
             resource_type: crabka_metadata::ResourceType::Cluster,
-            resource_name: "kafka-cluster",
+            resource_name: crate::handlers::acl_wire::CLUSTER_RESOURCE_NAME,
             operation: AclOperation::Describe,
         },
     );
@@ -168,7 +168,30 @@ mod tests {
     use super::*;
     use assert2::assert;
     use crabka_metadata::{BrokerRegistrationRecord, MetadataImage, MetadataRecord, TopicRecord};
+    use crabka_protocol::UnknownTaggedFields;
+    use crabka_security::{AuthMethod, Principal};
+    use std::net::SocketAddr;
+    use std::sync::Arc;
     use uuid::Uuid;
+
+    use crate::authorizer::{AuthorizationRequest, Authorizer};
+    use crate::broker::{Broker, BrokerHandle};
+    use crate::config::BrokerConfig;
+
+    const VERSION: i16 = 1;
+
+    #[derive(Debug)]
+    struct DenyAll;
+
+    impl Authorizer for DenyAll {
+        fn authorize(
+            &self,
+            _source: &dyn crabka_authz::AclSource,
+            _req: &AuthorizationRequest<'_>,
+        ) -> AuthorizationResult {
+            AuthorizationResult::Deny
+        }
+    }
 
     fn image_with_topics_and_brokers(topics: &[&str], broker_ids: &[u64]) -> MetadataImage {
         let mut img = MetadataImage::new(Uuid::nil());
@@ -194,6 +217,67 @@ mod tests {
             ));
         }
         img
+    }
+
+    fn encode_request(req: &ListConfigResourcesRequest) -> Bytes {
+        let mut buf = BytesMut::with_capacity(req.encoded_len(VERSION));
+        req.encode(&mut buf, VERSION).expect("encode request");
+        buf.freeze()
+    }
+
+    fn decode_response(bytes: &Bytes) -> ListConfigResourcesResponse {
+        let mut cur: &[u8] = bytes.as_ref();
+        let resp = ListConfigResourcesResponse::decode(&mut cur, VERSION).expect("decode response");
+        assert!(cur.is_empty(), "response decoder consumed all bytes");
+        resp
+    }
+
+    fn test_context<'a>(
+        principal: &'a Principal,
+        peer: &'a SocketAddr,
+    ) -> crate::handlers::RequestContext<'a> {
+        crate::handlers::RequestContext {
+            principal,
+            peer,
+            client_id: "admin-client",
+            sendfile_capable: false,
+            connection_listener_name: "PLAINTEXT",
+        }
+    }
+
+    fn principal(name: &str) -> Principal {
+        Principal {
+            name: name.into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        }
+    }
+
+    fn peer() -> SocketAddr {
+        "127.0.0.1:9092".parse().unwrap()
+    }
+
+    async fn start_broker(authorizer: Arc<dyn Authorizer>) -> (BrokerHandle, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
+        cfg.audit_enabled = false;
+        cfg.authorizer = authorizer;
+        let handle = Broker::start(cfg).await.expect("start broker");
+        (handle, dir)
+    }
+
+    async fn seed_topic(handle: &BrokerHandle, name: &str) {
+        handle
+            .broker_arc_for_test()
+            .controller
+            .submit_change(vec![MetadataRecord::V1Topic(TopicRecord {
+                name: name.into(),
+                topic_id: Uuid::nil(),
+                partitions: 1,
+                replication_factor: 1,
+            })])
+            .await
+            .expect("seed topic");
     }
 
     fn image_with_subs(names: &[&str]) -> MetadataImage {
@@ -240,35 +324,60 @@ mod tests {
         let out = collect_resources(&img, 1, &[]);
         // 2 topics + 2 brokers + 0 client_metrics = 4 entries, sorted by
         // (type, name): topics (type 2) before brokers (type 4).
-        assert!(out.len() == 4);
-        assert!(out[0].resource_type == RESOURCE_TYPE_TOPIC);
-        assert!(out[0].resource_name == "t-a");
-        assert!(out[1].resource_type == RESOURCE_TYPE_TOPIC);
-        assert!(out[1].resource_name == "t-b");
-        assert!(out[2].resource_type == RESOURCE_TYPE_BROKER);
-        assert!(out[2].resource_name == "1");
-        assert!(out[3].resource_type == RESOURCE_TYPE_BROKER);
-        assert!(out[3].resource_name == "2");
+        let expected = vec![
+            ConfigResource {
+                resource_name: "t-a".to_string(),
+                resource_type: RESOURCE_TYPE_TOPIC,
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            },
+            ConfigResource {
+                resource_name: "t-b".to_string(),
+                resource_type: RESOURCE_TYPE_TOPIC,
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            },
+            ConfigResource {
+                resource_name: "1".to_string(),
+                resource_type: RESOURCE_TYPE_BROKER,
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            },
+            ConfigResource {
+                resource_name: "2".to_string(),
+                resource_type: RESOURCE_TYPE_BROKER,
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            },
+        ];
+        assert!(out == expected);
     }
 
     #[test]
     fn v1_explicit_topic_only_filter_skips_brokers() {
         let img = image_with_topics_and_brokers(&["t-a"], &[1, 2]);
         let out = collect_resources(&img, 1, &[RESOURCE_TYPE_TOPIC]);
-        assert!(out.len() == 1);
-        assert!(out[0].resource_type == RESOURCE_TYPE_TOPIC);
-        assert!(out[0].resource_name == "t-a");
+        let expected = vec![ConfigResource {
+            resource_name: "t-a".to_string(),
+            resource_type: RESOURCE_TYPE_TOPIC,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }];
+        assert!(out == expected);
     }
 
     #[test]
     fn v1_explicit_broker_only_filter_skips_topics() {
         let img = image_with_topics_and_brokers(&["t-a", "t-b"], &[5, 7]);
         let out = collect_resources(&img, 1, &[RESOURCE_TYPE_BROKER]);
-        assert!(out.len() == 2);
-        assert!(out[0].resource_type == RESOURCE_TYPE_BROKER);
-        assert!(out[0].resource_name == "5");
-        assert!(out[1].resource_type == RESOURCE_TYPE_BROKER);
-        assert!(out[1].resource_name == "7");
+        let expected = vec![
+            ConfigResource {
+                resource_name: "5".to_string(),
+                resource_type: RESOURCE_TYPE_BROKER,
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            },
+            ConfigResource {
+                resource_name: "7".to_string(),
+                resource_type: RESOURCE_TYPE_BROKER,
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            },
+        ];
+        assert!(out == expected);
     }
 
     #[test]
@@ -294,9 +403,19 @@ mod tests {
                 RESOURCE_TYPE_BROKER,
             ],
         );
-        assert!(out.len() == 2);
-        assert!(out[0].resource_type == RESOURCE_TYPE_TOPIC);
-        assert!(out[1].resource_type == RESOURCE_TYPE_BROKER);
+        let expected = vec![
+            ConfigResource {
+                resource_name: "t-a".to_string(),
+                resource_type: RESOURCE_TYPE_TOPIC,
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            },
+            ConfigResource {
+                resource_name: "1".to_string(),
+                resource_type: RESOURCE_TYPE_BROKER,
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            },
+        ];
+        assert!(out == expected);
     }
 
     #[test]
@@ -307,5 +426,62 @@ mod tests {
         // by id-as-string.
         let names: Vec<&str> = out.iter().map(|r| r.resource_name.as_str()).collect();
         assert!(names == vec!["a-early", "z-late", "1", "10"]);
+    }
+
+    #[tokio::test]
+    async fn denied_handler_response_preserves_error_fields() {
+        let (broker_handle, _dir) = start_broker(Arc::new(DenyAll)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let p = principal("alice");
+        let peer = peer();
+        let ctx = test_context(&p, &peer);
+        let req = encode_request(&ListConfigResourcesRequest {
+            resource_types: vec![RESOURCE_TYPE_TOPIC],
+            ..Default::default()
+        });
+
+        let bytes = handle(&broker, VERSION, 123, &req, &ctx)
+            .await
+            .expect("handle");
+        let resp = decode_response(&bytes);
+
+        let expected = ListConfigResourcesResponse {
+            throttle_time_ms: 0,
+            error_code: codes::CLUSTER_AUTHORIZATION_FAILED,
+            config_resources: vec![],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn successful_handler_response_preserves_resource_fields() {
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer)).await;
+        seed_topic(&broker_handle, "orders").await;
+        let broker = broker_handle.broker_arc_for_test();
+        let p = principal("admin");
+        let peer = peer();
+        let ctx = test_context(&p, &peer);
+        let req = encode_request(&ListConfigResourcesRequest {
+            resource_types: vec![RESOURCE_TYPE_TOPIC],
+            ..Default::default()
+        });
+
+        let bytes = handle(&broker, VERSION, 123, &req, &ctx)
+            .await
+            .expect("handle");
+        let resp = decode_response(&bytes);
+
+        assert!(resp.error_code == codes::NONE);
+        assert!(resp.throttle_time_ms == 0);
+        let resource = resp
+            .config_resources
+            .iter()
+            .find(|r| r.resource_name == "orders")
+            .expect("seeded topic resource");
+        assert!(resource.resource_type == RESOURCE_TYPE_TOPIC);
+        broker_handle.shutdown().await;
     }
 }

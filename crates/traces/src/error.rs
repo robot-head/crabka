@@ -71,14 +71,18 @@ mod tests {
 
     #[test]
     fn status_codes_map_to_ingest_edge_failures() {
-        assert!(TracesError::UnsupportedContentType("x".into()).status_code() == 415);
-        assert!(TracesError::Decode("x".into()).status_code() == 400);
-        assert!(TracesError::Invalid("x".into()).status_code() == 400);
-        assert!(TracesError::Limit("x".into()).status_code() == 400);
-        assert!(TracesError::RateLimit("x".into()).status_code() == 429);
-        assert!(TracesError::TooLarge { limit: 1 }.status_code() == 400);
-        assert!(TracesError::Wal("x".into()).status_code() == 500);
-        assert!(TracesError::Produce("x".into()).status_code() == 500);
-        assert!(TracesError::Block("x".into()).status_code() == 500);
+        for (err, want) in [
+            (TracesError::UnsupportedContentType("x".into()), 415),
+            (TracesError::Decode("x".into()), 400),
+            (TracesError::Invalid("x".into()), 400),
+            (TracesError::Limit("x".into()), 400),
+            (TracesError::RateLimit("x".into()), 429),
+            (TracesError::TooLarge { limit: 1 }, 400),
+            (TracesError::Wal("x".into()), 500),
+            (TracesError::Produce("x".into()), 500),
+            (TracesError::Block("x".into()), 500),
+        ] {
+            assert!(err.status_code() == want, "case {err:?}");
+        }
     }
 }

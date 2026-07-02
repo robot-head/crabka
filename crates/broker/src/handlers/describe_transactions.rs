@@ -172,12 +172,19 @@ mod tests {
     fn topics_for_groups_and_sorts() {
         let e = entry();
         let t = topics_for(&e);
-        // alphabetical topics
-        assert!(t.len() == 2);
-        assert!(t[0].topic == "a");
-        assert!(t[0].partitions == vec![1]);
-        assert!(t[1].topic == "b");
-        // ascending partitions
-        assert!(t[1].partitions == vec![0, 2]);
+        // Alphabetical topics, ascending partitions.
+        let expected = vec![
+            TopicData {
+                topic: "a".to_string(),
+                partitions: vec![1],
+                unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+            },
+            TopicData {
+                topic: "b".to_string(),
+                partitions: vec![0, 2],
+                unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+            },
+        ];
+        assert!(t == expected);
     }
 }

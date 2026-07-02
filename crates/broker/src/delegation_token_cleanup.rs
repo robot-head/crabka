@@ -168,9 +168,13 @@ mod tests {
         // Post-sweep image keeps only the fresh token.
         let after = mock.current_image();
         assert!(after.all_delegation_tokens().count() == 1);
-        assert!(after.delegation_token_by_id("fresh").is_some());
-        assert!(after.delegation_token_by_id("expired-1").is_none());
-        assert!(after.delegation_token_by_id("expired-2").is_none());
+        let cases = [("fresh", true), ("expired-1", false), ("expired-2", false)];
+        for (token_id, expect_present) in cases {
+            assert!(
+                after.delegation_token_by_id(token_id).is_some() == expect_present,
+                "case: {token_id}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -187,5 +191,42 @@ mod tests {
 
         assert!(mock.submitted.lock().unwrap().is_empty());
         assert!(mock.current_image().all_delegation_tokens().count() == 1);
+    }
+
+    #[tokio::test]
+    async fn run_sweeps_expired_tokens_and_waits_for_shutdown() {
+        let mut img = MetadataImage::new(Uuid::nil());
+        img.apply(&dt_record("expired", 1_000));
+
+        let mock = Arc::new(MockController {
+            image: Mutex::new(Arc::new(img)),
+            submitted: Mutex::new(Vec::new()),
+        });
+        let shutdown = CancellationToken::new();
+        let mut task = tokio::spawn(run(mock.clone(), Duration::from_hours(1), shutdown.clone()));
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if !mock.submitted.lock().unwrap().is_empty() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("cleanup run loop should sweep on its first tick");
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), &mut task)
+                .await
+                .is_err(),
+            "cleanup run loop exited before shutdown"
+        );
+
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("cleanup task should observe shutdown")
+            .expect("cleanup task should not panic");
     }
 }

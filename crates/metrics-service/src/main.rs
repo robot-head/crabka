@@ -436,7 +436,7 @@ fn load_runtime_overrides(
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+    use assert2::{assert, check};
     use clap::Parser;
 
     use super::*;
@@ -464,9 +464,9 @@ mod tests {
         .unwrap();
 
         assert!(matches!(cli.target, Target::QueryFrontend));
-        assert!(cli.query_frontend_split_ms == 30_000);
-        assert!(cli.query_frontend_shards == 4);
-        assert!(cli.query_frontend_cache_prefix == "tenant-a-query-cache");
+        check!(cli.query_frontend_split_ms == 30_000);
+        check!(cli.query_frontend_shards == 4);
+        check!(cli.query_frontend_cache_prefix == "tenant-a-query-cache");
     }
 
     #[test]
@@ -491,15 +491,15 @@ mod tests {
         .unwrap();
 
         assert!(matches!(cli.target, Target::Ruler));
-        assert!(cli.ruler_tenant == "tenant-a");
-        assert!(cli.ruler_eval_interval_ms == 15_000);
-        assert!(cli.ruler_shard_index == 2);
-        assert!(cli.ruler_shard_total == 4);
-        assert!(
+        check!(cli.ruler_tenant == "tenant-a");
+        check!(cli.ruler_eval_interval_ms == 15_000);
+        check!(cli.ruler_shard_index == 2);
+        check!(cli.ruler_shard_total == 4);
+        check!(
             cli.ruler_alertmanager_url.as_deref()
                 == Some("http://alertmanager.example/api/v2/alerts")
         );
-        assert!(cli.ruler_state_topic == "__tenant_a_ruler_state");
+        check!(cli.ruler_state_topic == "__tenant_a_ruler_state");
     }
 
     #[test]
@@ -568,11 +568,11 @@ mod tests {
         ])
         .unwrap();
 
-        assert!(cli.wal_bootstrap.as_deref() == Some("127.0.0.1:9092"));
-        assert!(cli.wal_group_id == "metrics-querier");
-        assert!(cli.wal_client_id == "querier-a");
-        assert!(cli.wal_topic == "__crabka_metrics_wal");
-        assert!(cli.wal_head_retention_ms == 600_000);
+        check!(cli.wal_bootstrap.as_deref() == Some("127.0.0.1:9092"));
+        check!(cli.wal_group_id == "metrics-querier");
+        check!(cli.wal_client_id == "querier-a");
+        check!(cli.wal_topic == "__crabka_metrics_wal");
+        check!(cli.wal_head_retention_ms == 600_000);
     }
 
     #[test]

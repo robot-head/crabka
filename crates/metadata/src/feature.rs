@@ -297,7 +297,7 @@ pub fn is_supported_level(name: &str, level: i16) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use std::collections::BTreeMap;
 
     #[test]
@@ -310,27 +310,35 @@ mod tests {
     #[test]
     fn metadata_version_default_is_the_bootstrap_level_clamped() {
         let f = feature("metadata.version").unwrap();
-        assert!(f.default_level(25) == 25);
-        assert!(f.default_level(7) == 7);
-        assert!(f.default_level(99) == 25); // clamped to MAX
-        assert!(f.default_level(1) == 7); // clamped to MIN
+        for (bootstrap, want) in [
+            (25, 25),
+            (7, 7),
+            (99, 25), // clamped to MAX
+            (1, 7),   // clamped to MIN
+        ] {
+            assert!(f.default_level(bootstrap) == want, "bootstrap {bootstrap}");
+        }
     }
 
     #[test]
     fn is_supported_level_checks_range() {
-        assert!(is_supported_level("metadata.version", 7));
-        assert!(is_supported_level("metadata.version", 25));
-        assert!(!is_supported_level("metadata.version", 6));
-        assert!(!is_supported_level("metadata.version", 26));
-        assert!(!is_supported_level("not.a.feature", 1));
+        for (name, level, want) in [
+            ("metadata.version", 7, true),
+            ("metadata.version", 25, true),
+            ("metadata.version", 6, false),
+            ("metadata.version", 26, false),
+            ("not.a.feature", 1, false),
+        ] {
+            assert!(is_supported_level(name, level) == want, "({name}, {level})");
+        }
     }
 
     #[test]
     fn metadata_version_level_name() {
         let f = feature("metadata.version").unwrap();
-        assert!(f.level_name(25) == Some("4.0-IV3"));
-        assert!(f.level_name(7) == Some("3.3-IV3"));
-        assert!(f.level_name(99).is_none());
+        for (level, want) in [(25, Some("4.0-IV3")), (7, Some("3.3-IV3")), (99, None)] {
+            assert!(f.level_name(level) == want, "level {level}");
+        }
     }
 
     #[test]
@@ -352,18 +360,22 @@ mod tests {
 
         for (name, range, default_at_25, floor) in expected {
             let f = feature(name).expect("registered");
-            assert!(f.supported_range() == range, "range for {name}");
-            assert!(f.default_level(25) == default_at_25, "default for {name}");
-            assert!(f.min_required_floor(&image) == floor, "floor for {name}");
+            check!(f.supported_range() == range, "range for {name}");
+            check!(f.default_level(25) == default_at_25, "default for {name}");
+            check!(f.min_required_floor(&image) == floor, "floor for {name}");
         }
     }
 
     #[test]
     fn group_version_default_follows_release() {
         let f = feature("group.version").unwrap();
-        assert!(f.default_level(crate::group_version::GROUP_VERSION_GA_METADATA_LEVEL - 1) == 0);
-        assert!(f.default_level(crate::group_version::GROUP_VERSION_GA_METADATA_LEVEL) == 1);
-        assert!(f.default_level(25) == 1);
+        for (bootstrap, want) in [
+            (crate::group_version::GROUP_VERSION_GA_METADATA_LEVEL - 1, 0),
+            (crate::group_version::GROUP_VERSION_GA_METADATA_LEVEL, 1),
+            (25, 1),
+        ] {
+            assert!(f.default_level(bootstrap) == want, "bootstrap {bootstrap}");
+        }
     }
 
     #[test]
@@ -382,26 +394,30 @@ mod tests {
     #[test]
     fn streams_version_registered_opt_in() {
         let f = feature("streams.version").expect("registered");
-        assert!(f.supported_range() == (0, 1));
+        check!(f.supported_range() == (0, 1));
         // KIP-1071 is early access: never auto-enabled by any release level.
-        assert!(f.default_level(25) == 0);
-        assert!(f.dependencies(1).is_empty());
+        check!(f.default_level(25) == 0);
+        check!(f.dependencies(1).is_empty());
     }
 
     #[test]
     fn transaction_version_default_jumps_to_two_at_4_0_iv2() {
         let f = feature("transaction.version").unwrap();
-        assert!(f.default_level(23) == 0); // below 4.0-IV2
-        assert!(f.default_level(24) == 2); // at 4.0-IV2 → jumps to 2
-        assert!(f.default_level(25) == 2);
+        for (bootstrap, want) in [
+            (23, 0), // below 4.0-IV2
+            (24, 2), // at 4.0-IV2 → jumps to 2
+            (25, 2),
+        ] {
+            assert!(f.default_level(bootstrap) == want, "bootstrap {bootstrap}");
+        }
     }
 
     #[test]
     fn transaction_version_declares_no_hard_dependencies() {
         let f = feature("transaction.version").unwrap();
-        assert!(f.dependencies(0).is_empty());
-        assert!(f.dependencies(1).is_empty());
-        assert!(f.dependencies(2).is_empty());
+        for level in [0, 1, 2] {
+            assert!(f.dependencies(level).is_empty(), "level {level}");
+        }
     }
 
     #[test]
@@ -432,11 +448,14 @@ mod tests {
         // share.version / streams.version default to 0 at every release → no
         // record emitted (level 0 = absent = disabled, like Kafka's format).
         let levels = levels_of(&bootstrap_feature_records(25));
-        assert!(levels.get("metadata.version") == Some(&25));
-        assert!(levels.get("group.version") == Some(&1));
-        assert!(levels.get("transaction.version") == Some(&2));
-        assert!(!levels.contains_key("share.version"));
-        assert!(!levels.contains_key("streams.version"));
+        assert!(
+            levels
+                == BTreeMap::from([
+                    ("metadata.version".to_string(), 25),
+                    ("group.version".to_string(), 1),
+                    ("transaction.version".to_string(), 2),
+                ])
+        );
     }
 
     #[test]
@@ -445,9 +464,13 @@ mod tests {
         let mut ov = BTreeMap::new();
         ov.insert("group.version".to_string(), 0i16);
         let levels = levels_of(&bootstrap_feature_records_with_overrides(25, &ov));
-        assert!(levels.get("metadata.version") == Some(&25));
-        assert!(levels.get("transaction.version") == Some(&2));
-        assert!(!levels.contains_key("group.version"));
+        assert!(
+            levels
+                == BTreeMap::from([
+                    ("metadata.version".to_string(), 25),
+                    ("transaction.version".to_string(), 2),
+                ])
+        );
     }
 
     #[test]
@@ -468,9 +491,13 @@ mod tests {
             23,
             &BTreeMap::new(),
         ));
-        assert!(levels.get("metadata.version") == Some(&23));
-        assert!(levels.get("group.version") == Some(&1));
-        assert!(!levels.contains_key("transaction.version"));
+        assert!(
+            levels
+                == BTreeMap::from([
+                    ("metadata.version".to_string(), 23),
+                    ("group.version".to_string(), 1),
+                ])
+        );
     }
 
     #[test]
@@ -564,9 +591,9 @@ mod tests {
     #[test]
     fn share_version_accessors() {
         let f = feature("share.version").expect("registered");
-        assert!(f.name() == "share.version");
-        assert!(f.supported_range() == (0, 1));
+        check!(f.name() == "share.version");
+        check!(f.supported_range() == (0, 1));
         // Opt-in (KIP-932 early access): never auto-enabled by any release.
-        assert!(f.default_level(25) == 0);
+        check!(f.default_level(25) == 0);
     }
 }

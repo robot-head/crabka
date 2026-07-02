@@ -287,7 +287,7 @@ pub fn strip_replica_label(series: &mut [DecodedSeries]) {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+    use assert2::{assert, check};
     use crabka_blockstore::Labels;
 
     use crate::wire::DecodedSample;
@@ -332,9 +332,9 @@ mod tests {
         let r1 = [series_with("c1", "r1")];
         let r2 = [series_with("c1", "r2")];
 
-        assert!(ha_decision(&tracker, "tenant", &r1) == HaDecision::Accept);
-        assert!(ha_decision(&tracker, "tenant", &r2) == HaDecision::Drop);
-        assert!(tracker.elected_replica("tenant", "c1") == Some("r1".to_string()));
+        check!(ha_decision(&tracker, "tenant", &r1) == HaDecision::Accept);
+        check!(ha_decision(&tracker, "tenant", &r2) == HaDecision::Drop);
+        check!(tracker.elected_replica("tenant", "c1") == Some("r1".to_string()));
     }
 
     #[test]

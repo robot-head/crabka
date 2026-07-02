@@ -389,7 +389,7 @@ fn compute_revoke_split(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
 
     fn member(id: &str) -> MemberState {
         MemberState {
@@ -472,9 +472,9 @@ mod tests {
         target_for_m1.insert(t, vec![0, 1]);
         g.install_target([("m1".to_string(), target_for_m1)].into());
         let m = &g.members["m1"];
-        assert!(m.partitions_pending_revocation[&t] == vec![2]);
-        assert!(m.assigned_partitions[&t] == vec![0, 1]);
-        assert!(m.assignment_state == MemberAssignmentState::UnrevokedPartitions);
+        check!(m.partitions_pending_revocation[&t] == vec![2]);
+        check!(m.assigned_partitions[&t] == vec![0, 1]);
+        check!(m.assignment_state == MemberAssignmentState::UnrevokedPartitions);
     }
 
     #[test]

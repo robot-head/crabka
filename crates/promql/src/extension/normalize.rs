@@ -225,7 +225,7 @@ mod tests {
     use arrow::array::{Array, Float64Array, Int64Array};
     use arrow::compute::concat_batches;
     use arrow::datatypes::{DataType, Field, Schema};
-    use assert2::assert;
+    use assert2::{assert, check};
     use datafusion::catalog::MemTable;
     use datafusion::datasource::memory::MemorySourceConfig;
     use datafusion::logical_expr::{Extension, UserDefinedLogicalNodeCore, col};
@@ -284,16 +284,16 @@ mod tests {
             input: input.clone(),
         };
 
-        assert!(UserDefinedLogicalNodeCore::name(&node) == "SeriesNormalize");
+        check!(UserDefinedLogicalNodeCore::name(&node) == "SeriesNormalize");
         let plan = LogicalPlan::Extension(Extension {
             node: Arc::new(node),
         });
         let explain = format!("{plan}");
-        assert!(
+        check!(
             explain
                 .starts_with("PromSeriesNormalize: time=timestamp, offset_ms=123, filter_nan=true")
         );
-        assert!(explain.contains("TableScan: leaf projection=[timestamp, value]"));
+        check!(explain.contains("TableScan: leaf projection=[timestamp, value]"));
 
         let node = SeriesNormalize {
             offset_ms: 123,
@@ -301,17 +301,23 @@ mod tests {
             need_filter_out_nan: true,
             input: input.clone(),
         };
-        assert!(
+        check!(
             node.with_exprs_and_inputs(vec![col("timestamp")], vec![input.clone()])
                 .is_err()
         );
-        assert!(node.with_exprs_and_inputs(vec![], vec![]).is_err());
+        check!(node.with_exprs_and_inputs(vec![], vec![]).is_err());
         let rewritten = node
-            .with_exprs_and_inputs(vec![], vec![input])
+            .with_exprs_and_inputs(vec![], vec![input.clone()])
             .expect("valid rewrite");
-        assert!(rewritten.offset_ms == 123);
-        assert!(rewritten.time_index == "timestamp");
-        assert!(rewritten.need_filter_out_nan);
+        assert!(
+            rewritten
+                == SeriesNormalize {
+                    offset_ms: 123,
+                    time_index: "timestamp".to_string(),
+                    need_filter_out_nan: true,
+                    input,
+                }
+        );
     }
 
     #[test]
@@ -324,16 +330,16 @@ mod tests {
             Arc::clone(&input),
         ));
 
-        assert!(exec.name() == "SeriesNormalizeExec");
-        assert!(
+        check!(exec.name() == "SeriesNormalizeExec");
+        check!(
             format!(
                 "{}",
                 DisplayableExecutionPlan::new(exec.as_ref()).indent(false)
             ) == "PromSeriesNormalizeExec: time=timestamp, offset_ms=123, filter_nan=true\n  DataSourceExec: partitions=1, partition_sizes=[1]\n"
         );
-        assert!(exec.maintains_input_order() == vec![false]);
-        assert!(Arc::clone(&exec).with_new_children(vec![]).is_err());
-        assert!(
+        check!(exec.maintains_input_order() == vec![false]);
+        check!(Arc::clone(&exec).with_new_children(vec![]).is_err());
+        check!(
             Arc::clone(&exec)
                 .with_new_children(vec![input])
                 .expect("valid child rewrite")

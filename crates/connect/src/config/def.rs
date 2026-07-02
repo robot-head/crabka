@@ -333,6 +333,7 @@ async fn resolve_secret_value(
 
 #[cfg(test)]
 mod tests {
+    use assert2::check;
     use async_trait::async_trait;
     use serde_json::{Value, json};
 
@@ -562,11 +563,11 @@ mod tests {
 
         let debug = format!("{def:?}");
 
-        assert!(debug.contains("ConfigDef"));
-        assert!(debug.contains("demo"));
-        assert!(debug.contains("password"));
-        assert!(debug.contains("<redacted>"));
-        assert!(!debug.contains("literal-secret"));
+        check!(debug.contains("ConfigDef"));
+        check!(debug.contains("demo"));
+        check!(debug.contains("password"));
+        check!(debug.contains("<redacted>"));
+        check!(!debug.contains("literal-secret"));
     }
 
     #[test]

@@ -169,8 +169,8 @@ mod tests {
     fn debug_includes_observable_state_and_max_receive_size() {
         let ex = GssapiServerExchange::new(Box::new(FakeAcceptor { established: false }), 0x1_0000);
         let rendered = format!("{ex:?}");
-        assert!(rendered.contains("GssapiServerExchange"));
-        assert!(rendered.contains("AcceptingContext"));
-        assert!(rendered.contains("max_recv_size"));
+        for part in ["GssapiServerExchange", "AcceptingContext", "max_recv_size"] {
+            assert!(rendered.contains(part), "missing {part:?} in {rendered}");
+        }
     }
 }

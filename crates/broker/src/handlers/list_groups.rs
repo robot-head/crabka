@@ -26,6 +26,18 @@ use crate::coordinator::unified::GroupType;
 use crate::coordinator::unified::classic_state::GroupState;
 use crate::error::BrokerError;
 
+/// Wire `group_type` string for classic (pre-KIP-848) groups.
+const GROUP_TYPE_CLASSIC: &str = "classic";
+/// Wire `group_type` string for KIP-848 next-gen consumer groups.
+const GROUP_TYPE_CONSUMER: &str = "consumer";
+/// Wire `group_type` string for KIP-932 share groups.
+const GROUP_TYPE_SHARE: &str = "share";
+/// Wire `group_type` string for KIP-1071 streams groups.
+const GROUP_TYPE_STREAMS: &str = "streams";
+/// Kafka's consumer embedded-protocol type (`ConsumerProtocol.PROTOCOL_TYPE`),
+/// reported as `protocol_type` for classic and next-gen consumer groups.
+const CONSUMER_PROTOCOL_TYPE: &str = "consumer";
+
 #[tracing::instrument(
     name = "handle_list_groups",
     level = "info",
@@ -93,16 +105,18 @@ pub(crate) async fn handle(
             && !req
                 .types_filter
                 .iter()
-                .any(|t| t.eq_ignore_ascii_case("classic"))
+                .any(|t| t.eq_ignore_ascii_case(GROUP_TYPE_CLASSIC))
         {
             continue;
         }
         emitted.insert(s.group_id.clone());
         groups.push(ListedGroup {
             group_id: s.group_id,
-            protocol_type: s.protocol_type.unwrap_or_else(|| "consumer".into()),
+            protocol_type: s
+                .protocol_type
+                .unwrap_or_else(|| CONSUMER_PROTOCOL_TYPE.into()),
             group_state: state_str.into(),
-            group_type: "classic".into(),
+            group_type: GROUP_TYPE_CLASSIC.into(),
             ..Default::default()
         });
     }
@@ -122,7 +136,7 @@ pub(crate) async fn handle(
     append_next_gen(
         &mut groups,
         &mut emitted,
-        "consumer",
+        GROUP_TYPE_CONSUMER,
         consumer_ids,
         &req,
         states_active,
@@ -136,7 +150,7 @@ pub(crate) async fn handle(
         append_next_gen(
             &mut groups,
             &mut emitted,
-            "share",
+            GROUP_TYPE_SHARE,
             ng.share_group_ids(),
             &req,
             states_active,
@@ -152,7 +166,7 @@ pub(crate) async fn handle(
         append_next_gen(
             &mut groups,
             &mut emitted,
-            "streams",
+            GROUP_TYPE_STREAMS,
             ng.streams_group_ids(),
             &req,
             states_active,
@@ -203,10 +217,10 @@ fn append_next_gen(
     }
     // Share and streams groups carry an empty protocol_type (Kafka emits no
     // consumer protocol for them); next-gen consumer groups use "consumer".
-    let protocol_type = if group_type == "share" || group_type == "streams" {
+    let protocol_type = if group_type == GROUP_TYPE_SHARE || group_type == GROUP_TYPE_STREAMS {
         String::new()
     } else {
-        "consumer".into()
+        CONSUMER_PROTOCOL_TYPE.into()
     };
     for gid in ids {
         if emitted.contains(&gid) || !authorized(&gid) {
@@ -230,5 +244,206 @@ fn state_to_str(s: GroupState) -> &'static str {
         GroupState::CompletingRebalance => "CompletingRebalance",
         GroupState::Stable => "Stable",
         GroupState::Dead => "Dead",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert2::assert;
+    use crabka_security::{AuthMethod, Principal};
+    use std::collections::HashSet;
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    use crate::authorizer::Authorizer;
+    use crate::broker::{Broker, BrokerHandle};
+    use crate::config::BrokerConfig;
+
+    const VERSION: i16 = crabka_protocol::owned::list_groups_response::MAX_VERSION;
+
+    fn encode_request(req: &ListGroupsRequest) -> Bytes {
+        let mut buf = BytesMut::with_capacity(req.encoded_len(VERSION));
+        req.encode(&mut buf, VERSION).expect("encode request");
+        buf.freeze()
+    }
+
+    fn decode_response(bytes: &Bytes) -> ListGroupsResponse {
+        let mut cur: &[u8] = bytes.as_ref();
+        let resp = ListGroupsResponse::decode(&mut cur, VERSION).expect("decode response");
+        assert!(cur.is_empty(), "response decoder consumed all bytes");
+        resp
+    }
+
+    fn principal(name: &str) -> Principal {
+        Principal {
+            name: name.into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        }
+    }
+
+    fn peer() -> SocketAddr {
+        "127.0.0.1:9092".parse().unwrap()
+    }
+
+    fn test_context<'a>(
+        principal: &'a Principal,
+        peer: &'a SocketAddr,
+    ) -> crate::handlers::RequestContext<'a> {
+        crate::handlers::RequestContext {
+            principal,
+            peer,
+            client_id: "admin-client",
+            sendfile_capable: false,
+            connection_listener_name: "PLAINTEXT",
+        }
+    }
+
+    async fn start_broker(authorizer: Arc<dyn Authorizer>) -> (BrokerHandle, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
+        cfg.audit_enabled = false;
+        cfg.authorizer = authorizer;
+        let handle = Broker::start(cfg).await.expect("start broker");
+        (handle, dir)
+    }
+
+    #[tokio::test]
+    async fn handler_lists_classic_group_once_with_wire_fields() {
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let _ = broker.group_coordinator.get_or_create_classic("classic-a");
+        let p = principal("admin");
+        let peer = peer();
+        let ctx = test_context(&p, &peer);
+        let req = encode_request(&ListGroupsRequest::default());
+
+        let bytes = handle(&broker, VERSION, 123, &req, &ctx)
+            .await
+            .expect("handle");
+        let resp = decode_response(&bytes);
+
+        let expected = ListGroupsResponse {
+            throttle_time_ms: 0,
+            error_code: codes::NONE,
+            groups: vec![ListedGroup {
+                group_id: "classic-a".into(),
+                protocol_type: "consumer".into(),
+                group_state: "Empty".into(),
+                group_type: "classic".into(),
+                unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+            }],
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected, "{resp:?}");
+        broker_handle.shutdown().await;
+    }
+
+    #[test]
+    fn append_next_gen_filters_dedups_authorizes_and_preserves_share_fields() {
+        let req = ListGroupsRequest {
+            states_filter: vec!["Stable".into()],
+            types_filter: vec!["share".into()],
+            ..Default::default()
+        };
+        let mut groups = vec![ListedGroup {
+            group_id: "already".into(),
+            protocol_type: "consumer".into(),
+            group_state: "Stable".into(),
+            group_type: "classic".into(),
+            ..Default::default()
+        }];
+        let mut emitted = HashSet::from(["already".to_string()]);
+
+        append_next_gen(
+            &mut groups,
+            &mut emitted,
+            "share",
+            vec!["already".into(), "denied".into(), "share-a".into()],
+            &req,
+            true,
+            true,
+            &|gid| gid != "denied",
+        );
+
+        let expected_groups = vec![
+            ListedGroup {
+                group_id: "already".into(),
+                protocol_type: "consumer".into(),
+                group_state: "Stable".into(),
+                group_type: "classic".into(),
+                unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+            },
+            ListedGroup {
+                group_id: "share-a".into(),
+                protocol_type: String::new(),
+                group_state: "Stable".into(),
+                group_type: "share".into(),
+                unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+            },
+        ];
+        assert!(groups == expected_groups, "{groups:?}");
+        // "denied" was rejected by the authorizer; only "share-a" was added.
+        assert!(emitted == HashSet::from(["already".to_string(), "share-a".to_string()]));
+    }
+
+    #[test]
+    fn append_next_gen_rejects_mismatched_type_filter_and_keeps_consumer_protocol() {
+        let mismatched = ListGroupsRequest {
+            types_filter: vec!["share".into()],
+            ..Default::default()
+        };
+        let mut groups = Vec::new();
+        let mut emitted = HashSet::new();
+        append_next_gen(
+            &mut groups,
+            &mut emitted,
+            "consumer",
+            vec!["consumer-a".into()],
+            &mismatched,
+            false,
+            true,
+            &|_| true,
+        );
+        assert!(groups.is_empty());
+
+        let matched = ListGroupsRequest {
+            types_filter: vec!["consumer".into()],
+            ..Default::default()
+        };
+        append_next_gen(
+            &mut groups,
+            &mut emitted,
+            "consumer",
+            vec!["consumer-a".into()],
+            &matched,
+            false,
+            true,
+            &|_| true,
+        );
+        let expected = vec![ListedGroup {
+            group_id: "consumer-a".into(),
+            protocol_type: "consumer".into(),
+            group_state: "Stable".into(),
+            group_type: "consumer".into(),
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+        }];
+        assert!(groups == expected, "{groups:?}");
+    }
+
+    #[test]
+    fn state_to_str_covers_all_classic_states() {
+        let cases = [
+            (GroupState::Empty, "Empty"),
+            (GroupState::PreparingRebalance, "PreparingRebalance"),
+            (GroupState::CompletingRebalance, "CompletingRebalance"),
+            (GroupState::Stable, "Stable"),
+            (GroupState::Dead, "Dead"),
+        ];
+        for (state, want) in cases {
+            assert!(state_to_str(state) == want, "{state:?}");
+        }
     }
 }

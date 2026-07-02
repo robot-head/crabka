@@ -20,6 +20,7 @@ use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
 use crate::codes;
 use crate::error::BrokerError;
+use crate::handlers::acl_wire::CLUSTER_RESOURCE_NAME;
 use crate::handlers::authorized_operations::authorized_operations_bits;
 
 /// `DescribeCluster` `endpoint_type` (KIP-919): `1` = BROKERS (default),
@@ -38,8 +39,8 @@ const ENDPOINT_TYPE_CONTROLLERS: i8 = 2;
 )]
 pub(crate) async fn handle(
     broker: &Broker,
-    version: i16,
-    _correlation_id: i32,
+    version: crate::handlers::ApiVersion,
+    _correlation_id: crate::handlers::CorrelationId,
     req_bytes: &[u8],
     ctx: &crate::handlers::RequestContext<'_>,
 ) -> Result<Bytes, BrokerError> {
@@ -57,7 +58,7 @@ pub(crate) async fn handle(
             principal: ctx.principal,
             host: ctx.peer,
             resource_type: crabka_metadata::ResourceType::Cluster,
-            resource_name: "kafka-cluster",
+            resource_name: CLUSTER_RESOURCE_NAME,
             operation: AclOperation::Describe,
         },
     );
@@ -139,7 +140,7 @@ pub(crate) async fn handle(
             ctx.principal,
             ctx.peer,
             ResourceType::Cluster,
-            "kafka-cluster",
+            CLUSTER_RESOURCE_NAME,
         )
     } else {
         i32::MIN
@@ -161,4 +162,191 @@ pub(crate) async fn handle(
     let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
     resp.encode(&mut buf, version)?;
     Ok(buf.freeze())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert2::assert;
+    use crabka_metadata::{BrokerEndpoint, BrokerRegistrationRecord, MetadataRecord};
+    use crabka_security::{AuthMethod, ListenerProtocol, Principal};
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    use crate::authorizer::{AuthorizationRequest, Authorizer};
+    use crate::broker::{Broker, BrokerHandle};
+    use crate::config::BrokerConfig;
+
+    const VERSION: i16 = 1;
+
+    #[derive(Debug)]
+    struct DenyAll;
+
+    impl Authorizer for DenyAll {
+        fn authorize(
+            &self,
+            _source: &dyn crabka_authz::AclSource,
+            _req: &AuthorizationRequest<'_>,
+        ) -> AuthorizationResult {
+            AuthorizationResult::Deny
+        }
+    }
+
+    fn encode_request(req: &DescribeClusterRequest) -> Bytes {
+        let mut buf = BytesMut::with_capacity(req.encoded_len(VERSION));
+        req.encode(&mut buf, VERSION).expect("encode request");
+        buf.freeze()
+    }
+
+    fn decode_response(bytes: &Bytes) -> DescribeClusterResponse {
+        let mut cur: &[u8] = bytes.as_ref();
+        let resp = DescribeClusterResponse::decode(&mut cur, VERSION).expect("decode response");
+        assert!(cur.is_empty(), "response decoder consumed all bytes");
+        resp
+    }
+
+    fn request(include_ops: bool) -> DescribeClusterRequest {
+        DescribeClusterRequest {
+            include_cluster_authorized_operations: include_ops,
+            endpoint_type: 1,
+            ..Default::default()
+        }
+    }
+
+    fn test_context<'a>(
+        principal: &'a Principal,
+        peer: &'a SocketAddr,
+    ) -> crate::handlers::RequestContext<'a> {
+        crate::handlers::RequestContext {
+            principal,
+            peer,
+            client_id: "admin-client",
+            sendfile_capable: false,
+            connection_listener_name: "PLAINTEXT",
+        }
+    }
+
+    fn principal(name: &str) -> Principal {
+        Principal {
+            name: name.into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        }
+    }
+
+    fn peer() -> SocketAddr {
+        "127.0.0.1:9092".parse().unwrap()
+    }
+
+    async fn start_broker(authorizer: Arc<dyn Authorizer>) -> (BrokerHandle, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
+        cfg.audit_enabled = false;
+        cfg.authorizer = authorizer;
+        let handle = Broker::start(cfg).await.expect("start broker");
+        (handle, dir)
+    }
+
+    async fn seed_broker(handle: &BrokerHandle) {
+        handle
+            .broker_arc_for_test()
+            .controller
+            .submit_change(vec![MetadataRecord::V1BrokerRegistration(
+                BrokerRegistrationRecord {
+                    node_id: 42,
+                    broker_epoch: 7,
+                    incarnation_id: uuid::Uuid::nil(),
+                    host: "legacy-host".into(),
+                    port: 19092,
+                    rack: Some("rack-a".into()),
+                    endpoints: vec![BrokerEndpoint {
+                        name: "PLAINTEXT".into(),
+                        host: "broker-a".into(),
+                        port: 29092,
+                        protocol: ListenerProtocol::Plaintext,
+                    }],
+                },
+            )])
+            .await
+            .expect("seed broker registration");
+    }
+
+    #[tokio::test]
+    async fn denied_response_preserves_error_fields() {
+        let (broker_handle, _dir) = start_broker(Arc::new(DenyAll)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let p = principal("alice");
+        let peer = peer();
+        let ctx = test_context(&p, &peer);
+        let req = encode_request(&request(false));
+
+        let bytes = handle(&broker, VERSION, 123, &req, &ctx)
+            .await
+            .expect("handle");
+        let resp = decode_response(&bytes);
+
+        let expected = DescribeClusterResponse {
+            throttle_time_ms: 0,
+            error_code: codes::CLUSTER_AUTHORIZATION_FAILED,
+            error_message: Some("describe-cluster denied".into()),
+            endpoint_type: 1,
+            cluster_id: String::new(),
+            controller_id: -1,
+            brokers: vec![],
+            cluster_authorized_operations: i32::MIN,
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+        };
+        assert!(resp == expected);
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn broker_endpoint_response_preserves_non_default_fields() {
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer)).await;
+        seed_broker(&broker_handle).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let p = principal("admin");
+        let peer = peer();
+        let ctx = test_context(&p, &peer);
+        let req = encode_request(&request(false));
+
+        let bytes = handle(&broker, VERSION, 123, &req, &ctx)
+            .await
+            .expect("handle");
+        let resp = decode_response(&bytes);
+
+        assert!(
+            (
+                resp.error_code,
+                resp.error_message.clone(),
+                resp.endpoint_type,
+                resp.cluster_id.clone(),
+                resp.cluster_authorized_operations,
+                resp.throttle_time_ms
+            ) == (
+                codes::NONE,
+                None,
+                1,
+                broker.controller.current_image().cluster_id().to_string(),
+                i32::MIN,
+                0
+            )
+        );
+        let broker_row = resp
+            .brokers
+            .iter()
+            .find(|b| b.broker_id == 42)
+            .expect("seeded broker row");
+        let expected_row = DescribeClusterBroker {
+            broker_id: 42,
+            host: "broker-a".into(),
+            port: 29092,
+            rack: Some("rack-a".into()),
+            is_fenced: false,
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+        };
+        assert!(*broker_row == expected_row);
+        broker_handle.shutdown().await;
+    }
 }

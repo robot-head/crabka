@@ -494,7 +494,7 @@ fn remap_ref(reference: u32, table: &[u32]) -> u32 {
 mod tests {
     use std::sync::Arc;
 
-    use assert2::assert;
+    use assert2::{assert, check};
     use bytes::Bytes;
     use crabka_client_consumer::ConsumerRecord;
     use crabka_pprof::SymbolDb;
@@ -551,10 +551,19 @@ mod tests {
 
         let rec = mapping_rec(&mapping, &strings);
 
-        assert!(rec.has_functions == true);
-        assert!(rec.has_filenames == false);
-        assert!(rec.has_line_numbers == true);
-        assert!(rec.has_inline_frames == false);
+        assert!(
+            rec == MappingRec {
+                memory_start: 0x1000,
+                memory_limit: 0x2000,
+                file_offset: 0x10,
+                filename: 10,
+                build_id: 20,
+                has_functions: true,
+                has_filenames: false,
+                has_line_numbers: true,
+                has_inline_frames: false,
+            }
+        );
 
         // And the inverse pattern, to ensure no field is hard-wired.
         let inverted = WalMapping {
@@ -565,10 +574,19 @@ mod tests {
             ..mapping
         };
         let rec = mapping_rec(&inverted, &strings);
-        assert!(rec.has_functions == false);
-        assert!(rec.has_filenames == true);
-        assert!(rec.has_line_numbers == false);
-        assert!(rec.has_inline_frames == true);
+        assert!(
+            rec == MappingRec {
+                memory_start: 0x1000,
+                memory_limit: 0x2000,
+                file_offset: 0x10,
+                filename: 10,
+                build_id: 20,
+                has_functions: false,
+                has_filenames: true,
+                has_line_numbers: false,
+                has_inline_frames: true,
+            }
+        );
     }
 
     #[test]
@@ -621,10 +639,10 @@ mod tests {
             .unwrap();
 
         assert!(metas.len() == 1);
-        assert!(metas[0].tenant == "t");
-        assert!(metas[0].row_count == 2);
-        assert!(metas[0].min_ts == 1_700_000_000_000);
-        assert!(metas[0].max_ts == 1_700_000_000_000);
+        check!(metas[0].tenant == "t");
+        check!(metas[0].row_count == 2);
+        check!(metas[0].min_ts == 1_700_000_000_000);
+        check!(metas[0].max_ts == 1_700_000_000_000);
         let symdb_key = format!("{}.symdb", metas[0].object_key);
         assert!(
             store
@@ -650,17 +668,14 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(metas.len() == 2);
-        assert!(
-            metas
-                .iter()
-                .any(|meta| meta.tenant == "t" && meta.row_count == 2)
-        );
-        assert!(
-            metas
-                .iter()
-                .any(|meta| meta.tenant == "u" && meta.row_count == 1)
-        );
+        check!(metas.len() == 2);
+        for (tenant, row_count) in [("t", 2), ("u", 1)] {
+            check!(
+                metas
+                    .iter()
+                    .any(|meta| meta.tenant == tenant && meta.row_count == row_count)
+            );
+        }
         for meta in metas {
             assert!(
                 store
@@ -669,9 +684,10 @@ mod tests {
                     .is_ok()
             );
         }
-        assert!(index.profile_types("t") == vec!["process_cpu:cpu:nanoseconds:cpu:nanoseconds"]);
-        assert!(BlockIndex::block_count(&index, "t") == 1);
-        assert!(BlockIndex::block_count(&index, "u") == 1);
+        check!(index.profile_types("t") == vec!["process_cpu:cpu:nanoseconds:cpu:nanoseconds"]);
+        for tenant in ["t", "u"] {
+            check!(BlockIndex::block_count(&index, tenant) == 1);
+        }
     }
 
     #[test]
@@ -686,9 +702,9 @@ mod tests {
             vec![consumer_record(0, 11, rec("cpu", 7))],
             start + Duration::from_millis(1),
         );
-        assert!(accumulator.should_flush(start + Duration::from_millis(1)));
-        assert!(accumulator.take().len() == 2);
-        assert!(!accumulator.should_flush(start + Duration::from_mins(2)));
+        check!(accumulator.should_flush(start + Duration::from_millis(1)));
+        check!(accumulator.take().len() == 2);
+        check!(!accumulator.should_flush(start + Duration::from_mins(2)));
     }
 
     #[test]

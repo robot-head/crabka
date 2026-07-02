@@ -902,7 +902,7 @@ async fn build_consumer_with_retry(
 mod tests {
     use super::*;
     use crate::scenario::{Acks, Compression, FailoverSpec, LoadMode, ModeTag};
-    use assert2::assert;
+    use assert2::{assert, check};
 
     fn cfg(broker_count: u32) -> DriverConfig {
         DriverConfig {
@@ -946,10 +946,10 @@ mod tests {
 
     #[test]
     fn request_timeout_policy_bounds_producers_and_only_crabka_consumers() {
-        assert!(producer_request_timeout() == Duration::from_secs(2));
-        assert!(consumer_request_timeout(Stack::Crabka) == Duration::from_secs(5));
-        assert!(consumer_request_timeout(Stack::Kafka) == Duration::from_secs(30));
-        assert!(CONSUMER_BUILD_ATTEMPTS == 6);
+        check!(producer_request_timeout() == Duration::from_secs(2));
+        check!(consumer_request_timeout(Stack::Crabka) == Duration::from_secs(5));
+        check!(consumer_request_timeout(Stack::Kafka) == Duration::from_secs(30));
+        check!(CONSUMER_BUILD_ATTEMPTS == 6);
     }
 
     // TLS enabled: a CA path + server_name must build a `ClientSecurity` whose
@@ -964,13 +964,13 @@ mod tests {
             client_identity: None,
         };
         let sec = params.to_security();
-        assert!(sec.protocol == ListenerProtocol::Ssl);
-        assert!(sec.protocol.requires_tls());
-        assert!(sec.sasl.is_none());
+        check!(sec.protocol == ListenerProtocol::Ssl);
+        check!(sec.protocol.requires_tls());
+        check!(sec.sasl.is_none());
         let tls = sec.tls.expect("Ssl security carries a TLS config");
-        assert!(tls.server_name == "demo-broker-headless.default.svc.cluster.local");
-        assert!(tls.trust_roots_pem == Some(std::path::PathBuf::from("/etc/bench-ca/ca.crt")));
-        assert!(tls.client_identity.is_none());
+        check!(tls.server_name == "demo-broker-headless.default.svc.cluster.local");
+        check!(tls.trust_roots_pem == Some(std::path::PathBuf::from("/etc/bench-ca/ca.crt")));
+        check!(tls.client_identity.is_none());
     }
 
     // mTLS variant: a client identity threads through to the TLS config.
@@ -1007,13 +1007,13 @@ mod tests {
         let s = scenario(1);
         let c = cfg(1);
         let out = empty_output(&s, &c, 42, vec!["a-note".into()], vec!["an-error".into()]);
-        assert!(out.wallclock_start_unix_ms == 42);
-        assert!(out.wallclock_end_unix_ms == 42);
-        assert!(out.topology.broker_count == 1);
-        assert!(out.notes == vec!["a-note"]);
-        assert!(out.errors == vec!["an-error"]);
-        assert!(out.first_ack_ms == 0);
-        assert!(out.disturbance.is_none());
+        check!(out.wallclock_start_unix_ms == 42);
+        check!(out.wallclock_end_unix_ms == 42);
+        check!(out.topology.broker_count == 1);
+        check!(out.notes == vec!["a-note"]);
+        check!(out.errors == vec!["an-error"]);
+        check!(out.first_ack_ms == 0);
+        check!(out.disturbance.is_none());
     }
 
     // The state byte is shared across producer/consumer tasks; verify the
@@ -1021,9 +1021,9 @@ mod tests {
     // without ambiguity.
     #[test]
     fn state_constants_are_distinct() {
-        assert!(STATE_RUN != STATE_MEASURING);
-        assert!(STATE_MEASURING != STATE_STOP);
-        assert!(STATE_RUN != STATE_STOP);
+        check!(STATE_RUN != STATE_MEASURING);
+        check!(STATE_MEASURING != STATE_STOP);
+        check!(STATE_RUN != STATE_STOP);
     }
 
     #[tokio::test(start_paused = true)]

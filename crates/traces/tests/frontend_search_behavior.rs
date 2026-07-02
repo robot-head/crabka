@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use assert2::assert;
+use assert2::{assert, check};
 use axum::Router;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode, Uri};
@@ -154,10 +154,10 @@ async fn by_id_forwards_tenant_and_window_to_querier() {
     let echoed = json["trace"]["resourceSpans"][0]["scopeSpans"][0]["spans"][0].clone();
     // The querier sees the right trace id in its path, the tenant header, and
     // start/end as epoch seconds.
-    assert!(echoed["path"] == "/api/v2/traces/0123456789abcdef0123456789abcdef");
-    assert!(echoed["tenant"] == "tenant-a");
-    assert!(echoed["query"].as_str().unwrap().contains("start=1"));
-    assert!(echoed["query"].as_str().unwrap().contains("end=2"));
+    check!(echoed["path"] == "/api/v2/traces/0123456789abcdef0123456789abcdef");
+    check!(echoed["tenant"] == "tenant-a");
+    check!(echoed["query"].as_str().unwrap().contains("start=1"));
+    check!(echoed["query"].as_str().unwrap().contains("end=2"));
 }
 
 async fn record_by_id(State(()): State<()>, headers: HeaderMap, uri: Uri) -> axum::Json<Value> {
@@ -217,13 +217,13 @@ async fn merges_duplicate_trace_results_across_shards() {
     assert!(json["traces"].as_array().unwrap().len() == 1);
     assert!(json["traces"][0]["traceID"] == "0123456789abcdef0123456789abcdef");
     let span_sets = json["traces"][0]["spanSets"].as_array().unwrap();
-    assert!(span_sets.len() == 1);
-    assert!(span_sets[0]["matched"] == 2);
-    assert!(span_sets[0]["spans"].as_array().unwrap().len() == 2);
+    check!(span_sets.len() == 1);
+    check!(span_sets[0]["matched"] == 2);
+    check!(span_sets[0]["spans"].as_array().unwrap().len() == 2);
     // totalBlocks is the plan's block count (1 catalog block).
-    assert!(json["metrics"]["totalBlocks"] == 1);
+    check!(json["metrics"]["totalBlocks"] == 1);
     // inspectedTraces accumulates across shards (5 backend + 7 live).
-    assert!(json["metrics"]["inspectedTraces"] == 12);
+    check!(json["metrics"]["inspectedTraces"] == 12);
 }
 
 #[tokio::test]
@@ -252,11 +252,11 @@ async fn deduplicates_spans_across_shards() {
     let span_sets = json["traces"][0]["spanSets"].as_array().unwrap();
     let spans = span_sets[0]["spans"].as_array().unwrap();
 
-    assert!(json["traces"].as_array().unwrap().len() == 1);
-    assert!(span_sets.len() == 1);
-    assert!(span_sets[0]["matched"] == 1);
-    assert!(spans.len() == 1);
-    assert!(spans[0]["spanID"] == "1111111111111111");
+    check!(json["traces"].as_array().unwrap().len() == 1);
+    check!(span_sets.len() == 1);
+    check!(span_sets[0]["matched"] == 1);
+    check!(spans.len() == 1);
+    check!(spans[0]["spanID"] == "1111111111111111");
 }
 
 #[tokio::test]
@@ -284,9 +284,9 @@ async fn caps_merged_traces_to_limit_newest_first() {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: Value = serde_json::from_slice(&body).unwrap();
     let traces = json["traces"].as_array().unwrap();
-    assert!(traces.len() == 2);
-    assert!(traces[0]["startTimeUnixNano"] == "600");
-    assert!(traces[1]["startTimeUnixNano"] == "500");
+    check!(traces.len() == 2);
+    check!(traces[0]["startTimeUnixNano"] == "600");
+    check!(traces[1]["startTimeUnixNano"] == "500");
 }
 
 #[tokio::test]
@@ -359,10 +359,10 @@ async fn caps_span_sets_per_trace_to_spss() {
     let span_sets = json["traces"][0]["spanSets"].as_array().unwrap();
     let spans = span_sets[0]["spans"].as_array().unwrap();
     // spss=2 ⇒ first two spans kept (live shard's pair), matched is the true sum.
-    assert!(spans.len() == 2);
-    assert!(spans[0]["spanID"] == "1111111111111111");
-    assert!(spans[1]["spanID"] == "2222222222222222");
-    assert!(span_sets[0]["matched"] == 4);
+    check!(spans.len() == 2);
+    check!(spans[0]["spanID"] == "1111111111111111");
+    check!(spans[1]["spanID"] == "2222222222222222");
+    check!(span_sets[0]["matched"] == 4);
 }
 
 #[tokio::test]
@@ -482,9 +482,9 @@ async fn forwards_backend_row_group_job_to_querier() {
     let received_query = json["traces"][0]["rootTraceName"].as_str().unwrap();
     // The 100-byte block at a 100-byte budget stays one whole-block job:
     // [rg0, rg1) => rowGroupStart=0, rowGroupEnd=2.
-    assert!(received_query.contains("block=blocks%2Fa.parquet"));
-    assert!(received_query.contains("rowGroupStart=0"));
-    assert!(received_query.contains("rowGroupEnd=2"));
+    check!(received_query.contains("block=blocks%2Fa.parquet"));
+    check!(received_query.contains("rowGroupStart=0"));
+    check!(received_query.contains("rowGroupEnd=2"));
 }
 
 #[tokio::test]
@@ -544,9 +544,9 @@ async fn uses_tenant_specific_backend_row_group_jobs() {
     let json: Value = serde_json::from_slice(&body).unwrap();
     let received_query = json["traces"][0]["rootTraceName"].as_str().unwrap();
     // tenant-b's block has a single row-group at index 2 => [2, 3).
-    assert!(received_query.contains("block=blocks%2Ftenant-b.parquet"));
-    assert!(received_query.contains("rowGroupStart=2"));
-    assert!(received_query.contains("rowGroupEnd=3"));
+    check!(received_query.contains("block=blocks%2Ftenant-b.parquet"));
+    check!(received_query.contains("rowGroupStart=2"));
+    check!(received_query.contains("rowGroupEnd=3"));
 }
 
 // --- metrics: query_range / instant sharding -------------------------------
@@ -688,9 +688,9 @@ async fn shards_v2_tag_discovery_across_live_frontier() {
     assert!(json["scopes"].as_array().unwrap().len() == 1);
     assert!(json["scopes"][0]["name"] == "span");
     let tags = json["scopes"][0]["tags"].as_array().unwrap();
-    assert!(tags.len() == 2);
-    assert!(tags[0] == "backend.tag");
-    assert!(tags[1] == "live.tag");
+    check!(tags.len() == 2);
+    check!(tags[0] == "backend.tag");
+    check!(tags[1] == "live.tag");
 }
 
 #[tokio::test]

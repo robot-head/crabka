@@ -4,28 +4,52 @@ use std::collections::HashSet;
 
 use bytes::Bytes;
 use crabka_metadata::{AclOperation, ClientQuotaRecord, MetadataRecord, QuotaEntity, ResourceType};
-use crabka_protocol::Encode;
 use crabka_protocol::owned::alter_client_quotas_request::{
     AlterClientQuotasRequest, EntityData, EntryData,
 };
 use crabka_protocol::owned::alter_client_quotas_response::{
     AlterClientQuotasResponse, EntityData as RespEntity, EntryData as RespEntry,
 };
+use crabka_protocol::{Encode, UnknownTaggedFields};
 
+use super::acl_wire::CLUSTER_RESOURCE_NAME;
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
 use crate::codes::{
-    CLUSTER_AUTHORIZATION_FAILED, COORDINATOR_NOT_AVAILABLE, INVALID_CONFIG, INVALID_REQUEST,
+    CLUSTER_AUTHORIZATION_FAILED, COORDINATOR_NOT_AVAILABLE, INVALID_CONFIG, INVALID_REQUEST, NONE,
 };
 
+/// Quota key: produce-side bandwidth cap in bytes/sec (KIP-13).
+const PRODUCER_BYTE_RATE_KEY: &str = "producer_byte_rate";
+/// Quota key: fetch-side bandwidth cap in bytes/sec (KIP-13).
+const CONSUMER_BYTE_RATE_KEY: &str = "consumer_byte_rate";
+/// Quota key: request-handler time cap as a percentage of one thread (KIP-124).
+const REQUEST_PERCENTAGE_KEY: &str = "request_percentage";
+/// Quota key: per-IP connection creation rate (KIP-612).
+const CONNECTION_CREATION_RATE_KEY: &str = "connection_creation_rate";
+/// Quota key: controller mutation rate for topic/partition creation and deletion (KIP-599).
+const CONTROLLER_MUTATION_RATE_KEY: &str = "controller_mutation_rate";
+/// Upper bound for `request_percentage` — a percentage of one request-handler thread.
+const REQUEST_PERCENTAGE_MAX: f64 = 100.0;
+
+/// Quota keys Crabka accepts in `AlterClientQuotas` ops.
 const KNOWN_QUOTA_KEYS: &[&str] = &[
-    "producer_byte_rate",
-    "consumer_byte_rate",
-    "request_percentage",
-    "connection_creation_rate", // KIP-612 — only enforced when paired with ip entity
-    "controller_mutation_rate", // KIP-599
+    PRODUCER_BYTE_RATE_KEY,
+    CONSUMER_BYTE_RATE_KEY,
+    REQUEST_PERCENTAGE_KEY,
+    CONNECTION_CREATION_RATE_KEY, // KIP-612 — only enforced when paired with ip entity
+    CONTROLLER_MUTATION_RATE_KEY, // KIP-599
 ];
-const SUPPORTED_ENTITY_TYPES: &[&str] = &["user", "client-id", "ip"];
+
+/// Quota entity type: authenticated user principal (KIP-257).
+const ENTITY_TYPE_USER: &str = "user";
+/// Quota entity type: client id (KIP-257).
+const ENTITY_TYPE_CLIENT_ID: &str = "client-id";
+/// Quota entity type: client source IP address (KIP-612).
+const ENTITY_TYPE_IP: &str = "ip";
+
+/// Quota entity types Crabka accepts in `AlterClientQuotas` entries.
+const SUPPORTED_ENTITY_TYPES: &[&str] = &[ENTITY_TYPE_USER, ENTITY_TYPE_CLIENT_ID, ENTITY_TYPE_IP];
 
 #[tracing::instrument(
     name = "handle_alter_client_quotas",
@@ -47,7 +71,7 @@ pub(crate) async fn handle(
             principal: ctx.principal,
             host: ctx.peer,
             resource_type: ResourceType::Cluster,
-            resource_name: "kafka-cluster",
+            resource_name: CLUSTER_RESOURCE_NAME,
             operation: AclOperation::Alter,
         },
     );
@@ -78,18 +102,13 @@ pub(crate) async fn handle(
         && let Err(e) = broker.controller.submit_change(to_submit).await
     {
         tracing::warn!(error = %e, "alter-client-quotas submit failed");
-        for r in &mut entry_results {
-            if r.error_code == 0 {
-                r.error_code = COORDINATOR_NOT_AVAILABLE;
-                r.error_message = Some(format!("submit failed: {e}"));
-            }
-        }
+        apply_submit_error(&mut entry_results, e);
     }
 
     let resp = AlterClientQuotasResponse {
         throttle_time_ms: 0,
         entries: entry_results,
-        ..Default::default()
+        unknown_tagged_fields: UnknownTaggedFields::default(),
     };
     encode_response(&resp, api_version)
 }
@@ -115,7 +134,7 @@ pub(crate) fn process_one_entry(entry: &EntryData) -> Result<Vec<MetadataRecord>
             ));
         }
         // entity_name == None is fine for ip — that means the default ip entity.
-        if e.entity_type == "ip"
+        if e.entity_type == ENTITY_TYPE_IP
             && let Some(name) = &e.entity_name
             && name.parse::<std::net::Ipv4Addr>().is_err()
         {
@@ -134,7 +153,7 @@ pub(crate) fn process_one_entry(entry: &EntryData) -> Result<Vec<MetadataRecord>
                     format!("invalid value {} for {}", op.value, op.key),
                 ));
             }
-            if op.key == "request_percentage" && op.value > 100.0 {
+            if op.key == REQUEST_PERCENTAGE_KEY && op.value > REQUEST_PERCENTAGE_MAX {
                 return Err((
                     INVALID_CONFIG,
                     format!("request_percentage > 100.0: {}", op.value),
@@ -159,17 +178,17 @@ pub(crate) fn process_one_entry(entry: &EntryData) -> Result<Vec<MetadataRecord>
 
 fn ok_entry(entity: &[EntityData]) -> RespEntry {
     RespEntry {
-        error_code: 0,
+        error_code: NONE,
         error_message: None,
         entity: entity
             .iter()
             .map(|e| RespEntity {
                 entity_type: e.entity_type.clone(),
                 entity_name: e.entity_name.clone(),
-                ..Default::default()
+                unknown_tagged_fields: UnknownTaggedFields::default(),
             })
             .collect(),
-        ..Default::default()
+        unknown_tagged_fields: UnknownTaggedFields::default(),
     }
 }
 
@@ -182,10 +201,20 @@ fn err_entry(entity: &[EntityData], code: i16, msg: String) -> RespEntry {
             .map(|e| RespEntity {
                 entity_type: e.entity_type.clone(),
                 entity_name: e.entity_name.clone(),
-                ..Default::default()
+                unknown_tagged_fields: UnknownTaggedFields::default(),
             })
             .collect(),
-        ..Default::default()
+        unknown_tagged_fields: UnknownTaggedFields::default(),
+    }
+}
+
+fn apply_submit_error(entry_results: &mut [RespEntry], error: impl std::fmt::Display) {
+    let message = format!("submit failed: {error}");
+    for r in entry_results {
+        if r.error_code == NONE {
+            r.error_code = COORDINATOR_NOT_AVAILABLE;
+            r.error_message = Some(message.clone());
+        }
     }
 }
 
@@ -203,7 +232,7 @@ fn encode_whole_request_error(
     let resp = AlterClientQuotasResponse {
         throttle_time_ms: 0,
         entries,
-        ..Default::default()
+        unknown_tagged_fields: UnknownTaggedFields::default(),
     };
     encode_response(&resp, api_version)
 }
@@ -223,7 +252,28 @@ fn encode_response<R: Encode>(
 mod tests {
     use super::*;
     use assert2::assert;
+    use crabka_protocol::Decode;
     use crabka_protocol::owned::alter_client_quotas_request::{EntityData, EntryData, OpData};
+    use crabka_security::{AuthMethod, Principal};
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    use crate::authorizer::{AuthorizationRequest, Authorizer};
+    use crate::broker::{Broker, BrokerHandle};
+    use crate::config::BrokerConfig;
+
+    #[derive(Debug)]
+    struct DenyAll;
+
+    impl Authorizer for DenyAll {
+        fn authorize(
+            &self,
+            _source: &dyn crabka_authz::AclSource,
+            _req: &AuthorizationRequest<'_>,
+        ) -> AuthorizationResult {
+            AuthorizationResult::Deny
+        }
+    }
 
     fn entry(entity: Vec<(&str, Option<&str>)>, ops: Vec<(&str, f64, bool)>) -> EntryData {
         EntryData {
@@ -246,6 +296,51 @@ mod tests {
                 .collect(),
             ..Default::default()
         }
+    }
+
+    fn request(entries: Vec<EntryData>, validate_only: bool) -> AlterClientQuotasRequest {
+        AlterClientQuotasRequest {
+            entries,
+            validate_only,
+            ..Default::default()
+        }
+    }
+
+    fn decode_response(version: i16, bytes: &Bytes) -> AlterClientQuotasResponse {
+        let mut cur: &[u8] = bytes.as_ref();
+        let resp = AlterClientQuotasResponse::decode(&mut cur, version).expect("decode response");
+        assert!(cur.is_empty(), "response decoder consumed all bytes");
+        resp
+    }
+
+    fn test_context<'a>(
+        principal: &'a Principal,
+        peer: &'a SocketAddr,
+    ) -> crate::handlers::RequestContext<'a> {
+        crate::handlers::RequestContext {
+            principal,
+            peer,
+            client_id: "admin-client",
+            sendfile_capable: false,
+            connection_listener_name: "PLAINTEXT",
+        }
+    }
+
+    async fn start_broker(authorizer: Arc<dyn Authorizer>) -> (BrokerHandle, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
+        cfg.authorizer = authorizer;
+        let handle = Broker::start(cfg).await.expect("start broker");
+        (handle, dir)
+    }
+
+    fn quota_value(handle: &BrokerHandle, user: &str, quota_key: &str) -> Option<f64> {
+        let key: crabka_metadata::EntityKey = vec![("user".into(), Some(user.into()))];
+        handle
+            .controller_image_for_test()
+            .client_quotas()
+            .get(&key)
+            .and_then(|configs| configs.get(quota_key).copied())
     }
 
     #[test]
@@ -288,6 +383,36 @@ mod tests {
     }
 
     #[test]
+    fn inclusive_boundary_values_are_accepted() {
+        let e = entry(
+            vec![("user", Some("alice"))],
+            vec![
+                ("producer_byte_rate", 0.0, false),
+                ("request_percentage", 100.0, false),
+            ],
+        );
+
+        let records = process_one_entry(&e).expect("boundary values are valid");
+        let alice_entity = vec![QuotaEntity {
+            entity_type: "user".into(),
+            entity_name: Some("alice".into()),
+        }];
+        let expected = vec![
+            MetadataRecord::V1ClientQuota(ClientQuotaRecord {
+                entity: alice_entity.clone(),
+                config_key: "producer_byte_rate".into(),
+                config_value: Some(0.0),
+            }),
+            MetadataRecord::V1ClientQuota(ClientQuotaRecord {
+                entity: alice_entity,
+                config_key: "request_percentage".into(),
+                config_value: Some(100.0),
+            }),
+        ];
+        assert!(records == expected);
+    }
+
+    #[test]
     fn unsupported_entity_type_rejected() {
         let e = entry(
             vec![("group", Some("g1"))],
@@ -309,26 +434,19 @@ mod tests {
 
     #[test]
     fn out_of_range_value_rejected() {
-        let e = entry(
-            vec![("user", Some("alice"))],
-            vec![("producer_byte_rate", -100.0, false)],
-        );
-        let err = process_one_entry(&e).unwrap_err();
-        assert!(err.0 == INVALID_CONFIG);
-
-        let e2 = entry(
-            vec![("user", Some("alice"))],
-            vec![("request_percentage", 250.0, false)],
-        );
-        let err2 = process_one_entry(&e2).unwrap_err();
-        assert!(err2.0 == INVALID_CONFIG);
-
-        let e3 = entry(
-            vec![("user", Some("alice"))],
-            vec![("producer_byte_rate", f64::NAN, false)],
-        );
-        let err3 = process_one_entry(&e3).unwrap_err();
-        assert!(err3.0 == INVALID_CONFIG);
+        let cases = [
+            ("producer_byte_rate", -100.0),   // negative
+            ("request_percentage", 250.0),    // > 100.0 cap
+            ("producer_byte_rate", f64::NAN), // non-finite
+        ];
+        for (quota_key, value) in cases {
+            let e = entry(
+                vec![("user", Some("alice"))],
+                vec![(quota_key, value, false)],
+            );
+            let err = process_one_entry(&e).unwrap_err();
+            assert!(err.0 == INVALID_CONFIG, "key {quota_key}, value {value}");
+        }
     }
 
     #[test]
@@ -369,5 +487,322 @@ mod tests {
         };
         assert!(r.config_key == "controller_mutation_rate");
         assert!(r.config_value == Some(2.0));
+    }
+
+    #[test]
+    fn entry_helpers_preserve_wire_fields() {
+        let entity = [EntityData {
+            entity_type: "user".into(),
+            entity_name: Some("alice".into()),
+            ..Default::default()
+        }];
+
+        let ok = ok_entry(&entity);
+        let expected_ok = RespEntry {
+            error_code: 0,
+            error_message: None,
+            entity: vec![RespEntity {
+                entity_type: "user".into(),
+                entity_name: Some("alice".into()),
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            }],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(ok == expected_ok);
+
+        let err = err_entry(&entity, INVALID_CONFIG, "bad quota".into());
+        let expected_err = RespEntry {
+            error_code: INVALID_CONFIG,
+            error_message: Some("bad quota".into()),
+            entity: vec![RespEntity {
+                entity_type: "user".into(),
+                entity_name: Some("alice".into()),
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            }],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(err == expected_err);
+    }
+
+    #[test]
+    fn submit_error_only_stamps_successful_entries() {
+        let mut results = vec![
+            ok_entry(&[EntityData {
+                entity_type: "user".into(),
+                entity_name: Some("alice".into()),
+                ..Default::default()
+            }]),
+            err_entry(
+                &[EntityData {
+                    entity_type: "user".into(),
+                    entity_name: Some("bob".into()),
+                    ..Default::default()
+                }],
+                INVALID_REQUEST,
+                "invalid bob quota".into(),
+            ),
+        ];
+
+        apply_submit_error(&mut results, "raft unavailable");
+
+        let expected = vec![
+            RespEntry {
+                error_code: COORDINATOR_NOT_AVAILABLE,
+                error_message: Some("submit failed: raft unavailable".into()),
+                entity: vec![RespEntity {
+                    entity_type: "user".into(),
+                    entity_name: Some("alice".into()),
+                    unknown_tagged_fields: UnknownTaggedFields::default(),
+                }],
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            },
+            RespEntry {
+                error_code: INVALID_REQUEST,
+                error_message: Some("invalid bob quota".into()),
+                entity: vec![RespEntity {
+                    entity_type: "user".into(),
+                    entity_name: Some("bob".into()),
+                    unknown_tagged_fields: UnknownTaggedFields::default(),
+                }],
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            },
+        ];
+        assert!(results == expected);
+    }
+
+    #[test]
+    fn whole_request_error_encodes_all_entries() {
+        let version = 1;
+        let req = request(
+            vec![
+                entry(vec![("user", Some("alice"))], vec![]),
+                entry(vec![("client-id", Some("app"))], vec![]),
+            ],
+            false,
+        );
+
+        let bytes =
+            encode_whole_request_error(&req, CLUSTER_AUTHORIZATION_FAILED, "denied", version)
+                .expect("encode");
+        let resp = decode_response(version, &bytes);
+
+        let expected = AlterClientQuotasResponse {
+            throttle_time_ms: 0,
+            entries: vec![
+                RespEntry {
+                    error_code: CLUSTER_AUTHORIZATION_FAILED,
+                    error_message: Some("denied".into()),
+                    entity: vec![RespEntity {
+                        entity_type: "user".into(),
+                        entity_name: Some("alice".into()),
+                        unknown_tagged_fields: UnknownTaggedFields::default(),
+                    }],
+                    unknown_tagged_fields: UnknownTaggedFields::default(),
+                },
+                RespEntry {
+                    error_code: CLUSTER_AUTHORIZATION_FAILED,
+                    error_message: Some("denied".into()),
+                    entity: vec![RespEntity {
+                        entity_type: "client-id".into(),
+                        entity_name: Some("app".into()),
+                        unknown_tagged_fields: UnknownTaggedFields::default(),
+                    }],
+                    unknown_tagged_fields: UnknownTaggedFields::default(),
+                },
+            ],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
+    }
+
+    #[test]
+    fn encode_response_writes_decodable_body() {
+        let version = 1;
+        let resp = AlterClientQuotasResponse {
+            throttle_time_ms: 123,
+            entries: vec![err_entry(
+                &[EntityData {
+                    entity_type: "user".into(),
+                    entity_name: Some("alice".into()),
+                    ..Default::default()
+                }],
+                INVALID_REQUEST,
+                "bad request".into(),
+            )],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+
+        let bytes = encode_response(&resp, version).expect("encode");
+        let decoded = decode_response(version, &bytes);
+
+        let expected = AlterClientQuotasResponse {
+            throttle_time_ms: 123,
+            entries: vec![RespEntry {
+                error_code: INVALID_REQUEST,
+                error_message: Some("bad request".into()),
+                entity: vec![RespEntity {
+                    entity_type: "user".into(),
+                    entity_name: Some("alice".into()),
+                    unknown_tagged_fields: UnknownTaggedFields::default(),
+                }],
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            }],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(decoded == expected);
+    }
+
+    #[tokio::test]
+    async fn handle_denies_cluster_alter_for_each_entry() {
+        let version = 1;
+        let (broker_handle, _dir) = start_broker(Arc::new(DenyAll)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let principal = Principal {
+            name: "alice".into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        };
+        let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+        let ctx = test_context(&principal, &peer);
+        let req = request(
+            vec![entry(
+                vec![("user", Some("alice"))],
+                vec![("producer_byte_rate", 1024.0, false)],
+            )],
+            false,
+        );
+
+        let resp = handle(&broker, req, &ctx, version).await.expect("handle");
+        let resp = decode_response(version, &resp);
+
+        let expected = AlterClientQuotasResponse {
+            throttle_time_ms: 0,
+            entries: vec![RespEntry {
+                error_code: CLUSTER_AUTHORIZATION_FAILED,
+                error_message: Some("alter-client-quotas denied".into()),
+                entity: vec![RespEntity {
+                    entity_type: "user".into(),
+                    entity_name: Some("alice".into()),
+                    unknown_tagged_fields: UnknownTaggedFields::default(),
+                }],
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            }],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
+        assert!(quota_value(&broker_handle, "alice", "producer_byte_rate") == None);
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_returns_entry_results_and_submits_valid_changes() {
+        let version = 1;
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let principal = Principal {
+            name: "admin".into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        };
+        let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+        let ctx = test_context(&principal, &peer);
+        let req = request(
+            vec![
+                entry(
+                    vec![("user", Some("alice"))],
+                    vec![("producer_byte_rate", 1024.0, false)],
+                ),
+                entry(
+                    vec![("user", Some("bob"))],
+                    vec![("unknown_quota_key", 1.0, false)],
+                ),
+            ],
+            false,
+        );
+
+        let resp = handle(&broker, req, &ctx, version).await.expect("handle");
+        let resp = decode_response(version, &resp);
+
+        let expected = AlterClientQuotasResponse {
+            throttle_time_ms: 0,
+            entries: vec![
+                RespEntry {
+                    error_code: 0,
+                    error_message: None,
+                    entity: vec![RespEntity {
+                        entity_type: "user".into(),
+                        entity_name: Some("alice".into()),
+                        unknown_tagged_fields: UnknownTaggedFields::default(),
+                    }],
+                    unknown_tagged_fields: UnknownTaggedFields::default(),
+                },
+                RespEntry {
+                    error_code: INVALID_CONFIG,
+                    error_message: Some("unknown quota key \"unknown_quota_key\"".into()),
+                    entity: vec![RespEntity {
+                        entity_type: "user".into(),
+                        entity_name: Some("bob".into()),
+                        unknown_tagged_fields: UnknownTaggedFields::default(),
+                    }],
+                    unknown_tagged_fields: UnknownTaggedFields::default(),
+                },
+            ],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
+        for (user, quota_key, want) in [
+            ("alice", "producer_byte_rate", Some(1024.0)),
+            ("bob", "unknown_quota_key", None),
+        ] {
+            assert!(
+                quota_value(&broker_handle, user, quota_key) == want,
+                "user {user}"
+            );
+        }
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_validate_only_reports_success_without_submitting() {
+        let version = 1;
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let principal = Principal {
+            name: "admin".into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        };
+        let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+        let ctx = test_context(&principal, &peer);
+        let req = request(
+            vec![entry(
+                vec![("user", Some("carol"))],
+                vec![("producer_byte_rate", 2048.0, false)],
+            )],
+            true,
+        );
+
+        let resp = handle(&broker, req, &ctx, version).await.expect("handle");
+        let resp = decode_response(version, &resp);
+
+        let expected = AlterClientQuotasResponse {
+            throttle_time_ms: 0,
+            entries: vec![RespEntry {
+                error_code: 0,
+                error_message: None,
+                entity: vec![RespEntity {
+                    entity_type: "user".into(),
+                    entity_name: Some("carol".into()),
+                    unknown_tagged_fields: UnknownTaggedFields::default(),
+                }],
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            }],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
+        assert!(quota_value(&broker_handle, "carol", "producer_byte_rate") == None);
+        broker_handle.shutdown().await;
     }
 }

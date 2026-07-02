@@ -14,7 +14,7 @@
 //!     `next_cursor` round-trip
 //!   * Stable sort order on fetch-all (alphabetical)
 
-use assert2::assert;
+use assert2::{assert, check};
 mod support;
 
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
@@ -86,20 +86,20 @@ async fn named_request_returns_listed_topics_with_partitions() {
 
     assert!(resp.topics.len() == 2);
     // Named-request order preserves the request order.
-    assert!(resp.topics[0].name.as_deref() == Some("alpha"));
-    assert!(resp.topics[0].error_code == 0);
-    assert!(resp.topics[0].partitions.len() == 2);
+    check!(resp.topics[0].name.as_deref() == Some("alpha"));
+    check!(resp.topics[0].error_code == 0);
+    check!(resp.topics[0].partitions.len() == 2);
     for (i, part) in resp.topics[0].partitions.iter().enumerate() {
-        assert!(part.error_code == 0);
-        assert!(part.partition_index == i32::try_from(i).unwrap());
-        assert!(part.leader_id == 1);
+        check!(part.error_code == 0);
+        check!(part.partition_index == i32::try_from(i).unwrap());
+        check!(part.leader_id == 1);
     }
-    assert!(resp.topics[1].name.as_deref() == Some("beta"));
-    assert!(resp.topics[1].partitions.len() == 1);
+    check!(resp.topics[1].name.as_deref() == Some("beta"));
+    check!(resp.topics[1].partitions.len() == 1);
 
     // No truncation expected — every partition fits under the default
     // 2000-partition budget.
-    assert!(
+    check!(
         resp.next_cursor.is_none(),
         "no cursor expected: {:?}",
         resp.next_cursor,
@@ -169,13 +169,13 @@ async fn unknown_topic_in_named_request_returns_error_row() {
         .expect("DescribeTopicPartitions");
     assert!(resp.topics.len() == 2);
     // Unknown topic row carries UNKNOWN_TOPIC_OR_PARTITION (3).
-    assert!(resp.topics[0].name.as_deref() == Some("ghost"));
-    assert!(resp.topics[0].error_code == 3);
-    assert!(resp.topics[0].partitions.is_empty());
+    check!(resp.topics[0].name.as_deref() == Some("ghost"));
+    check!(resp.topics[0].error_code == 3);
+    check!(resp.topics[0].partitions.is_empty());
     // Known sibling still served on the same response.
-    assert!(resp.topics[1].name.as_deref() == Some("real-topic"));
-    assert!(resp.topics[1].error_code == 0);
-    assert!(resp.topics[1].partitions.len() == 1);
+    check!(resp.topics[1].name.as_deref() == Some("real-topic"));
+    check!(resp.topics[1].error_code == 0);
+    check!(resp.topics[1].partitions.len() == 1);
 
     p.broker.shutdown().await;
 }
@@ -314,8 +314,8 @@ async fn pagination_caps_response_at_partition_limit_and_returns_next_cursor() {
         .expect("DescribeTopicPartitions");
 
     assert!(resp.topics.len() == 1);
-    assert!(resp.topics[0].name.as_deref() == Some("big"));
-    assert!(resp.topics[0].partitions.len() == 3);
+    check!(resp.topics[0].name.as_deref() == Some("big"));
+    check!(resp.topics[0].partitions.len() == 3);
     let cursor = resp.next_cursor.expect("next_cursor must be set");
     assert!(cursor.topic_name == "big");
     assert!(cursor.partition_index == 3);

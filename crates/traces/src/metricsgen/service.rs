@@ -250,7 +250,7 @@ where
 mod tests {
     use std::sync::Arc;
 
-    use assert2::assert;
+    use assert2::{assert, check};
 
     use super::*;
     use crate::metricsgen::checkpoint::{EdgeCheckpointStore, InMemoryCheckpointStore};
@@ -303,14 +303,14 @@ mod tests {
         assert!(flushed == 1);
         assert!(svc.sink.writes().len() == 1);
         let payload = &svc.sink.writes()[0];
-        assert!(payload.tenant == "A");
-        assert!(
+        check!(payload.tenant == "A");
+        check!(
             payload
                 .series
                 .iter()
                 .any(|s| s.name == "traces_service_graph_request_total")
         );
-        assert!(svc.source.commits() == 1);
+        check!(svc.source.commits() == 1);
     }
 
     #[tokio::test]
@@ -354,15 +354,15 @@ mod tests {
         svc.poll_once(100).await.unwrap();
         svc.sink.fail_next();
 
-        assert!(svc.collect_once().await.is_err());
-        assert!(svc.source.commits() == 0);
-        assert!(svc.sink.writes().is_empty());
+        check!(svc.collect_once().await.is_err());
+        check!(svc.source.commits() == 0);
+        check!(svc.sink.writes().is_empty());
 
         let retried = svc.collect_once().await.unwrap();
 
-        assert!(retried == 1);
-        assert!(svc.sink.writes().len() == 1);
-        assert!(svc.source.commits() == 1);
+        check!(retried == 1);
+        check!(svc.sink.writes().len() == 1);
+        check!(svc.source.commits() == 1);
     }
 
     #[tokio::test]
@@ -375,25 +375,25 @@ mod tests {
         svc.poll_once(100).await.unwrap();
         svc.sink.fail_after_successes(1);
 
-        assert!(svc.collect_once().await.is_err());
-        assert!(svc.source.commits() == 0);
-        assert!(svc.sink.writes().len() == 1);
+        check!(svc.collect_once().await.is_err());
+        check!(svc.source.commits() == 0);
+        check!(svc.sink.writes().len() == 1);
 
         let retried = svc.collect_once().await.unwrap();
         let writes = svc.sink.writes();
 
-        assert!(retried == 1);
-        assert!(writes.len() == 2);
-        assert!(writes[0].tenant != writes[1].tenant);
-        assert!(svc.source.commits() == 1);
+        check!(retried == 1);
+        assert_eq!(writes.len(), 2);
+        check!(writes[0].tenant != writes[1].tenant);
+        check!(svc.source.commits() == 1);
     }
 
     #[tokio::test]
     async fn empty_poll_is_a_noop() {
         let svc = service();
-        assert!(svc.poll_once(100).await.unwrap() == 0);
-        assert!(svc.collect_once().await.unwrap() == 0);
-        assert!(svc.sink.writes().is_empty());
+        check!(svc.poll_once(100).await.unwrap() == 0);
+        check!(svc.collect_once().await.unwrap() == 0);
+        check!(svc.sink.writes().is_empty());
     }
 
     #[tokio::test]
@@ -460,23 +460,23 @@ mod tests {
         // tombstone before the payload is durably written and committed.
         clock.set(11_000_000_000);
         svc.sink.fail_next();
-        assert!(svc.collect_once().await.is_err());
-        assert!(svc.source.commits() == 0);
-        assert!(store.load_all("A").len() == 1);
+        check!(svc.collect_once().await.is_err());
+        check!(svc.source.commits() == 0);
+        check!(store.load_all("A").len() == 1);
 
         // A subsequent successful collect still emits/accounts the unpaired count
         // and only then tombstones the checkpoint.
         let written = svc.collect_once().await.unwrap();
         assert!(written == 1);
         let payload = svc.sink.writes().pop().unwrap();
-        assert!(
+        check!(
             payload
                 .series
                 .iter()
                 .any(|s| s.name == "traces_service_graph_unpaired_spans_total")
         );
-        assert!(svc.source.commits() == 1);
-        assert!(store.load_all("A").is_empty());
+        check!(svc.source.commits() == 1);
+        check!(store.load_all("A").is_empty());
     }
 
     #[tokio::test]
@@ -525,10 +525,10 @@ mod tests {
         assert!(restarted.collect_once().await.unwrap() == 2);
 
         let writes = restarted.sink.writes();
-        assert!(writes.len() == 2);
-        assert!(writes.iter().any(|payload| payload.tenant == "A"));
-        assert!(writes.iter().any(|payload| payload.tenant == "B"));
-        assert!(store.load_all("A").is_empty());
-        assert!(store.load_all("B").is_empty());
+        check!(writes.len() == 2);
+        check!(writes.iter().any(|payload| payload.tenant == "A"));
+        check!(writes.iter().any(|payload| payload.tenant == "B"));
+        check!(store.load_all("A").is_empty());
+        check!(store.load_all("B").is_empty());
     }
 }

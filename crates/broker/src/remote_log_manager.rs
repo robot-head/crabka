@@ -34,6 +34,9 @@ use crabka_remote_storage::{
 use crate::partition::Partition;
 use crate::partition_registry::PartitionRegistry;
 
+/// Default cadence of the tiered-storage sweep (copy + retention passes).
+const DEFAULT_TIERING_INTERVAL: Duration = Duration::from_secs(30);
+
 /// Tunables for [`run`].
 #[derive(Debug, Clone)]
 pub(crate) struct RemoteLogManagerConfig {
@@ -43,7 +46,7 @@ pub(crate) struct RemoteLogManagerConfig {
 impl Default for RemoteLogManagerConfig {
     fn default() -> Self {
         Self {
-            interval: Duration::from_secs(30),
+            interval: DEFAULT_TIERING_INTERVAL,
         }
     }
 }
@@ -171,10 +174,8 @@ pub(crate) fn local_retention_target(
     now_ms: i64,
 ) -> Option<i64> {
     let sealed_total: u64 = exports.iter().map(|e| e.size_bytes).sum();
-    let mut deletable_size_remaining = match effective_local_bytes {
-        Some(budget) if sealed_total > budget => sealed_total - budget,
-        _ => 0,
-    };
+    let mut deletable_size_remaining =
+        effective_local_bytes.map_or(0, |budget| sealed_total.saturating_sub(budget));
 
     let mut delete_through_last: Option<i64> = None;
     for ex in exports {
@@ -250,10 +251,8 @@ pub(crate) async fn local_retention_pass(
     };
     match result {
         Ok(n) => {
-            if n > 0 {
-                debug!(topic = %tp.topic, partition = tp.partition, target, removed = n,
-                       "remote-log-manager: deleted local segments past local-retention floor");
-            }
+            debug!(topic = %tp.topic, partition = tp.partition, target, removed = n,
+                   "remote-log-manager: local-retention deletion pass completed");
             n
         }
         Err(e) => {
@@ -287,10 +286,7 @@ pub(crate) fn remote_retention_eviction_set(
         .iter()
         .map(|m| u64::try_from(m.segment_size_in_bytes().max(0)).unwrap_or(0))
         .sum();
-    let mut size_to_reclaim = match retention_bytes {
-        Some(budget) if total > budget => total - budget,
-        _ => 0,
-    };
+    let mut size_to_reclaim = retention_bytes.map_or(0, |budget| total.saturating_sub(budget));
     let mut out = Vec::new();
     for md in finished {
         let by_time = matches!(
@@ -692,9 +688,10 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
 
     use crabka_log::{Log, LogConfig};
+    use crabka_metadata::{MetadataImage, MetadataRecord, TopicRecord};
     use crabka_protocol::records::{Record, RecordBatch};
     use crabka_remote_storage::{
         CustomMetadata, IndexType, InmemoryRemoteLogMetadataManager, LocalTieredStorage,
@@ -740,8 +737,122 @@ mod tests {
         }
     }
 
+    struct FixedMetadataSource {
+        image: Arc<MetadataImage>,
+        leader_tx: tokio::sync::watch::Sender<Option<NodeId>>,
+    }
+
+    impl FixedMetadataSource {
+        fn new(image: MetadataImage) -> Self {
+            let (leader_tx, _) = tokio::sync::watch::channel(Some(1));
+            Self {
+                image: Arc::new(image),
+                leader_tx,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::metadata_source::MetadataSource for FixedMetadataSource {
+        fn current_image(&self) -> Arc<MetadataImage> {
+            self.image.clone()
+        }
+
+        fn watch_image(&self) -> tokio::sync::watch::Receiver<Arc<MetadataImage>> {
+            let (_, rx) = tokio::sync::watch::channel(self.image.clone());
+            rx
+        }
+
+        fn watch_leader(&self) -> tokio::sync::watch::Receiver<Option<NodeId>> {
+            self.leader_tx.subscribe()
+        }
+
+        fn quorum_state(&self) -> crabka_raft::QuorumState {
+            crabka_raft::QuorumState {
+                current_term: 0,
+                last_applied_index: 0,
+                current_leader: *self.leader_tx.borrow(),
+                voters: Vec::new(),
+                voter_nodes: std::collections::BTreeMap::new(),
+                per_voter_matched_index: std::collections::BTreeMap::new(),
+            }
+        }
+
+        async fn submit_change(
+            &self,
+            _records: Vec<MetadataRecord>,
+        ) -> Result<(), crabka_raft::RaftError> {
+            Err(crabka_raft::RaftError::Unsupported("fixed metadata source"))
+        }
+
+        async fn change_membership(
+            &self,
+            _new_voters: std::collections::BTreeSet<NodeId>,
+        ) -> Result<(), crabka_raft::RaftError> {
+            Err(crabka_raft::RaftError::Unsupported("fixed metadata source"))
+        }
+
+        async fn add_learner(
+            &self,
+            _node_id: NodeId,
+            _node: crabka_raft::Node,
+        ) -> Result<(), crabka_raft::RaftError> {
+            Err(crabka_raft::RaftError::Unsupported("fixed metadata source"))
+        }
+
+        fn controller_bound_addr(&self) -> std::net::SocketAddr {
+            std::net::SocketAddr::from(([0, 0, 0, 0], 0))
+        }
+
+        fn read_snapshot_range(
+            &self,
+            _position: i64,
+            _max_bytes: i32,
+        ) -> crabka_raft::SnapshotRange {
+            crabka_raft::SnapshotRange::NoSnapshot
+        }
+
+        async fn trigger_snapshot(&self) -> Result<(), crabka_raft::RaftError> {
+            Err(crabka_raft::RaftError::Unsupported("fixed metadata source"))
+        }
+
+        async fn add_voter(
+            &self,
+            _req: crabka_raft::AddVoter,
+        ) -> Result<crabka_raft::ReconfigOutcome, crabka_raft::RaftError> {
+            Err(crabka_raft::RaftError::Unsupported("fixed metadata source"))
+        }
+
+        async fn remove_voter(
+            &self,
+            _req: crabka_raft::RemoveVoter,
+        ) -> Result<crabka_raft::ReconfigOutcome, crabka_raft::RaftError> {
+            Err(crabka_raft::RaftError::Unsupported("fixed metadata source"))
+        }
+
+        async fn update_voter(
+            &self,
+            _req: crabka_raft::UpdateVoter,
+        ) -> Result<crabka_raft::ReconfigOutcome, crabka_raft::RaftError> {
+            Err(crabka_raft::RaftError::Unsupported("fixed metadata source"))
+        }
+
+        async fn cancel(&self) {}
+    }
+
     fn tp() -> TopicIdPartition {
         TopicIdPartition::new(Uuid::from_u128(1), "orders", 0)
+    }
+
+    fn image_with_orders_topic() -> MetadataImage {
+        let mut image = MetadataImage::new(Uuid::from_u128(9));
+        image.apply(&MetadataRecord::V1Topic(TopicRecord {
+            name: "orders".into(),
+            topic_id: tp().topic_id,
+            partitions: 1,
+            replication_factor: 1,
+        }));
+        image
     }
 
     fn batch(n: i32) -> RecordBatch {
@@ -777,6 +888,185 @@ mod tests {
         log
     }
 
+    fn rolled_tiered_partition_with_config(
+        log_dir: &std::path::Path,
+        config: LogConfig,
+    ) -> Arc<Partition> {
+        let part_dir = crate::log_dir::partition_dir(log_dir, "orders", 0);
+        std::fs::create_dir_all(&part_dir).unwrap();
+        let mut log = Log::open(&part_dir, config).unwrap();
+        for _ in 0..12 {
+            let mut b = batch(2);
+            log.append(&mut b).unwrap();
+        }
+        let partition = crate::broker::spawn_partition(
+            "orders".to_string(),
+            0,
+            log_dir.to_path_buf(),
+            log,
+            crate::log_dir_status::LogDirRegistry::default(),
+            Arc::new(crate::producer_state::ProducerState::new()),
+        );
+        partition.current_leader.store(1, Ordering::Relaxed);
+        partition.current_leader_epoch.store(0, Ordering::Release);
+        partition
+    }
+
+    fn rolled_tiered_partition(log_dir: &std::path::Path) -> Arc<Partition> {
+        rolled_tiered_partition_with_config(
+            log_dir,
+            LogConfig {
+                segment_bytes: 256,
+                remote_storage_enable: true,
+                retention_ms: None,
+                retention_bytes: None,
+                ..LogConfig::default()
+            },
+        )
+    }
+
+    async fn wait_for_remote_segments(rlmm: &Arc<dyn RemoteLogMetadataManager>, expected: usize) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let listed = rlmm.list_remote_log_segments(&tp()).unwrap();
+                if listed.len() >= expected {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("remote-log-manager run loop did not copy expected segments");
+    }
+
+    #[tokio::test]
+    async fn run_ticks_and_copies_eligible_segments() {
+        let log_dir = tempfile::tempdir().unwrap();
+        let remote_dir = tempfile::tempdir().unwrap();
+        let partitions = Arc::new(PartitionRegistry::new());
+        let partition = rolled_tiered_partition(log_dir.path());
+        let export_count = partition
+            .log
+            .lock()
+            .expect("partition log mutex poisoned")
+            .tierable_segments()
+            .len();
+        assert!(export_count >= 2, "test needs multiple sealed segments");
+        partitions.insert("orders".to_string(), 0, partition);
+
+        let controller: Arc<dyn crate::metadata_source::MetadataSource> =
+            Arc::new(FixedMetadataSource::new(image_with_orders_topic()));
+        let rsm: Arc<dyn RemoteStorageManager> =
+            Arc::new(LocalTieredStorage::new(remote_dir.path()));
+        let rlmm: Arc<dyn RemoteLogMetadataManager> =
+            Arc::new(InmemoryRemoteLogMetadataManager::new());
+        let shutdown = CancellationToken::new();
+        let task = tokio::spawn(run(
+            partitions,
+            controller,
+            rsm,
+            rlmm.clone(),
+            1,
+            1,
+            RemoteLogManagerConfig {
+                interval: Duration::from_millis(10),
+            },
+            shutdown.clone(),
+        ));
+
+        wait_for_remote_segments(&rlmm, export_count).await;
+        shutdown.cancel();
+        task.await.expect("remote-log-manager task panicked");
+
+        let listed = rlmm.list_remote_log_segments(&tp()).unwrap();
+        assert!(listed.len() == export_count);
+        assert!(
+            listed
+                .iter()
+                .all(|md| md.state() == RemoteLogSegmentState::CopySegmentFinished)
+        );
+    }
+
+    #[tokio::test]
+    async fn tick_all_copies_local_leader_remote_enabled_partition() {
+        let log_dir = tempfile::tempdir().unwrap();
+        let remote_dir = tempfile::tempdir().unwrap();
+        let partitions = PartitionRegistry::new();
+        let partition = rolled_tiered_partition(log_dir.path());
+        let export_count = partition
+            .log
+            .lock()
+            .expect("partition log mutex poisoned")
+            .tierable_segments()
+            .len();
+        assert!(export_count >= 2, "test needs multiple sealed segments");
+        partitions.insert("orders".to_string(), 0, partition);
+
+        let controller = FixedMetadataSource::new(image_with_orders_topic());
+        let rsm: Arc<dyn RemoteStorageManager> =
+            Arc::new(LocalTieredStorage::new(remote_dir.path()));
+        let rlmm: Arc<dyn RemoteLogMetadataManager> =
+            Arc::new(InmemoryRemoteLogMetadataManager::new());
+
+        tick_all(&partitions, &controller, &rsm, &rlmm, 1, 1).await;
+
+        let listed = rlmm.list_remote_log_segments(&tp()).unwrap();
+        assert!(listed.len() == export_count);
+        assert!(
+            listed
+                .iter()
+                .all(|md| md.state() == RemoteLogSegmentState::CopySegmentFinished)
+        );
+    }
+
+    #[tokio::test]
+    async fn tick_all_skips_partition_led_by_other_node() {
+        let log_dir = tempfile::tempdir().unwrap();
+        let remote_dir = tempfile::tempdir().unwrap();
+        let partitions = PartitionRegistry::new();
+        let partition = rolled_tiered_partition(log_dir.path());
+        partition.current_leader.store(2, Ordering::Relaxed);
+        partitions.insert("orders".to_string(), 0, partition);
+
+        let controller = FixedMetadataSource::new(image_with_orders_topic());
+        let rsm: Arc<dyn RemoteStorageManager> =
+            Arc::new(LocalTieredStorage::new(remote_dir.path()));
+        let rlmm: Arc<dyn RemoteLogMetadataManager> =
+            Arc::new(InmemoryRemoteLogMetadataManager::new());
+
+        tick_all(&partitions, &controller, &rsm, &rlmm, 1, 1).await;
+
+        assert!(rlmm.list_remote_log_segments(&tp()).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn tick_all_skips_remote_storage_disabled_partition() {
+        let log_dir = tempfile::tempdir().unwrap();
+        let remote_dir = tempfile::tempdir().unwrap();
+        let partitions = PartitionRegistry::new();
+        let partition = rolled_tiered_partition_with_config(
+            log_dir.path(),
+            LogConfig {
+                segment_bytes: 256,
+                remote_storage_enable: false,
+                retention_ms: None,
+                retention_bytes: None,
+                ..LogConfig::default()
+            },
+        );
+        partitions.insert("orders".to_string(), 0, partition);
+
+        let controller = FixedMetadataSource::new(image_with_orders_topic());
+        let rsm: Arc<dyn RemoteStorageManager> =
+            Arc::new(LocalTieredStorage::new(remote_dir.path()));
+        let rlmm: Arc<dyn RemoteLogMetadataManager> =
+            Arc::new(InmemoryRemoteLogMetadataManager::new());
+
+        tick_all(&partitions, &controller, &rsm, &rlmm, 1, 1).await;
+
+        assert!(rlmm.list_remote_log_segments(&tp()).unwrap().is_empty());
+    }
+
     #[tokio::test]
     async fn copies_all_sealed_segments_and_records_finished() {
         let log_dir = tempfile::tempdir().unwrap();
@@ -796,11 +1086,12 @@ mod tests {
         let listed = rlmm.list_remote_log_segments(&tp()).unwrap();
         assert!(listed.len() == exports.len());
         for md in &listed {
-            assert!(md.state() == RemoteLogSegmentState::CopySegmentFinished);
-            // The data + offset index are fetchable from the remote store.
-            assert!(!rsm.fetch_log_segment(md, 0, None).unwrap().is_empty());
-            assert!(!rsm.fetch_index(md, IndexType::Offset).unwrap().is_empty());
-            assert!(
+            // The data + offset/leader-epoch indexes are fetchable (non-empty)
+            // from the remote store.
+            check!(md.state() == RemoteLogSegmentState::CopySegmentFinished);
+            check!(!rsm.fetch_log_segment(md, 0, None).unwrap().is_empty());
+            check!(!rsm.fetch_index(md, IndexType::Offset).unwrap().is_empty());
+            check!(
                 !rsm.fetch_index(md, IndexType::LeaderEpoch)
                     .unwrap()
                     .is_empty()
@@ -940,21 +1231,30 @@ mod tests {
             synth_export(20, 29, 300, 100),
         ];
         let finished: HashSet<i64> = [0, 10, 20].into_iter().collect();
-        // Total = 300; budget = 150 → must evict 150 bytes → oldest two go.
-        let target = local_retention_target(&exports, &finished, None, Some(150), 1_000);
-        assert!(target == Some(20));
+        let cases = [
+            // Total = 300; budget = 150 → must evict 150 bytes → oldest two go.
+            (Some(150), Some(20)),
+            // Budget tighter than one segment: still only the oldest, because
+            // after evicting 100B the remaining is 100 (>budget? no, 200>150,
+            // wait: total=300, budget=150 → need to evict 150; after dropping
+            // first 100B we still need 50 more → second segment also drops.
+            // Test with budget = 50: need to evict 250 → all three? but the
+            // walk stops since segments 0..=2 all become deletable.
+            (Some(50), Some(30)),
+            // Budget larger than total → nothing deletable.
+            (Some(10_000), None),
+        ];
+        for (budget, expected) in cases {
+            let target = local_retention_target(&exports, &finished, None, budget, 1_000);
+            assert!(target == expected, "budget: {budget:?}");
+        }
+    }
 
-        // Budget tighter than one segment: still only the oldest, because
-        // after evicting 100B the remaining is 100 (>budget? no, 200>150,
-        // wait: total=300, budget=150 → need to evict 150; after dropping
-        // first 100B we still need 50 more → second segment also drops.
-        // Test with budget = 50: need to evict 250 → all three? but the
-        // walk stops since segments 0..=2 all become deletable.
-        let target = local_retention_target(&exports, &finished, None, Some(50), 1_000);
-        assert!(target == Some(30));
-
-        // Budget larger than total → nothing deletable.
-        let target = local_retention_target(&exports, &finished, None, Some(10_000), 1_000);
+    #[test]
+    fn local_retention_target_equal_size_budget_keeps_all_segments() {
+        let exports = vec![synth_export(0, 9, 100, 100), synth_export(10, 19, 200, 100)];
+        let finished: HashSet<i64> = [0, 10].into_iter().collect();
+        let target = local_retention_target(&exports, &finished, None, Some(200), 1_000);
         assert!(target == None);
     }
 
@@ -1076,6 +1376,48 @@ mod tests {
         assert!(removed_again == 0);
     }
 
+    #[tokio::test]
+    async fn local_retention_pass_deletes_finished_segments_and_returns_count() {
+        let log_dir = tempfile::tempdir().unwrap();
+        let remote_dir = tempfile::tempdir().unwrap();
+        let partition = rolled_tiered_partition_with_config(
+            log_dir.path(),
+            LogConfig {
+                segment_bytes: 256,
+                remote_storage_enable: true,
+                local_retention_ms: Some(Duration::from_millis(1)),
+                ..LogConfig::default()
+            },
+        );
+        let (exports, log_config) = {
+            let log = partition.log.lock().expect("partition log mutex poisoned");
+            (log.tierable_segments(), log.config_snapshot())
+        };
+        assert!(exports.len() >= 2, "test needs multiple sealed segments");
+
+        let rsm: Arc<dyn RemoteStorageManager> =
+            Arc::new(LocalTieredStorage::new(remote_dir.path()));
+        let rlmm: Arc<dyn RemoteLogMetadataManager> =
+            Arc::new(InmemoryRemoteLogMetadataManager::new());
+        let copied = copy_eligible(&tp(), 1, 0, exports.clone(), &rsm, &rlmm).await;
+        assert!(copied == exports.len());
+
+        let removed = local_retention_pass(
+            &tp(),
+            &partition,
+            &exports,
+            &log_config,
+            &rlmm,
+            now_ms() + 1_000_000,
+        )
+        .await;
+
+        assert!(removed == exports.len());
+        let log = partition.log.lock().expect("partition log mutex poisoned");
+        assert!(log.local_log_start_offset() == exports.last().unwrap().last_offset + 1);
+        assert!(log.tierable_segments().is_empty());
+    }
+
     // ── remote-retention helper + cascade tests ────────────
 
     fn synth_remote_md(
@@ -1124,8 +1466,8 @@ mod tests {
         // seg0 (100) + seg1 (200) qualify; seg2 (9_500) stops the walk.
         let out = remote_retention_eviction_set(&segs, Some(500), None, 10_000);
         assert!(out.len() == 2);
-        assert!(out[0].start_offset() == 0);
-        assert!(out[1].start_offset() == 10);
+        check!(out[0].start_offset() == 0);
+        check!(out[1].start_offset() == 10);
     }
 
     #[test]
@@ -1135,14 +1477,24 @@ mod tests {
             synth_remote_md(11, 10, 19, 200, 100),
             synth_remote_md(12, 20, 29, 300, 100),
         ];
-        // Total=300, budget=150 → reclaim 150 → oldest two go.
-        let out = remote_retention_eviction_set(&segs, None, Some(150), 1_000);
-        assert!(out.len() == 2);
-        // Budget tighter than one segment → all three.
-        let out = remote_retention_eviction_set(&segs, None, Some(50), 1_000);
-        assert!(out.len() == 3);
-        // Budget larger than total → none.
-        let out = remote_retention_eviction_set(&segs, None, Some(10_000), 1_000);
+        let cases = [
+            // Total=300, budget=150 → reclaim 150 → oldest two go.
+            (Some(150), 2),
+            // Budget tighter than one segment → all three.
+            (Some(50), 3),
+            // Budget larger than total → none.
+            (Some(10_000), 0),
+        ];
+        for (budget, expected_len) in cases {
+            let out = remote_retention_eviction_set(&segs, None, budget, 1_000);
+            assert!(out.len() == expected_len, "budget: {budget:?}");
+        }
+    }
+
+    #[test]
+    fn remote_retention_eviction_set_equal_size_budget_keeps_all_segments() {
+        let segs = vec![synth_remote_md(10, 0, 9, 100, 100)];
+        let out = remote_retention_eviction_set(&segs, None, Some(100), 1_000);
         assert!(out.is_empty());
     }
 
@@ -1268,8 +1620,8 @@ mod tests {
         let exports = log.tierable_segments();
         let rsm: Arc<dyn RemoteStorageManager> =
             Arc::new(LocalTieredStorage::new(remote_dir.path()));
-        let rlmm: Arc<dyn RemoteLogMetadataManager> =
-            Arc::new(InmemoryRemoteLogMetadataManager::new());
+        let rlmm_impl = Arc::new(InmemoryRemoteLogMetadataManager::new());
+        let rlmm: Arc<dyn RemoteLogMetadataManager> = rlmm_impl.clone();
         let copied = copy_eligible(&tp(), 1, 0, exports.clone(), &rsm, &rlmm).await;
         assert!(copied == exports.len());
 
@@ -1284,6 +1636,15 @@ mod tests {
             let entries: Vec<_> = std::fs::read_dir(&part_dir).unwrap().collect();
             assert!(entries.is_empty(), "stray remote files: {entries:?}");
         }
+        let dump = rlmm_impl.export();
+        let partition = dump
+            .partitions
+            .iter()
+            .find(|partition| partition.topic_id_partition == tp())
+            .expect("partition delete state should be dumped");
+        assert!(
+            partition.delete_state == Some(RemotePartitionDeleteState::DeletePartitionFinished)
+        );
     }
 
     #[tokio::test]
@@ -1298,5 +1659,27 @@ mod tests {
         cascade_remote_partition_delete(tp(), 1, rsm, rlmm.clone()).await;
         // No segments after, no panics; that's the test.
         assert!(rlmm.list_remote_log_segments(&tp()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn now_ms_tracks_current_unix_epoch_millis() {
+        let before = i64::try_from(
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap();
+        let observed = now_ms();
+        let after = i64::try_from(
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap();
+
+        assert!(observed >= before);
+        assert!(observed <= after);
     }
 }

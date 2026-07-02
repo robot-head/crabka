@@ -1,4 +1,4 @@
-//! Docker-gated, `#[ignore]` corpus generator. Boots `apache/kafka:4.3.0`,
+//! Docker-gated, `#[ignore]` corpus generator. Boots `mirror.gcr.io/apache/kafka:4.3.0`,
 //! routes real JVM-client traffic through an in-process `kafka-tap`, captures
 //! one frame per `(api_key, version, direction)`, then synthesizes the
 //! remainder via the JVM oracle. Run manually:
@@ -22,7 +22,7 @@ include!(concat!(
 /// Captured message bodies keyed by `(api_key, version, is_request)`.
 type CaptureMap = Arc<Mutex<BTreeMap<(i16, i16, bool), Vec<u8>>>>;
 
-const IMAGE: &str = "apache/kafka:4.3.0";
+const IMAGE: &str = "mirror.gcr.io/apache/kafka:4.3.0";
 const CONTAINER: &str = "crabka-corpus-capture";
 const BROKER_HOST_PORT: u16 = 19092;
 const TAP_PORT: u16 = 19091;
@@ -183,7 +183,7 @@ fn write_entry(
 }
 
 #[test]
-#[ignore = "requires docker + apache/kafka:4.3.0"]
+#[ignore = "requires docker + mirror.gcr.io/apache/kafka:4.3.0"]
 #[allow(clippy::too_many_lines)]
 fn capture_and_generate_corpus() {
     if !docker_available() {
@@ -262,7 +262,9 @@ fn capture_and_generate_corpus() {
             is_request,
             &body,
             false,
-            &format!("{name} v{version} captured from apache/kafka:4.3.0 client traffic"),
+            &format!(
+                "{name} v{version} captured from mirror.gcr.io/apache/kafka:4.3.0 client traffic"
+            ),
         );
         covered.insert((api_key, version, is_request));
     }

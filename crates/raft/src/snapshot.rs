@@ -22,6 +22,9 @@ use crate::error::RaftError;
 
 const SNAPSHOT_HEADER_BASE_OFFSET: i64 = 0;
 const SNAPSHOT_DATA_BASE_OFFSET: i64 = 1;
+/// Message version of the KIP-630 `SnapshotHeaderRecord` / `SnapshotFooterRecord`
+/// bodies written into the checkpoint's control batches (Kafka writes v0).
+const SNAPSHOT_CONTROL_RECORD_VERSION: i16 = 0;
 
 /// Identifies a snapshot by the log position it covers: `end_offset` is
 /// the offset of the last record contained in the snapshot, and `epoch`
@@ -54,7 +57,7 @@ impl SnapshotWriter {
             ..Default::default()
         };
         let mut header_body = BytesMut::new();
-        header.encode(&mut header_body, 0)?;
+        header.encode(&mut header_body, SNAPSHOT_CONTROL_RECORD_VERSION)?;
         out.put_slice(&encode_control_batch(
             SNAPSHOT_HEADER_BASE_OFFSET,
             control_record_key(ControlRecordType::SnapshotHeader),
@@ -118,7 +121,7 @@ impl SnapshotWriter {
             .saturating_add(i64::try_from(total_blobs).unwrap_or(i64::MAX));
         let footer = SnapshotFooterRecord::default();
         let mut footer_body = BytesMut::new();
-        footer.encode(&mut footer_body, 0)?;
+        footer.encode(&mut footer_body, SNAPSHOT_CONTROL_RECORD_VERSION)?;
         out.put_slice(&encode_control_batch(
             footer_base_offset,
             control_record_key(ControlRecordType::SnapshotFooter),
@@ -177,7 +180,7 @@ impl SnapshotReader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use crabka_protocol::Decode;
 
     use crabka_metadata::{
@@ -250,22 +253,26 @@ mod tests {
         let mut cur: &[u8] = &bytes;
 
         let header = RecordBatch::decode(&mut cur).expect("header batch");
-        assert!(header.base_offset == 0);
-        assert!(header.attributes.is_control_batch());
-        assert!(header.records.len() == 1);
+        check!(header.base_offset == 0);
+        check!(header.attributes.is_control_batch());
+        check!(header.records.len() == 1);
         let header_value = header.records[0].value.as_ref().expect("header value");
         let mut header_cur = &header_value[..];
         let header_record =
             SnapshotHeaderRecord::decode(&mut header_cur, 0).expect("snapshot header");
-        assert!(header_record.version == 0);
-        assert!(header_record.last_contained_log_timestamp == timestamp);
+        let expected_header = SnapshotHeaderRecord {
+            version: 0,
+            last_contained_log_timestamp: timestamp,
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+        };
+        assert!(header_record == expected_header);
         assert!(header_cur.is_empty());
 
         let data = RecordBatch::decode(&mut cur).expect("data batch");
-        assert!(data.base_offset == 1);
-        assert!(!data.attributes.is_control_batch());
-        assert!(data.records.len() >= 2);
-        assert!(
+        check!(data.base_offset == 1);
+        check!(!data.attributes.is_control_batch());
+        check!(data.records.len() >= 2);
+        check!(
             data.last_offset_delta
                 == i32::try_from(data.records.len() - 1).expect("record count fits")
         );
@@ -275,18 +282,22 @@ mod tests {
         }
 
         let footer = RecordBatch::decode(&mut cur).expect("footer batch");
-        assert!(
+        check!(
             footer.base_offset == 1 + i64::try_from(data.records.len()).expect("record count fits")
         );
-        assert!(footer.attributes.is_control_batch());
-        assert!(footer.records.len() == 1);
+        check!(footer.attributes.is_control_batch());
+        check!(footer.records.len() == 1);
         let footer_value = footer.records[0].value.as_ref().expect("footer value");
         let mut footer_cur = &footer_value[..];
         let footer_record =
             SnapshotFooterRecord::decode(&mut footer_cur, 0).expect("snapshot footer");
-        assert!(footer_record.version == 0);
-        assert!(footer_cur.is_empty());
-        assert!(cur.is_empty());
+        let expected_footer = SnapshotFooterRecord {
+            version: 0,
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+        };
+        assert!(footer_record == expected_footer);
+        check!(footer_cur.is_empty());
+        check!(cur.is_empty());
     }
 
     /// A snapshot of an image carrying finalized KIP-584 features must
@@ -319,9 +330,9 @@ mod tests {
         let records = SnapshotReader::read_records(&bytes).unwrap();
         let rebuilt = MetadataImage::from_records(cid, &records);
         assert!(rebuilt == image);
-        assert!(rebuilt.finalized_features().get("metadata.version") == Some(&25));
-        assert!(rebuilt.finalized_features().get("group.version") == Some(&1));
-        assert!(rebuilt.finalized_features_epoch() == 3);
+        check!(rebuilt.finalized_features().get("metadata.version") == Some(&25));
+        check!(rebuilt.finalized_features().get("group.version") == Some(&1));
+        check!(rebuilt.finalized_features_epoch() == 3);
     }
 
     #[test]
@@ -343,28 +354,36 @@ mod tests {
         let mut cur: &[u8] = &bytes;
 
         let header = RecordBatch::decode(&mut cur).expect("header batch");
-        assert!(header.base_offset == 0);
-        assert!(header.attributes.is_control_batch());
-        assert!(header.records.len() == 1);
+        check!(header.base_offset == 0);
+        check!(header.attributes.is_control_batch());
+        check!(header.records.len() == 1);
         let header_value = header.records[0].value.as_ref().expect("header value");
         let mut header_cur = &header_value[..];
         let header_record =
             SnapshotHeaderRecord::decode(&mut header_cur, 0).expect("snapshot header");
-        assert!(header_record.version == 0);
-        assert!(header_record.last_contained_log_timestamp == 99);
+        let expected_header = SnapshotHeaderRecord {
+            version: 0,
+            last_contained_log_timestamp: 99,
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+        };
+        assert!(header_record == expected_header);
         assert!(header_cur.is_empty());
 
         let footer = RecordBatch::decode(&mut cur).expect("footer batch");
-        assert!(footer.base_offset == 1);
-        assert!(footer.attributes.is_control_batch());
-        assert!(footer.records.len() == 1);
+        check!(footer.base_offset == 1);
+        check!(footer.attributes.is_control_batch());
+        check!(footer.records.len() == 1);
         let footer_value = footer.records[0].value.as_ref().expect("footer value");
         let mut footer_cur = &footer_value[..];
         let footer_record =
             SnapshotFooterRecord::decode(&mut footer_cur, 0).expect("snapshot footer");
-        assert!(footer_record.version == 0);
-        assert!(footer_cur.is_empty());
-        assert!(cur.is_empty());
+        let expected_footer = SnapshotFooterRecord {
+            version: 0,
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+        };
+        assert!(footer_record == expected_footer);
+        check!(footer_cur.is_empty());
+        check!(cur.is_empty());
     }
 
     /// Docker-gated: a Crabka engine-produced KIP-630 snapshot (built by
@@ -448,7 +467,7 @@ mod tests {
                 "--rm",
                 "-v",
                 &format!("{}:/work", dir.path().display()),
-                "apache/kafka:4.0.0",
+                "mirror.gcr.io/apache/kafka:4.0.0",
                 "/opt/kafka/bin/kafka-dump-log.sh",
                 "--cluster-metadata-decoder",
                 "--files",
@@ -474,36 +493,46 @@ mod tests {
         ] {
             assert!(text.contains(needle), "missing {needle} in dump: {text}");
         }
-        // No record may fail the decoder's CRC / schema check.
-        assert!(
+        // Three text-shape checks over the dump output:
+        // 1. No record may fail the decoder's CRC / schema check.
+        // 2. All RegisterBroker records must have a non-nil incarnationId
+        //    (kafka-dump-log prints lines like `RegisterBrokerRecord(brokerId=1,
+        //    incarnationId=00000000-0000-0000-0000-000000000000, ...)` where a
+        //    nil UUID is all-zeros).
+        // 3. All Partition records must have partitionEpoch >= 0 after Slice 6
+        //    (not -1, the schema default).
+        check!(
             !text.contains("isvalid: false") && !text.to_lowercase().contains("could not"),
-            "dump-log reported an invalid record: {text}"
+            "dump-log record-validity check failed: {text}"
         );
-        // Assert all RegisterBroker records have a non-nil incarnationId.
-        // kafka-dump-log output contains lines like:
-        //   RegisterBrokerRecord(brokerId=1, incarnationId=00000000-0000-0000-0000-000000000000, ...)
-        // where a nil UUID is all-zeros.
-        assert!(
+        check!(
             !text.contains("incarnationId=00000000-0000-0000-0000-000000000000"),
-            "all RegisterBroker records must have a non-nil incarnationId; found nil in dump output"
+            "dump-log incarnationId check failed: {text}"
         );
-        // Assert all Partition records have partitionEpoch >= 0 (not -1, the schema default).
-        assert!(
+        check!(
             !text
                 .lines()
                 .any(|l| l.contains("PartitionRecord") && l.contains("partitionEpoch=-1")),
-            "all PartitionRecord entries must have partitionEpoch >= 0 after Slice 6; found -1 in dump"
+            "dump-log partitionEpoch check failed: {text}"
         );
     }
 
     #[test]
     fn byte_range_returns_expected_slice() {
         let buf: Vec<u8> = (0u8..=255).collect();
-        // In-range read.
-        assert!(SnapshotReader::byte_range(&buf, 10, 5) == &buf[10..15]);
-        // Position past EOF → empty.
-        assert!(SnapshotReader::byte_range(&buf, 1000, 5).is_empty());
-        // Length clamps to buffer end.
-        assert!(SnapshotReader::byte_range(&buf, 250, 100) == &buf[250..]);
+        let cases: [(usize, usize, &[u8]); 3] = [
+            // In-range read.
+            (10, 5, &buf[10..15]),
+            // Position past EOF → empty.
+            (1000, 5, &[]),
+            // Length clamps to buffer end.
+            (250, 100, &buf[250..]),
+        ];
+        for (position, max, want) in cases {
+            assert!(
+                SnapshotReader::byte_range(&buf, position, max) == want,
+                "position {position}, max {max}"
+            );
+        }
     }
 }

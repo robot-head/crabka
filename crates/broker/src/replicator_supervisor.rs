@@ -32,13 +32,17 @@ use crate::replicator;
 use crate::throttle::ThrottleState;
 use crate::txn::coordinator::TxnCoordinator;
 
+/// A `(topic, partition)` pair — the key the supervisor tracks follower
+/// tasks, local materialization, and dir-assignment reports by.
+pub(crate) type TopicPartition = (String, i32);
+
 /// `(topic, partition)` pairs where `node_id` is in `replicas` AND
 /// `leader != node_id` — i.e., the broker should run a follower
 /// replicator task.
 pub(crate) fn desired_follower_set(
     node_id: NodeId,
     image: &MetadataImage,
-) -> HashSet<(String, i32)> {
+) -> HashSet<TopicPartition> {
     let mut out = HashSet::new();
     for t in image.topics() {
         for p in image.partitions_of(&t.name) {
@@ -54,7 +58,7 @@ pub(crate) fn desired_follower_set(
 /// regardless of leader/follower role — every entry here means this
 /// broker hosts partition data on disk and must materialize the
 /// on-disk `Partition` locally.
-pub(crate) fn desired_local_set(node_id: NodeId, image: &MetadataImage) -> HashSet<(String, i32)> {
+pub(crate) fn desired_local_set(node_id: NodeId, image: &MetadataImage) -> HashSet<TopicPartition> {
     let mut out = HashSet::new();
     for t in image.topics() {
         for p in image.partitions_of(&t.name) {
@@ -117,7 +121,7 @@ pub(crate) fn materialize_partition(
 /// write inside `Log::set_config`. Errors on individual partitions are
 /// logged via `warn!` but don't propagate.
 pub(crate) async fn push_topic_configs(
-    desired: &HashSet<(String, i32)>,
+    desired: &HashSet<TopicPartition>,
     partitions: &PartitionRegistry,
     image: &MetadataImage,
 ) {
@@ -148,11 +152,11 @@ pub(crate) async fn push_topic_configs(
 /// scan present in the previous double-iteration approach.
 #[allow(clippy::type_complexity)]
 pub(crate) fn collect_changed_assignments(
-    local_set: &std::collections::HashSet<(String, i32)>,
+    local_set: &HashSet<TopicPartition>,
     partitions: &PartitionRegistry,
     log_dir_ids: &crate::log_dir_id::LogDirIds,
     image: &MetadataImage,
-    reported_dirs: &dashmap::DashMap<(String, i32), uuid::Uuid>,
+    reported_dirs: &dashmap::DashMap<TopicPartition, uuid::Uuid>,
 ) -> (
     Vec<(uuid::Uuid, i32, uuid::Uuid)>,
     Vec<(String, i32, uuid::Uuid)>,
@@ -180,6 +184,44 @@ pub(crate) fn collect_changed_assignments(
     (wire, updates)
 }
 
+fn resolve_leader_endpoint(
+    broker: &crabka_metadata::BrokerRegistrationRecord,
+    listener_name: &str,
+) -> (String, u16) {
+    broker
+        .endpoints
+        .iter()
+        .find(|e| e.name == listener_name)
+        .map_or_else(
+            || (broker.host.clone(), broker.port),
+            |e| (e.host.clone(), e.port),
+        )
+}
+
+#[async_trait::async_trait]
+trait AssignDirsReporter: Send + Sync {
+    async fn send(
+        &self,
+        controller: &Arc<dyn crate::metadata_source::MetadataSource>,
+        client_id: &str,
+        req: crabka_protocol::owned::assign_replicas_to_dirs_request::AssignReplicasToDirsRequest,
+    ) -> Result<(), String>;
+}
+
+struct NetworkAssignDirsReporter;
+
+#[async_trait::async_trait]
+impl AssignDirsReporter for NetworkAssignDirsReporter {
+    async fn send(
+        &self,
+        controller: &Arc<dyn crate::metadata_source::MetadataSource>,
+        client_id: &str,
+        req: crabka_protocol::owned::assign_replicas_to_dirs_request::AssignReplicasToDirsRequest,
+    ) -> Result<(), String> {
+        crate::assign_dirs::send_assignments(controller, client_id, req).await
+    }
+}
+
 pub(crate) struct ReplicatorSupervisor {
     node_id: NodeId,
     broker_id: i32,
@@ -188,11 +230,11 @@ pub(crate) struct ReplicatorSupervisor {
     log_dirs: Vec<PathBuf>,
     log_config: LogConfig,
     client_id: String,
-    tasks: DashMap<(String, i32), CancellationToken>,
+    tasks: DashMap<TopicPartition, CancellationToken>,
     /// Per-follower-partition (leader, `leader_epoch`) tuple captured at
     /// spawn time. On reconcile, if the tuple changes, the task is
     /// cancelled and respawned pointed at the new leader.
-    task_targets: DashMap<(String, i32), (NodeId, i32)>,
+    task_targets: DashMap<TopicPartition, (NodeId, i32)>,
     shutdown: CancellationToken,
     txn_coordinator: Option<Arc<TxnCoordinator>>,
     /// KIP-932 share coordinator. Its view of locally-led
@@ -231,7 +273,8 @@ pub(crate) struct ReplicatorSupervisor {
     /// KIP-858: tracks the last-reported dir UUID per (topic, partition) so
     /// we only send `AssignReplicasToDirs` on first materialization or after
     /// a KIP-113 log-dir swap.
-    reported_dirs: dashmap::DashMap<(String, i32), uuid::Uuid>,
+    reported_dirs: dashmap::DashMap<TopicPartition, uuid::Uuid>,
+    assign_dirs_reporter: Arc<dyn AssignDirsReporter>,
 }
 
 impl ReplicatorSupervisor {
@@ -278,6 +321,7 @@ impl ReplicatorSupervisor {
             metrics,
             log_dir_ids,
             reported_dirs: dashmap::DashMap::new(),
+            assign_dirs_reporter: Arc::new(NetworkAssignDirsReporter),
         }
     }
 
@@ -333,7 +377,7 @@ impl ReplicatorSupervisor {
         let desired = desired_follower_set(self.node_id, image);
 
         // 1. Cancel removed.
-        let current: Vec<(String, i32)> = self.tasks.iter().map(|e| e.key().clone()).collect();
+        let current: Vec<TopicPartition> = self.tasks.iter().map(|e| e.key().clone()).collect();
         for k in current {
             if !desired.contains(&k)
                 && let Some((_, token)) = self.tasks.remove(&k)
@@ -394,14 +438,8 @@ impl ReplicatorSupervisor {
             // the legacy top-level host/port for brokers that haven't
             // projected a per-listener endpoint yet (or PLAINTEXT-only
             // deployments where the synthesized endpoint matches anyway).
-            let (leader_host, leader_port) = broker
-                .endpoints
-                .iter()
-                .find(|e| e.name == self.inter_broker_listener_name)
-                .map_or_else(
-                    || (broker.host.clone(), broker.port),
-                    |e| (e.host.clone(), e.port),
-                );
+            let (leader_host, leader_port) =
+                resolve_leader_endpoint(&broker, &self.inter_broker_listener_name);
             tokio::spawn(replicator::run(replicator::Config {
                 node_id: self.node_id,
                 topic: k.0,
@@ -452,7 +490,7 @@ impl ReplicatorSupervisor {
     /// when at least one assignment has changed since the last successful send.
     async fn report_dir_assignments(
         &self,
-        local_set: &std::collections::HashSet<(String, i32)>,
+        local_set: &HashSet<TopicPartition>,
         image: &MetadataImage,
     ) {
         let (wire, updates) = collect_changed_assignments(
@@ -466,7 +504,11 @@ impl ReplicatorSupervisor {
             return;
         }
         let req = crate::assign_dirs::build_request(self.broker_id, &wire);
-        match crate::assign_dirs::send_assignments(&self.controller, &self.client_id, req).await {
+        match self
+            .assign_dirs_reporter
+            .send(&self.controller, &self.client_id, req)
+            .await
+        {
             Ok(()) => {
                 for (topic, partition, dir_uuid) in updates {
                     self.reported_dirs.insert((topic, partition), dir_uuid);
@@ -523,8 +565,19 @@ impl ReplicatorSupervisor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
-    use crabka_metadata::{MetadataImage, MetadataRecord, PartitionRecord, TopicRecord};
+    use assert2::{assert, check};
+    use crabka_metadata::{
+        BrokerEndpoint, BrokerRegistrationRecord, MetadataImage, MetadataRecord, PartitionRecord,
+        TopicRecord,
+    };
+    use crabka_raft::{
+        AddVoter, Node, QuorumState, RaftError, ReconfigOutcome, RemoveVoter, SnapshotRange,
+        UpdateVoter,
+    };
+    use std::collections::BTreeSet;
+    use std::net::SocketAddr;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::watch;
     use uuid::Uuid;
 
     fn image_with(records: &[MetadataRecord]) -> MetadataImage {
@@ -535,35 +588,209 @@ mod tests {
         img
     }
 
-    #[test]
-    fn includes_partition_where_self_is_follower() {
-        let img = image_with(&[
-            MetadataRecord::V1Topic(TopicRecord {
-                name: "t".into(),
-                topic_id: Uuid::new_v4(),
-                partitions: 1,
-                replication_factor: 3,
-            }),
-            MetadataRecord::V1Partition(PartitionRecord {
-                topic: "t".into(),
-                partition: 0,
-                leader: 1,
-                replicas: vec![1, 2, 3],
-                isr: vec![1, 2, 3],
-                leader_epoch: 0,
-                adding_replicas: vec![],
-                removing_replicas: vec![],
-                directories: vec![],
-                partition_epoch: 0,
-            }),
-        ]);
-        let d = desired_follower_set(2, &img);
-        assert!(d.contains(&("t".into(), 0)));
-        assert!(d.len() == 1);
+    fn topic_record(name: &str, partitions: i32) -> MetadataRecord {
+        MetadataRecord::V1Topic(TopicRecord {
+            name: name.into(),
+            topic_id: Uuid::new_v4(),
+            partitions,
+            replication_factor: 3,
+        })
+    }
+
+    fn partition_record(
+        topic: &str,
+        partition: i32,
+        leader: NodeId,
+        replicas: Vec<NodeId>,
+        leader_epoch: i32,
+    ) -> MetadataRecord {
+        MetadataRecord::V1Partition(PartitionRecord {
+            topic: topic.into(),
+            partition,
+            leader,
+            replicas: replicas.clone(),
+            isr: replicas,
+            leader_epoch,
+            adding_replicas: vec![],
+            removing_replicas: vec![],
+            directories: vec![],
+            partition_epoch: 0,
+        })
+    }
+
+    fn broker_record(node_id: NodeId) -> BrokerRegistrationRecord {
+        BrokerRegistrationRecord {
+            node_id,
+            broker_epoch: 0,
+            incarnation_id: Uuid::new_v4(),
+            host: "legacy-host".into(),
+            port: 9092,
+            rack: None,
+            endpoints: vec![BrokerEndpoint {
+                name: "INTERNAL".into(),
+                host: "internal-host".into(),
+                port: 19092,
+                protocol: crabka_security::ListenerProtocol::Plaintext,
+            }],
+        }
+    }
+
+    struct StaticMetadataSource {
+        image: Arc<MetadataImage>,
+        image_rx: watch::Receiver<Arc<MetadataImage>>,
+        leader_rx: watch::Receiver<Option<NodeId>>,
+    }
+
+    impl StaticMetadataSource {
+        fn new(image: MetadataImage) -> Self {
+            let image = Arc::new(image);
+            let (_image_tx, image_rx) = watch::channel(image.clone());
+            let (_leader_tx, leader_rx) = watch::channel(None);
+            Self {
+                image,
+                image_rx,
+                leader_rx,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::metadata_source::MetadataSource for StaticMetadataSource {
+        fn current_image(&self) -> Arc<MetadataImage> {
+            self.image.clone()
+        }
+
+        fn watch_image(&self) -> watch::Receiver<Arc<MetadataImage>> {
+            self.image_rx.clone()
+        }
+
+        fn watch_leader(&self) -> watch::Receiver<Option<NodeId>> {
+            self.leader_rx.clone()
+        }
+
+        fn quorum_state(&self) -> QuorumState {
+            QuorumState {
+                current_term: 0,
+                last_applied_index: 0,
+                current_leader: None,
+                voters: Vec::new(),
+                voter_nodes: std::collections::BTreeMap::new(),
+                per_voter_matched_index: std::collections::BTreeMap::new(),
+            }
+        }
+
+        async fn submit_change(&self, _records: Vec<MetadataRecord>) -> Result<(), RaftError> {
+            panic!("unused in replicator supervisor tests")
+        }
+
+        async fn change_membership(&self, _new_voters: BTreeSet<NodeId>) -> Result<(), RaftError> {
+            panic!("unused in replicator supervisor tests")
+        }
+
+        async fn add_learner(&self, _node_id: NodeId, _node: Node) -> Result<(), RaftError> {
+            panic!("unused in replicator supervisor tests")
+        }
+
+        fn controller_bound_addr(&self) -> SocketAddr {
+            SocketAddr::from(([127, 0, 0, 1], 0))
+        }
+
+        fn read_snapshot_range(&self, _position: i64, _max_bytes: i32) -> SnapshotRange {
+            SnapshotRange::NoSnapshot
+        }
+
+        async fn trigger_snapshot(&self) -> Result<(), RaftError> {
+            panic!("unused in replicator supervisor tests")
+        }
+
+        async fn add_voter(&self, _req: AddVoter) -> Result<ReconfigOutcome, RaftError> {
+            panic!("unused in replicator supervisor tests")
+        }
+
+        async fn remove_voter(&self, _req: RemoveVoter) -> Result<ReconfigOutcome, RaftError> {
+            panic!("unused in replicator supervisor tests")
+        }
+
+        async fn update_voter(&self, _req: UpdateVoter) -> Result<ReconfigOutcome, RaftError> {
+            panic!("unused in replicator supervisor tests")
+        }
+
+        async fn cancel(&self) {}
+    }
+
+    #[derive(Default)]
+    struct CountingAssignDirsReporter {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl AssignDirsReporter for CountingAssignDirsReporter {
+        async fn send(
+            &self,
+            _controller: &Arc<dyn crate::metadata_source::MetadataSource>,
+            _client_id: &str,
+            req: crabka_protocol::owned::assign_replicas_to_dirs_request::AssignReplicasToDirsRequest,
+        ) -> Result<(), String> {
+            assert!(!req.directories.is_empty());
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    fn supervisor_fixture(
+        image: MetadataImage,
+    ) -> (
+        ReplicatorSupervisor,
+        Arc<PartitionRegistry>,
+        Arc<CountingAssignDirsReporter>,
+        tempfile::TempDir,
+    ) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let partitions = Arc::new(PartitionRegistry::new());
+        let reporter = Arc::new(CountingAssignDirsReporter::default());
+        let mut supervisor = ReplicatorSupervisor::new(
+            2,
+            2,
+            Arc::new(StaticMetadataSource::new(image)),
+            partitions.clone(),
+            vec![dir.path().to_path_buf()],
+            LogConfig::default(),
+            "supervisor-test".into(),
+            CancellationToken::new(),
+            None,
+            None,
+            Arc::new(crate::network::client::InterBrokerClient::new(None, None)),
+            crabka_security::ListenerProtocol::Plaintext,
+            "INTERNAL".into(),
+            Arc::new(ThrottleState::new()),
+            crate::log_dir_status::LogDirRegistry::default(),
+            Arc::new(crate::producer_state::ProducerState::new()),
+            crate::metrics::BrokerMetrics::default(),
+            crate::log_dir_id::LogDirIds::resolve(&[dir.path().to_path_buf()]),
+        );
+        supervisor.assign_dirs_reporter = reporter.clone();
+        (supervisor, partitions, reporter, dir)
+    }
+
+    #[tokio::test]
+    async fn network_reporter_send_propagates_controller_resolution_errors() {
+        // The real network reporter must surface send_assignments' error
+        // (here: no controller leader elected), not swallow it into Ok(()).
+        let source: Arc<dyn crate::metadata_source::MetadataSource> =
+            Arc::new(StaticMetadataSource::new(MetadataImage::new(Uuid::nil())));
+        let err = NetworkAssignDirsReporter
+            .send(
+                &source,
+                "test",
+                crabka_protocol::owned::assign_replicas_to_dirs_request::AssignReplicasToDirsRequest::default(),
+            )
+            .await
+            .expect_err("no controller leader must fail");
+        assert!(err == "no controller leader");
     }
 
     #[test]
-    fn excludes_partition_where_self_is_leader() {
+    fn desired_follower_set_includes_followers_excludes_leader_and_non_replicas() {
         let img = image_with(&[
             MetadataRecord::V1Topic(TopicRecord {
                 name: "t".into(),
@@ -584,32 +811,44 @@ mod tests {
                 partition_epoch: 0,
             }),
         ]);
-        assert!(desired_follower_set(1, &img).is_empty());
+        let cases = [
+            // Self is a follower replica → included.
+            (2, HashSet::from_iter([("t".to_string(), 0)])),
+            // Self is the leader → excluded.
+            (1, HashSet::new()),
+            // Self is not a replica at all → excluded.
+            (99, HashSet::new()),
+        ];
+        for (node_id, want) in cases {
+            assert!(
+                desired_follower_set(node_id, &img) == want,
+                "node {node_id}"
+            );
+        }
     }
 
     #[test]
-    fn excludes_partition_where_self_is_not_a_replica() {
+    fn desired_local_set_exactly_includes_all_local_replicas() {
         let img = image_with(&[
-            MetadataRecord::V1Topic(TopicRecord {
-                name: "t".into(),
-                topic_id: Uuid::new_v4(),
-                partitions: 1,
-                replication_factor: 3,
-            }),
-            MetadataRecord::V1Partition(PartitionRecord {
-                topic: "t".into(),
-                partition: 0,
-                leader: 1,
-                replicas: vec![1, 2, 3],
-                isr: vec![1, 2, 3],
-                leader_epoch: 0,
-                adding_replicas: vec![],
-                removing_replicas: vec![],
-                directories: vec![],
-                partition_epoch: 0,
-            }),
+            topic_record("a", 2),
+            partition_record("a", 0, 1, vec![1, 2, 3], 0),
+            partition_record("a", 1, 2, vec![1, 2, 3], 0),
+            topic_record("b", 1),
+            partition_record("b", 0, 3, vec![1, 3], 0),
+            topic_record("c", 1),
+            partition_record("c", -1, 1, vec![2, 4], 0),
         ]);
-        assert!(desired_follower_set(99, &img).is_empty());
+
+        let local = desired_local_set(2, &img);
+
+        assert!(
+            local
+                == HashSet::from_iter([
+                    ("a".to_string(), 0),
+                    ("a".to_string(), 1),
+                    ("c".to_string(), -1),
+                ])
+        );
     }
 
     #[tokio::test]
@@ -689,10 +928,148 @@ mod tests {
             }),
         ]);
         let d = desired_follower_set(2, &img);
-        assert!(d.contains(&("a".into(), 0)));
-        assert!(d.contains(&("b".into(), 0)));
-        assert!(!d.contains(&("b".into(), 1))); // self is leader for b/1
-        assert!(d.len() == 2);
+        // b/1 is excluded: self is leader for it.
+        assert!(d == HashSet::from_iter([("a".to_string(), 0), ("b".to_string(), 0)]));
+    }
+
+    #[test]
+    fn resolve_leader_endpoint_prefers_matching_listener() {
+        let broker = broker_record(1);
+        assert!(resolve_leader_endpoint(&broker, "INTERNAL") == ("internal-host".into(), 19092));
+        assert!(resolve_leader_endpoint(&broker, "EXTERNAL") == ("legacy-host".into(), 9092));
+    }
+
+    #[tokio::test]
+    async fn reconcile_materializes_leader_partition_and_installs_isr() {
+        let img = image_with(&[
+            topic_record("t", 1),
+            partition_record("t", 0, 2, vec![1, 2, 3], 7),
+        ]);
+        let (supervisor, partitions, _reporter, _dir) = supervisor_fixture(img.clone());
+
+        supervisor.reconcile(&img).await;
+
+        let part = partitions.get("t", 0).expect("local leader materialized");
+        assert!(
+            part.current_leader
+                .load(std::sync::atomic::Ordering::Acquire)
+                == 2,
+            "leader cache updated"
+        );
+        assert!(
+            part.current_leader_epoch
+                .load(std::sync::atomic::Ordering::Acquire)
+                == 7,
+            "leader epoch cache updated"
+        );
+        let state = part.replica_state.lock().await;
+        assert!(state.isr == [1, 2, 3].into_iter().collect());
+    }
+
+    #[tokio::test]
+    async fn reconcile_materializes_follower_but_does_not_install_isr() {
+        let img = image_with(&[
+            topic_record("t", 1),
+            partition_record("t", 0, 1, vec![1, 2, 3], 7),
+        ]);
+        let (supervisor, partitions, _reporter, _dir) = supervisor_fixture(img.clone());
+
+        supervisor.reconcile(&img).await;
+
+        let part = partitions.get("t", 0).expect("local follower materialized");
+        let state = part.replica_state.lock().await;
+        assert!(state.isr.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reconcile_cancels_tasks_for_removed_partitions() {
+        let img = MetadataImage::new(Uuid::nil());
+        let (supervisor, _partitions, _reporter, _dir) = supervisor_fixture(img.clone());
+        let token = CancellationToken::new();
+        supervisor.tasks.insert(("stale".into(), 0), token.clone());
+        supervisor.task_targets.insert(("stale".into(), 0), (1, 0));
+
+        supervisor.reconcile(&img).await;
+
+        check!(token.is_cancelled());
+        check!(supervisor.tasks.len() == 0);
+        check!(supervisor.task_targets.len() == 0);
+    }
+
+    #[tokio::test]
+    async fn reconcile_cancels_task_when_target_leader_or_epoch_changes() {
+        let img = image_with(&[
+            topic_record("t", 1),
+            partition_record("t", 0, 1, vec![1, 2], 8),
+        ]);
+        let (supervisor, _partitions, _reporter, _dir) = supervisor_fixture(img.clone());
+        let token = CancellationToken::new();
+        supervisor.tasks.insert(("t".into(), 0), token.clone());
+        supervisor.task_targets.insert(("t".into(), 0), (9, 7));
+
+        supervisor.reconcile(&img).await;
+
+        check!(token.is_cancelled());
+        check!(supervisor.tasks.len() == 0);
+        check!(supervisor.task_targets.len() == 0);
+    }
+
+    #[tokio::test]
+    async fn report_dir_assignments_sends_and_records_successful_updates() {
+        let topic_id = Uuid::new_v4();
+        let img = image_with(&[
+            MetadataRecord::V1Topic(TopicRecord {
+                name: "t".into(),
+                topic_id,
+                partitions: 1,
+                replication_factor: 1,
+            }),
+            partition_record("t", 0, 2, vec![2], 0),
+        ]);
+        let (supervisor, partitions, reporter, _dir) = supervisor_fixture(img.clone());
+        supervisor.materialize_local_partition("t", 0).unwrap();
+        let mut local_set = HashSet::new();
+        local_set.insert(("t".to_string(), 0));
+
+        supervisor.report_dir_assignments(&local_set, &img).await;
+
+        assert!(reporter.calls.load(Ordering::SeqCst) == 1);
+        assert!(supervisor.reported_dirs.contains_key(&("t".to_string(), 0)));
+
+        let part = partitions.get("t", 0).expect("materialized");
+        let dir = part.log_dir.load();
+        let expected = supervisor.log_dir_ids.id_for(&dir).expect("dir id");
+        assert!(
+            supervisor
+                .reported_dirs
+                .get(&("t".to_string(), 0))
+                .map(|e| *e)
+                == Some(expected)
+        );
+    }
+
+    #[tokio::test]
+    async fn materialize_local_partition_inserts_partition() {
+        let img = MetadataImage::new(Uuid::nil());
+        let (supervisor, partitions, _reporter, _dir) = supervisor_fixture(img);
+
+        supervisor.materialize_local_partition("t", 0).unwrap();
+
+        assert!(partitions.contains("t", 0));
+    }
+
+    #[tokio::test]
+    async fn run_reconciles_initial_image_before_shutdown() {
+        let img = image_with(&[
+            topic_record("t", 1),
+            partition_record("t", 0, 2, vec![2], 0),
+        ]);
+        let (supervisor, partitions, _reporter, _dir) = supervisor_fixture(img);
+        supervisor.shutdown.cancel();
+
+        supervisor.run().await;
+
+        assert!(partitions.contains("t", 0));
     }
 
     #[tokio::test]
@@ -878,16 +1255,8 @@ mod tests {
             &img,
             &reported_dirs,
         );
-        assert!(wire.len() == 1);
-        assert!(updates.len() == 1);
-        let (w_topic_id, w_partition, w_dir_uuid) = wire[0];
-        assert!(w_topic_id == topic_id);
-        assert!(w_partition == 0);
-        assert!(w_dir_uuid == dir_uuid);
-        let (u_topic, u_partition, u_dir_uuid) = &updates[0];
-        assert!(u_topic == "t");
-        assert!(*u_partition == 0);
-        assert!(*u_dir_uuid == dir_uuid);
+        assert!(wire == vec![(topic_id, 0, dir_uuid)]);
+        assert!(updates == vec![("t".to_string(), 0, dir_uuid)]);
 
         // Simulate a successful send: insert the tracker update.
         for (topic, partition, uuid) in updates {

@@ -1073,7 +1073,7 @@ fn chrono_now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
 
     use crate::coordinator::unified::GroupCoordinator;
     use crate::coordinator::unified::actor::MetadataProvider;
@@ -1137,14 +1137,14 @@ mod tests {
             },
         )
         .await;
-        assert!(resp.error_code == codes::NONE);
-        assert!(!resp.member_id.is_empty(), "server mints a member id");
+        check!(resp.error_code == codes::NONE);
+        check!(!resp.member_id.is_empty(), "server mints a member id");
         // No metadata source / no topology → NotReady, empty assignment, but the
         // member still advances to the (bumped) group epoch.
-        assert!(resp.member_epoch == 1);
-        assert!(resp.active_tasks == Some(vec![]));
-        assert!(resp.standby_tasks == Some(vec![]));
-        assert!(resp.warmup_tasks == Some(vec![]));
+        check!(resp.member_epoch == 1);
+        check!(resp.active_tasks == Some(vec![]));
+        check!(resp.standby_tasks == Some(vec![]));
+        check!(resp.warmup_tasks == Some(vec![]));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1334,15 +1334,15 @@ mod tests {
         };
         apply_seed(&mut actor, seed);
 
-        assert!(actor.state.group_epoch == 4);
-        assert!(actor.state.target.epoch == 4);
-        assert!(actor.state.topology_epoch == 2);
+        check!(actor.state.group_epoch == 4);
+        check!(actor.state.target.epoch == 4);
+        check!(actor.state.topology_epoch == 2);
         let m = actor.state.members.get("m1").expect("member restored");
-        assert!(m.member_epoch == 4);
-        assert!(m.previous_member_epoch == 3);
-        assert!(m.process_id == "p1");
-        assert!(m.active == BTreeMap::from([("0".to_string(), vec![0, 1])]));
-        assert!(actor.state.target.active["m1"] == BTreeMap::from([("0".to_string(), vec![0, 1])]));
-        assert!(actor.state.phase == StreamsGroupStatePhase::Stable);
+        check!(m.member_epoch == 4);
+        check!(m.previous_member_epoch == 3);
+        check!(m.process_id == "p1");
+        check!(m.active == BTreeMap::from([("0".to_string(), vec![0, 1])]));
+        check!(actor.state.target.active["m1"] == BTreeMap::from([("0".to_string(), vec![0, 1])]));
+        check!(actor.state.phase == StreamsGroupStatePhase::Stable);
     }
 }

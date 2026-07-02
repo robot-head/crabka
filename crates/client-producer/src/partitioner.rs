@@ -107,16 +107,16 @@ fn murmur2(data: &[u8]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
 
     #[test]
     fn key_hash_is_stable_across_calls() {
         let p = UniformStickyPartitioner::new();
         let a = p.pick("t", Some(b"my-key"), 12);
         let b = p.pick("t", Some(b"my-key"), 12);
-        assert!(a == b);
-        assert!(a == 9);
-        assert!((0..12).contains(&a));
+        check!(a == b);
+        check!(a == 9);
+        check!((0..12).contains(&a));
     }
 
     #[test]
@@ -164,13 +164,17 @@ mod tests {
 
     #[test]
     fn murmur2_matches_kafka_golden_vectors() {
-        assert!(murmur2(b"") == 275_646_681);
-        assert!(murmur2(b"a") == -1_563_381_124);
-        assert!(murmur2(b"ab") == 316_155_434);
-        assert!(murmur2(b"abc") == 479_470_107);
-        assert!(murmur2(b"abcd") == -1_323_649_548);
-        assert!(murmur2(b"abcde") == 461_995_741);
-        assert!(murmur2(b"kafka") == -798_503_068);
-        assert!(murmur2(b"my-key") == 1_748_425_209);
+        for (input, want) in [
+            (b"".as_slice(), 275_646_681),
+            (b"a".as_slice(), -1_563_381_124),
+            (b"ab".as_slice(), 316_155_434),
+            (b"abc".as_slice(), 479_470_107),
+            (b"abcd".as_slice(), -1_323_649_548),
+            (b"abcde".as_slice(), 461_995_741),
+            (b"kafka".as_slice(), -798_503_068),
+            (b"my-key".as_slice(), 1_748_425_209),
+        ] {
+            assert!(murmur2(input) == want);
+        }
     }
 }

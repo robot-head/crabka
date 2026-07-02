@@ -1,5 +1,5 @@
 //! KIP-595 Slice 6 ACCEPTANCE TEST (Docker-gated, `#[ignore]`) — one
-//! `apache/kafka:4.0.0` controller plus two Crabka controllers form a single
+//! `mirror.gcr.io/apache/kafka:4.0.0` controller plus two Crabka controllers form a single
 //! STATIC (`controller.quorum.voters`, kraft.version=0) metadata quorum that
 //! elects a cross-impl leader AND replicates committed metadata: the JVM joins
 //! as a follower of the Crabka leader, never fatal-faults, catches its
@@ -20,7 +20,7 @@
 //! - Crabka voters id 1, 2: in-process, real TCP controller listeners bound to
 //!   `0.0.0.0:p1` / `0.0.0.0:p2` on the host. They hold the 2/3 majority and
 //!   elect among themselves immediately.
-//! - JVM voter id 3: `apache/kafka:4.0.0`, `process.roles=controller`, in a
+//! - JVM voter id 3: `mirror.gcr.io/apache/kafka:4.0.0`, `process.roles=controller`, in a
 //!   container publishing `-p p3:p3`, dialing the Crabka voters at
 //!   `host.docker.internal:p1` / `:p2`.
 //! - Shared cluster id: a `uuid::Uuid` whose 16 bytes are the same bytes the JVM
@@ -30,6 +30,7 @@ use std::net::SocketAddr;
 use std::process::Command;
 use std::time::Duration;
 
+use assert2::check;
 use base64::Engine as _;
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -38,7 +39,7 @@ use crabka_broker::{BootstrapMode, Broker, BrokerConfig, BrokerHandle};
 
 mod support;
 
-const KAFKA_IMAGE: &str = "apache/kafka:4.0.0";
+const KAFKA_IMAGE: &str = "mirror.gcr.io/apache/kafka:4.0.0";
 const CONTAINER: &str = "crabka-kip595-slice5-spike";
 
 /// Kafka encodes a 16-byte UUID as URL-safe base64 with no padding. The JVM
@@ -276,7 +277,7 @@ async fn static_mixed_jvm_crabka_quorum() {
     c2.shutdown().await;
 
     // The two Crabka voters MUST elect among themselves regardless of the JVM.
-    assert!(
+    check!(
         elected,
         "Crabka 2/3 majority failed to elect a stable shared leader \
          (n1={last_l1:?} n2={last_l2:?})"
@@ -286,15 +287,15 @@ async fn static_mixed_jvm_crabka_quorum() {
     // static quorum as a follower, never fatal-faults, and replicates the
     // leader's committed metadata (HWM catch-up + a FeaturesImage carrying
     // metadata.version=25).
-    assert!(
+    check!(
         jvm_joined && !jvm_unsupported_version,
         "JVM did not join cross-impl: joined={jvm_joined}, unsupported={jvm_unsupported_version}"
     );
-    assert!(
+    check!(
         !jvm_fatal_fault,
         "JVM raft thread fatal-faulted (a wire/record inconsistency); see logs"
     );
-    assert!(
+    check!(
         jvm_replicated,
         "JVM did not replicate the Crabka leader's committed metadata (no HWM catch-up / \
          metadata.version not loaded); see JVM logs"
@@ -305,7 +306,7 @@ const CONTESTED_CONTAINER: &str = "crabka-kip996-contested";
 
 /// KIP-996 CONTESTED-ELECTION ACCEPTANCE TEST (Docker-gated, `#[ignore]`).
 ///
-/// 2 Crabka voters (ids 1,2) + 1 `apache/kafka:4.0.0` voter (id 3) form a static
+/// 2 Crabka voters (ids 1,2) + 1 `mirror.gcr.io/apache/kafka:4.0.0` voter (id 3) form a static
 /// 3-voter quorum. After the Crabka leader is killed, only 1 Crabka voter + the
 /// JVM voter survive, so the surviving Crabka candidate can only reach majority
 /// if the JVM grants its PRE-VOTE and real vote. This is the path the old

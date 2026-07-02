@@ -9,7 +9,7 @@
 
 #![allow(clippy::pedantic)]
 
-use assert2::assert;
+use assert2::{assert, check};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -254,13 +254,13 @@ async fn create_proposal_on_balanced_cluster_returns_empty_movements() {
         )
         .await,
     );
-    assert!(
+    check!(
         proposal.movements.is_empty(),
         "expected empty movements on a single-broker balanced cluster, got {:?}",
         proposal.movements
     );
-    assert!(!proposal.id.is_empty(), "proposal must have an id");
-    assert!(
+    check!(!proposal.id.is_empty(), "proposal must have an id");
+    check!(
         proposal.status == i32::from(pb::ProposalStatus::Computed),
         "fresh proposal must be Computed"
     );
@@ -397,7 +397,7 @@ async fn get_state_returns_unavailable_before_first_snapshot() {
     let gs = unwrap_err(
         handlers::get_state(Extension(state.clone()), req(pb::GetStateRequest {})).await,
     );
-    assert!(gs.code() == Code::Unavailable);
+    check!(gs.code() == Code::Unavailable);
 
     // CreateProposal also reads the snapshot → Unavailable.
     let cp = unwrap_err(
@@ -407,7 +407,7 @@ async fn get_state_returns_unavailable_before_first_snapshot() {
         )
         .await,
     );
-    assert!(cp.code() == Code::Unavailable);
+    check!(cp.code() == Code::Unavailable);
 
     // ListProposals doesn't need a snapshot; it should return an empty
     // list rather than erroring.
@@ -418,7 +418,7 @@ async fn get_state_returns_unavailable_before_first_snapshot() {
         )
         .await,
     );
-    assert!(
+    check!(
         listed.proposals.is_empty(),
         "no proposals yet, got {:?}",
         listed.proposals
@@ -437,7 +437,7 @@ async fn get_state_returns_unavailable_before_first_snapshot() {
         )
         .await,
     );
-    assert!(exec.code() == Code::NotFound);
+    check!(exec.code() == Code::NotFound);
 }
 
 /// Execute a proposal end-to-end against a single-broker Crabka.
@@ -768,13 +768,13 @@ async fn rack_aware_eliminates_same_rack_collisions() {
         "expected exactly one RackAware movement, got {mvs:?}"
     );
     let m = &mvs[0];
-    assert!(m.topic == "t");
-    assert!(m.partition == 0);
-    assert!(
+    check!(m.topic == "t");
+    check!(m.partition == 0);
+    check!(
         !m.new_replicas.contains(&1) || !m.new_replicas.contains(&2),
         "movement must remove one of the rack-A brokers; got {m:?}"
     );
-    assert!(
+    check!(
         m.new_replicas.contains(&3),
         "movement must add the rack-B broker (3); got {m:?}"
     );
@@ -857,7 +857,7 @@ async fn replica_capacity_evicts_over_capacity_broker() {
     for m in &mvs {
         let before = m.old_replicas.iter().filter(|x| **x == 1).count();
         let after = m.new_replicas.iter().filter(|x| **x == 1).count();
-        assert!(
+        check!(
             after < before,
             "movement {m:?} doesn't reduce broker 1's replicas"
         );
@@ -878,7 +878,7 @@ async fn replica_capacity_evicts_over_capacity_broker() {
         .iter()
         .map(|p| p.replicas.iter().filter(|x| **x == 1).count())
         .sum();
-    assert!(
+    check!(
         final_broker_1_count <= 5,
         "broker 1 still has {final_broker_1_count} replicas after eviction"
     );

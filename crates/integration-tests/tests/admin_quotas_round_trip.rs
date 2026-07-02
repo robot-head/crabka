@@ -6,7 +6,7 @@
 //! quota path: read the current per-user state, diff, write the
 //! resulting `(set, remove)` ops, read back.
 
-use assert2::assert;
+use assert2::{assert, check};
 use crabka_client_admin::{AdminClient, QuotaOp, diff_user_quotas};
 
 #[path = "../../broker/tests/support/mod.rs"]
@@ -52,8 +52,8 @@ async fn user_quotas_set_change_remove() {
 
     let after_set = admin.describe_user_quotas(user).await.unwrap();
     assert!(after_set.len() == 2);
-    assert!((after_set["producer_byte_rate"] - 1_048_576.0).abs() < f64::EPSILON);
-    assert!((after_set["request_percentage"] - 25.0).abs() < f64::EPSILON);
+    check!((after_set["producer_byte_rate"] - 1_048_576.0).abs() < f64::EPSILON);
+    check!((after_set["request_percentage"] - 25.0).abs() < f64::EPSILON);
 
     // 3. `diff_user_quotas` with the same desired-state map → no ops.
     let same = after_set.clone();

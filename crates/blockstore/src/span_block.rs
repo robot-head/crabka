@@ -497,7 +497,7 @@ mod tests {
         Array, BooleanArray, FixedSizeBinaryArray, Float64Array, Int32Array, Int64Array, ListArray,
         StringArray,
     };
-    use assert2::assert;
+    use assert2::{assert, check};
 
     use super::*;
     use crate::span_schema::{
@@ -704,7 +704,7 @@ mod tests {
         let first_attr = row0_values.value(0);
         let first_attr = first_attr.as_any().downcast_ref::<StringArray>().unwrap();
         assert!(first_attr.len() == 2);
-        assert!(first_attr.value(0) == "GET");
-        assert!(first_attr.value(1) == "POST");
+        check!(first_attr.value(0) == "GET");
+        check!(first_attr.value(1) == "POST");
     }
 }

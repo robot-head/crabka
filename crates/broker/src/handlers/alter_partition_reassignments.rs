@@ -12,6 +12,9 @@ use crate::codes::{
     UNKNOWN_TOPIC_OR_PARTITION,
 };
 
+/// Per-row rejection: Kafka wire error code plus a human-readable message.
+type RowError = (i16, String);
+
 /// Process one (topic, partition, `target_opt`) row from an
 /// `AlterPartitionReassignments` request. Returns:
 ///   - `Ok(Some(PartitionRecord))` — submit this intermediate record
@@ -23,7 +26,7 @@ pub(crate) fn process_one_partition(
     partition: i32,
     target: Option<&[i32]>,
     allow_rf_change: bool,
-) -> Result<Option<PartitionRecord>, (i16, String)> {
+) -> Result<Option<PartitionRecord>, RowError> {
     let pr = image
         .partition(topic, partition)
         .ok_or((UNKNOWN_TOPIC_OR_PARTITION, "unknown partition".into()))?;
@@ -42,7 +45,7 @@ fn validate_target(
     image: &MetadataImage,
     allow_rf_change: bool,
     pr: &PartitionRecord,
-) -> Result<(), (i16, String)> {
+) -> Result<(), RowError> {
     if target.is_empty() {
         return Err((INVALID_REPLICA_ASSIGNMENT, "empty target".into()));
     }
@@ -81,7 +84,7 @@ fn validate_target(
     Ok(())
 }
 
-fn cancel_path(pr: &PartitionRecord) -> Result<Option<PartitionRecord>, (i16, String)> {
+fn cancel_path(pr: &PartitionRecord) -> Result<Option<PartitionRecord>, RowError> {
     if pr.adding_replicas.is_empty() && pr.removing_replicas.is_empty() {
         return Err((NO_REASSIGNMENT_IN_PROGRESS, "nothing to cancel".into()));
     }
@@ -205,7 +208,7 @@ pub(crate) async fn handle(
             principal: ctx.principal,
             host: ctx.peer,
             resource_type: ResourceType::Cluster,
-            resource_name: "kafka-cluster",
+            resource_name: crate::handlers::acl_wire::CLUSTER_RESOURCE_NAME,
             operation: crabka_metadata::AclOperation::Alter,
         },
     );
@@ -246,14 +249,7 @@ pub(crate) async fn handle(
         && let Err(e) = broker.controller.submit_change(to_submit).await
     {
         tracing::warn!(error = %e, "alter-reassignment submit failed");
-        for rows in by_topic.values_mut() {
-            for r in rows.iter_mut() {
-                if r.error_code == 0 {
-                    r.error_code = COORDINATOR_NOT_AVAILABLE;
-                    r.error_message = Some(format!("submit failed: {e}"));
-                }
-            }
-        }
+        mark_submit_failed(&mut by_topic, &format!("submit failed: {e}"));
     }
 
     let responses: Vec<ReassignableTopicResponse> = by_topic
@@ -265,10 +261,7 @@ pub(crate) async fn handle(
         })
         .collect();
     let resp = AlterPartitionReassignmentsResponse {
-        throttle_time_ms: 0,
         allow_replication_factor_change: req.allow_replication_factor_change,
-        error_code: 0,
-        error_message: None,
         responses,
         ..Default::default()
     };
@@ -278,8 +271,6 @@ pub(crate) async fn handle(
 fn ok_row(partition_index: i32) -> ReassignablePartitionResponse {
     ReassignablePartitionResponse {
         partition_index,
-        error_code: 0,
-        error_message: None,
         ..Default::default()
     }
 }
@@ -290,6 +281,20 @@ fn err_row(partition_index: i32, code: i16, msg: String) -> ReassignablePartitio
         error_code: code,
         error_message: Some(msg),
         ..Default::default()
+    }
+}
+
+fn mark_submit_failed(
+    by_topic: &mut HashMap<String, Vec<ReassignablePartitionResponse>>,
+    msg: &str,
+) {
+    for rows in by_topic.values_mut() {
+        for r in rows.iter_mut() {
+            if r.error_code == 0 {
+                r.error_code = COORDINATOR_NOT_AVAILABLE;
+                r.error_message = Some(msg.to_string());
+            }
+        }
     }
 }
 
@@ -313,10 +318,7 @@ fn encode_whole_request_error(
         })
         .collect();
     let resp = AlterPartitionReassignmentsResponse {
-        throttle_time_ms: 0,
         allow_replication_factor_change: req.allow_replication_factor_change,
-        error_code: 0,
-        error_message: None,
         responses,
         ..Default::default()
     };
@@ -338,8 +340,33 @@ fn encode_response<R: Encode>(
 mod tests {
     use super::*;
     use assert2::assert;
-    use crabka_metadata::{BrokerRegistrationRecord, MetadataRecord, TopicRecord};
+    use crabka_metadata::{BrokerRegistrationRecord, MetadataRecord, PartitionRecord, TopicRecord};
+    use crabka_protocol::Decode;
+    use crabka_protocol::UnknownTaggedFields;
+    use crabka_protocol::owned::alter_partition_reassignments_request::{
+        AlterPartitionReassignmentsRequest, ReassignablePartition, ReassignableTopic,
+    };
+    use crabka_security::{AuthMethod, Principal};
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+    use std::time::Duration;
     use uuid::Uuid;
+
+    use crate::authorizer::{AuthorizationRequest, AuthorizationResult, Authorizer};
+    use crate::config::BrokerConfig;
+
+    #[derive(Debug)]
+    struct DenyAll;
+
+    impl Authorizer for DenyAll {
+        fn authorize(
+            &self,
+            _source: &dyn crabka_authz::AclSource,
+            _req: &AuthorizationRequest<'_>,
+        ) -> AuthorizationResult {
+            AuthorizationResult::Deny
+        }
+    }
 
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     fn img_with(
@@ -348,6 +375,18 @@ mod tests {
         adding: &[NodeId],
         removing: &[NodeId],
         leader: NodeId,
+    ) -> MetadataImage {
+        img_with_epoch(replicas, isr, adding, removing, leader, 0)
+    }
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    fn img_with_epoch(
+        replicas: &[NodeId],
+        isr: &[NodeId],
+        adding: &[NodeId],
+        removing: &[NodeId],
+        leader: NodeId,
+        partition_epoch: i32,
     ) -> MetadataImage {
         let mut img = MetadataImage::new(Uuid::nil());
         // Register brokers 1..=6 so validate_target accepts target lists.
@@ -380,9 +419,126 @@ mod tests {
             adding_replicas: adding.to_vec(),
             removing_replicas: removing.to_vec(),
             directories: vec![],
-            partition_epoch: 0,
+            partition_epoch,
         }));
         img
+    }
+
+    fn request(
+        allow_replication_factor_change: bool,
+        topic: &str,
+        partition_index: i32,
+        replicas: Option<Vec<i32>>,
+    ) -> AlterPartitionReassignmentsRequest {
+        AlterPartitionReassignmentsRequest {
+            timeout_ms: 30_000,
+            allow_replication_factor_change,
+            topics: vec![ReassignableTopic {
+                name: topic.into(),
+                partitions: vec![ReassignablePartition {
+                    partition_index,
+                    replicas,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn decode_response(version: i16, bytes: &Bytes) -> AlterPartitionReassignmentsResponse {
+        let mut cur: &[u8] = bytes.as_ref();
+        let resp = AlterPartitionReassignmentsResponse::decode(&mut cur, version)
+            .expect("decode AlterPartitionReassignmentsResponse");
+        assert!(cur.is_empty(), "response decoder consumed all bytes");
+        resp
+    }
+
+    fn test_context<'a>(
+        principal: &'a Principal,
+        peer: &'a SocketAddr,
+    ) -> crate::handlers::RequestContext<'a> {
+        crate::handlers::RequestContext {
+            principal,
+            peer,
+            client_id: "admin-client",
+            sendfile_capable: false,
+            connection_listener_name: "PLAINTEXT",
+        }
+    }
+
+    async fn start_broker(
+        authorizer: Arc<dyn Authorizer>,
+    ) -> (crate::broker::BrokerHandle, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
+        cfg.authorizer = authorizer;
+        let handle = Broker::start(cfg).await.expect("start broker");
+        (handle, dir)
+    }
+
+    async fn wait_for_leader(broker: &Broker) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if broker
+                .controller
+                .watch_leader()
+                .borrow()
+                .is_some_and(|n| n == broker.config.node_id)
+            {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() <= deadline,
+                "broker did not become controller leader"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    async fn seed_reassignable_partition(broker: &Broker) {
+        broker
+            .controller
+            .submit_change(vec![
+                MetadataRecord::V1BrokerRegistration(BrokerRegistrationRecord {
+                    node_id: 1,
+                    broker_epoch: 1,
+                    incarnation_id: uuid::Uuid::nil(),
+                    host: "localhost".into(),
+                    port: 9092,
+                    rack: None,
+                    endpoints: vec![],
+                }),
+                MetadataRecord::V1BrokerRegistration(BrokerRegistrationRecord {
+                    node_id: 2,
+                    broker_epoch: 1,
+                    incarnation_id: uuid::Uuid::nil(),
+                    host: "localhost".into(),
+                    port: 9093,
+                    rack: None,
+                    endpoints: vec![],
+                }),
+                MetadataRecord::V1Topic(TopicRecord {
+                    name: "orders".into(),
+                    topic_id: Uuid::nil(),
+                    partitions: 1,
+                    replication_factor: 1,
+                }),
+                MetadataRecord::V1Partition(PartitionRecord {
+                    topic: "orders".into(),
+                    partition: 7,
+                    leader: 1,
+                    replicas: vec![1],
+                    isr: vec![1],
+                    leader_epoch: 3,
+                    adding_replicas: vec![],
+                    removing_replicas: vec![],
+                    directories: vec![],
+                    partition_epoch: 11,
+                }),
+            ])
+            .await
+            .expect("seed reassignment metadata");
     }
 
     #[test]
@@ -394,15 +550,245 @@ mod tests {
 
     #[test]
     fn start_writes_union_replicas() {
-        let img = img_with(&[1, 2, 3], &[1, 2, 3], &[], &[], 1);
+        let img = img_with_epoch(&[1, 2, 3], &[1, 2, 3], &[], &[], 1, 11);
         let res = process_one_partition(&img, "foo", 0, Some(&[1, 4]), true)
             .expect("ok")
             .expect("Some");
-        assert!(res.replicas == vec![1, 2, 3, 4]);
-        assert!(res.adding_replicas == vec![4]);
-        assert!(res.removing_replicas == vec![2, 3]);
-        assert!(res.leader == 1);
-        assert!(res.leader_epoch == 5); // unchanged on start
+        let expected = PartitionRecord {
+            topic: "foo".into(),
+            partition: 0,
+            leader: 1,
+            replicas: vec![1, 2, 3, 4],
+            isr: vec![1, 2, 3],
+            leader_epoch: 5, // unchanged on start
+            adding_replicas: vec![4],
+            removing_replicas: vec![2, 3],
+            directories: vec![Uuid::nil(); 4],
+            partition_epoch: 12,
+        };
+        assert!(res == expected);
+    }
+
+    #[test]
+    fn row_builders_preserve_non_default_fields() {
+        let ok = ok_row(7);
+        let expected_ok = ReassignablePartitionResponse {
+            partition_index: 7,
+            error_code: 0,
+            error_message: None,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(ok == expected_ok);
+
+        let err = err_row(8, UNKNOWN_TOPIC_OR_PARTITION, "missing partition".into());
+        let expected_err = ReassignablePartitionResponse {
+            partition_index: 8,
+            error_code: UNKNOWN_TOPIC_OR_PARTITION,
+            error_message: Some("missing partition".into()),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(err == expected_err);
+    }
+
+    #[test]
+    fn encode_whole_request_error_preserves_request_shape() {
+        let version = 1;
+        let req = request(false, "payments", 8, Some(vec![1, 2]));
+
+        let bytes =
+            encode_whole_request_error(&req, CLUSTER_AUTHORIZATION_FAILED, "denied", version)
+                .expect("encode whole request error");
+        let resp = decode_response(version, &bytes);
+
+        let expected = AlterPartitionReassignmentsResponse {
+            throttle_time_ms: 0,
+            allow_replication_factor_change: false,
+            error_code: 0,
+            error_message: None,
+            responses: vec![ReassignableTopicResponse {
+                name: "payments".into(),
+                partitions: vec![ReassignablePartitionResponse {
+                    partition_index: 8,
+                    error_code: CLUSTER_AUTHORIZATION_FAILED,
+                    error_message: Some("denied".into()),
+                    unknown_tagged_fields: UnknownTaggedFields::default(),
+                }],
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            }],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
+    }
+
+    #[test]
+    fn mark_submit_failed_only_rewrites_successful_rows() {
+        let mut by_topic = std::collections::HashMap::from([(
+            "orders".to_string(),
+            vec![
+                ok_row(7),
+                err_row(8, UNKNOWN_TOPIC_OR_PARTITION, "unknown partition".into()),
+            ],
+        )]);
+
+        mark_submit_failed(&mut by_topic, "submit failed: not controller");
+        let rows = by_topic.get("orders").expect("topic rows");
+
+        let expected = vec![
+            ReassignablePartitionResponse {
+                partition_index: 7,
+                error_code: COORDINATOR_NOT_AVAILABLE,
+                error_message: Some("submit failed: not controller".into()),
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            },
+            ReassignablePartitionResponse {
+                partition_index: 8,
+                error_code: UNKNOWN_TOPIC_OR_PARTITION,
+                error_message: Some("unknown partition".into()),
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            },
+        ];
+        assert!(*rows == expected);
+    }
+
+    #[tokio::test]
+    async fn handle_preserves_unknown_partition_response_shape() {
+        let version = 1;
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let principal = Principal {
+            name: "admin".into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        };
+        let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+        let ctx = test_context(&principal, &peer);
+
+        let bytes = handle(
+            &broker,
+            request(false, "payments", 8, Some(vec![1, 2])),
+            &ctx,
+            version,
+        )
+        .await
+        .expect("handle");
+        let resp = decode_response(version, &bytes);
+
+        let expected = AlterPartitionReassignmentsResponse {
+            throttle_time_ms: 0,
+            allow_replication_factor_change: false,
+            error_code: 0,
+            error_message: None,
+            responses: vec![ReassignableTopicResponse {
+                name: "payments".into(),
+                partitions: vec![ReassignablePartitionResponse {
+                    partition_index: 8,
+                    error_code: UNKNOWN_TOPIC_OR_PARTITION,
+                    error_message: Some("unknown partition".into()),
+                    unknown_tagged_fields: UnknownTaggedFields::default(),
+                }],
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            }],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_denies_cluster_alter_for_each_requested_partition() {
+        let version = 1;
+        let (broker_handle, _dir) = start_broker(Arc::new(DenyAll)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let principal = Principal {
+            name: "admin".into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        };
+        let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+        let ctx = test_context(&principal, &peer);
+
+        let bytes = handle(
+            &broker,
+            request(false, "payments", 8, Some(vec![1, 2])),
+            &ctx,
+            version,
+        )
+        .await
+        .expect("handle");
+        let resp = decode_response(version, &bytes);
+
+        let expected = AlterPartitionReassignmentsResponse {
+            throttle_time_ms: 0,
+            allow_replication_factor_change: false,
+            error_code: 0,
+            error_message: None,
+            responses: vec![ReassignableTopicResponse {
+                name: "payments".into(),
+                partitions: vec![ReassignablePartitionResponse {
+                    partition_index: 8,
+                    error_code: CLUSTER_AUTHORIZATION_FAILED,
+                    error_message: Some("alter-reassignment denied".into()),
+                    unknown_tagged_fields: UnknownTaggedFields::default(),
+                }],
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            }],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_submits_successful_reassignment_records() {
+        let version = 1;
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        wait_for_leader(&broker).await;
+        seed_reassignable_partition(&broker).await;
+        let principal = Principal {
+            name: "admin".into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        };
+        let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+        let ctx = test_context(&principal, &peer);
+
+        let bytes = handle(
+            &broker,
+            request(true, "orders", 7, Some(vec![1, 2])),
+            &ctx,
+            version,
+        )
+        .await
+        .expect("handle");
+        let resp = decode_response(version, &bytes);
+
+        let expected = AlterPartitionReassignmentsResponse {
+            throttle_time_ms: 0,
+            allow_replication_factor_change: true,
+            error_code: 0,
+            error_message: None,
+            responses: vec![ReassignableTopicResponse {
+                name: "orders".into(),
+                partitions: vec![ReassignablePartitionResponse {
+                    partition_index: 7,
+                    error_code: 0,
+                    error_message: None,
+                    unknown_tagged_fields: UnknownTaggedFields::default(),
+                }],
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            }],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
+
+        let image = broker.controller.current_image();
+        let partition = image.partition("orders", 7).expect("partition committed");
+        assert!(partition.adding_replicas == vec![2]);
+        assert!(partition.partition_epoch == 12);
+        broker_handle.shutdown().await;
     }
 
     #[test]
@@ -414,9 +800,19 @@ mod tests {
         let res = process_one_partition(&img, "foo", 0, Some(&[5, 6]), true)
             .expect("ok")
             .expect("Some");
-        assert!(res.replicas == vec![1, 4, 5, 6]);
-        assert!(res.adding_replicas == vec![5, 6]);
-        assert!(res.removing_replicas == vec![1, 4]);
+        let expected = PartitionRecord {
+            topic: "foo".into(),
+            partition: 0,
+            leader: 1,
+            replicas: vec![1, 4, 5, 6],
+            isr: vec![1, 2, 3],
+            leader_epoch: 5,
+            adding_replicas: vec![5, 6],
+            removing_replicas: vec![1, 4],
+            directories: vec![Uuid::nil(); 4],
+            partition_epoch: 1,
+        };
+        assert!(res == expected);
     }
 
     #[test]
@@ -436,19 +832,57 @@ mod tests {
     }
 
     #[test]
+    fn rf_check_counts_current_target_without_removing_replicas() {
+        let img = img_with(&[1, 2, 3, 4], &[1, 3, 4], &[4], &[2], 1);
+        let res = process_one_partition(&img, "foo", 0, Some(&[1, 3, 4]), false).expect("ok");
+
+        assert!(res.is_none());
+    }
+
+    #[test]
     fn cancel_with_leader_in_adding_reverts_leader() {
         // After a successful leader handoff during reassignment, leader=4 (an adding replica).
         // Cancel: leader should revert to whoever in reverted replicas ∩ isr.
         // replicas=[1,2,3,4], adding=[4], removing=[2,3], leader=4, isr=[1,4].
-        let img = img_with(&[1, 2, 3, 4], &[1, 4], &[4], &[2, 3], 4);
+        let img = img_with_epoch(&[1, 2, 3, 4], &[1, 4], &[4], &[2, 3], 4, 11);
         let res = process_one_partition(&img, "foo", 0, None, true)
             .expect("ok")
             .expect("Some");
-        assert!(res.replicas == vec![1, 2, 3]);
-        assert!(res.adding_replicas == Vec::<NodeId>::new());
-        assert!(res.removing_replicas == Vec::<NodeId>::new());
-        assert!(res.leader == 1); // reverted replicas ∩ isr = [1]
-        assert!(res.leader_epoch == 6); // bumped
+        let expected = PartitionRecord {
+            topic: "foo".into(),
+            partition: 0,
+            leader: 1, // reverted replicas ∩ isr = [1]
+            replicas: vec![1, 2, 3],
+            isr: vec![1],
+            leader_epoch: 6, // bumped
+            adding_replicas: vec![],
+            removing_replicas: vec![],
+            directories: vec![Uuid::nil(); 3],
+            partition_epoch: 12,
+        };
+        assert!(res == expected);
+    }
+
+    #[test]
+    fn cancel_with_only_removing_replicas_is_valid() {
+        let img = img_with_epoch(&[1, 2, 3], &[1, 2, 3], &[], &[3], 1, 11);
+        let res = process_one_partition(&img, "foo", 0, None, true)
+            .expect("ok")
+            .expect("Some");
+
+        let expected = PartitionRecord {
+            topic: "foo".into(),
+            partition: 0,
+            leader: 1,
+            replicas: vec![1, 2, 3],
+            isr: vec![1, 2, 3],
+            leader_epoch: 5,
+            adding_replicas: vec![],
+            removing_replicas: vec![],
+            directories: vec![Uuid::nil(); 3],
+            partition_epoch: 12,
+        };
+        assert!(res == expected);
     }
 
     #[test]

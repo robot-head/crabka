@@ -38,7 +38,7 @@ pub fn percentiles(h: &Histogram<u64>) -> LatencyPercentiles {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
 
     #[test]
     fn percentiles_basic() {
@@ -47,9 +47,9 @@ mod tests {
             record_us(&mut h, v);
         }
         let p = percentiles(&h);
-        assert!(p.p50_ms > 0.0);
-        assert!(p.count == 5);
-        assert!(p.max_ms >= p.p99_ms);
+        check!(p.p50_ms > 0.0);
+        check!(p.count == 5);
+        check!(p.max_ms >= p.p99_ms);
     }
 
     #[test]

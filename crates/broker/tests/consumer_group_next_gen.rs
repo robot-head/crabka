@@ -3,7 +3,7 @@
 
 #![allow(clippy::pedantic)]
 
-use assert2::assert;
+use assert2::{assert, check};
 use std::sync::Arc;
 
 use crabka_broker::{Broker, BrokerConfig};
@@ -231,8 +231,8 @@ async fn describe_after_join() {
         .await
         .unwrap();
     assert!(desc.groups.len() == 1);
-    assert!(desc.groups[0].error_code == 0);
-    assert!(desc.groups[0].group_state == "STABLE");
+    check!(desc.groups[0].error_code == 0);
+    check!(desc.groups[0].group_state == "STABLE");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

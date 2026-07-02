@@ -531,7 +531,7 @@ Extend `.github/workflows/operator-e2e.yml`:
 5. Assert the pod has a `metrics` containerPort: `kubectl get pod demo-brokers-0 -o jsonpath='{.spec.containers[?(@.name=="broker")].ports[?(@.name=="metrics")].containerPort}' == "9404"`.
 6. Curl `/metrics` from inside the cluster:
    ```sh
-   kubectl run curl-metrics --rm -it --image=curlimages/curl --restart=Never -- \
+   kubectl run curl-metrics --rm -it --image=mirror.gcr.io/curlimages/curl --restart=Never -- \
      -s http://demo-brokers-0.demo-broker-headless.default.svc.cluster.local:9404/metrics \
      | grep -q '^# TYPE crabka_broker'
    ```

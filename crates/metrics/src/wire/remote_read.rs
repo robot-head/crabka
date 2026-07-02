@@ -120,7 +120,7 @@ pub fn series_to_timeseries(series: Vec<(Labels, Vec<(i64, f64)>)>) -> v1::Query
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+    use assert2::{assert, check};
     use crabka_blockstore::{Labels, MatchOp};
     use prost::Message;
 
@@ -153,11 +153,11 @@ mod tests {
 
         assert!(back.queries.len() == 1);
         let (selectors, start, end) = matchers_to_selectors(&back.queries[0]).unwrap();
-        assert!(start == 1000);
-        assert!(end == 2000);
-        assert!(selectors[0].name == "__name__");
-        assert!(selectors[0].op == MatchOp::Eq);
-        assert!(selectors[0].value == "http_requests_total");
+        check!(start == 1000);
+        check!(end == 2000);
+        check!(selectors[0].name == "__name__");
+        check!(selectors[0].op == MatchOp::Eq);
+        check!(selectors[0].value == "http_requests_total");
     }
 
     /// A `remote_read` snappy block declaring a huge uncompressed length but
@@ -193,10 +193,10 @@ mod tests {
         let result = series_to_timeseries(vec![(labels, vec![(2_i64, 2.0_f64), (1, 1.0)])]);
 
         let ts = &result.timeseries[0];
-        assert!(ts.labels[0].name == "__name__");
-        assert!(ts.labels[1].name == "job");
-        assert!(ts.samples[0].timestamp == 1);
-        assert!(ts.samples[1].timestamp == 2);
+        check!(ts.labels[0].name == "__name__");
+        check!(ts.labels[1].name == "job");
+        check!(ts.samples[0].timestamp == 1);
+        check!(ts.samples[1].timestamp == 2);
     }
 
     #[test]

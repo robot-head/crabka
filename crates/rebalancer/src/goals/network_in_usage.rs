@@ -270,9 +270,16 @@ mod tests {
 
         let mvs = NetworkInUsage.propose(&s, &ctx);
 
-        assert!(mvs.len() == 1);
-        assert!(mvs[0].old_replicas == vec![1]);
-        assert!(mvs[0].new_replicas == vec![2]);
+        assert!(
+            mvs == vec![Movement {
+                topic: "hot".into(),
+                partition: 0,
+                old_replicas: vec![1],
+                new_replicas: vec![2],
+                old_leader: 1,
+                new_leader: 2,
+            }]
+        );
     }
 
     #[test]
@@ -313,10 +320,16 @@ mod tests {
 
         let mvs = NetworkInUsage.propose(&s, &ctx);
 
-        assert!(mvs.len() == 1);
-        assert!(mvs[0].old_replicas == vec![99, 1]);
-        assert!(mvs[0].new_replicas == vec![99, 2]);
-        assert!(mvs[0].new_leader == 99);
+        assert!(
+            mvs == vec![Movement {
+                topic: "t".into(),
+                partition: 0,
+                old_replicas: vec![99, 1],
+                new_replicas: vec![99, 2],
+                old_leader: 99,
+                new_leader: 99,
+            }]
+        );
     }
 
     #[test]

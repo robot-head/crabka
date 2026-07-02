@@ -74,10 +74,14 @@ mod tests {
 
     #[test]
     fn status_terminal_flags() {
-        assert!(!ProposalStatus::Computed.is_terminal());
-        assert!(!ProposalStatus::Executing.is_terminal());
-        assert!(ProposalStatus::Completed.is_terminal());
-        assert!(ProposalStatus::Failed.is_terminal());
-        assert!(ProposalStatus::Cancelled.is_terminal());
+        for (status, want) in [
+            (ProposalStatus::Computed, false),
+            (ProposalStatus::Executing, false),
+            (ProposalStatus::Completed, true),
+            (ProposalStatus::Failed, true),
+            (ProposalStatus::Cancelled, true),
+        ] {
+            assert!(status.is_terminal() == want, "status {status:?}");
+        }
     }
 }

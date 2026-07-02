@@ -42,7 +42,7 @@ pub struct ListenerSpec {
 
 /// Credentials the broker uses when connecting *to* other brokers, one
 /// variant per SASL mechanism the inter-broker client can speak.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InterBrokerCredentials {
     /// SASL/PLAIN: `\0username\0password`.
     Plain { username: String, password: String },
@@ -572,8 +572,8 @@ impl Default for KafkaRlmmConfig {
     fn default() -> Self {
         Self {
             bootstrap: String::new(),
-            num_partitions: 50,
-            replication: 3,
+            num_partitions: DEFAULT_RLMM_TOPIC_NUM_PARTITIONS,
+            replication: DEFAULT_RLMM_TOPIC_REPLICATION_FACTOR,
             snapshot_interval: DEFAULT_RLMM_SNAPSHOT_INTERVAL,
             snapshot_dir: std::path::PathBuf::new(),
             security: None,
@@ -598,6 +598,78 @@ pub enum RemoteStorageBackend {
     /// ADC auth (leave all credential fields unset).
     Gcs(crabka_remote_storage::GcsConfig),
 }
+
+/// Default broker→controller `BrokerHeartbeat` cadence, in milliseconds.
+pub const DEFAULT_HEARTBEAT_INTERVAL_MS: u64 = 3_000;
+
+/// Default controller-side broker-session timeout, in milliseconds (3× the
+/// heartbeat interval, so a broker survives two missed heartbeats).
+pub const DEFAULT_HEARTBEAT_TIMEOUT_MS: u64 = 9_000;
+
+/// Default maximum follower lag before the leader proposes ISR shrink, in
+/// milliseconds. Matches Kafka's `replica.lag.time.max.ms` default.
+pub const DEFAULT_REPLICA_LAG_TIME_MAX_MS: u64 = 30_000;
+
+/// Default byte gap between metadata-log snapshots: 20 MiB, matching Kafka's
+/// `metadata.log.max.record.bytes.between.snapshots`.
+pub const DEFAULT_METADATA_MAX_BYTES_BETWEEN_SNAPSHOTS: u64 = 20 * 1024 * 1024;
+
+/// Default time cap between metadata-log snapshots: 1 hour, matching Kafka's
+/// `metadata.log.max.snapshot.interval.ms`.
+pub const DEFAULT_METADATA_MAX_SNAPSHOT_INTERVAL: std::time::Duration =
+    std::time::Duration::from_hours(1);
+
+/// KIP-630: default committed-record gap between metadata-log snapshots.
+pub const DEFAULT_METADATA_SNAPSHOT_INTERVAL_RECORDS: u64 = 10_000;
+
+/// KIP-853: default maximum log-entry lag at which an observer is still
+/// promotable to a quorum voter.
+pub const DEFAULT_OBSERVER_LAG_BOUND: u64 = 100;
+
+/// KIP-460: default auto-rebalance tick cadence, in seconds. Matches Kafka's
+/// `leader.imbalance.check.interval.seconds`.
+pub const DEFAULT_LEADER_IMBALANCE_CHECK_INTERVAL_SECS: u64 = 300;
+
+/// KIP-460: default minimum percentage of imbalanced partitions before the
+/// auto-rebalance ticker acts. Matches Kafka's
+/// `leader.imbalance.per.broker.percentage`.
+pub const DEFAULT_LEADER_IMBALANCE_PER_BROKER_PERCENTAGE: u32 = 10;
+
+/// KIP-227: default incremental-fetch session cache capacity. Matches Kafka's
+/// `max.incremental.fetch.session.cache.slots`.
+pub const DEFAULT_MAX_INCREMENTAL_FETCH_SESSION_CACHE_SLOTS: usize = 1000;
+
+/// Default cadence of the background JWKS re-fetch for the signed
+/// OAUTHBEARER validator: 5 minutes.
+pub const DEFAULT_JWKS_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_mins(5);
+
+/// Default minimum pause between on-demand JWKS refreshes triggered by
+/// validator signals: 1 second (Strimzi parity).
+pub const DEFAULT_JWKS_MIN_ON_DEMAND_PAUSE: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// KIP-405: default partition count for `__remote_log_metadata` on first
+/// creation. Matches Kafka's `remote.log.metadata.topic.num.partitions`.
+pub const DEFAULT_RLMM_TOPIC_NUM_PARTITIONS: i32 = 50;
+
+/// KIP-405: default replication factor for `__remote_log_metadata` on first
+/// creation. Matches Kafka's `remote.log.metadata.topic.replication.factor`.
+pub const DEFAULT_RLMM_TOPIC_REPLICATION_FACTOR: i32 = 3;
+
+/// Default internal topic name for `FedRAMP` MLA audit records.
+pub const DEFAULT_AUDIT_TOPIC: &str = "__crabka_audit";
+
+/// Default number of audit records between signed checkpoints.
+pub const DEFAULT_AUDIT_CHECKPOINT_EVERY_N: u64 = 1000;
+
+/// Default maximum seconds between signed audit checkpoints.
+pub const DEFAULT_AUDIT_CHECKPOINT_EVERY_SECS: u64 = 60;
+
+/// Default durable audit-spool directory (relative paths resolve under the
+/// broker's log dir).
+pub const DEFAULT_AUDIT_SPOOL_DIR: &str = "audit-spool";
+
+/// Default cap on the durable audit spool: 1 GiB.
+pub const DEFAULT_AUDIT_SPOOL_MAX_BYTES: u64 = 1024 * 1024 * 1024;
 
 /// KIP-48: default hard upper bound on delegation-token lifetime.
 /// 7 days, matches Kafka's `delegation.token.max.lifetime.ms` default.
@@ -636,7 +708,7 @@ impl BrokerConfig {
             directory_id: uuid::Uuid::from_u128(1),
             incarnation_id: uuid::Uuid::new_v4(),
             auto_join: false,
-            observer_lag_bound: 100,
+            observer_lag_bound: DEFAULT_OBSERVER_LAG_BOUND,
             heartbeat_interval_ms: 200,
             heartbeat_timeout_ms: 2_000,
             replica_lag_time_max_ms: 2_000,
@@ -649,9 +721,9 @@ impl BrokerConfig {
             // pass within its 5s assertion window.
             controller_election_timeout: std::time::Duration::from_millis(500),
             controller_heartbeat_interval: std::time::Duration::from_millis(100),
-            metadata_max_bytes_between_snapshots: 20 * 1024 * 1024,
-            metadata_max_snapshot_interval: std::time::Duration::from_hours(1),
-            metadata_snapshot_interval_records: 10_000,
+            metadata_max_bytes_between_snapshots: DEFAULT_METADATA_MAX_BYTES_BETWEEN_SNAPSHOTS,
+            metadata_max_snapshot_interval: DEFAULT_METADATA_MAX_SNAPSHOT_INTERVAL,
+            metadata_snapshot_interval_records: DEFAULT_METADATA_SNAPSHOT_INTERVAL_RECORDS,
             bootstrap_mode: BootstrapMode::Bootstrap,
             cluster_id: None,
             rack: None,
@@ -668,7 +740,7 @@ impl BrokerConfig {
             oauthbearer_validator: crabka_security::OAuthBearerValidator::default(),
             gssapi: None,
             oauthbearer_jwks_endpoint: None,
-            oauthbearer_jwks_refresh_interval: std::time::Duration::from_mins(5),
+            oauthbearer_jwks_refresh_interval: DEFAULT_JWKS_REFRESH_INTERVAL,
             oauthbearer_idp_tls_trust: None,
             oauthbearer_max_session_lifetime_seconds: None,
             oauthbearer_jwks_signal_rx: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -678,7 +750,7 @@ impl BrokerConfig {
             oauthbearer_jwks_last_on_demand_refresh_ms: std::sync::Arc::new(
                 std::sync::atomic::AtomicI64::new(0),
             ),
-            oauthbearer_jwks_min_on_demand_pause: std::time::Duration::from_secs(1),
+            oauthbearer_jwks_min_on_demand_pause: DEFAULT_JWKS_MIN_ON_DEMAND_PAUSE,
             oauthbearer_jwks_ignore_key_use: false,
             auto_leader_rebalance_enable: false, // tests opt in explicitly
             transaction_two_phase_commit_enable: false, // tests opt in explicitly
@@ -696,8 +768,8 @@ impl BrokerConfig {
             share_coordinator: Box::new(
                 crate::share_coordinator::config::ShareCoordinatorConfig::default(),
             ),
-            leader_imbalance_check_interval_secs: 300,
-            leader_imbalance_per_broker_percentage: 10,
+            leader_imbalance_check_interval_secs: DEFAULT_LEADER_IMBALANCE_CHECK_INTERVAL_SECS,
+            leader_imbalance_per_broker_percentage: DEFAULT_LEADER_IMBALANCE_PER_BROKER_PERCENTAGE,
             #[cfg(any(test, feature = "test-helpers"))]
             cleaner_interval_override: None,
             // Short interval so hot-reload tests don't wait long for a
@@ -711,7 +783,8 @@ impl BrokerConfig {
             // background task doesn't tick during short-lived fixtures.
             // Integration tests enable this explicitly when needed.
             partition_disk_scan_interval_secs: 0,
-            max_incremental_fetch_session_cache_slots: 1000,
+            max_incremental_fetch_session_cache_slots:
+                DEFAULT_MAX_INCREMENTAL_FETCH_SESSION_CACHE_SLOTS,
             // Connection caps unlimited by default (Kafka's
             // Integer.MAX_VALUE); the enforcement path treats usize::MAX
             // as "no cap" and never increments the per-IP map.
@@ -734,13 +807,13 @@ impl BrokerConfig {
             remote_log_metadata: RlmmKind::InMemory,
             // Audit enabled by default (secure-by-default / `FedRAMP` MLA).
             audit_enabled: true,
-            audit_topic: "__crabka_audit".to_string(),
+            audit_topic: DEFAULT_AUDIT_TOPIC.to_string(),
             audit_signing_key_path: None,
             audit_signing_key_id: None,
-            audit_checkpoint_every_n: 1000,
-            audit_checkpoint_every_secs: 60,
-            audit_spool_dir: std::path::PathBuf::from("audit-spool"),
-            audit_spool_max_bytes: 1_073_741_824,
+            audit_checkpoint_every_n: DEFAULT_AUDIT_CHECKPOINT_EVERY_N,
+            audit_checkpoint_every_secs: DEFAULT_AUDIT_CHECKPOINT_EVERY_SECS,
+            audit_spool_dir: std::path::PathBuf::from(DEFAULT_AUDIT_SPOOL_DIR),
+            audit_spool_max_bytes: DEFAULT_AUDIT_SPOOL_MAX_BYTES,
         }
     }
 
@@ -921,15 +994,15 @@ impl Default for BrokerConfig {
             directory_id: uuid::Uuid::from_u128(1),
             incarnation_id: uuid::Uuid::nil(),
             auto_join: false,
-            observer_lag_bound: 100,
-            heartbeat_interval_ms: 3_000,
-            heartbeat_timeout_ms: 9_000,
-            replica_lag_time_max_ms: 30_000,
+            observer_lag_bound: DEFAULT_OBSERVER_LAG_BOUND,
+            heartbeat_interval_ms: DEFAULT_HEARTBEAT_INTERVAL_MS,
+            heartbeat_timeout_ms: DEFAULT_HEARTBEAT_TIMEOUT_MS,
+            replica_lag_time_max_ms: DEFAULT_REPLICA_LAG_TIME_MAX_MS,
             controller_election_timeout: std::time::Duration::from_secs(5),
             controller_heartbeat_interval: std::time::Duration::from_millis(500),
-            metadata_max_bytes_between_snapshots: 20 * 1024 * 1024,
-            metadata_max_snapshot_interval: std::time::Duration::from_hours(1),
-            metadata_snapshot_interval_records: 10_000,
+            metadata_max_bytes_between_snapshots: DEFAULT_METADATA_MAX_BYTES_BETWEEN_SNAPSHOTS,
+            metadata_max_snapshot_interval: DEFAULT_METADATA_MAX_SNAPSHOT_INTERVAL,
+            metadata_snapshot_interval_records: DEFAULT_METADATA_SNAPSHOT_INTERVAL_RECORDS,
             bootstrap_mode: BootstrapMode::Bootstrap,
             cluster_id: None,
             rack: None,
@@ -946,7 +1019,7 @@ impl Default for BrokerConfig {
             oauthbearer_validator: crabka_security::OAuthBearerValidator::default(),
             gssapi: None,
             oauthbearer_jwks_endpoint: None,
-            oauthbearer_jwks_refresh_interval: std::time::Duration::from_mins(5),
+            oauthbearer_jwks_refresh_interval: DEFAULT_JWKS_REFRESH_INTERVAL,
             oauthbearer_idp_tls_trust: None,
             oauthbearer_max_session_lifetime_seconds: None,
             oauthbearer_jwks_signal_rx: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -956,7 +1029,7 @@ impl Default for BrokerConfig {
             oauthbearer_jwks_last_on_demand_refresh_ms: std::sync::Arc::new(
                 std::sync::atomic::AtomicI64::new(0),
             ),
-            oauthbearer_jwks_min_on_demand_pause: std::time::Duration::from_secs(1),
+            oauthbearer_jwks_min_on_demand_pause: DEFAULT_JWKS_MIN_ON_DEMAND_PAUSE,
             oauthbearer_jwks_ignore_key_use: false,
             auto_leader_rebalance_enable: true,
             // KIP-939: 2PC participation is opt-in, matching Kafka's default.
@@ -976,8 +1049,8 @@ impl Default for BrokerConfig {
             share_coordinator: Box::new(
                 crate::share_coordinator::config::ShareCoordinatorConfig::default(),
             ),
-            leader_imbalance_check_interval_secs: 300,
-            leader_imbalance_per_broker_percentage: 10,
+            leader_imbalance_check_interval_secs: DEFAULT_LEADER_IMBALANCE_CHECK_INTERVAL_SECS,
+            leader_imbalance_per_broker_percentage: DEFAULT_LEADER_IMBALANCE_PER_BROKER_PERCENTAGE,
             #[cfg(any(test, feature = "test-helpers"))]
             cleaner_interval_override: None,
             tls_reload_interval: std::time::Duration::from_secs(30),
@@ -989,7 +1062,8 @@ impl Default for BrokerConfig {
             // metrics by default.
             metrics_listen_addr: None,
             partition_disk_scan_interval_secs: 60,
-            max_incremental_fetch_session_cache_slots: 1000,
+            max_incremental_fetch_session_cache_slots:
+                DEFAULT_MAX_INCREMENTAL_FETCH_SESSION_CACHE_SLOTS,
             // Connection caps unlimited by default, matching Kafka's
             // max.connections / max.connections.per.ip (Integer.MAX_VALUE).
             max_connections: usize::MAX,
@@ -1011,13 +1085,13 @@ impl Default for BrokerConfig {
             remote_log_metadata: RlmmKind::TopicBacked(KafkaRlmmConfig::default()),
             // Audit enabled by default (secure-by-default / `FedRAMP` MLA).
             audit_enabled: true,
-            audit_topic: "__crabka_audit".to_string(),
+            audit_topic: DEFAULT_AUDIT_TOPIC.to_string(),
             audit_signing_key_path: None,
             audit_signing_key_id: None,
-            audit_checkpoint_every_n: 1000,
-            audit_checkpoint_every_secs: 60,
-            audit_spool_dir: std::path::PathBuf::from("audit-spool"),
-            audit_spool_max_bytes: 1_073_741_824,
+            audit_checkpoint_every_n: DEFAULT_AUDIT_CHECKPOINT_EVERY_N,
+            audit_checkpoint_every_secs: DEFAULT_AUDIT_CHECKPOINT_EVERY_SECS,
+            audit_spool_dir: std::path::PathBuf::from(DEFAULT_AUDIT_SPOOL_DIR),
+            audit_spool_max_bytes: DEFAULT_AUDIT_SPOOL_MAX_BYTES,
         }
     }
 }
@@ -1026,7 +1100,7 @@ impl Default for BrokerConfig {
 mod tests {
     use super::*;
     use crate::BrokerError as BrokerStartError;
-    use assert2::assert;
+    use assert2::{assert, check};
 
     #[test]
     fn production_default_selects_topic_backed_rlmm() {
@@ -1043,10 +1117,12 @@ mod tests {
     #[test]
     fn kafka_rlmm_config_default_has_sane_topic_settings() {
         let c = KafkaRlmmConfig::default();
-        assert!(c.num_partitions == 50);
-        assert!(c.replication == 3);
-        assert!(c.bootstrap.is_empty());
-        assert!(c.snapshot_dir.as_os_str().is_empty());
+        check!(c.num_partitions == 50);
+        check!(c.replication == 3);
+        check!(c.bootstrap.is_empty());
+        check!(c.snapshot_dir == std::path::PathBuf::new());
+        check!(c.snapshot_interval == DEFAULT_RLMM_SNAPSHOT_INTERVAL);
+        check!(c.security.is_none());
     }
 
     #[test]
@@ -1164,6 +1240,14 @@ mod tests {
     }
 
     #[test]
+    fn for_tests_uses_20_mib_metadata_snapshot_threshold() {
+        let cfg = BrokerConfig::for_tests(std::path::PathBuf::from("/tmp"));
+        let mib = 1024 * 1024;
+        assert!(cfg.metadata_max_bytes_between_snapshots == 20 * mib);
+        assert!(cfg.metadata_max_bytes_between_snapshots / mib == 20);
+    }
+
+    #[test]
     fn for_tests_uses_short_raft_timings_for_fast_failover() {
         let c = BrokerConfig::for_tests(std::path::PathBuf::from("/tmp"));
         // Short enough that a 3-broker test can detect a dead leader and
@@ -1186,13 +1270,22 @@ mod tests {
     }
 
     #[test]
+    fn all_log_dirs_keeps_primary_first_and_deduplicates_extras() {
+        let primary = std::path::PathBuf::from("/data/primary");
+        let extra = std::path::PathBuf::from("/data/extra");
+        let mut c = BrokerConfig::for_tests(primary.clone());
+        c.extra_log_dirs = vec![extra.clone(), primary.clone(), extra.clone()];
+
+        assert!(c.all_log_dirs() == vec![primary, extra]);
+    }
+
+    #[test]
     fn defaults_to_combined_roles() {
         let d = BrokerConfig::default();
-        assert!(d.is_controller(), "default node is a controller");
-        assert!(d.is_broker(), "default node is a broker");
         assert!(
-            d.roles == vec![NodeRole::Controller, NodeRole::Broker],
-            "default roles are the combined set"
+            (d.is_controller(), d.is_broker(), d.roles)
+                == (true, true, vec![NodeRole::Controller, NodeRole::Broker]),
+            "default node is a combined controller+broker with the combined role set"
         );
 
         let t = BrokerConfig::for_tests(std::path::PathBuf::from("/tmp"));
@@ -1347,9 +1440,9 @@ mod tests {
     #[test]
     fn auto_leader_rebalance_defaults_to_true_in_default() {
         let c = BrokerConfig::default();
-        assert!(c.auto_leader_rebalance_enable);
-        assert!(c.leader_imbalance_check_interval_secs == 300);
-        assert!(c.leader_imbalance_per_broker_percentage == 10);
+        check!(c.auto_leader_rebalance_enable);
+        check!(c.leader_imbalance_check_interval_secs == 300);
+        check!(c.leader_imbalance_per_broker_percentage == 10);
     }
 
     #[test]
@@ -1380,6 +1473,17 @@ mod tests {
             c.validate(),
             Err(BrokerError::InvalidLeaderRebalanceThreshold { value: 101 })
         ));
+    }
+
+    #[test]
+    fn rebalance_threshold_100_is_allowed_by_validate() {
+        let c = BrokerConfig {
+            leader_imbalance_per_broker_percentage: 100,
+            ..BrokerConfig::default()
+        };
+
+        c.validate()
+            .expect("100% leader imbalance threshold is the maximum valid value");
     }
 
     #[test]

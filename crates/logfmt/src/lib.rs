@@ -159,7 +159,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use std::io::Write;
     use std::sync::{Arc, Mutex};
     use tracing_subscriber::layer::SubscriberExt as _;
@@ -207,16 +207,20 @@ mod tests {
                 "connection opened"
             );
         });
-        assert!(v["severity"] == "INFO");
-        assert!(v["message"] == "connection opened");
-        assert!(v["listener"] == "PLAIN");
         // Field types are preserved, not stringified.
-        assert!(v["sasl"] == false);
-        assert!(v["port"] == 9092);
-        assert!(v["target"].is_string());
-        assert!(v["timestamp"].as_str().is_some_and(|t| t.ends_with('Z')));
+        for (field, want) in [
+            ("severity", serde_json::json!("INFO")),
+            ("message", serde_json::json!("connection opened")),
+            ("listener", serde_json::json!("PLAIN")),
+            ("sasl", serde_json::json!(false)),
+            ("port", serde_json::json!(9092)),
+        ] {
+            assert!(v[field] == want, "field {field:?} in {v}");
+        }
+        check!(v["target"].is_string());
+        check!(v["timestamp"].as_str().is_some_and(|t| t.ends_with('Z')));
         // `level` is replaced by Cloud Logging's `severity`.
-        assert!(v.get("level").is_none());
+        check!(v.get("level").is_none());
     }
 
     #[test]

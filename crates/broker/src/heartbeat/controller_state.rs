@@ -407,9 +407,12 @@ mod tests {
         let liveness = ControllerLivenessState::new(Duration::from_secs(10));
         liveness.set_wants_shutdown(1, true).await;
         liveness.set_wants_shutdown(2, true).await;
-        assert!(liveness.wants_shutdown(1).await);
-        assert!(liveness.wants_shutdown(2).await);
-        assert!(!liveness.wants_shutdown(3).await);
+        for (broker, want) in [(1, true), (2, true), (3, false)] {
+            assert!(
+                liveness.wants_shutdown(broker).await == want,
+                "broker {broker}"
+            );
+        }
         liveness.set_wants_shutdown(1, false).await;
         assert!(!liveness.wants_shutdown(1).await);
         assert!(liveness.wants_shutdown(2).await);

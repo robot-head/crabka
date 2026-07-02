@@ -8,7 +8,7 @@
 //!
 //! The Crabka broker runs in-process on the host, bound to `0.0.0.0:9092`, and
 //! advertises `host.docker.internal:9092`. The cp-kafka CLI tools run inside
-//! `confluentinc/cp-kafka` containers launched with
+//! `mirror.gcr.io/confluentinc/cp-kafka` containers launched with
 //! `--add-host=host.docker.internal:host-gateway`, so they reach the host
 //! broker via the advertised name (same trick as `jvm_acceptance.rs`).
 //!
@@ -44,7 +44,7 @@ use crabka_security::gssapi::name::Rule;
 use crabka_security::{ListenerProtocol, SaslMechanism};
 
 /// cp-kafka image bundling the GSSAPI-capable console tools.
-const KAFKA_IMAGE: &str = "confluentinc/cp-kafka:6.1.1";
+const KAFKA_IMAGE: &str = "mirror.gcr.io/confluentinc/cp-kafka:6.1.1";
 /// Host bind address for the broker's `SASL_PLAINTEXT` data-plane listener.
 const LISTEN: &str = "0.0.0.0:9092";
 /// Advertised name the CLI containers resolve via `--add-host`. Also the host

@@ -251,7 +251,7 @@ fn millis_to_secs_ceil(ms: u64) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+    use assert2::{assert, check};
     use crabka_blockstore::Labels;
 
     use super::*;
@@ -295,7 +295,7 @@ mod tests {
         let ok = labels(&[("ab", "cd")]);
         let bad_name = labels(&[("toolong", "x")]);
         let bad_val = labels(&[("a", "toolong")]);
-        assert!(IngestEnforcer::check_labels(&l, &ok).is_ok());
+        check!(IngestEnforcer::check_labels(&l, &ok).is_ok());
         assert!(matches!(
             IngestEnforcer::check_labels(&l, &bad_name),
             Err(LimitError::LabelNameTooLong { .. })
@@ -390,9 +390,9 @@ mod tests {
             ingestion_burst_size: 1000,
             ..Limits::default()
         };
-        assert!(e.check_sample_rate(&l, "t", 500).is_ok());
-        assert!(e.check_sample_rate(&l, "t", 500).is_ok());
-        assert!(e.check_sample_rate(&l, "t", 1).is_err());
+        check!(e.check_sample_rate(&l, "t", 500).is_ok());
+        check!(e.check_sample_rate(&l, "t", 500).is_ok());
+        check!(e.check_sample_rate(&l, "t", 1).is_err());
     }
 
     #[test]
@@ -420,8 +420,8 @@ mod tests {
             max_samples_per_query: 1000,
             ..Limits::default()
         };
-        assert!(QueryEnforcer::check_series_count(&l, 11).is_err());
-        assert!(QueryEnforcer::check_sample_count(&l, 1001).is_err());
-        assert!(QueryEnforcer::check_series_count(&l, 10).is_ok());
+        check!(QueryEnforcer::check_series_count(&l, 11).is_err());
+        check!(QueryEnforcer::check_sample_count(&l, 1001).is_err());
+        check!(QueryEnforcer::check_series_count(&l, 10).is_ok());
     }
 }

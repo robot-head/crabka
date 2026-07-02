@@ -18,6 +18,68 @@ use crate::log_dir;
 use crate::partition::{Partition, WriterMessage};
 use crate::partition_registry::PartitionRegistry;
 
+/// Startup deadline for the controller quorum to elect a leader before
+/// `Broker::start` fails with a `Startup` error.
+const STARTUP_LEADER_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(2);
+
+/// Maximum broker self-registration submit attempts before `Broker::start`
+/// gives up and fails startup.
+const SELF_REGISTRATION_MAX_ATTEMPTS: u32 = 8;
+
+/// First delay of the exponential self-registration retry backoff.
+const SELF_REGISTRATION_BACKOFF_MIN: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Ceiling of the exponential self-registration retry backoff.
+const SELF_REGISTRATION_BACKOFF_MAX: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Max bytes per `__cluster_metadata` fetch issued by a broker-only node's
+/// metadata observer (1 MiB).
+const OBSERVER_FETCH_MAX_BYTES: u32 = 1_048_576;
+
+/// How often a broker-only node's metadata observer polls the controller
+/// quorum for new `__cluster_metadata` records.
+const OBSERVER_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Capacity of the bounded audit-event channel between `AuditLog::emit`
+/// callers and the `AuditWriter` drain task; events past this depth drop.
+const AUDIT_EVENT_QUEUE_CAPACITY: usize = 8192;
+
+/// Cadence at which the `AuditWriter` replays spooled audit records back
+/// into the audit topic.
+const AUDIT_SPOOL_REPLAY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Cadence at which audit spool stats are polled into Prometheus gauges.
+const AUDIT_STATS_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Startup wait for this broker's led audit partition to materialise before
+/// emitting the `BrokerStarted` lifecycle event (best-effort; on timeout the
+/// event is emitted anyway and may drop).
+const AUDIT_PARTITION_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Cadence of the controller-side liveness scan that fires leader-election
+/// callbacks on broker alive/dead transitions.
+const LIVENESS_TICK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Cadence of the background poll refreshing the partition/controller health
+/// gauges (`partitions_led`, URP, under-min-ISR, offline, `active_controller`).
+const GAUGE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Cadence of the KIP-714 client-metrics stale-entry eviction sweep.
+const CLIENT_METRICS_EVICTION_TICK: std::time::Duration = std::time::Duration::from_mins(1);
+
+/// KIP-714 eviction: a client-metrics entry is stale once this many push
+/// intervals have elapsed without a push.
+const CLIENT_METRICS_STALE_PUSH_INTERVALS: u32 = 3;
+
+/// KIP-714 eviction: floor on the staleness window, so clients on very short
+/// push intervals are not evicted between pushes.
+const CLIENT_METRICS_STALE_FLOOR: std::time::Duration = std::time::Duration::from_mins(10);
+
+/// Safety-net timeout shared by the test-helper `wait_*` awaiters: a
+/// condition that has not held within this window fails the test loudly.
+#[cfg(any(test, feature = "test-helpers"))]
+const TEST_AWAITER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// The running broker. Library callers get a [`BrokerHandle`] from
 /// [`Broker::start`]; this struct is the shared internal state.
 // `config`, `metadata`, `partitions` are consumed by the per-API handlers
@@ -485,7 +547,7 @@ impl BrokerHandle {
         topic_id: uuid::Uuid,
         partition: i32,
     ) {
-        let res = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let res = tokio::time::timeout(TEST_AWAITER_TIMEOUT, async {
             loop {
                 if self
                     .share_state_summary_for_test(group, topic_id, partition)
@@ -515,7 +577,7 @@ impl BrokerHandle {
         partition: i32,
         min: i64,
     ) {
-        let res = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let res = tokio::time::timeout(TEST_AWAITER_TIMEOUT, async {
             loop {
                 if let Some((_, _, spso, _)) = self
                     .share_state_summary_for_test(group, topic_id, partition)
@@ -545,7 +607,7 @@ impl BrokerHandle {
         partition: i32,
         min: i32,
     ) {
-        let res = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let res = tokio::time::timeout(TEST_AWAITER_TIMEOUT, async {
             loop {
                 if let Some((_, _, _, dcc)) = self
                     .share_state_summary_for_test(group, topic_id, partition)
@@ -577,7 +639,7 @@ impl BrokerHandle {
         partition: i32,
         n: i32,
     ) {
-        let res = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let res = tokio::time::timeout(TEST_AWAITER_TIMEOUT, async {
             loop {
                 if let Some(cell) = self
                     ._broker
@@ -631,7 +693,7 @@ impl BrokerHandle {
     #[cfg(any(test, feature = "test-helpers"))]
     #[allow(clippy::used_underscore_binding)]
     pub async fn wait_until_group_member_count(&self, group_id: &str, n: usize) {
-        let res = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let res = tokio::time::timeout(TEST_AWAITER_TIMEOUT, async {
             loop {
                 let count = self
                     .group_describe_for_test(group_id)
@@ -695,7 +757,7 @@ impl BrokerHandle {
     #[cfg(any(test, feature = "test-helpers"))]
     #[allow(clippy::used_underscore_binding)]
     pub async fn wait_until_classic_group_member_count(&self, group_id: &str, n: usize) {
-        let res = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let res = tokio::time::timeout(TEST_AWAITER_TIMEOUT, async {
             loop {
                 let count = self
                     .classic_group_inspect_for_test(group_id)
@@ -750,7 +812,7 @@ impl BrokerHandle {
     #[cfg(any(test, feature = "test-helpers"))]
     #[allow(clippy::used_underscore_binding)]
     pub async fn wait_until_streams_group_member_count(&self, group_id: &str, n: usize) {
-        let res = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let res = tokio::time::timeout(TEST_AWAITER_TIMEOUT, async {
             loop {
                 let count = self
                     .streams_group_describe_for_test(group_id)
@@ -861,7 +923,6 @@ impl BrokerHandle {
         let mut last_offset = 0i64;
         for i in 0..n {
             let batch = crabka_protocol::records::RecordBatch {
-                last_offset_delta: 0,
                 records: vec![crabka_protocol::records::Record {
                     offset_delta: 0,
                     value: Some(bytes::Bytes::from(format!("test-record-{i}").into_bytes())),
@@ -942,7 +1003,7 @@ impl BrokerHandle {
     /// broker without hard-coding a node id.
     #[must_use]
     #[allow(clippy::used_underscore_binding)]
-    pub fn node_id(&self) -> u64 {
+    pub fn node_id(&self) -> crabka_raft::NodeId {
         self._broker.config.node_id
     }
 
@@ -1051,7 +1112,11 @@ impl BrokerHandle {
     #[cfg(any(test, feature = "test-helpers"))]
     #[must_use]
     #[allow(clippy::used_underscore_binding)]
-    pub fn partition_leader_for_test(&self, topic: &str, partition: i32) -> Option<u64> {
+    pub fn partition_leader_for_test(
+        &self,
+        topic: &str,
+        partition: i32,
+    ) -> Option<crabka_raft::NodeId> {
         let img = self._broker.controller.current_image();
         let p = img.partition(topic, partition)?;
         if p.leader == 0 { None } else { Some(p.leader) }
@@ -1063,7 +1128,11 @@ impl BrokerHandle {
     #[cfg(any(test, feature = "test-helpers"))]
     #[must_use]
     #[allow(clippy::used_underscore_binding)]
-    pub fn partition_isr_for_test(&self, topic: &str, partition: i32) -> Option<Vec<u64>> {
+    pub fn partition_isr_for_test(
+        &self,
+        topic: &str,
+        partition: i32,
+    ) -> Option<Vec<crabka_raft::NodeId>> {
         let img = self._broker.controller.current_image();
         let p = img.partition(topic, partition)?;
         Some(p.isr.clone())
@@ -1109,7 +1178,7 @@ impl BrokerHandle {
         F: Fn(&crabka_metadata::MetadataImage) -> bool,
     {
         let mut rx = self._broker.controller.watch_image();
-        let res = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let res = tokio::time::timeout(TEST_AWAITER_TIMEOUT, async {
             loop {
                 // Scope the borrow so it is dropped before the await.
                 if pred(&rx.borrow_and_update()) {
@@ -1130,7 +1199,7 @@ impl BrokerHandle {
     #[allow(clippy::used_underscore_binding)]
     pub async fn wait_until_controller_leader(&self) -> crabka_raft::NodeId {
         let mut rx = self.watch_leader_for_test();
-        let res = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let res = tokio::time::timeout(TEST_AWAITER_TIMEOUT, async {
             loop {
                 if let Some(id) = *rx.borrow_and_update()
                     && id != 0
@@ -1174,7 +1243,7 @@ impl BrokerHandle {
         &self,
         topic: &str,
         partition: i32,
-        exclude: u64,
+        exclude: crabka_raft::NodeId,
     ) {
         self.wait_for_image(|img| {
             img.partition(topic, partition)
@@ -1204,7 +1273,7 @@ impl BrokerHandle {
     #[cfg(any(test, feature = "test-helpers"))]
     #[allow(clippy::used_underscore_binding)]
     pub async fn wait_until_local_log_end_offset(&self, topic: &str, partition: i32, min: i64) {
-        let res = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let res = tokio::time::timeout(TEST_AWAITER_TIMEOUT, async {
             loop {
                 if let Some(part) = self._broker.partitions.get(topic, partition) {
                     let notified = part.append_notify.notified();
@@ -1245,7 +1314,7 @@ impl BrokerHandle {
         partition: i32,
         target: i64,
     ) {
-        let res = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let res = tokio::time::timeout(TEST_AWAITER_TIMEOUT, async {
             loop {
                 if let Some(part) = self._broker.partitions.get(topic, partition) {
                     let notified = part.append_notify.notified();
@@ -1905,8 +1974,8 @@ impl Broker {
                     dialer: dialer.clone(),
                     client_id: format!("crabka-broker-{}-observer", config.broker_id),
                     cluster_id: config.cluster_id.unwrap_or_else(uuid::Uuid::nil),
-                    max_bytes: 1_048_576,
-                    poll_interval: std::time::Duration::from_millis(100),
+                    max_bytes: OBSERVER_FETCH_MAX_BYTES,
+                    poll_interval: OBSERVER_POLL_INTERVAL,
                 },
             );
             let forwarder = crate::metadata_source::QuorumForwarder {
@@ -1964,12 +2033,12 @@ impl Broker {
         //    membership reconciliation can retry later.
         {
             let mut leader_rx = controller.watch_leader();
-            let deadline = std::time::Instant::now() + std::time::Duration::from_mins(2);
+            let deadline = std::time::Instant::now() + STARTUP_LEADER_WAIT_TIMEOUT;
             while leader_rx.borrow().is_none() {
                 if std::time::Instant::now() > deadline {
-                    return Err(BrokerError::Startup(
-                        "no leader elected within 2 min".into(),
-                    ));
+                    return Err(BrokerError::Startup(format!(
+                        "no leader elected within {STARTUP_LEADER_WAIT_TIMEOUT:?}"
+                    )));
                 }
                 let _ = tokio::time::timeout(
                     std::time::Duration::from_millis(100),
@@ -2023,9 +2092,9 @@ impl Broker {
                     },
                 );
                 let backoff = exponential_backoff::Backoff::new(
-                    8,
-                    std::time::Duration::from_millis(100),
-                    Some(std::time::Duration::from_secs(5)),
+                    SELF_REGISTRATION_MAX_ATTEMPTS,
+                    SELF_REGISTRATION_BACKOFF_MIN,
+                    Some(SELF_REGISTRATION_BACKOFF_MAX),
                 );
                 for (attempt_idx, delay) in backoff.into_iter().enumerate() {
                     let attempt = attempt_idx + 1;
@@ -2298,7 +2367,7 @@ impl Broker {
         };
 
         let audit_log = if config.audit_enabled {
-            let (log, rx) = crabka_audit::AuditLog::new(8192);
+            let (log, rx) = crabka_audit::AuditLog::new(AUDIT_EVENT_QUEUE_CAPACITY);
             if let Some(pidx) = audit_led_partition {
                 let sink = std::sync::Arc::new(crate::audit_sink::KafkaTopicAuditSink::new(
                     partitions.clone(),
@@ -2376,19 +2445,19 @@ impl Broker {
                         chain,
                         spool,
                         stats: stats.clone(),
-                        replay_every: std::time::Duration::from_secs(2),
+                        replay_every: AUDIT_SPOOL_REPLAY_INTERVAL,
                     },
                 );
                 tokio::spawn(writer.run());
 
-                // Poll spool stats into Prometheus once a second.
+                // Poll spool stats into Prometheus on each tick.
                 let poll_metrics = metrics.clone();
                 let poll_log = log.clone();
                 tokio::spawn(async move {
                     let mut last_spooled = 0u64;
                     let mut last_replayed = 0u64;
                     let mut last_dropped = 0u64;
-                    let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+                    let mut tick = tokio::time::interval(AUDIT_STATS_POLL_INTERVAL);
                     loop {
                         tick.tick().await;
                         let spooled = stats.spooled();
@@ -2517,7 +2586,7 @@ impl Broker {
         let metrics_for_ticker = metrics.clone();
         let recovery_for_ticker = unclean_recovery.clone();
         tokio::spawn(async move {
-            let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+            let mut tick = tokio::time::interval(LIVENESS_TICK_INTERVAL);
             loop {
                 tokio::select! {
                     _ = tick.tick() => {},
@@ -2648,17 +2717,20 @@ impl Broker {
                 ),
             ));
         }
-        // Periodic eviction of stale client-metrics entries (3× push
-        // interval, floor 600s). Child token of supervisor_shutdown.
+        // Periodic eviction of stale client-metrics entries. Child token of
+        // supervisor_shutdown.
         {
             let cm = client_metrics.clone();
             let token = supervisor_shutdown.child_token();
             tokio::spawn(async move {
-                let mut tick = tokio::time::interval(std::time::Duration::from_mins(1));
+                let mut tick = tokio::time::interval(CLIENT_METRICS_EVICTION_TICK);
                 loop {
                     tokio::select! {
                         () = token.cancelled() => break,
-                        _ = tick.tick() => cm.manager.evict_stale(3, std::time::Duration::from_mins(10)),
+                        _ = tick.tick() => cm.manager.evict_stale(
+                            CLIENT_METRICS_STALE_PUSH_INTERVALS,
+                            CLIENT_METRICS_STALE_FLOOR,
+                        ),
                     }
                 }
             });
@@ -2674,7 +2746,7 @@ impl Broker {
             let m = metrics.clone();
             let shutdown = supervisor_shutdown.child_token();
             tokio::spawn(async move {
-                let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+                let mut tick = tokio::time::interval(GAUGE_POLL_INTERVAL);
                 loop {
                     tokio::select! {
                         _ = tick.tick() => {}
@@ -2721,7 +2793,7 @@ impl Broker {
                         .map(|topic| {
                             let min_isr = image
                                 .topic_config(&topic.name)
-                                .and_then(|m| m.get("min.insync.replicas"))
+                                .and_then(|m| m.get(crate::config_keys::MIN_INSYNC_REPLICAS))
                                 .and_then(|v| v.parse::<usize>().ok())
                                 .unwrap_or(1);
                             (topic.name.as_str(), min_isr)
@@ -3337,7 +3409,7 @@ impl Broker {
         if let Some(led_pidx) = audit_led_partition {
             let audit_topic = broker.config.audit_topic.clone();
             let partitions_for_wait = broker.partitions.clone();
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let _ = tokio::time::timeout(AUDIT_PARTITION_WAIT_TIMEOUT, async {
                 loop {
                     // Wait for this broker's led audit partition to materialise.
                     if partitions_for_wait.contains(&audit_topic, led_pidx) {
@@ -3438,6 +3510,10 @@ const RLMM_RECONCILE_TICK: std::time::Duration = std::time::Duration::from_secs(
 /// Maximum backoff between successive topic-backed RLMM bootstrap attempts.
 const RLMM_BOOTSTRAP_BACKOFF_MAX: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// First backoff after a failed topic-backed RLMM bootstrap attempt; doubles
+/// per failure up to [`RLMM_BOOTSTRAP_BACKOFF_MAX`].
+const RLMM_BOOTSTRAP_BACKOFF_INITIAL: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// Next backoff after a failed RLMM bootstrap attempt: double, capped.
 fn next_rlmm_backoff(cur: std::time::Duration, max: std::time::Duration) -> std::time::Duration {
     (cur * 2).min(max)
@@ -3503,7 +3579,7 @@ async fn bootstrap_topic_rlmm(
     // Retry the topic-backed bootstrap with bounded backoff until it succeeds
     // or the broker shuts down. Until then the SwappableRlmm stays on the
     // fail-closed NotReadyRlmm placeholder.
-    let mut backoff = std::time::Duration::from_millis(250);
+    let mut backoff = RLMM_BOOTSTRAP_BACKOFF_INITIAL;
     let manager = loop {
         metrics.tiered_storage_rlmm_bootstrap_attempts.inc();
         // Race the attempt against shutdown: `KafkaMetadataEventLog::start`
@@ -3668,8 +3744,12 @@ pub(crate) fn spawn_partition(
     log_dir_status: crate::log_dir_status::LogDirRegistry,
     producer_state: Arc<crate::producer_state::ProducerState>,
 ) -> Arc<Partition> {
+    /// Depth of the per-partition writer mpsc queue: bounds how many
+    /// produce/replication appends may be in flight to one partition before
+    /// senders back-pressure.
+    const PARTITION_WRITER_QUEUE_DEPTH: usize = 64;
     let log = Arc::new(Mutex::new(log));
-    let (tx, rx) = tokio::sync::mpsc::channel::<WriterMessage>(64);
+    let (tx, rx) = tokio::sync::mpsc::channel::<WriterMessage>(PARTITION_WRITER_QUEUE_DEPTH);
     let notify = Arc::new(tokio::sync::Notify::new());
     let replica_state = Arc::new(tokio::sync::Mutex::new(
         crate::replica_state::ReplicaState::new(),
@@ -3711,6 +3791,9 @@ pub(crate) fn spawn_partition(
 /// `:` so IPv6 literals do not break on inner colons (we still expect
 /// IPv6 callers to wrap in `[...]`).
 fn parse_advertised_host_port(addr: &str) -> (String, u16) {
+    /// Kafka's canonical default plaintext port, used only as the fallback
+    /// when an advertised address fails to parse as `host:port`.
+    const DEFAULT_KAFKA_PORT: u16 = 9092;
     if let Some((h, p)) = addr.rsplit_once(':')
         && let Ok(port) = p.parse::<u16>()
     {
@@ -3720,7 +3803,7 @@ fn parse_advertised_host_port(addr: &str) -> (String, u16) {
         addr,
         "advertised not host:port; falling back to localhost:9092"
     );
-    ("localhost".into(), 9092)
+    ("localhost".into(), DEFAULT_KAFKA_PORT)
 }
 
 /// Build the KIP-595 static controller [`VoterSet`](crabka_metadata::VoterSet)
@@ -3899,6 +3982,15 @@ impl Drop for ConnectionGuard {
     }
 }
 
+/// KIP-612 quota key for accept-rate throttling; matches the
+/// `connection_creation_rate` config name Kafka's `AlterClientQuotas` uses
+/// for `ip` entities.
+const CONNECTION_CREATION_RATE_QUOTA_KEY: &str = "connection_creation_rate";
+
+/// Upper bound on the KIP-612 accept-throttle delay, so a very low configured
+/// rate cannot stall the accept loop for more than this per connection.
+const CONNECTION_CREATION_THROTTLE_MAX: std::time::Duration = std::time::Duration::from_secs(1);
+
 async fn accept_loop(
     broker: Arc<Broker>,
     listener: TcpListener,
@@ -3942,14 +4034,14 @@ async fn accept_loop(
                             crate::quota::lookup_ip_quota_with_key(
                                 &image,
                                 peer_ip,
-                                "connection_creation_rate",
+                                CONNECTION_CREATION_RATE_QUOTA_KEY,
                             )
                             && rate > 0.0
                         {
                             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                             let initial_rate = rate.max(1.0) as u64;
                             let bucket = broker.quota_buckets.get_or_create(
-                                "connection_creation_rate",
+                                CONNECTION_CREATION_RATE_QUOTA_KEY,
                                 &entity_key,
                                 initial_rate,
                             );
@@ -3962,7 +4054,7 @@ async fn accept_loop(
                                     ((1.0_f64 / rate) * 1_000_000.0) as u64;
                                 let delay =
                                     std::time::Duration::from_micros(delay_micros)
-                                        .min(std::time::Duration::from_secs(1));
+                                        .min(CONNECTION_CREATION_THROTTLE_MAX);
                                 tokio::time::sleep(delay).await;
                             }
                         }
@@ -4025,8 +4117,430 @@ fn tune_accepted_socket(stream: &tokio::net::TcpStream) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use tempfile::tempdir;
+
+    struct MockMetadataSource {
+        image: Arc<crabka_metadata::MetadataImage>,
+        leader_tx: tokio::sync::watch::Sender<Option<crabka_raft::NodeId>>,
+    }
+
+    impl MockMetadataSource {
+        fn new(image: crabka_metadata::MetadataImage, leader: Option<crabka_raft::NodeId>) -> Self {
+            let (leader_tx, _) = tokio::sync::watch::channel(leader);
+            Self {
+                image: Arc::new(image),
+                leader_tx,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::metadata_source::MetadataSource for MockMetadataSource {
+        fn current_image(&self) -> Arc<crabka_metadata::MetadataImage> {
+            self.image.clone()
+        }
+
+        fn watch_image(&self) -> tokio::sync::watch::Receiver<Arc<crabka_metadata::MetadataImage>> {
+            let (_, rx) = tokio::sync::watch::channel(self.image.clone());
+            rx
+        }
+
+        fn watch_leader(&self) -> tokio::sync::watch::Receiver<Option<crabka_raft::NodeId>> {
+            self.leader_tx.subscribe()
+        }
+
+        fn quorum_state(&self) -> crabka_raft::QuorumState {
+            crabka_raft::QuorumState {
+                current_term: 0,
+                last_applied_index: 0,
+                current_leader: *self.leader_tx.borrow(),
+                voters: Vec::new(),
+                voter_nodes: std::collections::BTreeMap::new(),
+                per_voter_matched_index: std::collections::BTreeMap::new(),
+            }
+        }
+
+        async fn submit_change(
+            &self,
+            _records: Vec<crabka_metadata::MetadataRecord>,
+        ) -> Result<(), crabka_raft::RaftError> {
+            Err(crabka_raft::RaftError::Unsupported("mock metadata source"))
+        }
+
+        async fn change_membership(
+            &self,
+            _new_voters: std::collections::BTreeSet<crabka_raft::NodeId>,
+        ) -> Result<(), crabka_raft::RaftError> {
+            Err(crabka_raft::RaftError::Unsupported("mock metadata source"))
+        }
+
+        async fn add_learner(
+            &self,
+            _node_id: crabka_raft::NodeId,
+            _node: crabka_raft::Node,
+        ) -> Result<(), crabka_raft::RaftError> {
+            Err(crabka_raft::RaftError::Unsupported("mock metadata source"))
+        }
+
+        fn controller_bound_addr(&self) -> std::net::SocketAddr {
+            "127.0.0.1:9093".parse().unwrap()
+        }
+
+        fn read_snapshot_range(
+            &self,
+            _position: i64,
+            _max_bytes: i32,
+        ) -> crabka_raft::SnapshotRange {
+            crabka_raft::SnapshotRange::NoSnapshot
+        }
+
+        async fn trigger_snapshot(&self) -> Result<(), crabka_raft::RaftError> {
+            Err(crabka_raft::RaftError::Unsupported("mock metadata source"))
+        }
+
+        async fn add_voter(
+            &self,
+            _req: crabka_raft::AddVoter,
+        ) -> Result<crabka_raft::ReconfigOutcome, crabka_raft::RaftError> {
+            Err(crabka_raft::RaftError::Unsupported("mock metadata source"))
+        }
+
+        async fn remove_voter(
+            &self,
+            _req: crabka_raft::RemoveVoter,
+        ) -> Result<crabka_raft::ReconfigOutcome, crabka_raft::RaftError> {
+            Err(crabka_raft::RaftError::Unsupported("mock metadata source"))
+        }
+
+        async fn update_voter(
+            &self,
+            _req: crabka_raft::UpdateVoter,
+        ) -> Result<crabka_raft::ReconfigOutcome, crabka_raft::RaftError> {
+            Err(crabka_raft::RaftError::Unsupported("mock metadata source"))
+        }
+
+        async fn cancel(&self) {}
+    }
+
+    async fn assert_listener_stops_accepting(addr: SocketAddr) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            match tokio::net::TcpStream::connect(addr).await {
+                Ok(stream) => {
+                    drop(stream);
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "listener at {addr} still accepts connections after shutdown"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+                Err(_) => return,
+            }
+        }
+    }
+
+    async fn wait_for_connection_count(broker: &Broker, expected: usize, message: &'static str) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if broker.connections.total() == expected {
+                return;
+            }
+            assert!(std::time::Instant::now() < deadline, "{message}");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    fn local_partition_with_records(
+        log_dir: &std::path::Path,
+        topic: &str,
+        partition: i32,
+        values: &[&'static [u8]],
+    ) -> Arc<Partition> {
+        let part_dir = crate::log_dir::partition_dir(log_dir, topic, partition);
+        std::fs::create_dir_all(&part_dir).expect("create partition dir");
+        let log = crabka_log::Log::open(&part_dir, crabka_log::LogConfig::default())
+            .expect("open partition log");
+        let part = spawn_partition(
+            topic.to_string(),
+            partition,
+            log_dir.to_path_buf(),
+            log,
+            crate::log_dir_status::LogDirRegistry::default(),
+            Arc::new(crate::producer_state::ProducerState::new()),
+        );
+        if !values.is_empty() {
+            let mut batch = crabka_protocol::records::RecordBatch {
+                last_offset_delta: i32::try_from(values.len() - 1).expect("record count fits"),
+                records: values
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, value)| crabka_protocol::records::Record {
+                        offset_delta: i32::try_from(idx).expect("offset delta fits"),
+                        value: Some(bytes::Bytes::from_static(value)),
+                        ..Default::default()
+                    })
+                    .collect(),
+                ..Default::default()
+            };
+            part.log
+                .lock()
+                .expect("partition log lock")
+                .append(&mut batch)
+                .expect("append records");
+        }
+        part
+    }
+
+    fn consumer_group_seed(member_id: &str) -> crate::coordinator::unified::GroupSeed {
+        let mut seed = crate::coordinator::unified::GroupSeed {
+            group_epoch: 3,
+            target_epoch: 4,
+            ..Default::default()
+        };
+        seed.members.insert(
+            member_id.to_string(),
+            crate::coordinator::unified::persistence_next_gen::MemberMetadataValue {
+                instance_id: None,
+                rack_id: None,
+                client_id: "client".to_string(),
+                client_host: "127.0.0.1".to_string(),
+                subscribed_topic_names: vec!["orders".to_string()],
+                subscribed_topic_regex: None,
+                server_assignor: None,
+                rebalance_timeout_ms: 60_000,
+                classic: None,
+            },
+        );
+        seed
+    }
+
+    fn classic_group_with_member(
+        group_id: &str,
+        member_id: &str,
+    ) -> Box<crate::coordinator::unified::group::Group> {
+        let mut classic = crate::coordinator::unified::classic_state::Group::new(group_id);
+        classic.protocol_type = Some("consumer".to_string());
+        classic.generation_id = 1;
+        let member = crate::coordinator::unified::classic_state::Member::new(
+            member_id,
+            "client",
+            "127.0.0.1",
+            std::time::Duration::from_secs(30),
+            std::time::Duration::from_mins(1),
+            vec![("range".to_string(), bytes::Bytes::from_static(b"metadata"))],
+        );
+        let _ = classic.add_member(member);
+        Box::new(crate::coordinator::unified::group::Group {
+            group_id: group_id.to_string(),
+            kind: crate::coordinator::unified::group::GroupKind::Classic(classic),
+            committed_offsets: std::collections::HashMap::new(),
+        })
+    }
+
+    fn streams_group_seed(member_id: &str) -> crate::coordinator::unified::StreamsGroupSeed {
+        let mut active = std::collections::BTreeMap::new();
+        active.insert("subtopology-0".to_string(), vec![0, 1]);
+
+        let mut members = std::collections::HashMap::new();
+        members.insert(
+            member_id.to_string(),
+            crate::coordinator::unified::streams::persistence::StreamsGroupMemberMetadataValue {
+                instance_id: None,
+                rack_id: None,
+                client_id: "streams-client".to_string(),
+                client_host: "127.0.0.1".to_string(),
+                process_id: "process-1".to_string(),
+                user_endpoint: None,
+                client_tags: Vec::new(),
+                rebalance_timeout_ms: 60_000,
+                topology_epoch: 0,
+            },
+        );
+
+        let mut target_per_member = std::collections::HashMap::new();
+        target_per_member.insert(
+            member_id.to_string(),
+            crate::coordinator::unified::streams::persistence::StreamsGroupTargetAssignmentMemberValue {
+                active: active.clone(),
+                standby: std::collections::BTreeMap::new(),
+                warmup: std::collections::BTreeMap::new(),
+            },
+        );
+
+        let mut current_per_member = std::collections::HashMap::new();
+        current_per_member.insert(
+            member_id.to_string(),
+            crate::coordinator::unified::streams::persistence::StreamsGroupCurrentMemberAssignmentValue {
+                member_epoch: 5,
+                previous_member_epoch: 4,
+                state: crate::coordinator::unified::streams::state::StreamsMemberAssignmentState::Stable
+                    .as_i8(),
+                active,
+                standby: std::collections::BTreeMap::new(),
+                warmup: std::collections::BTreeMap::new(),
+                active_pending_revocation: std::collections::BTreeMap::new(),
+            },
+        );
+
+        crate::coordinator::unified::StreamsGroupSeed {
+            group_epoch: 5,
+            assignment_epoch: 6,
+            topology: None,
+            partition_metadata: None,
+            members,
+            target_per_member,
+            current_per_member,
+        }
+    }
+
+    async fn assert_streams_group_helpers_observe_live_actor_view(
+        broker: &Arc<Broker>,
+        handle: &BrokerHandle,
+    ) {
+        let streams_group_id = "handle-streams-group-mutant";
+        let streams_member_id = "streams-member-1";
+        let streams_actor = broker
+            .group_coordinator
+            .get_or_create_streams(streams_group_id);
+        streams_actor
+            .tx
+            .send(
+                crate::coordinator::unified::streams::actor::StreamsGroupActorMessage::Seed(
+                    streams_group_seed(streams_member_id),
+                ),
+            )
+            .await
+            .expect("seed streams group");
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                handle.wait_until_streams_group_member_count(streams_group_id, 1),
+            )
+            .await
+            .is_ok()
+        );
+        let streams = handle
+            .streams_group_describe_for_test(streams_group_id)
+            .await
+            .expect("streams group describe");
+        let expected_active = {
+            let mut active = std::collections::BTreeMap::new();
+            active.insert("subtopology-0".to_string(), vec![0, 1]);
+            active
+        };
+        check!(streams.group_id.as_str() == streams_group_id);
+        check!(streams.members.len() == 1);
+        check!(streams.members[0].member_id.as_str() == streams_member_id);
+        check!(streams.members[0].active == expected_active);
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(75),
+                handle.wait_until_streams_group_empty(streams_group_id),
+            )
+            .await
+            .is_err()
+        );
+
+        let empty_streams_group_id = "handle-empty-streams-group-mutant";
+        let _ = broker
+            .group_coordinator
+            .get_or_create_streams(empty_streams_group_id);
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                handle.wait_until_streams_group_empty(empty_streams_group_id),
+            )
+            .await
+            .is_ok()
+        );
+    }
+
+    fn metadata_topic_record(topic: &str, topic_id: u128) -> crabka_metadata::MetadataRecord {
+        crabka_metadata::MetadataRecord::V1Topic(crabka_metadata::TopicRecord {
+            name: topic.to_string(),
+            topic_id: uuid::Uuid::from_u128(topic_id),
+            partitions: 1,
+            replication_factor: 1,
+        })
+    }
+
+    fn metadata_partition_record(
+        topic: &str,
+        partition: i32,
+        leader: u64,
+        replicas: &[u64],
+        isr: &[u64],
+        leader_epoch: i32,
+    ) -> crabka_metadata::PartitionRecord {
+        crabka_metadata::PartitionRecord {
+            topic: topic.to_string(),
+            partition,
+            leader,
+            replicas: replicas.to_vec(),
+            isr: isr.to_vec(),
+            leader_epoch,
+            adding_replicas: Vec::new(),
+            removing_replicas: Vec::new(),
+            directories: vec![uuid::Uuid::nil(); replicas.len()],
+            partition_epoch: 0,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn submit_metadata_topic_partition(
+        handle: &BrokerHandle,
+        topic: &str,
+        topic_id: u128,
+        partition: i32,
+        leader: u64,
+        replicas: &[u64],
+        isr: &[u64],
+        leader_epoch: i32,
+    ) {
+        handle
+            .submit_metadata_record_for_test(metadata_topic_record(topic, topic_id))
+            .await
+            .expect("submit topic record");
+        let partition_record =
+            metadata_partition_record(topic, partition, leader, replicas, isr, leader_epoch);
+        handle
+            .submit_metadata_record_for_test(crabka_metadata::MetadataRecord::V1Partition(
+                partition_record.clone(),
+            ))
+            .await
+            .expect("submit partition record");
+
+        let image = handle.controller_image_for_test();
+        assert!(image.topic(topic).is_some());
+        assert!(image.partition(topic, partition) == Some(&partition_record));
+    }
+
+    fn unused_loopback_addr() -> SocketAddr {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve loopback port");
+        listener.local_addr().expect("reserved loopback addr")
+    }
+
+    fn static_voter_test_config(
+        log_dir: &std::path::Path,
+        node_id: u64,
+        listen_addr: SocketAddr,
+        controller_addr: SocketAddr,
+        voters: &[(u64, SocketAddr)],
+    ) -> BrokerConfig {
+        let mut config = BrokerConfig::for_tests(log_dir.to_path_buf());
+        config.broker_id = i32::try_from(node_id).expect("node id fits broker id");
+        config.node_id = node_id;
+        config.listen_addr = listen_addr;
+        config.advertised_listener = listen_addr.to_string();
+        config.controller_listen_addr = controller_addr;
+        config.directory_id = uuid::Uuid::from_u128(u128::from(node_id));
+        config.controller_quorum_voters = voters
+            .iter()
+            .map(|(id, addr)| (*id, addr.to_string()))
+            .collect();
+        config
+    }
 
     #[test]
     fn static_voter_set_keeps_peer_hostnames_for_per_dial_resolution() {
@@ -4057,10 +4571,12 @@ mod tests {
             .iter()
             .find(|e| e.name == "CONTROLLER")
             .expect("controller endpoint");
-        assert!(ep0.host == "demo-broker-0-0.demo-broker-headless.default.svc.cluster.local");
-        assert!(ep0.port == 9093);
         // Self keeps its real directory id; peers get the nil placeholder.
-        assert!(v0.directory_id == self_dir);
+        check!(
+            ep0.host.as_str() == "demo-broker-0-0.demo-broker-headless.default.svc.cluster.local"
+        );
+        check!(ep0.port == 9093);
+        check!(v0.directory_id == self_dir);
 
         let v1 = set.get(1).expect("voter 1 present");
         let ep1 = v1
@@ -4088,6 +4604,22 @@ mod tests {
     }
 
     #[test]
+    fn advertised_listener_parser_preserves_valid_host_ports_and_uses_fallback() {
+        let cases = [
+            ("broker-1.example:19092", ("broker-1.example", 19092)),
+            ("[2001:db8::7]:9094", ("[2001:db8::7]", 9094)),
+            ("missing-port", ("localhost", 9092)),
+            ("broker:not-a-port", ("localhost", 9092)),
+        ];
+        for (input, (host, port)) in cases {
+            assert!(
+                parse_advertised_host_port(input) == (host.to_string(), port),
+                "input {input:?}"
+            );
+        }
+    }
+
+    #[test]
     fn connection_guard_increments_and_decrements_global_and_per_ip() {
         let limiter = Arc::new(ConnectionLimiter::new(usize::MAX, usize::MAX));
         let ip: IpAddr = "10.0.0.1".parse().unwrap();
@@ -4110,9 +4642,9 @@ mod tests {
 
         drop(g2);
         // Per-IP entry must be removed (not left at 0) when it hits zero.
-        assert!(limiter.total() == 0);
-        assert!(limiter.per_ip_count(ip) == 0);
-        assert!(limiter.per_ip.get(&ip).is_none());
+        check!(limiter.total() == 0);
+        check!(limiter.per_ip_count(ip) == 0);
+        check!(limiter.per_ip.get(&ip).is_none());
     }
 
     #[test]
@@ -4123,10 +4655,10 @@ mod tests {
         let _g = limiter.try_acquire(a).expect("first connection accepted");
         // Global ceiling of 1 reached — a different IP is still rejected,
         // and the rejection reserves nothing (per-IP entry not created).
-        assert!(limiter.try_acquire(b).is_none());
-        assert!(limiter.total() == 1);
-        assert!(limiter.per_ip_count(b) == 0);
-        assert!(limiter.per_ip.get(&b).is_none());
+        check!(limiter.try_acquire(b).is_none());
+        check!(limiter.total() == 1);
+        check!(limiter.per_ip_count(b) == 0);
+        check!(limiter.per_ip.get(&b).is_none());
     }
 
     #[test]
@@ -4137,9 +4669,9 @@ mod tests {
         let _g1 = limiter.try_acquire(a).expect("first from a");
         // Second from the same IP rejected; global must be rolled back so
         // the count reflects only the one live connection.
-        assert!(limiter.try_acquire(a).is_none());
-        assert!(limiter.total() == 1);
-        assert!(limiter.per_ip_count(a) == 1);
+        check!(limiter.try_acquire(a).is_none());
+        check!(limiter.total() == 1);
+        check!(limiter.per_ip_count(a) == 1);
         // A different IP is still under its own per-IP ceiling.
         let _g2 = limiter.try_acquire(b).expect("first from b allowed");
         assert!(limiter.total() == 2);
@@ -4156,17 +4688,997 @@ mod tests {
         assert!(limiter.per_ip_count(ip) == 0);
     }
 
+    #[tokio::test]
+    async fn accepted_socket_tuning_sets_nodelay_and_large_buffers() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let client_task = tokio::spawn(tokio::net::TcpStream::connect(addr));
+        let (server, _) = listener.accept().await.expect("accept loopback client");
+        let client = client_task
+            .await
+            .expect("connect task")
+            .expect("connect loopback client");
+
+        let sock = socket2::SockRef::from(&server);
+        server.set_nodelay(false).expect("clear TCP_NODELAY");
+        sock.set_send_buffer_size(4096).expect("shrink send buffer");
+        sock.set_recv_buffer_size(4096).expect("shrink recv buffer");
+
+        tune_accepted_socket(&server);
+
+        check!(server.nodelay().expect("read TCP_NODELAY"));
+        // Linux clamps SO_SNDBUF/SO_RCVBUF at net.core.{w,r}mem_max (208 KiB
+        // by default, ~416 KiB after the kernel's readback doubling), so the
+        // 1 MiB request cannot be asserted verbatim; 128 KiB still proves the
+        // buffers grew far beyond the 4 KiB baseline set above.
+        check!(sock.send_buffer_size().expect("read send buffer") >= 128 * 1024);
+        check!(sock.recv_buffer_size().expect("read recv buffer") >= 128 * 1024);
+        drop(client);
+    }
+
     #[test]
     fn loopback_bootstrap_maps_wildcard_to_loopback() {
         use std::net::SocketAddr;
+        let cases = [
+            ("0.0.0.0:9092", "127.0.0.1:9092"),
+            ("192.168.1.5:9094", "192.168.1.5:9094"),
+            ("[::]:9092", "[::1]:9092"),
+            ("[2001:db8::5]:9092", "[2001:db8::5]:9092"),
+        ];
+        for (listen, expected) in cases {
+            assert!(
+                loopback_bootstrap(listen.parse::<SocketAddr>().unwrap()) == expected,
+                "listen {listen}"
+            );
+        }
+    }
+
+    #[test]
+    fn controller_adapters_report_leadership_from_leader_watch() {
+        let source: Arc<dyn crate::metadata_source::MetadataSource> =
+            Arc::new(MockMetadataSource::new(
+                crabka_metadata::MetadataImage::new(uuid::Uuid::from_u128(1)),
+                Some(7),
+            ));
+
+        let leader_adapter = ControllerAdapter {
+            handle: source.clone(),
+            node_id: 7,
+        };
+        let follower_adapter = ControllerAdapter {
+            handle: source.clone(),
+            node_id: 8,
+        };
+        assert!(crate::leader_rebalance::ControllerLike::is_leader(
+            &leader_adapter
+        ));
+        assert!(!crate::leader_rebalance::ControllerLike::is_leader(
+            &follower_adapter
+        ));
+
+        let leader_adapter = ReassignmentControllerAdapter {
+            handle: source.clone(),
+            node_id: 7,
+        };
+        let follower_adapter = ReassignmentControllerAdapter {
+            handle: source,
+            node_id: 8,
+        };
+        assert!(crate::reassignment::ReassignmentController::is_leader(
+            &leader_adapter
+        ));
+        assert!(!crate::reassignment::ReassignmentController::is_leader(
+            &follower_adapter
+        ));
+    }
+
+    #[test]
+    fn image_watcher_adapters_forward_current_image() {
+        let cluster_id = uuid::Uuid::from_u128(0x5150);
+        let source: Arc<dyn crate::metadata_source::MetadataSource> = Arc::new(
+            MockMetadataSource::new(crabka_metadata::MetadataImage::new(cluster_id), Some(1)),
+        );
+
+        let leader = ControllerAdapter {
+            handle: source.clone(),
+            node_id: 1,
+        };
         assert!(
-            loopback_bootstrap("0.0.0.0:9092".parse::<SocketAddr>().unwrap()) == "127.0.0.1:9092"
+            crate::leader_rebalance::ControllerLike::current_image(&leader).cluster_id()
+                == cluster_id
+        );
+
+        let reassignment = ReassignmentControllerAdapter {
+            handle: source.clone(),
+            node_id: 1,
+        };
+        assert!(
+            crate::reassignment::ReassignmentController::current_image(&reassignment).cluster_id()
+                == cluster_id
+        );
+        let reassignment_rx =
+            crate::reassignment::ReassignmentController::watch_image(&reassignment);
+        assert!(reassignment_rx.borrow().cluster_id() == cluster_id);
+
+        let throttle = ThrottleControllerAdapter {
+            handle: source.clone(),
+        };
+        assert!(crate::throttle::ImageWatcher::current_image(&throttle).cluster_id() == cluster_id);
+        let throttle_rx = crate::throttle::ImageWatcher::watch_image(&throttle);
+        assert!(throttle_rx.borrow().cluster_id() == cluster_id);
+
+        let quota = QuotaControllerAdapter {
+            handle: source.clone(),
+        };
+        assert!(crate::quota::ImageWatcher::current_image(&quota).cluster_id() == cluster_id);
+
+        let cleanup = DelegationTokenCleanupControllerAdapter { handle: source };
+        assert!(
+            crate::delegation_token_cleanup::DelegationTokenController::current_image(&cleanup)
+                .cluster_id()
+                == cluster_id
+        );
+    }
+
+    #[tokio::test]
+    async fn controller_adapters_forward_submit_errors() {
+        let source: Arc<dyn crate::metadata_source::MetadataSource> =
+            Arc::new(MockMetadataSource::new(
+                crabka_metadata::MetadataImage::new(uuid::Uuid::from_u128(1)),
+                Some(1),
+            ));
+        let record = metadata_topic_record("adapter-submit-mutant-topic", 0xADAD);
+
+        let leader = ControllerAdapter {
+            handle: source.clone(),
+            node_id: 1,
+        };
+        assert!(
+            crate::leader_rebalance::ControllerLike::submit_change(&leader, vec![record.clone()])
+                .await
+                .is_err()
+        );
+
+        let reassignment = ReassignmentControllerAdapter {
+            handle: source.clone(),
+            node_id: 1,
+        };
+        assert!(
+            crate::reassignment::ReassignmentController::submit_change(
+                &reassignment,
+                vec![record.clone()],
+            )
+            .await
+            .is_err()
+        );
+
+        let cleanup = DelegationTokenCleanupControllerAdapter { handle: source };
+        assert!(
+            crate::delegation_token_cleanup::DelegationTokenController::submit_change(
+                &cleanup,
+                vec![record],
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn rlmm_bootstrap_backoff_returns_false_when_cancelled() {
+        let shutdown = CancellationToken::new();
+        shutdown.cancel();
+        let mut backoff = std::time::Duration::from_mins(1);
+
+        assert!(!rlmm_bootstrap_backoff(&mut backoff, &shutdown).await);
+        assert!(backoff == std::time::Duration::from_mins(1));
+    }
+
+    #[tokio::test]
+    async fn rlmm_bootstrap_backoff_returns_true_after_sleep_and_advances() {
+        tokio::time::pause();
+        let shutdown = CancellationToken::new();
+        let task = tokio::spawn(async move {
+            let mut backoff = std::time::Duration::from_millis(250);
+            let ok = rlmm_bootstrap_backoff(&mut backoff, &shutdown).await;
+            (ok, backoff)
+        });
+
+        tokio::time::advance(std::time::Duration::from_millis(250)).await;
+        let (ok, backoff) = task.await.expect("backoff task");
+        assert!(ok);
+        assert!(backoff == std::time::Duration::from_millis(500));
+    }
+
+    #[tokio::test]
+    async fn rlmm_reconciler_applies_initial_and_changed_assignments() {
+        let log: Arc<dyn crabka_remote_storage_topic::MetadataEventLog> =
+            crabka_remote_storage_topic::InProcessMetadataEventLog::new(3);
+        let snapshot_dir = tempfile::tempdir().expect("snapshot tempdir");
+        let manager = crabka_remote_storage_topic::TopicBasedRemoteLogMetadataManager::start(
+            log,
+            tokio::runtime::Handle::current(),
+            snapshot_dir.path().join("rlmm-manager"),
+            std::time::Duration::from_hours(1),
+        )
+        .await
+        .expect("topic-backed manager start");
+        let (set_tx, set_rx) = tokio::sync::watch::channel(vec![0, 2]);
+        let shutdown = CancellationToken::new();
+
+        spawn_rlmm_reconciler(manager.clone(), set_rx, shutdown.clone());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while manager.assigned_metadata_partitions() != vec![0, 2] {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "initial assignment was not reconciled"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        set_tx.send(vec![1]).expect("send changed assignment");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while manager.assigned_metadata_partitions() != vec![1] {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "changed assignment was not reconciled"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        shutdown.cancel();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn single_broker_handle_helpers_observe_real_state_and_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = BrokerConfig::for_tests(dir.path().to_path_buf());
+        config.metrics_listen_addr = Some("127.0.0.1:0".parse().unwrap());
+        let handle = Broker::start(config).await.expect("broker start");
+        let broker = handle.broker_arc_for_test();
+
+        check!(broker.handlers().get(18).is_some());
+        check!(handle.metrics_addr().is_some_and(|addr| addr.port() != 0));
+        check!(handle.offset_for_leader_epoch_count_for_test() == 0);
+        broker
+            .offset_for_leader_epoch_requests
+            .store(2, std::sync::atomic::Ordering::Release);
+        assert!(handle.offset_for_leader_epoch_count_for_test() == 2);
+        assert!(!handle.rlmm_topic_backed_active_for_test());
+        broker.metrics.tiered_storage_rlmm_topic_backed.set(1);
+        assert!(handle.rlmm_topic_backed_active_for_test());
+        broker.metrics.tiered_storage_rlmm_topic_backed.set(2);
+        check!(!handle.rlmm_topic_backed_active_for_test());
+        check!(handle.reload_tls().is_err());
+        check!(!handle.has_partition("missing-mutant-topic", 0).await);
+        check!(handle.local_log_end_offset("missing-mutant-topic", 0).await == None);
+        check!(
+            handle
+                .test_advance_log_start("missing-mutant-topic", 0, 10)
+                .await
+                .is_err()
+        );
+        check!(
+            handle
+                .change_membership([1_u64].into_iter().collect())
+                .await
+                .is_err()
+        );
+
+        let leader = handle.wait_until_controller_leader().await;
+        assert!(leader == handle.node_id());
+        assert!(handle.controller_leader_id().await == Some(handle.node_id()));
+
+        let mut endpoints = handle.self_registration_endpoints().await;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while endpoints.is_empty() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            endpoints = handle.self_registration_endpoints().await;
+        }
+        assert!(!endpoints.is_empty());
+
+        handle
+            .submit_metadata_record_for_test(crabka_metadata::MetadataRecord::V1BrokerRegistration(
+                crabka_metadata::BrokerRegistrationRecord {
+                    node_id: handle.node_id() + 1,
+                    broker_epoch: 0,
+                    incarnation_id: uuid::Uuid::from_u128(0xBEEF),
+                    host: "127.0.0.1".to_string(),
+                    port: 19_092,
+                    rack: None,
+                    endpoints: vec![crabka_metadata::BrokerEndpoint {
+                        name: "PLAINTEXT".to_string(),
+                        host: "127.0.0.1".to_string(),
+                        port: 19_092,
+                        protocol: crabka_security::ListenerProtocol::Plaintext,
+                    }],
+                },
+            ))
+            .await
+            .expect("submit peer broker registration");
+        assert!(
+            handle
+                .controller_image_for_test()
+                .broker(handle.node_id() + 1)
+                .is_some()
+        );
+        handle.wait_until_brokers_registered(2).await;
+        assert!(handle.broker_count().await == 2);
+
+        let topic = "handle-mutant-topic";
+        let partition_leader = handle.node_id() + 1;
+        let partition_isr = [partition_leader, handle.node_id()];
+        submit_metadata_topic_partition(
+            &handle,
+            topic,
+            0xCAFE,
+            0,
+            partition_leader,
+            &partition_isr,
+            &partition_isr,
+            3,
+        )
+        .await;
+        handle.wait_until_partition_present(topic, 0).await;
+        check!(handle.has_partition(topic, 0).await);
+        check!(handle.partition_leader_for_test(topic, 0) == Some(partition_leader));
+        check!(handle.partition_isr_for_test(topic, 0) == Some(partition_isr.to_vec()));
+        let observed_partition = handle
+            .partition_record_for_test(topic, 0)
+            .expect("partition record");
+        let expected_partition = crabka_metadata::PartitionRecord {
+            topic: topic.to_string(),
+            partition: 0,
+            leader: partition_leader,
+            replicas: partition_isr.to_vec(),
+            isr: partition_isr.to_vec(),
+            leader_epoch: 3,
+            adding_replicas: Vec::new(),
+            removing_replicas: Vec::new(),
+            directories: vec![uuid::Uuid::nil(); partition_isr.len()],
+            partition_epoch: 0,
+        };
+        assert!(observed_partition == expected_partition);
+        check!(handle.partition_leader_for_test("missing-mutant-topic", 0) == None);
+        check!(handle.partition_isr_for_test("missing-mutant-topic", 0) == None);
+        check!(handle.partition_record_for_test("missing-mutant-topic", 0) == None);
+        check!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                handle.wait_until_partition_leader_changed(topic, 0, handle.node_id()),
+            )
+            .await
+            .is_ok()
+        );
+
+        assert!(
+            matches!(
+                broker.controller.read_snapshot_range(0, 1),
+                crabka_raft::SnapshotRange::NoSnapshot
+            ),
+            "test should start without a metadata snapshot"
+        );
+        handle
+            .trigger_snapshot_for_test()
+            .await
+            .expect("trigger metadata snapshot");
+        let crabka_raft::SnapshotRange::Slice(snapshot) =
+            broker.controller.read_snapshot_range(0, 1)
+        else {
+            panic!("trigger_snapshot_for_test should write a readable snapshot");
+        };
+        assert!(snapshot.total_size > 0);
+        assert!(!snapshot.bytes.is_empty());
+
+        let local_topic = "handle-local-log-mutant-topic";
+        let local_part = local_partition_with_records(dir.path(), local_topic, 0, &[b"a", b"b"]);
+        assert!(!handle.partition_exists_for_test(local_topic, 0));
+        broker
+            .partitions
+            .insert(local_topic.to_string(), 0, Arc::clone(&local_part));
+        assert!(handle.partition_exists_for_test(local_topic, 0));
+        assert!(handle.local_log_end_offset(local_topic, 0).await == Some(2));
+        handle.test_set_leader_epoch(local_topic, 0, 7);
+        assert!(
+            local_part
+                .current_leader_epoch
+                .load(std::sync::atomic::Ordering::Acquire)
+                == 7
+        );
+        handle
+            .test_truncate_local_log(local_topic, 0, 1)
+            .await
+            .expect("truncate local partition");
+        assert!(handle.local_log_end_offset(local_topic, 0).await == Some(0));
+
+        let helper_topic = "handle-partition-helper-mutant-topic";
+        let helper_part = local_partition_with_records(dir.path(), helper_topic, 0, &[]);
+        let helper_config = crabka_log::LogConfig {
+            retention_ms: Some(std::time::Duration::from_secs(123)),
+            segment_bytes: 4096,
+            ..Default::default()
+        };
+        helper_part
+            .log
+            .lock()
+            .expect("helper partition log lock")
+            .set_config(helper_config.clone());
+        broker
+            .partitions
+            .insert(helper_topic.to_string(), 0, Arc::clone(&helper_part));
+        handle
+            .test_advance_log_start(helper_topic, 0, 2)
+            .await
+            .expect("advance helper partition log start");
+        assert!(handle.partition_log_start_for_test(helper_topic, 0) == Some(2));
+        assert!(
+            handle.partition_retention_ms_for_test(helper_topic, 0)
+                == Some(Some(std::time::Duration::from_secs(123)))
+        );
+        let observed_config = handle
+            .partition_log_config_for_test(helper_topic, 0)
+            .expect("helper partition log config");
+        assert!(observed_config.retention_ms == helper_config.retention_ms);
+        assert!(observed_config.segment_bytes == helper_config.segment_bytes);
+        let last_offset = handle
+            .produce_records_for_test(helper_topic, 0, 3)
+            .await
+            .expect("produce helper partition records");
+        let log_end = handle
+            .local_log_end_offset(helper_topic, 0)
+            .await
+            .expect("helper partition log end offset");
+        assert!(last_offset >= 2);
+        assert!(last_offset + 1 == log_end);
+        let read = helper_part
+            .log
+            .lock()
+            .expect("helper partition log lock")
+            .read(2, 1 << 20)
+            .expect("read helper partition records");
+        assert!(read.start_offset == 2);
+        assert!(!read.batches.is_empty());
+        let records: Vec<_> = read
+            .batches
+            .iter()
+            .flat_map(|batch| batch.records.iter())
+            .collect();
+        check!(records.len() == 1);
+        check!(records[0].offset_delta == 0);
+        check!(
+            records[0].value.as_ref().map(bytes::Bytes::as_ref)
+                == Some(b"test-record-2".as_slice())
+        );
+        // Waiting for log_end + 1 must stay pending; waiting for the reached
+        // log_end must resolve (both the >= and == variants).
+        check!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(75),
+                handle.wait_until_local_log_end_offset(helper_topic, 0, log_end + 1),
+            )
+            .await
+            .is_err()
+        );
+        check!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(75),
+                handle.wait_until_local_log_end_offset_eq(helper_topic, 0, log_end + 1),
+            )
+            .await
+            .is_err()
+        );
+        check!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                handle.wait_until_local_log_end_offset(helper_topic, 0, log_end),
+            )
+            .await
+            .is_ok()
+        );
+        check!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                handle.wait_until_local_log_end_offset_eq(helper_topic, 0, log_end),
+            )
+            .await
+            .is_ok()
+        );
+
+        let share_group = "handle-share-summary-mutant-group";
+        let share_topic_id = uuid::Uuid::from_u128(0xBEE5);
+        let share_partition = 3;
+        assert!(
+            handle
+                .share_state_summary_for_test(share_group, share_topic_id, share_partition)
+                .await
+                .is_none()
+        );
+        let share_state_partition = broker.share_coordinator.state_partition_for(
+            share_group,
+            &share_topic_id,
+            share_partition,
+        );
+        let share_state_part = local_partition_with_records(
+            dir.path(),
+            crate::share_coordinator::bootstrap::TOPIC,
+            share_state_partition,
+            &[],
+        );
+        broker.partitions.insert(
+            crate::share_coordinator::bootstrap::TOPIC.to_string(),
+            share_state_partition,
+            share_state_part,
+        );
+        broker
+            .share_coordinator
+            .initialize(share_group, share_topic_id, share_partition, 11, 90)
+            .await
+            .expect("initialize share state");
+        broker
+            .share_coordinator
+            .write(
+                share_group,
+                share_topic_id,
+                share_partition,
+                12,
+                2,
+                95,
+                7,
+                vec![crate::share_coordinator::persistence::StateBatch {
+                    first_offset: 95,
+                    last_offset: 99,
+                    delivery_state: 0,
+                    delivery_count: 1,
+                }],
+            )
+            .await
+            .expect("write share state summary");
+        check!(
+            handle
+                .share_state_summary_for_test(share_group, share_topic_id, share_partition)
+                .await
+                == Some((12, 2, 95, 7))
+        );
+        check!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                handle.wait_until_share_spso(share_group, share_topic_id, share_partition, 95),
+            )
+            .await
+            .is_ok()
+        );
+        check!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                handle.wait_until_share_delivery_complete(
+                    share_group,
+                    share_topic_id,
+                    share_partition,
+                    7,
+                ),
+            )
+            .await
+            .is_ok()
+        );
+
+        let acquired_group = "handle-share-acquired-mutant-group";
+        let acquired_topic_id = uuid::Uuid::from_u128(0xACCD);
+        let acquired_cell = broker
+            .share_partition_leaders
+            .get_or_load(acquired_group, acquired_topic_id, 0)
+            .await;
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(75),
+                handle.wait_until_share_acquired_count(acquired_group, acquired_topic_id, 0, 1),
+            )
+            .await
+            .is_err()
+        );
+        {
+            let mut state = acquired_cell.lock().await;
+            state.materialize(3, 10);
+            let acquired = state.acquire(
+                "member-1",
+                3,
+                i32::MAX,
+                std::time::Instant::now(),
+                std::time::Duration::from_secs(30),
+                i16::MAX,
+            );
+            assert!(!acquired.is_empty());
+        }
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                handle.wait_until_share_acquired_count(acquired_group, acquired_topic_id, 0, 1),
+            )
+            .await
+            .is_ok()
+        );
+
+        let closed_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind closed learner port");
+        let closed_addr = closed_listener.local_addr().expect("closed learner addr");
+        drop(closed_listener);
+        let add_learner = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            handle.add_learner(handle.node_id() + 10, closed_addr),
+        )
+        .await
+        .expect("add_learner returned before timeout");
+        assert!(add_learner.is_err());
+
+        let own_directory = handle
+            .voter_directory_id_for_test(handle.node_id())
+            .expect("own voter directory id");
+        check!(own_directory != uuid::Uuid::nil());
+        check!(handle.voter_directory_id_for_test(handle.node_id() + 10_000) == None);
+
+        // Marking the same log dir offline twice: first succeeds, second is a
+        // no-op.
+        check!(handle.test_mark_log_dir_offline(dir.path()));
+        check!(!handle.test_mark_log_dir_offline(dir.path()));
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn group_handle_helpers_observe_live_actor_views() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = BrokerConfig::for_tests(dir.path().to_path_buf());
+        let handle = Broker::start(config).await.expect("broker start");
+        let broker = handle.broker_arc_for_test();
+
+        let group_id = "handle-next-gen-group-mutant";
+        let member_id = "member-1";
+        let actor = broker.group_coordinator.get_or_create_group(
+            group_id,
+            crate::coordinator::unified::actor::GroupKindTag::Consumer,
+        );
+        actor
+            .tx
+            .send(crate::coordinator::unified::actor::GroupActorMessage::Seed(
+                consumer_group_seed(member_id),
+            ))
+            .await
+            .expect("seed next-gen group");
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                handle.wait_until_group_member_count(group_id, 1),
+            )
+            .await
+            .is_ok()
+        );
+        let described = handle
+            .group_describe_for_test(group_id)
+            .await
+            .expect("next-gen group describe");
+        check!(described.group_id.as_str() == group_id);
+        check!(described.members.len() == 1);
+        check!(described.members[0].member_id.as_str() == member_id);
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(75),
+                handle.wait_until_group_empty(group_id),
+            )
+            .await
+            .is_err()
+        );
+
+        let empty_group_id = "handle-empty-group-mutant";
+        let _ = broker.group_coordinator.get_or_create_group(
+            empty_group_id,
+            crate::coordinator::unified::actor::GroupKindTag::Consumer,
         );
         assert!(
-            loopback_bootstrap("192.168.1.5:9094".parse::<SocketAddr>().unwrap())
-                == "192.168.1.5:9094"
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                handle.wait_until_group_empty(empty_group_id),
+            )
+            .await
+            .is_ok()
         );
-        assert!(loopback_bootstrap("[::]:9092".parse::<SocketAddr>().unwrap()) == "[::1]:9092");
+
+        let classic_group_id = "handle-classic-group-mutant";
+        let classic_member_id = "classic-member-1";
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(75),
+                handle.wait_until_classic_group_member_count(classic_group_id, 1),
+            )
+            .await
+            .is_err()
+        );
+        broker.group_coordinator.seed_classic(
+            classic_group_id,
+            classic_group_with_member(classic_group_id, classic_member_id),
+        );
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                handle.wait_until_classic_group_member_count(classic_group_id, 1),
+            )
+            .await
+            .is_ok()
+        );
+        let classic = handle
+            .classic_group_inspect_for_test(classic_group_id)
+            .await
+            .expect("classic group inspect");
+        check!(classic.group_id.as_str() == classic_group_id);
+        check!(classic.members.len() == 1);
+        check!(classic.members[0].member_id.as_str() == classic_member_id);
+
+        let created_classic_group_id = "handle-create-classic-group-mutant";
+        assert!(
+            handle
+                .classic_group_inspect_for_test(created_classic_group_id)
+                .await
+                .is_none()
+        );
+        handle.group_create_for_test(created_classic_group_id);
+        let created = handle
+            .classic_group_inspect_for_test(created_classic_group_id)
+            .await
+            .expect("created classic group inspect");
+        assert!(created.group_id == created_classic_group_id);
+        assert!(created.members.is_empty());
+
+        let marked_classic_group_id = "handle-marked-classic-group-mutant";
+        assert!(
+            handle
+                .group_type_for_test(marked_classic_group_id)
+                .is_none()
+        );
+        broker
+            .group_coordinator
+            .mark_classic(marked_classic_group_id);
+        assert!(
+            handle.group_type_for_test(marked_classic_group_id)
+                == Some(crate::coordinator::unified::GroupType::Classic)
+        );
+
+        assert_streams_group_helpers_observe_live_actor_view(&broker, &handle).await;
+
+        handle.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn broker_handle_reports_non_default_node_and_voter_state() {
+        let dir7 = tempfile::tempdir().unwrap();
+        let dir8 = tempfile::tempdir().unwrap();
+        let listen7 = unused_loopback_addr();
+        let listen8 = unused_loopback_addr();
+        let controller7 = unused_loopback_addr();
+        let controller8 = unused_loopback_addr();
+        let voters = [(7, controller7), (8, controller8)];
+
+        let config7 = static_voter_test_config(dir7.path(), 7, listen7, controller7, &voters);
+        let config8 = static_voter_test_config(dir8.path(), 8, listen8, controller8, &voters);
+        let start = Box::pin(tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            async { tokio::try_join!(Broker::start(config7), Broker::start(config8)) },
+        ));
+        let (handle7, handle8) = start
+            .await
+            .expect("two-voter brokers started before timeout")
+            .expect("two-voter broker start");
+
+        let leader = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if let Some(leader) = handle7.controller_leader_id().await
+                    && leader != 0
+                {
+                    return leader;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("two-voter cluster leader");
+        assert!(leader == 7 || leader == 8);
+        handle7.wait_for_image(|img| img.voters().len() == 2).await;
+        handle8.wait_for_image(|img| img.voters().len() == 2).await;
+
+        check!(handle7.node_id() == 7);
+        check!(handle8.node_id() == 8);
+        check!(handle7.controller_leader_id().await == Some(leader));
+        check!(
+            handle7
+                .quorum_voters_for_test()
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                == [7, 8]
+                    .into_iter()
+                    .collect::<std::collections::BTreeSet<_>>()
+        );
+        check!(handle7.voter_count_for_test() == 2);
+        check!(
+            handle7.voter_ids_for_test()
+                == [7, 8]
+                    .into_iter()
+                    .collect::<std::collections::BTreeSet<_>>()
+        );
+
+        // The multi-thread test runtime aborts remaining tasks on exit if raft
+        // shutdown takes longer than the helper assertions above.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::join!(handle7.shutdown(), handle8.shutdown());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn wait_helpers_remain_pending_until_their_conditions_are_met() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = BrokerConfig::for_tests(dir.path().to_path_buf());
+        let handle = Broker::start(config).await.expect("broker start");
+        let timeout = std::time::Duration::from_millis(75);
+        let topic_id = uuid::Uuid::from_u128(0xFEED);
+
+        // Every wait helper must still be pending (time out) while its
+        // condition is unmet. The futures are lazy async fns, so building the
+        // table up front does no work; each is awaited sequentially below.
+        #[allow(clippy::type_complexity)]
+        let pending_waits: [(
+            &str,
+            std::pin::Pin<Box<dyn std::future::Future<Output = ()> + '_>>,
+        ); 9] = [
+            (
+                "wait_for_share_state_summary",
+                Box::pin(async {
+                    let () = handle
+                        .wait_for_share_state_summary("missing-mutant-group", topic_id, 0)
+                        .await;
+                }),
+            ),
+            (
+                "wait_until_share_spso",
+                Box::pin(async {
+                    handle
+                        .wait_until_share_spso("missing-mutant-group", topic_id, 0, 1)
+                        .await;
+                }),
+            ),
+            (
+                "wait_until_share_delivery_complete",
+                Box::pin(async {
+                    handle
+                        .wait_until_share_delivery_complete("missing-mutant-group", topic_id, 0, 1)
+                        .await;
+                }),
+            ),
+            (
+                "wait_until_group_member_count",
+                Box::pin(async {
+                    handle
+                        .wait_until_group_member_count("missing-mutant-group", 1)
+                        .await;
+                }),
+            ),
+            (
+                "wait_until_streams_group_member_count",
+                Box::pin(async {
+                    handle
+                        .wait_until_streams_group_member_count("missing-mutant-streams", 1)
+                        .await;
+                }),
+            ),
+            (
+                "wait_until_brokers_registered",
+                Box::pin(async {
+                    handle.wait_until_brokers_registered(2).await;
+                }),
+            ),
+            (
+                "wait_until_partition_present",
+                Box::pin(async {
+                    handle
+                        .wait_until_partition_present("missing-mutant-topic", 0)
+                        .await;
+                }),
+            ),
+            (
+                "wait_until_partition_leader_changed",
+                Box::pin(async {
+                    handle
+                        .wait_until_partition_leader_changed("missing-mutant-topic", 0, 1)
+                        .await;
+                }),
+            ),
+            (
+                "wait_until_isr_len",
+                Box::pin(async {
+                    handle
+                        .wait_until_isr_len("missing-mutant-topic", 0, 1)
+                        .await;
+                }),
+            ),
+        ];
+        for (name, wait) in pending_waits {
+            assert!(
+                tokio::time::timeout(timeout, wait).await.is_err(),
+                "{name} resolved while its condition was unmet"
+            );
+        }
+
+        // wait_until_partition_leader_changed must stay pending for each of
+        // these submitted partitions:
+        // (topic, topic_id, leader, replicas/isr, leader_epoch, excluded leader)
+        #[allow(clippy::type_complexity)]
+        let leader_changed_cases: [(&str, u128, u64, &[u64], i32, u64); 4] = [
+            // leader 0 means "no leader" — never counts as a change.
+            ("leader-zero-mutant-topic", 0xF001, 0, &[1], 3, 1),
+            // the current leader is exactly the excluded node.
+            ("leader-excluded-mutant-topic", 0xF002, 2, &[1, 2], 3, 2),
+            // leader epoch 0 is not a completed election.
+            ("leader-epoch-zero-mutant-topic", 0xF003, 2, &[1, 2], 0, 1),
+            // negative leader epoch likewise.
+            (
+                "leader-epoch-negative-mutant-topic",
+                0xF004,
+                2,
+                &[1, 2],
+                -1,
+                1,
+            ),
+        ];
+        for (topic, topic_id, leader, replicas, leader_epoch, excluded) in leader_changed_cases {
+            submit_metadata_topic_partition(
+                &handle,
+                topic,
+                topic_id,
+                0,
+                leader,
+                replicas,
+                replicas,
+                leader_epoch,
+            )
+            .await;
+            assert!(
+                tokio::time::timeout(
+                    timeout,
+                    handle.wait_until_partition_leader_changed(topic, 0, excluded),
+                )
+                .await
+                .is_err(),
+                "{topic}: wait_until_partition_leader_changed resolved"
+            );
+        }
+        // Leader 0 is also reported as "no leader" by the direct helper.
+        assert!(
+            handle
+                .partition_leader_for_test("leader-zero-mutant-topic", 0)
+                .is_none()
+        );
+
+        submit_metadata_topic_partition(
+            &handle,
+            "isr-len-mutant-topic",
+            0xF005,
+            0,
+            1,
+            &[1, 2],
+            &[1, 2],
+            3,
+        )
+        .await;
+        assert!(
+            tokio::time::timeout(
+                timeout,
+                handle.wait_until_isr_len("isr-len-mutant-topic", 0, 1)
+            )
+            .await
+            .is_err()
+        );
+
+        handle.shutdown().await;
     }
 
     #[test]
@@ -4223,17 +5735,48 @@ mod tests {
         let dir = tempdir().unwrap();
         let config = BrokerConfig::for_tests(dir.path().to_path_buf());
         let handle = Broker::start(config).await.unwrap();
-        assert!(handle.listen_addr().port() != 0);
+        let broker = handle.broker_arc_for_test();
+        let addr = handle.listen_addr();
+        assert!(addr.port() != 0);
+        let stream = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("listener accepts before shutdown");
+        wait_for_connection_count(&broker, 1, "accept_loop did not register live connection").await;
+        drop(stream);
+        wait_for_connection_count(&broker, 0, "connection guard did not release client slot").await;
         handle.shutdown().await;
+        assert_listener_stops_accepting(addr).await;
+    }
+
+    #[tokio::test]
+    async fn controlled_shutdown_timeout_stops_listener_and_reports_error() {
+        let dir = tempdir().unwrap();
+        let config = BrokerConfig::for_tests(dir.path().to_path_buf());
+        let handle = Broker::start(config).await.unwrap();
+        let addr = handle.listen_addr();
+        let err = handle
+            .controlled_shutdown(std::time::Duration::ZERO)
+            .await
+            .expect_err("zero-timeout controlled shutdown should report drain timeout");
+        assert!(matches!(err, BrokerError::ShutdownTimeout(timeout) if timeout.is_zero()));
+        assert_listener_stops_accepting(addr).await;
     }
 
     #[test]
     fn rlmm_backoff_doubles_then_caps() {
         use std::time::Duration;
         let max = Duration::from_secs(10);
-        assert!(next_rlmm_backoff(Duration::from_millis(250), max) == Duration::from_millis(500));
-        assert!(next_rlmm_backoff(Duration::from_secs(8), max) == max); // 16s capped to 10s
-        assert!(next_rlmm_backoff(max, max) == max);
+        let cases = [
+            (Duration::from_millis(250), Duration::from_millis(500)),
+            (Duration::from_secs(8), max), // 16s capped to 10s
+            (max, max),
+        ];
+        for (current, expected) in cases {
+            assert!(
+                next_rlmm_backoff(current, max) == expected,
+                "current {current:?}"
+            );
+        }
     }
 
     #[tokio::test]

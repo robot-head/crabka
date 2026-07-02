@@ -2355,6 +2355,7 @@ dependencies = [
 name = "crabka-connect-derive"
 version = "0.3.8"
 dependencies = [
+ "assert2",
  "crabka-connect",
  "datatest-stable",
  "proc-macro-crate",

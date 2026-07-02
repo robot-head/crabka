@@ -88,13 +88,26 @@ pub(crate) const DELETE_RETENTION_MS: &str = "delete.retention.ms";
 pub(crate) const QOS_TIER: &str = "qos.tier";
 pub(crate) const DEFAULT_QOS_TIER: &str = "default";
 
+/// Kafka sentinel for `retention.ms` / `retention.bytes`: `-1` means
+/// unlimited retention, and is the lowest legal value.
+const RETENTION_UNLIMITED: i64 = -1;
+
+/// KIP-405 sentinel for `local.retention.ms` / `local.retention.bytes`:
+/// `-2` means "inherit the corresponding non-local retention setting", and
+/// is the lowest legal value (`-1` = unlimited also applies).
+const LOCAL_RETENTION_INHERIT: i64 = -2;
+
 /// Validate a single key/value pair. `Err(reason)` carries an
 /// operator-readable explanation that the handler propagates into the
 /// `error_message` field of the response.
 pub(crate) fn validate_topic_config(key: &str, value: &str) -> Result<(), String> {
     match key {
-        RETENTION_MS | RETENTION_BYTES => parse_i64_at_least(-1, value).map(|_| ()),
-        LOCAL_RETENTION_MS | LOCAL_RETENTION_BYTES => parse_i64_at_least(-2, value).map(|_| ()),
+        RETENTION_MS | RETENTION_BYTES => {
+            parse_i64_at_least(RETENTION_UNLIMITED, value).map(|_| ())
+        }
+        LOCAL_RETENTION_MS | LOCAL_RETENTION_BYTES => {
+            parse_i64_at_least(LOCAL_RETENTION_INHERIT, value).map(|_| ())
+        }
         DELETE_RETENTION_MS => parse_i64_at_least(0, value).map(|_| ()),
         SEGMENT_BYTES => parse_u64_at_least(1, value).map(|_| ()),
         CLEANUP_POLICY => match value {
@@ -514,24 +527,29 @@ mod tests {
     use assert2::assert;
 
     #[test]
-    fn validate_retention_ms_accepts_positive_and_minus_one() {
-        assert!(validate_topic_config(RETENTION_MS, "60000").is_ok());
-        assert!(validate_topic_config(RETENTION_MS, "-1").is_ok());
-    }
-
-    #[test]
-    fn validate_retention_ms_rejects_below_minus_one() {
-        assert!(validate_topic_config(RETENTION_MS, "-5").is_err());
-    }
-
-    #[test]
-    fn validate_retention_ms_rejects_non_integer() {
-        assert!(validate_topic_config(RETENTION_MS, "abc").is_err());
+    fn validate_retention_ms_boundary_cases() {
+        let cases = [
+            ("60000", true), // positive accepted
+            ("-1", true),    // -1 (unlimited) accepted
+            ("-5", false),   // below -1 rejected
+            ("abc", false),  // non-integer rejected
+        ];
+        for (value, want_ok) in cases {
+            assert!(
+                validate_topic_config(RETENTION_MS, value).is_ok() == want_ok,
+                "retention.ms={value}"
+            );
+        }
     }
 
     #[test]
     fn validate_segment_bytes_rejects_zero() {
         assert!(validate_topic_config(SEGMENT_BYTES, "0").is_err());
+    }
+
+    #[test]
+    fn validate_segment_bytes_accepts_minimum_one() {
+        assert!(validate_topic_config(SEGMENT_BYTES, "1").is_ok());
     }
 
     #[test]
@@ -578,11 +596,19 @@ mod tests {
     #[test]
     fn parse_compression_type_maps_codecs() {
         use crabka_compression::CompressionType;
-        assert!(parse_compression_type("gzip") == Ok(Some(CompressionType::Gzip)));
-        assert!(parse_compression_type("snappy") == Ok(Some(CompressionType::Snappy)));
-        assert!(parse_compression_type("lz4") == Ok(Some(CompressionType::Lz4)));
-        assert!(parse_compression_type("zstd") == Ok(Some(CompressionType::Zstd)));
-        assert!(parse_compression_type("uncompressed") == Ok(Some(CompressionType::None)));
+        let cases = [
+            ("gzip", CompressionType::Gzip),
+            ("snappy", CompressionType::Snappy),
+            ("lz4", CompressionType::Lz4),
+            ("zstd", CompressionType::Zstd),
+            ("uncompressed", CompressionType::None),
+        ];
+        for (input, want) in cases {
+            assert!(
+                parse_compression_type(input) == Ok(Some(want)),
+                "compression.type={input}"
+            );
+        }
     }
 
     #[test]
@@ -673,19 +699,20 @@ mod tests {
     }
 
     #[test]
-    fn is_recognized_returns_true_for_whitelisted_keys() {
-        assert!(is_recognized(RETENTION_MS));
-        assert!(is_recognized(RETENTION_BYTES));
-        assert!(is_recognized(SEGMENT_BYTES));
-        assert!(is_recognized(CLEANUP_POLICY));
-        assert!(is_recognized(COMPRESSION_TYPE));
-        assert!(is_recognized(MIN_INSYNC_REPLICAS));
-    }
-
-    #[test]
-    fn is_recognized_returns_false_for_unknown_keys() {
-        assert!(!is_recognized("flush.ms"));
-        assert!(!is_recognized(""));
+    fn is_recognized_matches_whitelist() {
+        let cases = [
+            (RETENTION_MS, true),
+            (RETENTION_BYTES, true),
+            (SEGMENT_BYTES, true),
+            (CLEANUP_POLICY, true),
+            (COMPRESSION_TYPE, true),
+            (MIN_INSYNC_REPLICAS, true),
+            ("flush.ms", false),
+            ("", false),
+        ];
+        for (key, want) in cases {
+            assert!(is_recognized(key) == want, "key {key:?}");
+        }
     }
 
     #[test]
@@ -723,6 +750,14 @@ mod tests {
     }
 
     #[test]
+    fn apply_retention_ms_zero_is_retained() {
+        let mut o = BTreeMap::new();
+        o.insert(RETENTION_MS.into(), "0".into());
+        let out = apply_to_log_config(&o, &LogConfig::default());
+        assert!(out.retention_ms == Some(Duration::from_millis(0)));
+    }
+
+    #[test]
     fn apply_retention_bytes_propagates() {
         let mut o = BTreeMap::new();
         o.insert(RETENTION_BYTES.into(), "1048576".into());
@@ -736,6 +771,14 @@ mod tests {
         o.insert(RETENTION_BYTES.into(), "-1".into());
         let out = apply_to_log_config(&o, &LogConfig::default());
         assert!(out.retention_bytes == None);
+    }
+
+    #[test]
+    fn apply_retention_bytes_zero_is_retained() {
+        let mut o = BTreeMap::new();
+        o.insert(RETENTION_BYTES.into(), "0".into());
+        let out = apply_to_log_config(&o, &LogConfig::default());
+        assert!(out.retention_bytes == Some(0));
     }
 
     #[test]
@@ -778,9 +821,12 @@ mod tests {
 
     #[test]
     fn validate_local_retention_ms_accepts_minus_one_minus_two_and_positive() {
-        assert!(validate_topic_config(LOCAL_RETENTION_MS, "-2").is_ok());
-        assert!(validate_topic_config(LOCAL_RETENTION_MS, "-1").is_ok());
-        assert!(validate_topic_config(LOCAL_RETENTION_MS, "60000").is_ok());
+        for value in ["-2", "-1", "60000"] {
+            assert!(
+                validate_topic_config(LOCAL_RETENTION_MS, value) == Ok(()),
+                "local.retention.ms={value}"
+            );
+        }
     }
 
     #[test]
@@ -808,6 +854,14 @@ mod tests {
     }
 
     #[test]
+    fn apply_local_retention_ms_zero_is_retained() {
+        let mut o = BTreeMap::new();
+        o.insert(LOCAL_RETENTION_MS.into(), "0".into());
+        let out = apply_to_log_config(&o, &LogConfig::default());
+        assert!(out.local_retention_ms == Some(Duration::from_millis(0)));
+    }
+
+    #[test]
     fn apply_local_retention_ms_positive_propagates() {
         let mut o = BTreeMap::new();
         o.insert(LOCAL_RETENTION_MS.into(), "60000".into());
@@ -832,10 +886,22 @@ mod tests {
     }
 
     #[test]
+    fn apply_local_retention_bytes_zero_is_retained() {
+        let mut o = BTreeMap::new();
+        o.insert(LOCAL_RETENTION_BYTES.into(), "0".into());
+        let out = apply_to_log_config(&o, &LogConfig::default());
+        assert!(out.local_retention_bytes == Some(0));
+    }
+
+    #[test]
     fn validate_delete_retention_ms_accepts_nonneg_rejects_negative() {
-        assert!(validate_topic_config(DELETE_RETENTION_MS, "0").is_ok());
-        assert!(validate_topic_config(DELETE_RETENTION_MS, "86400000").is_ok());
-        assert!(validate_topic_config(DELETE_RETENTION_MS, "-1").is_err());
+        let cases = [("0", true), ("86400000", true), ("-1", false)];
+        for (value, want_ok) in cases {
+            assert!(
+                validate_topic_config(DELETE_RETENTION_MS, value).is_ok() == want_ok,
+                "delete.retention.ms={value}"
+            );
+        }
     }
 
     #[test]
@@ -873,10 +939,15 @@ mod tests {
 
     #[test]
     fn parse_recovery_strategy_maps_values() {
-        assert!(RecoveryStrategy::parse("None") == Some(RecoveryStrategy::None));
-        assert!(RecoveryStrategy::parse("Balanced") == Some(RecoveryStrategy::Balanced));
-        assert!(RecoveryStrategy::parse("Aggressive") == Some(RecoveryStrategy::Aggressive));
-        assert!(RecoveryStrategy::parse("bogus") == None);
+        let cases = [
+            ("None", Some(RecoveryStrategy::None)),
+            ("Balanced", Some(RecoveryStrategy::Balanced)),
+            ("Aggressive", Some(RecoveryStrategy::Aggressive)),
+            ("bogus", None),
+        ];
+        for (input, want) in cases {
+            assert!(RecoveryStrategy::parse(input) == want, "input {input:?}");
+        }
     }
 
     #[test]

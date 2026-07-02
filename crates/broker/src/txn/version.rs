@@ -56,18 +56,31 @@ mod tests {
 
     #[test]
     fn resolves_levels() {
-        assert!(resolve_txn_version(&image_with_tv(None)) == TxnVersion::Classic);
-        assert!(resolve_txn_version(&image_with_tv(Some(0))) == TxnVersion::Classic);
-        assert!(resolve_txn_version(&image_with_tv(Some(1))) == TxnVersion::Flexible);
-        assert!(resolve_txn_version(&image_with_tv(Some(2))) == TxnVersion::Verified);
+        for (level, want) in [
+            (None, TxnVersion::Classic),
+            (Some(0), TxnVersion::Classic),
+            (Some(1), TxnVersion::Flexible),
+            (Some(2), TxnVersion::Verified),
+        ] {
+            assert!(
+                resolve_txn_version(&image_with_tv(level)) == want,
+                "{level:?}"
+            );
+        }
     }
 
     #[test]
     fn behavior_predicates() {
-        assert!(!TxnVersion::Classic.flexible_records());
-        assert!(TxnVersion::Flexible.flexible_records());
-        assert!(TxnVersion::Verified.flexible_records());
-        assert!(!TxnVersion::Flexible.verified());
-        assert!(TxnVersion::Verified.verified());
+        for (v, want_flexible, want_verified) in [
+            (TxnVersion::Classic, false, false),
+            (TxnVersion::Flexible, true, false),
+            (TxnVersion::Verified, true, true),
+        ] {
+            assert!(
+                v.flexible_records() == want_flexible,
+                "{v:?} flexible_records"
+            );
+            assert!(v.verified() == want_verified, "{v:?} verified");
+        }
     }
 }

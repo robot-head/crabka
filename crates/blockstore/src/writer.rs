@@ -185,7 +185,7 @@ mod tests {
     use arrow::array::{Int64Array, StringArray, UInt64Array};
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
-    use assert2::assert;
+    use assert2::{assert, check};
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::{ObjectStore, ObjectStoreExt};
@@ -223,14 +223,18 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(meta.tenant == "tenant-a");
-        assert!(meta.object_key == "blocks/tenant-a/b1.parquet");
-        assert!(meta.min_ts == 100);
-        assert!(meta.max_ts == 400);
-        assert!(meta.row_count == 4);
-        let mut fps = meta.fingerprints.clone();
-        fps.sort_unstable();
-        assert!(fps == vec![10_u64, 20]);
+        let mut meta = meta;
+        meta.fingerprints.sort_unstable();
+        assert!(
+            meta == BlockMeta {
+                tenant: "tenant-a".to_string(),
+                object_key: "blocks/tenant-a/b1.parquet".to_string(),
+                min_ts: 100,
+                max_ts: 400,
+                row_count: 4,
+                fingerprints: vec![10, 20],
+            }
+        );
 
         let head = store.head(&Path::from("blocks/tenant-a/b1.parquet")).await;
         assert!(head.is_ok());
@@ -261,10 +265,10 @@ mod tests {
             &SummaryColumns::new("trace_id", "start_unix_nano"),
         )
         .unwrap();
-        assert!(min_ts == 100);
-        assert!(max_ts == 200);
-        assert!(row_count == 2);
-        assert!(fps.is_empty());
+        check!(min_ts == 100);
+        check!(max_ts == 200);
+        check!(row_count == 2);
+        check!(fps.is_empty());
     }
 
     #[test]

@@ -89,6 +89,11 @@ impl MetadataObserver {
             let _ = h.await;
         }
     }
+
+    #[cfg(test)]
+    pub(crate) async fn task_drained_for_test(&self) -> bool {
+        self.task.lock().await.is_none()
+    }
 }
 
 /// One iteration: fetch from `addr` at `fetch_offset`, decode + apply, and
@@ -148,18 +153,23 @@ async fn fetch_once(
         return None;
     }
 
+    Some(apply_fetch_records(fetch_offset, &resp.records, image_tx))
+}
+
+fn apply_fetch_records(
+    fetch_offset: u64,
+    records: &[u8],
+    image_tx: &watch::Sender<Arc<MetadataImage>>,
+) -> u64 {
     // No new records: the controller had nothing past `fetch_offset`. Skip the
-    // expensive full-image clone entirely — the no-op path below would only
-    // discard it (`new_offset` would stay equal to `fetch_offset`).
-    if resp.records.is_empty() {
-        return Some(fetch_offset);
+    // expensive full-image clone entirely.
+    if records.is_empty() {
+        return fetch_offset;
     }
 
-    // There are records to apply, so clone the current image, mutate it, and
-    // publish exactly as before.
     let mut next: MetadataImage = (**image_tx.borrow()).clone();
     let mut new_offset = fetch_offset;
-    let mut buf: &[u8] = &resp.records;
+    let mut buf: &[u8] = records;
     while !buf.is_empty() {
         let batch = match RecordBatch::decode(&mut buf) {
             Ok(b) => b,
@@ -194,7 +204,7 @@ async fn fetch_once(
     if new_offset != fetch_offset {
         let _ = image_tx.send_replace(Arc::new(next));
     }
-    Some(new_offset.max(fetch_offset))
+    new_offset.max(fetch_offset)
 }
 
 /// Round-robin pick into a non-empty voter list: index `idx` wrapped by the
@@ -249,10 +259,148 @@ async fn run_loop(
 mod tests {
     use super::*;
     use assert2::assert;
-    use crabka_metadata::{MetadataRecord, TopicRecord};
+    use bytes::{Bytes, BytesMut};
+    use crabka_metadata::{MetadataRecord, TopicRecord, to_kraft_values};
+    use crabka_protocol::Encode;
+    use crabka_protocol::owned::api_versions_request;
+    use crabka_protocol::owned::api_versions_response::{ApiVersion, ApiVersionsResponse};
+    use crabka_protocol::records::header::Attributes;
+    use crabka_protocol::records::{Record, RecordBatch};
     use crabka_raft::{BootstrapMode, Controller, ControllerConfig};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
     use uuid::Uuid;
+
+    #[derive(Clone)]
+    struct RecordingDialer {
+        client_ids: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl OutboundDialer for RecordingDialer {
+        async fn dial(
+            &self,
+            target: NodeId,
+            addr: &str,
+            options: crabka_client_core::ConnectionOptions,
+        ) -> Result<crabka_client_core::Connection, crabka_client_core::ClientError> {
+            self.client_ids
+                .lock()
+                .unwrap()
+                .push(options.client_id.clone());
+            crabka_raft::PlaintextDialer
+                .dial(target, addr, options)
+                .await
+        }
+    }
+
+    #[derive(Clone)]
+    struct CountingDialer {
+        dial_count: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl OutboundDialer for CountingDialer {
+        async fn dial(
+            &self,
+            target: NodeId,
+            addr: &str,
+            options: crabka_client_core::ConnectionOptions,
+        ) -> Result<crabka_client_core::Connection, crabka_client_core::ClientError> {
+            self.dial_count.fetch_add(1, Ordering::SeqCst);
+            crabka_raft::PlaintextDialer
+                .dial(target, addr, options)
+                .await
+        }
+    }
+
+    fn api_versions_response_v0() -> Vec<u8> {
+        let resp = ApiVersionsResponse {
+            error_code: 0,
+            api_keys: vec![ApiVersion {
+                api_key: api_versions_request::API_KEY,
+                min_version: 0,
+                max_version: 3,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut buf = BytesMut::new();
+        resp.encode(&mut buf, 0).unwrap();
+        buf.to_vec()
+    }
+
+    fn metadata_fetch_response_body(records: Bytes) -> Vec<u8> {
+        let mut out = vec![0u8]; // flexible ResponseHeader v1 tagged-fields
+        crabka_raft::CrabkaMetadataFetchResponse {
+            error_code: 0,
+            leader_hint: 1,
+            log_start_offset: 0,
+            high_watermark: 0,
+            records,
+        }
+        .encode_v0(&mut out)
+        .unwrap();
+        out
+    }
+
+    fn topic_record(name: &str) -> MetadataRecord {
+        MetadataRecord::V1Topic(TopicRecord {
+            name: name.into(),
+            topic_id: Uuid::new_v4(),
+            partitions: 1,
+            replication_factor: 1,
+        })
+    }
+
+    fn metadata_batch(base_offset: i64, rec: &MetadataRecord) -> RecordBatch {
+        let values = to_kraft_values(rec, &MetadataImage::new(Uuid::nil())).expect("to kraft");
+        let records: Vec<Record> = values
+            .into_iter()
+            .enumerate()
+            .map(|(idx, value)| Record {
+                offset_delta: i32::try_from(idx).unwrap(),
+                value: Some(value),
+                ..Default::default()
+            })
+            .collect();
+        RecordBatch {
+            base_offset,
+            last_offset_delta: i32::try_from(records.len().saturating_sub(1)).unwrap(),
+            records,
+            ..Default::default()
+        }
+    }
+
+    fn control_batch(base_offset: i64) -> RecordBatch {
+        RecordBatch {
+            base_offset,
+            attributes: Attributes::default().with_control(true),
+            last_offset_delta: 0,
+            records: vec![Record {
+                offset_delta: 0,
+                value: Some(Bytes::from_static(b"leader-change")),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn encode_batches(batches: &[RecordBatch]) -> Bytes {
+        let mut out = Vec::new();
+        for batch in batches {
+            batch.encode(&mut out).expect("encode batch");
+        }
+        Bytes::from(out)
+    }
+
+    fn image_channel(cluster_id: Uuid) -> watch::Sender<Arc<MetadataImage>> {
+        let (tx, _) = watch::channel(Arc::new(MetadataImage::new(cluster_id)));
+        tx
+    }
+
+    /// Per-fetch soft byte cap used by every observer fixture (1 MiB).
+    const TEST_MAX_FETCH_BYTES: u32 = 1_048_576;
 
     #[test]
     fn voter_at_wraps_round_robin_by_modulo() {
@@ -264,13 +412,94 @@ mod tests {
         // In-range picks each distinct voter. `idx / len` (the `%`→`/` mutant)
         // would collapse 1 and 2 to index 0 ("a"), so distinguishing 0/1/2 here
         // proves the modulo, not integer division, indexes the list.
-        assert!(voter_at(&voters, 0).0 == 1);
-        assert!(voter_at(&voters, 1).0 == 2);
-        assert!(voter_at(&voters, 2).0 == 3);
         // Wrap-around: index 3 must rotate back to the first voter (3 % 3 == 0);
         // `3 / 3 == 1` would return the second voter instead.
-        assert!(voter_at(&voters, 3).0 == 1);
-        assert!(voter_at(&voters, 4).0 == 2);
+        let cases = [(0usize, 1u64), (1, 2), (2, 3), (3, 1), (4, 2)];
+        for (idx, expected_id) in cases {
+            assert!(voter_at(&voters, idx).0 == expected_id, "idx {idx}");
+        }
+    }
+
+    #[test]
+    fn apply_fetch_records_advances_past_control_batch() {
+        let image_tx = image_channel(Uuid::new_v4());
+        let records = encode_batches(&[control_batch(6)]);
+
+        let new_offset = apply_fetch_records(6, &records, &image_tx);
+
+        assert!(new_offset == 7);
+    }
+
+    #[test]
+    fn apply_fetch_records_advances_data_batch_offset_and_publishes() {
+        let image_tx = image_channel(Uuid::new_v4());
+        let records = encode_batches(&[metadata_batch(4, &topic_record("offset-topic"))]);
+
+        let new_offset = apply_fetch_records(4, &records, &image_tx);
+
+        assert!(new_offset == 5);
+        assert!(image_tx.borrow().topic("offset-topic").is_some());
+    }
+
+    #[tokio::test]
+    async fn cancel_drains_background_task() {
+        let observer = MetadataObserver::start(ObserverConfig {
+            voters: vec![],
+            dialer: Arc::new(crabka_raft::PlaintextDialer),
+            client_id: "cancel-test".into(),
+            cluster_id: Uuid::nil(),
+            max_bytes: TEST_MAX_FETCH_BYTES,
+            poll_interval: Duration::from_mins(1),
+        });
+
+        observer.cancel().await;
+
+        assert!(observer.task.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn run_loop_sleeps_after_empty_fetch() {
+        let fetches = Arc::new(AtomicUsize::new(0));
+        let fetches_for_mock = fetches.clone();
+        let mock =
+            crabka_client_core::MockBroker::start(move |api_key, _version, _corr_id, _body| {
+                if api_key == api_versions_request::API_KEY {
+                    return Some(api_versions_response_v0());
+                }
+                if api_key == crabka_raft::API_KEY_METADATA_FETCH {
+                    fetches_for_mock.fetch_add(1, Ordering::SeqCst);
+                    return Some(metadata_fetch_response_body(Bytes::new()));
+                }
+                None
+            })
+            .await;
+        let dial_count = Arc::new(AtomicUsize::new(0));
+        let observer = MetadataObserver::start(ObserverConfig {
+            voters: vec![(1, mock.addr.to_string())],
+            dialer: Arc::new(CountingDialer {
+                dial_count: dial_count.clone(),
+            }),
+            client_id: "sleep-test".into(),
+            cluster_id: Uuid::nil(),
+            max_bytes: TEST_MAX_FETCH_BYTES,
+            poll_interval: Duration::from_millis(250),
+        });
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while fetches.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("observer should issue the first fetch");
+        let after_first_fetch = fetches.load(Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        assert!(fetches.load(Ordering::SeqCst) == after_first_fetch);
+        assert!(dial_count.load(Ordering::SeqCst) == after_first_fetch);
+
+        observer.cancel().await;
+        mock.stop();
     }
 
     #[tokio::test]
@@ -294,13 +523,16 @@ mod tests {
         })])
         .await
         .expect("submit");
+        let client_ids = Arc::new(std::sync::Mutex::new(Vec::new()));
 
         let observer = MetadataObserver::start(ObserverConfig {
             voters: vec![(1, ctrl_addr.to_string())],
-            dialer: Arc::new(crabka_raft::PlaintextDialer),
+            dialer: Arc::new(RecordingDialer {
+                client_ids: client_ids.clone(),
+            }),
             client_id: "test-observer".into(),
             cluster_id: Uuid::nil(),
-            max_bytes: 1_048_576,
+            max_bytes: TEST_MAX_FETCH_BYTES,
             poll_interval: Duration::from_millis(50),
         });
 
@@ -316,6 +548,15 @@ mod tests {
             );
             let _ = tokio::time::timeout(Duration::from_millis(200), img_rx.changed()).await;
         }
+
+        assert!(observer.current_image().topic("observed").is_some());
+        assert!(
+            client_ids
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|id| id == "test-observer")
+        );
 
         observer.cancel().await;
         ctrl.shutdown().await;

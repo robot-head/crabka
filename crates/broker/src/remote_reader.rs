@@ -20,6 +20,15 @@ use tracing::warn;
 use zerocopy::byteorder::{I64, U32};
 use zerocopy::{BigEndian, FromBytes, Immutable, KnownLayout, Unaligned};
 
+/// Absolute (partition-level) log offset.
+pub(crate) type LogOffset = i64;
+/// Record timestamp in milliseconds since the Unix epoch.
+pub(crate) type TimestampMs = i64;
+/// Offset relative to a segment's base offset — the offset-index key.
+pub(crate) type RelativeOffset = u32;
+/// Byte position within a segment's `.log` file — the offset-index value.
+pub(crate) type BytePosition = u32;
+
 /// 8 bytes per entry: rel u32 BE + pos u32 BE. Mirrors
 /// `crabka_log::index::OffsetEntryRaw` so the remote-tier copy of an
 /// `OffsetIndex` file decodes through the same byte layout the local index
@@ -31,7 +40,10 @@ pub(crate) struct OffsetIndexEntry {
     position: U32<BigEndian>,
 }
 
-const _: () = assert!(std::mem::size_of::<OffsetIndexEntry>() == 8);
+/// Byte length of one serialized offset-index entry.
+const OFFSET_INDEX_ENTRY_LEN: usize = std::mem::size_of::<OffsetIndexEntry>();
+
+const _: () = assert!(OFFSET_INDEX_ENTRY_LEN == 8);
 
 /// 12 bytes per entry: ts i64 BE + rel u32 BE. Mirrors
 /// `crabka_log::index::TimeEntryRaw`.
@@ -42,7 +54,10 @@ pub(crate) struct TimeIndexEntry {
     relative_offset: U32<BigEndian>,
 }
 
-const _: () = assert!(std::mem::size_of::<TimeIndexEntry>() == 12);
+/// Byte length of one serialized time-index entry.
+const TIME_INDEX_ENTRY_LEN: usize = std::mem::size_of::<TimeIndexEntry>();
+
+const _: () = assert!(TIME_INDEX_ENTRY_LEN == 12);
 
 /// 24 bytes per entry: `start_offset` i64 BE + `last_offset` i64 BE +
 /// `producer_id` i64 BE. Mirrors `crabka_log::txn_index::AbortedTxnRaw` so the
@@ -56,13 +71,16 @@ pub(crate) struct AbortedTxnIndexEntry {
     producer_id: I64<BigEndian>,
 }
 
-const _: () = assert!(std::mem::size_of::<AbortedTxnIndexEntry>() == 24);
+/// Byte length of one serialized aborted-transaction index entry.
+const TXN_INDEX_ENTRY_LEN: usize = std::mem::size_of::<AbortedTxnIndexEntry>();
+
+const _: () = assert!(TXN_INDEX_ENTRY_LEN == 24);
 
 /// One decoded aborted-transaction entry from a remote segment's `.txnindex`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct AbortedTxnEntry {
-    pub(crate) start_offset: i64,
-    pub(crate) last_offset: i64,
+    pub(crate) start_offset: LogOffset,
+    pub(crate) last_offset: LogOffset,
     pub(crate) producer_id: i64,
 }
 
@@ -91,7 +109,7 @@ impl RemoteReader {
         &self,
         tp: &TopicIdPartition,
         leader_epoch: i32,
-        offset: i64,
+        offset: LogOffset,
         max_bytes: usize,
     ) -> Result<Option<RecordBatch>, RemoteStorageError> {
         // Primary lookup: epoch-indexed fast path.  The caller resolves
@@ -179,8 +197,8 @@ impl RemoteReader {
         &self,
         tp: &TopicIdPartition,
         leader_epoch: i32,
-        from_offset: i64,
-        to_offset: i64,
+        from_offset: LogOffset,
+        to_offset: LogOffset,
     ) -> Result<Vec<AbortedTxnEntry>, RemoteStorageError> {
         let Some(metadata) =
             self.rlmm
@@ -221,7 +239,7 @@ impl RemoteReader {
     pub(crate) fn earliest_offset(
         &self,
         tp: &TopicIdPartition,
-    ) -> Result<Option<i64>, RemoteStorageError> {
+    ) -> Result<Option<LogOffset>, RemoteStorageError> {
         let listed = self.rlmm.list_remote_log_segments(tp)?;
         Ok(listed
             .into_iter()
@@ -238,8 +256,8 @@ impl RemoteReader {
     pub(crate) async fn offset_for_timestamp(
         &self,
         tp: &TopicIdPartition,
-        target_timestamp: i64,
-    ) -> Result<Option<i64>, RemoteStorageError> {
+        target_timestamp: TimestampMs,
+    ) -> Result<Option<LogOffset>, RemoteStorageError> {
         let mut listed = self.rlmm.list_remote_log_segments(tp)?;
         listed.retain(|md| md.state() == RemoteLogSegmentState::CopySegmentFinished);
         listed.sort_by_key(RemoteLogSegmentMetadata::start_offset);
@@ -283,8 +301,8 @@ impl RemoteReader {
     async fn fetch_log_blocking(
         &self,
         metadata: RemoteLogSegmentMetadata,
-        start_position: u32,
-        end_position: Option<u32>,
+        start_position: BytePosition,
+        end_position: Option<BytePosition>,
     ) -> Result<Vec<u8>, RemoteStorageError> {
         let rsm = self.rsm.clone();
         match tokio::task::spawn_blocking(move || {
@@ -309,10 +327,10 @@ impl RemoteReader {
 /// `max_bytes` would reach or exceed `segment_size`. Otherwise the inclusive
 /// last byte to read.
 pub(crate) fn end_position_for(
-    start_position: u32,
+    start_position: BytePosition,
     segment_size: u32,
     max_bytes: usize,
-) -> Option<u32> {
+) -> Option<BytePosition> {
     if max_bytes == 0 {
         return None;
     }
@@ -340,7 +358,7 @@ fn corrupt_index(kind: &str) -> RemoteStorageError {
 /// `&[OffsetIndexEntry]` (8 bytes / entry: rel u32 BE + pos u32 BE). Trailing
 /// bytes that don't complete an 8-byte entry are ignored. Borrows from `bytes`.
 pub(crate) fn parse_offset_index(bytes: &[u8]) -> Result<&[OffsetIndexEntry], RemoteStorageError> {
-    let truncated_len = (bytes.len() / 8) * 8;
+    let truncated_len = (bytes.len() / OFFSET_INDEX_ENTRY_LEN) * OFFSET_INDEX_ENTRY_LEN;
     <[OffsetIndexEntry]>::ref_from_bytes(&bytes[..truncated_len])
         .map_err(|_| corrupt_index("offset"))
 }
@@ -349,7 +367,10 @@ pub(crate) fn parse_offset_index(bytes: &[u8]) -> Result<&[OffsetIndexEntry], Re
 /// or 0 when empty / target is before the first entry. Runs directly against
 /// the borrowed zero-copy slice — no owned `Vec` is materialized.
 #[must_use]
-pub(crate) fn position_for_relative_offset(entries: &[OffsetIndexEntry], target_rel: u32) -> u32 {
+pub(crate) fn position_for_relative_offset(
+    entries: &[OffsetIndexEntry],
+    target_rel: RelativeOffset,
+) -> BytePosition {
     match entries.binary_search_by_key(&target_rel, |e| e.relative_offset.get()) {
         Ok(i) => entries[i].position.get(),
         Err(0) => 0,
@@ -361,7 +382,7 @@ pub(crate) fn position_for_relative_offset(entries: &[OffsetIndexEntry], target_
 /// `&[TimeIndexEntry]` (12 bytes / entry: ts i64 BE + rel u32 BE). Trailing
 /// bytes that don't complete a 12-byte entry are ignored. Borrows from `bytes`.
 pub(crate) fn parse_time_index(bytes: &[u8]) -> Result<&[TimeIndexEntry], RemoteStorageError> {
-    let truncated_len = (bytes.len() / 12) * 12;
+    let truncated_len = (bytes.len() / TIME_INDEX_ENTRY_LEN) * TIME_INDEX_ENTRY_LEN;
     <[TimeIndexEntry]>::ref_from_bytes(&bytes[..truncated_len]).map_err(|_| corrupt_index("time"))
 }
 
@@ -370,7 +391,7 @@ pub(crate) fn parse_time_index(bytes: &[u8]) -> Result<&[TimeIndexEntry], Remote
 /// `last_offset` i64 BE, `producer_id` i64 BE). Trailing bytes that don't
 /// complete a 24-byte entry are ignored. Borrows from `bytes`.
 pub(crate) fn parse_txn_index(bytes: &[u8]) -> Result<&[AbortedTxnIndexEntry], RemoteStorageError> {
-    let truncated_len = (bytes.len() / 24) * 24;
+    let truncated_len = (bytes.len() / TXN_INDEX_ENTRY_LEN) * TXN_INDEX_ENTRY_LEN;
     <[AbortedTxnIndexEntry]>::ref_from_bytes(&bytes[..truncated_len])
         .map_err(|_| corrupt_index("transaction"))
 }
@@ -380,7 +401,11 @@ pub(crate) fn parse_txn_index(bytes: &[u8]) -> Result<&[AbortedTxnIndexEntry], R
 /// test against an inclusive range: the entry's `[start, last]` intersects
 /// `[from, to]` iff `start <= to && last >= from`.
 #[must_use]
-pub(crate) fn txn_overlaps(entry: &AbortedTxnIndexEntry, from_offset: i64, to_offset: i64) -> bool {
+pub(crate) fn txn_overlaps(
+    entry: &AbortedTxnIndexEntry,
+    from_offset: LogOffset,
+    to_offset: LogOffset,
+) -> bool {
     entry.start_offset.get() <= to_offset && entry.last_offset.get() >= from_offset
 }
 
@@ -389,8 +414,8 @@ pub(crate) fn txn_overlaps(entry: &AbortedTxnIndexEntry, from_offset: i64, to_of
 #[must_use]
 pub(crate) fn relative_offset_for_timestamp(
     entries: &[TimeIndexEntry],
-    target_ts: i64,
-) -> Option<u32> {
+    target_ts: TimestampMs,
+) -> Option<RelativeOffset> {
     entries
         .iter()
         .find(|e| e.timestamp.get() >= target_ts)
@@ -401,7 +426,7 @@ pub(crate) fn relative_offset_for_timestamp(
 /// `>= floor`. Used to skip past batches at the start of the returned byte
 /// range that the offset-index pointed at but that don't actually cover the
 /// requested offset (because Kafka offset indexes are sparse).
-fn first_batch_at_or_after(data: &[u8], floor: i64) -> Option<RecordBatch> {
+fn first_batch_at_or_after(data: &[u8], floor: LogOffset) -> Option<RecordBatch> {
     let mut cur: &[u8] = data;
     while !cur.is_empty() {
         let Ok(batch) = RecordBatch::decode(&mut cur) else {
@@ -459,17 +484,19 @@ mod tests {
     #[test]
     fn position_for_relative_offset_returns_floor() {
         let entries = offset_entries(&[(0, 0), (10, 256), (20, 512), (30, 1024)]);
-        assert!(position_for_relative_offset(&entries, 10) == 256, "exact");
-        assert!(position_for_relative_offset(&entries, 15) == 256, "between");
-        assert!(
-            position_for_relative_offset(&entries, 0) == 0,
-            "first entry exact"
-        );
-        assert!(
-            position_for_relative_offset(&entries, 100) == 1024,
-            "after last"
-        );
-        assert!(position_for_relative_offset(&[], 50) == 0, "empty");
+        let cases: [(&[OffsetIndexEntry], u32, u32); 5] = [
+            (&entries, 10, 256),   // exact
+            (&entries, 15, 256),   // between
+            (&entries, 0, 0),      // first entry exact
+            (&entries, 100, 1024), // after last
+            (&[], 50, 0),          // empty
+        ];
+        for (entries, rel, want) in cases {
+            assert!(
+                position_for_relative_offset(entries, rel) == want,
+                "rel {rel}"
+            );
+        }
     }
 
     #[test]
@@ -497,32 +524,40 @@ mod tests {
     #[test]
     fn relative_offset_for_timestamp_returns_first_ge() {
         let entries = time_entries(&[(1_000, 0), (2_000, 10), (3_000, 20)]);
-        assert!(
-            relative_offset_for_timestamp(&entries, 1_000) == Some(0),
-            "exact match"
-        );
-        assert!(
-            relative_offset_for_timestamp(&entries, 1_500) == Some(10),
-            "between → next"
-        );
-        assert!(
-            relative_offset_for_timestamp(&entries, 4_000) == None,
-            "after last"
-        );
-        assert!(relative_offset_for_timestamp(&[], 1_000) == None, "empty");
+        let cases: [(&[TimeIndexEntry], i64, Option<u32>); 4] = [
+            (&entries, 1_000, Some(0)),  // exact match
+            (&entries, 1_500, Some(10)), // between → next
+            (&entries, 4_000, None),     // after last
+            (&[], 1_000, None),          // empty
+        ];
+        for (entries, ts, want) in cases {
+            assert!(
+                relative_offset_for_timestamp(entries, ts) == want,
+                "ts {ts} entries_len {}",
+                entries.len()
+            );
+        }
     }
 
     #[test]
     fn end_position_for_caps_with_max_bytes() {
-        // start=0, segment=1024, max_bytes=256 → exclusive_end=256 →
-        // inclusive=255.
-        assert!(end_position_for(0, 1024, 256) == Some(255));
-        // max_bytes >= remaining → read to end.
-        assert!(end_position_for(512, 1024, 999_999) == None);
-        // max_bytes=0 → read to end (zero is a no-cap sentinel).
-        assert!(end_position_for(0, 1024, 0) == None);
-        // start past the segment-end cap still safe via saturating add.
-        assert!(end_position_for(u32::MAX, 1024, 100) == None);
+        let cases = [
+            // start=0, segment=1024, max_bytes=256 → exclusive_end=256 →
+            // inclusive=255.
+            (0, 1024, 256, Some(255)),
+            // max_bytes >= remaining → read to end.
+            (512, 1024, 999_999, None),
+            // max_bytes=0 → read to end (zero is a no-cap sentinel).
+            (0, 1024, 0, None),
+            // start past the segment-end cap still safe via saturating add.
+            (u32::MAX, 1024, 100, None),
+        ];
+        for (start, segment, max_bytes, want) in cases {
+            assert!(
+                end_position_for(start, segment, max_bytes) == want,
+                "start {start} segment {segment} max_bytes {max_bytes}"
+            );
+        }
     }
 
     #[test]
@@ -561,18 +596,36 @@ mod tests {
         b.encode(&mut buf).unwrap();
         let bytes = buf.freeze();
 
-        let got = first_batch_at_or_after(&bytes, 10).expect("found batch");
-        assert!(got.base_offset == 10);
-
-        // Floor below everything → first batch.
-        let got = first_batch_at_or_after(&bytes, 0).expect("found batch");
-        assert!(got.base_offset == 0);
-
-        // Floor above everything → None.
-        assert!(first_batch_at_or_after(&bytes, 1_000).is_none());
+        let cases = [
+            // Floor=10 skips the first batch (last=9), returns the second.
+            (10, Some(10)),
+            // Floor below everything → first batch.
+            (0, Some(0)),
+            // Floor above everything → None.
+            (1_000, None),
+        ];
+        for (floor, want_base) in cases {
+            assert!(
+                first_batch_at_or_after(&bytes, floor).map(|b| b.base_offset) == want_base,
+                "floor {floor}"
+            );
+        }
 
         // Empty buffer → None.
         assert!(first_batch_at_or_after(&[], 0).is_none());
+    }
+
+    #[test]
+    fn first_batch_at_or_after_rejects_floor_past_base_plus_delta() {
+        let batch = test_batch_at(3, 4, b'z');
+        let mut buf = bytes::BytesMut::new();
+        batch.encode(&mut buf).unwrap();
+        let bytes = buf.freeze();
+
+        assert!(
+            first_batch_at_or_after(&bytes, 7).is_none(),
+            "batch 3..6 must not cover floor 7"
+        );
     }
 
     #[test]
@@ -586,13 +639,17 @@ mod tests {
             buf.extend_from_slice(&pid.to_be_bytes());
         }
         let entries = parse_txn_index(&buf).expect("valid txn index");
-        assert!(entries.len() == 2);
-        assert!(entries[0].start_offset.get() == 0);
-        assert!(entries[0].last_offset.get() == 4);
-        assert!(entries[0].producer_id.get() == 1000);
-        assert!(entries[1].start_offset.get() == 10);
-        assert!(entries[1].last_offset.get() == 14);
-        assert!(entries[1].producer_id.get() == 2000);
+        let decoded: Vec<(i64, i64, i64)> = entries
+            .iter()
+            .map(|e| {
+                (
+                    e.start_offset.get(),
+                    e.last_offset.get(),
+                    e.producer_id.get(),
+                )
+            })
+            .collect();
+        assert!(decoded == vec![(0, 4, 1000), (10, 14, 2000)]);
     }
 
     #[test]
@@ -620,18 +677,26 @@ mod tests {
             last_offset: I64::new(14),
             producer_id: I64::new(1),
         };
-        // Range fully before the entry → excluded.
-        assert!(!txn_overlaps(&e, 0, 9), "range ends just before entry");
-        // Range touching the entry's first offset → included.
-        assert!(txn_overlaps(&e, 0, 10), "range ends on entry start");
-        // Range fully inside the entry → included.
-        assert!(txn_overlaps(&e, 11, 13), "range inside entry");
-        // Range touching the entry's last offset → included.
-        assert!(txn_overlaps(&e, 14, 100), "range starts on entry last");
-        // Range fully after the entry → excluded.
-        assert!(!txn_overlaps(&e, 15, 100), "range starts just after entry");
-        // Range fully covering the entry → included.
-        assert!(txn_overlaps(&e, 0, 100), "range covers entry");
+        let cases = [
+            // Range fully before the entry → excluded.
+            (0, 9, false),
+            // Range touching the entry's first offset → included.
+            (0, 10, true),
+            // Range fully inside the entry → included.
+            (11, 13, true),
+            // Range touching the entry's last offset → included.
+            (14, 100, true),
+            // Range fully after the entry → excluded.
+            (15, 100, false),
+            // Range fully covering the entry → included.
+            (0, 100, true),
+        ];
+        for (start, end, want) in cases {
+            assert!(
+                txn_overlaps(&e, start, end) == want,
+                "range [{start},{end}]"
+            );
+        }
     }
 
     // ── Integration tests against `LocalTieredStorage` +
@@ -669,6 +734,117 @@ mod tests {
             });
         }
         b
+    }
+
+    fn test_batch_at(
+        base_offset: i64,
+        record_count: i32,
+        value_byte: u8,
+    ) -> crabka_protocol::records::RecordBatch {
+        use bytes::Bytes;
+        let mut batch = crabka_protocol::records::RecordBatch {
+            base_offset,
+            last_offset_delta: record_count - 1,
+            ..crabka_protocol::records::RecordBatch::default()
+        };
+        for offset_delta in 0..record_count {
+            batch.records.push(Record {
+                offset_delta,
+                value: Some(Bytes::from(vec![value_byte; 4])),
+                ..Default::default()
+            });
+        }
+        batch
+    }
+
+    fn offset_index_bytes(entries: &[(u32, u32)]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        for (relative_offset, position) in entries {
+            buf.extend_from_slice(&relative_offset.to_be_bytes());
+            buf.extend_from_slice(&position.to_be_bytes());
+        }
+        buf
+    }
+
+    fn time_index_bytes(entries: &[(i64, u32)]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        for (timestamp, relative_offset) in entries {
+            buf.extend_from_slice(&timestamp.to_be_bytes());
+            buf.extend_from_slice(&relative_offset.to_be_bytes());
+        }
+        buf
+    }
+
+    fn write_test_file(dir: &std::path::Path, name: &str, bytes: &[u8]) -> std::path::PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    fn sparse_remote_segment_reader() -> (RemoteReader, tempfile::TempDir) {
+        let source_dir = tempfile::tempdir().unwrap();
+        let remote_dir = tempfile::tempdir().unwrap();
+
+        let first = test_batch_at(10, 4, b'a');
+        let second = test_batch_at(14, 3, b'b');
+        let mut log_bytes = bytes::BytesMut::new();
+        first.encode(&mut log_bytes).unwrap();
+        let second_position = u32::try_from(log_bytes.len()).unwrap();
+        second.encode(&mut log_bytes).unwrap();
+        let log_bytes = log_bytes.freeze();
+
+        let log_path = write_test_file(source_dir.path(), "00000000000000000010.log", &log_bytes);
+        let offset_index_path = write_test_file(
+            source_dir.path(),
+            "00000000000000000010.index",
+            &offset_index_bytes(&[(0, 0), (4, second_position)]),
+        );
+        let time_index_path = write_test_file(
+            source_dir.path(),
+            "00000000000000000010.timeindex",
+            &time_index_bytes(&[(1_000, 0), (2_000, 4)]),
+        );
+
+        let rsm: Arc<dyn RemoteStorageManager> =
+            Arc::new(LocalTieredStorage::new(remote_dir.path()));
+        let rlmm: Arc<dyn RemoteLogMetadataManager> =
+            Arc::new(InmemoryRemoteLogMetadataManager::new());
+        let id = crabka_remote_storage::RemoteLogSegmentId::new(tp(), Uuid::new_v4());
+        let md = RemoteLogSegmentMetadata::new(
+            id.clone(),
+            10,
+            16,
+            2_000,
+            1,
+            2_000,
+            i32::try_from(log_bytes.len()).unwrap_or(i32::MAX),
+            RemoteLogSegmentState::CopySegmentStarted,
+            BTreeMap::from([(0_i32, 10_i64)]),
+        )
+        .unwrap();
+
+        rlmm.add_remote_log_segment_metadata(md.clone()).unwrap();
+        let data = crabka_remote_storage::LogSegmentData {
+            log_segment: log_path,
+            offset_index: offset_index_path,
+            time_index: time_index_path,
+            transaction_index: None,
+            producer_snapshot_index: None,
+            leader_epoch_index: bytes::Bytes::from_static(b"0\n1\n0 10\n"),
+        };
+        rsm.copy_log_segment_data(&md, &data).unwrap();
+        rlmm.update_remote_log_segment_metadata(
+            crabka_remote_storage::RemoteLogSegmentMetadataUpdate {
+                remote_log_segment_id: id,
+                event_timestamp_ms: 2_000,
+                custom_metadata: None,
+                state: RemoteLogSegmentState::CopySegmentFinished,
+                broker_id: 1,
+            },
+        )
+        .unwrap();
+
+        (RemoteReader::new(rsm, rlmm), remote_dir)
     }
 
     /// Build a log rolled into several sealed segments under `dir`, then copy
@@ -857,10 +1033,12 @@ mod tests {
             .aborted_transactions(&tp(), 0, start, last)
             .await
             .expect("ok");
-        assert!(got.len() == 1, "the copied abort is returned");
-        assert!(got[0].start_offset == start);
-        assert!(got[0].last_offset == last);
-        assert!(got[0].producer_id == pid);
+        let expected = vec![AbortedTxnEntry {
+            start_offset: start,
+            last_offset: last,
+            producer_id: pid,
+        }];
+        assert!(got == expected, "the copied abort is returned");
     }
 
     #[tokio::test]
@@ -906,6 +1084,23 @@ mod tests {
             "batch [{},{}] doesn't cover target {target_offset}",
             got.base_offset,
             last
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_batch_uses_offset_relative_to_remote_segment_start() {
+        let (reader, _remote_dir) = sparse_remote_segment_reader();
+
+        let got = reader
+            .fetch_batch(&tp(), 0, 12, 4096)
+            .await
+            .expect("ok")
+            .expect("offset 12 is in the synthetic remote segment");
+
+        assert!(
+            got.base_offset == 10,
+            "relative offset 2 should read the first batch, not jump to {}",
+            got.base_offset
         );
     }
 
@@ -1008,6 +1203,19 @@ mod tests {
         // The first finished segment is the lowest-base one.
         let expected = exports.iter().map(|e| e.base_offset).min().unwrap();
         assert!(got == expected);
+    }
+
+    #[tokio::test]
+    async fn offset_for_timestamp_adds_relative_offset_to_segment_start() {
+        let (reader, _remote_dir) = sparse_remote_segment_reader();
+
+        let got = reader
+            .offset_for_timestamp(&tp(), 2_000)
+            .await
+            .unwrap()
+            .expect("timestamp 2000 is indexed");
+
+        assert!(got == 14);
     }
 
     #[tokio::test]

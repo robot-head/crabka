@@ -401,7 +401,7 @@ impl BlockIndex for ProfileIndex {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+    use assert2::{assert, check};
 
     use super::*;
     use crate::labels::Labels;
@@ -521,7 +521,7 @@ mod tests {
     fn profile_index_matching_and_block_helpers_return_pruned_metadata() {
         let (index, cpu_checkout, heap_checkout, cpu_payments) = seed_with_blocks();
 
-        assert!(
+        check!(
             index
                 .matching_fingerprints(
                     "t",
@@ -530,7 +530,7 @@ mod tests {
                 .unwrap()
                 == BTreeSet::from([cpu_checkout, heap_checkout])
         );
-        assert!(
+        check!(
             index
                 .select_fingerprints(
                     "t",
@@ -540,12 +540,12 @@ mod tests {
                 .unwrap()
                 == BTreeSet::from([cpu_checkout])
         );
-        assert!(
+        check!(
             index.select_fingerprints("t", CPU_TYPE, &[]).unwrap()
                 == BTreeSet::from([cpu_checkout, cpu_payments])
         );
 
-        assert!(
+        check!(
             index.candidate_blocks_for_series(
                 "t",
                 &BTreeSet::from([cpu_checkout, cpu_payments]),
@@ -553,26 +553,26 @@ mod tests {
                 180,
             ) == strings(&["cpu-checkout.parquet", "cpu-payments.parquet"])
         );
-        assert!(index.block_time_bounds("t", 175, 180) == Some((100, 250)));
-        assert!(index.block_time_bounds("t", 450, 500) == None);
-        assert!(
+        check!(index.block_time_bounds("t", 175, 180) == Some((100, 250)));
+        check!(index.block_time_bounds("t", 450, 500) == None);
+        check!(
             BlockIndex::candidate_blocks(&index, "t", 175, 180)
                 == strings(&["cpu-checkout.parquet", "cpu-payments.parquet"])
         );
-        assert!(BlockIndex::block_count(&index, "t") == 3);
+        check!(BlockIndex::block_count(&index, "t") == 3);
     }
 
     #[test]
     fn profile_index_profile_type_helpers_return_pruned_metadata() {
         let (index, cpu_checkout, heap_checkout, _) = seed_with_blocks();
 
-        assert!(index.profile_types_for_time("t", 175, 180) == strings(&[CPU_TYPE]));
-        assert!(index.profile_types_for_time("t", 320, 330) == strings(&[HEAP_TYPE]));
-        assert!(
+        check!(index.profile_types_for_time("t", 175, 180) == strings(&[CPU_TYPE]));
+        check!(index.profile_types_for_time("t", 320, 330) == strings(&[HEAP_TYPE]));
+        check!(
             index.profile_types_for_fingerprints("t", &BTreeSet::from([cpu_checkout]))
                 == strings(&[CPU_TYPE])
         );
-        assert!(
+        check!(
             index.profile_types_for_fingerprints("t", &BTreeSet::from([heap_checkout]))
                 == strings(&[HEAP_TYPE])
         );
@@ -582,33 +582,33 @@ mod tests {
     fn profile_index_label_helpers_return_pruned_metadata() {
         let (index, cpu_checkout, heap_checkout, _) = seed_with_blocks();
 
-        assert!(
+        check!(
             index
                 .label_values_for_time("t", "service_name", &[], 175, 180)
                 .unwrap()
                 == strings(&["checkout", "payments"])
         );
-        assert!(
+        check!(
             index.label_values_for_fingerprints(
                 "t",
                 "service_name",
                 &BTreeSet::from([heap_checkout])
             ) == strings(&["checkout"])
         );
-        assert!(
+        check!(
             index.label_names_for_time("t", &[], 175, 180).unwrap()
                 == strings(&["__name__", "__profile_type__", "service_name"])
         );
-        assert!(
+        check!(
             index.label_names_for_fingerprints("t", &BTreeSet::from([cpu_checkout]))
                 == strings(&["__name__", "__profile_type__", "service_name"])
         );
 
-        assert!(
+        check!(
             index.label_names("t") == strings(&["__name__", "__profile_type__", "service_name"])
         );
-        assert!(index.label_values("t", "service_name") == strings(&["checkout", "payments"]));
-        assert!(
+        check!(index.label_values("t", "service_name") == strings(&["checkout", "payments"]));
+        check!(
             index
                 .label_names_for(
                     "t",
@@ -617,7 +617,7 @@ mod tests {
                 .unwrap()
                 == strings(&["__name__", "__profile_type__", "service_name"])
         );
-        assert!(
+        check!(
             index
                 .label_values_for(
                     "t",
@@ -633,7 +633,7 @@ mod tests {
     fn profile_index_series_helpers_return_projected_metadata() {
         let (index, _, heap_checkout, _) = seed_with_blocks();
 
-        assert!(
+        check!(
             index
                 .series_for_time("t", &[], &["service_name".to_string()], 175, 180)
                 .unwrap()
@@ -642,7 +642,7 @@ mod tests {
                     vec![("service_name".to_string(), "payments".to_string())],
                 ]
         );
-        assert!(
+        check!(
             index.series_for_fingerprints("t", &BTreeSet::from([heap_checkout]), &[])
                 == vec![vec![
                     ("__name__".to_string(), "memory".to_string()),
@@ -650,7 +650,7 @@ mod tests {
                     ("service_name".to_string(), "checkout".to_string()),
                 ]]
         );
-        assert!(
+        check!(
             index
                 .series(
                     "t",
@@ -742,9 +742,9 @@ mod tests {
             )],
         );
 
-        assert!(index.stacktrace_partitions("old.parquet").is_empty());
-        assert!(index.stacktrace_partitions("new.parquet") == vec![99]);
-        assert!(BlockIndex::candidate_blocks(&index, "t", 0, 10) == vec!["new.parquet"]);
+        check!(index.stacktrace_partitions("old.parquet").is_empty());
+        check!(index.stacktrace_partitions("new.parquet") == vec![99]);
+        check!(BlockIndex::candidate_blocks(&index, "t", 0, 10) == vec!["new.parquet"]);
     }
 
     #[tokio::test]
@@ -778,15 +778,15 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(snapshot_key.starts_with("index/profiles/snapshots/"));
-        assert!(
+        check!(snapshot_key.starts_with("index/profiles/snapshots/"));
+        check!(
             store
                 .head(&Path::from("index/profiles.json"))
                 .await
                 .is_err()
         );
-        assert!(loaded.profile_types("t").len() == 2);
-        assert!(loaded.stacktrace_partitions("blocks/p1.parquet") == vec![0, 1]);
+        check!(loaded.profile_types("t").len() == 2);
+        check!(loaded.stacktrace_partitions("blocks/p1.parquet") == vec![0, 1]);
     }
 
     #[tokio::test]

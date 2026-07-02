@@ -84,7 +84,7 @@ subtopology id are done by Kafka's own code; the harness only renames fields to 
 
 ## Capture mechanism B — real broker cross-check (`--verify-broker`)
 
-`src/verify/java/crabka/capture/CaptureBroker.java` stands up a real `apache/kafka:4.1.0`
+`src/verify/java/crabka/capture/CaptureBroker.java` stands up a real `mirror.gcr.io/apache/kafka:4.1.0`
 KRaft broker with streams groups enabled
 (`group.coordinator.rebalance.protocols=classic,consumer,streams`, `streams.version=1`,
 unstable api/feature versions), runs the `count` topology with `group.protocol=streams`, lets

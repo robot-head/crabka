@@ -106,10 +106,14 @@ mod tests {
 
     #[test]
     fn camel_to_snake() {
-        assert!(field_name("errorCode") == "error_code");
-        assert!(field_name("apiKeys") == "api_keys");
-        assert!(field_name("aclEntries") == "acl_entries");
-        assert!(field_name("zkMigrationReady") == "zk_migration_ready");
+        for (input, want) in [
+            ("errorCode", "error_code"),
+            ("apiKeys", "api_keys"),
+            ("aclEntries", "acl_entries"),
+            ("zkMigrationReady", "zk_migration_ready"),
+        ] {
+            assert!(field_name(input) == want);
+        }
     }
 
     #[test]
@@ -128,9 +132,9 @@ mod tests {
 
     #[test]
     fn reserved_keywords_get_underscore() {
-        assert!(field_name("type") == "type_");
-        assert!(field_name("Match") == "match_");
-        assert!(field_name("loop") == "loop_");
+        for (input, want) in [("type", "type_"), ("Match", "match_"), ("loop", "loop_")] {
+            assert!(field_name(input) == want);
+        }
     }
 
     #[test]

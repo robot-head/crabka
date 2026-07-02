@@ -216,6 +216,7 @@ pub fn condition_for(outcome: &LoggingOutcome) -> KafkaCondition {
 mod tests {
     use super::*;
     use assert2::assert;
+    use assert2::check;
 
     fn loggers(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         pairs
@@ -292,25 +293,29 @@ mod tests {
 
     #[test]
     fn outcome_filter_accessor() {
-        assert!(LoggingOutcome::Resolved("info".into()).filter() == Some("info"));
-        assert!(LoggingOutcome::Disabled.filter() == None);
-        assert!(LoggingOutcome::Invalid(LoggingError::EmptyLoggers).filter() == None);
+        for (outcome, want) in [
+            (LoggingOutcome::Resolved("info".into()), Some("info")),
+            (LoggingOutcome::Disabled, None),
+            (LoggingOutcome::Invalid(LoggingError::EmptyLoggers), None),
+        ] {
+            assert!(outcome.filter() == want, "case {outcome:?}");
+        }
     }
 
     #[test]
     fn condition_disabled_is_false() {
         let c = condition_for(&LoggingOutcome::Disabled);
-        assert!(c.type_ == "LoggingReady");
-        assert!(c.status == "False");
-        assert!(c.reason == "Disabled");
+        check!(c.type_ == "LoggingReady");
+        check!(c.status == "False");
+        check!(c.reason == "Disabled");
     }
 
     #[test]
     fn condition_resolved_is_true_and_echoes_filter() {
         let c = condition_for(&LoggingOutcome::Resolved("crabka_broker=debug,info".into()));
-        assert!(c.status == "True");
-        assert!(c.reason == "Available");
-        assert!(c.message.contains("crabka_broker=debug,info"));
+        check!(c.status == "True");
+        check!(c.reason == "Available");
+        check!(c.message.contains("crabka_broker=debug,info"));
     }
 
     #[test]
@@ -320,8 +325,8 @@ mod tests {
                 name: "missing-cm".into(),
             },
         ));
-        assert!(c.status == "False");
-        assert!(c.reason == "LoggingConfigMapNotFound");
-        assert!(c.message.contains("missing-cm"));
+        check!(c.status == "False");
+        check!(c.reason == "LoggingConfigMapNotFound");
+        check!(c.message.contains("missing-cm"));
     }
 }

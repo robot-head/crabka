@@ -114,6 +114,31 @@ fn resolve_new_partition_assignments(
     }
 }
 
+fn create_partitions_response(
+    results: Vec<CreatePartitionsTopicResult>,
+    throttle_time_ms: i32,
+) -> CreatePartitionsResponse {
+    CreatePartitionsResponse {
+        results,
+        throttle_time_ms,
+        ..Default::default()
+    }
+}
+
+fn encode_response<R: Encode>(resp: &R, version: i16) -> Result<Bytes, BrokerError> {
+    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
+    resp.encode(&mut buf, version)?;
+    Ok(buf.freeze())
+}
+
+fn should_materialize_locally(replicas: &[NodeId], node_id: NodeId) -> bool {
+    replicas.contains(&node_id)
+}
+
+fn is_local_leader(leader: NodeId, node_id: NodeId) -> bool {
+    leader == node_id
+}
+
 #[allow(clippy::too_many_lines)]
 #[tracing::instrument(
     name = "handle_create_partitions",
@@ -185,8 +210,6 @@ pub(crate) async fn handle(
     for t in req.topics {
         let mut out = CreatePartitionsTopicResult {
             name: t.name.clone(),
-            error_code: codes::NONE,
-            error_message: None,
             ..Default::default()
         };
 
@@ -275,28 +298,27 @@ pub(crate) async fn handle(
                 // Materialize new partitions on local disk where self in replicas.
                 for (i, p) in new_partition_indices.iter().enumerate() {
                     let replicas = &new_assignments[i];
-                    if !replicas.contains(&node_id) {
-                        continue;
-                    }
-                    if let Err(e) = materialize_partition(
-                        &partitions_map,
-                        &t.name,
-                        *p,
-                        &log_dirs,
-                        &log_config,
-                        &log_dir_status,
-                        &producer_state,
-                    ) {
-                        tracing::error!(
-                            topic = %t.name, partition = *p, error = %e,
-                            "CreatePartitions: materialize after quorum commit failed"
-                        );
-                    } else if let Some(part) = partitions_map.get(&t.name, *p) {
-                        let leader = replicas[0];
-                        part.install_leader_change(leader, 0).await;
-                        if leader == node_id {
-                            // At creation the ISR equals the full replica set.
-                            part.install_isr(replicas, replicas, leader).await;
+                    if should_materialize_locally(replicas, node_id) {
+                        if let Err(e) = materialize_partition(
+                            &partitions_map,
+                            &t.name,
+                            *p,
+                            &log_dirs,
+                            &log_config,
+                            &log_dir_status,
+                            &producer_state,
+                        ) {
+                            tracing::error!(
+                                topic = %t.name, partition = *p, error = %e,
+                                "CreatePartitions: materialize after quorum commit failed"
+                            );
+                        } else if let Some(part) = partitions_map.get(&t.name, *p) {
+                            let leader = replicas[0];
+                            part.install_leader_change(leader, 0).await;
+                            if is_local_leader(leader, node_id) {
+                                // At creation the ISR equals the full replica set.
+                                part.install_isr(replicas, replicas, leader).await;
+                            }
                         }
                     }
                 }
@@ -323,30 +345,191 @@ pub(crate) async fn handle(
         ctx.client_id,
         mutation_count,
     );
-    let resp = CreatePartitionsResponse {
+    let resp = create_partitions_response(
         results,
-        throttle_time_ms: i32::try_from(delay.as_millis()).unwrap_or(i32::MAX),
-        ..Default::default()
-    };
+        i32::try_from(delay.as_millis()).unwrap_or(i32::MAX),
+    );
     if delay > std::time::Duration::ZERO {
         tokio::time::sleep(delay).await;
     }
-    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-    resp.encode(&mut buf, version)?;
-    Ok(buf.freeze())
+    encode_response(&resp, version)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use assert2::assert;
-    use crabka_protocol::owned::create_partitions_request::CreatePartitionsAssignment;
+    use assert2::check;
+    use crabka_metadata::TopicRecord;
+    use crabka_protocol::Decode;
+    use crabka_protocol::owned::create_partitions_request::{
+        CreatePartitionsAssignment, CreatePartitionsTopic,
+    };
+    use crabka_security::{AuthMethod, Principal};
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    use crate::authorizer::{AuthorizationRequest, Authorizer};
+    use crate::broker::{Broker, BrokerHandle};
+    use crate::config::BrokerConfig;
+
+    const VERSION: i16 = 3;
+
+    #[derive(Debug)]
+    struct DenyAll;
+
+    impl Authorizer for DenyAll {
+        fn authorize(
+            &self,
+            _source: &dyn crabka_authz::AclSource,
+            _req: &AuthorizationRequest<'_>,
+        ) -> AuthorizationResult {
+            AuthorizationResult::Deny
+        }
+    }
 
     fn assn(broker_ids: &[i32]) -> CreatePartitionsAssignment {
         CreatePartitionsAssignment {
             broker_ids: broker_ids.to_vec(),
             ..Default::default()
         }
+    }
+
+    fn topic_req(
+        name: &str,
+        count: i32,
+        assignments: Option<Vec<CreatePartitionsAssignment>>,
+    ) -> CreatePartitionsTopic {
+        CreatePartitionsTopic {
+            name: name.into(),
+            count,
+            assignments,
+            ..Default::default()
+        }
+    }
+
+    fn request(topics: Vec<CreatePartitionsTopic>, validate_only: bool) -> CreatePartitionsRequest {
+        CreatePartitionsRequest {
+            topics,
+            timeout_ms: 5_000,
+            validate_only,
+            ..Default::default()
+        }
+    }
+
+    fn encode_request(req: &CreatePartitionsRequest) -> Bytes {
+        let mut buf = BytesMut::with_capacity(req.encoded_len(VERSION));
+        req.encode(&mut buf, VERSION).expect("encode request");
+        buf.freeze()
+    }
+
+    fn decode_response(bytes: &Bytes) -> CreatePartitionsResponse {
+        let mut cur: &[u8] = bytes.as_ref();
+        let resp = CreatePartitionsResponse::decode(&mut cur, VERSION).expect("decode response");
+        assert!(cur.is_empty(), "response decoder consumed all bytes");
+        resp
+    }
+
+    fn test_context<'a>(
+        principal: &'a Principal,
+        peer: &'a SocketAddr,
+    ) -> crate::handlers::RequestContext<'a> {
+        crate::handlers::RequestContext {
+            principal,
+            peer,
+            client_id: "admin-client",
+            sendfile_capable: false,
+            connection_listener_name: "PLAINTEXT",
+        }
+    }
+
+    fn principal(name: &str) -> Principal {
+        Principal {
+            name: name.into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        }
+    }
+
+    fn peer() -> SocketAddr {
+        "127.0.0.1:9092".parse().unwrap()
+    }
+
+    async fn start_broker(authorizer: Arc<dyn Authorizer>) -> (BrokerHandle, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
+        cfg.audit_enabled = false;
+        cfg.authorizer = authorizer;
+        let handle = Broker::start(cfg).await.expect("start broker");
+        (handle, dir)
+    }
+
+    async fn seed_topic(handle: &BrokerHandle, name: &str, partitions: i32, rf: i16) {
+        let replicas = vec![handle.node_id()];
+        let mut records = vec![MetadataRecord::V1Topic(TopicRecord {
+            name: name.into(),
+            topic_id: uuid::Uuid::new_v4(),
+            partitions,
+            replication_factor: rf,
+        })];
+        for partition in 0..partitions {
+            records.push(MetadataRecord::V1Partition(PartitionRecord {
+                topic: name.into(),
+                partition,
+                leader: handle.node_id(),
+                replicas: replicas.clone(),
+                isr: replicas.clone(),
+                leader_epoch: 0,
+                adding_replicas: vec![],
+                removing_replicas: vec![],
+                directories: vec![],
+                partition_epoch: 0,
+            }));
+        }
+        handle
+            .broker_arc_for_test()
+            .controller
+            .submit_change(records)
+            .await
+            .expect("seed topic");
+    }
+
+    async fn seed_controller_quota(handle: &BrokerHandle, rate: f64) {
+        handle
+            .broker_arc_for_test()
+            .controller
+            .submit_change(vec![MetadataRecord::V1ClientQuota(
+                crabka_metadata::ClientQuotaRecord {
+                    entity: vec![
+                        crabka_metadata::QuotaEntity {
+                            entity_type: "user".into(),
+                            entity_name: Some("admin".into()),
+                        },
+                        crabka_metadata::QuotaEntity {
+                            entity_type: "client-id".into(),
+                            entity_name: Some("admin-client".into()),
+                        },
+                    ],
+                    config_key: "controller_mutation_rate".into(),
+                    config_value: Some(rate),
+                },
+            )])
+            .await
+            .expect("seed quota");
+    }
+
+    async fn drive(
+        broker: &Broker,
+        req: &CreatePartitionsRequest,
+        principal: &Principal,
+        peer: &SocketAddr,
+    ) -> CreatePartitionsResponse {
+        let ctx = test_context(principal, peer);
+        let req_bytes = encode_request(req);
+        let bytes = handle(broker, VERSION, 123, &req_bytes, &ctx)
+            .await
+            .expect("handle");
+        decode_response(&bytes)
     }
 
     #[test]
@@ -398,9 +581,11 @@ mod tests {
         let provided = vec![assn(&[0, 1]), assn(&[1, 2])];
         let err = resolve_new_partition_assignments(Some(&provided), &brokers, 0, 3, 2)
             .expect_err("2 assignments for 3 new partitions must fail");
-        assert!(err.0 == codes::INVALID_REPLICA_ASSIGNMENT);
-        assert!(err.1.contains("assignments.len()=2"));
-        assert!(err.1.contains("new partition count=3"));
+        let expected = (
+            codes::INVALID_REPLICA_ASSIGNMENT,
+            "assignments.len()=2 does not match new partition count=3".to_string(),
+        );
+        assert!(err == expected);
     }
 
     #[test]
@@ -451,5 +636,234 @@ mod tests {
             .expect_err("Some(empty) for >0 new partitions must fail");
         assert!(err.0 == codes::INVALID_REPLICA_ASSIGNMENT);
         assert!(err.1.contains("assignments.len()=0"));
+    }
+
+    #[test]
+    fn encode_response_writes_decodable_results_and_throttle() {
+        let bytes = encode_response(
+            &create_partitions_response(
+                vec![CreatePartitionsTopicResult {
+                    name: "orders".into(),
+                    error_code: codes::INVALID_PARTITIONS,
+                    error_message: Some("bad count".into()),
+                    ..Default::default()
+                }],
+                321,
+            ),
+            VERSION,
+        )
+        .expect("encode");
+        let resp = decode_response(&bytes);
+
+        let expected = CreatePartitionsResponse {
+            throttle_time_ms: 321,
+            results: vec![CreatePartitionsTopicResult {
+                name: "orders".into(),
+                error_code: codes::INVALID_PARTITIONS,
+                error_message: Some("bad count".into()),
+                unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
+            }],
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
+    }
+
+    #[test]
+    fn local_materialization_predicates_track_replica_membership_and_leader() {
+        check!(should_materialize_locally(&[1, 2], 1));
+        check!(should_materialize_locally(&[1, 2], 2));
+        check!(!should_materialize_locally(&[1, 2], 3));
+        check!(is_local_leader(1, 1));
+        check!(!is_local_leader(2, 1));
+    }
+
+    #[tokio::test]
+    async fn handle_denies_topic_alter_for_each_topic() {
+        let (broker_handle, _dir) = start_broker(Arc::new(DenyAll)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let p = principal("alice");
+        let peer = peer();
+        let req = request(
+            vec![topic_req("orders", 2, None), topic_req("payments", 2, None)],
+            false,
+        );
+
+        let resp = drive(&broker, &req, &p, &peer).await;
+
+        let expected = CreatePartitionsResponse {
+            throttle_time_ms: 0,
+            results: vec![
+                CreatePartitionsTopicResult {
+                    name: "orders".into(),
+                    error_code: codes::TOPIC_AUTHORIZATION_FAILED,
+                    error_message: None,
+                    unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
+                },
+                CreatePartitionsTopicResult {
+                    name: "payments".into(),
+                    error_code: codes::TOPIC_AUTHORIZATION_FAILED,
+                    error_message: None,
+                    unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
+                },
+            ],
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_reports_unknown_topic_and_rejects_same_partition_count() {
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer)).await;
+        seed_topic(&broker_handle, "stable", 2, 1).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let p = principal("admin");
+        let peer = peer();
+        let req = request(
+            vec![topic_req("missing", 3, None), topic_req("stable", 2, None)],
+            false,
+        );
+
+        let resp = drive(&broker, &req, &p, &peer).await;
+
+        let expected = CreatePartitionsResponse {
+            throttle_time_ms: 0,
+            results: vec![
+                CreatePartitionsTopicResult {
+                    name: "missing".into(),
+                    error_code: codes::UNKNOWN_TOPIC_OR_PARTITION,
+                    error_message: Some("unknown topic `missing`".into()),
+                    unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
+                },
+                CreatePartitionsTopicResult {
+                    name: "stable".into(),
+                    error_code: codes::INVALID_PARTITIONS,
+                    error_message: Some(
+                        "topic `stable` already has 2 partitions; cannot decrease to 2".into(),
+                    ),
+                    unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
+                },
+            ],
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
+        assert!(
+            broker_handle
+                .controller_image_for_test()
+                .partitions_of("stable")
+                .count()
+                == 2
+        );
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn validate_only_reports_success_without_adding_partitions() {
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer)).await;
+        seed_topic(&broker_handle, "dry-run", 1, 1).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let p = principal("admin");
+        let peer = peer();
+        let req = request(vec![topic_req("dry-run", 3, None)], true);
+
+        let resp = drive(&broker, &req, &p, &peer).await;
+
+        let expected = CreatePartitionsResponse {
+            throttle_time_ms: 0,
+            results: vec![CreatePartitionsTopicResult {
+                name: "dry-run".into(),
+                error_code: codes::NONE,
+                error_message: None,
+                unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
+            }],
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
+        assert!(
+            broker_handle
+                .controller_image_for_test()
+                .partitions_of("dry-run")
+                .count()
+                == 1
+        );
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_adds_new_partitions_and_preserves_response_identity() {
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer)).await;
+        seed_topic(&broker_handle, "grow", 1, 1).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let p = principal("admin");
+        let peer = peer();
+        let req = request(
+            vec![topic_req("grow", 3, Some(vec![assn(&[1]), assn(&[1])]))],
+            false,
+        );
+
+        let resp = drive(&broker, &req, &p, &peer).await;
+
+        let expected = CreatePartitionsResponse {
+            throttle_time_ms: 0,
+            results: vec![CreatePartitionsTopicResult {
+                name: "grow".into(),
+                error_code: codes::NONE,
+                error_message: None,
+                unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
+            }],
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
+        assert!(
+            broker_handle
+                .controller_image_for_test()
+                .partitions_of("grow")
+                .count()
+                == 3
+        );
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn throttled_create_partitions_counts_only_new_partitions_and_waits() {
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer)).await;
+        seed_topic(&broker_handle, "metered", 2, 1).await;
+        seed_controller_quota(&broker_handle, 2.0).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let p = principal("admin");
+        let peer = peer();
+        let req = request(vec![topic_req("metered", 5, None)], false);
+
+        let started = tokio::time::Instant::now();
+        let resp = drive(&broker, &req, &p, &peer).await;
+        let elapsed = started.elapsed();
+
+        let expected = CreatePartitionsResponse {
+            throttle_time_ms: 500,
+            results: vec![CreatePartitionsTopicResult {
+                name: "metered".into(),
+                error_code: codes::NONE,
+                error_message: None,
+                unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
+            }],
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
+        check!(
+            elapsed >= std::time::Duration::from_millis(450),
+            "handler must wait for the advertised throttle, elapsed={elapsed:?}"
+        );
+        check!(
+            broker_handle
+                .controller_image_for_test()
+                .partitions_of("metered")
+                .count()
+                == 5
+        );
+        broker_handle.shutdown().await;
     }
 }

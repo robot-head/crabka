@@ -1,5 +1,5 @@
 //! Docker interop test: prove our `KafkaStore` + `StoreReader` can decode
-//! `_schemas` records that a REAL `confluentinc/cp-schema-registry:7.4.0`
+//! `_schemas` records that a REAL `mirror.gcr.io/confluentinc/cp-schema-registry:7.4.0`
 //! wrote, and that our REST router returns the same schema through `GET`.
 //!
 //! Mirrors the setup in `capture_fixtures.rs`:
@@ -40,7 +40,7 @@ const CONTROLLER_LISTEN: &str = "0.0.0.0:9093";
 const ADVERTISED: &str = "host.docker.internal:9092";
 const DIRECT_ADDR: &str = "127.0.0.1:9092";
 
-const SR_IMAGE: &str = "confluentinc/cp-schema-registry:7.4.0";
+const SR_IMAGE: &str = "mirror.gcr.io/confluentinc/cp-schema-registry:7.4.0";
 const SR_CONTENT_TYPE: &str = "application/vnd.schemaregistry.v1+json";
 
 // ── broker ────────────────────────────────────────────────────────────────────

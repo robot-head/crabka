@@ -1,6 +1,6 @@
 //! Asserts our Avro framing/body matches bytes captured from Confluent's
 //! `AvroSerializer`. The golden in `testdata/schema_serde/avro/order.hex` was
-//! captured against `confluentinc/cp-schema-registry` (schema id 1) via
+//! captured against `mirror.gcr.io/confluentinc/cp-schema-registry` (schema id 1) via
 //! `tests/schema-serde-capture/run.sh`.
 
 use apache_avro::AvroSchema;

@@ -296,8 +296,26 @@ impl MetadataWriter for QuorumForwarder {
 
 #[cfg(test)]
 mod tests {
-    use super::build_forward_order;
+    use super::{
+        MetadataSource, MetadataWriter, ObserverSource, QuorumForwarder, build_forward_order,
+    };
     use assert2::assert;
+    use bytes::BytesMut;
+    use crabka_metadata::{MetadataRecord, TopicRecord};
+    use crabka_protocol::Encode;
+    use crabka_protocol::owned::api_versions_request;
+    use crabka_protocol::owned::api_versions_response::{ApiVersion, ApiVersionsResponse};
+    use crabka_raft::{
+        BootstrapMode, Controller, ControllerConfig, Node, NodeId, OutboundDialer, RaftError,
+        SnapshotRange,
+    };
+    use std::collections::BTreeSet;
+    use std::net::SocketAddr;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use tempfile::TempDir;
+    use tokio::sync::watch;
+    use uuid::Uuid;
 
     fn voters() -> Vec<(crabka_raft::NodeId, String)> {
         vec![
@@ -305,6 +323,124 @@ mod tests {
             (2, "h2:9093".to_string()),
             (3, "h3:9093".to_string()),
         ]
+    }
+
+    fn topic_record(name: &str) -> MetadataRecord {
+        MetadataRecord::V1Topic(TopicRecord {
+            name: name.into(),
+            topic_id: Uuid::new_v4(),
+            partitions: 1,
+            replication_factor: 1,
+        })
+    }
+
+    fn api_versions_response_v0() -> Vec<u8> {
+        let resp = ApiVersionsResponse {
+            error_code: 0,
+            api_keys: vec![ApiVersion {
+                api_key: api_versions_request::API_KEY,
+                min_version: 0,
+                max_version: 3,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut buf = BytesMut::new();
+        resp.encode(&mut buf, 0).unwrap();
+        buf.to_vec()
+    }
+
+    fn submit_change_response_body(error_code: i16, leader_hint: i64) -> Vec<u8> {
+        let mut out = vec![0u8]; // flexible ResponseHeader v1 tagged-fields
+        crabka_raft::CrabkaSubmitChangeResponse {
+            error_code,
+            leader_hint,
+        }
+        .encode_v0(&mut out);
+        out
+    }
+
+    #[derive(Clone)]
+    struct RecordingDialer {
+        client_ids: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl OutboundDialer for RecordingDialer {
+        async fn dial(
+            &self,
+            target: NodeId,
+            addr: &str,
+            options: crabka_client_core::ConnectionOptions,
+        ) -> Result<crabka_client_core::Connection, crabka_client_core::ClientError> {
+            self.client_ids
+                .lock()
+                .unwrap()
+                .push(options.client_id.clone());
+            crabka_raft::PlaintextDialer
+                .dial(target, addr, options)
+                .await
+        }
+    }
+
+    fn forwarder(
+        addr: SocketAddr,
+        client_ids: Arc<Mutex<Vec<String>>>,
+        leader_hint: Option<NodeId>,
+    ) -> QuorumForwarder {
+        let (_leader_tx, leader_rx) = watch::channel(leader_hint);
+        QuorumForwarder {
+            voters: vec![(1, addr.to_string())],
+            dialer: Arc::new(RecordingDialer { client_ids }),
+            client_id: "forwarder-client".into(),
+            leader: leader_rx,
+        }
+    }
+
+    struct RecordingWriter {
+        calls: Mutex<Vec<Vec<MetadataRecord>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl MetadataWriter for RecordingWriter {
+        async fn submit_change(&self, records: Vec<MetadataRecord>) -> Result<(), RaftError> {
+            self.calls.lock().unwrap().push(records);
+            Ok(())
+        }
+    }
+
+    fn not_leader_none(result: &Result<(), RaftError>) {
+        assert!(matches!(
+            result,
+            Err(RaftError::NotLeader {
+                current_leader: None
+            })
+        ));
+    }
+
+    async fn wait_for_controller_leader(ctrl: &crabka_raft::ControllerHandle) {
+        let mut leader_rx = ctrl.watch_leader();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while leader_rx.borrow().is_none() {
+                leader_rx.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("controller should elect itself");
+    }
+
+    async fn bind_eventually(addr: SocketAddr) -> tokio::net::TcpListener {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            match tokio::net::TcpListener::bind(addr).await {
+                Ok(listener) => return listener,
+                Err(err) if tokio::time::Instant::now() < deadline => {
+                    let _ = err;
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                Err(err) => panic!("listener address {addr} was not released: {err}"),
+            }
+        }
     }
 
     #[test]
@@ -338,5 +474,194 @@ mod tests {
         // voter is still tried (hint 9 != each id).
         let order = build_forward_order(&voters(), Some(9));
         assert!(order == voters());
+    }
+
+    #[tokio::test]
+    async fn controller_handle_metadata_source_forwards_snapshot_reconfig_and_cancel() {
+        let dir = TempDir::new().unwrap();
+        let cfg = ControllerConfig {
+            bootstrap_mode: BootstrapMode::Bootstrap,
+            ..ControllerConfig::for_tests(1, dir.path().to_path_buf())
+        };
+        let ctrl = Controller::start(cfg).await.expect("controller");
+        wait_for_controller_leader(&ctrl).await;
+        let source: &dyn MetadataSource = &ctrl;
+
+        assert!(matches!(
+            source.add_learner(2, Node::default()).await,
+            Err(RaftError::Unsupported(_))
+        ));
+        source
+            .submit_change(vec![topic_record("snapshot-topic")])
+            .await
+            .expect("submit metadata");
+        source.trigger_snapshot().await.expect("snapshot");
+        assert!(matches!(
+            source.read_snapshot_range(0, 1),
+            SnapshotRange::Slice(_)
+        ));
+
+        let addr = source.controller_bound_addr();
+        source.cancel().await;
+        let listener = bind_eventually(addr).await;
+        drop(listener);
+    }
+
+    #[tokio::test]
+    async fn observer_source_uses_observer_writer_and_denies_controller_only_ops() {
+        let cluster_id = Uuid::new_v4();
+        let observer = crate::metadata_observer::MetadataObserver::start(
+            crate::metadata_observer::ObserverConfig {
+                voters: vec![],
+                dialer: Arc::new(crabka_raft::PlaintextDialer),
+                client_id: "observer-source-test".into(),
+                cluster_id,
+                max_bytes: 1_048_576,
+                poll_interval: std::time::Duration::from_mins(1),
+            },
+        );
+        let writer = Arc::new(RecordingWriter {
+            calls: Mutex::new(Vec::new()),
+        });
+        let source = ObserverSource::new(observer.clone(), writer.clone());
+
+        assert!(source.current_image().cluster_id() == cluster_id);
+        source
+            .submit_change(vec![topic_record("forwarded-topic")])
+            .await
+            .expect("submit via writer");
+        {
+            let calls = writer.calls.lock().unwrap();
+            assert!(calls.len() == 1);
+            assert!(
+                matches!(&calls[0][0], MetadataRecord::V1Topic(t) if t.name == "forwarded-topic")
+            );
+        }
+
+        not_leader_none(&source.change_membership(BTreeSet::new()).await);
+        not_leader_none(&source.add_learner(2, Node::default()).await);
+        not_leader_none(&source.trigger_snapshot().await);
+        source.cancel().await;
+        assert!(observer.task_drained_for_test().await);
+    }
+
+    #[tokio::test]
+    async fn quorum_forwarder_applied_response_returns_ok_and_sends_client_id() {
+        let submit_requests = Arc::new(AtomicUsize::new(0));
+        let submit_requests_for_mock = submit_requests.clone();
+        let mock =
+            crabka_client_core::MockBroker::start(move |api_key, _version, _corr_id, _body| {
+                if api_key == api_versions_request::API_KEY {
+                    return Some(api_versions_response_v0());
+                }
+                if api_key == crabka_raft::API_KEY_SUBMIT_CHANGE {
+                    submit_requests_for_mock.fetch_add(1, Ordering::SeqCst);
+                    return Some(submit_change_response_body(0, -1));
+                }
+                None
+            })
+            .await;
+        let client_ids = Arc::new(Mutex::new(Vec::new()));
+        let forwarder = forwarder(mock.addr, client_ids.clone(), Some(1));
+
+        forwarder
+            .submit_change(vec![topic_record("applied")])
+            .await
+            .expect("applied");
+
+        assert!(submit_requests.load(Ordering::SeqCst) == 1);
+        assert!(
+            client_ids
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|id| id == "forwarder-client")
+        );
+        mock.stop();
+    }
+
+    #[tokio::test]
+    async fn quorum_forwarder_error_code_two_maps_to_topic_exists() {
+        let mock =
+            crabka_client_core::MockBroker::start(move |api_key, _version, _corr_id, _body| {
+                if api_key == api_versions_request::API_KEY {
+                    return Some(api_versions_response_v0());
+                }
+                if api_key == crabka_raft::API_KEY_SUBMIT_CHANGE {
+                    return Some(submit_change_response_body(2, -1));
+                }
+                None
+            })
+            .await;
+        let forwarder = forwarder(mock.addr, Arc::new(Mutex::new(Vec::new())), Some(1));
+
+        let err = forwarder
+            .submit_change(vec![topic_record("already-exists")])
+            .await
+            .expect_err("metadata error");
+
+        assert!(matches!(
+            err,
+            RaftError::Metadata(crabka_metadata::MetadataError::TopicExists(_))
+        ));
+        mock.stop();
+    }
+
+    #[tokio::test]
+    async fn quorum_forwarder_not_leader_response_preserves_positive_hint() {
+        let mock =
+            crabka_client_core::MockBroker::start(move |api_key, _version, _corr_id, _body| {
+                if api_key == api_versions_request::API_KEY {
+                    return Some(api_versions_response_v0());
+                }
+                if api_key == crabka_raft::API_KEY_SUBMIT_CHANGE {
+                    return Some(submit_change_response_body(1, 7));
+                }
+                None
+            })
+            .await;
+        let forwarder = forwarder(mock.addr, Arc::new(Mutex::new(Vec::new())), Some(1));
+
+        let err = forwarder
+            .submit_change(vec![topic_record("redirect")])
+            .await
+            .expect_err("not leader");
+
+        assert!(matches!(
+            err,
+            RaftError::NotLeader {
+                current_leader: Some(7)
+            }
+        ));
+        mock.stop();
+    }
+
+    #[tokio::test]
+    async fn quorum_forwarder_negative_leader_hint_is_unknown() {
+        let mock =
+            crabka_client_core::MockBroker::start(move |api_key, _version, _corr_id, _body| {
+                if api_key == api_versions_request::API_KEY {
+                    return Some(api_versions_response_v0());
+                }
+                if api_key == crabka_raft::API_KEY_SUBMIT_CHANGE {
+                    return Some(submit_change_response_body(3, -1));
+                }
+                None
+            })
+            .await;
+        let forwarder = forwarder(mock.addr, Arc::new(Mutex::new(Vec::new())), Some(1));
+
+        let err = forwarder
+            .submit_change(vec![topic_record("unknown-leader")])
+            .await
+            .expect_err("not leader");
+
+        assert!(matches!(
+            err,
+            RaftError::NotLeader {
+                current_leader: None
+            }
+        ));
+        mock.stop();
     }
 }

@@ -243,7 +243,7 @@ impl Consumer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use crabka_protocol::UnknownTaggedFields;
     use crabka_protocol::owned::offset_commit_request::OffsetCommitRequestPartition;
     use crabka_protocol::owned::offset_commit_response::{
@@ -276,9 +276,13 @@ mod tests {
 
     #[test]
     fn first_commit_error_returns_first_non_zero_partition_error() {
-        assert!(first_commit_error(&response(&[0, 0])) == 0);
-        assert!(first_commit_error(&response(&[0, 27, 42])) == 27);
-        assert!(first_commit_error(&response(&[16, 27])) == 16);
+        for (errors, want) in [
+            (&[0, 0][..], 0),
+            (&[0, 27, 42][..], 27),
+            (&[16, 27][..], 16),
+        ] {
+            assert!(first_commit_error(&response(errors)) == want);
+        }
     }
 
     #[test]
@@ -323,25 +327,27 @@ mod tests {
             42,
             "member-a".into(),
             Some("instance-a".into()),
-            topics,
+            topics.clone(),
         );
 
-        assert!(req.group_id == "group-a");
-        assert!(req.generation_id_or_member_epoch == 42);
-        assert!(req.member_id == "member-a");
-        assert!(req.group_instance_id.as_deref() == Some("instance-a"));
-        assert!(req.topics.len() == 1);
-        assert!(req.topics[0].name == "topic");
-        assert!(req.topics[0].partitions[0].partition_index == 3);
-        assert!(req.topics[0].partitions[0].committed_offset == 99);
-        assert!(req.topics[0].partitions[0].committed_leader_epoch == 5);
+        assert!(
+            req == OffsetCommitRequest {
+                group_id: "group-a".into(),
+                generation_id_or_member_epoch: 42,
+                member_id: "member-a".into(),
+                group_instance_id: Some("instance-a".into()),
+                retention_time_ms: -1,
+                topics,
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            }
+        );
     }
 
     #[test]
     fn commit_response_result_defers_rebalance_codes_only_while_coordinator_alive() {
         // success regardless of coordinator liveness
-        assert!(commit_response_result(&response(&[0, 0]), true).is_ok());
-        assert!(commit_response_result(&response(&[0, 0]), false).is_ok());
+        check!(commit_response_result(&response(&[0, 0]), true).is_ok());
+        check!(commit_response_result(&response(&[0, 0]), false).is_ok());
         // a non-rebalance error is always fatal
         assert!(matches!(
             commit_response_result(&response(&[0, 42]), true).unwrap_err(),
@@ -351,10 +357,10 @@ mod tests {
         // REBALANCE_IN_PROGRESS (27) DEFER while the coordinator is alive to
         // rejoin (it republishes the generation/member and the offsets recommit
         // next round) — a commit loop must survive a rebalance or broker restart.
-        assert!(commit_response_result(&response(&[22]), true).is_ok());
-        assert!(commit_response_result(&response(&[25]), true).is_ok());
-        assert!(commit_response_result(&response(&[27]), true).is_ok());
-        assert!(commit_response_result(&response(&[0, 22]), true).is_ok());
+        check!(commit_response_result(&response(&[22]), true).is_ok());
+        check!(commit_response_result(&response(&[25]), true).is_ok());
+        check!(commit_response_result(&response(&[27]), true).is_ok());
+        check!(commit_response_result(&response(&[0, 22]), true).is_ok());
         // ...but they are FATAL if the coordinator task has exited: it can never
         // refresh the generation, so deferring would silently never-advance.
         assert!(matches!(

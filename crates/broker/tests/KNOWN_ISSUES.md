@@ -3,7 +3,7 @@
 ## `console_producer_round_trip` / `kafka_topics_describe_smokes_metadata`
 
 These tests run a Rust `crabka-broker` on the host while the JVM Kafka
-command-line tools run inside a `confluentinc/cp-kafka` testcontainers
+command-line tools run inside a `mirror.gcr.io/confluentinc/cp-kafka` testcontainers
 container. The in-container JVM client must be able to reach the host
 broker, AND the host broker's `advertised_listener` (returned in
 `Metadata` responses) must point at an address that's reachable from

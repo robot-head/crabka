@@ -208,6 +208,7 @@ impl Consumer {
 mod tests {
     use super::*;
     use assert2::assert;
+    use assert2::check;
 
     fn pos(offset_epoch: i32, leader_epoch: i32, awaiting_validation: bool) -> PartitionPosition {
         PartitionPosition {
@@ -261,18 +262,19 @@ mod tests {
 
     #[test]
     fn validation_routing_requires_known_non_negative_leader() {
-        assert!(should_route_to_leader(3, true));
-        assert!(!should_route_to_leader(-1, true));
-        assert!(!should_route_to_leader(3, false));
+        let cases = [(3, true, true), (-1, true, false), (3, false, false)];
+        for (leader_id, knows_leader, expected) in cases {
+            assert!(should_route_to_leader(leader_id, knows_leader) == expected);
+        }
     }
 
     #[test]
     fn response_epoch_must_still_match_position_epoch() {
         let p = pos(2, 7, true);
-        assert!(response_still_current(&p, 7));
-        assert!(!response_still_current(&p, 6));
-        assert!(!should_skip_stale_response(&p, 7));
-        assert!(should_skip_stale_response(&p, 6));
+        check!(response_still_current(&p, 7));
+        check!(!response_still_current(&p, 6));
+        check!(!should_skip_stale_response(&p, 7));
+        check!(should_skip_stale_response(&p, 6));
     }
 
     #[test]

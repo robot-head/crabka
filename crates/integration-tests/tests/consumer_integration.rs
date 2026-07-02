@@ -7,7 +7,7 @@
 //! runtime can't drive both the broker's accept loop and the test body
 //! when the test makes synchronous-style blocking calls into the broker.
 
-use assert2::assert;
+use assert2::{assert, check};
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
@@ -859,9 +859,9 @@ async fn consumer_none_policy_surfaces_log_truncation() {
                 fetch_offset,
                 ..
             }) => {
-                assert!(topic == "oor-none");
-                assert!(partition == 0);
-                assert!(
+                check!(topic == "oor-none");
+                check!(partition == 0);
+                check!(
                     fetch_offset == 0,
                     "fetch_offset should be the out-of-range offset 0, got {fetch_offset}"
                 );

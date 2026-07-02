@@ -269,7 +269,7 @@ mod tests {
     use arrow::array::{
         Array, BooleanArray, FixedSizeBinaryArray, Int32Array, ListArray, StringArray,
     };
-    use assert2::assert;
+    use assert2::{assert, check};
     use crabka_blockstore::{
         SCOL_ATTR_IS_ARRAY, SCOL_ATTR_KEYS, SCOL_ATTR_VALUE, SCOL_NESTED_SET_LEFT,
         SCOL_NESTED_SET_RIGHT, SCOL_PARENT_ID, SCOL_ROOT_SERVICE_NAME, SCOL_SPAN_ID, SCOL_TRACE_ID,
@@ -331,10 +331,11 @@ mod tests {
         let left = col::<Int32Array>(&batch, SCOL_NESTED_SET_LEFT);
         let right = col::<Int32Array>(&batch, SCOL_NESTED_SET_RIGHT);
         let parent_id = col::<Int32Array>(&batch, SCOL_PARENT_ID);
-        assert!(left.value(1) > left.value(0));
-        assert!(right.value(1) < right.value(0));
-        assert!(parent_id.value(1) == left.value(0));
-        assert!(parent_id.value(0) == -1); // root span: Tempo nestedSetParent sentinel
+        assert_eq!(left.values().as_ref(), &[1, 2]);
+        assert_eq!(right.values().as_ref(), &[4, 3]);
+        // Root parent is -1 (Tempo nestedSetParent sentinel); the child's
+        // parent_id equals the root's left value.
+        assert_eq!(parent_id.values().as_ref(), &[-1, 1]);
 
         let service = col::<StringArray>(&batch, SCOL_ROOT_SERVICE_NAME);
         assert!(service.value(0) == "api");
@@ -414,11 +415,9 @@ mod tests {
         ];
         let batch = span_batch(&spans).unwrap();
         let counts = col::<Int32Array>(&batch, SCOL_CHILD_COUNT);
-        // Rows are index-aligned with input order.
-        assert!(counts.value(0) == 2); // root: children 2 and 3
-        assert!(counts.value(1) == 1); // span 2: child 4
-        assert!(counts.value(2) == 0); // span 3: leaf
-        assert!(counts.value(3) == 0); // span 4: leaf
+        // Rows are index-aligned with input order: root has children 2 and 3,
+        // span 2 has child 4, spans 3 and 4 are leaves.
+        assert_eq!(counts.values().as_ref(), &[2, 1, 0, 0]);
     }
 
     #[test]
@@ -486,15 +485,15 @@ mod tests {
         });
 
         let batch = span_batch(&[s]).unwrap();
-        assert!(batch.num_rows() == 1);
-        assert!(
+        check!(batch.num_rows() == 1);
+        check!(
             batch
                 .column_by_name(crabka_blockstore::SCOL_EVENTS)
                 .unwrap()
                 .len()
                 == 1
         );
-        assert!(
+        check!(
             batch
                 .column_by_name(crabka_blockstore::SCOL_LINKS)
                 .unwrap()

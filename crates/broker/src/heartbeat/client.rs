@@ -258,17 +258,22 @@ mod tests {
 
     #[test]
     fn heartbeat_rpc_timeout_tracks_interval_with_bounds() {
-        assert!(heartbeat_rpc_timeout(Duration::from_millis(50)) == Duration::from_millis(500));
-        assert!(heartbeat_rpc_timeout(Duration::from_millis(500)) == Duration::from_secs(1));
-        assert!(heartbeat_rpc_timeout(Duration::from_secs(5)) == Duration::from_secs(1));
+        for (interval, want) in [
+            (Duration::from_millis(50), Duration::from_millis(500)),
+            (Duration::from_millis(500), Duration::from_secs(1)),
+            (Duration::from_secs(5), Duration::from_secs(1)),
+        ] {
+            assert!(heartbeat_rpc_timeout(interval) == want, "{interval:?}");
+        }
     }
 
     #[test]
     fn heartbeat_connection_options_use_bounded_rpc_timeout() {
+        use assert2::check;
         let opts = heartbeat_connection_options(9, Duration::from_millis(500));
 
-        assert!(opts.client_id == "crabka-broker-9-heartbeat");
-        assert!(opts.connect_timeout == Duration::from_secs(1));
-        assert!(opts.request_timeout == Duration::from_secs(1));
+        check!(opts.client_id == "crabka-broker-9-heartbeat");
+        check!(opts.connect_timeout == Duration::from_secs(1));
+        check!(opts.request_timeout == Duration::from_secs(1));
     }
 }

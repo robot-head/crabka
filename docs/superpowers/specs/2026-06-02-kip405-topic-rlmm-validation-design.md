@@ -160,7 +160,7 @@ remote data. The TDD plan asserts this.
 
 Two new tests, both `#[ignore = "requires Docker"]`, extending the existing
 MinIO harness (`MinioContainer`, `start_host_broker_with_minio_tier`,
-`confluentinc/cp-kafka:7.8.8`, `kafka-console-producer` / `kafka-console-consumer`
+`mirror.gcr.io/confluentinc/cp-kafka:7.8.8`, `kafka-console-producer` / `kafka-console-consumer`
 in `crates/broker/tests/jvm_acceptance.rs:7690+`).
 
 ### T1 — Durability across restart (single-broker, primary proof, locally runnable)

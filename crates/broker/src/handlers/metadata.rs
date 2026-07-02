@@ -412,10 +412,14 @@ mod tests {
             endpoint("tls", "tls-host", 9094),
         ]);
         let out = project_broker(&rec, "tls", "plain");
-        assert!(out.node_id == 7);
-        assert!(out.host == "tls-host");
-        assert!(out.port == 9094);
-        assert!(out.rack == Some("rack-a".to_string()));
+        let expected = MetadataResponseBroker {
+            node_id: 7,
+            host: "tls-host".to_string(),
+            port: 9094,
+            rack: Some("rack-a".to_string()),
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+        };
+        assert!(out == expected);
     }
 
     /// A plaintext client on the `"plain"` listener gets the plain endpoint

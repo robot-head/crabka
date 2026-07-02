@@ -540,7 +540,7 @@ impl AcquisitionState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
 
     fn t0() -> Instant {
         Instant::now()
@@ -615,8 +615,13 @@ mod tests {
         s.expire_locks(t0() + Duration::from_secs(31));
         // Now another member can acquire; redelivery bumps the count.
         let acq = s.acquire("m2", 10, i32::MAX, t0() + Duration::from_secs(31), LOCK, 5);
-        assert!(acq.len() == 1);
-        assert!(acq[0].delivery_count == 2);
+        assert!(
+            acq == vec![AcquiredRange {
+                first: 0,
+                last: 3,
+                delivery_count: 2
+            }]
+        );
         assert!(s.start_offset == 0);
     }
 
@@ -649,14 +654,18 @@ mod tests {
         s.materialize(5, 100);
         let _ = s.acquire("m1", 10, i32::MAX, t0(), LOCK, 5);
         let (start, dcc, batches) = s.to_persist_batches();
-        assert!(start == 0);
-        assert!(dcc == 0); // nothing terminal yet
-        assert!(batches.len() == 1);
+        check!(start == 0);
+        check!(dcc == 0); // nothing terminal yet
         // Acquired persists as Available(0) but retains its delivery_count.
-        assert!(batches[0].delivery_state == DS_AVAILABLE);
-        assert!(batches[0].first_offset == 0);
-        assert!(batches[0].last_offset == 4);
-        assert!(batches[0].delivery_count == 1);
+        check!(
+            batches
+                == vec![StateBatch {
+                    first_offset: 0,
+                    last_offset: 4,
+                    delivery_state: DS_AVAILABLE,
+                    delivery_count: 1
+                }]
+        );
     }
 
     #[test]
@@ -671,11 +680,11 @@ mod tests {
 
         let mut reloaded = AcquisitionState::new(0);
         reloaded.load_from(start, 7, 3, 0, &batches);
-        assert!(reloaded.start_offset == 4);
-        assert!(reloaded.end_offset == 10);
-        assert!(reloaded.state_epoch == 7);
-        assert!(reloaded.leader_epoch == 3);
-        assert!(!reloaded.dirty);
+        check!(reloaded.start_offset == 4);
+        check!(reloaded.end_offset == 10);
+        check!(reloaded.state_epoch == 7);
+        check!(reloaded.leader_epoch == 3);
+        check!(!reloaded.dirty);
         // The remaining records are Available again and re-acquirable.
         let acq = reloaded.acquire("m2", 100, i32::MAX, t0(), LOCK, 5);
         assert!(

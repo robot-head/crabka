@@ -5,7 +5,7 @@
 //!
 //! Drives the REAL Apache Kafka 4.1.0 `kafka-streams-groups.sh` admin tool
 //! (a `KafkaStreamsGroupsCommand` wrapping the JVM `AdminClient`) inside an
-//! `apache/kafka:4.1.0` container against an in-process Crabka broker running
+//! `mirror.gcr.io/apache/kafka:4.1.0` container against an in-process Crabka broker running
 //! on the host. The container has a JRE-only Kafka image (no `javac`/`jshell`),
 //! so we cannot compile a custom KafkaStreams app; instead we use the native
 //! `crabka-client-core` client to make a streams group EXIST on Crabka (finalize
@@ -32,7 +32,7 @@
 //! and advertises `host.docker.internal:9092`; the container reaches it via
 //! `--add-host=host.docker.internal:host-gateway`.
 
-use assert2::assert;
+use assert2::{assert, check};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -54,8 +54,11 @@ const BOOTSTRAP: &str = "host.docker.internal:9092";
 const LISTEN: &str = "0.0.0.0:9092";
 /// Official Apache Kafka image. Ships KIP-1071 streams groups plus the
 /// `kafka-streams-groups.sh` admin tool (StreamsGroupDescribe / ListGroups).
-const KAFKA_IMAGE: &str = "apache/kafka:4.1.0";
+const KAFKA_IMAGE: &str = "mirror.gcr.io/apache/kafka:4.1.0";
 const STREAMS_GROUPS: &str = "/opt/kafka/bin/kafka-streams-groups.sh";
+/// Kafka `COORDINATOR_LOAD_IN_PROGRESS` — the first-join heartbeat is retried
+/// while the coordinator is still loading.
+const ERR_COORDINATOR_LOAD_IN_PROGRESS: i16 = 14;
 
 /// Boot one broker bound to `0.0.0.0:9092`, advertising `host.docker.internal:
 /// 9092` so the Docker container's post-Metadata connect targets a hostname it
@@ -225,8 +228,8 @@ async fn join_and_converge(
     let mut member_id = resp.member_id.clone();
 
     for _ in 0..tries {
-        // COORDINATOR_LOAD_IN_PROGRESS (14): retry the first join.
-        if resp.error_code == 14 {
+        // COORDINATOR_LOAD_IN_PROGRESS: retry the first join.
+        if resp.error_code == ERR_COORDINATOR_LOAD_IN_PROGRESS {
             resp = client
                 .send(first_join(group, topo.clone()))
                 .await
@@ -354,12 +357,17 @@ async fn jvm_streams_groups_admin_round_trips_crabka() {
     // of the single subtopology over `streams-input` (native StreamsGroupHeartbeat
     // / api 88).
     let (member_id, resp) = join_and_converge(&client, group, topology(topic), 2, 12).await;
-    assert!(resp.error_code == 0, "join error: {resp:?}");
-    assert!(!member_id.is_empty(), "broker must mint a member id");
-    assert!(
+    check!(
+        resp.error_code == 0,
+        "lone member must join cleanly, got member_id={member_id:?}, {resp:?}"
+    );
+    check!(
+        !member_id.is_empty(),
+        "lone member must get a broker-minted member id, got member_id={member_id:?}, {resp:?}"
+    );
+    check!(
         active_partition_count(&resp) == 2,
-        "lone member must own both input partitions, got {:?}",
-        resp.active_tasks
+        "lone member must own both input partitions, got member_id={member_id:?}, {resp:?}"
     );
     let epoch = resp.member_epoch;
     keepalive(&client, group, &member_id, epoch).await;
@@ -385,55 +393,44 @@ async fn jvm_streams_groups_admin_round_trips_crabka() {
     // KIP-1071 StreamsGroupDescribe API (apiKey=89) and the finalized
     // streams.version feature — the streams-group admin surface is visible to a
     // real Apache Kafka 4.1.0 AdminClient.
-    assert!(
-        wire.contains("Received API_VERSIONS response"),
-        "JVM AdminClient must negotiate ApiVersions with Crabka; wire log:\n{wire}"
-    );
-    assert!(
-        wire.contains("apiKey=89"),
-        "Crabka's ApiVersions must advertise StreamsGroupDescribe (apiKey=89) to \
-         the JVM AdminClient; wire log:\n{wire}"
-    );
-    assert!(
-        wire.contains("FinalizedFeatureKey(name='streams.version'"),
-        "Crabka must advertise finalized streams.version to the JVM AdminClient; \
-         wire log:\n{wire}"
-    );
-
+    //
     // Checkpoint 2: the tool issued the KIP-1071 streams-group LIST_GROUPS
     // request (typesFilter=[Streams]) and Crabka answered it cleanly. This is
     // the real JVM streams-group admin client round-tripping against Crabka.
-    assert!(
-        wire.contains("Sending LIST_GROUPS request") && wire.contains("typesFilter=[Streams]"),
-        "JVM kafka-streams-groups.sh must send a streams-typed ListGroups to \
-         Crabka; wire log:\n{wire}"
-    );
-    assert!(
-        wire.contains("Received LIST_GROUPS response") && wire.contains("errorCode=0"),
-        "Crabka must answer the streams ListGroups with errorCode=0; wire log:\n{wire}"
-    );
-
+    //
     // Checkpoint 3: the streams group now surfaces in Crabka's ListGroups reply,
     // so `StreamsGroupCommand.describeGroups()` proceeds past `listStreamsGroups()`,
     // resolves the coordinator, and issues the KIP-1071 `StreamsGroupDescribe`
     // (api 89). Crabka answers with the full group — topology + member + active
-    // task assignment — completing the JVM admin round-trip end to end.
-    assert!(
-        wire.contains("Received STREAMS_GROUP_DESCRIBE response"),
-        "with the group listed, the JVM tool must issue + receive a \
-         StreamsGroupDescribe (api 89) against Crabka; wire log:\n{wire}"
-    );
-    // The describe response must carry the resolved topology — the real JVM
-    // `DescribeStreamsGroupsHandler` logs an ERROR and rejects a describe whose
-    // topology is absent. Guard against regressing that.
-    assert!(
-        !wire.contains("missing the topology information"),
-        "Crabka's StreamsGroupDescribe response must include the topology; the \
-         JVM handler flagged it missing. wire log:\n{wire}"
-    );
-    assert!(
-        wire.contains("subtopologyId='0'") && wire.contains(&format!("groupId='{group}'")),
-        "the describe response must render the group's subtopology + assignment; \
-         wire log:\n{wire}"
-    );
+    // task assignment — completing the JVM admin round-trip end to end. The
+    // describe response must carry the resolved topology ("missing the topology
+    // information" must NOT appear) — the real JVM `DescribeStreamsGroupsHandler`
+    // logs an ERROR and rejects a describe whose topology is absent.
+    let group_needle = format!("groupId='{group}'");
+    // (needle, expected presence in the DEBUG wire log)
+    let cases = [
+        // Checkpoint 1.
+        ("Received API_VERSIONS response", true),
+        ("apiKey=89", true),
+        ("FinalizedFeatureKey(name='streams.version'", true),
+        // Checkpoint 2.
+        ("Sending LIST_GROUPS request", true),
+        ("typesFilter=[Streams]", true),
+        ("Received LIST_GROUPS response", true),
+        ("errorCode=0", true),
+        // Checkpoint 3. The describe response must carry the resolved topology,
+        // so "missing the topology information" must NOT appear.
+        ("Received STREAMS_GROUP_DESCRIBE response", true),
+        ("missing the topology information", false),
+        ("subtopologyId='0'", true),
+        (group_needle.as_str(), true),
+    ];
+    for (needle, expected) in cases {
+        assert!(
+            wire.contains(needle) == expected,
+            "JVM streams-group admin round-trip checkpoint failed: wire log must {} \
+             {needle:?}; wire log:\n{wire}",
+            if expected { "contain" } else { "not contain" },
+        );
+    }
 }

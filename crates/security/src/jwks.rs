@@ -340,7 +340,7 @@ pub(crate) use tests::{mint_es256, mint_rs256, mint_rs256_with_header};
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use ring::rand::SystemRandom;
     use ring::signature::{EcdsaKeyPair, KeyPair, RsaKeyPair};
 
@@ -482,18 +482,18 @@ mod tests {
     #[test]
     fn empty_jwks_has_no_keys() {
         let jwks = Jwks::empty();
-        assert!(jwks.is_empty());
-        assert!(jwks.len() == 0);
-        assert!(!jwks.contains_kid("k1"));
+        check!(jwks.is_empty());
+        check!(jwks.len() == 0);
+        check!(!jwks.contains_kid("k1"));
     }
 
     #[test]
     fn jwks_with_key_is_not_empty() {
         let (_token, jwks_json) = rs256("k1", "{\"sub\":\"alice\",\"exp\":9999999999}");
         let jwks = Jwks::from_json(&jwks_json, false).expect("parse jwks");
-        assert!(!jwks.is_empty());
-        assert!(jwks.len() == 1);
-        assert!(jwks.contains_kid("k1"));
+        check!(!jwks.is_empty());
+        check!(jwks.len() == 1);
+        check!(jwks.contains_kid("k1"));
     }
 
     #[test]

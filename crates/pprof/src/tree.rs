@@ -434,7 +434,7 @@ fn write_uvarint(out: &mut Vec<u8>, mut value: u64) {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+    use assert2::{assert, check};
 
     use super::*;
     use crate::Frame;
@@ -457,13 +457,13 @@ mod tests {
         tree.add_stack(&stack(&["work", "main"]), 10);
         tree.add_stack(&stack(&["other", "main"]), 3);
 
-        assert!(tree.total_of(&["total"]) == 13);
-        assert!(tree.self_of(&["total"]) == 0);
-        assert!(tree.total_of(&["total", "main"]) == 13);
-        assert!(tree.self_of(&["total", "main"]) == 0);
-        assert!(tree.total_of(&["total", "main", "work"]) == 10);
-        assert!(tree.self_of(&["total", "main", "work"]) == 10);
-        assert!(tree.self_of(&["total", "main", "other"]) == 3);
+        check!(tree.total_of(&["total"]) == 13);
+        check!(tree.self_of(&["total"]) == 0);
+        check!(tree.total_of(&["total", "main"]) == 13);
+        check!(tree.self_of(&["total", "main"]) == 0);
+        check!(tree.total_of(&["total", "main", "work"]) == 10);
+        check!(tree.self_of(&["total", "main", "work"]) == 10);
+        check!(tree.self_of(&["total", "main", "other"]) == 3);
     }
 
     #[test]
@@ -488,9 +488,9 @@ mod tests {
         b.add_stack(&stack(&["work", "main"]), 5);
         b.add_stack(&stack(&["new", "main"]), 2);
         a.merge(b);
-        assert!(a.total_of(&["total"]) == 17);
-        assert!(a.total_of(&["total", "main", "work"]) == 15);
-        assert!(a.self_of(&["total", "main", "new"]) == 2);
+        check!(a.total_of(&["total"]) == 17);
+        check!(a.total_of(&["total", "main", "work"]) == 15);
+        check!(a.self_of(&["total", "main", "new"]) == 2);
     }
 
     #[test]
@@ -499,9 +499,9 @@ mod tests {
         tree.add_stack(&stack(&["a", "main"]), 6);
         tree.add_stack(&stack(&["b", "main"]), 4);
         let fg = tree.to_flamegraph(2048);
-        assert!(fg.names[0] == "total");
-        assert!(fg.total == 10);
-        assert!(fg.levels[0].values == vec![0, 10, 0, 0]);
+        check!(fg.names[0] == "total");
+        check!(fg.total == 10);
+        check!(fg.levels[0].values == vec![0, 10, 0, 0]);
     }
 
     #[test]

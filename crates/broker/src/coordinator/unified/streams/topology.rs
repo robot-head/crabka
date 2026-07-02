@@ -505,7 +505,7 @@ pub async fn ensure_internal_topics(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
 
     fn topic_record(name: &str, id: u8, partitions: i32) -> TopicRecord {
         TopicRecord {
@@ -594,27 +594,38 @@ mod tests {
         };
 
         let stored = to_stored_topology(&wire_topology);
-        assert!(stored.epoch == 9);
-        assert!(stored.subtopologies.len() == 1);
-        let s = &stored.subtopologies[0];
-        assert!(s.subtopology_id == "0");
-        assert!(s.source_topics == vec!["in-a".to_string(), "in-b".to_string()]);
-        assert!(s.source_topic_regex == vec!["^orders-.*".to_string()]);
-        assert!(s.repartition_sink_topics == vec!["rp-1".to_string()]);
-        assert!(s.state_changelog_topics.len() == 1);
-        assert!(s.state_changelog_topics[0].name == "store-changelog");
-        assert!(s.state_changelog_topics[0].partitions == 4);
-        assert!(s.state_changelog_topics[0].replication_factor == 3);
         assert!(
-            s.state_changelog_topics[0].topic_configs
-                == vec![("cleanup.policy".to_string(), "compact".to_string())]
+            stored
+                == StreamsGroupTopologyValue {
+                    epoch: 9,
+                    subtopologies: vec![StoredSubtopology {
+                        subtopology_id: "0".to_string(),
+                        source_topics: vec!["in-a".to_string(), "in-b".to_string()],
+                        source_topic_regex: vec!["^orders-.*".to_string()],
+                        repartition_sink_topics: vec!["rp-1".to_string()],
+                        state_changelog_topics: vec![StoredTopicInfo {
+                            name: "store-changelog".to_string(),
+                            partitions: 4,
+                            replication_factor: 3,
+                            topic_configs: vec![(
+                                "cleanup.policy".to_string(),
+                                "compact".to_string()
+                            )],
+                        }],
+                        repartition_source_topics: vec![StoredTopicInfo {
+                            name: "rp-1".to_string(),
+                            partitions: 4,
+                            replication_factor: 3,
+                            topic_configs: vec![],
+                        }],
+                        copartition_groups: vec![StoredCopartitionGroup {
+                            source_topics: vec![0, 1],
+                            source_topic_regex: vec![0],
+                            repartition_source_topics: vec![0],
+                        }],
+                    }],
+                }
         );
-        assert!(s.repartition_source_topics.len() == 1);
-        assert!(s.repartition_source_topics[0].name == "rp-1");
-        assert!(s.copartition_groups.len() == 1);
-        assert!(s.copartition_groups[0].source_topics == vec![0i16, 1]);
-        assert!(s.copartition_groups[0].source_topic_regex == vec![0i16]);
-        assert!(s.copartition_groups[0].repartition_source_topics == vec![0i16]);
     }
 
     #[test]
@@ -628,12 +639,19 @@ mod tests {
         };
 
         let derived = derive_tasks(&topology, &image);
-        assert!(derived.num_tasks.get("0") == Some(&6));
-        assert!(derived.partition_metadata.topics.len() == 1);
-        let meta = &derived.partition_metadata.topics[0];
-        assert!(meta.topic_name == "in-a");
-        assert!(meta.num_partitions == 6);
-        assert!(meta.topic_id == Uuid::from_bytes([1; 16]));
+        assert!(
+            derived
+                == DerivedTasks {
+                    num_tasks: BTreeMap::from([("0".to_string(), 6)]),
+                    partition_metadata: StreamsGroupPartitionMetadataValue {
+                        topics: vec![StreamsTopicMeta {
+                            topic_name: "in-a".to_string(),
+                            topic_id: Uuid::from_bytes([1; 16]),
+                            num_partitions: 6,
+                        }],
+                    },
+                }
+        );
     }
 
     #[test]
@@ -661,11 +679,20 @@ mod tests {
         };
 
         let derived = derive_tasks(&topology, &image);
-        assert!(derived.num_tasks.get("0") == Some(&3));
-        assert!(derived.num_tasks.get("1") == Some(&3));
         // Only the external source topic appears in the partition snapshot.
-        assert!(derived.partition_metadata.topics.len() == 1);
-        assert!(derived.partition_metadata.topics[0].topic_name == "in-a");
+        assert!(
+            derived
+                == DerivedTasks {
+                    num_tasks: BTreeMap::from([("0".to_string(), 3), ("1".to_string(), 3)]),
+                    partition_metadata: StreamsGroupPartitionMetadataValue {
+                        topics: vec![StreamsTopicMeta {
+                            topic_name: "in-a".to_string(),
+                            topic_id: Uuid::from_bytes([1; 16]),
+                            num_partitions: 3,
+                        }],
+                    },
+                }
+        );
     }
 
     #[test]
@@ -716,8 +743,8 @@ mod tests {
         };
         let issues = validate_topology(&topology, &image);
         assert!(issues.len() == 1);
-        assert!(issues[0].0 == status::MISSING_SOURCE_TOPICS);
-        assert!(issues[0].1.contains("in-a"));
+        check!(issues[0].0 == status::MISSING_SOURCE_TOPICS);
+        check!(issues[0].1.contains("in-a"));
     }
 
     #[test]
@@ -787,15 +814,27 @@ mod tests {
         assert!(specs.len() == 2);
 
         let rp = specs.iter().find(|s| s.name == "rp").unwrap();
-        assert!(rp.partitions == 5);
-        assert!(rp.replication_factor == 2);
-        assert!(rp.configs.get("cleanup.policy") == Some(&"delete".to_string()));
-        assert!(rp.configs.get("segment.ms") == Some(&"100".to_string()));
+        assert!(
+            *rp == InternalTopicSpec {
+                name: "rp".to_string(),
+                partitions: 5,
+                replication_factor: 2,
+                configs: BTreeMap::from([
+                    ("cleanup.policy".to_string(), "delete".to_string()),
+                    ("segment.ms".to_string(), "100".to_string()),
+                ]),
+            }
+        );
 
         let cl = specs.iter().find(|s| s.name == "cl").unwrap();
-        assert!(cl.partitions == 5);
-        assert!(cl.replication_factor == 3);
-        assert!(cl.configs.get("cleanup.policy") == Some(&"compact".to_string()));
+        assert!(
+            *cl == InternalTopicSpec {
+                name: "cl".to_string(),
+                partitions: 5,
+                replication_factor: 3,
+                configs: BTreeMap::from([("cleanup.policy".to_string(), "compact".to_string())]),
+            }
+        );
     }
 
     #[test]

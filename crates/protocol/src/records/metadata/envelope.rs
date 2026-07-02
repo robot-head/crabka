@@ -7,7 +7,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use crate::primitives::varint::{get_uvarint, put_uvarint, uvarint_len};
 
 /// Current `KRaft` metadata frame version. Kafka writes 1 (verified against
-/// apache/kafka:4.0.0 `__cluster_metadata` record values — the leading byte is
+/// mirror.gcr.io/apache/kafka:4.0.0 `__cluster_metadata` record values — the leading byte is
 /// `0x01`).
 pub const FRAME_VERSION: u32 = 1;
 
@@ -68,9 +68,12 @@ mod tests {
         assert!(value.len() == 3 + body.len());
         let mut cur: &[u8] = &value;
         let hdr = decode_value_header(&mut cur).expect("decode header");
-        assert!(hdr.frame_version == 1);
-        assert!(hdr.api_key == 12);
-        assert!(hdr.api_version == 0);
+        let expected = ValueHeader {
+            frame_version: 1,
+            api_key: 12,
+            api_version: 0,
+        };
+        assert!(hdr == expected);
         assert!(cur == body);
     }
 

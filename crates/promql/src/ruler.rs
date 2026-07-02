@@ -1120,6 +1120,7 @@ mod tests {
     use std::sync::Mutex;
 
     use assert2::assert;
+    use assert2::check;
     use crabka_metrics::{SamplePayload, WalRecord};
 
     use crabka_blockstore::Labels;
@@ -1135,19 +1136,26 @@ mod tests {
 
     #[test]
     fn parse_duration_ms_supports_all_units_and_compounds_and_rejects_bad_input() {
-        // Compound multi-unit durations.
-        assert!(super::parse_duration_ms("1h30m").unwrap() == 5_400_000);
-        // Single-unit coverage across the full Prometheus unit set.
-        assert!(super::parse_duration_ms("100ms").unwrap() == 100);
-        assert!(super::parse_duration_ms("5s").unwrap() == 5_000);
-        assert!(super::parse_duration_ms("1w").unwrap() == 604_800_000);
-        assert!(super::parse_duration_ms("1y").unwrap() == 31_536_000_000);
-        assert!(super::parse_duration_ms("0").unwrap() == 0);
-        // Negative, empty, and unparseable input is a hard error, never `0`.
-        assert!(super::parse_duration_ms("-5m").is_err());
-        assert!(super::parse_duration_ms("").is_err());
-        assert!(super::parse_duration_ms("5x").is_err());
-        assert!(super::parse_duration_ms("abc").is_err());
+        // Compound multi-unit durations, single-unit coverage across the full
+        // Prometheus unit set, and hard errors (`None`, never `0`) for negative,
+        // empty, and unparseable input.
+        for (input, want_ms) in [
+            ("1h30m", Some(5_400_000)),
+            ("100ms", Some(100)),
+            ("5s", Some(5_000)),
+            ("1w", Some(604_800_000)),
+            ("1y", Some(31_536_000_000)),
+            ("0", Some(0)),
+            ("-5m", None),
+            ("", None),
+            ("5x", None),
+            ("abc", None),
+        ] {
+            assert!(
+                super::parse_duration_ms(input).ok() == want_ms,
+                "case {input:?}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1244,8 +1252,8 @@ for: -5m
             let filtered = super::filter_ruler_rule_set_for_shard("tenant-a", &rules, shard);
             for (namespace, groups) in filtered {
                 for (group_name, group) in groups {
-                    assert!(assigned.insert((namespace.clone(), group_name.clone())));
-                    assert!(
+                    check!(assigned.insert((namespace.clone(), group_name.clone())));
+                    check!(
                         group
                             == rules
                                 .get(&namespace)
@@ -1254,8 +1262,8 @@ for: -5m
                                 .expect("group")
                                 .clone()
                     );
-                    assert!(shard.owns_group("tenant-a", &namespace, &group_name));
-                    assert!(!shard.owns_group("tenant-b", &namespace, &group_name));
+                    check!(shard.owns_group("tenant-a", &namespace, &group_name));
+                    check!(!shard.owns_group("tenant-b", &namespace, &group_name));
                 }
             }
         }
@@ -1269,9 +1277,12 @@ for: -5m
                     ("team-c".to_string(), "slo".to_string()),
                 ])
         );
-        assert!(super::RulerShard::new(0, shard_count).is_err());
-        assert!(super::RulerShard::new(shard_count + 1, shard_count).is_err());
-        assert!(super::RulerShard::new(1, 0).is_err());
+        for (index, total) in [(0, shard_count), (shard_count + 1, shard_count), (1, 0)] {
+            assert!(
+                super::RulerShard::new(index, total).is_err(),
+                "case ({index}, {total})"
+            );
+        }
     }
 
     #[derive(Default)]
@@ -1406,9 +1417,9 @@ for: -5m
         .await
         .expect("recording rule evaluation");
 
-        assert!(records.len() == 2);
-        assert!(records.iter().all(|record| record.tenant == "tenant-a"));
-        assert!(records.iter().any(|record| record.labels
+        check!(records.len() == 2);
+        check!(records.iter().all(|record| record.tenant == "tenant-a"));
+        check!(records.iter().any(|record| record.labels
             == vec![
                 ("__name__".to_string(), "job:http_requests:sum".to_string()),
                 ("job".to_string(), "api".to_string()),
@@ -1421,7 +1432,7 @@ for: -5m
                     start_timestamp_ms: None,
                 }
             )));
-        assert!(records.iter().any(|record| record.labels
+        check!(records.iter().any(|record| record.labels
             == vec![
                 ("__name__".to_string(), "job:http_requests:sum".to_string()),
                 ("job".to_string(), "web".to_string()),
@@ -1456,15 +1467,22 @@ for: -5m
         .await
         .expect("recording rule append");
 
-        let records = sink.records();
         assert!(appended == 1);
-        assert!(records.len() == 1);
         assert!(
-            records[0].labels
-                == vec![
-                    ("__name__".to_string(), "job:up:current".to_string()),
-                    ("job".to_string(), "api".to_string()),
-                ]
+            sink.records()
+                == vec![WalRecord {
+                    tenant: "tenant-a".to_string(),
+                    labels: vec![
+                        ("__name__".to_string(), "job:up:current".to_string()),
+                        ("job".to_string(), "api".to_string()),
+                    ],
+                    payload: SamplePayload::Float {
+                        timestamp_ms: 60_000,
+                        value: 1.0,
+                        start_timestamp_ms: None,
+                    },
+                    exemplars: Vec::new(),
+                }]
         );
     }
 
@@ -1493,21 +1511,18 @@ for: -5m
 
         assert!(records.len() == 2);
         for record in &records {
-            assert!(
-                record
-                    .labels
-                    .contains(&("env".to_string(), "prod".to_string()))
-            );
-            assert!(
-                record
-                    .labels
-                    .contains(&("team".to_string(), "sre".to_string()))
-            );
-            assert!(
-                record
-                    .labels
-                    .contains(&("__name__".to_string(), "job:up:current".to_string()))
-            );
+            for (name, value) in [
+                ("env", "prod"),
+                ("team", "sre"),
+                ("__name__", "job:up:current"),
+            ] {
+                assert!(
+                    record
+                        .labels
+                        .contains(&(name.to_string(), value.to_string())),
+                    "label {name}={value}"
+                );
+            }
         }
     }
 
@@ -1566,9 +1581,9 @@ rules:
         .expect("recording rule group append");
 
         let records = sink.records();
-        assert!(appended == 2);
-        assert!(records.len() == 2);
-        assert!(records.iter().all(
+        check!(appended == 2);
+        check!(records.len() == 2);
+        check!(records.iter().all(
             |record| record.labels[0] == ("__name__".to_string(), "job:up:current".to_string())
         ));
     }
@@ -1598,14 +1613,25 @@ annotations:
                 .await
                 .expect("alert dispatch");
 
-        let alerts = sink.alerts();
         assert!(dispatched == 1);
-        assert!(alerts.len() == 1);
-        assert!(alerts[0].labels.get("alertname").map(String::as_str) == Some("InstanceUp"));
-        assert!(alerts[0].labels.get("job").map(String::as_str) == Some("api"));
-        assert!(alerts[0].labels.get("severity").map(String::as_str) == Some("page"));
-        assert!(alerts[0].annotations.get("summary").map(String::as_str) == Some("instance is up"));
-        assert!(alerts[0].starts_at_ms == 60_000);
+        assert!(
+            sink.alerts()
+                == vec![super::AlertmanagerAlert {
+                    labels: BTreeMap::from([
+                        ("__name__".to_string(), "up".to_string()),
+                        ("alertname".to_string(), "InstanceUp".to_string()),
+                        ("job".to_string(), "api".to_string()),
+                        ("severity".to_string(), "page".to_string()),
+                    ]),
+                    annotations: BTreeMap::from([(
+                        "summary".to_string(),
+                        "instance is up".to_string()
+                    )]),
+                    starts_at_ms: 60_000,
+                    ends_at_ms: None,
+                    generator_url: String::new(),
+                }]
+        );
     }
 
     #[tokio::test]
@@ -1633,18 +1659,31 @@ annotations:
                 .await
                 .expect("alert dispatch");
 
-        let alerts = sink.alerts();
         assert!(dispatched == 1);
-        assert!(alerts.len() == 1);
-        // $value formatted via format_sample_value, $labels.job resolved.
-        assert!(alerts[0].annotations.get("summary").map(String::as_str) == Some("api value 1"));
-        // Unknown actions are left untouched.
+        // `$value` is formatted via format_sample_value and `$labels.job` resolved
+        // (in alert label values too); unknown actions like `humanize` are left
+        // untouched.
         assert!(
-            alerts[0].annotations.get("passthrough").map(String::as_str)
-                == Some("{{ humanize $value }}")
+            sink.alerts()
+                == vec![super::AlertmanagerAlert {
+                    labels: BTreeMap::from([
+                        ("__name__".to_string(), "up".to_string()),
+                        ("alertname".to_string(), "InstanceUp".to_string()),
+                        ("detail".to_string(), "v=1".to_string()),
+                        ("job".to_string(), "api".to_string()),
+                    ]),
+                    annotations: BTreeMap::from([
+                        (
+                            "passthrough".to_string(),
+                            "{{ humanize $value }}".to_string()
+                        ),
+                        ("summary".to_string(), "api value 1".to_string()),
+                    ]),
+                    starts_at_ms: 60_000,
+                    ends_at_ms: None,
+                    generator_url: String::new(),
+                }]
         );
-        // Alert label values are templated too.
-        assert!(alerts[0].labels.get("detail").map(String::as_str) == Some("v=1"));
     }
 
     #[tokio::test]
@@ -1694,9 +1733,9 @@ for: 5m
             ("alertname".to_string(), "InstanceUp".to_string()),
             ("job".to_string(), "api".to_string()),
         ]);
-        assert!(pending == 0);
-        assert!(cleared == 0);
-        assert!(
+        check!(pending == 0);
+        check!(cleared == 0);
+        check!(
             state_sink.alert_records()
                 == vec![
                     super::RulerAlertStateRecord {
@@ -1794,13 +1833,16 @@ for: 5m
             },
         ]);
 
-        assert!(state.last_eval_ms("tenant-a", "team-a", "availability") == Some(120_000));
-        assert!(state.last_eval_ms("tenant-a", "team-b", "latency") == Some(90_000));
-        assert!(
-            state
-                .last_eval_ms("tenant-b", "team-a", "availability")
-                .is_none()
-        );
+        for (tenant, namespace, group, want) in [
+            ("tenant-a", "team-a", "availability", Some(120_000)),
+            ("tenant-a", "team-b", "latency", Some(90_000)),
+            ("tenant-b", "team-a", "availability", None),
+        ] {
+            assert!(
+                state.last_eval_ms(tenant, namespace, group) == want,
+                "case {tenant}/{namespace}/{group}"
+            );
+        }
     }
 
     #[test]
@@ -1839,10 +1881,22 @@ for: 5m
 
         let due = super::filter_ruler_rule_set_due_for_eval("tenant-a", &rules, &state, 180_000);
 
-        assert!(due.get("team-a").expect("team-a").contains_key("new"));
-        assert!(!due.get("team-a").expect("team-a").contains_key("not-yet"));
-        assert!(due.get("team-b").expect("team-b").contains_key("due"));
-        assert!(due.len() == 2);
+        let due_group_names = due
+            .iter()
+            .map(|(namespace, groups)| {
+                (
+                    namespace.clone(),
+                    groups.keys().cloned().collect::<BTreeSet<_>>(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert!(
+            due_group_names
+                == BTreeMap::from([
+                    ("team-a".to_string(), BTreeSet::from(["new".to_string()])),
+                    ("team-b".to_string(), BTreeSet::from(["due".to_string()])),
+                ])
+        );
     }
 
     #[test]
@@ -1928,10 +1982,21 @@ for: 5m
         )
         .await
         .expect("firing alert evaluation");
-        let alerts = sink.alerts();
         assert!(firing == 1);
-        assert!(alerts.len() == 1);
-        assert!(alerts[0].starts_at_ms == 60_000);
+        assert!(
+            sink.alerts()
+                == vec![super::AlertmanagerAlert {
+                    labels: BTreeMap::from([
+                        ("__name__".to_string(), "up".to_string()),
+                        ("alertname".to_string(), "InstanceUp".to_string()),
+                        ("job".to_string(), "api".to_string()),
+                    ]),
+                    annotations: BTreeMap::new(),
+                    starts_at_ms: 60_000,
+                    ends_at_ms: None,
+                    generator_url: String::new(),
+                }]
+        );
     }
 
     #[tokio::test]
@@ -1977,11 +2042,21 @@ expr: up > 0
         )
         .await
         .expect("resolved evaluation");
-        let alerts = resolved_sink.alerts();
         assert!(resolved == 1);
-        assert!(alerts.len() == 1);
-        assert!(alerts[0].labels.get("alertname").map(String::as_str) == Some("InstanceUp"));
-        assert!(alerts[0].ends_at_ms == Some(120_000));
+        assert!(
+            resolved_sink.alerts()
+                == vec![super::AlertmanagerAlert {
+                    labels: BTreeMap::from([
+                        ("__name__".to_string(), "up".to_string()),
+                        ("alertname".to_string(), "InstanceUp".to_string()),
+                        ("job".to_string(), "api".to_string()),
+                    ]),
+                    annotations: BTreeMap::new(),
+                    starts_at_ms: 60_000,
+                    ends_at_ms: Some(120_000),
+                    generator_url: String::new(),
+                }]
+        );
     }
 
     #[tokio::test]
@@ -2071,14 +2146,25 @@ rules:
         )
         .await
         .expect("firing group alert evaluation");
-        let alerts = sink.alerts();
         assert!(firing == 1);
-        assert!(alerts.len() == 1);
-        assert!(alerts[0].labels.get("alertname").map(String::as_str) == Some("InstanceUp"));
-        assert!(alerts[0].starts_at_ms == 60_000);
+        assert!(
+            sink.alerts()
+                == vec![super::AlertmanagerAlert {
+                    labels: BTreeMap::from([
+                        ("__name__".to_string(), "up".to_string()),
+                        ("alertname".to_string(), "InstanceUp".to_string()),
+                        ("job".to_string(), "api".to_string()),
+                    ]),
+                    annotations: BTreeMap::new(),
+                    starts_at_ms: 60_000,
+                    ends_at_ms: None,
+                    generator_url: String::new(),
+                }]
+        );
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn ruler_rule_group_evaluation_appends_recordings_and_dispatches_firing_alerts() {
         let group: serde_yaml::Value = serde_yaml::from_str(
             r"
@@ -2113,9 +2199,14 @@ rules:
         )
         .await
         .expect("pending group evaluation");
-        assert!(pending.recording_records == 1);
-        assert!(pending.alerts_dispatched == 0);
-        assert!(pending.last_eval_ms == 60_000);
+        assert!(
+            pending
+                == super::RulerGroupEvaluation {
+                    recording_records: 1,
+                    alerts_dispatched: 0,
+                    last_eval_ms: 60_000,
+                }
+        );
 
         let firing = super::evaluate_ruler_rule_group(
             &engine,
@@ -2129,11 +2220,59 @@ rules:
         .await
         .expect("firing group evaluation");
 
-        assert!(firing.recording_records == 1);
-        assert!(firing.alerts_dispatched == 1);
-        assert!(firing.last_eval_ms == 360_000);
-        assert!(wal_sink.records().len() == 2);
-        assert!(alert_sink.alerts().len() == 1);
+        assert!(
+            firing
+                == super::RulerGroupEvaluation {
+                    recording_records: 1,
+                    alerts_dispatched: 1,
+                    last_eval_ms: 360_000,
+                }
+        );
+        assert!(
+            wal_sink.records()
+                == vec![
+                    WalRecord {
+                        tenant: "tenant-a".to_string(),
+                        labels: vec![
+                            ("__name__".to_string(), "job:up:current".to_string()),
+                            ("job".to_string(), "api".to_string()),
+                        ],
+                        payload: SamplePayload::Float {
+                            timestamp_ms: 60_000,
+                            value: 1.0,
+                            start_timestamp_ms: None,
+                        },
+                        exemplars: Vec::new(),
+                    },
+                    WalRecord {
+                        tenant: "tenant-a".to_string(),
+                        labels: vec![
+                            ("__name__".to_string(), "job:up:current".to_string()),
+                            ("job".to_string(), "api".to_string()),
+                        ],
+                        payload: SamplePayload::Float {
+                            timestamp_ms: 360_000,
+                            value: 1.0,
+                            start_timestamp_ms: None,
+                        },
+                        exemplars: Vec::new(),
+                    },
+                ]
+        );
+        assert!(
+            alert_sink.alerts()
+                == vec![super::AlertmanagerAlert {
+                    labels: BTreeMap::from([
+                        ("__name__".to_string(), "up".to_string()),
+                        ("alertname".to_string(), "InstanceUp".to_string()),
+                        ("job".to_string(), "api".to_string()),
+                    ]),
+                    annotations: BTreeMap::new(),
+                    starts_at_ms: 60_000,
+                    ends_at_ms: None,
+                    generator_url: String::new(),
+                }]
+        );
     }
 
     #[tokio::test]
@@ -2188,9 +2327,14 @@ rules:
         .await
         .expect("rule-set evaluation with state persistence");
 
-        assert!(evaluation.recording_records == 1);
-        assert!(evaluation.alerts_dispatched == 1);
-        assert!(evaluation.last_eval_ms == 120_000);
+        assert!(
+            evaluation
+                == super::RulerGroupEvaluation {
+                    recording_records: 1,
+                    alerts_dispatched: 1,
+                    last_eval_ms: 120_000,
+                }
+        );
         assert!(
             state_sink.group_records()
                 == vec![
@@ -2324,6 +2468,7 @@ rules:
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn ruler_rule_set_evaluation_runs_namespaced_groups() {
         let recording_group: serde_yaml::Value = serde_yaml::from_str(
             r"
@@ -2374,9 +2519,14 @@ rules:
         )
         .await
         .expect("pending rule-set evaluation");
-        assert!(pending.recording_records == 1);
-        assert!(pending.alerts_dispatched == 0);
-        assert!(pending.last_eval_ms == 60_000);
+        assert!(
+            pending
+                == super::RulerGroupEvaluation {
+                    recording_records: 1,
+                    alerts_dispatched: 0,
+                    last_eval_ms: 60_000,
+                }
+        );
 
         let firing = super::evaluate_ruler_rule_set(
             &engine,
@@ -2389,10 +2539,58 @@ rules:
         )
         .await
         .expect("firing rule-set evaluation");
-        assert!(firing.recording_records == 1);
-        assert!(firing.alerts_dispatched == 1);
-        assert!(firing.last_eval_ms == 360_000);
-        assert!(wal_sink.records().len() == 2);
-        assert!(alert_sink.alerts().len() == 1);
+        assert!(
+            firing
+                == super::RulerGroupEvaluation {
+                    recording_records: 1,
+                    alerts_dispatched: 1,
+                    last_eval_ms: 360_000,
+                }
+        );
+        assert!(
+            wal_sink.records()
+                == vec![
+                    WalRecord {
+                        tenant: "tenant-a".to_string(),
+                        labels: vec![
+                            ("__name__".to_string(), "job:up:current".to_string()),
+                            ("job".to_string(), "api".to_string()),
+                        ],
+                        payload: SamplePayload::Float {
+                            timestamp_ms: 60_000,
+                            value: 1.0,
+                            start_timestamp_ms: None,
+                        },
+                        exemplars: Vec::new(),
+                    },
+                    WalRecord {
+                        tenant: "tenant-a".to_string(),
+                        labels: vec![
+                            ("__name__".to_string(), "job:up:current".to_string()),
+                            ("job".to_string(), "api".to_string()),
+                        ],
+                        payload: SamplePayload::Float {
+                            timestamp_ms: 360_000,
+                            value: 1.0,
+                            start_timestamp_ms: None,
+                        },
+                        exemplars: Vec::new(),
+                    },
+                ]
+        );
+        assert!(
+            alert_sink.alerts()
+                == vec![super::AlertmanagerAlert {
+                    labels: BTreeMap::from([
+                        ("__name__".to_string(), "up".to_string()),
+                        ("alertname".to_string(), "InstanceUp".to_string()),
+                        ("job".to_string(), "api".to_string()),
+                    ]),
+                    annotations: BTreeMap::new(),
+                    starts_at_ms: 60_000,
+                    ends_at_ms: None,
+                    generator_url: String::new(),
+                }]
+        );
     }
 }

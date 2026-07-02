@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use assert2::assert;
+use assert2::{assert, check};
 use axum::Router;
 use axum::extract::State;
 use axum::routing::get;
@@ -71,21 +71,21 @@ async fn http_querier_search_job_sends_scan_params_and_parses() {
         .await
         .unwrap();
 
-    assert!(out.traces.len() == 1);
-    assert!(out.metrics.inspected_bytes == 64);
-    assert!(out.metrics.total_blocks == 1);
+    check!(out.traces.len() == 1);
+    check!(out.metrics.inspected_bytes == 64);
+    check!(out.metrics.total_blocks == 1);
 
     let log = seen.lock().unwrap();
     assert!(log.len() == 1);
     let entry = &log[0];
-    assert!(entry.starts_with("tenant-x|"));
+    check!(entry.starts_with("tenant-x|"));
     // The real querier scan-job params.
-    assert!(entry.contains("block=blk-1"));
-    assert!(entry.contains("rowGroupStart=2"));
-    assert!(entry.contains("rowGroupEnd=5"));
+    check!(entry.contains("block=blk-1"));
+    check!(entry.contains("rowGroupStart=2"));
+    check!(entry.contains("rowGroupEnd=5"));
     // start/end are epoch seconds.
-    assert!(entry.contains("start=0"));
-    assert!(entry.contains("end=100"));
+    check!(entry.contains("start=0"));
+    check!(entry.contains("end=100"));
 }
 
 #[tokio::test]

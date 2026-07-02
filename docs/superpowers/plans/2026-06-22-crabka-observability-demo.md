@@ -1162,7 +1162,7 @@ bench
 # syntax=docker/dockerfile:1
 # Single image with every Crabka binary the demo needs, built with heap
 # profiling and debug symbols (for readable flamegraphs).
-FROM rust:1.96-bookworm AS build
+FROM mirror.gcr.io/library/rust:1.96-bookworm AS build
 WORKDIR /src
 # jemalloc build needs a C toolchain (already in bookworm) + make.
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -1186,7 +1186,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
       cp "target/release/$b" /out/; \
     done
 
-FROM debian:bookworm-slim AS runtime
+FROM mirror.gcr.io/library/debian:bookworm-slim AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl && rm -rf /var/lib/apt/lists/*
 COPY --from=build /out/* /usr/local/bin/
@@ -1257,7 +1257,7 @@ services:
       retries: 30
 
   minio:
-    image: minio/minio:latest
+    image: mirror.gcr.io/minio/minio:latest
     command: ["server", "/data", "--console-address", ":9001"]
     environment:
       MINIO_ROOT_USER: minioadmin
@@ -1271,7 +1271,7 @@ services:
       retries: 30
 
   minio-setup:
-    image: minio/mc:latest
+    image: mirror.gcr.io/minio/mc:latest
     depends_on:
       minio: { condition: service_healthy }
     entrypoint: ["/bin/sh", "/bootstrap.sh"]
@@ -1388,7 +1388,7 @@ services:
 
   # ---- COLLECTOR + GRAFANA ----
   alloy:
-    image: grafana/alloy:v1.5.1
+    image: mirror.gcr.io/grafana/alloy:v1.5.1
     command: ["run", "--server.http.listen-addr=0.0.0.0:12345", "/etc/alloy/config.alloy"]
     volumes:
       - "./alloy/config.alloy:/etc/alloy/config.alloy:ro"
@@ -1398,7 +1398,7 @@ services:
       broker: { condition: service_healthy }
 
   grafana:
-    image: grafana/grafana:11.4.0
+    image: mirror.gcr.io/grafana/grafana:11.4.0
     environment:
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
@@ -1574,14 +1574,14 @@ pyroscope.write "crabka" {
 }
 ```
 
-> **Confirm during implementation (Alloy is external; syntax is version-pinned to `grafana/alloy:v1.5.1`):**
+> **Confirm during implementation (Alloy is external; syntax is version-pinned to `mirror.gcr.io/grafana/alloy:v1.5.1`):**
 > 1. The metrics remote-write path — `crabka-metrics` distributor may serve `/api/v1/push` (Mimir) or `/api/v1/write` (Prometheus). The golden `grafana_e2e` test pushes to `/api/v1/write`; the first survey said `/api/v1/push`. Read `crates/metrics/src/distributor` route registration and set the real path.
 > 2. `pyroscope.scrape`'s `profile.process_cpu`/`profile.memory` default endpoints are `/debug/pprof/profile` and `/debug/pprof/heap` — matches Task 2's routes. Verify against the pinned Alloy version's reference and adjust block names if needed.
 > 3. The logs OTLP endpoint (`/otlp`) is optional; Crabka's primary log path is stdout→`loki.source.docker`→`loki.write`. If the logs distributor has no OTLP route, drop the `otelcol.exporter.otlphttp.logs` block and route OTLP `logs` output to nothing.
 
 - [ ] **Step 2: Validate Alloy config syntax**
 
-Run: `docker run --rm -v "$(pwd)/demo/observability/alloy/config.alloy:/c.alloy:ro" grafana/alloy:v1.5.1 fmt /c.alloy >/dev/null && echo OK`
+Run: `docker run --rm -v "$(pwd)/demo/observability/alloy/config.alloy:/c.alloy:ro" mirror.gcr.io/grafana/alloy:v1.5.1 fmt /c.alloy >/dev/null && echo OK`
 Expected: `OK` (Alloy parses/formats the file).
 
 - [ ] **Step 3: Commit**

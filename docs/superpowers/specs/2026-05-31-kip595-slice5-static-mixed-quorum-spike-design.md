@@ -6,7 +6,7 @@ Disposition: **Throwaway spike** (Slice-0 spirit). Produces a findings doc that 
 
 ## Why
 
-The program's end goal (Slice 6) is a mixed `apache/kafka:4.0.0` JVM + Crabka joint
+The program's end goal (Slice 6) is a mixed `mirror.gcr.io/apache/kafka:4.0.0` JVM + Crabka joint
 metadata quorum. The open question for Slice 5 is whether we need full KIP-853
 **dynamic** reconfiguration (kraft.version=1, VotersRecord/KRaftVersionRecord on
 the log, AddVoter/RemoveVoter RPCs, the reconfiguration protocol) — a large
@@ -25,7 +25,7 @@ is plausibly within reach; the spike finds out.
 
 Stand up **one quorum of three voters**: node ids `1,2` = Crabka controllers
 (in-process, real TCP controller listener), node id `3` = a JVM
-`apache/kafka:4.0.0` controller (`process.roles=controller`), all sharing one
+`mirror.gcr.io/apache/kafka:4.0.0` controller (`process.roles=controller`), all sharing one
 `cluster_id` and one static `controller.quorum.voters` list, all kraft.version=0
 / metadata.version 4.0. Crabka holds the 2/3 majority.
 
@@ -84,7 +84,7 @@ a **valid, valuable outcome** — the failure mode is the finding.
 - **Voter-set identity:** static config lists `id@host:port`; confirm the JVM
   matches Crabka voters by node id alone at v0 (no directory-id pinning).
 
-Per CLAUDE.md, all of these are checked against the actual `apache/kafka:4.0.0`
+Per CLAUDE.md, all of these are checked against the actual `mirror.gcr.io/apache/kafka:4.0.0`
 image behavior, not assumed.
 
 ## Out of scope

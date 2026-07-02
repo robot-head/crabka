@@ -629,7 +629,7 @@ impl DelegationTokenAdmin for crate::context::AdminClientHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use std::sync::Mutex as StdMutex;
 
@@ -921,25 +921,28 @@ mod tests {
 
         // Admin calls: Describe (empty result) → Create.
         let calls = admin.calls();
-        assert!(calls.len() == 2, "expected Describe+Create, got: {calls:?}");
-        assert!(matches!(calls[0], MockCall::Describe { ref owner } if owner == "User:alice"));
-        assert!(matches!(
-            calls[1],
-            MockCall::Create {
-                ref owner,
-                ref renewers,
-                max_lifetime_ms,
-            } if owner == "alice" && renewers == &vec!["User:bob".to_string()] && max_lifetime_ms == 86_400_000,
-        ));
+        assert!(
+            calls
+                == vec![
+                    MockCall::Describe {
+                        owner: "User:alice".into(),
+                    },
+                    MockCall::Create {
+                        owner: "alice".into(),
+                        renewers: vec!["User:bob".into()],
+                        max_lifetime_ms: 86_400_000,
+                    },
+                ],
+            "expected Describe+Create, got: {calls:?}",
+        );
 
         // Secret applied with the expected keys.
         let applied = secrets.applied.lock().unwrap();
         assert!(applied.len() == 1);
         let data = applied[0].data.as_ref().expect("data set");
-        assert!(data.contains_key("token-id"));
-        assert!(data.contains_key("hmac"));
-        assert!(data.contains_key("password"));
-        assert!(data.contains_key("sasl.jaas.config"));
+        for key in ["token-id", "hmac", "password", "sasl.jaas.config"] {
+            assert!(data.contains_key(key), "missing key {key:?}");
+        }
         let jaas = std::str::from_utf8(&data["sasl.jaas.config"].0).unwrap();
         assert!(jaas.contains("tokenauth=\"true\""), "jaas: {jaas}");
         assert!(jaas.contains("ScramLoginModule"), "jaas: {jaas}");
@@ -1001,16 +1004,22 @@ mod tests {
             .unwrap();
 
         let calls = admin.calls();
-        assert!(calls.len() == 2, "expected Describe+Renew, got: {calls:?}");
-        assert!(matches!(calls[0], MockCall::Describe { .. }));
         assert!(
-            matches!(calls[1], MockCall::Renew { ref hmac } if hmac == &existing.hmac),
-            "expected Renew on the existing hmac, got: {calls:?}",
+            calls
+                == vec![
+                    MockCall::Describe {
+                        owner: "User:alice".into(),
+                    },
+                    MockCall::Renew {
+                        hmac: vec![0xEE; 32],
+                    },
+                ],
+            "expected Describe+Renew on the existing hmac, got: {calls:?}",
         );
 
         // Secret + status both patched.
-        assert!(secrets.applied.lock().unwrap().len() == 1);
-        assert!(users.patches.lock().unwrap().len() == 1);
+        check!(secrets.applied.lock().unwrap().len() == 1);
+        check!(users.patches.lock().unwrap().len() == 1);
     }
 
     // --- failure-path coverage (§2.5) ------------------------------------
@@ -1080,15 +1089,19 @@ mod tests {
         let t = token_with(0, vec![]);
         let data = build_secret_data(&t);
         assert!(data.len() == 4);
-        assert!(data["token-id"].0 == t.token_id.as_bytes().to_vec());
-        assert!(data["hmac"].0 == t.hmac);
         // password is base64(hmac), bytes of the b64 string.
         let want_b64 = base64::engine::general_purpose::STANDARD.encode(&t.hmac);
-        assert!(data["password"].0 == want_b64.as_bytes().to_vec());
+        for (key, want) in [
+            ("token-id", t.token_id.as_bytes().to_vec()),
+            ("hmac", t.hmac.clone()),
+            ("password", want_b64.as_bytes().to_vec()),
+        ] {
+            assert!(data[key].0 == want, "key {key:?}");
+        }
         let jaas = std::str::from_utf8(&data["sasl.jaas.config"].0).unwrap();
-        assert!(jaas.contains(&t.token_id));
-        assert!(jaas.contains(&want_b64));
-        assert!(jaas.contains("tokenauth=\"true\""));
+        for want in [t.token_id.as_str(), want_b64.as_str(), "tokenauth=\"true\""] {
+            assert!(jaas.contains(want), "jaas missing {want:?}: {jaas}");
+        }
     }
 
     #[test]

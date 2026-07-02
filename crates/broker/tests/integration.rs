@@ -1,7 +1,7 @@
 //! Multi-RPC sequences against an in-process broker, driven through
 //! `crabka-client-core`. These run on every push (no Docker required).
 
-use assert2::assert;
+use assert2::{assert, check};
 mod support;
 
 use bytes::Bytes;
@@ -149,9 +149,9 @@ async fn list_offsets_by_timestamp_local() {
 
     // Positive timestamp: first record with ts >= 150 is offset 1 (ts 200).
     let r = query(150).await;
-    assert!(r.topics[0].partitions[0].error_code == 0);
-    assert!(r.topics[0].partitions[0].offset == 1);
-    assert!(r.topics[0].partitions[0].timestamp == 200);
+    check!(r.topics[0].partitions[0].error_code == 0);
+    check!(r.topics[0].partitions[0].offset == 1);
+    check!(r.topics[0].partitions[0].timestamp == 200);
 
     // EARLIEST_LOCAL (-4) → local log start = 0.
     let r = query(-4).await;

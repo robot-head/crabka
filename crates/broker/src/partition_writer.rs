@@ -50,11 +50,13 @@ fn flag_storage_failure(
     err: &crate::error::BrokerError,
     log_dir: &ArcSwap<PathBuf>,
     log_dir_status: &LogDirRegistry,
-) {
+) -> bool {
     if let crate::error::BrokerError::Log(crabka_log::LogError::Io(io_err)) = err {
         let dir = log_dir.load();
-        log_dir_status.mark_offline(&dir, &format!("partition write/fsync failed: {io_err}"));
+        return log_dir_status
+            .mark_offline(&dir, &format!("partition write/fsync failed: {io_err}"));
     }
+    false
 }
 
 /// Lock the partition log, recovering the guard if the mutex was
@@ -230,7 +232,9 @@ pub async fn run(
                 for (ack, result) in acks.into_iter().zip(results) {
                     match &result {
                         Ok(_) => any_ok = true,
-                        Err(e) => flag_storage_failure(e, &log_dir, &log_dir_status),
+                        Err(e) => {
+                            flag_storage_failure(e, &log_dir, &log_dir_status);
+                        }
                     }
                     // If the receiver dropped, the handler timed out — fine.
                     let _ = ack.send(result);
@@ -538,7 +542,8 @@ fn swap_future_log(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
+    use crabka_compression::CompressionType;
     use crabka_log::LogConfig;
     use crabka_protocol::records::{Record, RecordBatch};
     use tempfile::tempdir;
@@ -556,6 +561,46 @@ mod tests {
             });
         }
         b
+    }
+
+    fn open_log_with_records(path: &std::path::Path, records: i32) -> Log {
+        let mut log = Log::open(path, LogConfig::default()).expect("open log");
+        if records > 0 {
+            log.append(&mut sample_batch(records)).expect("append");
+        }
+        log
+    }
+
+    #[test]
+    fn flag_storage_failure_marks_io_errors_offline() {
+        let dir = tempdir().expect("tempdir");
+        let status = crate::log_dir_status::LogDirRegistry::probe(&[dir.path().to_path_buf()]);
+        let log_dir = ArcSwap::from_pointee(dir.path().to_path_buf());
+        let err = storage_failure_error("append failed", "synthetic EIO");
+
+        assert!(flag_storage_failure(&err, &log_dir, &status));
+
+        assert!(status.is_offline(dir.path()));
+        let expected_offline = vec![(
+            dir.path().to_path_buf(),
+            "partition write/fsync failed: append failed: synthetic EIO".to_string(),
+        )];
+        assert!(status.offline() == expected_offline);
+    }
+
+    #[test]
+    fn flag_storage_failure_ignores_non_storage_errors() {
+        let dir = tempdir().expect("tempdir");
+        let status = crate::log_dir_status::LogDirRegistry::probe(&[dir.path().to_path_buf()]);
+        let log_dir = ArcSwap::from_pointee(dir.path().to_path_buf());
+        let err = crate::error::BrokerError::UnsupportedApi {
+            api_key: 123,
+            version: 0,
+        };
+
+        check!(!flag_storage_failure(&err, &log_dir, &status));
+        check!(!status.is_offline(dir.path()));
+        check!(status.offline().is_empty());
     }
 
     #[tokio::test]
@@ -601,6 +646,58 @@ mod tests {
         .await
         .expect("send job 2");
         assert!(ack_rx.await.expect("ack recv 2").expect("append 2 ok") == 3);
+
+        drop(tx);
+        writer.await.expect("writer join");
+    }
+
+    #[tokio::test]
+    async fn writer_groups_queued_produces_up_to_configured_cap() {
+        let dir = tempdir().expect("tempdir");
+        let log = Arc::new(Mutex::new(
+            Log::open(dir.path(), LogConfig::default()).expect("open log"),
+        ));
+        let (tx, rx) = mpsc::channel(MAX_PRODUCE_GROUP);
+        let notify = Arc::new(Notify::new());
+
+        let mut acks = Vec::with_capacity(MAX_PRODUCE_GROUP);
+        for _ in 0..MAX_PRODUCE_GROUP {
+            let (ack, ack_rx) = oneshot::channel();
+            tx.send(WriterMessage::Produce(ProduceJob {
+                data: ProduceData::Owned(sample_batch(1)),
+                ack,
+            }))
+            .await
+            .expect("queue produce");
+            acks.push(ack_rx);
+        }
+
+        let writer = tokio::spawn(run(
+            "t".to_string(),
+            0,
+            log.clone(),
+            Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
+            rx,
+            notify,
+            Arc::new(tokio::sync::Mutex::new(
+                crate::replica_state::ReplicaState::new(),
+            )),
+            Arc::new(Notify::new()),
+            crate::log_dir_status::LogDirRegistry::default(),
+            Arc::new(ProducerState::new()),
+        ));
+
+        let mut acks = acks.into_iter();
+        let first = acks.next().expect("first ack");
+        assert!(first.await.expect("ack 0").expect("append 0 ok") == 0);
+        for (idx, mut ack) in acks.enumerate() {
+            let assigned = ack
+                .try_recv()
+                .expect("same group ack is ready")
+                .expect("append ok");
+            assert!(assigned == i64::try_from(idx + 1).unwrap());
+        }
+        assert!(log.lock().unwrap().log_end_offset() == i64::try_from(MAX_PRODUCE_GROUP).unwrap());
 
         drop(tx);
         writer.await.expect("writer join");
@@ -712,6 +809,35 @@ mod tests {
 
         drop(tx);
         writer.await.expect("writer join");
+    }
+
+    #[test]
+    fn append_owned_batch_recompresses_to_configured_log_codec() {
+        let dir = tempdir().expect("tempdir");
+        let log = Mutex::new(
+            Log::open(
+                dir.path(),
+                LogConfig {
+                    compression_type: Some(CompressionType::Lz4),
+                    ..LogConfig::default()
+                },
+            )
+            .expect("open log"),
+        );
+
+        let original = sample_batch(2);
+        assert!(original.attributes.compression() == CompressionType::None);
+
+        let (results, leo) = append_produce_batch(&log, vec![ProduceData::Owned(original)]);
+        assert!(results.len() == 1);
+        let assigned = results.into_iter().next().unwrap().expect("append ok");
+        assert!(assigned == 0);
+        assert!(leo == 2);
+
+        let read = log.lock().unwrap().read(0, 10 * 1024 * 1024).unwrap();
+        assert!(read.batches.len() == 1);
+        check!(read.batches[0].attributes.compression() == CompressionType::Lz4);
+        check!(read.batches[0].records.len() == 2);
     }
 
     #[tokio::test]
@@ -936,6 +1062,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn writer_does_not_notify_hw_when_append_leaves_hw_unchanged() {
+        let dir = tempdir().expect("tempdir");
+        let log = Arc::new(Mutex::new(
+            Log::open(dir.path(), LogConfig::default()).expect("open log"),
+        ));
+        let (tx, rx) = mpsc::channel(1);
+        let append_notify = Arc::new(Notify::new());
+        let replica_state = Arc::new(tokio::sync::Mutex::new(
+            crate::replica_state::ReplicaState::new(),
+        ));
+        {
+            let mut st = replica_state.lock().await;
+            st.install_isr(&[1, 2], &[1, 2], 1, std::time::Instant::now());
+        }
+        let hw_advance_notify = Arc::new(Notify::new());
+        let writer = tokio::spawn(run(
+            "t".to_string(),
+            0,
+            log.clone(),
+            Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
+            rx,
+            append_notify,
+            replica_state.clone(),
+            hw_advance_notify.clone(),
+            crate::log_dir_status::LogDirRegistry::default(),
+            Arc::new(ProducerState::new()),
+        ));
+
+        let waiter = hw_advance_notify.notified();
+        tokio::pin!(waiter);
+
+        let (ack, ack_rx) = oneshot::channel();
+        tx.send(WriterMessage::Produce(ProduceJob {
+            data: ProduceData::Owned(sample_batch(1)),
+            ack,
+        }))
+        .await
+        .expect("send job");
+        ack_rx.await.expect("ack").expect("append ok");
+
+        assert!(replica_state.lock().await.hw == 0);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), waiter)
+                .await
+                .is_err()
+        );
+
+        drop(tx);
+        writer.await.expect("writer join");
+    }
+
+    #[tokio::test]
     async fn writer_set_log_config_swaps_config() {
         use crabka_log::LogConfig;
         let dir = tempdir().expect("tempdir");
@@ -1069,5 +1247,80 @@ mod tests {
 
         drop(tx);
         writer.await.expect("writer join");
+    }
+
+    #[test]
+    fn swap_future_log_accepts_future_at_same_leo() {
+        let dir = tempdir().expect("tempdir");
+        let source_dir = dir.path().join("source");
+        let target_dir = dir.path().join("target");
+        let source_partition = source_dir.join("t-0");
+        let future_path = target_dir.join("t-0.future");
+        let target_partition_path = target_dir.join("t-0");
+
+        let log = Arc::new(Mutex::new(open_log_with_records(&source_partition, 2)));
+        let future_log = Arc::new(Mutex::new(open_log_with_records(&future_path, 2)));
+        let log_dir = Arc::new(ArcSwap::from_pointee(source_dir.clone()));
+
+        let result = swap_future_log(
+            &log,
+            &log_dir,
+            target_dir.clone(),
+            &future_log,
+            &future_path,
+            &target_partition_path,
+        )
+        .expect("swap");
+
+        // Pull both log observations under one lock acquisition — two
+        // `lock()` temporaries in a single assert statement would deadlock.
+        let (leo, log_dir_now) = {
+            let guard = log.lock().unwrap();
+            (guard.log_end_offset(), guard.dir().to_path_buf())
+        };
+        check!(result == SwapOutcome::Swapped);
+        check!(leo == 2);
+        check!(log_dir_now == target_partition_path.clone());
+        check!(log_dir.load().as_ref().clone() == target_dir);
+        check!(!source_partition.exists());
+        check!(target_partition_path.exists());
+    }
+
+    #[test]
+    fn swap_future_log_rejects_future_behind_current_leo() {
+        let dir = tempdir().expect("tempdir");
+        let source_dir = dir.path().join("source");
+        let target_dir = dir.path().join("target");
+        let source_partition = source_dir.join("t-0");
+        let future_path = target_dir.join("t-0.future");
+        let target_partition_path = target_dir.join("t-0");
+
+        let log = Arc::new(Mutex::new(open_log_with_records(&source_partition, 2)));
+        let future_log = Arc::new(Mutex::new(open_log_with_records(&future_path, 1)));
+        let log_dir = Arc::new(ArcSwap::from_pointee(source_dir.clone()));
+
+        let result = swap_future_log(
+            &log,
+            &log_dir,
+            target_dir,
+            &future_log,
+            &future_path,
+            &target_partition_path,
+        )
+        .expect("not caught up response");
+
+        // Pull both log observations under one lock acquisition — two
+        // `lock()` temporaries in a single assert statement would deadlock.
+        let (leo, log_dir_now) = {
+            let guard = log.lock().unwrap();
+            (guard.log_end_offset(), guard.dir().to_path_buf())
+        };
+        check!(result == SwapOutcome::NotCaughtUp);
+        check!(leo == 2);
+        check!(log_dir_now == source_partition.clone());
+        check!(log_dir.load().as_ref().clone() == source_dir);
+        check!(source_partition.exists());
+        check!(future_path.exists());
+        check!(!target_partition_path.exists());
     }
 }

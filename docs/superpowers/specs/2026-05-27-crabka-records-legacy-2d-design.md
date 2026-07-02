@@ -39,7 +39,7 @@ each exercised against a genuine JVM client.
 Extend `crates/broker/tests/jvm_acceptance.rs`. Add one constant:
 
 ```rust
-const KAFKA_IMAGE_LEGACY: &str = "confluentinc/cp-kafka:3.1.2";  // Kafka 0.10.0
+const KAFKA_IMAGE_LEGACY: &str = "mirror.gcr.io/confluentinc/cp-kafka:3.1.2";  // Kafka 0.10.0
 ```
 
 Reuse the existing helpers as-is:

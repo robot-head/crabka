@@ -307,13 +307,20 @@ mod tests {
         // Query window ends at 300, frontier 200 => window reaches hot.
         let blocks = vec![block("b1", 0, 100, &[500])];
         let plan = plan_search_jobs(&blocks, 300, 200, 10_000);
-        assert!(plan.jobs.len() == 2);
-        assert!(plan.jobs.iter().any(|j| matches!(j, JobShard::Live)));
-        assert!(plan.jobs.iter().any(|j| matches!(
-            j,
-            JobShard::Block { block_id, row_group_start: 0, row_group_end: 1 } if block_id == "b1"
-        )));
-        assert!(plan.total_blocks == 1);
+        assert_eq!(
+            plan,
+            JobPlan {
+                jobs: vec![
+                    JobShard::Live,
+                    JobShard::Block {
+                        block_id: "b1".to_string(),
+                        row_group_start: 0,
+                        row_group_end: 1,
+                    },
+                ],
+                total_blocks: 1,
+            }
+        );
     }
 
     #[test]
@@ -322,39 +329,43 @@ mod tests {
         // (query window ends at -10, before the frontier 0).
         let blocks = vec![block("b2", -1000, -10, &[10_000, 10_000, 10_000])];
         let plan = plan_search_jobs(&blocks, -10, 0, 10_000);
-        let rg_jobs: Vec<_> = plan
-            .jobs
-            .iter()
-            .filter(|j| matches!(j, JobShard::Block { .. }))
-            .collect();
-        assert!(rg_jobs.len() == 3);
-        assert!(!plan.jobs.iter().any(|j| matches!(j, JobShard::Live)));
-        // Each job is a single-row-group range.
-        assert!(matches!(
-            rg_jobs[0],
-            JobShard::Block {
-                row_group_start: 0,
-                row_group_end: 1,
-                ..
+        // Each job is a single-row-group range; no Live job.
+        assert_eq!(
+            plan,
+            JobPlan {
+                jobs: vec![
+                    JobShard::Block {
+                        block_id: "b2".to_string(),
+                        row_group_start: 0,
+                        row_group_end: 1,
+                    },
+                    JobShard::Block {
+                        block_id: "b2".to_string(),
+                        row_group_start: 1,
+                        row_group_end: 2,
+                    },
+                    JobShard::Block {
+                        block_id: "b2".to_string(),
+                        row_group_start: 2,
+                        row_group_end: 3,
+                    },
+                ],
+                total_blocks: 1,
             }
-        ));
-        assert!(matches!(
-            rg_jobs[2],
-            JobShard::Block {
-                row_group_start: 2,
-                row_group_end: 3,
-                ..
-            }
-        ));
+        );
     }
 
     #[test]
     fn empty_blocks_with_hot_window_is_just_live() {
         let blocks: Vec<BlockMetaInfo> = vec![];
         let plan = plan_search_jobs(&blocks, i64::MAX, 0, 10_000);
-        assert!(plan.jobs.len() == 1);
-        assert!(matches!(plan.jobs[0], JobShard::Live));
-        assert!(plan.total_blocks == 0);
+        assert_eq!(
+            plan,
+            JobPlan {
+                jobs: vec![JobShard::Live],
+                total_blocks: 0,
+            }
+        );
     }
 
     #[test]

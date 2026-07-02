@@ -35,18 +35,36 @@ use crate::partition::{Partition, ProduceData, ProduceJob, WriterMessage};
 use crate::partition_registry::PartitionRegistry;
 use crabka_log::VerbatimBatch;
 
+/// Kafka `acks` sentinel `-1` (producer `acks=all`): the leader must hold
+/// the response until the high watermark covers the append, i.e. every
+/// in-sync replica has it.
+const ACKS_ALL: i16 = -1;
+
+/// Kafka's default `min.insync.replicas` — every partition always has at
+/// least its leader in the ISR, so `1` preserves the legacy
+/// "any-ISR-counts" behavior.
+const DEFAULT_MIN_INSYNC_REPLICAS: i32 = 1;
+
+/// Wire sentinel: "no offset assigned" (`ProduceResponse.INVALID_OFFSET`).
+/// Stamped on partition rows that failed before any append happened.
+const INVALID_OFFSET: i64 = -1;
+
+/// Wire sentinel: "leader unknown" for the KIP-951 `current_leader` hint —
+/// used when the leader's `NodeId` doesn't fit the wire's `i32`.
+const NO_LEADER_ID: i32 = -1;
+
 /// Resolve `min.insync.replicas` for a topic from the metadata image.
 /// Defaults to `1` (Kafka's default — every cluster has at least the
-/// leader in ISR), and silently falls back to `1` on malformed values
-/// (the `AlterConfigs` validator already rejected invalid values, so
-/// any non-parseable string here is a corrupt metadata image — safer
+/// leader in ISR), and silently falls back to the default on malformed
+/// values (the `AlterConfigs` validator already rejected invalid values,
+/// so any non-parseable string here is a corrupt metadata image — safer
 /// to err toward the permissive default than to wedge produce).
 fn topic_min_insync_replicas(image: &crabka_metadata::MetadataImage, topic: &str) -> i32 {
     image
         .topic_config(topic)
         .and_then(|m| m.get(MIN_INSYNC_REPLICAS))
         .and_then(|v| v.parse::<i32>().ok())
-        .unwrap_or(1)
+        .unwrap_or(DEFAULT_MIN_INSYNC_REPLICAS)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -446,7 +464,7 @@ async fn process_partition(
     if leader != this_node_id {
         out.error_code = codes::NOT_LEADER_OR_FOLLOWER;
         out.current_leader = LeaderIdAndEpoch {
-            leader_id: i32::try_from(leader).unwrap_or(-1),
+            leader_id: i32::try_from(leader).unwrap_or(NO_LEADER_ID),
             leader_epoch,
             ..Default::default()
         };
@@ -461,7 +479,7 @@ async fn process_partition(
     let Some(part) = partitions.get(topic_name, idx) else {
         out.error_code = codes::NOT_LEADER_OR_FOLLOWER;
         out.current_leader = LeaderIdAndEpoch {
-            leader_id: i32::try_from(leader).unwrap_or(-1),
+            leader_id: i32::try_from(leader).unwrap_or(NO_LEADER_ID),
             leader_epoch,
             ..Default::default()
         };
@@ -488,7 +506,7 @@ async fn process_partition(
     // in-sync replicas ack" — fail fast with NOT_ENOUGH_REPLICAS (19)
     // before queueing work on the writer. Default `1` matches Apache
     // Kafka and preserves the legacy "any-ISR-counts" behavior.
-    if acks == -1
+    if acks == ACKS_ALL
         && let Some(pr) = image.partition(topic_name, idx)
     {
         let min_isr = topic_min_insync_replicas(image, topic_name);
@@ -618,7 +636,7 @@ async fn process_partition(
             // followers may not have it yet, and a leader crash
             // before they catch up would lose data the producer
             // believed acknowledged.
-            if acks == -1 {
+            if acks == ACKS_ALL {
                 let target = base_offset + i64::from(last_offset_delta) + 1;
                 let deadline = std::time::Instant::now() + timeout;
                 match part.await_hw_at_least(target, deadline).await {
@@ -744,7 +762,7 @@ async fn finalize_ack(
     key: &CommitKey<'_>,
 ) {
     let target = base_offset + i64::from(key.last_offset_delta) + 1;
-    if acks == -1 {
+    if acks == ACKS_ALL {
         let deadline = std::time::Instant::now() + timeout;
         out.error_code = match part.await_hw_at_least(target, deadline).await {
             Ok(()) => codes::NONE,
@@ -817,7 +835,7 @@ fn build_topic_error_response(
             .map(|p| PartitionProduceResponse {
                 index: p.index,
                 error_code: code,
-                base_offset: -1,
+                base_offset: INVALID_OFFSET,
                 ..Default::default()
             })
             .collect(),
@@ -1220,14 +1238,19 @@ fn build_produce_data(prepared: PreparedBatch, leader_epoch: i32) -> ProduceData
 mod tests {
     use super::{
         FramedPartition, FramedTopic, MIN_INSYNC_REPLICAS, PartitionPayload,
-        produce_bytes_by_qos_tier, topic_min_insync_replicas,
+        build_topic_error_response, decode_owned_batch, process_partition,
+        produce_bytes_by_qos_tier, resolve_topic_compression, topic_min_insync_replicas,
     };
-    use assert2::assert;
-    use bytes::Bytes;
+    use assert2::{assert, check};
+    use bytes::{Bytes, BytesMut};
+    use crabka_compression::CompressionType;
     use crabka_metadata::{
         MetadataImage, MetadataRecord, PartitionRecord, TopicConfigRecord, TopicRecord,
     };
+    use crabka_protocol::records::{Record, RecordBatch, RecordsPayload};
     use std::collections::BTreeMap;
+    use std::sync::Arc;
+    use std::time::Duration;
     use uuid::Uuid;
 
     fn image_with_topic(topic: &str, isr: &[u64]) -> MetadataImage {
@@ -1284,6 +1307,12 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    fn encode_batch(batch: &RecordBatch) -> Bytes {
+        let mut buf = BytesMut::new();
+        batch.encode(&mut buf).expect("encode record batch");
+        buf.freeze()
     }
 
     #[test]
@@ -1356,9 +1385,208 @@ mod tests {
 
         let grouped = produce_bytes_by_qos_tier(&img, &topics);
 
-        assert!(grouped.get("gold") == Some(&30));
-        assert!(grouped.get(crate::config_keys::DEFAULT_QOS_TIER) == Some(&7));
-        assert!(grouped.len() == 2);
+        let expected: BTreeMap<String, u64> = BTreeMap::from([
+            ("gold".to_string(), 30),
+            (crate::config_keys::DEFAULT_QOS_TIER.to_string(), 7),
+        ]);
+        assert!(grouped == expected);
+    }
+
+    #[test]
+    fn build_topic_error_response_preserves_topic_and_partition_fields() {
+        use crabka_protocol::owned::produce_response::{
+            LeaderIdAndEpoch, PartitionProduceResponse, TopicProduceResponse,
+        };
+        let topic_id = crabka_protocol::primitives::uuid::Uuid([7; 16]);
+        let topic = FramedTopic {
+            name: "orders".into(),
+            topic_id,
+            partition_data: vec![
+                FramedPartition {
+                    index: 0,
+                    payload: PartitionPayload::Null,
+                },
+                FramedPartition {
+                    index: 4,
+                    payload: PartitionPayload::Slice(Bytes::from_static(b"not-a-batch")),
+                },
+            ],
+        };
+
+        let resp = build_topic_error_response(&topic, crate::codes::UNKNOWN_TOPIC_ID);
+
+        let error_partition = |index: i32| PartitionProduceResponse {
+            index,
+            error_code: crate::codes::UNKNOWN_TOPIC_ID,
+            base_offset: -1,
+            log_append_time_ms: -1,
+            log_start_offset: -1,
+            record_errors: vec![],
+            error_message: None,
+            current_leader: LeaderIdAndEpoch {
+                leader_id: -1,
+                leader_epoch: -1,
+                unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+            },
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+        };
+        let expected = TopicProduceResponse {
+            name: "orders".to_string(),
+            topic_id,
+            partition_responses: vec![error_partition(0), error_partition(4)],
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
+    }
+
+    #[test]
+    fn resolve_topic_compression_distinguishes_producer_and_forced_codecs() {
+        let cases = [
+            // "producer" keeps the producer's codec → no forced compression.
+            ("producer", None),
+            // A concrete codec forces recompression to that codec.
+            ("zstd", Some(CompressionType::Zstd)),
+        ];
+        for (config_value, want) in cases {
+            let mut img = image_with_topic("t", &[1]);
+            let mut overrides = BTreeMap::new();
+            overrides.insert(
+                crate::config_keys::COMPRESSION_TYPE.into(),
+                config_value.into(),
+            );
+            img.apply(&MetadataRecord::V1TopicConfig(TopicConfigRecord {
+                topic: "t".into(),
+                overrides,
+            }));
+            assert!(
+                resolve_topic_compression(&img, "t") == want,
+                "compression.type {config_value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn decode_owned_batch_preserves_non_default_header_and_record_fields() {
+        let batch = RecordBatch {
+            last_offset_delta: 1,
+            max_timestamp: 9876,
+            producer_id: 22,
+            producer_epoch: 3,
+            base_sequence: 11,
+            records: vec![
+                Record {
+                    value: Some(Bytes::from_static(b"a")),
+                    ..Default::default()
+                },
+                Record {
+                    value: Some(Bytes::from_static(b"b")),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let decoded = decode_owned_batch(
+            RecordsPayload::V2(vec![batch]),
+            "orders",
+            &crate::metrics::BrokerMetrics::new(),
+        )
+        .expect("decode owned batch");
+
+        check!(decoded.last_offset_delta == 1);
+        check!(decoded.max_timestamp == 9876);
+        check!(decoded.producer_id == 22);
+        check!(decoded.producer_epoch == 3);
+        check!(decoded.base_sequence == 11);
+        assert!(decoded.records.len() == 2);
+        check!(decoded.records[0].value.as_deref() == Some(&b"a"[..]));
+        check!(decoded.records[1].value.as_deref() == Some(&b"b"[..]));
+    }
+
+    #[test]
+    fn decode_owned_batch_rejects_empty_v2_payload() {
+        let err = decode_owned_batch(
+            RecordsPayload::V2(Vec::new()),
+            "orders",
+            &crate::metrics::BrokerMetrics::new(),
+        )
+        .unwrap_err();
+        assert!(err == crate::codes::INVALID_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn process_partition_non_leader_preserves_current_leader_hint() {
+        use crabka_protocol::owned::produce_response::{
+            LeaderIdAndEpoch, PartitionProduceResponse,
+        };
+        let mut img = image_with_topic("orders", &[2, 3]);
+        img.apply(&MetadataRecord::V1Partition(PartitionRecord {
+            topic: "orders".into(),
+            partition: 0,
+            leader: 2,
+            replicas: vec![2, 3],
+            isr: vec![2, 3],
+            leader_epoch: 17,
+            adding_replicas: vec![],
+            removing_replicas: vec![],
+            directories: vec![],
+            partition_epoch: 1,
+        }));
+        let image = Arc::new(img);
+        let partitions = Arc::new(crate::partition_registry::PartitionRegistry::new());
+        let txn_coordinator = Arc::new(crate::txn::coordinator::TxnCoordinator::new(
+            1,
+            Arc::clone(&partitions),
+            Arc::new(crate::producer_id_manager::ProducerIdManager::new()),
+        ));
+        let producer_state = Arc::new(crate::producer_state::ProducerState::new());
+        let log_dir_status = crate::log_dir_status::LogDirRegistry::default();
+        let metrics = crate::metrics::BrokerMetrics::new();
+        let payload = encode_batch(&RecordBatch {
+            records: vec![Record {
+                value: Some(Bytes::from_static(b"hello")),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+
+        let resp = process_partition(
+            FramedPartition {
+                index: 0,
+                payload: PartitionPayload::Slice(payload),
+            },
+            None,
+            "orders",
+            false,
+            false,
+            1,
+            Duration::from_millis(1),
+            &partitions,
+            &txn_coordinator,
+            &producer_state,
+            &log_dir_status,
+            &image,
+            1,
+            &metrics,
+        )
+        .await
+        .expect("process partition");
+
+        let expected = PartitionProduceResponse {
+            index: 0,
+            error_code: crate::codes::NOT_LEADER_OR_FOLLOWER,
+            base_offset: 0,
+            log_append_time_ms: -1,
+            log_start_offset: -1,
+            record_errors: vec![],
+            error_message: None,
+            current_leader: LeaderIdAndEpoch {
+                leader_id: 2,
+                leader_epoch: 17,
+                unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+            },
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
     }
 
     #[test]
@@ -1408,7 +1636,7 @@ mod tests {
         use super::super::{
             PartitionPayload, PreparedSource, ProduceData, build_produce_data, prepare_batch,
         };
-        use assert2::assert;
+        use assert2::{assert, check};
         use bytes::{Bytes, BytesMut};
         use crabka_compression::CompressionType;
         use crabka_protocol::records::{Attributes, Record, RecordBatch, TimestampType};
@@ -1456,10 +1684,19 @@ mod tests {
                 ..Default::default()
             };
             let wire = encode(&batch);
-            assert!(PartitionPayload::Slice(wire).message_count() == 3);
             // A null field and a non-v2 (zeroed) slice both contribute zero.
-            assert!(PartitionPayload::Null.message_count() == 0);
-            assert!(PartitionPayload::Slice(Bytes::from_static(&[0u8; 64])).message_count() == 0);
+            let cases = [
+                (PartitionPayload::Slice(wire), 3, "v2 slice with 3 records"),
+                (PartitionPayload::Null, 0, "null records field"),
+                (
+                    PartitionPayload::Slice(Bytes::from_static(&[0u8; 64])),
+                    0,
+                    "non-v2 zeroed slice",
+                ),
+            ];
+            for (payload, want, label) in cases {
+                assert!(payload.message_count() == want, "case: {label}");
+            }
         }
 
         /// Run the full dispatch over a v≥3 records slice: `prepare_batch`
@@ -1482,10 +1719,10 @@ mod tests {
             let data = dispatch_slice(wire.clone(), None, 7);
             match data {
                 ProduceData::Verbatim(v) => {
-                    assert!(&v.bytes[..] == &wire[..]);
-                    assert!(v.leader_epoch == 7);
-                    assert!(v.max_timestamp == 42);
-                    assert!(v.last_offset_delta == 0);
+                    check!(&v.bytes[..] == &wire[..]);
+                    check!(v.leader_epoch == 7);
+                    check!(v.max_timestamp == 42);
+                    check!(v.last_offset_delta == 0);
                 }
                 ProduceData::Owned(_) => panic!("expected Verbatim"),
             }
@@ -1617,14 +1854,14 @@ mod tests {
             match data {
                 ProduceData::Verbatim(v) => {
                     // Stored bytes are the COMPRESSED wire bytes — verbatim, not
-                    // re-encoded from decompressed records.
-                    assert!(&v.bytes[..] == &wire[..]);
-                    assert!(v.bytes.len() == wire.len());
-                    assert!(v.bytes.len() < big.len(), "must stay compressed");
+                    // re-encoded from decompressed records ("must stay compressed").
                     // Header fields came from the v2 header, no record decode.
-                    assert!(v.max_timestamp == 7_777);
-                    assert!(v.last_offset_delta == 0);
-                    assert!(v.leader_epoch == 3);
+                    check!(&v.bytes[..] == &wire[..]);
+                    check!(v.bytes.len() == wire.len());
+                    check!(v.bytes.len() < big.len());
+                    check!(v.max_timestamp == 7_777);
+                    check!(v.last_offset_delta == 0);
+                    check!(v.leader_epoch == 3);
                 }
                 ProduceData::Owned(_) => {
                     panic!("lz4 producer batch must pass through verbatim (no decompress)")
@@ -1653,20 +1890,20 @@ mod tests {
             let prepared =
                 prepare_batch(PartitionPayload::Slice(wire.clone()), None, "t", &m).unwrap();
             assert!(matches!(prepared.source, PreparedSource::Verbatim(_)));
-            assert!(prepared.producer_id == 4242);
-            assert!(prepared.producer_epoch == 9);
-            assert!(prepared.base_sequence == 17);
-            assert!(prepared.last_offset_delta == 2);
-            assert!(prepared.max_timestamp == 555);
+            check!(prepared.producer_id == 4242);
+            check!(prepared.producer_epoch == 9);
+            check!(prepared.base_sequence == 17);
+            check!(prepared.last_offset_delta == 2);
+            check!(prepared.max_timestamp == 555);
 
             // Cross-check: an owned decode of the same compressed bytes yields
             // the same header identity (proving the header read is correct).
             let mut cur: &[u8] = &wire;
             let owned = RecordBatch::decode(&mut cur).unwrap();
-            assert!(owned.producer_id == prepared.producer_id);
-            assert!(owned.producer_epoch == prepared.producer_epoch);
-            assert!(owned.base_sequence == prepared.base_sequence);
-            assert!(owned.last_offset_delta == prepared.last_offset_delta);
+            check!(owned.producer_id == prepared.producer_id);
+            check!(owned.producer_epoch == prepared.producer_epoch);
+            check!(owned.base_sequence == prepared.base_sequence);
+            check!(owned.last_offset_delta == prepared.last_offset_delta);
         }
     }
 }

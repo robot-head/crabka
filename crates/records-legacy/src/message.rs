@@ -235,6 +235,7 @@ fn get_nullable_bytes(
 mod tests {
     use super::*;
     use assert2::assert;
+    use assert2::check;
     use bytes::BytesMut;
 
     fn fixture_v0() -> Message {
@@ -296,9 +297,9 @@ mod tests {
         m.encode_into(&mut buf);
         let mut cur: &[u8] = &buf[..];
         let decoded = Message::decode_from(&mut cur, m.encoded_len()).unwrap();
-        assert!(decoded == m);
-        assert!(decoded.key.is_none());
-        assert!(decoded.value.is_none());
+        check!(decoded == m);
+        check!(decoded.key.is_none());
+        check!(decoded.value.is_none());
     }
 
     #[test]
@@ -367,10 +368,17 @@ mod tests {
 
     #[test]
     fn attrs_with_compression_exact_codes() {
-        assert!(attrs_with_compression(0, CompressionType::None) == 0);
-        assert!(attrs_with_compression(0, CompressionType::Gzip) == 1);
-        assert!(attrs_with_compression(0, CompressionType::Snappy) == 2);
-        assert!(attrs_with_compression(0, CompressionType::Lz4) == 3);
+        for (compression, want) in [
+            (CompressionType::None, 0),
+            (CompressionType::Gzip, 1),
+            (CompressionType::Snappy, 2),
+            (CompressionType::Lz4, 3),
+        ] {
+            check!(
+                attrs_with_compression(0, compression) == want,
+                "{compression:?}"
+            );
+        }
     }
 
     #[test]

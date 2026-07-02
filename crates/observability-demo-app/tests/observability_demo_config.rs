@@ -1,3 +1,4 @@
+use assert2::check;
 use std::path::{Path, PathBuf};
 
 fn repo_root() -> PathBuf {
@@ -143,18 +144,22 @@ fn normalize_whitespace(input: &str) -> String {
 fn docker_log_tailing_is_scoped_to_the_demo_compose_project() {
     let config = alloy_config();
     let relabel = balanced_block_after_marker(&config, "discovery.relabel \"containers\" {");
-    assert!(
-        relabel.contains("__meta_docker_container_label_com_docker_compose_project"),
-        "Docker log discovery should inspect the Compose project label before forwarding targets"
-    );
-    assert!(
-        relabel.contains("action        = \"keep\""),
-        "Docker log discovery should drop non-demo containers instead of tailing every Docker container"
-    );
-    assert!(
-        relabel.contains("regex         = \"crabka-observability-.*\""),
-        "Docker log discovery should only tail Crabka observability Compose projects"
-    );
+    for (needle, why) in [
+        (
+            "__meta_docker_container_label_com_docker_compose_project",
+            "Docker log discovery should inspect the Compose project label before forwarding targets",
+        ),
+        (
+            "action        = \"keep\"",
+            "Docker log discovery should drop non-demo containers instead of tailing every Docker container",
+        ),
+        (
+            "regex         = \"crabka-observability-.*\"",
+            "Docker log discovery should only tail Crabka observability Compose projects",
+        ),
+    ] {
+        assert!(relabel.contains(needle), "{why}");
+    }
 }
 
 #[test]
@@ -309,17 +314,17 @@ fn cpu_profiles_use_bounded_sampling_windows() {
     ] {
         let scrape = scrape_block(&config, scrape_name);
         let process_cpu = normalize_whitespace(profile_process_cpu_block(scrape));
-        assert!(
+        check!(
             process_cpu.contains("enabled = true"),
             "{scrape_name} should keep CPU profiling enabled"
         );
-        assert!(
+        check!(
             scrape.contains(&format!(
                 "delta_profiling_duration = \"{expected_duration}\""
             )),
             "{scrape_name} should keep CPU profiling overhead low enough for the demo stack"
         );
-        assert!(
+        check!(
             !process_cpu.contains("delta_profiling_duration"),
             "{scrape_name} should set the CPU duration on pyroscope.scrape, not profile.process_cpu"
         );
@@ -354,15 +359,15 @@ fn demo_app_image_does_not_enable_conflicting_heap_allocator() {
         .nth(1)
         .and_then(|rest| rest.split("mkdir -p dist").next())
         .expect("demo app cargo build block exists");
-    assert!(
+    check!(
         melange.contains("-p observability-demo-app"),
         "demo image package should still build the demo app"
     );
-    assert!(
+    check!(
         !demo_app_build.contains("--features heap-profiling"),
         "demo app depends on turso, which already defines a global allocator"
     );
-    assert!(
+    check!(
         melange.contains("--features heap-profiling"),
         "Crabka service binaries should still expose jemalloc heap profiling"
     );
@@ -412,31 +417,31 @@ fn demo_image_is_built_with_apko_and_melange() {
             "demo package should install binary {bin}"
         );
     }
-    assert!(
+    check!(
         apko.contains("- crabka-demo"),
         "apko image should install the local crabka-demo package"
     );
-    assert!(
+    check!(
         apko.contains("- curl"),
         "demo image should keep curl for compose healthchecks"
     );
-    assert!(
+    check!(
         workflow.contains("melange build packaging/melange/crabka-demo.yaml"),
         "publish-demo-image should build the demo APK with melange"
     );
-    assert!(
+    check!(
         workflow.contains("apko publish packaging/apko/crabka-demo.yaml"),
         "publish-demo-image should publish the demo OCI image with apko"
     );
-    assert!(
+    check!(
         !workflow.contains("docker/build-push-action"),
         "publish-demo-image should not use the Dockerfile build action"
     );
-    assert!(
+    check!(
         compose.contains("image: ghcr.io/robot-head/crabka-demo:latest"),
         "all demo Crabka services should pull the GHCR image by default"
     );
-    assert!(
+    check!(
         !compose.contains("image: crabka-demo:latest"),
         "compose should not require a short local crabka-demo tag for broker-format"
     );
@@ -445,33 +450,34 @@ fn demo_image_is_built_with_apko_and_melange() {
 #[test]
 fn rustfs_bootstrap_verifies_obsolete_log_manifest_cleanup() {
     let bootstrap = rustfs_bootstrap_script();
-    assert!(
-        bootstrap
-            .contains("obsolete_logs_manifest_key=\"logs/tenant=demo/index/logs/manifest.json\""),
-        "RustFS bootstrap should target the obsolete full logs manifest left by older demo revisions"
-    );
-    assert!(
-        bootstrap.contains(
-            "obsolete_logs_shard_catalog_key=\"logs/tenant=demo/index/logs/shards/manifest.json\""
+    for (needle, why) in [
+        (
+            "obsolete_logs_manifest_key=\"logs/tenant=demo/index/logs/manifest.json\"",
+            "RustFS bootstrap should target the obsolete full logs manifest left by older demo revisions",
         ),
-        "RustFS bootstrap should also target the obsolete logs shard catalog left by older demo revisions"
-    );
-    assert!(
-        bootstrap.contains("for attempt in 1 2 3 4 5; do"),
-        "RustFS bootstrap should retry obsolete manifest cleanup because RustFS can be busy during setup"
-    );
-    assert!(
-        bootstrap.contains("s3api delete-object"),
-        "RustFS bootstrap should use the S3 API delete operation for obsolete manifest cleanup"
-    );
-    assert!(
-        bootstrap.contains("s3api wait object-not-exists"),
-        "RustFS bootstrap should verify the obsolete manifest is gone after delete"
-    );
-    assert!(
-        bootstrap.contains("failed to remove obsolete $label"),
-        "RustFS bootstrap should fail loudly when obsolete index cleanup fails"
-    );
+        (
+            "obsolete_logs_shard_catalog_key=\"logs/tenant=demo/index/logs/shards/manifest.json\"",
+            "RustFS bootstrap should also target the obsolete logs shard catalog left by older demo revisions",
+        ),
+        (
+            "for attempt in 1 2 3 4 5; do",
+            "RustFS bootstrap should retry obsolete manifest cleanup because RustFS can be busy during setup",
+        ),
+        (
+            "s3api delete-object",
+            "RustFS bootstrap should use the S3 API delete operation for obsolete manifest cleanup",
+        ),
+        (
+            "s3api wait object-not-exists",
+            "RustFS bootstrap should verify the obsolete manifest is gone after delete",
+        ),
+        (
+            "failed to remove obsolete $label",
+            "RustFS bootstrap should fail loudly when obsolete index cleanup fails",
+        ),
+    ] {
+        assert!(bootstrap.contains(needle), "{why}");
+    }
     for label in ["\"logs full manifest\"", "\"logs shard catalog\""] {
         assert!(
             bootstrap.contains(label),
@@ -552,23 +558,23 @@ fn self_dashboard_surfaces_service_heap_profiles() {
 #[test]
 fn compose_and_alloy_collect_container_resource_metrics() {
     let compose = docker_compose();
-    assert!(
+    check!(
         compose.contains("cadvisor:"),
         "the observability stack should include cAdvisor for container CPU/RSS metrics"
     );
-    assert!(
+    check!(
         compose.contains("ghcr.io/google/cadvisor:"),
         "cAdvisor should use the upstream GHCR container image"
     );
-    assert!(
+    check!(
         compose.contains("\"/var/run/docker.sock:/var/run/docker.sock:ro\""),
         "cAdvisor should read Docker container metadata through the socket"
     );
-    assert!(
+    check!(
         compose.contains("--disable_metrics=app,cpuLoad,disk,oom_event,percpu,perf_event,pressure"),
         "cAdvisor should keep network and diskIO enabled for runtime I/O dashboards while skipping unused metric families"
     );
-    assert!(
+    check!(
         !compose.contains("diskIO,network"),
         "cAdvisor must not disable the network and diskIO families used to explain object-store pressure"
     );
@@ -613,42 +619,50 @@ fn compose_and_alloy_collect_container_resource_metrics() {
 #[test]
 fn runtime_resources_dashboard_surfaces_stack_cpu_and_memory() {
     let dashboard = dashboard("crabka-runtime.json");
-    assert!(
-        dashboard.contains("\"uid\": \"crabka-runtime\""),
-        "runtime resource dashboard should have a stable UID"
-    );
-    assert!(
-        dashboard.contains("container_cpu_usage_seconds_total"),
-        "runtime dashboard should chart container CPU"
-    );
-    assert!(
-        dashboard.contains("container_memory_working_set_bytes"),
-        "runtime dashboard should chart container working-set memory"
-    );
-    assert!(
-        dashboard.contains("container_memory_rss") && dashboard.contains("container_memory_cache"),
-        "runtime dashboard should break down querier memory into RSS and cache"
-    );
-    assert!(
-        dashboard.contains("Querier memory breakdown"),
-        "runtime dashboard should include a querier memory breakdown panel"
-    );
-    assert!(
-        dashboard.contains("container_label_com_docker_compose_service=~\\\".*-querier\\\""),
-        "querier memory breakdown should focus on querier services"
-    );
-    assert!(
-        dashboard.contains("container_label_com_docker_compose_project"),
-        "runtime dashboard should filter on the Docker Compose project label"
-    );
-    assert!(
-        dashboard.contains("crabka-observability-.*"),
-        "runtime dashboard should scope resource panels to Crabka observability compose projects"
-    );
-    assert!(
-        dashboard.contains("broker-format|rustfs-permissions|rustfs-setup|topic-setup"),
-        "runtime resource panels should exclude one-shot setup containers from steady-state resource rankings"
-    );
+    for (needle, why) in [
+        (
+            "\"uid\": \"crabka-runtime\"",
+            "runtime resource dashboard should have a stable UID",
+        ),
+        (
+            "container_cpu_usage_seconds_total",
+            "runtime dashboard should chart container CPU",
+        ),
+        (
+            "container_memory_working_set_bytes",
+            "runtime dashboard should chart container working-set memory",
+        ),
+        (
+            "container_memory_rss",
+            "runtime dashboard should break down querier memory into RSS and cache",
+        ),
+        (
+            "container_memory_cache",
+            "runtime dashboard should break down querier memory into RSS and cache",
+        ),
+        (
+            "Querier memory breakdown",
+            "runtime dashboard should include a querier memory breakdown panel",
+        ),
+        (
+            "container_label_com_docker_compose_service=~\\\".*-querier\\\"",
+            "querier memory breakdown should focus on querier services",
+        ),
+        (
+            "container_label_com_docker_compose_project",
+            "runtime dashboard should filter on the Docker Compose project label",
+        ),
+        (
+            "crabka-observability-.*",
+            "runtime dashboard should scope resource panels to Crabka observability compose projects",
+        ),
+        (
+            "broker-format|rustfs-permissions|rustfs-setup|topic-setup",
+            "runtime resource panels should exclude one-shot setup containers from steady-state resource rankings",
+        ),
+    ] {
+        assert!(dashboard.contains(needle), "{why}");
+    }
     for service in [
         "rustfs",
         "grafana",
@@ -755,25 +769,25 @@ fn rustfs_dashboard_surfaces_object_store_health_and_io() {
             "RustFS dashboard should query metric {metric}"
         );
     }
-    assert!(
+    check!(
         dashboard.contains("container_label_com_docker_compose_service=\\\"rustfs\\\""),
         "RustFS dashboard should scope resource panels to the RustFS service"
     );
-    assert!(
+    check!(
         dashboard.contains("{service_name=\\\"rustfs\\\"}"),
         "RustFS dashboard should include RustFS logs"
     );
-    assert!(
+    check!(
         dashboard.contains("object_store::client::retry"),
         "RustFS dashboard should surface S3/object-store retry chatter from Crabka clients"
     );
-    assert!(
+    check!(
         !dashboard.contains(
             "max(rustfs_cluster_capacity_used_bytes) or max(rustfs_cluster_usage_objects_total_bytes)"
         ),
         "object usage panels must not prefer raw drive capacity over RustFS object metrics"
     );
-    assert!(
+    check!(
         dashboard.contains("clamp_min(((max(rustfs_cluster_capacity_used_bytes)"),
         "RustFS dashboard should make raw-drive to object-metric deltas visible"
     );
@@ -782,47 +796,51 @@ fn rustfs_dashboard_surfaces_object_store_health_and_io() {
 #[test]
 fn runtime_resources_dashboard_surfaces_container_restarts() {
     let dashboard = dashboard("crabka-runtime.json");
-    assert!(
-        dashboard.contains("Shortest container uptime"),
-        "runtime dashboard should make recently recreated containers obvious"
-    );
-    assert!(
-        dashboard.contains("Container start changes (1h)"),
-        "runtime dashboard should show container start-time changes over the last hour"
-    );
-    assert!(
-        dashboard.contains("container_start_time_seconds"),
-        "runtime dashboard should use cAdvisor start-time metrics for restart detection"
-    );
-    assert!(
-        dashboard.contains(
-            "changes(max by (container_label_com_docker_compose_service) (container_start_time_seconds"
+    for (needle, why) in [
+        (
+            "Shortest container uptime",
+            "runtime dashboard should make recently recreated containers obvious",
         ),
-        "runtime dashboard should count start-time changes by Compose service"
-    );
+        (
+            "Container start changes (1h)",
+            "runtime dashboard should show container start-time changes over the last hour",
+        ),
+        (
+            "container_start_time_seconds",
+            "runtime dashboard should use cAdvisor start-time metrics for restart detection",
+        ),
+        (
+            "changes(max by (container_label_com_docker_compose_service) (container_start_time_seconds",
+            "runtime dashboard should count start-time changes by Compose service",
+        ),
+    ] {
+        assert!(dashboard.contains(needle), "{why}");
+    }
 }
 
 #[test]
 fn alerts_surface_recent_observability_container_restarts() {
     let alerts = grafana_alerting_config();
-    assert!(
-        alerts.contains("uid: crabka-obs-container-restarted"),
-        "Grafana alerts should include a stable UID for observability container restarts"
-    );
-    assert!(
-        alerts.contains("title: Observability container restarted recently"),
-        "Grafana alerts should name the restart condition clearly"
-    );
-    assert!(
-        alerts.contains("container_start_time_seconds"),
-        "restart alert should be driven by cAdvisor container start times"
-    );
-    assert!(
-        alerts.contains(
-            "changes(max by (container_label_com_docker_compose_service) (container_start_time_seconds"
+    for (needle, why) in [
+        (
+            "uid: crabka-obs-container-restarted",
+            "Grafana alerts should include a stable UID for observability container restarts",
         ),
-        "restart alert should detect recent start-time changes by Compose service"
-    );
+        (
+            "title: Observability container restarted recently",
+            "Grafana alerts should name the restart condition clearly",
+        ),
+        (
+            "container_start_time_seconds",
+            "restart alert should be driven by cAdvisor container start times",
+        ),
+        (
+            "changes(max by (container_label_com_docker_compose_service) (container_start_time_seconds",
+            "restart alert should detect recent start-time changes by Compose service",
+        ),
+    ] {
+        assert!(alerts.contains(needle), "{why}");
+    }
     for service in [
         "alloy",
         "cadvisor",

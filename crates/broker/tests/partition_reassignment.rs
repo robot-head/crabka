@@ -18,7 +18,7 @@
 //! Gated to non-Windows to match the multi-broker test convention from
 //! slices 10b/12b/14.
 
-use assert2::assert;
+use assert2::{assert, check};
 use std::io;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -474,8 +474,8 @@ async fn list_in_flight_returns_pending_rows() {
         "expected 1 partition in-flight; got {:?}",
         foo.1
     );
-    assert!(foo.1[0].0 == 0, "expected partition_index=0");
-    assert!(
+    check!(foo.1[0].0 == 0, "expected partition_index=0");
+    check!(
         foo.1[0].2 == vec![new_replica],
         "expected adding_replicas=[new_replica]; got {:?}",
         foo.1[0].2

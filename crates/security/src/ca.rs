@@ -396,9 +396,12 @@ mod tests {
         let der = pem_to_der(&ca.cert_pem);
         let (_, cert) = X509Certificate::from_der(der.as_ref()).expect("parse cluster CA DER");
         let subject = cert.subject().to_string();
-        assert!(subject.contains("CN=c1"), "subject was {subject}");
-        assert!(subject.contains("O=crabka"), "subject was {subject}");
-        assert!(subject.contains("OU=cluster"), "subject was {subject}");
+        for part in ["CN=c1", "O=crabka", "OU=cluster"] {
+            assert!(
+                subject.contains(part),
+                "missing {part}; subject was {subject}"
+            );
+        }
         let bc = cert
             .basic_constraints()
             .expect("BC parse")
@@ -516,9 +519,9 @@ mod tests {
         let der = pem_to_der(&renewed_pem);
         let (_, cert) = X509Certificate::from_der(der.as_ref()).expect("parse renewed");
         let subject = cert.subject().to_string();
-        assert!(subject.contains("CN=c1-cluster-ca"), "subject={subject}");
-        assert!(subject.contains("O=crabka"), "subject={subject}");
-        assert!(subject.contains("OU=cluster"), "subject={subject}");
+        for part in ["CN=c1-cluster-ca", "O=crabka", "OU=cluster"] {
+            assert!(subject.contains(part), "missing {part}; subject={subject}");
+        }
         assert!(
             cert.basic_constraints()
                 .expect("BC")

@@ -216,6 +216,8 @@ fn is_json_path_field_name_char(ch: char) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use assert2::check;
+
     use super::{JsonExtraction, JsonPath, JsonPathPart, LogfmtExtraction, LogfmtParserConfig};
 
     #[test]
@@ -240,9 +242,9 @@ mod tests {
 
     #[test]
     fn json_path_parse_rejects_empty_dot_field_segments() {
-        assert!(JsonPath::parse(".request").is_err());
-        assert!(JsonPath::parse("request.").is_err());
-        assert!(JsonPath::parse("request..headers").is_err());
+        for path in [".request", "request.", "request..headers"] {
+            assert!(JsonPath::parse(path).is_err(), "{path}");
+        }
     }
 
     #[test]
@@ -308,9 +310,9 @@ mod tests {
 
     #[test]
     fn logfmt_extractions_reject_empty_destination_or_source() {
-        assert!(LogfmtExtraction::same("").is_err());
-        assert!(LogfmtExtraction::rename("", "source").is_err());
-        assert!(LogfmtExtraction::rename("destination", "").is_err());
+        check!(LogfmtExtraction::same("").is_err());
+        check!(LogfmtExtraction::rename("", "source").is_err());
+        check!(LogfmtExtraction::rename("destination", "").is_err());
     }
 }
 

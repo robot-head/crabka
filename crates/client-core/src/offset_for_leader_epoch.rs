@@ -92,6 +92,7 @@ fn parse_single(
 mod tests {
     use super::*;
     use assert2::assert;
+    use crabka_protocol::UnknownTaggedFields;
     use crabka_protocol::owned::offset_for_leader_epoch_response::{
         EpochEndOffset as WireEpochEndOffset, OffsetForLeaderEpochResponse,
         OffsetForLeaderTopicResult,
@@ -128,14 +129,22 @@ mod tests {
     fn build_request_preserves_partition_epoch_query() {
         let req = build_request("orders", 2, 17, 11);
 
-        assert!(req.replica_id == -1);
-        assert!(req.topics.len() == 1);
-        assert!(req.topics[0].topic == "orders");
-        assert!(req.topics[0].partitions.len() == 1);
-        let partition = &req.topics[0].partitions[0];
-        assert!(partition.partition == 2);
-        assert!(partition.current_leader_epoch == 17);
-        assert!(partition.leader_epoch == 11);
+        assert!(
+            req == OffsetForLeaderEpochRequest {
+                replica_id: -1,
+                topics: vec![OffsetForLeaderTopic {
+                    topic: "orders".to_string(),
+                    partitions: vec![OffsetForLeaderPartition {
+                        partition: 2,
+                        current_leader_epoch: 17,
+                        leader_epoch: 11,
+                        unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                    }],
+                    unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                }],
+                unknown_tagged_fields: UnknownTaggedFields(vec![]),
+            }
+        );
     }
 
     #[test]

@@ -2522,7 +2522,7 @@ mod tests {
         StringDictionaryBuilder,
     };
     use arrow::datatypes::{Field as ArrowField, Int32Type, Schema};
-    use assert2::assert;
+    use assert2::{assert, check};
     use datafusion::catalog::MemTable;
     use datafusion::prelude::SessionContext;
 
@@ -2697,11 +2697,11 @@ mod tests {
             .search("t", "{ .svc = \"b\" }", 0, 100_000, 20)
             .await
             .unwrap();
-        assert!(r.traces.len() == 1);
-        assert!(r.traces[0].trace_id == [9; 16]);
-        assert!(r.traces[0].root_service_name == "a");
-        assert!(r.traces[0].span_sets[0].matched == 1);
-        assert!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
+        check!(r.traces.len() == 1);
+        check!(r.traces[0].trace_id == [9; 16]);
+        check!(r.traces[0].root_service_name == "a");
+        check!(r.traces[0].span_sets[0].matched == 1);
+        check!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
     }
 
     #[tokio::test]
@@ -2743,10 +2743,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(r.traces.len() == 1);
-        assert!(r.traces[0].span_sets[0].matched == 1);
-        assert!(r.traces[0].span_sets[0].spans.len() == 1);
-        assert!(r.traces[0].span_sets[0].spans[0].span_id == [1; 8]);
+        check!(r.traces.len() == 1);
+        check!(r.traces[0].span_sets[0].matched == 1);
+        check!(r.traces[0].span_sets[0].spans.len() == 1);
+        check!(r.traces[0].span_sets[0].spans[0].span_id == [1; 8]);
     }
 
     #[tokio::test]
@@ -2785,10 +2785,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(r.traces.len() == 1);
-        assert!(r.traces[0].trace_id == [9; 16]);
-        assert!(r.traces[0].span_sets[0].matched == 1);
-        assert!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
+        check!(r.traces.len() == 1);
+        check!(r.traces[0].trace_id == [9; 16]);
+        check!(r.traces[0].span_sets[0].matched == 1);
+        check!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
     }
 
     #[tokio::test]
@@ -2798,9 +2798,9 @@ mod tests {
             .search("t", "{ .svc = \"a\" } && { .svc = \"b\" }", 0, 100_000, 20)
             .await
             .unwrap();
-        assert!(r.traces.len() == 1);
-        assert!(r.traces[0].trace_id == [9; 16]);
-        assert!(r.traces[0].span_sets[0].matched == 2);
+        check!(r.traces.len() == 1);
+        check!(r.traces[0].trace_id == [9; 16]);
+        check!(r.traces[0].span_sets[0].matched == 2);
     }
 
     #[tokio::test]
@@ -2829,35 +2829,24 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(r.traces.len() == 1);
-        assert!(r.traces[0].trace_id == [9; 16]);
-        assert!(r.traces[0].span_sets[0].matched == 2);
+        check!(r.traces.len() == 1);
+        check!(r.traces[0].trace_id == [9; 16]);
+        check!(r.traces[0].span_sets[0].matched == 2);
         let spans = &r.traces[0].span_sets[0].spans;
-        assert!(spans.iter().any(|span| span.span_id == [1; 8]));
-        assert!(spans.iter().any(|span| span.span_id == [2; 8]));
+        check!(spans.iter().any(|span| span.span_id == [1; 8]));
+        check!(spans.iter().any(|span| span.span_id == [2; 8]));
     }
 
     #[tokio::test]
-    async fn search_descendant_structural() {
+    async fn search_descendant_structural_returns_right_hand_spans() {
         let e = engine();
         let r = e
             .search("t", "{ .svc = \"a\" } >> { .svc = \"b\" }", 0, 100_000, 20)
             .await
             .unwrap();
-        assert!(r.traces.len() == 1);
-        assert!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
-    }
-
-    #[tokio::test]
-    async fn structural_operators_return_right_hand_spans() {
-        let e = engine();
-        let r = e
-            .search("t", "{ .svc = \"a\" } >> { .svc = \"b\" }", 0, 100_000, 20)
-            .await
-            .unwrap();
-        assert!(r.traces.len() == 1);
-        assert!(r.traces[0].span_sets[0].matched == 1);
-        assert!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
+        check!(r.traces.len() == 1);
+        check!(r.traces[0].span_sets[0].matched == 1);
+        check!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
     }
 
     #[tokio::test]
@@ -2867,10 +2856,10 @@ mod tests {
             .search("t", "{ span:childCount = 1 }", 0, 100_000, 20)
             .await
             .unwrap();
-        assert!(r.traces.len() == 1);
-        assert!(r.traces[0].trace_id == [9; 16]);
-        assert!(r.traces[0].span_sets[0].matched == 1);
-        assert!(r.traces[0].span_sets[0].spans[0].span_id == [1; 8]);
+        check!(r.traces.len() == 1);
+        check!(r.traces[0].trace_id == [9; 16]);
+        check!(r.traces[0].span_sets[0].matched == 1);
+        check!(r.traces[0].span_sets[0].spans[0].span_id == [1; 8]);
     }
 
     #[tokio::test]
@@ -2948,9 +2937,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(r.traces.len() == 1);
-        assert!(r.traces[0].trace_id == [9; 16]);
-        assert!(r.traces[0].span_sets[0].matched == 2);
+        check!(r.traces.len() == 1);
+        check!(r.traces[0].trace_id == [9; 16]);
+        check!(r.traces[0].span_sets[0].matched == 2);
     }
 
     #[tokio::test]
@@ -2961,10 +2950,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(r.traces.len() == 1);
-        assert!(r.traces[0].trace_id == [9; 16]);
-        assert!(r.traces[0].span_sets[0].matched == 1);
-        assert!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
+        check!(r.traces.len() == 1);
+        check!(r.traces[0].trace_id == [9; 16]);
+        check!(r.traces[0].span_sets[0].matched == 1);
+        check!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
     }
 
     #[tokio::test]
@@ -2981,10 +2970,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(r.traces.len() == 1);
-        assert!(r.traces[0].trace_id == [9; 16]);
-        assert!(r.traces[0].span_sets[0].matched == 1);
-        assert!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
+        check!(r.traces.len() == 1);
+        check!(r.traces[0].trace_id == [9; 16]);
+        check!(r.traces[0].span_sets[0].matched == 1);
+        check!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
     }
 
     #[tokio::test]
@@ -3004,10 +2993,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(r.traces.len() == 1);
-        assert!(r.traces[0].trace_id == [9; 16]);
-        assert!(r.traces[0].span_sets[0].matched == 1);
-        assert!(r.traces[0].span_sets[0].spans[0].span_id == [1; 8]);
+        check!(r.traces.len() == 1);
+        check!(r.traces[0].trace_id == [9; 16]);
+        check!(r.traces[0].span_sets[0].matched == 1);
+        check!(r.traces[0].span_sets[0].spans[0].span_id == [1; 8]);
     }
 
     #[tokio::test]
@@ -3028,9 +3017,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(r.traces.len() == 1);
-        assert!(r.traces[0].span_sets[0].matched == 1);
-        assert!(r.traces[0].span_sets[0].spans[0].span_id == [1; 8]);
+        check!(r.traces.len() == 1);
+        check!(r.traces[0].span_sets[0].matched == 1);
+        check!(r.traces[0].span_sets[0].spans[0].span_id == [1; 8]);
     }
 
     #[tokio::test]
@@ -3051,9 +3040,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(r.traces.len() == 1);
-        assert!(r.traces[0].span_sets[0].matched == 1);
-        assert!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
+        check!(r.traces.len() == 1);
+        check!(r.traces[0].span_sets[0].matched == 1);
+        check!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
     }
 
     #[tokio::test]
@@ -3074,9 +3063,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(r.traces.len() == 1);
-        assert!(r.traces[0].span_sets[0].matched == 1);
-        assert!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
+        check!(r.traces.len() == 1);
+        check!(r.traces[0].span_sets[0].matched == 1);
+        check!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
     }
 
     #[tokio::test]
@@ -3109,9 +3098,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(r.traces.len() == 1);
-        assert!(r.traces[0].span_sets[0].matched == 1);
-        assert!(r.traces[0].span_sets[0].spans[0].span_id == [3; 8]);
+        check!(r.traces.len() == 1);
+        check!(r.traces[0].span_sets[0].matched == 1);
+        check!(r.traces[0].span_sets[0].spans[0].span_id == [3; 8]);
     }
 
     #[tokio::test]
@@ -3152,9 +3141,9 @@ mod tests {
         assert!(r.traces.len() == 1);
         assert!(r.traces[0].span_sets[0].matched == 2);
         let spans = &r.traces[0].span_sets[0].spans;
-        assert!(!spans.iter().any(|span| span.span_id == [1; 8]));
-        assert!(spans.iter().any(|span| span.span_id == [2; 8]));
-        assert!(spans.iter().any(|span| span.span_id == [3; 8]));
+        check!(!spans.iter().any(|span| span.span_id == [1; 8]));
+        check!(spans.iter().any(|span| span.span_id == [2; 8]));
+        check!(spans.iter().any(|span| span.span_id == [3; 8]));
     }
 
     #[tokio::test]
@@ -3193,9 +3182,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(r.traces.len() == 1);
-        assert!(r.traces[0].span_sets[0].matched == 1);
-        assert!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
+        check!(r.traces.len() == 1);
+        check!(r.traces[0].span_sets[0].matched == 1);
+        check!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
     }
 
     #[tokio::test]
@@ -3226,9 +3215,9 @@ mod tests {
         assert!(r.traces.len() == 1);
         assert!(r.traces[0].span_sets[0].matched == 2);
         let spans = &r.traces[0].span_sets[0].spans;
-        assert!(spans.iter().any(|span| span.span_id == [1; 8]));
-        assert!(spans.iter().any(|span| span.span_id == [2; 8]));
-        assert!(!spans.iter().any(|span| span.span_id == [3; 8]));
+        check!(spans.iter().any(|span| span.span_id == [1; 8]));
+        check!(spans.iter().any(|span| span.span_id == [2; 8]));
+        check!(!spans.iter().any(|span| span.span_id == [3; 8]));
     }
 
     #[tokio::test]
@@ -3258,17 +3247,17 @@ mod tests {
             .search("t", "{ span.http.method = \"POST\" }", 0, 100_000, 20)
             .await
             .unwrap();
-        assert!(r.traces.len() == 1);
-        assert!(r.traces[0].span_sets[0].matched == 1);
-        assert!(r.traces[0].span_sets[0].spans[0].span_id == [1; 8]);
+        check!(r.traces.len() == 1);
+        check!(r.traces[0].span_sets[0].matched == 1);
+        check!(r.traces[0].span_sets[0].spans[0].span_id == [1; 8]);
 
         let r = e
             .search("t", "{ span.http.method != \"POST\" }", 0, 100_000, 20)
             .await
             .unwrap();
-        assert!(r.traces.len() == 1);
-        assert!(r.traces[0].span_sets[0].matched == 1);
-        assert!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
+        check!(r.traces.len() == 1);
+        check!(r.traces[0].span_sets[0].matched == 1);
+        check!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
     }
 
     #[tokio::test]
@@ -3288,10 +3277,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(r.traces.len() == 1);
-        assert!(r.traces[0].trace_id == [9; 16]);
-        assert!(r.traces[0].span_sets[0].matched == 1);
-        assert!(r.traces[0].span_sets[0].spans[0].span_id == [1; 8]);
+        check!(r.traces.len() == 1);
+        check!(r.traces[0].trace_id == [9; 16]);
+        check!(r.traces[0].span_sets[0].matched == 1);
+        check!(r.traces[0].span_sets[0].spans[0].span_id == [1; 8]);
     }
 
     #[tokio::test]
@@ -3302,10 +3291,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(r.traces.len() == 1);
-        assert!(r.traces[0].trace_id == [9; 16]);
-        assert!(r.traces[0].span_sets[0].matched == 1);
-        assert!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
+        check!(r.traces.len() == 1);
+        check!(r.traces[0].trace_id == [9; 16]);
+        check!(r.traces[0].span_sets[0].matched == 1);
+        check!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
     }
 
     #[tokio::test]
@@ -3329,10 +3318,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(r.traces.len() == 1);
-        assert!(r.traces[0].trace_id == [9; 16]);
-        assert!(r.traces[0].span_sets[0].matched == 1);
-        assert!(r.traces[0].span_sets[0].spans[0].span_id == [1; 8]);
+        check!(r.traces.len() == 1);
+        check!(r.traces[0].trace_id == [9; 16]);
+        check!(r.traces[0].span_sets[0].matched == 1);
+        check!(r.traces[0].span_sets[0].spans[0].span_id == [1; 8]);
     }
 
     #[tokio::test]
@@ -3356,10 +3345,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(r.traces.len() == 1);
-        assert!(r.traces[0].trace_id == [9; 16]);
-        assert!(r.traces[0].span_sets[0].matched == 1);
-        assert!(r.traces[0].span_sets[0].spans[0].span_id == [1; 8]);
+        check!(r.traces.len() == 1);
+        check!(r.traces[0].trace_id == [9; 16]);
+        check!(r.traces[0].span_sets[0].matched == 1);
+        check!(r.traces[0].span_sets[0].spans[0].span_id == [1; 8]);
     }
 
     #[tokio::test]
@@ -3382,9 +3371,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(r.traces.len() == 1);
-        assert!(r.traces[0].span_sets[0].matched == 1);
-        assert!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
+        check!(r.traces.len() == 1);
+        check!(r.traces[0].span_sets[0].matched == 1);
+        check!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
     }
 
     #[tokio::test]
@@ -3401,9 +3390,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(r.traces.len() == 1);
-        assert!(r.traces[0].span_sets[0].matched == 1);
-        assert!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
+        check!(r.traces.len() == 1);
+        check!(r.traces[0].span_sets[0].matched == 1);
+        check!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
     }
 
     #[tokio::test]
@@ -3436,10 +3425,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(r.traces.len() == 1);
-        assert!(r.traces[0].trace_id == [9; 16]);
-        assert!(r.traces[0].span_sets[0].matched == 1);
-        assert!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
+        check!(r.traces.len() == 1);
+        check!(r.traces[0].trace_id == [9; 16]);
+        check!(r.traces[0].span_sets[0].matched == 1);
+        check!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
     }
 
     #[tokio::test]
@@ -3595,11 +3584,20 @@ mod tests {
             .unwrap()
             .series;
         got.sort_by(|a, b| a.labels.cmp(&b.labels));
-        assert!(got.len() == 2);
-        assert!(got[0].labels == vec![("span.svc".into(), "api".into())]);
-        assert!(got[0].points == vec![(0, 2.0), (60_000, 0.0), (120_000, 0.0)]);
-        assert!(got[1].labels == vec![("span.svc".into(), "db".into())]);
-        assert!(got[1].points == vec![(0, 1.0), (60_000, 1.0), (120_000, 0.0)]);
+        assert!(
+            got == vec![
+                TraceMetricSeries {
+                    labels: vec![("span.svc".into(), "api".into())],
+                    points: vec![(0, 2.0), (60_000, 0.0), (120_000, 0.0)],
+                    exemplars: vec![],
+                },
+                TraceMetricSeries {
+                    labels: vec![("span.svc".into(), "db".into())],
+                    points: vec![(0, 1.0), (60_000, 1.0), (120_000, 0.0)],
+                    exemplars: vec![],
+                },
+            ]
+        );
     }
 
     #[tokio::test]
@@ -3629,9 +3627,13 @@ mod tests {
             .unwrap()
             .series;
 
-        assert!(got.len() == 1);
-        assert!(got[0].labels == vec![("span.svc".into(), "api".into())]);
-        assert!(got[0].points == vec![(0, 2.0)]);
+        assert!(
+            got == vec![TraceMetricSeries {
+                labels: vec![("span.svc".into(), "api".into())],
+                points: vec![(0, 2.0)],
+                exemplars: vec![],
+            }]
+        );
     }
 
     #[tokio::test]
@@ -3658,11 +3660,20 @@ mod tests {
             .series;
 
         got.sort_by(|a, b| a.labels.cmp(&b.labels));
-        assert!(got.len() == 2);
-        assert!(got[0].labels == vec![("resource.service.name".into(), "billing".into())]);
-        assert!(got[0].points == vec![(0, 1.0), (60_000, 0.0)]);
-        assert!(got[1].labels == vec![("resource.service.name".into(), "checkout".into())]);
-        assert!(got[1].points == vec![(0, 1.0), (60_000, 0.0)]);
+        assert!(
+            got == vec![
+                TraceMetricSeries {
+                    labels: vec![("resource.service.name".into(), "billing".into())],
+                    points: vec![(0, 1.0), (60_000, 0.0)],
+                    exemplars: vec![],
+                },
+                TraceMetricSeries {
+                    labels: vec![("resource.service.name".into(), "checkout".into())],
+                    points: vec![(0, 1.0), (60_000, 0.0)],
+                    exemplars: vec![],
+                },
+            ]
+        );
     }
 
     #[tokio::test]
@@ -3684,11 +3695,20 @@ mod tests {
             .series;
 
         got.sort_by(|a, b| a.labels.cmp(&b.labels));
-        assert!(got.len() == 2);
-        assert!(got[0].labels == vec![("span.http.method".into(), "GET".into())]);
-        assert!(got[0].points == vec![(0, 1.0), (60_000, 0.0)]);
-        assert!(got[1].labels == vec![("span.http.method".into(), "POST".into())]);
-        assert!(got[1].points == vec![(0, 1.0), (60_000, 0.0)]);
+        assert!(
+            got == vec![
+                TraceMetricSeries {
+                    labels: vec![("span.http.method".into(), "GET".into())],
+                    points: vec![(0, 1.0), (60_000, 0.0)],
+                    exemplars: vec![],
+                },
+                TraceMetricSeries {
+                    labels: vec![("span.http.method".into(), "POST".into())],
+                    points: vec![(0, 1.0), (60_000, 0.0)],
+                    exemplars: vec![],
+                },
+            ]
+        );
     }
 
     #[tokio::test]
@@ -3721,11 +3741,20 @@ mod tests {
             .series;
 
         got.sort_by(|a, b| a.labels.cmp(&b.labels));
-        assert!(got.len() == 2);
-        assert!(got[0].labels == vec![("name".into(), "cache.hit".into())]);
-        assert!(got[0].points == vec![(0, 1.0), (60_000, 0.0)]);
-        assert!(got[1].labels == vec![("name".into(), "cache.miss".into())]);
-        assert!(got[1].points == vec![(0, 1.0), (60_000, 0.0)]);
+        assert!(
+            got == vec![
+                TraceMetricSeries {
+                    labels: vec![("name".into(), "cache.hit".into())],
+                    points: vec![(0, 1.0), (60_000, 0.0)],
+                    exemplars: vec![],
+                },
+                TraceMetricSeries {
+                    labels: vec![("name".into(), "cache.miss".into())],
+                    points: vec![(0, 1.0), (60_000, 0.0)],
+                    exemplars: vec![],
+                },
+            ]
+        );
     }
 
     #[tokio::test]
@@ -3759,11 +3788,20 @@ mod tests {
             .series;
 
         got.sort_by(|a, b| a.labels.cmp(&b.labels));
-        assert!(got.len() == 2);
-        assert!(got[0].labels == vec![("name".into(), "cache.hit".into())]);
-        assert!(got[0].points == vec![(0, 1.0), (60_000, 0.0)]);
-        assert!(got[1].labels == vec![("name".into(), "cache.miss".into())]);
-        assert!(got[1].points == vec![(0, 1.0), (60_000, 0.0)]);
+        assert!(
+            got == vec![
+                TraceMetricSeries {
+                    labels: vec![("name".into(), "cache.hit".into())],
+                    points: vec![(0, 1.0), (60_000, 0.0)],
+                    exemplars: vec![],
+                },
+                TraceMetricSeries {
+                    labels: vec![("name".into(), "cache.miss".into())],
+                    points: vec![(0, 1.0), (60_000, 0.0)],
+                    exemplars: vec![],
+                },
+            ]
+        );
     }
 
     #[tokio::test]
@@ -3797,11 +3835,20 @@ mod tests {
             .series;
 
         got.sort_by(|a, b| a.labels.cmp(&b.labels));
-        assert!(got.len() == 2);
-        assert!(got[0].labels == vec![("event.cache.key".into(), "orders".into())]);
-        assert!(got[0].points == vec![(0, 1.0), (60_000, 0.0)]);
-        assert!(got[1].labels == vec![("event.cache.key".into(), "users".into())]);
-        assert!(got[1].points == vec![(0, 1.0), (60_000, 0.0)]);
+        assert!(
+            got == vec![
+                TraceMetricSeries {
+                    labels: vec![("event.cache.key".into(), "orders".into())],
+                    points: vec![(0, 1.0), (60_000, 0.0)],
+                    exemplars: vec![],
+                },
+                TraceMetricSeries {
+                    labels: vec![("event.cache.key".into(), "users".into())],
+                    points: vec![(0, 1.0), (60_000, 0.0)],
+                    exemplars: vec![],
+                },
+            ]
+        );
     }
 
     #[tokio::test]
@@ -3827,11 +3874,13 @@ mod tests {
             .unwrap()
             .series;
 
-        assert!(got.len() == 1);
         assert!(
-            got[0].labels == vec![("traceID".into(), "09090909090909090909090909090909".into())]
+            got == vec![TraceMetricSeries {
+                labels: vec![("traceID".into(), "09090909090909090909090909090909".into())],
+                points: vec![(0, 1.0), (60_000, 0.0)],
+                exemplars: vec![],
+            }]
         );
-        assert!(got[0].points == vec![(0, 1.0), (60_000, 0.0)]);
     }
 
     #[tokio::test]
@@ -3865,11 +3914,20 @@ mod tests {
             .series;
 
         got.sort_by(|a, b| a.labels.cmp(&b.labels));
-        assert!(got.len() == 2);
-        assert!(got[0].labels == vec![("spanID".into(), "0606060606060606".into())]);
-        assert!(got[0].points == vec![(0, 1.0), (60_000, 0.0)]);
-        assert!(got[1].labels == vec![("spanID".into(), "0808080808080808".into())]);
-        assert!(got[1].points == vec![(0, 1.0), (60_000, 0.0)]);
+        assert!(
+            got == vec![
+                TraceMetricSeries {
+                    labels: vec![("spanID".into(), "0606060606060606".into())],
+                    points: vec![(0, 1.0), (60_000, 0.0)],
+                    exemplars: vec![],
+                },
+                TraceMetricSeries {
+                    labels: vec![("spanID".into(), "0808080808080808".into())],
+                    points: vec![(0, 1.0), (60_000, 0.0)],
+                    exemplars: vec![],
+                },
+            ]
+        );
     }
 
     #[tokio::test]
@@ -3899,11 +3957,20 @@ mod tests {
             .series;
 
         got.sort_by(|a, b| a.labels.cmp(&b.labels));
-        assert!(got.len() == 2);
-        assert!(got[0].labels == vec![("span.svc".into(), "api".into())]);
-        assert!(got[0].points == vec![(0, 2.0), (60_000, 0.0)]);
-        assert!(got[1].labels == vec![("span.svc".into(), "db".into())]);
-        assert!(got[1].points == vec![(0, 1.0), (60_000, 0.0)]);
+        assert!(
+            got == vec![
+                TraceMetricSeries {
+                    labels: vec![("span.svc".into(), "api".into())],
+                    points: vec![(0, 2.0), (60_000, 0.0)],
+                    exemplars: vec![],
+                },
+                TraceMetricSeries {
+                    labels: vec![("span.svc".into(), "db".into())],
+                    points: vec![(0, 1.0), (60_000, 0.0)],
+                    exemplars: vec![],
+                },
+            ]
+        );
     }
 
     #[tokio::test]
@@ -3945,13 +4012,25 @@ mod tests {
             .series;
 
         got.sort_by(|a, b| a.labels.cmp(&b.labels));
-        assert!(got.len() == 3);
-        assert!(got[0].labels == vec![("kind".into(), "2".into()), ("status".into(), "0".into())]);
-        assert!(got[0].points == vec![(0, 1.0), (60_000, 0.0)]);
-        assert!(got[1].labels == vec![("kind".into(), "2".into()), ("status".into(), "2".into())]);
-        assert!(got[1].points == vec![(0, 1.0), (60_000, 0.0)]);
-        assert!(got[2].labels == vec![("kind".into(), "3".into()), ("status".into(), "2".into())]);
-        assert!(got[2].points == vec![(0, 1.0), (60_000, 0.0)]);
+        assert!(
+            got == vec![
+                TraceMetricSeries {
+                    labels: vec![("kind".into(), "2".into()), ("status".into(), "0".into())],
+                    points: vec![(0, 1.0), (60_000, 0.0)],
+                    exemplars: vec![],
+                },
+                TraceMetricSeries {
+                    labels: vec![("kind".into(), "2".into()), ("status".into(), "2".into())],
+                    points: vec![(0, 1.0), (60_000, 0.0)],
+                    exemplars: vec![],
+                },
+                TraceMetricSeries {
+                    labels: vec![("kind".into(), "3".into()), ("status".into(), "2".into())],
+                    points: vec![(0, 1.0), (60_000, 0.0)],
+                    exemplars: vec![],
+                },
+            ]
+        );
     }
 
     #[tokio::test]
@@ -3990,11 +4069,20 @@ mod tests {
             .series;
 
         got.sort_by(|a, b| a.labels.cmp(&b.labels));
-        assert!(got.len() == 2);
-        assert!(got[0].labels == vec![("statusMessage".into(), "cancelled".into())]);
-        assert!(got[0].points == vec![(0, 1.0), (60_000, 0.0)]);
-        assert!(got[1].labels == vec![("statusMessage".into(), "timeout".into())]);
-        assert!(got[1].points == vec![(0, 2.0), (60_000, 0.0)]);
+        assert!(
+            got == vec![
+                TraceMetricSeries {
+                    labels: vec![("statusMessage".into(), "cancelled".into())],
+                    points: vec![(0, 1.0), (60_000, 0.0)],
+                    exemplars: vec![],
+                },
+                TraceMetricSeries {
+                    labels: vec![("statusMessage".into(), "timeout".into())],
+                    points: vec![(0, 2.0), (60_000, 0.0)],
+                    exemplars: vec![],
+                },
+            ]
+        );
     }
 
     #[tokio::test]
@@ -4016,11 +4104,20 @@ mod tests {
             .series;
 
         got.sort_by(|a, b| a.labels.cmp(&b.labels));
-        assert!(got.len() == 2);
-        assert!(got[0].labels == vec![("id".into(), "11111111111111111111111111111111".into())]);
-        assert!(got[0].points == vec![(0, 1.0), (60_000, 0.0)]);
-        assert!(got[1].labels == vec![("id".into(), "22222222222222222222222222222222".into())]);
-        assert!(got[1].points == vec![(0, 1.0), (60_000, 0.0)]);
+        assert!(
+            got == vec![
+                TraceMetricSeries {
+                    labels: vec![("id".into(), "11111111111111111111111111111111".into())],
+                    points: vec![(0, 1.0), (60_000, 0.0)],
+                    exemplars: vec![],
+                },
+                TraceMetricSeries {
+                    labels: vec![("id".into(), "22222222222222222222222222222222".into())],
+                    points: vec![(0, 1.0), (60_000, 0.0)],
+                    exemplars: vec![],
+                },
+            ]
+        );
     }
 
     #[tokio::test]
@@ -4049,11 +4146,20 @@ mod tests {
             .series;
 
         got.sort_by(|a, b| a.labels.cmp(&b.labels));
-        assert!(got.len() == 2);
-        assert!(got[0].labels == vec![("childCount".into(), "0".into())]);
-        assert!(got[0].points == vec![(0, 1.0), (60_000, 0.0)]);
-        assert!(got[1].labels == vec![("childCount".into(), "1".into())]);
-        assert!(got[1].points == vec![(0, 1.0), (60_000, 0.0)]);
+        assert!(
+            got == vec![
+                TraceMetricSeries {
+                    labels: vec![("childCount".into(), "0".into())],
+                    points: vec![(0, 1.0), (60_000, 0.0)],
+                    exemplars: vec![],
+                },
+                TraceMetricSeries {
+                    labels: vec![("childCount".into(), "1".into())],
+                    points: vec![(0, 1.0), (60_000, 0.0)],
+                    exemplars: vec![],
+                },
+            ]
+        );
     }
 
     #[tokio::test]
@@ -4073,9 +4179,13 @@ mod tests {
             .unwrap()
             .series;
 
-        assert!(got.len() == 1);
-        assert!(got[0].labels == vec![("name".into(), "tracer".into())]);
-        assert!(got[0].points == vec![(0, 1.0), (60_000, 0.0)]);
+        assert!(
+            got == vec![TraceMetricSeries {
+                labels: vec![("name".into(), "tracer".into())],
+                points: vec![(0, 1.0), (60_000, 0.0)],
+                exemplars: vec![],
+            }]
+        );
     }
 
     #[tokio::test]
@@ -4104,13 +4214,22 @@ mod tests {
             .series;
 
         got.sort_by(|a, b| a.labels.cmp(&b.labels));
-        assert!(got.len() == 2);
         // Root span groups under nestedSetParent = -1 (Tempo root sentinel);
         // "-1" sorts before "1".
-        assert!(got[0].labels == vec![("nestedSetParent".into(), "-1".into())]);
-        assert!(got[0].points == vec![(0, 1.0), (60_000, 0.0)]);
-        assert!(got[1].labels == vec![("nestedSetParent".into(), "1".into())]);
-        assert!(got[1].points == vec![(0, 1.0), (60_000, 0.0)]);
+        assert!(
+            got == vec![
+                TraceMetricSeries {
+                    labels: vec![("nestedSetParent".into(), "-1".into())],
+                    points: vec![(0, 1.0), (60_000, 0.0)],
+                    exemplars: vec![],
+                },
+                TraceMetricSeries {
+                    labels: vec![("nestedSetParent".into(), "1".into())],
+                    points: vec![(0, 1.0), (60_000, 0.0)],
+                    exemplars: vec![],
+                },
+            ]
+        );
     }
 
     #[tokio::test]
@@ -4263,23 +4382,27 @@ mod tests {
             .unwrap()
             .series;
         series.sort_by(|a, b| a.labels.cmp(&b.labels));
-        assert!(series.len() == 2);
         assert!(
-            series[0].labels
+            series
                 == vec![
-                    ("p".into(), "0.5".into()),
-                    ("span.svc".into(), "api".into())
+                    TraceMetricSeries {
+                        labels: vec![
+                            ("p".into(), "0.5".into()),
+                            ("span.svc".into(), "api".into())
+                        ],
+                        points: vec![(0, 300.0), (60_000, 0.0)],
+                        exemplars: vec![],
+                    },
+                    TraceMetricSeries {
+                        labels: vec![
+                            ("p".into(), "0.9".into()),
+                            ("span.svc".into(), "api".into())
+                        ],
+                        points: vec![(0, 460.0), (60_000, 0.0)],
+                        exemplars: vec![],
+                    },
                 ]
         );
-        assert!(series[0].points == vec![(0, 300.0), (60_000, 0.0)]);
-        assert!(
-            series[1].labels
-                == vec![
-                    ("p".into(), "0.9".into()),
-                    ("span.svc".into(), "api".into())
-                ]
-        );
-        assert!(series[1].points == vec![(0, 460.0), (60_000, 0.0)]);
     }
 
     #[tokio::test]
@@ -4318,46 +4441,29 @@ mod tests {
             .series;
 
         series.sort_by(|a, b| a.labels.cmp(&b.labels));
-        assert!(series.iter().any(|s| {
-            s.labels
-                == vec![
-                    ("le".into(), "2000000".into()),
-                    ("span.svc".into(), "api".into()),
-                ]
-                && s.points == vec![(0, 1.0), (60_000, 0.0)]
-        }));
-        assert!(series.iter().any(|s| {
-            s.labels
-                == vec![
-                    ("le".into(), "2048000000".into()),
-                    ("span.svc".into(), "api".into()),
-                ]
-                && s.points == vec![(0, 2.0), (60_000, 0.0)]
-        }));
-        assert!(series.iter().any(|s| {
-            s.labels
-                == vec![
-                    ("le".into(), "+Inf".into()),
-                    ("span.svc".into(), "api".into()),
-                ]
-                && s.points == vec![(0, 3.0), (60_000, 0.0)]
-        }));
-        assert!(series.iter().any(|s| {
-            s.labels
-                == vec![
-                    ("__metric__".into(), "sum".into()),
-                    ("span.svc".into(), "api".into()),
-                ]
-                && s.points == vec![(0, 14_001_000_000.0), (60_000, 0.0)]
-        }));
-        assert!(series.iter().any(|s| {
-            s.labels
-                == vec![
-                    ("__metric__".into(), "count".into()),
-                    ("span.svc".into(), "api".into()),
-                ]
-                && s.points == vec![(0, 3.0), (60_000, 0.0)]
-        }));
+        for (key, value, points) in [
+            ("le", "2000000", vec![(0, 1.0), (60_000, 0.0)]),
+            ("le", "2048000000", vec![(0, 2.0), (60_000, 0.0)]),
+            ("le", "+Inf", vec![(0, 3.0), (60_000, 0.0)]),
+            (
+                "__metric__",
+                "sum",
+                vec![(0, 14_001_000_000.0), (60_000, 0.0)],
+            ),
+            ("__metric__", "count", vec![(0, 3.0), (60_000, 0.0)]),
+        ] {
+            check!(
+                series.iter().any(|s| {
+                    s.labels
+                        == vec![
+                            (key.into(), value.into()),
+                            ("span.svc".into(), "api".into()),
+                        ]
+                        && s.points == points
+                }),
+                "missing series {key}={value}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -4425,11 +4531,20 @@ mod tests {
             .unwrap()
             .series;
         top.sort_by(|a, b| a.labels.cmp(&b.labels));
-        assert!(top.len() == 2);
-        assert!(top[0].labels == vec![("span.svc".into(), "api".into())]);
-        assert!(top[0].points == vec![(0, 2.0), (60_000, 0.0)]);
-        assert!(top[1].labels == vec![("span.svc".into(), "worker".into())]);
-        assert!(top[1].points == vec![(0, 3.0), (60_000, 0.0)]);
+        assert!(
+            top == vec![
+                TraceMetricSeries {
+                    labels: vec![("span.svc".into(), "api".into())],
+                    points: vec![(0, 2.0), (60_000, 0.0)],
+                    exemplars: vec![],
+                },
+                TraceMetricSeries {
+                    labels: vec![("span.svc".into(), "worker".into())],
+                    points: vec![(0, 3.0), (60_000, 0.0)],
+                    exemplars: vec![],
+                },
+            ]
+        );
 
         let bottom = e
             .query_range(
@@ -4441,9 +4556,14 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(bottom.series.len() == 1);
-        assert!(bottom.series[0].labels == vec![("span.svc".into(), "db".into())]);
-        assert!(bottom.series[0].points == vec![(0, 1.0), (60_000, 0.0)]);
+        assert!(
+            bottom.series
+                == vec![TraceMetricSeries {
+                    labels: vec![("span.svc".into(), "db".into())],
+                    points: vec![(0, 1.0), (60_000, 0.0)],
+                    exemplars: vec![],
+                }]
+        );
     }
 
     #[tokio::test]
@@ -4476,11 +4596,20 @@ mod tests {
             .unwrap()
             .series;
         top.sort_by(|a, b| a.labels.cmp(&b.labels));
-        assert!(top.len() == 2);
-        assert!(top[0].labels == vec![("span.svc".into(), "api".into())]);
-        assert!(top[0].points == vec![(0, 2.0), (60_000, 0.0)]);
-        assert!(top[1].labels == vec![("span.svc".into(), "worker".into())]);
-        assert!(top[1].points == vec![(0, 3.0), (60_000, 0.0)]);
+        assert!(
+            top == vec![
+                TraceMetricSeries {
+                    labels: vec![("span.svc".into(), "api".into())],
+                    points: vec![(0, 2.0), (60_000, 0.0)],
+                    exemplars: vec![],
+                },
+                TraceMetricSeries {
+                    labels: vec![("span.svc".into(), "worker".into())],
+                    points: vec![(0, 3.0), (60_000, 0.0)],
+                    exemplars: vec![],
+                },
+            ]
+        );
     }
 
     #[tokio::test]
@@ -4511,11 +4640,21 @@ mod tests {
             .series;
         series.sort_by(|a, b| a.labels.cmp(&b.labels));
 
-        assert!(series.len() == 2);
-        assert!(series[0].labels == vec![("span.svc".into(), "api".into())]);
-        assert!(series[0].points == vec![(0, 2.0), (60_000, 0.0)]);
-        assert!(series[1].labels == vec![("span.svc".into(), "db".into())]);
-        assert!(series[1].points == vec![(0, 1.0), (60_000, 0.0)]);
+        assert!(
+            series
+                == vec![
+                    TraceMetricSeries {
+                        labels: vec![("span.svc".into(), "api".into())],
+                        points: vec![(0, 2.0), (60_000, 0.0)],
+                        exemplars: vec![],
+                    },
+                    TraceMetricSeries {
+                        labels: vec![("span.svc".into(), "db".into())],
+                        points: vec![(0, 1.0), (60_000, 0.0)],
+                        exemplars: vec![],
+                    },
+                ]
+        );
     }
 
     #[tokio::test]
@@ -4549,11 +4688,20 @@ mod tests {
             .series;
         top.sort_by(|a, b| a.labels.cmp(&b.labels));
 
-        assert!(top.len() == 2);
-        assert!(top[0].labels == vec![("span.svc".into(), "api".into())]);
-        assert!(top[0].points == vec![(0, 2.0), (60_000, 0.0)]);
-        assert!(top[1].labels == vec![("span.svc".into(), "worker".into())]);
-        assert!(top[1].points == vec![(0, 3.0), (60_000, 0.0)]);
+        assert!(
+            top == vec![
+                TraceMetricSeries {
+                    labels: vec![("span.svc".into(), "api".into())],
+                    points: vec![(0, 2.0), (60_000, 0.0)],
+                    exemplars: vec![],
+                },
+                TraceMetricSeries {
+                    labels: vec![("span.svc".into(), "worker".into())],
+                    points: vec![(0, 3.0), (60_000, 0.0)],
+                    exemplars: vec![],
+                },
+            ]
+        );
     }
 
     #[tokio::test]
@@ -4585,17 +4733,17 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(got.series.len() == 1);
-        assert!(got.series[0].exemplars.len() == 1);
-        assert!(
+        check!(got.series.len() == 1);
+        check!(got.series[0].exemplars.len() == 1);
+        check!(
             got.series[0].exemplars[0].labels
                 == vec![
                     ("trace_id".into(), "11111111111111111111111111111111".into()),
                     ("span_id".into(), "2222222222222222".into())
                 ]
         );
-        assert!(got.series[0].exemplars[0].timestamp_ns == 0);
-        assert!((got.series[0].exemplars[0].value - 1.0).abs() < f64::EPSILON);
+        check!(got.series[0].exemplars[0].timestamp_ns == 0);
+        check!((got.series[0].exemplars[0].value - 1.0).abs() < f64::EPSILON);
     }
 
     #[tokio::test]
@@ -4629,12 +4777,12 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(got.series.len() == 1);
-        assert!(got.series[0].labels == vec![("span.svc".into(), "api".into())]);
-        assert!(got.series[0].points == vec![(0, 2.0)]);
-        assert!(got.series[0].exemplars.len() == 1);
-        assert!(got.series[0].exemplars[0].timestamp_ns == 0);
-        assert!(
+        check!(got.series.len() == 1);
+        check!(got.series[0].labels == vec![("span.svc".into(), "api".into())]);
+        check!(got.series[0].points == vec![(0, 2.0)]);
+        check!(got.series[0].exemplars.len() == 1);
+        check!(got.series[0].exemplars[0].timestamp_ns == 0);
+        check!(
             got.series[0].exemplars[0].labels
                 == vec![
                     ("trace_id".into(), "11111111111111111111111111111111".into()),
@@ -4827,12 +4975,12 @@ mod tests {
 
         // optional_fixed_8: root has no parent (None), child's parent is [10;8],
         // which is neither [0;8] nor [1;8].
-        assert!(root_span.parent_span_id.is_none());
-        assert!(child_span.parent_span_id == Some([10; 8]));
+        check!(root_span.parent_span_id.is_none());
+        check!(child_span.parent_span_id == Some([10; 8]));
 
         // i32_value: kind is 2 / 3, not 0, 1, or -1.
-        assert!(root_span.kind == 2);
-        assert!(child_span.kind == 3);
+        check!(root_span.kind == 2);
+        check!(child_span.kind == 3);
 
         // row_attrs: the int attribute is carried through with its exact value
         // (kills `row_attrs -> Ok(vec![])`).
@@ -4967,19 +5115,23 @@ mod tests {
         let bool_values = optional_list_column(&batch, BLOCK_ATTR_VALUE_BOOL).unwrap();
 
         // optional_list_column must actually find the columns (kills `-> Ok(None)`).
-        assert!(str_values.is_some());
-        assert!(int_values.is_some());
-        assert!(double_values.is_some());
-        assert!(bool_values.is_some());
+        check!(str_values.is_some());
+        check!(int_values.is_some());
+        check!(double_values.is_some());
+        check!(bool_values.is_some());
 
         let for_idx = |idx| {
             block_attr_values_for_key(str_values, int_values, double_values, bool_values, 0, idx)
                 .unwrap()
         };
-        assert!(for_idx(0) == vec![AttrValue::Str("hello".into())]);
-        assert!(for_idx(1) == vec![AttrValue::Int(42)]);
-        assert!(for_idx(2) == vec![AttrValue::Float(3.5)]);
-        assert!(for_idx(3) == vec![AttrValue::Bool(true)]);
+        for (idx, want) in [
+            (0, vec![AttrValue::Str("hello".into())]),
+            (1, vec![AttrValue::Int(42)]),
+            (2, vec![AttrValue::Float(3.5)]),
+            (3, vec![AttrValue::Bool(true)]),
+        ] {
+            check!(for_idx(idx) == want, "attr_idx {idx}");
+        }
     }
 
     #[test]
@@ -4993,34 +5145,32 @@ mod tests {
         let double_values = optional_list_column(&batch, BLOCK_ATTR_VALUE_DOUBLE).unwrap();
         let bool_values = optional_list_column(&batch, BLOCK_ATTR_VALUE_BOOL).unwrap();
 
-        assert!(
+        check!(
             string_attr_values(str_values, 0, 0, BLOCK_ATTR_VALUE).unwrap()
                 == vec!["hello".to_string()]
         );
-        assert!(i64_attr_values(int_values, 0, 1, BLOCK_ATTR_VALUE_INT).unwrap() == vec![42]);
-        assert!(
-            f64_attr_values(double_values, 0, 2, BLOCK_ATTR_VALUE_DOUBLE).unwrap() == vec![3.5]
-        );
-        assert!(bool_attr_values(bool_values, 0, 3, BLOCK_ATTR_VALUE_BOOL).unwrap() == vec![true]);
+        check!(i64_attr_values(int_values, 0, 1, BLOCK_ATTR_VALUE_INT).unwrap() == vec![42]);
+        check!(f64_attr_values(double_values, 0, 2, BLOCK_ATTR_VALUE_DOUBLE).unwrap() == vec![3.5]);
+        check!(bool_attr_values(bool_values, 0, 3, BLOCK_ATTR_VALUE_BOOL).unwrap() == vec![true]);
 
         // An index whose inner list is empty yields an empty vec (not a trivial
         // non-empty replacement).
-        assert!(
+        check!(
             string_attr_values(str_values, 0, 1, BLOCK_ATTR_VALUE)
                 .unwrap()
                 .is_empty()
         );
-        assert!(
+        check!(
             i64_attr_values(int_values, 0, 0, BLOCK_ATTR_VALUE_INT)
                 .unwrap()
                 .is_empty()
         );
-        assert!(
+        check!(
             f64_attr_values(double_values, 0, 0, BLOCK_ATTR_VALUE_DOUBLE)
                 .unwrap()
                 .is_empty()
         );
-        assert!(
+        check!(
             bool_attr_values(bool_values, 0, 0, BLOCK_ATTR_VALUE_BOOL)
                 .unwrap()
                 .is_empty()
@@ -5065,62 +5215,64 @@ mod tests {
         // parse (Ok(None)); each match guard `<slot>.is_none()` (and `!compare`)
         // is what enforces that. Replacing a guard with `true` would accept the
         // duplicate.
-        assert!(
-            metric_pipeline_parts(&[
-                Pipeline::Aggregate(Aggregate::CountOverTime),
-                Pipeline::Aggregate(Aggregate::Rate),
-            ])
-            .unwrap()
-            .is_none()
-        );
-        assert!(
-            metric_pipeline_parts(&[
-                Pipeline::Aggregate(Aggregate::CountOverTime),
-                Pipeline::By(by.clone()),
-                Pipeline::By(by.clone()),
-            ])
-            .unwrap()
-            .is_none()
-        );
-        assert!(
-            metric_pipeline_parts(&[
-                Pipeline::Aggregate(Aggregate::CountOverTime),
-                Pipeline::Filter {
-                    op: ComparisonOp::Gt,
-                    value: 1.0,
-                },
-                Pipeline::Filter {
-                    op: ComparisonOp::Gt,
-                    value: 2.0,
-                },
-            ])
-            .unwrap()
-            .is_none()
-        );
-        assert!(
-            metric_pipeline_parts(&[
-                Pipeline::Aggregate(Aggregate::CountOverTime),
-                Pipeline::TopK(1),
-                Pipeline::TopK(2),
-            ])
-            .unwrap()
-            .is_none()
-        );
         let compare_stage = || Pipeline::Compare {
             selection: Box::new(SpansetExpr::Selector(Box::new(FieldExpr::Const(true)))),
             top_n: 10,
             start: None,
             end: None,
         };
-        assert!(
-            metric_pipeline_parts(&[
-                Pipeline::Aggregate(Aggregate::CountOverTime),
-                compare_stage(),
-                compare_stage(),
-            ])
-            .unwrap()
-            .is_none()
-        );
+        for (name, stages) in [
+            (
+                "aggregate",
+                vec![
+                    Pipeline::Aggregate(Aggregate::CountOverTime),
+                    Pipeline::Aggregate(Aggregate::Rate),
+                ],
+            ),
+            (
+                "by",
+                vec![
+                    Pipeline::Aggregate(Aggregate::CountOverTime),
+                    Pipeline::By(by.clone()),
+                    Pipeline::By(by.clone()),
+                ],
+            ),
+            (
+                "filter",
+                vec![
+                    Pipeline::Aggregate(Aggregate::CountOverTime),
+                    Pipeline::Filter {
+                        op: ComparisonOp::Gt,
+                        value: 1.0,
+                    },
+                    Pipeline::Filter {
+                        op: ComparisonOp::Gt,
+                        value: 2.0,
+                    },
+                ],
+            ),
+            (
+                "rank",
+                vec![
+                    Pipeline::Aggregate(Aggregate::CountOverTime),
+                    Pipeline::TopK(1),
+                    Pipeline::TopK(2),
+                ],
+            ),
+            (
+                "compare",
+                vec![
+                    Pipeline::Aggregate(Aggregate::CountOverTime),
+                    compare_stage(),
+                    compare_stage(),
+                ],
+            ),
+        ] {
+            check!(
+                metric_pipeline_parts(&stages).unwrap().is_none(),
+                "duplicate {name} stage must abort the parse"
+            );
+        }
     }
 
     #[test]
@@ -5164,119 +5316,132 @@ mod tests {
     }
 
     #[test]
-    #[allow(
-        clippy::too_many_lines,
-        reason = "exhaustive per-scope metric column mapping"
-    )]
     fn metric_field_column_maps_every_scope_to_its_column() {
-        // service.name short-circuits to the root-service column for Both/Resource.
-        assert!(
-            metric_field_column(&field(Scope::Both, "service.name")).unwrap()
-                == COL_ROOT_SERVICE_NAME
-        );
-        assert!(
-            metric_field_column(&field(Scope::Resource, "service.name")).unwrap()
-                == COL_ROOT_SERVICE_NAME
-        );
-        // Generic attribute scopes prefix the key.
-        assert!(
-            metric_field_column(&field(Scope::Span, "http.method")).unwrap() == "attr.http.method"
-        );
-        assert!(
-            metric_field_column(&field(Scope::Event, "k")).unwrap()
-                == format!("{ATTR_PREFIX}{EVENT_ATTR_PREFIX}k")
-        );
-        // Scope::Link arm.
-        assert!(
-            metric_field_column(&field(Scope::Link, "k")).unwrap()
-                == format!("{ATTR_PREFIX}{LINK_ATTR_PREFIX}k")
-        );
-        // Intrinsic arms each map to a distinct column (not the `_ => Err`).
-        assert!(
-            metric_field_column(&field(Scope::Intrinsic(Intrinsic::Name), "x")).unwrap()
-                == COL_NAME
-        );
-        assert!(
-            metric_field_column(&field(Scope::Intrinsic(Intrinsic::Id), "x")).unwrap()
-                == COL_SPAN_ID
-        );
-        assert!(
-            metric_field_column(&field(Scope::Intrinsic(Intrinsic::ParentId), "x")).unwrap()
-                == COL_PARENT_SPAN_ID
-        );
-        assert!(
-            metric_field_column(&field(Scope::Intrinsic(Intrinsic::NestedSetLeft), "x")).unwrap()
-                == COL_NS_LEFT
-        );
-        assert!(
-            metric_field_column(&field(Scope::Intrinsic(Intrinsic::NestedSetRight), "x")).unwrap()
-                == COL_NS_RIGHT
-        );
-        assert!(
-            metric_field_column(&field(Scope::Intrinsic(Intrinsic::TraceRootService), "x"))
-                .unwrap()
-                == COL_ROOT_SERVICE_NAME
-        );
-        assert!(
-            metric_field_column(&field(Scope::Intrinsic(Intrinsic::TraceRootName), "x")).unwrap()
-                == COL_ROOT_SPAN_NAME
-        );
-        assert!(
-            metric_field_column(&field(
+        let cases = [
+            // service.name short-circuits to the root-service column for
+            // Both/Resource.
+            (
+                Scope::Both,
+                "service.name",
+                COL_ROOT_SERVICE_NAME.to_string(),
+            ),
+            (
+                Scope::Resource,
+                "service.name",
+                COL_ROOT_SERVICE_NAME.to_string(),
+            ),
+            // Generic attribute scopes prefix the key.
+            (Scope::Span, "http.method", "attr.http.method".to_string()),
+            (
+                Scope::Event,
+                "k",
+                format!("{ATTR_PREFIX}{EVENT_ATTR_PREFIX}k"),
+            ),
+            // Scope::Link arm.
+            (
+                Scope::Link,
+                "k",
+                format!("{ATTR_PREFIX}{LINK_ATTR_PREFIX}k"),
+            ),
+            // Intrinsic arms each map to a distinct column (not the `_ => Err`).
+            (Scope::Intrinsic(Intrinsic::Name), "x", COL_NAME.to_string()),
+            (
+                Scope::Intrinsic(Intrinsic::Id),
+                "x",
+                COL_SPAN_ID.to_string(),
+            ),
+            (
+                Scope::Intrinsic(Intrinsic::ParentId),
+                "x",
+                COL_PARENT_SPAN_ID.to_string(),
+            ),
+            (
+                Scope::Intrinsic(Intrinsic::NestedSetLeft),
+                "x",
+                COL_NS_LEFT.to_string(),
+            ),
+            (
+                Scope::Intrinsic(Intrinsic::NestedSetRight),
+                "x",
+                COL_NS_RIGHT.to_string(),
+            ),
+            (
+                Scope::Intrinsic(Intrinsic::TraceRootService),
+                "x",
+                COL_ROOT_SERVICE_NAME.to_string(),
+            ),
+            (
+                Scope::Intrinsic(Intrinsic::TraceRootName),
+                "x",
+                COL_ROOT_SPAN_NAME.to_string(),
+            ),
+            (
                 Scope::Intrinsic(Intrinsic::InstrumentationVersion),
-                "x"
-            ))
-            .unwrap()
-                == COL_INSTRUMENTATION_VERSION
-        );
-        assert!(
-            metric_field_column(&field(
+                "x",
+                COL_INSTRUMENTATION_VERSION.to_string(),
+            ),
+            (
                 Scope::Intrinsic(Intrinsic::EventTimeSinceStart),
-                "x"
-            ))
-            .unwrap()
-                == COL_EVENT_TIME_SINCE_START
-        );
+                "x",
+                COL_EVENT_TIME_SINCE_START.to_string(),
+            ),
+        ];
+        for (scope, key, want) in cases {
+            check!(
+                metric_field_column(&field(scope.clone(), key)).unwrap() == want,
+                "scope {scope:?} key {key:?}"
+            );
+        }
     }
 
     #[test]
     fn usize_from_integer_f64_validates_and_converts() {
-        // A valid non-negative integer float converts to the exact usize.
-        assert!(usize_from_integer_f64(3.0).unwrap() == 3);
-        assert!(usize_from_integer_f64(0.0).unwrap() == 0);
-        // Boundary on the `< 0.0` check: exactly 0.0 is accepted, but any negative
-        // is rejected (distinguishes `<` from `<=`/`==`).
-        assert!(usize_from_integer_f64(-0.5).is_err());
-        assert!(usize_from_integer_f64(-1.0).is_err());
-        // The `|| value < 0.0 ||` chain: a NaN (non-finite) and a fractional
-        // value are both rejected, so neither `&&` form would pass them.
-        assert!(usize_from_integer_f64(f64::NAN).is_err());
-        assert!(usize_from_integer_f64(f64::INFINITY).is_err());
-        assert!(usize_from_integer_f64(2.5).is_err());
+        let cases = [
+            // A valid non-negative integer float converts to the exact usize.
+            (3.0, Some(3)),
+            (0.0, Some(0)),
+            // Boundary on the `< 0.0` check: exactly 0.0 is accepted, but any
+            // negative is rejected (distinguishes `<` from `<=`/`==`).
+            (-0.5, None),
+            (-1.0, None),
+            // The `|| value < 0.0 ||` chain: a NaN (non-finite) and a fractional
+            // value are both rejected, so neither `&&` form would pass them.
+            (f64::NAN, None),
+            (f64::INFINITY, None),
+            (2.5, None),
+        ];
+        for (value, want) in cases {
+            check!(usize_from_integer_f64(value).ok() == want, "input {value}");
+        }
     }
 
     #[test]
     fn metric_filter_passes_covers_every_operator() {
         use crate::ast::ComparisonOp;
         let f = |op| MetricFilter { op, value: 5.0 };
-        // Eq / Neq.
-        assert!(metric_filter_passes(5.0, f(ComparisonOp::Eq)));
-        assert!(!metric_filter_passes(6.0, f(ComparisonOp::Eq)));
-        // Neq is the negation of Eq — the `!` is load-bearing.
-        assert!(metric_filter_passes(6.0, f(ComparisonOp::Neq)));
-        assert!(!metric_filter_passes(5.0, f(ComparisonOp::Neq)));
-        // Lt / Lte.
-        assert!(metric_filter_passes(4.0, f(ComparisonOp::Lt)));
-        assert!(!metric_filter_passes(5.0, f(ComparisonOp::Lt)));
-        // Lte is `!is_gt` — both sides matter.
-        assert!(metric_filter_passes(5.0, f(ComparisonOp::Lte)));
-        assert!(!metric_filter_passes(6.0, f(ComparisonOp::Lte)));
-        // Gt / Gte.
-        assert!(metric_filter_passes(6.0, f(ComparisonOp::Gt)));
-        assert!(!metric_filter_passes(5.0, f(ComparisonOp::Gt)));
-        // Gte is `!is_lt` — both sides matter.
-        assert!(metric_filter_passes(5.0, f(ComparisonOp::Gte)));
-        assert!(!metric_filter_passes(4.0, f(ComparisonOp::Gte)));
+        let cases = [
+            // Eq / Neq. Neq is the negation of Eq — the `!` is load-bearing.
+            (5.0, ComparisonOp::Eq, true),
+            (6.0, ComparisonOp::Eq, false),
+            (6.0, ComparisonOp::Neq, true),
+            (5.0, ComparisonOp::Neq, false),
+            // Lt / Lte. Lte is `!is_gt` — both sides matter.
+            (4.0, ComparisonOp::Lt, true),
+            (5.0, ComparisonOp::Lt, false),
+            (5.0, ComparisonOp::Lte, true),
+            (6.0, ComparisonOp::Lte, false),
+            // Gt / Gte. Gte is `!is_lt` — both sides matter.
+            (6.0, ComparisonOp::Gt, true),
+            (5.0, ComparisonOp::Gt, false),
+            (5.0, ComparisonOp::Gte, true),
+            (4.0, ComparisonOp::Gte, false),
+        ];
+        for (value, op, want) in cases {
+            check!(
+                metric_filter_passes(value, f(op)) == want,
+                "value {value} op {op:?}"
+            );
+        }
     }
 
     fn metric_start_batch(starts: &[i64]) -> RecordBatch {
@@ -5484,19 +5649,26 @@ mod tests {
             .unwrap();
 
         // Per-group totals: 3 selection spans, 2 baseline spans.
-        assert!(meta_total(&resp, "selection_total") == 3);
-        assert!(meta_total(&resp, "baseline_total") == 2);
+        check!(meta_total(&resp, "selection_total") == 3);
+        check!(meta_total(&resp, "baseline_total") == 2);
 
-        // Selection http.method distribution: GET=2, POST=1.
-        assert!(compare_total(&resp, "selection", "span.http.method", "GET") == 2);
-        assert!(compare_total(&resp, "selection", "span.http.method", "POST") == 1);
-        // Baseline http.method distribution: GET=1, PUT=1.
-        assert!(compare_total(&resp, "baseline", "span.http.method", "GET") == 1);
-        assert!(compare_total(&resp, "baseline", "span.http.method", "PUT") == 1);
-
-        // The status intrinsic distribution is emitted too.
-        assert!(compare_total(&resp, "selection", "status", "error") == 3);
-        assert!(compare_total(&resp, "baseline", "status", "ok") == 2);
+        let cases = [
+            // Selection http.method distribution: GET=2, POST=1.
+            ("selection", "span.http.method", "GET", 2),
+            ("selection", "span.http.method", "POST", 1),
+            // Baseline http.method distribution: GET=1, PUT=1.
+            ("baseline", "span.http.method", "GET", 1),
+            ("baseline", "span.http.method", "PUT", 1),
+            // The status intrinsic distribution is emitted too.
+            ("selection", "status", "error", 3),
+            ("baseline", "status", "ok", 2),
+        ];
+        for (meta, attr, value, want) in cases {
+            check!(
+                compare_total(&resp, meta, attr, value) == want,
+                "{meta} {attr}={value}"
+            );
+        }
 
         // Every value series carries exactly the __meta_type + one attr label.
         for series in &resp.series {
@@ -5590,10 +5762,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(meta_total(&resp, "baseline_total") == 1);
-        assert!(meta_total(&resp, "selection_total") == 0);
+        check!(meta_total(&resp, "baseline_total") == 1);
+        check!(meta_total(&resp, "selection_total") == 0);
         // The lone span lands in baseline.
-        assert!(compare_total(&resp, "baseline", "span.k", "v") == 1);
+        check!(compare_total(&resp, "baseline", "span.k", "v") == 1);
     }
 
     #[tokio::test]
@@ -5624,10 +5796,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(meta_total(&resp, "selection_total") == 1);
-        assert!(meta_total(&resp, "baseline_total") == 1);
-        assert!(compare_total(&resp, "selection", "span.z", "in") == 1);
-        assert!(compare_total(&resp, "baseline", "span.z", "out") == 1);
+        check!(meta_total(&resp, "selection_total") == 1);
+        check!(meta_total(&resp, "baseline_total") == 1);
+        check!(compare_total(&resp, "selection", "span.z", "in") == 1);
+        check!(compare_total(&resp, "baseline", "span.z", "out") == 1);
     }
 
     #[tokio::test]
@@ -5820,9 +5992,16 @@ mod tests {
             assemble_compare_response(&[compare_block_batch()], &compare, compare_range()).unwrap();
 
         // The lone span falls to baseline (selection is Const(false)).
-        assert!(compare_total(&resp, "baseline", "span.http.method", "GET") == 1);
-        assert!(compare_total(&resp, "baseline", "resource.cluster", "eu") == 1);
-        assert!(compare_total(&resp, "baseline", "resource.service.name", "root-svc") == 1);
+        for (attr, value) in [
+            ("span.http.method", "GET"),
+            ("resource.cluster", "eu"),
+            ("resource.service.name", "root-svc"),
+        ] {
+            check!(
+                compare_total(&resp, "baseline", attr, value) == 1,
+                "baseline {attr}={value}"
+            );
+        }
         // Exactly one resource.service.name value series exists, and it is the
         // trace-root service (no duplicate from the per-span block attr).
         let svc_values: std::collections::BTreeSet<&str> = resp
@@ -5966,24 +6145,23 @@ mod tests {
         assert!(compare_field_present(&field(Scope::Span, "present"), &row));
         assert!(!compare_field_present(&field(Scope::Span, "missing"), &row));
         let resource_values = compare_row_attr_values(&row, &Scope::Resource, "region");
-        assert!(resource_values.len() == 1);
-        assert!(resource_values[0] == &AttrValue::Str("eu".into()));
-        assert!(!field_expr_matches_row(
+        check!(resource_values == vec![&AttrValue::Str("eu".into())]);
+        check!(!field_expr_matches_row(
             &FieldExpr::And(Box::new(present.clone()), Box::new(missing.clone())),
             &row,
             &regexes,
         ));
-        assert!(field_expr_matches_row(
+        check!(field_expr_matches_row(
             &FieldExpr::Or(Box::new(present.clone()), Box::new(missing.clone())),
             &row,
             &regexes,
         ));
-        assert!(!field_expr_matches_row(
+        check!(!field_expr_matches_row(
             &FieldExpr::Not(Box::new(present.clone())),
             &row,
             &regexes,
         ));
-        assert!(!spanset_matches_row(
+        check!(!spanset_matches_row(
             &SpansetExpr::And(
                 Box::new(selector(present.clone())),
                 Box::new(selector(missing.clone())),
@@ -5991,7 +6169,7 @@ mod tests {
             &row,
             &regexes,
         ));
-        assert!(spanset_matches_row(
+        check!(spanset_matches_row(
             &SpansetExpr::Or(Box::new(selector(present)), Box::new(selector(missing))),
             &row,
             &regexes,
@@ -6023,30 +6201,18 @@ mod tests {
     fn compare_value_match_covers_numeric_and_bool_attrs() {
         let regexes = CompareRegexCache::new();
 
-        assert!(compare_value_match(
-            &AttrValue::Int(42),
-            ComparisonOp::Eq,
-            &Value::Int(42),
-            &regexes,
-        ));
-        assert!(compare_value_match(
-            &AttrValue::Int(42),
-            ComparisonOp::Eq,
-            &Value::Duration(42),
-            &regexes,
-        ));
-        assert!(compare_value_match(
-            &AttrValue::Float(1.5),
-            ComparisonOp::Eq,
-            &Value::Float(1.5),
-            &regexes,
-        ));
-        assert!(compare_value_match(
-            &AttrValue::Bool(true),
-            ComparisonOp::Eq,
-            &Value::Bool(true),
-            &regexes,
-        ));
+        let cases = [
+            (AttrValue::Int(42), Value::Int(42)),
+            (AttrValue::Int(42), Value::Duration(42)),
+            (AttrValue::Float(1.5), Value::Float(1.5)),
+            (AttrValue::Bool(true), Value::Bool(true)),
+        ];
+        for (attr, rhs) in cases {
+            check!(
+                compare_value_match(&attr, ComparisonOp::Eq, &rhs, &regexes),
+                "{attr:?} should equal {rhs:?}"
+            );
+        }
     }
 
     #[test]
@@ -6106,27 +6272,25 @@ mod tests {
         };
         let regexes = CompareRegexCache::new();
 
-        assert!(compare_intrinsic_matches(
-            &row,
-            &Intrinsic::StatusMessage,
-            ComparisonOp::Eq,
-            &Value::Str("failed".into()),
-            &regexes,
-        ));
-        assert!(compare_intrinsic_matches(
-            &row,
-            &Intrinsic::Kind,
-            ComparisonOp::Eq,
-            &Value::Str("client".into()),
-            &regexes,
-        ));
-        assert!(compare_intrinsic_matches(
-            &row,
-            &Intrinsic::Duration,
-            ComparisonOp::Gt,
-            &Value::Duration(50),
-            &regexes,
-        ));
+        let cases = [
+            (
+                Intrinsic::StatusMessage,
+                ComparisonOp::Eq,
+                Value::Str("failed".into()),
+            ),
+            (
+                Intrinsic::Kind,
+                ComparisonOp::Eq,
+                Value::Str("client".into()),
+            ),
+            (Intrinsic::Duration, ComparisonOp::Gt, Value::Duration(50)),
+        ];
+        for (intrinsic, op, rhs) in cases {
+            check!(
+                compare_intrinsic_matches(&row, &intrinsic, op, &rhs, &regexes),
+                "{intrinsic:?} {op:?} {rhs:?}"
+            );
+        }
     }
 
     #[test]
@@ -6134,44 +6298,51 @@ mod tests {
         let mut regexes = CompareRegexCache::new();
         regexes.insert("op-.*".into(), regex::Regex::new("^(?:op-.*)$").unwrap());
 
-        assert!(enum_cmp(
-            0,
-            ComparisonOp::Eq,
-            &Value::Str("unset".into()),
-            status_enum_value,
-        ));
-        assert!(enum_cmp(
-            1,
-            ComparisonOp::Eq,
-            &Value::Str("ok".into()),
-            status_enum_value,
-        ));
-        assert!(enum_cmp(
-            2,
-            ComparisonOp::Eq,
-            &Value::Int(2),
-            status_enum_value
-        ));
-        assert!(!string_cmp("op-1", ComparisonOp::Nre, "op-.*", &regexes));
-        assert!(num_cmp(42, ComparisonOp::Neq, 7));
-        assert!(num_cmp(3, ComparisonOp::Lt, 5));
-        assert!(!num_cmp(5, ComparisonOp::Lt, 5));
-        assert!(num_cmp(5, ComparisonOp::Lte, 5));
-        assert!(num_cmp(7, ComparisonOp::Gt, 5));
-        assert!(!num_cmp(5, ComparisonOp::Gt, 5));
-        assert!(num_cmp(5, ComparisonOp::Gte, 5));
+        for (code, rhs) in [
+            (0, Value::Str("unset".into())),
+            (1, Value::Str("ok".into())),
+            (2, Value::Int(2)),
+        ] {
+            check!(
+                enum_cmp(code, ComparisonOp::Eq, &rhs, status_enum_value),
+                "status code {code} vs {rhs:?}"
+            );
+        }
+        check!(!string_cmp("op-1", ComparisonOp::Nre, "op-.*", &regexes));
 
-        assert!(!float_cmp(1.0, ComparisonOp::Eq, 2.0));
-        assert!(float_cmp(1.0, ComparisonOp::Neq, 2.0));
-        assert!(float_cmp(1.0, ComparisonOp::Lt, 2.0));
-        assert!(!float_cmp(2.0, ComparisonOp::Lt, 2.0));
-        assert!(float_cmp(2.0, ComparisonOp::Lte, 2.0));
-        assert!(float_cmp(3.0, ComparisonOp::Gt, 2.0));
-        assert!(!float_cmp(2.0, ComparisonOp::Gt, 2.0));
-        assert!(float_cmp(2.0, ComparisonOp::Gte, 2.0));
+        for (lhs, op, rhs, want) in [
+            (42, ComparisonOp::Neq, 7, true),
+            (3, ComparisonOp::Lt, 5, true),
+            (5, ComparisonOp::Lt, 5, false),
+            (5, ComparisonOp::Lte, 5, true),
+            (7, ComparisonOp::Gt, 5, true),
+            (5, ComparisonOp::Gt, 5, false),
+            (5, ComparisonOp::Gte, 5, true),
+        ] {
+            check!(
+                num_cmp(lhs, op, rhs) == want,
+                "num_cmp({lhs}, {op:?}, {rhs})"
+            );
+        }
 
-        assert!(!bool_cmp(true, ComparisonOp::Eq, false));
-        assert!(bool_cmp(true, ComparisonOp::Neq, false));
+        for (lhs, op, rhs, want) in [
+            (1.0, ComparisonOp::Eq, 2.0, false),
+            (1.0, ComparisonOp::Neq, 2.0, true),
+            (1.0, ComparisonOp::Lt, 2.0, true),
+            (2.0, ComparisonOp::Lt, 2.0, false),
+            (2.0, ComparisonOp::Lte, 2.0, true),
+            (3.0, ComparisonOp::Gt, 2.0, true),
+            (2.0, ComparisonOp::Gt, 2.0, false),
+            (2.0, ComparisonOp::Gte, 2.0, true),
+        ] {
+            check!(
+                float_cmp(lhs, op, rhs) == want,
+                "float_cmp({lhs}, {op:?}, {rhs})"
+            );
+        }
+
+        check!(!bool_cmp(true, ComparisonOp::Eq, false));
+        check!(bool_cmp(true, ComparisonOp::Neq, false));
     }
 
     #[test]
@@ -6268,15 +6439,23 @@ mod tests {
         };
         let selection_set = value_set("selection");
         let baseline_set = value_set("baseline");
-        assert!(selection_set == ["eu".to_string(), "us".to_string()].into_iter().collect());
-        assert!(baseline_set == selection_set);
+        check!(selection_set == ["eu".to_string(), "us".to_string()].into_iter().collect());
+        check!(baseline_set == selection_set);
 
-        // The selection-only value "us" has a zero-filled baseline series.
-        assert!(compare_total(&resp, "selection", "span.region", "us") == 1);
-        assert!(compare_total(&resp, "baseline", "span.region", "us") == 0);
-        // The shared value "eu": selection 2, baseline 1.
-        assert!(compare_total(&resp, "selection", "span.region", "eu") == 2);
-        assert!(compare_total(&resp, "baseline", "span.region", "eu") == 1);
+        let cases = [
+            // The selection-only value "us" has a zero-filled baseline series.
+            ("selection", "us", 1),
+            ("baseline", "us", 0),
+            // The shared value "eu": selection 2, baseline 1.
+            ("selection", "eu", 2),
+            ("baseline", "eu", 1),
+        ];
+        for (meta, value, want) in cases {
+            check!(
+                compare_total(&resp, meta, "span.region", value) == want,
+                "{meta} span.region={value}"
+            );
+        }
     }
 
     // ---- MAJOR 2: per-attribute value cardinality is bounded ----

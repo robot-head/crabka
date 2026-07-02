@@ -29,6 +29,18 @@ use crabka_security::{KafkaPrincipal, SecretBytes};
 use crate::network::auth::ConnectionAuth;
 use crate::time_util::now_ms;
 
+/// A relative span of milliseconds (token lifetime / renew period), as
+/// distinct from an absolute epoch timestamp in milliseconds.
+pub(crate) type DurationMs = i64;
+
+/// Wire sentinel: `CreateDelegationToken.max_lifetime_ms == -1` defers to the
+/// broker's configured lifetime ceiling (`delegation.token.max.lifetime.ms`).
+const USE_BROKER_LIFETIME_CEILING: i64 = -1;
+
+/// The only `KafkaPrincipal` type supported as an act-as token owner
+/// (Kafka's `KafkaPrincipal.USER_TYPE`; mTLS-DN owners are not supported).
+const USER_PRINCIPAL_TYPE: &str = "User";
+
 /// Wire convention: the JVM admin client serialises "not act-as" by
 /// either omitting the compact-nullable string (`None`) or sending an
 /// empty string. Treat both as "absent" so the act-as branch only fires
@@ -47,8 +59,8 @@ pub(crate) async fn handle<S: BuildHasher>(
     req: &CreateDelegationTokenRequest,
     auth: &ConnectionAuth,
     secret_key: Option<&SecretBytes>,
-    max_lifetime_ms: i64,
-    default_renew_period_ms: i64,
+    max_lifetime_ms: DurationMs,
+    default_renew_period_ms: DurationMs,
     controller: &dyn crate::metadata_source::MetadataSource,
     super_users: &HashSet<String, S>,
 ) -> CreateDelegationTokenResponse {
@@ -104,7 +116,7 @@ pub(crate) async fn handle<S: BuildHasher>(
             // returning INVALID_REQUEST for unsupported types here
             // rather than authorization-failed — the request is
             // syntactically wrong, not unauthorized.
-            if owner_type != "User" {
+            if owner_type != USER_PRINCIPAL_TYPE {
                 return err_response(crate::codes::INVALID_REQUEST);
             }
             KafkaPrincipal {
@@ -120,7 +132,7 @@ pub(crate) async fn handle<S: BuildHasher>(
     // ceiling; a positive value is clamped to the ceiling; anything
     // else is invalid (zero or non-`-1` negatives).
     let chosen_lifetime = match req.max_lifetime_ms {
-        -1 => max_lifetime_ms,
+        USE_BROKER_LIFETIME_CEILING => max_lifetime_ms,
         n if n > 0 => n.min(max_lifetime_ms),
         _ => return err_response(crate::codes::INVALID_REQUEST),
     };
@@ -176,7 +188,6 @@ pub(crate) async fn handle<S: BuildHasher>(
     let (requester_type, requester_name) = (caller.principal_type, caller.name);
 
     CreateDelegationTokenResponse {
-        error_code: 0,
         principal_type: owner.principal_type.clone(),
         principal_name: owner.name.clone(),
         token_requester_principal_type: requester_type,
@@ -186,7 +197,6 @@ pub(crate) async fn handle<S: BuildHasher>(
         max_timestamp_ms,
         token_id,
         hmac: bytes::Bytes::from(hmac),
-        throttle_time_ms: 0,
         ..Default::default()
     }
 }
@@ -301,26 +311,44 @@ mod tests {
             &empty_super_users(),
         )
         .await;
-        assert!(resp.error_code == 0);
-        assert!(resp.principal_type == "User");
-        assert!(resp.principal_name == "alice");
-        assert!(!resp.token_id.is_empty(), "token_id should be non-empty");
-        // HMAC-SHA-256 output is 32 bytes; the response carries them raw.
-        assert!(resp.hmac.len() == 32);
+        // token_id is a random UUID; the HMAC-SHA-256 output is 32 bytes and
+        // the response carries them raw.
+        assert!((resp.token_id.is_empty(), resp.hmac.len()) == (false, 32));
         // 60s ceiling < 24h default renew period → both timestamps collapse
         // to issue + 60s (the chosen_lifetime ceiling).
-        assert!(resp.expiry_timestamp_ms - resp.issue_timestamp_ms == 60_000);
-        assert!(resp.max_timestamp_ms == resp.expiry_timestamp_ms);
+        let expected = CreateDelegationTokenResponse {
+            error_code: 0,
+            principal_type: "User".into(),
+            principal_name: "alice".into(),
+            token_requester_principal_type: "User".into(),
+            token_requester_principal_name: "alice".into(),
+            issue_timestamp_ms: resp.issue_timestamp_ms,
+            expiry_timestamp_ms: resp.issue_timestamp_ms + 60_000,
+            max_timestamp_ms: resp.issue_timestamp_ms + 60_000,
+            token_id: resp.token_id.clone(),
+            hmac: resp.hmac.clone(),
+            throttle_time_ms: 0,
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
         // Persisted in image with the same hmac + owner + timestamps.
         let img = controller.current_image();
         let stored = img
             .delegation_token_by_id(&resp.token_id)
             .expect("token in image");
-        assert!(stored.hmac.as_slice() == &resp.hmac[..]);
-        assert!(stored.owner.principal_type == "User");
-        assert!(stored.owner.name == "alice");
-        assert!(stored.expiry_timestamp_ms == resp.expiry_timestamp_ms);
-        assert!(stored.max_timestamp_ms == resp.max_timestamp_ms);
+        let expected_stored = crabka_metadata::DelegationToken {
+            token_id: resp.token_id.clone(),
+            owner: KafkaPrincipal {
+                principal_type: "User".into(),
+                name: "alice".into(),
+            },
+            hmac: resp.hmac.to_vec(),
+            issue_timestamp_ms: resp.issue_timestamp_ms,
+            expiry_timestamp_ms: resp.expiry_timestamp_ms,
+            max_timestamp_ms: resp.max_timestamp_ms,
+            renewers: vec![],
+        };
+        assert!(*stored == expected_stored);
         controller.cancel().await;
     }
 
@@ -368,14 +396,23 @@ mod tests {
             &empty_super_users(),
         )
         .await;
-        assert!(resp.error_code == 0);
         // 5-minute ceiling < 24h default renew period → both timestamps
         // collapse to issue + ceiling.
-        let max_offset = resp.max_timestamp_ms - resp.issue_timestamp_ms;
-        let expiry_offset = resp.expiry_timestamp_ms - resp.issue_timestamp_ms;
-        assert!(max_offset == ceiling_ms);
-        assert!(expiry_offset == ceiling_ms);
-        assert!(resp.max_timestamp_ms == resp.expiry_timestamp_ms);
+        let expected = CreateDelegationTokenResponse {
+            error_code: 0,
+            principal_type: "User".into(),
+            principal_name: "alice".into(),
+            token_requester_principal_type: "User".into(),
+            token_requester_principal_name: "alice".into(),
+            issue_timestamp_ms: resp.issue_timestamp_ms,
+            expiry_timestamp_ms: resp.issue_timestamp_ms + ceiling_ms,
+            max_timestamp_ms: resp.issue_timestamp_ms + ceiling_ms,
+            token_id: resp.token_id.clone(),
+            hmac: resp.hmac.clone(),
+            throttle_time_ms: 0,
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
         controller.cancel().await;
     }
 
@@ -389,70 +426,52 @@ mod tests {
         let controller = test_controller(dir.path().into()).await;
         let secret = SecretBytes::new(b"k".to_vec());
 
-        // Branch 1: max_lifetime_ms = 1h, default_renew_period_ms = 24h.
-        // The renew period is clamped *down* to chosen_lifetime, so both
-        // timestamps collapse to issue + 1h.
-        let one_hour = 60 * 60 * 1_000;
-        let req = CreateDelegationTokenRequest {
-            max_lifetime_ms: -1,
-            ..Default::default()
-        };
-        let resp = handle(
-            &req,
-            &authed("alice"),
-            Some(&secret),
-            one_hour,
-            RENEW_24H_MS,
-            &*controller,
-            &empty_super_users(),
-        )
-        .await;
-        assert!(resp.error_code == 0);
-        assert!(
-            resp.expiry_timestamp_ms - resp.issue_timestamp_ms == one_hour,
-            "1h ceiling clamps the 24h renew period; expiry must == issue + 1h"
-        );
-        assert!(
-            resp.max_timestamp_ms - resp.issue_timestamp_ms == one_hour,
-            "max must equal issue + chosen_lifetime"
-        );
-        assert!(
-            resp.expiry_timestamp_ms == resp.max_timestamp_ms,
-            "expiry must collapse to max when renew period > chosen_lifetime"
-        );
-
-        // Branch 2: max_lifetime_ms = 7d, default_renew_period_ms = 24h.
-        // Now the renew period is the smaller of the two, so expiry =
-        // issue + 24h and max = issue + 7d — they are SEPARATE, leaving
-        // room for Renew to extend expiry up to max.
-        let seven_days = 7 * 24 * 60 * 60 * 1_000;
-        let req = CreateDelegationTokenRequest {
-            max_lifetime_ms: -1,
-            ..Default::default()
-        };
-        let resp = handle(
-            &req,
-            &authed("alice"),
-            Some(&secret),
-            seven_days,
-            RENEW_24H_MS,
-            &*controller,
-            &empty_super_users(),
-        )
-        .await;
-        assert!(resp.error_code == 0);
-        assert!(
-            resp.expiry_timestamp_ms - resp.issue_timestamp_ms == RENEW_24H_MS,
-            "24h renew period < 7d ceiling, so expiry must == issue + 24h"
-        );
-        assert!(
-            resp.max_timestamp_ms - resp.issue_timestamp_ms == seven_days,
-            "max must == issue + 7d (the ceiling, untouched)"
-        );
-        assert!(
-            resp.expiry_timestamp_ms < resp.max_timestamp_ms,
-            "expiry and max must be SEPARATE so Renew has room to extend",
-        );
+        let one_hour: i64 = 60 * 60 * 1_000;
+        let seven_days: i64 = 7 * 24 * 60 * 60 * 1_000;
+        // (broker ceiling, expected expiry delta, expected max delta), with
+        // default_renew_period_ms = 24h throughout.
+        let cases = [
+            // Branch 1: ceiling = 1h < 24h renew period. The renew period is
+            // clamped *down* to chosen_lifetime, so expiry must collapse to
+            // max, and both must equal issue + 1h (the chosen_lifetime).
+            (one_hour, one_hour, one_hour),
+            // Branch 2: ceiling = 7d > 24h renew period. Now the renew period
+            // is the smaller of the two, so expiry (issue + 24h) and max
+            // (issue + 7d, the ceiling untouched) must be SEPARATE, leaving
+            // room for Renew to extend expiry up to max.
+            (seven_days, RENEW_24H_MS, seven_days),
+        ];
+        for (ceiling_ms, expiry_delta, max_delta) in cases {
+            let req = CreateDelegationTokenRequest {
+                max_lifetime_ms: -1,
+                ..Default::default()
+            };
+            let resp = handle(
+                &req,
+                &authed("alice"),
+                Some(&secret),
+                ceiling_ms,
+                RENEW_24H_MS,
+                &*controller,
+                &empty_super_users(),
+            )
+            .await;
+            let expected = CreateDelegationTokenResponse {
+                error_code: 0,
+                principal_type: "User".into(),
+                principal_name: "alice".into(),
+                token_requester_principal_type: "User".into(),
+                token_requester_principal_name: "alice".into(),
+                issue_timestamp_ms: resp.issue_timestamp_ms,
+                expiry_timestamp_ms: resp.issue_timestamp_ms + expiry_delta,
+                max_timestamp_ms: resp.issue_timestamp_ms + max_delta,
+                token_id: resp.token_id.clone(),
+                hmac: resp.hmac.clone(),
+                throttle_time_ms: 0,
+                unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+            };
+            assert!(resp == expected, "ceiling {ceiling_ms}: {resp:?}");
+        }
 
         controller.cancel().await;
     }
@@ -507,20 +526,42 @@ mod tests {
             &super_users_with(&["admin"]),
         )
         .await;
-        assert!(resp.error_code == 0);
-        // Owner = the act-as target.
-        assert!(resp.principal_type == "User");
-        assert!(resp.principal_name == "alice");
-        // Requester = the caller (admin), set for act-as mints.
-        assert!(resp.token_requester_principal_type == "User");
-        assert!(resp.token_requester_principal_name == "admin");
+        // Owner = the act-as target; requester = the caller (admin), set for
+        // act-as mints. 60s ceiling < 24h renew period → expiry == max ==
+        // issue + 60s.
+        let expected = CreateDelegationTokenResponse {
+            error_code: 0,
+            principal_type: "User".into(),
+            principal_name: "alice".into(),
+            token_requester_principal_type: "User".into(),
+            token_requester_principal_name: "admin".into(),
+            issue_timestamp_ms: resp.issue_timestamp_ms,
+            expiry_timestamp_ms: resp.issue_timestamp_ms + 60_000,
+            max_timestamp_ms: resp.issue_timestamp_ms + 60_000,
+            token_id: resp.token_id.clone(),
+            hmac: resp.hmac.clone(),
+            throttle_time_ms: 0,
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected, "{resp:?}");
         // Persisted owner matches the response owner.
         let img = controller.current_image();
         let stored = img
             .delegation_token_by_id(&resp.token_id)
             .expect("token in image");
-        assert!(stored.owner.principal_type == "User");
-        assert!(stored.owner.name == "alice");
+        let expected_stored = crabka_metadata::DelegationToken {
+            token_id: resp.token_id.clone(),
+            owner: KafkaPrincipal {
+                principal_type: "User".into(),
+                name: "alice".into(),
+            },
+            hmac: resp.hmac.to_vec(),
+            issue_timestamp_ms: resp.issue_timestamp_ms,
+            expiry_timestamp_ms: resp.expiry_timestamp_ms,
+            max_timestamp_ms: resp.max_timestamp_ms,
+            renewers: vec![],
+        };
+        assert!(*stored == expected_stored);
         controller.cancel().await;
     }
 
@@ -564,43 +605,31 @@ mod tests {
         let controller = test_controller(dir.path().into()).await;
         let secret = SecretBytes::new(b"k".to_vec());
 
-        // Type set but name empty.
-        let req_name_missing = CreateDelegationTokenRequest {
-            max_lifetime_ms: -1,
-            owner_principal_type: Some("User".to_string()),
-            owner_principal_name: None,
-            ..Default::default()
-        };
-        let resp = handle(
-            &req_name_missing,
-            &authed("admin"),
-            Some(&secret),
-            60_000,
-            RENEW_24H_MS,
-            &*controller,
-            &super_users_with(&["admin"]),
-        )
-        .await;
-        assert!(resp.error_code == crate::codes::INVALID_REQUEST);
-
-        // Name set but type empty.
-        let req_type_missing = CreateDelegationTokenRequest {
-            max_lifetime_ms: -1,
-            owner_principal_type: None,
-            owner_principal_name: Some("alice".to_string()),
-            ..Default::default()
-        };
-        let resp = handle(
-            &req_type_missing,
-            &authed("admin"),
-            Some(&secret),
-            60_000,
-            RENEW_24H_MS,
-            &*controller,
-            &super_users_with(&["admin"]),
-        )
-        .await;
-        assert!(resp.error_code == crate::codes::INVALID_REQUEST);
+        let cases = [
+            // Type set but name empty.
+            ("name missing", Some("User".to_string()), None),
+            // Name set but type empty.
+            ("type missing", None, Some("alice".to_string())),
+        ];
+        for (case, owner_principal_type, owner_principal_name) in cases {
+            let req = CreateDelegationTokenRequest {
+                max_lifetime_ms: -1,
+                owner_principal_type,
+                owner_principal_name,
+                ..Default::default()
+            };
+            let resp = handle(
+                &req,
+                &authed("admin"),
+                Some(&secret),
+                60_000,
+                RENEW_24H_MS,
+                &*controller,
+                &super_users_with(&["admin"]),
+            )
+            .await;
+            assert!(resp.error_code == crate::codes::INVALID_REQUEST, "{case}");
+        }
 
         controller.cancel().await;
     }
@@ -626,9 +655,11 @@ mod tests {
             .is_err()
         };
 
-        assert!(!gate(None));
-        assert!(gate(Some(13)));
-        assert!(!gate(Some(14)));
+        // (finalized metadata.version level; None = fresh image) → gated?
+        let cases = [(None, false), (Some(13), true), (Some(14), false)];
+        for (level, want_gated) in cases {
+            assert!(gate(level) == want_gated, "level {level:?}");
+        }
     }
 
     /// Spec §1.2: only `User` is supported as the act-as owner

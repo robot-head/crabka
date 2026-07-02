@@ -413,7 +413,7 @@ impl<R: NativeResolver> SymbolSource for LazySymbolizer<R> {
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use assert2::assert;
+    use assert2::{assert, check};
     // Only used by the ELF/DWARF self-symbolization tests below, which run on Linux.
     #[cfg(target_os = "linux")]
     use object::{Object, ObjectSymbol};
@@ -475,9 +475,9 @@ mod tests {
         let first = source.resolve(0, stack);
         let second = source.resolve(0, stack);
 
-        assert!(first == second);
-        assert!(first[0].function == "native_main");
-        assert!(resolver.calls.load(Ordering::Relaxed) == 1);
+        check!(first == second);
+        check!(first[0].function == "native_main");
+        check!(resolver.calls.load(Ordering::Relaxed) == 1);
     }
 
     #[test]
@@ -676,9 +676,9 @@ mod tests {
             .unwrap();
 
         server_thread.join().unwrap();
-        assert!(served.load(Ordering::Relaxed) == 1);
-        assert!(first == second);
-        assert!(
+        check!(served.load(Ordering::Relaxed) == 1);
+        check!(first == second);
+        check!(
             first
                 .iter()
                 .any(|frame| frame.function.contains("object_symbol_anchor"))
@@ -803,32 +803,38 @@ mod tests {
 
     #[test]
     fn build_id_validation_accepts_lowercase_hex() {
-        assert!(is_valid_build_id("deadbeef"));
-        assert!(is_valid_build_id("0123456789abcdef"));
-        // Real debuginfod build-ids are 40-char SHA-1 hex digests.
-        assert!(is_valid_build_id(
-            "aabbccddeeff00112233445566778899aabbccdd"
-        ));
-        // Minimum length is two hex digits.
-        assert!(is_valid_build_id("ab"));
+        for build_id in [
+            "deadbeef",
+            "0123456789abcdef",
+            // Real debuginfod build-ids are 40-char SHA-1 hex digests.
+            "aabbccddeeff00112233445566778899aabbccdd",
+            // Minimum length is two hex digits.
+            "ab",
+        ] {
+            assert!(is_valid_build_id(build_id), "{build_id}");
+        }
     }
 
     #[test]
     fn build_id_validation_rejects_traversal_and_non_hex() {
-        // Path traversal and slashes must never reach URL construction.
-        assert!(!is_valid_build_id("../x"));
-        assert!(!is_valid_build_id("a/b"));
-        assert!(!is_valid_build_id(".."));
-        assert!(!is_valid_build_id("foo/../bar"));
-        // Uppercase is not a valid lowercase-hex build-id.
-        assert!(!is_valid_build_id("DEADBEEF"));
-        assert!(!is_valid_build_id("AbCd"));
-        // Empty / single char / non-hex bytes.
-        assert!(!is_valid_build_id(""));
-        assert!(!is_valid_build_id("a"));
-        assert!(!is_valid_build_id("xyz"));
-        assert!(!is_valid_build_id("dead beef"));
-        assert!(!is_valid_build_id("build-a"));
+        for build_id in [
+            // Path traversal and slashes must never reach URL construction.
+            "../x",
+            "a/b",
+            "..",
+            "foo/../bar",
+            // Uppercase is not a valid lowercase-hex build-id.
+            "DEADBEEF",
+            "AbCd",
+            // Empty / single char / non-hex bytes.
+            "",
+            "a",
+            "xyz",
+            "dead beef",
+            "build-a",
+        ] {
+            assert!(!is_valid_build_id(build_id), "{build_id:?}");
+        }
     }
 
     #[test]
@@ -882,9 +888,12 @@ mod tests {
 
     #[test]
     fn content_length_cap_allows_absent_and_exact_lengths_only() {
-        assert!(content_length_within_cap(None, 10));
-        assert!(content_length_within_cap(Some(10), 10));
-        assert!(!content_length_within_cap(Some(11), 10));
+        for (content_length, want) in [(None, true), (Some(10), true), (Some(11), false)] {
+            assert!(
+                content_length_within_cap(content_length, 10) == want,
+                "{content_length:?}"
+            );
+        }
     }
 
     #[cfg(target_os = "linux")]

@@ -415,6 +415,11 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn move_read_chunk_size_is_one_mib() {
+        assert!(MOVE_READ_CHUNK_BYTES == 1024 * 1024);
+    }
+
+    #[test]
     fn move_error_log_dir_not_found_when_target_unknown() {
         // Empty broker — no partitions, no log dirs. `start_move`
         // returns LogDirNotFound before it ever looks at the
@@ -471,6 +476,68 @@ mod tests {
         )
     }
 
+    fn append_records(part: &Arc<Partition>, count: i32) {
+        use bytes::Bytes;
+        use crabka_protocol::records::{Attributes, Record, RecordBatch};
+
+        let mut batch = RecordBatch {
+            base_offset: 0,
+            partition_leader_epoch: -1,
+            attributes: Attributes::default(),
+            last_offset_delta: count - 1,
+            base_timestamp: 1_700_000_000,
+            max_timestamp: 1_700_000_000,
+            producer_id: -1,
+            producer_epoch: -1,
+            base_sequence: -1,
+            records: (0..count)
+                .map(|i| Record {
+                    attributes: 0,
+                    offset_delta: i,
+                    timestamp_delta: 0,
+                    key: None,
+                    value: Some(Bytes::from_static(b"v")),
+                    headers: vec![],
+                })
+                .collect(),
+        };
+        part.log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .append(&mut batch)
+            .expect("append source records");
+    }
+
+    fn append_value_batch(part: &Arc<Partition>, value_size: usize) {
+        use bytes::Bytes;
+        use crabka_protocol::records::{Attributes, Record, RecordBatch};
+
+        let mut batch = RecordBatch {
+            base_offset: 0,
+            partition_leader_epoch: -1,
+            attributes: Attributes::default(),
+            last_offset_delta: 0,
+            base_timestamp: 1_700_000_000,
+            max_timestamp: 1_700_000_000,
+            producer_id: -1,
+            producer_epoch: -1,
+            base_sequence: -1,
+            records: vec![Record {
+                attributes: 0,
+                offset_delta: 0,
+                timestamp_delta: 0,
+                key: None,
+                value: Some(Bytes::from(vec![b'x'; value_size])),
+                headers: vec![],
+            }],
+        };
+        part.log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .append(&mut batch)
+            .expect("append source batch");
+    }
+
     #[tokio::test]
     async fn start_move_to_current_dir_is_noop() {
         // Asking to move a partition to the directory it already
@@ -497,6 +564,109 @@ mod tests {
             future_logs.is_empty(),
             "noop must not register a future log"
         );
+    }
+
+    #[test]
+    fn resume_move_errors_when_partition_missing() {
+        let partitions = Arc::new(PartitionRegistry::new());
+        let future_logs = Arc::new(DashMap::new());
+        let target = tempdir().unwrap();
+
+        let err = resume_move(
+            &partitions,
+            &future_logs,
+            target.path(),
+            &LogConfig::default(),
+            "missing",
+            0,
+        )
+        .expect_err("missing partition must reject resume");
+
+        assert!(matches!(err, MoveError::ReplicaNotAvailable));
+        assert!(future_logs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn resume_move_catches_up_and_swaps_future_log() {
+        let primary = tempdir().unwrap();
+        let target = tempdir().unwrap();
+        let partitions = Arc::new(PartitionRegistry::new());
+        let future_logs = Arc::new(DashMap::new());
+        let part = fixture_partition(primary.path(), "t", 0);
+        append_records(&part, 3);
+        partitions.insert("t".to_string(), 0, part.clone());
+
+        let future_path = log_dir::future_partition_dir(target.path(), "t", 0);
+        std::fs::create_dir_all(&future_path).unwrap();
+
+        resume_move(
+            &partitions,
+            &future_logs,
+            target.path(),
+            &LogConfig::default(),
+            "t",
+            0,
+        )
+        .expect("resume should spawn a future-log move");
+
+        tokio::time::timeout(Duration::from_millis(500), async {
+            loop {
+                let moved = canonicalize_or_self(&part.log_dir.load_full())
+                    == canonicalize_or_self(target.path());
+                if moved && future_logs.is_empty() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("future log should catch up and swap");
+
+        assert!(part.log_end_offset() == 3);
+        assert!(
+            canonicalize_or_self(&part.log_dir.load_full()) == canonicalize_or_self(target.path())
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_move_continues_after_partial_catch_up() {
+        let primary = tempdir().unwrap();
+        let target = tempdir().unwrap();
+        let partitions = Arc::new(PartitionRegistry::new());
+        let future_logs = Arc::new(DashMap::new());
+        let part = fixture_partition(primary.path(), "t", 0);
+        for _ in 0..4 {
+            append_value_batch(&part, 400 * 1024);
+        }
+        partitions.insert("t".to_string(), 0, part.clone());
+
+        let future_path = log_dir::future_partition_dir(target.path(), "t", 0);
+        std::fs::create_dir_all(&future_path).unwrap();
+
+        resume_move(
+            &partitions,
+            &future_logs,
+            target.path(),
+            &LogConfig::default(),
+            "t",
+            0,
+        )
+        .expect("resume should spawn a future-log move");
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let moved = canonicalize_or_self(&part.log_dir.load_full())
+                    == canonicalize_or_self(target.path());
+                if moved && future_logs.is_empty() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("future log should keep copying after a partial catch-up pass");
+
+        assert!(part.log_end_offset() == 4);
     }
 
     #[tokio::test]

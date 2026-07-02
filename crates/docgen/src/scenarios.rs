@@ -121,24 +121,28 @@ reach the two-vote majority, so it cannot elect itself.
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
 
     #[test]
     fn renders_sequence_diagrams_and_split_brain() {
         let md = failure_scenarios_md();
-        assert!(md.contains("sequenceDiagram"));
-        assert!(md.contains("{% mermaid() %}"));
-        assert!(md.contains("{% end %}"));
-        assert!(md.contains("split-brain") || md.contains("Split-brain"));
+        check!(md.contains("sequenceDiagram"));
+        check!(md.contains("{% mermaid() %}"));
+        check!(md.contains("{% end %}"));
+        check!(md.contains("split-brain") || md.contains("Split-brain"));
     }
 
     #[test]
     fn renders_all_three_scenarios() {
         let md = failure_scenarios_md();
-        assert!(md.contains("Reordered message delivery"));
-        assert!(md.contains("Duplicate message delivery"));
-        assert!(md.contains("**Invariant:**"));
-        assert!(md.contains("**Outcome:**"));
+        for needle in [
+            "Reordered message delivery",
+            "Duplicate message delivery",
+            "**Invariant:**",
+            "**Outcome:**",
+        ] {
+            assert!(md.contains(needle), "missing {needle:?}");
+        }
     }
 
     #[test]
@@ -150,14 +154,14 @@ mod tests {
         // only the single hand-authored contrast block would remain.
         let md = failure_scenarios_md();
         let mermaid_blocks = md.matches("{% mermaid() %}").count();
-        assert!(
+        check!(
             mermaid_blocks == 4,
             "expected 3 generated diagrams + 1 contrast, got {mermaid_blocks}"
         );
         // A generated diagram declares its participants and draws message
         // arrows — content the hand-authored contrast for a single scenario
         // cannot account for on its own (e.g. the reordered/duplicate scenarios).
-        assert!(md.matches("participant N").count() >= 6);
-        assert!(md.contains("->>"));
+        check!(md.matches("participant N").count() >= 6);
+        check!(md.contains("->>"));
     }
 }

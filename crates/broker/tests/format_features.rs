@@ -7,7 +7,7 @@
 //! would otherwise re-seed every feature at the latest release — proving the
 //! `--feature` overrides survive boot rather than being clobbered.
 
-use assert2::assert;
+use assert2::{assert, check};
 use std::process::Command;
 
 use crabka_broker::{Broker, BrokerConfig};
@@ -124,24 +124,20 @@ async fn standalone_format_feature_overrides_surface_in_api_versions() {
             .map(|f| f.max_version_level)
     };
 
-    // --feature transaction.version=1 took effect (not the release default 2).
-    assert!(
-        finalized("transaction.version") == Some(1),
-        "transaction.version must be finalized at 1: {:?}",
-        av.finalized_features
-    );
-    // --feature group.version=0 → omitted → not finalized at all.
-    assert!(
-        finalized("group.version").is_none(),
-        "group.version pinned to 0 must be absent: {:?}",
-        av.finalized_features
-    );
+    // transaction.version=1 took effect (not the release default 2);
+    // group.version=0 → omitted → not finalized at all;
     // metadata.version was not overridden → latest stable (25).
-    assert!(
-        finalized("metadata.version") == Some(25),
-        "metadata.version must be finalized at 25: {:?}",
-        av.finalized_features
-    );
+    for (feature, want) in [
+        ("transaction.version", Some(1)),
+        ("group.version", None),
+        ("metadata.version", Some(25)),
+    ] {
+        check!(
+            finalized(feature) == want,
+            "{feature} must be finalized at {want:?}: {:?}",
+            av.finalized_features
+        );
+    }
 
     handle.shutdown().await;
 }

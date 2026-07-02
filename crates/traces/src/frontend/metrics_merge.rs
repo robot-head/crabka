@@ -240,9 +240,21 @@ mod tests {
             }],
         };
         let merged = merge_metrics(vec![p0, p1], Some(1));
-        assert!(merged.series.len() == 1);
-        assert!(merged.series[0].samples[0].value == 3.0);
-        assert!(merged.series[0].exemplars.len() == 1);
+        assert_eq!(
+            merged,
+            MetricsResponseJson {
+                series: vec![MetricSeries {
+                    labels: labels("api"),
+                    prom_labels: "{svc=\"api\"}".to_string(),
+                    samples: vec![sample("1", 3.0)],
+                    exemplars: vec![Exemplar {
+                        labels: vec![],
+                        value: 1.0,
+                        timestamp_ms: "1".to_string(),
+                    }],
+                }],
+            }
+        );
     }
 
     #[test]
@@ -261,12 +273,28 @@ mod tests {
             }]
         });
         let resp: MetricsResponseJson = serde_json::from_value(body.clone()).unwrap();
-        assert!(resp.series.len() == 1);
-        assert!(resp.series[0].samples[0] == sample("1000", 2.0));
-        assert!(resp.series[0].prom_labels == "{svc=\"api\"}");
-        assert!(resp.series[0].labels[0].key == "svc");
-        assert!(resp.series[0].exemplars[0].value == 1.5);
+        assert_eq!(
+            resp,
+            MetricsResponseJson {
+                series: vec![MetricSeries {
+                    labels: vec![KeyValue {
+                        key: "svc".to_string(),
+                        value: serde_json::json!({ "stringValue": "api" }),
+                    }],
+                    prom_labels: "{svc=\"api\"}".to_string(),
+                    samples: vec![sample("1000", 2.0)],
+                    exemplars: vec![Exemplar {
+                        labels: vec![KeyValue {
+                            key: "trace_id".to_string(),
+                            value: serde_json::json!({ "stringValue": "0a" }),
+                        }],
+                        value: 1.5,
+                        timestamp_ms: "1000".to_string(),
+                    }],
+                }],
+            }
+        );
         // Re-serializes to the same Tempo shape (round-trip stable).
-        assert!(serde_json::to_value(&resp).unwrap() == body);
+        assert_eq!(serde_json::to_value(&resp).unwrap(), body);
     }
 }

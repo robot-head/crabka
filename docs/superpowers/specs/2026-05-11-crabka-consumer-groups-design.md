@@ -6,7 +6,7 @@
 
 ## Goal
 
-Ship the classic Kafka group-coordinator protocol end-to-end. Acceptance: an unmodified JVM `kafka-console-consumer` (no `--partition`) subscribes through a group, receives records produced by a JVM `kafka-console-producer`, and its committed offsets survive a broker restart. The job runs from the same `confluentinc/cp-kafka:6.1.1` testcontainers image slice 4 uses.
+Ship the classic Kafka group-coordinator protocol end-to-end. Acceptance: an unmodified JVM `kafka-console-consumer` (no `--partition`) subscribes through a group, receives records produced by a JVM `kafka-console-producer`, and its committed offsets survive a broker restart. The job runs from the same `mirror.gcr.io/confluentinc/cp-kafka:6.1.1` testcontainers image slice 4 uses.
 
 ## In scope
 

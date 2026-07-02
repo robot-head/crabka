@@ -79,11 +79,15 @@ mod tests {
 
     #[test]
     fn parse_known_values() {
-        assert!(ReplicaSelectorKind::from_config_str("leader") == Ok(ReplicaSelectorKind::Leader));
-        assert!(
-            ReplicaSelectorKind::from_config_str("rack-aware")
-                == Ok(ReplicaSelectorKind::RackAware)
-        );
+        for (input, want) in [
+            ("leader", ReplicaSelectorKind::Leader),
+            ("rack-aware", ReplicaSelectorKind::RackAware),
+        ] {
+            assert!(
+                ReplicaSelectorKind::from_config_str(input) == Ok(want),
+                "{input}"
+            );
+        }
         assert!(ReplicaSelectorKind::from_config_str("bogus").is_err());
     }
 

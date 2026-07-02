@@ -87,7 +87,7 @@ The established Slice-1 workflow:
 - **Unit:** per-record envelope round-trip (`encode_value(ver)` →
   `decode_value` → byte-identical) for all ~19 modeled variants, plus the
   existing `Unknown`-arm + truncation tests.
-- **JVM byte round-trip (Docker-gated):** drive an `apache/kafka:4.0.0` cluster
+- **JVM byte round-trip (Docker-gated):** drive an `mirror.gcr.io/apache/kafka:4.0.0` cluster
   to emit the rare records into its `__cluster_metadata` log — `kafka-configs`
   (ConfigRecord, ClientQuota), `kafka-acls` (AccessControlEntry),
   `kafka-configs --alter --entity-type users` (UserScramCredential) — capture

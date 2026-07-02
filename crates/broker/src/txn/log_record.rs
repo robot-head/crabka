@@ -254,7 +254,7 @@ pub(crate) fn decode_key(bytes: &[u8]) -> Result<String, BrokerError> {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+    use assert2::{assert, check};
 
     use super::*;
 
@@ -301,21 +301,21 @@ mod tests {
     #[test]
     fn sample_bytes_decode() {
         let entry = decode_value(SAMPLE, "my-txn-id".into()).unwrap();
-        assert!(entry.producer_id == 0);
-        assert!(entry.producer_epoch == 0);
-        assert!(entry.txn_timeout_ms == 60_000);
-        assert!(entry.state == TxnState::Ongoing);
-        assert!(entry.prev_producer_id == -1);
-        assert!(entry.next_producer_id == -1);
-        assert!(entry.last_update_ms == SAMPLE_TS);
-        assert!(entry.start_ms == SAMPLE_TS);
+        check!(entry.producer_id == 0);
+        check!(entry.producer_epoch == 0);
+        check!(entry.txn_timeout_ms == 60_000);
+        check!(entry.state == TxnState::Ongoing);
+        check!(entry.prev_producer_id == -1);
+        check!(entry.next_producer_id == -1);
+        check!(entry.last_update_ms == SAMPLE_TS);
+        check!(entry.start_ms == SAMPLE_TS);
         let expected: HashSet<TopicPartition> = [TopicPartition {
             topic: "txtest".into(),
             partition: 0,
         }]
         .into_iter()
         .collect();
-        assert!(entry.partitions == expected);
+        check!(entry.partitions == expected);
     }
 
     #[test]
@@ -360,15 +360,15 @@ mod tests {
         let first = encode_value(&entry, true);
         let decoded = decode_value(&first, "tid".into()).unwrap();
 
-        assert!(decoded.producer_id == entry.producer_id);
-        assert!(decoded.producer_epoch == entry.producer_epoch);
-        assert!(decoded.state == entry.state);
-        assert!(decoded.txn_timeout_ms == entry.txn_timeout_ms);
-        assert!(decoded.prev_producer_id == 100);
-        assert!(decoded.next_producer_id == 200);
-        assert!(decoded.last_update_ms == entry.last_update_ms);
-        assert!(decoded.start_ms == entry.start_ms);
-        assert!(decoded.partitions == entry.partitions);
+        check!(decoded.producer_id == 42);
+        check!(decoded.producer_epoch == 7);
+        check!(decoded.state == TxnState::PrepareCommit);
+        check!(decoded.txn_timeout_ms == 30_000);
+        check!(decoded.prev_producer_id == 100);
+        check!(decoded.next_producer_id == 200);
+        check!(decoded.last_update_ms == 1_234_567);
+        check!(decoded.start_ms == 1_000_000);
+        check!(decoded.partitions == entry.partitions);
 
         // Re-encode is byte-identical (determinism).
         let second = encode_value(&decoded, true);
@@ -402,14 +402,14 @@ mod tests {
         assert!(encoded[0] == 0x00 && encoded[1] == 0x00);
 
         let decoded = decode_value(&encoded, "tid".into()).unwrap();
-        assert!(decoded.producer_id == 9);
-        assert!(decoded.state == TxnState::Ongoing);
-        assert!(decoded.partitions == entry.partitions);
-        assert!(decoded.last_update_ms == 111);
-        assert!(decoded.start_ms == 222);
+        check!(decoded.producer_id == 9);
+        check!(decoded.state == TxnState::Ongoing);
+        check!(decoded.partitions == entry.partitions);
+        check!(decoded.last_update_ms == 111);
+        check!(decoded.start_ms == 222);
         // v0 carries no tagged fields; bookkeeping ids default to -1.
-        assert!(decoded.prev_producer_id == -1);
-        assert!(decoded.next_producer_id == -1);
+        check!(decoded.prev_producer_id == -1);
+        check!(decoded.next_producer_id == -1);
     }
 
     #[test]
@@ -453,9 +453,9 @@ mod tests {
     #[test]
     fn decode_value_rejects_truncated_input() {
         // A prefix of the valid SAMPLE must error, not panic.
-        assert!(decode_value(&SAMPLE[..10], "t".into()).is_err());
-        assert!(decode_value(&SAMPLE[..1], "t".into()).is_err());
-        assert!(decode_value(&[], "t".into()).is_err());
+        for input in [&SAMPLE[..10], &SAMPLE[..1], &[][..]] {
+            assert!(decode_value(input, "t".into()).is_err());
+        }
     }
 
     #[test]

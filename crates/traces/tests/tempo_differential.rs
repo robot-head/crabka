@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use assert2::assert;
+use assert2::{assert, check};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use crabka_traceql::{
@@ -45,6 +45,14 @@ const ERROR_SPAN_ID_HEX: &str = "0404040404040404";
 const OTLP_STATUS_CODE_ERROR: i32 = 2;
 const DOCKER_HOST_ALIAS: &str = "host.testcontainers.internal";
 const GRAFANA_TEMPO_DATASOURCE_UID: &str = "crabka-traces";
+/// Tempo query-frontend HTTP port inside the container (matches
+/// `http_listen_port` in [`TEMPO_CONFIG`]).
+const TEMPO_HTTP_PORT: u16 = 3200;
+/// Tempo OTLP/HTTP receiver port inside the container (matches the
+/// `distributor.receivers.otlp` endpoint in [`TEMPO_CONFIG`]).
+const TEMPO_OTLP_PORT: u16 = 4318;
+/// Grafana HTTP port inside the container.
+const GRAFANA_HTTP_PORT: u16 = 3000;
 const TEMPO_CONFIG: &str = r"
 multitenancy_enabled: false
 server:
@@ -124,35 +132,28 @@ fn differential_search_corpus() -> Vec<QueryCase> {
 fn differential_search_corpus_covers_selector_structural_and_pipeline_queries() {
     let corpus = differential_search_corpus();
 
-    assert!(
-        corpus
-            .iter()
-            .any(|case| case.kind == QueryCaseKind::Selector)
+    let kinds: Vec<QueryCaseKind> = corpus.iter().map(|case| case.kind).collect();
+    let has_child_span_expectation = corpus
+        .iter()
+        .any(|case| case.expected_span_id == Some(CHILD_SPAN_ID_HEX));
+    check!(
+        kinds
+            == vec![
+                QueryCaseKind::Selector,
+                QueryCaseKind::Structural,
+                QueryCaseKind::Pipeline,
+            ]
     );
-    assert!(
-        corpus
-            .iter()
-            .any(|case| case.kind == QueryCaseKind::Structural)
-    );
-    assert!(
-        corpus
-            .iter()
-            .any(|case| case.kind == QueryCaseKind::Pipeline)
-    );
-    assert!(
-        corpus
-            .iter()
-            .any(|case| case.expected_span_id == Some(CHILD_SPAN_ID_HEX))
-    );
+    check!(has_child_span_expectation);
 }
 
 #[tokio::test]
-#[ignore = "requires Docker and the grafana/tempo image"]
+#[ignore = "requires Docker and the mirror.gcr.io/grafana/tempo image"]
 async fn real_tempo_and_crabka_match_basic_by_id_and_search() -> TestResult {
     let client = reqwest::Client::new();
     let tempo = start_tempo().await?;
-    let tempo_query = mapped_base_url(&tempo, 3200).await?;
-    let tempo_otlp = mapped_base_url(&tempo, 4318).await?;
+    let tempo_query = mapped_base_url(&tempo, TEMPO_HTTP_PORT).await?;
+    let tempo_otlp = mapped_base_url(&tempo, TEMPO_OTLP_PORT).await?;
     wait_for_http_ok(&client, &tempo_query, &["/ready", "/status"]).await?;
 
     let query_range = "start=0&end=1";
@@ -234,12 +235,12 @@ async fn real_tempo_and_crabka_match_basic_by_id_and_search() -> TestResult {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker and the grafana/tempo image"]
+#[ignore = "requires Docker and the mirror.gcr.io/grafana/tempo image"]
 async fn real_tempo_and_crabka_match_traceql_metrics_query_range() -> TestResult {
     let client = reqwest::Client::new();
     let tempo = start_tempo().await?;
-    let tempo_query = mapped_base_url(&tempo, 3200).await?;
-    let tempo_otlp = mapped_base_url(&tempo, 4318).await?;
+    let tempo_query = mapped_base_url(&tempo, TEMPO_HTTP_PORT).await?;
+    let tempo_otlp = mapped_base_url(&tempo, TEMPO_OTLP_PORT).await?;
     wait_for_http_ok(&client, &tempo_query, &["/ready", "/status"]).await?;
 
     let trace_start_secs = SystemTime::now()
@@ -284,7 +285,7 @@ async fn real_tempo_and_crabka_match_traceql_metrics_query_range() -> TestResult
 }
 
 #[tokio::test]
-#[ignore = "requires Docker and the grafana/tempo image"]
+#[ignore = "requires Docker and the mirror.gcr.io/grafana/tempo image"]
 async fn real_tempo_and_crabka_accept_query_param_alias() -> TestResult {
     // The Grafana Tempo datasource — and therefore the Traces Drilldown
     // breakdown — sends the TraceQL metrics query under `query=`, not `q=`.
@@ -294,8 +295,8 @@ async fn real_tempo_and_crabka_accept_query_param_alias() -> TestResult {
     // mirrors the live datasource exactly.
     let client = reqwest::Client::new();
     let tempo = start_tempo().await?;
-    let tempo_query = mapped_base_url(&tempo, 3200).await?;
-    let tempo_otlp = mapped_base_url(&tempo, 4318).await?;
+    let tempo_query = mapped_base_url(&tempo, TEMPO_HTTP_PORT).await?;
+    let tempo_otlp = mapped_base_url(&tempo, TEMPO_OTLP_PORT).await?;
     wait_for_http_ok(&client, &tempo_query, &["/ready", "/status"]).await?;
 
     let trace_start_secs = SystemTime::now()
@@ -343,7 +344,7 @@ async fn real_tempo_and_crabka_accept_query_param_alias() -> TestResult {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker and the grafana/tempo image"]
+#[ignore = "requires Docker and the mirror.gcr.io/grafana/tempo image"]
 async fn real_tempo_and_crabka_match_traceql_metrics_by_labels() -> TestResult {
     // Regression for the Grafana Traces Drilldown breakdown: its per-attribute
     // panels key on the FULL scoped attribute (e.g. `resource.service.name`), so
@@ -352,8 +353,8 @@ async fn real_tempo_and_crabka_match_traceql_metrics_by_labels() -> TestResult {
     // breakdown blank even though the data and totals were correct.
     let client = reqwest::Client::new();
     let tempo = start_tempo().await?;
-    let tempo_query = mapped_base_url(&tempo, 3200).await?;
-    let tempo_otlp = mapped_base_url(&tempo, 4318).await?;
+    let tempo_query = mapped_base_url(&tempo, TEMPO_HTTP_PORT).await?;
+    let tempo_otlp = mapped_base_url(&tempo, TEMPO_OTLP_PORT).await?;
     wait_for_http_ok(&client, &tempo_query, &["/ready", "/status"]).await?;
 
     let trace_start_secs = SystemTime::now()
@@ -462,7 +463,7 @@ async fn crabka_tenant_b_cannot_see_tenant_a_traces_tags_or_values() -> TestResu
 }
 
 #[tokio::test]
-#[ignore = "requires Docker and the grafana/grafana image"]
+#[ignore = "requires Docker and the mirror.gcr.io/grafana/grafana image"]
 #[allow(
     clippy::too_many_lines,
     reason = "integration test drives all Grafana datasource legs end-to-end"
@@ -473,7 +474,7 @@ async fn grafana_accepts_tempo_datasource_pointing_at_crabka() -> TestResult {
     let crabka = start_crabka_pair_reachable_from_container(&otlp_body).await?;
 
     let grafana = start_grafana().await?;
-    let grafana_base = mapped_base_url(&grafana, 3000).await?;
+    let grafana_base = mapped_base_url(&grafana, GRAFANA_HTTP_PORT).await?;
     wait_for_http_ok(&client, &grafana_base, &["/api/health"]).await?;
 
     let payload = json!({
@@ -622,12 +623,12 @@ async fn grafana_accepts_tempo_datasource_pointing_at_crabka() -> TestResult {
 ///   therefore prove the two ends of the loop separately rather than asserting a
 ///   passing query against data the harness never produces.
 #[tokio::test]
-#[ignore = "requires Docker and the grafana/grafana image"]
+#[ignore = "requires Docker and the mirror.gcr.io/grafana/grafana image"]
 async fn grafana_service_graph_prometheus_datasource_and_series() -> TestResult {
     let client = reqwest::Client::new();
 
     let grafana = start_grafana().await?;
-    let grafana_base = mapped_base_url(&grafana, 3000).await?;
+    let grafana_base = mapped_base_url(&grafana, GRAFANA_HTTP_PORT).await?;
     wait_for_http_ok(&client, &grafana_base, &["/api/health"]).await?;
 
     // (1) Grafana-side wiring: provision the Prometheus datasource that backs the
@@ -685,24 +686,24 @@ async fn grafana_service_graph_prometheus_datasource_and_series() -> TestResult 
     let SeriesSample::Counter(count) = request_total.sample else {
         panic!("traces_service_graph_request_total must be a counter")
     };
-    assert!(
-        (count - 1.0).abs() < 1e-9,
-        "expected one paired request for the seed edge, got {count}"
-    );
-    assert!(
+    let has_edge_label = |key: &str, value: &str| {
         request_total
             .labels
             .iter()
-            .any(|(k, v)| k == "client" && v == "checkout-frontend"),
-        "service-graph edge missing client label: {:?}",
+            .any(|(k, v)| k == key && v == value)
+    };
+    check!(
+        (count - 1.0).abs() < 1e-9,
+        "expected one paired request for the seed edge, got count={count}"
+    );
+    check!(
+        has_edge_label("client", "checkout-frontend"),
+        "expected the client=checkout-frontend label on the seed edge, got labels={:?}",
         request_total.labels
     );
-    assert!(
-        request_total
-            .labels
-            .iter()
-            .any(|(k, v)| k == "server" && v == "cart-backend"),
-        "service-graph edge missing server label: {:?}",
+    check!(
+        has_edge_label("server", "cart-backend"),
+        "expected the server=cart-backend label on the seed edge, got labels={:?}",
         request_total.labels
     );
 
@@ -903,29 +904,33 @@ fn resource_attr<'a>(span: &'a Span, key: &str) -> Option<&'a str> {
 
 async fn start_tempo() -> TestResult<testcontainers::ContainerAsync<GenericImage>> {
     let tag = std::env::var("CRABKA_TEMPO_IMAGE_TAG").unwrap_or_else(|_| "latest".into());
-    Ok(GenericImage::new("grafana/tempo".to_string(), tag)
-        .with_exposed_port(3200.tcp())
-        .with_exposed_port(4318.tcp())
-        .with_wait_for(WaitFor::message_on_stderr("Tempo started"))
-        .with_copy_to(
-            CopyTargetOptions::new("/tmp/tempo.yaml").with_mode(0o644),
-            CopyDataSource::Data(TEMPO_CONFIG.as_bytes().to_vec()),
-        )
-        .with_cmd(["-target=all", "-config.file=/tmp/tempo.yaml"])
-        .with_user("root")
-        .start()
-        .await?)
+    Ok(
+        GenericImage::new("mirror.gcr.io/grafana/tempo".to_string(), tag)
+            .with_exposed_port(TEMPO_HTTP_PORT.tcp())
+            .with_exposed_port(TEMPO_OTLP_PORT.tcp())
+            .with_wait_for(WaitFor::message_on_stderr("Tempo started"))
+            .with_copy_to(
+                CopyTargetOptions::new("/tmp/tempo.yaml").with_mode(0o644),
+                CopyDataSource::Data(TEMPO_CONFIG.as_bytes().to_vec()),
+            )
+            .with_cmd(["-target=all", "-config.file=/tmp/tempo.yaml"])
+            .with_user("root")
+            .start()
+            .await?,
+    )
 }
 
 async fn start_grafana() -> TestResult<testcontainers::ContainerAsync<GenericImage>> {
     let tag = std::env::var("CRABKA_GRAFANA_IMAGE_TAG").unwrap_or_else(|_| "latest".into());
-    Ok(GenericImage::new("grafana/grafana".to_string(), tag)
-        .with_exposed_port(3000.tcp())
-        .with_wait_for(WaitFor::seconds(5))
-        .with_env_var("GF_SECURITY_ADMIN_PASSWORD", "admin")
-        .with_host(DOCKER_HOST_ALIAS, Host::HostGateway)
-        .start()
-        .await?)
+    Ok(
+        GenericImage::new("mirror.gcr.io/grafana/grafana".to_string(), tag)
+            .with_exposed_port(GRAFANA_HTTP_PORT.tcp())
+            .with_wait_for(WaitFor::seconds(5))
+            .with_env_var("GF_SECURITY_ADMIN_PASSWORD", "admin")
+            .with_host(DOCKER_HOST_ALIAS, Host::HostGateway)
+            .start()
+            .await?,
+    )
 }
 
 async fn mapped_base_url(
@@ -1113,19 +1118,22 @@ fn assert_trace_shape_matches(tempo: &JsonValue, crabka: &JsonValue) {
 }
 
 fn assert_search_shape_matches(tempo: &JsonValue, crabka: &JsonValue) {
-    assert!(
+    check!(
         tempo["traces"]
             .as_array()
             .is_some_and(|traces| !traces.is_empty()),
-        "Tempo search response: {tempo}"
+        "search shape mismatch; Tempo search response: {tempo}; Crabka search response: {crabka}"
     );
-    assert!(
+    check!(
         crabka["traces"]
             .as_array()
             .is_some_and(|traces| !traces.is_empty()),
-        "Crabka search response: {crabka}"
+        "search shape mismatch; Tempo search response: {tempo}; Crabka search response: {crabka}"
     );
-    assert!(crabka["traces"][0]["traceID"] == TRACE_ID_HEX);
+    check!(
+        crabka["traces"][0]["traceID"].as_str() == Some(TRACE_ID_HEX),
+        "search shape mismatch; Tempo search response: {tempo}; Crabka search response: {crabka}"
+    );
 }
 
 fn assert_search_contains_span_id(search: &JsonValue, span_id: &str) {

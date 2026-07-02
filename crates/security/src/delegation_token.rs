@@ -44,15 +44,15 @@ pub fn compute_token_hmac(secret_key: &[u8], token_id: &str) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
 
     #[test]
     fn secret_bytes_accessors() {
         let s = SecretBytes::new(Bytes::from_static(b"abc"));
-        assert!(s.as_bytes() == b"abc");
-        assert!(s.len() == 3);
-        assert!(!s.is_empty());
-        assert!(SecretBytes::new(Bytes::new()).is_empty());
+        check!(s.as_bytes() == b"abc");
+        check!(s.len() == 3);
+        check!(!s.is_empty());
+        check!(SecretBytes::new(Bytes::new()).is_empty());
     }
 
     #[test]

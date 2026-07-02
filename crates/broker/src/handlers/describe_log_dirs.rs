@@ -212,7 +212,7 @@ fn cluster_describe_denied(
             principal,
             host,
             resource_type: ResourceType::Cluster,
-            resource_name: "kafka-cluster",
+            resource_name: crate::handlers::acl_wire::CLUSTER_RESOURCE_NAME,
             operation: AclOperation::Describe,
         },
     ) == AuthorizationResult::Deny
@@ -338,10 +338,14 @@ mod tests {
         let mut m = BTreeMap::new();
         m.insert("t".to_string(), vec![0, 2]);
         let f = Filter::Topics(m);
-        assert!(f.allows("t", 0));
-        assert!(!f.allows("t", 1));
-        assert!(f.allows("t", 2));
-        assert!(!f.allows("other", 0));
+        for (topic, partition, want) in [
+            ("t", 0, true),
+            ("t", 1, false),
+            ("t", 2, true),
+            ("other", 0, false),
+        ] {
+            assert!(f.allows(topic, partition) == want, "{topic}-{partition}");
+        }
     }
 
     #[test]
@@ -349,9 +353,9 @@ mod tests {
         let mut m = BTreeMap::new();
         m.insert("t".to_string(), vec![]);
         let f = Filter::Topics(m);
-        assert!(f.allows("t", 0));
-        assert!(f.allows("t", 7));
-        assert!(!f.allows("u", 0));
+        for (topic, partition, want) in [("t", 0, true), ("t", 7, true), ("u", 0, false)] {
+            assert!(f.allows(topic, partition) == want, "{topic}-{partition}");
+        }
     }
 
     /// On unix, `statvfs` against any tempdir must return positive,
@@ -362,17 +366,18 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn log_dir_capacity_returns_sensible_unix_numbers() {
+        use assert2::check;
         let tmp = tempfile::tempdir().unwrap();
         let (total, usable) = log_dir_capacity(tmp.path());
-        assert!(
+        check!(
             total > 0,
             "total_bytes must be positive on unix tempdir, got {total}"
         );
-        assert!(
+        check!(
             usable > 0,
             "usable_bytes must be positive on unix tempdir, got {usable}"
         );
-        assert!(
+        check!(
             total >= usable,
             "total_bytes ({total}) must be ≥ usable_bytes ({usable})",
         );

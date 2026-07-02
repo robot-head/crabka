@@ -346,9 +346,13 @@ mod tests {
     /// (or a blanket mutation of `operation_str`) is caught.
     #[test]
     fn operation_str_maps_kafka_names() {
-        assert!(operation_str(AclOperation::Read) == "Read");
-        assert!(operation_str(AclOperation::Write) == "Write");
-        assert!(operation_str(AclOperation::TwoPhaseCommit) == "TwoPhaseCommit");
+        for (op, want) in [
+            (AclOperation::Read, "Read"),
+            (AclOperation::Write, "Write"),
+            (AclOperation::TwoPhaseCommit, "TwoPhaseCommit"),
+        ] {
+            assert!(operation_str(op) == want, "{op:?}");
+        }
     }
 
     fn host() -> SocketAddr {

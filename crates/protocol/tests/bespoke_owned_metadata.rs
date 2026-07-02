@@ -20,8 +20,14 @@ fn owned_metadata_request_v0_topics_none_encodes_as_empty_array() {
     let decoded = MetadataRequest::decode(&mut cur, MIN_VERSION).unwrap();
     assert!(cur.is_empty(), "decoder left trailing bytes");
     // v0: topics=None encodes as empty array; decoded will come back as Some([])
-    assert!(decoded.topics == Some(vec![]));
-    assert!(decoded.allow_auto_topic_creation == req.allow_auto_topic_creation);
+    let expected = MetadataRequest {
+        topics: Some(vec![]),
+        allow_auto_topic_creation: true,
+        include_cluster_authorized_operations: false,
+        include_topic_authorized_operations: false,
+        unknown_tagged_fields: UnknownTaggedFields::default(),
+    };
+    assert!(decoded == expected);
 }
 
 #[test]

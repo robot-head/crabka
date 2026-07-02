@@ -13,7 +13,7 @@
 //!   2. A Produce to a partition that lives on the still-online `primary` dir
 //!      returns error code 0.
 
-use assert2::assert;
+use assert2::{assert, check};
 use std::io;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -348,7 +348,7 @@ async fn assign_replicas_to_dirs_reports_and_echoes() {
     let mut cur: &[u8] = &resp_bytes;
     let resp = AssignReplicasToDirsResponse::decode(&mut cur, VERSION).unwrap();
 
-    assert!(
+    check!(
         resp.error_code == 0,
         "AssignReplicasToDirs top-level error_code must be NONE (0), got {}",
         resp.error_code
@@ -357,7 +357,7 @@ async fn assign_replicas_to_dirs_reports_and_echoes() {
         !resp.directories.is_empty(),
         "response must echo at least one directory"
     );
-    assert!(
+    check!(
         resp.directories[0].topics[0].partitions[0].error_code == 0,
         "per-partition error_code must be NONE (0)"
     );

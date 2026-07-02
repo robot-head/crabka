@@ -967,7 +967,7 @@ fn chrono_now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
 
     use crate::coordinator::unified::GroupCoordinator;
     use crate::coordinator::unified::config::NextGenConfig;
@@ -1255,8 +1255,8 @@ mod tests {
         assert!(restored.group_epoch == 3);
         assert!(restored.target.epoch == 3);
         let rm = restored.members.get("m1").expect("member restored");
-        assert!(rm.member_epoch == 3);
-        assert!(rm.assigned_partitions[&id] == vec![0, 1]);
-        assert!(restored.target.per_member["m1"][&id] == vec![0, 1]);
+        check!(rm.member_epoch == 3);
+        check!(rm.assigned_partitions[&id] == vec![0, 1]);
+        check!(restored.target.per_member["m1"][&id] == vec![0, 1]);
     }
 }

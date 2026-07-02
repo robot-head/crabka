@@ -30,15 +30,41 @@ use crate::wire::{
     CrabkaMetadataFetchResponse, CrabkaSubmitChangeRequest, CrabkaSubmitChangeResponse,
 };
 
+/// Kafka request-header `api_key` (`RequestHeader` field 1).
+type ApiKey = i16;
+/// Kafka request-header `api_version` (`RequestHeader` field 2).
+type ApiVersion = i16;
+/// Kafka request-header `correlation_id`, echoed back in the response header.
+type CorrelationId = i32;
+
 /// Kafka's `ApiVersions` API key. The controller TCP listener answers this
 /// because `crabka_client_core::Connection::connect` performs an `ApiVersions`
 /// handshake before any other request.
-const API_KEY_API_VERSIONS: i16 = 18;
+const API_KEY_API_VERSIONS: ApiKey = 18;
+
+/// Highest `ApiVersions` request version this listener speaks: the advertised
+/// max in the `api_keys` table and the clamp applied to the response body codec
+/// (JVM controllers dial at v4; Crabka's own client at v0).
+const API_VERSIONS_MAX_VERSION: ApiVersion = 4;
 
 /// `DescribeCluster` (KIP-919) — served on the controller listener so an
 /// `AdminClient` bootstrapped with `--bootstrap-controller` can discover the
 /// quorum's controller (or broker) endpoints directly from the leader.
-const API_KEY_DESCRIBE_CLUSTER: i16 = 60;
+const API_KEY_DESCRIBE_CLUSTER: ApiKey = 60;
+
+/// `CrabkaSubmitChangeResponse::error_code`: the change was applied.
+const SUBMIT_CHANGE_APPLIED: i16 = 0;
+/// `CrabkaSubmitChangeResponse::error_code`: this node is not the leader;
+/// consult `leader_hint`.
+const SUBMIT_CHANGE_NOT_LEADER: i16 = 1;
+/// `CrabkaSubmitChangeResponse::error_code`: metadata validation rejected the
+/// records (also returned when the wincode body fails to decode).
+const SUBMIT_CHANGE_REJECTED: i16 = 2;
+/// `CrabkaSubmitChangeResponse::error_code`: any other engine failure.
+const SUBMIT_CHANGE_FAILED: i16 = 3;
+
+/// `leader_hint` sentinel meaning "the current leader is unknown".
+const LEADER_HINT_UNKNOWN: i64 = -1;
 
 pub(crate) async fn run(
     listener: TcpListener,
@@ -160,7 +186,9 @@ fn require_remaining(available: usize, required: usize) -> Result<(), RaftError>
     }
 }
 
-async fn read_one_request<S>(stream: &mut S) -> Result<(i16, i16, i32, Bytes), RaftError>
+async fn read_one_request<S>(
+    stream: &mut S,
+) -> Result<(ApiKey, ApiVersion, CorrelationId, Bytes), RaftError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -203,7 +231,7 @@ where
 
 async fn write_response<S>(
     stream: &mut S,
-    correlation_id: i32,
+    correlation_id: CorrelationId,
     body: Bytes,
 ) -> Result<(), RaftError>
 where
@@ -226,7 +254,7 @@ where
 /// `ApiVersions` v0 path, which decodes a `ResponseHeader v0`.
 async fn write_response_no_tagged_fields<S>(
     stream: &mut S,
-    correlation_id: i32,
+    correlation_id: CorrelationId,
     body: Bytes,
 ) -> Result<(), RaftError>
 where
@@ -246,7 +274,7 @@ where
 
 /// `ApiVersionsResponse` advertising the controller-listener APIs.
 ///
-/// A real `apache/kafka:4.0.0` controller dials peers with `ApiVersions v4` over a
+/// A real `mirror.gcr.io/apache/kafka:4.0.0` controller dials peers with `ApiVersions v4` over a
 /// flexible (v2) request header, then consults the returned table to decide
 /// which version of `Vote`/`Fetch`/etc. to send. An EMPTY `api_keys` list made
 /// the JVM treat every raft RPC as `UNSUPPORTED_VERSION` and refuse to send
@@ -258,24 +286,27 @@ where
 /// `throttle_time_ms(i32)`, response-level `tagged(0)`. Per the documented Kafka
 /// asymmetry, the *response header* stays v0 (no leading tagged-fields byte) —
 /// so this is written via [`write_response_no_tagged_fields`].
-fn api_versions_response_body(req_version: i16) -> Bytes {
+fn api_versions_response_body(req_version: ApiVersion) -> Bytes {
     use crabka_protocol::Encode;
-    use crabka_protocol::owned::api_versions_response::{ApiVersion, ApiVersionsResponse};
+    use crabka_protocol::owned::api_versions_response::{
+        ApiVersion as ApiVersionEntry, ApiVersionsResponse,
+    };
     // (api_key, max_version) — min_version/error_code/throttle_time_ms are all
-    // protocol defaults of 0, so leave them implicit.
-    const KEYS: &[(i16, i16)] = &[
-        (1, 17), // Fetch
-        (18, 4), // ApiVersions
-        (52, 2), // Vote
-        (53, 1), // BeginQuorumEpoch
-        (54, 1), // EndQuorumEpoch
-        (59, 1), // FetchSnapshot
-        (60, 2), // DescribeCluster (KIP-919)
+    // protocol defaults of 0, so leave them implicit. Each max_version is the
+    // highest version the engine's codec speaks for that API.
+    const KEYS: &[(ApiKey, ApiVersion)] = &[
+        (api_key::FETCH, 17),
+        (API_KEY_API_VERSIONS, API_VERSIONS_MAX_VERSION),
+        (api_key::VOTE, 2),
+        (api_key::BEGIN_QUORUM_EPOCH, 1),
+        (api_key::END_QUORUM_EPOCH, 1),
+        (api_key::FETCH_SNAPSHOT, 1),
+        (API_KEY_DESCRIBE_CLUSTER, 2),
     ];
     let resp = ApiVersionsResponse {
         api_keys: KEYS
             .iter()
-            .map(|&(api_key, max_version)| ApiVersion {
+            .map(|&(api_key, max_version)| ApiVersionEntry {
                 api_key,
                 max_version,
                 ..Default::default()
@@ -288,7 +319,7 @@ fn api_versions_response_body(req_version: i16) -> Bytes {
     // v0-shaped body, req v>=3 → flexible (compact) body. The v0 ApiVersions
     // response HEADER asymmetry lives in the framing (`write_response_no_tagged_fields`),
     // not here.
-    let body_version = req_version.clamp(0, 4);
+    let body_version = req_version.clamp(0, API_VERSIONS_MAX_VERSION);
     let mut buf = BytesMut::new();
     let _ = resp.encode(&mut buf, body_version);
     buf.freeze()
@@ -302,7 +333,7 @@ fn api_versions_response_body(req_version: i16) -> Bytes {
 /// request/response wire types.
 #[tracing::instrument(level = "debug", skip_all, fields(node = engine.node_id(), api_key = api_key_n), err)]
 async fn dispatch(
-    api_key_n: i16,
+    api_key_n: ApiKey,
     body: Bytes,
     engine: &KraftController,
 ) -> Result<Bytes, RaftError> {
@@ -358,8 +389,8 @@ async fn dispatch_submit_change(body: &[u8], engine: &KraftController) -> Result
         Err(e) => {
             tracing::warn!(error = %e, "submit-change body decode failed");
             let resp = CrabkaSubmitChangeResponse {
-                error_code: 2,
-                leader_hint: -1,
+                error_code: SUBMIT_CHANGE_REJECTED,
+                leader_hint: LEADER_HINT_UNKNOWN,
             };
             let mut out = Vec::with_capacity(16);
             resp.encode_v0(&mut out);
@@ -368,24 +399,24 @@ async fn dispatch_submit_change(body: &[u8], engine: &KraftController) -> Result
     };
     let resp = match engine.submit_change(records).await {
         Ok(()) => CrabkaSubmitChangeResponse {
-            error_code: 0,
-            leader_hint: -1,
+            error_code: SUBMIT_CHANGE_APPLIED,
+            leader_hint: LEADER_HINT_UNKNOWN,
         },
         Err(RaftError::Metadata(_)) => CrabkaSubmitChangeResponse {
-            error_code: 2,
-            leader_hint: -1,
+            error_code: SUBMIT_CHANGE_REJECTED,
+            leader_hint: LEADER_HINT_UNKNOWN,
         },
         Err(RaftError::NotLeader { current_leader }) => CrabkaSubmitChangeResponse {
-            error_code: 1,
+            error_code: SUBMIT_CHANGE_NOT_LEADER,
             leader_hint: current_leader
                 .and_then(|l| i64::try_from(l).ok())
-                .unwrap_or(-1),
+                .unwrap_or(LEADER_HINT_UNKNOWN),
         },
         Err(e) => {
             tracing::warn!(error = ?e, "submit-change failed");
             CrabkaSubmitChangeResponse {
-                error_code: 3,
-                leader_hint: -1,
+                error_code: SUBMIT_CHANGE_FAILED,
+                leader_hint: LEADER_HINT_UNKNOWN,
             }
         }
     };
@@ -411,7 +442,7 @@ async fn dispatch_metadata_fetch(
         .ok()
         .and_then(|qs| qs.leader_id)
         .and_then(|l| i64::try_from(l).ok())
-        .unwrap_or(-1);
+        .unwrap_or(LEADER_HINT_UNKNOWN);
 
     let resp = CrabkaMetadataFetchResponse {
         error_code: 0,
@@ -432,7 +463,7 @@ async fn dispatch_metadata_fetch(
 /// listener carries no principal/ACL context (it is the inter-node trust
 /// boundary, like `metadata_fetch`), so there is no auth gate.
 async fn describe_cluster_response_body(
-    version: i16,
+    version: ApiVersion,
     body: &[u8],
     engine: &KraftController,
 ) -> Result<Bytes, RaftError> {
@@ -495,7 +526,7 @@ async fn describe_cluster_response_body(
 /// Encode a `DescribeClusterResponse` body for `version` from already-projected
 /// node tuples. Pure (no engine), so the projection-and-encode is unit-testable.
 fn build_describe_cluster_body(
-    version: i16,
+    version: ApiVersion,
     endpoint_type: i8,
     voters: &[(i32, String, i32)],
     brokers: &[(i32, String, i32, Option<String>)],
@@ -550,7 +581,7 @@ fn build_describe_cluster_body(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use bytes::{BufMut, Bytes};
     use crabka_metadata::{MetadataRecord, TopicRecord};
     use crabka_protocol::Decode;
@@ -712,142 +743,107 @@ mod tests {
 
     #[test]
     fn is_eof_only_matches_unexpected_eof_io_errors() {
-        let eof = super::RaftError::Storage(crabka_log::LogError::Io(std::io::Error::new(
-            std::io::ErrorKind::UnexpectedEof,
-            "eof",
-        )));
-        assert!(super::is_eof(&eof));
-
-        let broken_pipe = super::RaftError::Storage(crabka_log::LogError::Io(std::io::Error::new(
-            std::io::ErrorKind::BrokenPipe,
-            "broken",
-        )));
-        assert!(!super::is_eof(&broken_pipe));
-
-        let protocol =
-            super::RaftError::Protocol(crabka_protocol::ProtocolError::InvalidValue("not io"));
-        assert!(!super::is_eof(&protocol));
+        let io_error = |kind| {
+            super::RaftError::Storage(crabka_log::LogError::Io(std::io::Error::new(kind, "io")))
+        };
+        let cases = [
+            (io_error(std::io::ErrorKind::UnexpectedEof), true),
+            (io_error(std::io::ErrorKind::BrokenPipe), false),
+            (
+                super::RaftError::Protocol(crabka_protocol::ProtocolError::InvalidValue("not io")),
+                false,
+            ),
+        ];
+        for (err, want) in cases {
+            assert!(super::is_eof(&err) == want, "err: {err:?}");
+        }
     }
 
     #[tokio::test]
-    async fn read_one_request_decodes_flexible_header_and_body() {
-        let (mut client, mut server) = tokio::io::duplex(128);
-        let frame = request_frame(52, 2, 123, "raft-client", b"payload");
-        let writer = tokio::spawn(async move {
-            client.write_all(&frame).await.unwrap();
-        });
+    async fn read_one_request_decodes_header_variants() {
+        let cases = [
+            (
+                "flexible header with client id and body",
+                request_frame(52, 2, 123, "raft-client", b"payload"),
+                b"payload".as_slice(),
+            ),
+            (
+                "null client id with no body",
+                raw_request_frame(52, 2, 123, -1, &[], &[]),
+                b"".as_slice(),
+            ),
+        ];
+        for (case, frame, want_body) in cases {
+            let (mut client, mut server) = tokio::io::duplex(128);
+            let writer = tokio::spawn(async move {
+                client.write_all(&frame).await.unwrap();
+            });
 
-        let (api_key, api_version, correlation_id, body) =
-            super::read_one_request(&mut server).await.expect("decode");
+            let (api_key, api_version, correlation_id, body) =
+                super::read_one_request(&mut server).await.expect("decode");
 
-        assert!(api_key == 52);
-        assert!(api_version == 2);
-        assert!(correlation_id == 123);
-        assert!(body.as_ref() == b"payload");
-        writer.await.unwrap();
+            check!(api_key == 52, "case: {case}");
+            check!(api_version == 2, "case: {case}");
+            check!(correlation_id == 123, "case: {case}");
+            check!(body.as_ref() == want_body, "case: {case}");
+            writer.await.unwrap();
+        }
     }
 
     #[tokio::test]
-    async fn read_one_request_reports_fixed_header_shortfall() {
-        let (mut client, mut server) = tokio::io::duplex(128);
-        let frame = length_prefixed(&[0, 52, 0, 2]);
-        let writer = tokio::spawn(async move {
-            client.write_all(&frame).await.unwrap();
-        });
+    async fn read_one_request_reports_header_shortfalls() {
+        let partial_fixed = {
+            let mut f = bytes::BytesMut::new();
+            f.put_i16(52);
+            f.put_i16(2);
+            f.put_i32(123);
+            f
+        };
+        let mut partial_client_id_len = partial_fixed.clone();
+        partial_client_id_len.put_u8(0x80);
+        let cases = [
+            // Frame ends inside the 8-byte fixed header.
+            ("short fixed header", length_prefixed(&[0, 52, 0, 2]), 4),
+            // Fixed header complete, client-id length missing entirely.
+            (
+                "missing client id length",
+                length_prefixed(&partial_fixed),
+                2,
+            ),
+            // Only one byte of the 2-byte client-id length present.
+            (
+                "partial client id length",
+                length_prefixed(&partial_client_id_len),
+                1,
+            ),
+            // Client-id length declares 4 bytes; only 1 present.
+            (
+                "client id bytes shortfall",
+                raw_request_frame(52, 2, 123, 4, b"x", &[]),
+                3,
+            ),
+        ];
+        for (case, frame, needed) in cases {
+            let (mut client, mut server) = tokio::io::duplex(128);
+            let writer = tokio::spawn(async move {
+                client.write_all(&frame).await.unwrap();
+            });
 
-        let err = super::read_one_request(&mut server)
-            .await
-            .expect_err("short fixed header");
+            let err = super::read_one_request(&mut server)
+                .await
+                .expect_err("short frame");
 
-        assert!(matches!(
-            err,
-            super::RaftError::Protocol(crabka_protocol::ProtocolError::UnexpectedEof { needed: 4 })
-        ));
-        writer.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn read_one_request_reports_client_id_length_shortfall() {
-        let (mut client, mut server) = tokio::io::duplex(128);
-        let mut fixed = bytes::BytesMut::new();
-        fixed.put_i16(52);
-        fixed.put_i16(2);
-        fixed.put_i32(123);
-        let frame = length_prefixed(&fixed);
-        let writer = tokio::spawn(async move {
-            client.write_all(&frame).await.unwrap();
-        });
-
-        let err = super::read_one_request(&mut server)
-            .await
-            .expect_err("missing client id length");
-
-        assert!(matches!(
-            err,
-            super::RaftError::Protocol(crabka_protocol::ProtocolError::UnexpectedEof { needed: 2 })
-        ));
-        writer.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn read_one_request_accepts_null_client_id_with_no_body() {
-        let (mut client, mut server) = tokio::io::duplex(128);
-        let frame = raw_request_frame(52, 2, 123, -1, &[], &[]);
-        let writer = tokio::spawn(async move {
-            client.write_all(&frame).await.unwrap();
-        });
-
-        let (api_key, api_version, correlation_id, body) =
-            super::read_one_request(&mut server).await.expect("decode");
-
-        assert!(api_key == 52);
-        assert!(api_version == 2);
-        assert!(correlation_id == 123);
-        assert!(body.is_empty());
-        writer.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn read_one_request_reports_partial_client_id_length_shortfall() {
-        let (mut client, mut server) = tokio::io::duplex(128);
-        let mut fixed = bytes::BytesMut::new();
-        fixed.put_i16(52);
-        fixed.put_i16(2);
-        fixed.put_i32(123);
-        fixed.put_u8(0x80);
-        let frame = length_prefixed(&fixed);
-        let writer = tokio::spawn(async move {
-            client.write_all(&frame).await.unwrap();
-        });
-
-        let err = super::read_one_request(&mut server)
-            .await
-            .expect_err("partial client id length");
-
-        assert!(matches!(
-            err,
-            super::RaftError::Protocol(crabka_protocol::ProtocolError::UnexpectedEof { needed: 1 })
-        ));
-        writer.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn read_one_request_reports_client_id_bytes_shortfall() {
-        let (mut client, mut server) = tokio::io::duplex(128);
-        let frame = raw_request_frame(52, 2, 123, 4, b"x", &[]);
-        let writer = tokio::spawn(async move {
-            client.write_all(&frame).await.unwrap();
-        });
-
-        let err = super::read_one_request(&mut server)
-            .await
-            .expect_err("partial client id");
-
-        assert!(matches!(
-            err,
-            super::RaftError::Protocol(crabka_protocol::ProtocolError::UnexpectedEof { needed: 3 })
-        ));
-        writer.await.unwrap();
+            assert!(
+                matches!(
+                    err,
+                    super::RaftError::Protocol(
+                        crabka_protocol::ProtocolError::UnexpectedEof { needed: n }
+                    ) if n == needed
+                ),
+                "case: {case}, err: {err:?}"
+            );
+            writer.await.unwrap();
+        }
     }
 
     #[tokio::test]
@@ -994,10 +990,10 @@ mod tests {
             .expect("metadata fetch dispatch");
 
         let resp = decode_metadata_fetch_response(&body);
-        assert!(resp.error_code == 0);
-        assert!(resp.leader_hint == -1);
-        assert!(resp.high_watermark == 0);
-        assert!(resp.records.is_empty());
+        check!(resp.error_code == 0);
+        check!(resp.leader_hint == -1);
+        check!(resp.high_watermark == 0);
+        check!(resp.records.is_empty());
     }
 
     #[tokio::test]
@@ -1018,10 +1014,10 @@ mod tests {
         .expect("metadata fetch dispatch");
 
         let resp = decode_metadata_fetch_response(&body);
-        assert!(resp.error_code == 0);
-        assert!(resp.leader_hint == 1);
-        assert!(resp.high_watermark >= 1);
-        assert!(!resp.records.is_empty());
+        check!(resp.error_code == 0);
+        check!(resp.leader_hint == 1);
+        check!(resp.high_watermark >= 1);
+        check!(!resp.records.is_empty());
     }
 
     #[tokio::test]
@@ -1035,12 +1031,12 @@ mod tests {
 
         let mut cur = &body[..];
         let resp = DescribeClusterResponse::decode(&mut cur, 1).expect("describe response");
-        assert!(cur.is_empty());
-        assert!(resp.controller_id == -1);
-        assert!(resp.brokers.len() == 1);
-        assert!(resp.brokers[0].broker_id == -1);
-        assert!(resp.brokers[0].host.is_empty());
-        assert!(resp.brokers[0].port == -1);
+        check!(cur.is_empty());
+        check!(resp.controller_id == -1);
+        check!(resp.brokers.len() == 1);
+        check!(resp.brokers[0].broker_id == -1);
+        check!(resp.brokers[0].host.as_str() == "");
+        check!(resp.brokers[0].port == -1);
     }
 
     #[test]
@@ -1098,15 +1094,13 @@ mod tests {
             let mut cur = &body[..];
             let resp = DescribeClusterResponse::decode(&mut cur, version).unwrap();
             assert!(cur.is_empty(), "no trailing bytes (v={version})");
-            assert!(resp.endpoint_type == 2);
-            assert!(resp.cluster_id == "clusterX");
-            assert!(resp.controller_id == 1);
-            assert!(resp.brokers.len() == 2);
-            assert!(
-                resp.brokers[0].broker_id == 1
-                    && resp.brokers[0].host == "c1"
-                    && resp.brokers[0].port == 9093
-            );
+            check!(resp.endpoint_type == 2);
+            check!(resp.cluster_id.as_str() == "clusterX");
+            check!(resp.controller_id == 1);
+            check!(resp.brokers.len() == 2);
+            check!(resp.brokers[0].broker_id == 1);
+            check!(resp.brokers[0].host.as_str() == "c1");
+            check!(resp.brokers[0].port == 9093);
 
             // endpoint_type = BROKERS (1) → broker projection (rack preserved).
             let body =
@@ -1114,14 +1108,12 @@ mod tests {
                     .unwrap();
             let mut cur = &body[..];
             let resp = DescribeClusterResponse::decode(&mut cur, version).unwrap();
-            assert!(resp.endpoint_type == 1);
-            assert!(resp.brokers.len() == 1);
-            assert!(
-                resp.brokers[0].broker_id == 10
-                    && resp.brokers[0].host == "b10"
-                    && resp.brokers[0].port == 9092
-            );
-            assert!(resp.brokers[0].rack.as_deref() == Some("rack-a"));
+            check!(resp.endpoint_type == 1);
+            check!(resp.brokers.len() == 1);
+            check!(resp.brokers[0].broker_id == 10);
+            check!(resp.brokers[0].host.as_str() == "b10");
+            check!(resp.brokers[0].port == 9092);
+            check!(resp.brokers[0].rack.as_deref() == Some("rack-a"));
         }
     }
 }

@@ -140,12 +140,13 @@ mod tests {
         let ms =
             parse_label_selector(r#"{service_name="checkout", env=~"prod|stage", region!="eu"}"#)
                 .unwrap();
-        assert!(ms.len() == 3);
         assert!(
-            ms[0].name == "service_name" && ms[0].op == MatchOp::Eq && ms[0].value == "checkout"
+            ms == vec![
+                LabelMatcher::new("service_name", MatchOp::Eq, "checkout"),
+                LabelMatcher::new("env", MatchOp::Re, "prod|stage"),
+                LabelMatcher::new("region", MatchOp::Neq, "eu"),
+            ]
         );
-        assert!(ms[1].op == MatchOp::Re);
-        assert!(ms[2].op == MatchOp::Neq);
     }
 
     #[test]
@@ -184,22 +185,24 @@ mod tests {
     fn keeps_commas_inside_quoted_matcher_values() {
         let ms = parse_label_selector(r#"{service_name="api,primary",instance="pod-1"}"#).unwrap();
 
-        assert!(ms.len() == 2);
-        assert!(ms[0].name == "service_name");
-        assert!(ms[0].value == "api,primary");
-        assert!(ms[1].name == "instance");
-        assert!(ms[1].value == "pod-1");
+        assert!(
+            ms == vec![
+                LabelMatcher::new("service_name", MatchOp::Eq, "api,primary"),
+                LabelMatcher::new("instance", MatchOp::Eq, "pod-1"),
+            ]
+        );
     }
 
     #[test]
     fn escaped_quotes_do_not_toggle_comma_splitting() {
         let ms = parse_label_selector(r#"{note="say \"hi, there\"",service_name="api"}"#).unwrap();
 
-        assert!(ms.len() == 2);
-        assert!(ms[0].name == "note");
-        assert!(ms[0].value == "say \"hi, there\"");
-        assert!(ms[1].name == "service_name");
-        assert!(ms[1].value == "api");
+        assert!(
+            ms == vec![
+                LabelMatcher::new("note", MatchOp::Eq, "say \"hi, there\""),
+                LabelMatcher::new("service_name", MatchOp::Eq, "api"),
+            ]
+        );
     }
 
     #[test]

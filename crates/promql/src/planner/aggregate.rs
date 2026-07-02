@@ -415,53 +415,40 @@ mod tests {
 
     #[tokio::test]
     async fn count_and_group_yield_floats() {
-        let ctx = SessionContext::new();
-        let leaf = selector_like_leaf(
-            &ctx,
-            &[
-                ("prod", "api", 1.0),
-                ("prod", "db", 2.0),
-                ("canary", "api", 4.0),
-            ],
-        )
-        .await;
-        let count_plan = plan_simple_aggregate(
-            leaf,
-            SimpleAggregateOp::Count,
-            &Grouping::By(vec!["group".into()]),
-        )
-        .unwrap();
-        let got = run(count_plan, &ctx).await;
-        assert!(
-            got == vec![
-                (vec![("group".to_string(), "canary".to_string())], 1.0),
-                (vec![("group".to_string(), "prod".to_string())], 2.0),
-            ]
-        );
-
-        let ctx2 = SessionContext::new();
-        let leaf2 = selector_like_leaf(
-            &ctx2,
-            &[
-                ("prod", "api", 9.0),
-                ("prod", "db", 2.0),
-                ("canary", "api", 4.0),
-            ],
-        )
-        .await;
-        let group_plan = plan_simple_aggregate(
-            leaf2,
-            SimpleAggregateOp::Group,
-            &Grouping::By(vec!["group".into()]),
-        )
-        .unwrap();
-        let got2 = run(group_plan, &ctx2).await;
-        assert!(
-            got2 == vec![
-                (vec![("group".to_string(), "canary".to_string())], 1.0),
-                (vec![("group".to_string(), "prod".to_string())], 1.0),
-            ]
-        );
+        let cases = [
+            (
+                SimpleAggregateOp::Count,
+                [
+                    ("prod", "api", 1.0),
+                    ("prod", "db", 2.0),
+                    ("canary", "api", 4.0),
+                ],
+                vec![
+                    (vec![("group".to_string(), "canary".to_string())], 1.0),
+                    (vec![("group".to_string(), "prod".to_string())], 2.0),
+                ],
+            ),
+            (
+                SimpleAggregateOp::Group,
+                [
+                    ("prod", "api", 9.0),
+                    ("prod", "db", 2.0),
+                    ("canary", "api", 4.0),
+                ],
+                vec![
+                    (vec![("group".to_string(), "canary".to_string())], 1.0),
+                    (vec![("group".to_string(), "prod".to_string())], 1.0),
+                ],
+            ),
+        ];
+        for (op, rows, want) in cases {
+            let ctx = SessionContext::new();
+            let leaf = selector_like_leaf(&ctx, &rows).await;
+            let plan =
+                plan_simple_aggregate(leaf, op, &Grouping::By(vec!["group".into()])).unwrap();
+            let got = run(plan, &ctx).await;
+            assert!(got == want, "case {op:?}");
+        }
     }
 
     #[tokio::test]
@@ -511,81 +498,44 @@ mod tests {
         // A group mixing genuine NaN with finite samples: Prometheus takes the
         // extremum over the non-NaN values (NaN ignored), unlike Arrow's built-in
         // min/max which propagate NaN.
-        let ctx = SessionContext::new();
-        let leaf = selector_like_leaf(
-            &ctx,
-            &[
-                ("prod", "api", f64::NAN),
-                ("prod", "db", 3.0),
-                ("prod", "x", 1.0),
-                ("prod", "y", f64::NAN),
-            ],
-        )
-        .await;
-        let min_plan = plan_simple_aggregate(
-            leaf,
-            SimpleAggregateOp::Min,
-            &Grouping::By(vec!["group".into()]),
-        )
-        .unwrap();
-        let got = run(min_plan, &ctx).await;
-        assert!(got.len() == 1);
-        assert!(got[0].1.to_bits() == 1.0_f64.to_bits());
-
-        let ctx2 = SessionContext::new();
-        let leaf2 = selector_like_leaf(
-            &ctx2,
-            &[
-                ("prod", "api", f64::NAN),
-                ("prod", "db", 3.0),
-                ("prod", "x", 1.0),
-                ("prod", "y", f64::NAN),
-            ],
-        )
-        .await;
-        let max_plan = plan_simple_aggregate(
-            leaf2,
-            SimpleAggregateOp::Max,
-            &Grouping::By(vec!["group".into()]),
-        )
-        .unwrap();
-        let got2 = run(max_plan, &ctx2).await;
-        assert!(got2.len() == 1);
-        assert!(got2[0].1.to_bits() == 3.0_f64.to_bits());
+        for (op, want) in [
+            (SimpleAggregateOp::Min, 1.0_f64),
+            (SimpleAggregateOp::Max, 3.0_f64),
+        ] {
+            let ctx = SessionContext::new();
+            let leaf = selector_like_leaf(
+                &ctx,
+                &[
+                    ("prod", "api", f64::NAN),
+                    ("prod", "db", 3.0),
+                    ("prod", "x", 1.0),
+                    ("prod", "y", f64::NAN),
+                ],
+            )
+            .await;
+            let plan =
+                plan_simple_aggregate(leaf, op, &Grouping::By(vec!["group".into()])).unwrap();
+            let got = run(plan, &ctx).await;
+            assert!(got.len() == 1, "case {op:?}");
+            assert!(got[0].1.to_bits() == want.to_bits(), "case {op:?}");
+        }
     }
 
     #[tokio::test]
     async fn min_max_over_all_nan_group_yield_nan_and_keep_series() {
         // Every sample in the group is NaN: Prometheus keeps the series with a
         // NaN result (it does not drop the group).
-        let ctx = SessionContext::new();
-        let leaf =
-            selector_like_leaf(&ctx, &[("prod", "api", f64::NAN), ("prod", "db", f64::NAN)]).await;
-        let min_plan = plan_simple_aggregate(
-            leaf,
-            SimpleAggregateOp::Min,
-            &Grouping::By(vec!["group".into()]),
-        )
-        .unwrap();
-        let got = run(min_plan, &ctx).await;
-        assert!(got.len() == 1);
-        assert!(got[0].1.is_nan());
-
-        let ctx2 = SessionContext::new();
-        let leaf2 = selector_like_leaf(
-            &ctx2,
-            &[("prod", "api", f64::NAN), ("prod", "db", f64::NAN)],
-        )
-        .await;
-        let max_plan = plan_simple_aggregate(
-            leaf2,
-            SimpleAggregateOp::Max,
-            &Grouping::By(vec!["group".into()]),
-        )
-        .unwrap();
-        let got2 = run(max_plan, &ctx2).await;
-        assert!(got2.len() == 1);
-        assert!(got2[0].1.is_nan());
+        for op in [SimpleAggregateOp::Min, SimpleAggregateOp::Max] {
+            let ctx = SessionContext::new();
+            let leaf =
+                selector_like_leaf(&ctx, &[("prod", "api", f64::NAN), ("prod", "db", f64::NAN)])
+                    .await;
+            let plan =
+                plan_simple_aggregate(leaf, op, &Grouping::By(vec!["group".into()])).unwrap();
+            let got = run(plan, &ctx).await;
+            assert!(got.len() == 1, "case {op:?}");
+            assert!(got[0].1.is_nan(), "case {op:?}");
+        }
     }
 
     #[tokio::test]

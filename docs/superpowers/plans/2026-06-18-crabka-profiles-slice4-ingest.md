@@ -301,7 +301,7 @@ Create `crates/profiles/proto/types/v1/types.proto`:
 ```proto
 syntax = "proto3";
 package types.v1;
-// Vendored from grafana/pyroscope api/types/v1/types.proto @ <PIN A TAG/COMMIT>.
+// Vendored from mirror.gcr.io/grafana/pyroscope api/types/v1/types.proto @ <PIN A TAG/COMMIT>.
 
 message LabelPair {
   string name = 1;
@@ -314,7 +314,7 @@ Create `crates/profiles/proto/push/v1/push.proto`:
 ```proto
 syntax = "proto3";
 package push.v1;
-// Vendored from grafana/pyroscope api/push/v1/push.proto @ <PIN A TAG/COMMIT>.
+// Vendored from mirror.gcr.io/grafana/pyroscope api/push/v1/push.proto @ <PIN A TAG/COMMIT>.
 
 import "types/v1/types.proto";
 
@@ -340,7 +340,7 @@ message RawSample {
 }
 ```
 
-> **Verify field numbers/names against the pinned grafana/pyroscope tag.** `RawSample.raw_profile` @1 (gzipped pprof) and `RawSample.ID` @2 are byte-load-bearing for Alloy `pyroscope.write` compatibility. prost lowercases `ID` → `id`; the round-trip test below pins whatever the generated field name is.
+> **Verify field numbers/names against the pinned mirror.gcr.io/grafana/pyroscope tag.** `RawSample.raw_profile` @1 (gzipped pprof) and `RawSample.ID` @2 are byte-load-bearing for Alloy `pyroscope.write` compatibility. prost lowercases `ID` → `id`; the round-trip test below pins whatever the generated field name is.
 
 - [ ] **Step 2: Vendor the OTLP `v1development` profiles protos (commit-pinned)**
 

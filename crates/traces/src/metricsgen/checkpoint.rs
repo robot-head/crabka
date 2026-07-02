@@ -106,7 +106,7 @@ impl EdgeCheckpointStore for InMemoryCheckpointStore {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+    use assert2::{assert, check};
 
     use super::*;
 
@@ -114,11 +114,9 @@ mod tests {
     fn checkpoint_key_round_trips() {
         let trace = [0x22; 16];
         let key = encode_checkpoint_key("tenant-a", &trace, &[0xAA, 0xBB]);
-        let (tenant, parsed_trace, edge_id) = parse_checkpoint_key(&key).unwrap();
+        let parsed = parse_checkpoint_key(&key).unwrap();
 
-        assert!(tenant == "tenant-a");
-        assert!(parsed_trace == trace);
-        assert!(edge_id == vec![0xAA, 0xBB]);
+        assert_eq!(parsed, ("tenant-a".to_string(), trace, vec![0xAA, 0xBB]));
     }
 
     #[test]
@@ -144,9 +142,8 @@ mod tests {
 
         store.save("t", b"k1", b"");
         let after_tombstone = store.load_all("t");
-        assert!(after_tombstone.len() == 1);
-        assert!(after_tombstone[0].0 == b"k2".to_vec());
-        assert!(store.load_all("other").is_empty());
-        assert!(store.tenants() == vec!["t".to_string()]);
+        assert_eq!(after_tombstone, vec![(b"k2".to_vec(), b"v2".to_vec())]);
+        check!(store.load_all("other").is_empty());
+        check!(store.tenants() == vec!["t".to_string()]);
     }
 }

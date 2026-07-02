@@ -529,8 +529,9 @@ fn build_ack_topics(acks: Vec<(WireUuid, i32, i64, i64, i8)>) -> Vec<Acknowledge
 mod tests {
     use std::sync::Arc;
 
-    use assert2::assert;
+    use assert2::{assert, check};
     use crabka_client_core::Client;
+    use crabka_protocol::tagged_fields::UnknownTaggedFields;
     use tokio::sync::Mutex;
     use tokio_util::sync::CancellationToken;
 
@@ -590,18 +591,23 @@ mod tests {
             vec![topic.clone()],
         );
 
-        assert!(req.group_id == Some("group-a".into()));
-        assert!(req.member_id == Some("member-a".into()));
-        assert!(req.share_session_epoch == 4);
-        assert!(req.max_wait_ms == 250);
-        assert!(req.min_bytes == 1);
-        assert!(req.max_bytes == MAX_BYTES);
-        assert!(req.max_records == MAX_RECORDS);
-        assert!(req.batch_size == MAX_RECORDS);
-        assert!(req.share_acquire_mode == 0);
-        assert!(!req.is_renew_ack);
-        assert!(req.topics == vec![topic]);
-        assert!(req.forgotten_topics_data.is_empty());
+        assert!(
+            req == ShareFetchRequest {
+                group_id: Some("group-a".into()),
+                member_id: Some("member-a".into()),
+                share_session_epoch: 4,
+                max_wait_ms: 250,
+                min_bytes: 1,
+                max_bytes: 52_428_800,
+                max_records: 500,
+                batch_size: 500,
+                share_acquire_mode: 0,
+                is_renew_ack: false,
+                topics: vec![topic],
+                forgotten_topics_data: Vec::new(),
+                unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+            }
+        );
 
         let saturated = build_share_fetch_request(
             "group-a".into(),
@@ -657,25 +663,30 @@ mod tests {
         let req =
             build_share_ack_request("group-a".into(), "member-a".into(), 5, true, topics.clone());
 
-        assert!(req.group_id == Some("group-a".into()));
-        assert!(req.member_id == Some("member-a".into()));
-        assert!(req.share_session_epoch == 5);
-        assert!(req.is_renew_ack);
-        assert!(req.topics == topics);
+        assert!(
+            req == ShareAcknowledgeRequest {
+                group_id: Some("group-a".into()),
+                member_id: Some("member-a".into()),
+                share_session_epoch: 5,
+                is_renew_ack: true,
+                topics,
+                unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+            }
+        );
     }
 
     #[test]
     fn response_and_record_helpers_preserve_boundaries() {
-        assert!(!response_has_error(0));
-        assert!(response_has_error(17));
-        assert!(range_len(10, 12) == 3);
-        assert!(range_len(12, 10) == 0);
-        assert!(offset_in_range(10, 10, 12));
-        assert!(offset_in_range(10, 12, 12));
-        assert!(!offset_in_range(10, 9, 12));
-        assert!(!offset_in_range(10, 13, 12));
-        assert!(record_offset(100, 7) == 107);
-        assert!(record_timestamp(1000, 33) == 1033);
+        check!(!response_has_error(0));
+        check!(response_has_error(17));
+        check!(range_len(10, 12) == 3);
+        check!(range_len(12, 10) == 0);
+        check!(offset_in_range(10, 10, 12));
+        check!(offset_in_range(10, 12, 12));
+        check!(!offset_in_range(10, 9, 12));
+        check!(!offset_in_range(10, 13, 12));
+        check!(record_offset(100, 7) == 107);
+        check!(record_timestamp(1000, 33) == 1033);
     }
 
     #[tokio::test]
@@ -738,9 +749,15 @@ mod tests {
 
         assert!(consumer.prev_delivered.is_empty());
         let batch = only(acks.get(&(id(7), 2)).unwrap());
-        assert!(batch.first_offset == 10);
-        assert!(batch.last_offset == 12);
-        assert!(batch.acknowledge_types == vec![ShareAckType::Accept.wire(); 3]);
+        assert!(
+            *batch
+                == FetchAckBatch {
+                    first_offset: 10,
+                    last_offset: 12,
+                    acknowledge_types: vec![1, 1, 1],
+                    unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                }
+        );
     }
 
     #[tokio::test]
@@ -754,9 +771,15 @@ mod tests {
         assert!(consumer.prev_delivered.is_empty());
         assert!(consumer.pending_acks.is_empty());
         let batch = only(acks.get(&(id(7), 2)).unwrap());
-        assert!(batch.first_offset == 10);
-        assert!(batch.last_offset == 11);
-        assert!(batch.acknowledge_types == vec![ShareAckType::Reject.wire(); 2]);
+        assert!(
+            *batch
+                == FetchAckBatch {
+                    first_offset: 10,
+                    last_offset: 11,
+                    acknowledge_types: vec![3, 3],
+                    unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                }
+        );
     }
 
     #[tokio::test]
@@ -768,9 +791,13 @@ mod tests {
             .await
             .insert(id(8), "topic-b".into());
 
-        assert!(consumer.topic_id_for("topic-a") == id(7));
-        assert!(consumer.topic_id_for("topic-b") == id(8));
-        assert!(consumer.topic_id_for("missing") == WireUuid::default());
+        for (name, expected) in [
+            ("topic-a", id(7)),
+            ("topic-b", id(8)),
+            ("missing", WireUuid::default()),
+        ] {
+            assert!(consumer.topic_id_for(name) == expected, "name: {name}");
+        }
     }
 
     #[test]
@@ -789,14 +816,26 @@ mod tests {
             .find(|part| part.partition_index == 2)
             .unwrap();
         let batch = only(&part.acknowledgement_batches);
-        assert!(batch.first_offset == 10);
-        assert!(batch.last_offset == 12);
-        assert!(batch.acknowledge_types == vec![ShareAckType::Accept.wire(); 3]);
+        assert!(
+            *batch
+                == AckAckBatch {
+                    first_offset: 10,
+                    last_offset: 12,
+                    acknowledge_types: vec![1, 1, 1],
+                    unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                }
+        );
 
         let renew = build_ack_topics(vec![(id(7), 2, 10, 10, 0)]);
         let renew_batch = only(&only(&only(&renew).partitions).acknowledgement_batches);
-        assert!(renew_batch.first_offset == 10);
-        assert!(renew_batch.last_offset == 10);
-        assert!(renew_batch.acknowledge_types.is_empty());
+        assert!(
+            *renew_batch
+                == AckAckBatch {
+                    first_offset: 10,
+                    last_offset: 10,
+                    acknowledge_types: Vec::new(),
+                    unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                }
+        );
     }
 }

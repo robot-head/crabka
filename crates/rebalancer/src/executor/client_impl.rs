@@ -324,6 +324,8 @@ impl ClientFacade for LiveClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::{assert, check};
+    use crabka_protocol::UnknownTaggedFields;
     use crabka_protocol::owned::alter_partition_reassignments_response::{
         AlterPartitionReassignmentsResponse, ReassignablePartitionResponse,
         ReassignableTopicResponse,
@@ -382,7 +384,7 @@ mod tests {
             error_message: Some("top".into()),
             ..Default::default()
         };
-        assert!(
+        check!(
             check_reassign_response(&top)
                 .unwrap_err()
                 .to_string()
@@ -403,41 +405,63 @@ mod tests {
             ..Default::default()
         };
         let err = check_reassign_response(&per_partition).expect_err("partition failure");
-        assert!(err.to_string().contains("orders"));
-        assert!(err.to_string().contains("error_code=9"));
+        check!(err.to_string().contains("orders"));
+        check!(err.to_string().contains("error_code=9"));
     }
 
     #[test]
     fn build_alter_throttle_request_sets_all_resource_fields() {
         let req = build_alter_throttle_request(ConfigOp::Set, &targets(), 1234);
 
-        assert!(req.resources.len() == 3);
-        let leader_broker = req
-            .resources
-            .iter()
-            .find(|r| r.resource_type == RESOURCE_TYPE_BROKER && r.resource_name == "1")
-            .expect("leader broker resource");
-        assert!(leader_broker.configs.len() == 1);
-        assert!(leader_broker.configs[0].name == RATE_KEY_LEADER);
-        assert!(leader_broker.configs[0].config_operation == OP_SET);
-        assert!(leader_broker.configs[0].value.as_deref() == Some("1234"));
-
-        let follower_broker = req
-            .resources
-            .iter()
-            .find(|r| r.resource_type == RESOURCE_TYPE_BROKER && r.resource_name == "2")
-            .expect("follower broker resource");
-        assert!(follower_broker.configs[0].name == RATE_KEY_FOLLOWER);
-
-        let topic = req
-            .resources
-            .iter()
-            .find(|r| r.resource_type == RESOURCE_TYPE_TOPIC && r.resource_name == "orders")
-            .expect("topic resource");
-        let names: Vec<_> = topic.configs.iter().map(|c| c.name.as_str()).collect();
-        assert!(names == vec![REPLICAS_KEY_LEADER, REPLICAS_KEY_FOLLOWER]);
-        assert!(topic.configs[0].value.as_deref() == Some("0:1"));
-        assert!(topic.configs[1].value.as_deref() == Some("0:2"));
+        assert!(
+            req == IncrementalAlterConfigsRequest {
+                resources: vec![
+                    AlterConfigsResource {
+                        resource_type: 4,
+                        resource_name: "1".into(),
+                        configs: vec![AlterableConfig {
+                            name: "leader.replication.throttled.rate".into(),
+                            config_operation: 0,
+                            value: Some("1234".into()),
+                            unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                        }],
+                        unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                    },
+                    AlterConfigsResource {
+                        resource_type: 4,
+                        resource_name: "2".into(),
+                        configs: vec![AlterableConfig {
+                            name: "follower.replication.throttled.rate".into(),
+                            config_operation: 0,
+                            value: Some("1234".into()),
+                            unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                        }],
+                        unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                    },
+                    AlterConfigsResource {
+                        resource_type: 2,
+                        resource_name: "orders".into(),
+                        configs: vec![
+                            AlterableConfig {
+                                name: "leader.replication.throttled.replicas".into(),
+                                config_operation: 0,
+                                value: Some("0:1".into()),
+                                unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                            },
+                            AlterableConfig {
+                                name: "follower.replication.throttled.replicas".into(),
+                                config_operation: 0,
+                                value: Some("0:2".into()),
+                                unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                            },
+                        ],
+                        unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                    },
+                ],
+                validate_only: false,
+                unknown_tagged_fields: UnknownTaggedFields(vec![]),
+            }
+        );
     }
 
     #[test]
@@ -458,14 +482,40 @@ mod tests {
             movement("payments", 0, vec![2], vec![3]),
         ]);
 
-        assert!(req.timeout_ms == 60_000);
-        assert!(req.topics.len() == 2);
-        let orders = req.topics.iter().find(|t| t.name == "orders").unwrap();
-        assert!(orders.partitions.len() == 2);
-        assert!(orders.partitions[0].partition_index == 1);
-        assert!(orders.partitions[0].replicas.as_deref() == Some(&[2, 3][..]));
-        assert!(orders.partitions[1].partition_index == 0);
-        assert!(orders.partitions[1].replicas.as_deref() == Some(&[4][..]));
+        assert!(
+            req == AlterPartitionReassignmentsRequest {
+                timeout_ms: 60_000,
+                allow_replication_factor_change: true,
+                topics: vec![
+                    ReassignableTopic {
+                        name: "orders".into(),
+                        partitions: vec![
+                            ReassignablePartition {
+                                partition_index: 1,
+                                replicas: Some(vec![2, 3]),
+                                unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                            },
+                            ReassignablePartition {
+                                partition_index: 0,
+                                replicas: Some(vec![4]),
+                                unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                            },
+                        ],
+                        unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                    },
+                    ReassignableTopic {
+                        name: "payments".into(),
+                        partitions: vec![ReassignablePartition {
+                            partition_index: 0,
+                            replicas: Some(vec![3]),
+                            unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                        }],
+                        unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                    },
+                ],
+                unknown_tagged_fields: UnknownTaggedFields(vec![]),
+            }
+        );
     }
 
     #[test]
@@ -475,19 +525,32 @@ mod tests {
             ("payments".to_string(), 0),
         ]);
 
-        assert!(req.timeout_ms == 60_000);
         assert!(
-            req.topics
-                .iter()
-                .map(|topic| {
-                    (
-                        topic.name.as_str(),
-                        topic.partitions[0].partition_index,
-                        topic.partitions[0].replicas.as_ref(),
-                    )
-                })
-                .collect::<Vec<_>>()
-                == vec![("orders", 1, None), ("payments", 0, None)]
+            req == AlterPartitionReassignmentsRequest {
+                timeout_ms: 60_000,
+                allow_replication_factor_change: true,
+                topics: vec![
+                    ReassignableTopic {
+                        name: "orders".into(),
+                        partitions: vec![ReassignablePartition {
+                            partition_index: 1,
+                            replicas: None,
+                            unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                        }],
+                        unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                    },
+                    ReassignableTopic {
+                        name: "payments".into(),
+                        partitions: vec![ReassignablePartition {
+                            partition_index: 0,
+                            replicas: None,
+                            unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                        }],
+                        unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                    },
+                ],
+                unknown_tagged_fields: UnknownTaggedFields(vec![]),
+            }
         );
     }
 

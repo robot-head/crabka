@@ -260,6 +260,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn minus_one_renew_period_uses_default_period() {
+        let dir = TempDir::new().unwrap();
+        let controller = test_controller(dir.path().into()).await;
+        let secret = SecretBytes::new(b"k".to_vec());
+        let hmac = vec![0xA1; 32];
+        let now = now_ms();
+        seed_token(
+            &controller,
+            "tok-default-renew",
+            hmac.clone(),
+            kp("alice"),
+            vec![],
+            now - 1_000,
+            now + 60_000,
+            now + 7 * 24 * 60 * 60 * 1_000,
+        )
+        .await;
+
+        let default_period = 120_000;
+        let req = RenewDelegationTokenRequest {
+            hmac: hmac.into(),
+            renew_period_ms: -1,
+            ..Default::default()
+        };
+        let resp = handle(
+            &req,
+            &authed("alice"),
+            Some(&secret),
+            default_period,
+            &*controller,
+            &empty_super_users(),
+        )
+        .await;
+
+        assert!(resp.error_code == 0);
+        let target = now_ms() + default_period;
+        assert!(
+            (resp.expiry_timestamp_ms - target).abs() < 60_000,
+            "expiry {} far from {target}",
+            resp.expiry_timestamp_ms
+        );
+        controller.cancel().await;
+    }
+
+    #[tokio::test]
     async fn success_as_renewer_extends_expiry() {
         let dir = TempDir::new().unwrap();
         let controller = test_controller(dir.path().into()).await;

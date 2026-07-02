@@ -106,7 +106,7 @@ fn metadata_type(value: i32) -> String {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+    use assert2::{assert, check};
     use prost::Message;
 
     use super::*;
@@ -143,9 +143,9 @@ mod tests {
         let decoded = decode_v1(&snappy(&req.encode_to_vec()), 1 << 20).unwrap();
 
         assert!(decoded.len() == 1);
-        assert!(decoded[0].labels.get("__name__") == Some("up"));
-        assert!(decoded[0].samples == vec![DecodedSample::new(1000, 1.0)]);
-        assert!(decoded[0].exemplars[0].labels.get("trace_id") == Some("abc"));
+        check!(decoded[0].labels.get("__name__") == Some("up"));
+        check!(decoded[0].samples == vec![DecodedSample::new(1000, 1.0)]);
+        check!(decoded[0].exemplars[0].labels.get("trace_id") == Some("abc"));
     }
 
     #[test]
@@ -170,8 +170,8 @@ mod tests {
         let decoded = decode_v1(&snappy(&req.encode_to_vec()), 1 << 20).unwrap();
 
         assert!(decoded[0].histograms.len() == 1);
-        assert!(decoded[0].histograms[0].0 == 10);
-        assert!(decoded[0].histograms[0].1.positive_counts == vec![1.0, 3.0]);
+        check!(decoded[0].histograms[0].0 == 10);
+        check!(decoded[0].histograms[0].1.positive_counts == vec![1.0, 3.0]);
     }
 
     #[test]

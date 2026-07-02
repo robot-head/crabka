@@ -409,7 +409,7 @@ pub fn decode_native_histograms(
 #[cfg(test)]
 mod tests {
     use arrow::datatypes::{DataType, Field, Schema};
-    use assert2::assert;
+    use assert2::{assert, check};
 
     use super::*;
 
@@ -460,9 +460,9 @@ mod tests {
 
         let back = decode_native_histograms(&batch).unwrap();
         assert!(back == rows);
-        assert!(back[0].2.custom_values == None);
-        assert!(back[1].2.custom_values == Some(vec![0.5, 1.0, 2.0]));
-        assert!(back[2].2.custom_values == Some(vec![]));
+        check!(back[0].2.custom_values == None);
+        check!(back[1].2.custom_values == Some(vec![0.5, 1.0, 2.0]));
+        check!(back[2].2.custom_values == Some(vec![]));
     }
 
     #[test]

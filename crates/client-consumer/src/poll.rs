@@ -699,9 +699,11 @@ mod offset_advance_tests {
     use std::collections::HashMap;
 
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
+    use crabka_protocol::owned::fetch_request::ReplicaState;
     use crabka_protocol::primitives::uuid::Uuid as WireUuid;
     use crabka_protocol::records::{RecordBatch, RecordsPayload};
+    use crabka_protocol::tagged_fields::UnknownTaggedFields;
 
     fn id(n: u8) -> WireUuid {
         let mut b = [0u8; 16];
@@ -711,14 +713,14 @@ mod offset_advance_tests {
 
     #[test]
     fn fetch_leader_id_uses_known_non_negative_leader_or_bootstrap() {
-        assert!(BOOTSTRAP_LEADER == -1);
-        assert!(UNKNOWN_LEADER_ID == -1);
-        assert!(UNKNOWN_FETCH_OFFSET == -1);
-        assert!(fetch_leader_id(3, true) == 3);
-        assert!(fetch_leader_id(-1, true) == BOOTSTRAP_LEADER);
-        assert!(fetch_leader_id(3, false) == BOOTSTRAP_LEADER);
-        assert!(should_use_bootstrap_leader(BOOTSTRAP_LEADER));
-        assert!(!should_use_bootstrap_leader(3));
+        check!(BOOTSTRAP_LEADER == -1);
+        check!(UNKNOWN_LEADER_ID == -1);
+        check!(UNKNOWN_FETCH_OFFSET == -1);
+        check!(fetch_leader_id(3, true) == 3);
+        check!(fetch_leader_id(-1, true) == BOOTSTRAP_LEADER);
+        check!(fetch_leader_id(3, false) == BOOTSTRAP_LEADER);
+        check!(should_use_bootstrap_leader(BOOTSTRAP_LEADER));
+        check!(!should_use_bootstrap_leader(3));
     }
 
     #[test]
@@ -728,19 +730,19 @@ mod offset_advance_tests {
 
         assert!(fetch_offset_or_unknown(&offsets, &key) == UNKNOWN_FETCH_OFFSET);
         offsets.insert(key.clone(), 42);
-        assert!(fetch_offset_or_unknown(&offsets, &key) == 42);
+        check!(fetch_offset_or_unknown(&offsets, &key) == 42);
 
-        assert!(is_read_committed(IsolationLevel::ReadCommitted));
-        assert!(!is_read_committed(IsolationLevel::ReadUncommitted));
-        assert!(aborted_txn_started(10, 10));
-        assert!(aborted_txn_started(10, 11));
-        assert!(!aborted_txn_started(11, 10));
-        assert!(should_drop_aborted_batch(true, true, true));
-        assert!(!should_drop_aborted_batch(false, true, true));
-        assert!(!should_drop_aborted_batch(true, false, true));
-        assert!(!should_drop_aborted_batch(true, true, false));
-        assert!(record_offset(100, 7) == 107);
-        assert!(record_timestamp(1000, 33) == 1033);
+        check!(is_read_committed(IsolationLevel::ReadCommitted));
+        check!(!is_read_committed(IsolationLevel::ReadUncommitted));
+        check!(aborted_txn_started(10, 10));
+        check!(aborted_txn_started(10, 11));
+        check!(!aborted_txn_started(11, 10));
+        check!(should_drop_aborted_batch(true, true, true));
+        check!(!should_drop_aborted_batch(false, true, true));
+        check!(!should_drop_aborted_batch(true, false, true));
+        check!(!should_drop_aborted_batch(true, true, false));
+        check!(record_offset(100, 7) == 107);
+        check!(record_timestamp(1000, 33) == 1033);
     }
 
     #[test]
@@ -750,28 +752,28 @@ mod offset_advance_tests {
 
         use crabka_client_core::ClientError;
 
-        assert!(is_transient_transport_error(&ClientError::Disconnected));
-        assert!(is_transient_transport_error(&ClientError::Timeout(
+        check!(is_transient_transport_error(&ClientError::Disconnected));
+        check!(is_transient_transport_error(&ClientError::Timeout(
             Duration::from_millis(10)
         )));
-        assert!(is_transient_transport_error(&ClientError::Io(
+        check!(is_transient_transport_error(&ClientError::Io(
             io::Error::new(io::ErrorKind::ConnectionReset, "reset")
         )));
-        assert!(is_transient_transport_error(&ClientError::Connect {
+        check!(is_transient_transport_error(&ClientError::Connect {
             addr: "127.0.0.1:9092".parse().unwrap(),
             source: io::Error::new(io::ErrorKind::ConnectionRefused, "refused"),
         }));
-        assert!(is_transient_poll_error(&ConsumerError::Client(
+        check!(is_transient_poll_error(&ConsumerError::Client(
             ClientError::Connect {
                 addr: "127.0.0.1:9092".parse().unwrap(),
                 source: io::Error::new(io::ErrorKind::ConnectionRefused, "refused"),
             }
         )));
-        assert!(!is_transient_transport_error(&ClientError::Server {
+        check!(!is_transient_transport_error(&ClientError::Server {
             error_code: 6
         }));
-        assert!(!is_transient_poll_error(&ConsumerError::Server(6)));
-        assert!(!is_transient_transport_error(
+        check!(!is_transient_poll_error(&ConsumerError::Server(6)));
+        check!(!is_transient_transport_error(
             &ClientError::IncompatibleVersion {
                 api_key: 1,
                 broker_min: 0,
@@ -785,26 +787,53 @@ mod offset_advance_tests {
     #[test]
     fn build_fetch_request_preserves_topic_partition_and_limits() {
         let topic = build_fetch_topic("topic-a".into(), id(7), vec![(2, 42, 5, 4)], 128 * 1024);
-        assert!(topic.topic == "topic-a");
-        assert!(topic.topic_id == id(7));
-        assert!(topic.partitions.len() == 1);
-        assert!(topic.partitions[0].partition == 2);
-        assert!(topic.partitions[0].fetch_offset == 42);
-        assert!(topic.partitions[0].current_leader_epoch == 5);
-        assert!(topic.partitions[0].last_fetched_epoch == 4);
-        assert!(topic.partitions[0].partition_max_bytes == 128 * 1024);
+        assert!(
+            topic
+                == FetchTopic {
+                    topic: "topic-a".into(),
+                    topic_id: id(7),
+                    partitions: vec![FetchPartition {
+                        partition: 2,
+                        current_leader_epoch: 5,
+                        fetch_offset: 42,
+                        last_fetched_epoch: 4,
+                        log_start_offset: -1,
+                        partition_max_bytes: 128 * 1024,
+                        replica_directory_id: WireUuid::default(),
+                        high_watermark: i64::MAX,
+                        unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                    }],
+                    unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                }
+        );
 
         let req = build_fetch_request(
             123,
             IsolationLevel::ReadCommitted,
             2 * 1024 * 1024,
-            vec![topic],
+            vec![topic.clone()],
         );
-        assert!(req.max_wait_ms == 123);
-        assert!(req.min_bytes == 1);
-        assert!(req.max_bytes == 2 * 1024 * 1024);
-        assert!(req.isolation_level == IsolationLevel::ReadCommitted.wire());
-        assert!(req.topics.len() == 1);
+        assert!(
+            req == FetchRequest {
+                replica_id: -1,
+                max_wait_ms: 123,
+                min_bytes: 1,
+                max_bytes: 2 * 1024 * 1024,
+                isolation_level: 1, // read_committed wire value
+                session_id: 0,
+                session_epoch: -1,
+                topics: vec![topic],
+                forgotten_topics_data: Vec::new(),
+                rack_id: String::new(),
+                cluster_id: None,
+                replica_state: ReplicaState {
+                    replica_id: -1,
+                    replica_epoch: -1,
+                    unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                },
+                unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+            }
+        );
     }
 
     #[test]
@@ -813,11 +842,24 @@ mod offset_advance_tests {
         by_topic.insert("topic-a".to_string(), vec![3]);
         let req = build_latest_offsets_request(by_topic);
 
-        assert!(req.replica_id == -1);
-        assert!(req.topics.len() == 1);
-        assert!(req.topics[0].name == "topic-a");
-        assert!(req.topics[0].partitions[0].partition_index == 3);
-        assert!(req.topics[0].partitions[0].timestamp == -1);
+        assert!(
+            req == ListOffsetsRequest {
+                replica_id: -1,
+                isolation_level: 0,
+                topics: vec![ListOffsetsTopic {
+                    name: "topic-a".into(),
+                    partitions: vec![ListOffsetsPartition {
+                        partition_index: 3,
+                        current_leader_epoch: -1,
+                        timestamp: -1,
+                        unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                    }],
+                    unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                }],
+                timeout_ms: 0,
+                unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+            }
+        );
     }
 
     #[test]

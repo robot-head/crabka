@@ -71,53 +71,94 @@ mod tests {
     use assert2::assert;
 
     #[test]
-    fn consistent_position_is_valid() {
-        // We consumed up to offset 100 at epoch 2; leader says epoch 2 ends at
-        // 150 (still open / ahead). No truncation.
-        assert!(classify(100, 2, 2, 150) == ValidationOutcome::Valid { leader_epoch: 2 });
-    }
-
-    #[test]
-    fn leader_end_at_position_is_still_valid() {
-        assert!(classify(100, 2, 2, 100) == ValidationOutcome::Valid { leader_epoch: 2 });
-    }
-
-    #[test]
-    fn leader_end_zero_is_known_and_valid_for_negative_position() {
-        assert!(classify(-1, 2, 2, 0) == ValidationOutcome::Valid { leader_epoch: 2 });
-    }
-
-    #[test]
-    fn leader_end_below_position_is_truncation() {
-        // Leader's epoch-2 end offset (80) is below our position (100): the
-        // tail we hold was truncated away.
-        assert!(classify(100, 2, 2, 80) == ValidationOutcome::Truncated { safe_offset: 80 });
-    }
-
-    #[test]
-    fn negative_leader_end_alone_truncates_to_zero() {
-        assert!(classify(-3, 2, 2, -2) == ValidationOutcome::Truncated { safe_offset: 0 });
-    }
-
-    #[test]
-    fn older_leader_epoch_is_truncation() {
-        // Leader only knows up to epoch 1 for our offset; our epoch 2 data
-        // diverged.
-        assert!(classify(100, 2, 1, 60) == ValidationOutcome::Truncated { safe_offset: 60 });
-    }
-
-    #[test]
-    fn older_leader_epoch_alone_is_truncation() {
-        assert!(classify(10, 2, 1, 20) == ValidationOutcome::Truncated { safe_offset: 20 });
-    }
-
-    #[test]
-    fn undefined_leader_offset_truncates_to_zero() {
-        assert!(classify(100, 2, -1, -1) == ValidationOutcome::Truncated { safe_offset: 0 });
-    }
-
-    #[test]
-    fn undefined_leader_offset_truncates_even_when_epoch_matches() {
-        assert!(classify(100, 2, 2, -1) == ValidationOutcome::Truncated { safe_offset: 0 });
+    fn classify_decides_validity_or_truncation() {
+        use ValidationOutcome::{Truncated, Valid};
+        // (case, offset, offset_epoch, leader_epoch, leader_end_offset, expected)
+        let cases = [
+            // We consumed up to offset 100 at epoch 2; leader says epoch 2 ends
+            // at 150 (still open / ahead). No truncation.
+            (
+                "consistent position is valid",
+                100,
+                2,
+                2,
+                150,
+                Valid { leader_epoch: 2 },
+            ),
+            (
+                "leader end at position is still valid",
+                100,
+                2,
+                2,
+                100,
+                Valid { leader_epoch: 2 },
+            ),
+            (
+                "leader end zero is known and valid for negative position",
+                -1,
+                2,
+                2,
+                0,
+                Valid { leader_epoch: 2 },
+            ),
+            // Leader's epoch-2 end offset (80) is below our position (100): the
+            // tail we hold was truncated away.
+            (
+                "leader end below position is truncation",
+                100,
+                2,
+                2,
+                80,
+                Truncated { safe_offset: 80 },
+            ),
+            (
+                "negative leader end alone truncates to zero",
+                -3,
+                2,
+                2,
+                -2,
+                Truncated { safe_offset: 0 },
+            ),
+            // Leader only knows up to epoch 1 for our offset; our epoch 2 data
+            // diverged.
+            (
+                "older leader epoch is truncation",
+                100,
+                2,
+                1,
+                60,
+                Truncated { safe_offset: 60 },
+            ),
+            (
+                "older leader epoch alone is truncation",
+                10,
+                2,
+                1,
+                20,
+                Truncated { safe_offset: 20 },
+            ),
+            (
+                "undefined leader offset truncates to zero",
+                100,
+                2,
+                -1,
+                -1,
+                Truncated { safe_offset: 0 },
+            ),
+            (
+                "undefined leader offset truncates even when epoch matches",
+                100,
+                2,
+                2,
+                -1,
+                Truncated { safe_offset: 0 },
+            ),
+        ];
+        for (case, offset, offset_epoch, leader_epoch, leader_end_offset, expected) in cases {
+            assert!(
+                classify(offset, offset_epoch, leader_epoch, leader_end_offset) == expected,
+                "case: {case}"
+            );
+        }
     }
 }

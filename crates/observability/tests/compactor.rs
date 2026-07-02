@@ -4,7 +4,7 @@ use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
 
-use assert2::assert;
+use assert2::{assert, check};
 use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -178,9 +178,9 @@ async fn compactor_writes_block_then_tenant_index_manifest() {
     .await
     .unwrap();
 
-    assert!(descriptor.key == key);
-    assert!(descriptor.fingerprints == BTreeSet::from([api]));
-    assert!(
+    check!(descriptor.key == key);
+    check!(descriptor.fingerprints == BTreeSet::from([api]));
+    check!(
         block_index.match_blocks("tenant-a", TimeRange::new(0, 30).unwrap(), &[api])
             == vec![descriptor.clone()]
     );
@@ -229,15 +229,15 @@ async fn compactor_commits_partition_offset_after_writing_block_and_index() {
     let key = BlockKey::new("tenant-a", 0, 42, 43, TimeRange::new(10, 19).unwrap());
     let api = label_index.insert_series("tenant-a", labels([("app", "api"), ("env", "prod")]));
 
-    assert!(descriptor.key == key);
-    assert!(
+    check!(descriptor.key == key);
+    check!(
         committer.committed
             == vec![WalPosition {
                 partition: 0,
                 offset: 43
             }]
     );
-    assert!(
+    check!(
         block_index.match_blocks("tenant-a", TimeRange::new(0, 30).unwrap(), &[api])
             == vec![descriptor.clone()]
     );
@@ -285,15 +285,15 @@ async fn compactor_decodes_kafka_wal_records_before_writing_block() {
     let key = BlockKey::new("tenant-a", 2, 42, 43, TimeRange::new(10, 19).unwrap());
     let api = label_index.insert_series("tenant-a", labels([("app", "api"), ("env", "prod")]));
 
-    assert!(descriptor.key == key);
-    assert!(
+    check!(descriptor.key == key);
+    check!(
         committer.committed
             == vec![WalPosition {
                 partition: 2,
                 offset: 43
             }]
     );
-    assert!(
+    check!(
         block_index.match_blocks("tenant-a", TimeRange::new(0, 30).unwrap(), &[api])
             == vec![descriptor.clone()]
     );
@@ -358,12 +358,17 @@ async fn compactor_decodes_native_kafka_log_records_from_headers() {
     let rows = read_log_block_from_object_store(&store, &prefix, &key)
         .await
         .unwrap();
-    assert!(rows.len() == 1);
-    assert!(rows[0].line == "api error");
-    assert!(rows[0].structured_metadata == BTreeMap::from([("trace_id".into(), "abc".into())]));
-
     let labels = labels([("app", "api"), ("env", "prod")]);
     let fingerprint = series_fingerprint(&labels);
+    assert!(
+        rows == vec![LogRow::new(
+            fingerprint,
+            1_900_000,
+            "api error",
+            BTreeMap::from([("trace_id".into(), "abc".into())]),
+        )]
+    );
+
     let (loaded_labels, loaded_blocks) = read_all_tenant_shard_indexes(&store, &prefix, "tenant-a")
         .await
         .unwrap();
@@ -399,10 +404,10 @@ async fn compactor_does_not_commit_offset_for_invalid_wal_batch() {
     .await
     .unwrap_err();
 
-    assert!(error.to_string().contains("missing WAL position"));
-    assert!(committer.committed.is_empty());
-    assert!(label_index.label_names("tenant-a").is_empty());
-    assert!(
+    check!(error.to_string().contains("missing WAL position"));
+    check!(committer.committed.is_empty());
+    check!(label_index.label_names("tenant-a").is_empty());
+    check!(
         block_index
             .match_blocks("tenant-a", TimeRange::new(0, 30).unwrap(), &[])
             .is_empty()
@@ -435,14 +440,14 @@ async fn compactor_does_not_commit_offset_for_invalid_kafka_wal_payload() {
     .await
     .unwrap_err();
 
-    assert!(
+    check!(
         error
             .to_string()
             .contains("wal record deserialization failed")
     );
-    assert!(committer.committed.is_empty());
-    assert!(label_index.label_names("tenant-a").is_empty());
-    assert!(
+    check!(committer.committed.is_empty());
+    check!(label_index.label_names("tenant-a").is_empty());
+    check!(
         block_index
             .match_blocks("tenant-a", TimeRange::new(0, 30).unwrap(), &[])
             .is_empty()
@@ -517,13 +522,13 @@ async fn compactor_does_not_commit_polled_batch_when_decode_fails() {
     .await
     .unwrap_err();
 
-    assert!(
+    check!(
         error
             .to_string()
             .contains("wal record deserialization failed")
     );
-    assert!(consumer.committed.is_empty());
-    assert!(label_index.label_names("tenant-a").is_empty());
+    check!(consumer.committed.is_empty());
+    check!(label_index.label_names("tenant-a").is_empty());
 }
 
 #[tokio::test]
@@ -1055,15 +1060,15 @@ async fn compactor_runtime_writes_shard_indexes_without_index_metadata_rewrites(
     .unwrap();
     let api = series_fingerprint(&labels([("app", "api"), ("env", "prod")]));
 
-    assert!(
+    check!(
         manifest_puts == 0,
         "service compactor should not rewrite the full tenant manifest"
     );
-    assert!(
+    check!(
         shard_catalog_puts == 0,
         "service compactor should not rewrite the shard catalog"
     );
-    assert!(
+    check!(
         loaded_blocks.match_blocks("tenant-a", TimeRange::new(0, 30).unwrap(), &[api])
             == descriptors
     );
@@ -1263,16 +1268,26 @@ async fn compactor_runtime_splits_mixed_tenant_wal_batch_into_tenant_blocks() {
     let api_labels = labels([("app", "api"), ("env", "prod")]);
     let api = series_fingerprint(&api_labels);
 
-    assert!(tenant_a_labels.label_values("tenant-a", "app") == BTreeSet::from(["api".into()]));
-    assert!(tenant_b_labels.label_values("tenant-b", "app") == BTreeSet::from(["api".into()]));
-    assert!(
-        tenant_a_blocks.match_blocks("tenant-a", TimeRange::new(0, 30).unwrap(), &[api])
-            == vec![descriptors[0].clone()]
-    );
-    assert!(
-        tenant_b_blocks.match_blocks("tenant-b", TimeRange::new(0, 30).unwrap(), &[api])
-            == vec![descriptors[1].clone()]
-    );
+    for (tenant_labels, tenant_blocks, tenant, descriptor) in [
+        (
+            &tenant_a_labels,
+            &tenant_a_blocks,
+            "tenant-a",
+            &descriptors[0],
+        ),
+        (
+            &tenant_b_labels,
+            &tenant_b_blocks,
+            "tenant-b",
+            &descriptors[1],
+        ),
+    ] {
+        assert!(tenant_labels.label_values(tenant, "app") == BTreeSet::from(["api".into()]));
+        assert!(
+            tenant_blocks.match_blocks(tenant, TimeRange::new(0, 30).unwrap(), &[api])
+                == vec![descriptor.clone()]
+        );
+    }
 }
 
 #[tokio::test]
@@ -1689,8 +1704,9 @@ async fn compactor_service_accumulates_adjacent_small_wal_polls_into_one_block()
     .unwrap();
 
     assert!(descriptors.len() == 1);
-    assert!(descriptors[0].key.first_offset == 42);
-    assert!(descriptors[0].key.last_offset == 43);
+    assert!(
+        descriptors[0].key == BlockKey::new("tenant-a", 6, 42, 43, TimeRange::new(10, 20).unwrap())
+    );
 
     let prefix = ObjectPath::from("observability/logs");
     let rows = read_log_block_from_object_store(&store, &prefix, &descriptors[0].key)

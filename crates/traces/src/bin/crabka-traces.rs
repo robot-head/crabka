@@ -850,7 +850,7 @@ async fn wal_consumer(
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+    use assert2::{assert, check};
     use axum::body::Body;
     use axum::http::{Request, StatusCode as HttpStatusCode};
     use clap::Parser;
@@ -914,10 +914,10 @@ mod tests {
     fn distributor_defaults_include_tempo_push_ports() {
         let cli = Cli::try_parse_from(["crabka-traces", "--target", "distributor"]).unwrap();
 
-        assert!(cli.otlp_http_listen == "127.0.0.1:4318");
-        assert!(cli.jaeger_grpc_listen == "127.0.0.1:14250");
-        assert!(cli.jaeger_http_listen == "127.0.0.1:14268");
-        assert!(cli.zipkin_listen == "127.0.0.1:9411");
+        check!(cli.otlp_http_listen == "127.0.0.1:4318");
+        check!(cli.jaeger_grpc_listen == "127.0.0.1:14250");
+        check!(cli.jaeger_http_listen == "127.0.0.1:14268");
+        check!(cli.zipkin_listen == "127.0.0.1:9411");
     }
 
     #[test]
@@ -935,9 +935,9 @@ mod tests {
         ])
         .unwrap();
 
-        assert!(cli.max_spans_per_request == 123);
-        assert!(cli.max_attr_value_len == 456);
-        assert!(cli.max_decompressed_bytes == 789);
+        check!(cli.max_spans_per_request == 123);
+        check!(cli.max_attr_value_len == 456);
+        check!(cli.max_decompressed_bytes == 789);
     }
 
     #[test]
@@ -990,8 +990,8 @@ mod tests {
         .unwrap();
 
         assert!(matches!(cli.target, Target::BlockBuilder));
-        assert!(cli.block_builder_flush_max_records == 1000);
-        assert!(cli.block_builder_flush_max_age_ms == 30_000);
+        check!(cli.block_builder_flush_max_records == 1000);
+        check!(cli.block_builder_flush_max_age_ms == 30_000);
     }
 
     #[test]
@@ -1010,11 +1010,11 @@ mod tests {
         .unwrap();
 
         let promoted = promoted_attrs_from_cli(&cli).unwrap();
-        assert!(
+        check!(
             promoted[0] == crabka_blockstore::PromotedSpanAttr::string("__resource.service.name")
         );
-        assert!(promoted[1] == crabka_blockstore::PromotedSpanAttr::int("http.status_code"));
-        assert!(promoted[2] == crabka_blockstore::PromotedSpanAttr::string("http.method"));
+        check!(promoted[1] == crabka_blockstore::PromotedSpanAttr::int("http.status_code"));
+        check!(promoted[2] == crabka_blockstore::PromotedSpanAttr::string("http.method"));
     }
 
     #[test]
@@ -1063,8 +1063,8 @@ mod tests {
         .unwrap();
 
         assert!(matches!(cli.target, Target::Querier));
-        assert!(cli.querier_live_store);
-        assert!(cli.retention_ns == 42);
+        check!(cli.querier_live_store);
+        check!(cli.retention_ns == 42);
     }
 
     #[test]
@@ -1103,14 +1103,14 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(response.status() == HttpStatusCode::OK);
+        check!(response.status() == HttpStatusCode::OK);
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(json["status"] == "COMPLETE");
-        assert!(
+        check!(json["status"] == "COMPLETE");
+        check!(
             json["trace"]["resourceSpans"][0]["resource"]["attributes"][0]["key"] == "service.name"
         );
-        assert!(
+        check!(
             json["trace"]["resourceSpans"][0]["scopeSpans"][0]["spans"][0]["name"] == "GET /live"
         );
     }
@@ -1184,10 +1184,10 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        assert!(trace.trace_id == [9; 16]);
-        assert!(trace.root_service_name == "live-api");
-        assert!(trace.spans[0].span_id == [5; 8]);
-        assert!(trace.spans[0].name == "GET /live");
+        check!(trace.trace_id == [9; 16]);
+        check!(trace.root_service_name == "live-api");
+        check!(trace.spans[0].span_id == [5; 8]);
+        check!(trace.spans[0].name == "GET /live");
         server.abort();
     }
 
@@ -1358,13 +1358,13 @@ mod tests {
         .unwrap();
 
         assert!(matches!(cli.target, Target::MetricsGenerator));
-        assert!(cli.remote_write_url.as_deref() == Some("http://mimir.example/api/v1/push"));
-        assert!(cli.collection_interval_secs == Some(30));
-        assert!(cli.max_exemplars_per_series == Some(3));
-        assert!(cli.edge_ttl_secs == Some(20));
-        assert!(cli.edge_store_max_items == Some(1234));
-        assert!(cli.histogram_buckets_ns == Some(vec![1000.0, 2000.0, 5000.0]));
-        assert!(cli.config.as_deref() == Some("metricsgen.yaml"));
+        check!(cli.remote_write_url.as_deref() == Some("http://mimir.example/api/v1/push"));
+        check!(cli.collection_interval_secs == Some(30));
+        check!(cli.max_exemplars_per_series == Some(3));
+        check!(cli.edge_ttl_secs == Some(20));
+        check!(cli.edge_store_max_items == Some(1234));
+        check!(cli.histogram_buckets_ns == Some(vec![1000.0, 2000.0, 5000.0]));
+        check!(cli.config.as_deref() == Some("metricsgen.yaml"));
     }
 
     #[test]
@@ -1379,9 +1379,9 @@ mod tests {
         ])
         .unwrap();
 
-        assert!(cli.enable_target_info);
-        assert!(cli.enable_status_message);
-        assert!(cli.enable_messaging_system_latency);
+        check!(cli.enable_target_info);
+        check!(cli.enable_status_message);
+        check!(cli.enable_messaging_system_latency);
     }
 
     #[test]
@@ -1399,12 +1399,12 @@ mod tests {
 
         apply_metrics_generator_cli_overrides(&mut cfg, &cli);
 
-        assert!(cfg.collection_interval == Duration::from_secs(30));
-        assert!(cfg.max_exemplars_per_series == 5);
-        assert!(cfg.edge_ttl == Duration::from_mins(1));
-        assert!(cfg.edge_store_max_items == 2_000);
-        assert!(cfg.histogram_buckets_ns == vec![1_000.0, 2_000.0]);
-        assert!(cfg.remote_write_url == "http://metrics.example/api/v1/push");
+        check!(cfg.collection_interval == Duration::from_secs(30));
+        check!(cfg.max_exemplars_per_series == 5);
+        check!(cfg.edge_ttl == Duration::from_mins(1));
+        check!(cfg.edge_store_max_items == 2_000);
+        check!(cfg.histogram_buckets_ns == vec![1_000.0, 2_000.0]);
+        check!(cfg.remote_write_url == "http://metrics.example/api/v1/push");
 
         let cli = Cli::try_parse_from([
             "crabka-traces",
@@ -1427,12 +1427,12 @@ mod tests {
 
         apply_metrics_generator_cli_overrides(&mut cfg, &cli);
 
-        assert!(cfg.collection_interval == Duration::from_secs(45));
-        assert!(cfg.max_exemplars_per_series == 2);
-        assert!(cfg.edge_ttl == Duration::from_secs(9));
-        assert!(cfg.edge_store_max_items == 77);
-        assert!(cfg.histogram_buckets_ns == vec![500.0, 1000.0, 2500.0]);
-        assert!(cfg.remote_write_url == "http://override.example/api/v1/push");
+        check!(cfg.collection_interval == Duration::from_secs(45));
+        check!(cfg.max_exemplars_per_series == 2);
+        check!(cfg.edge_ttl == Duration::from_secs(9));
+        check!(cfg.edge_store_max_items == 77);
+        check!(cfg.histogram_buckets_ns == vec![500.0, 1000.0, 2500.0]);
+        check!(cfg.remote_write_url == "http://override.example/api/v1/push");
     }
 
     #[tokio::test]
@@ -1454,8 +1454,8 @@ mod tests {
         .unwrap();
 
         assert!(matches!(cli.target, Target::Querier));
-        assert!(cli.max_trace_spans == 100);
-        assert!(build_querier_router(&cli).await.is_ok());
+        check!(cli.max_trace_spans == 100);
+        check!(build_querier_router(&cli).await.is_ok());
     }
 
     #[tokio::test]
@@ -1470,8 +1470,8 @@ mod tests {
         .unwrap();
 
         assert!(matches!(cli.target, Target::Querier));
-        assert!(cli.max_search_traces == 42);
-        assert!(build_querier_router(&cli).await.is_ok());
+        check!(cli.max_search_traces == 42);
+        check!(build_querier_router(&cli).await.is_ok());
     }
 
     #[test]
@@ -1486,8 +1486,8 @@ mod tests {
         .unwrap();
 
         assert!(matches!(cli.target, Target::Querier));
-        assert!(cli.max_metric_exemplars == 7);
-        assert!(engine_opts_from_cli(&cli).max_exemplars == 7);
+        check!(cli.max_metric_exemplars == 7);
+        check!(engine_opts_from_cli(&cli).max_exemplars == 7);
     }
 
     #[test]
@@ -1519,8 +1519,8 @@ mod tests {
         .unwrap();
 
         assert!(matches!(cli.target, Target::Distributor));
-        assert!(cli.max_ingest_spans_per_second == 42);
-        assert!(cli.ingest_rate_burst == 7);
+        check!(cli.max_ingest_spans_per_second == 42);
+        check!(cli.ingest_rate_burst == 7);
     }
 
     #[test]
@@ -1537,8 +1537,8 @@ mod tests {
         .unwrap();
 
         assert!(matches!(cli.target, Target::Compactor));
-        assert!(cli.compaction_start_ns == 100);
-        assert!(cli.compaction_end_ns == 200);
+        check!(cli.compaction_start_ns == 100);
+        check!(cli.compaction_end_ns == 200);
     }
 
     #[test]
@@ -1552,12 +1552,12 @@ mod tests {
         ])
         .unwrap();
 
-        assert!(cli.object_store_url == "memory:///tempo/traces");
+        check!(cli.object_store_url == "memory:///tempo/traces");
         let configured = build_object_store(&cli).unwrap();
-        assert!(configured.root == Url::parse("memory:///tempo/traces").unwrap());
-        assert!(configured.prefix.to_string() == "tempo/traces");
-        assert!(configured.object_key("index/traces.json") == "tempo/traces/index/traces.json");
-        assert!(
+        check!(configured.root == Url::parse("memory:///tempo/traces").unwrap());
+        check!(configured.prefix.to_string() == "tempo/traces");
+        check!(configured.object_key("index/traces.json") == "tempo/traces/index/traces.json");
+        check!(
             configured.object_key("traces/tenant-a/block.parquet")
                 == "tempo/traces/traces/tenant-a/block.parquet"
         );
@@ -1581,10 +1581,10 @@ mod tests {
         .unwrap();
 
         assert!(matches!(cli.target, Target::QueryFrontend));
-        assert!(cli.querier_url == "http://querier-a.example:3200,http://querier-b.example:3200");
-        assert!(cli.live_frontier_ns == Some(60_000_000_000));
-        assert!(cli.query_queue_depth == 4);
-        assert!(cli.target_bytes_per_job == 4096);
-        assert!(build_query_frontend_router(&cli).await.is_ok());
+        check!(cli.querier_url == "http://querier-a.example:3200,http://querier-b.example:3200");
+        check!(cli.live_frontier_ns == Some(60_000_000_000));
+        check!(cli.query_queue_depth == 4);
+        check!(cli.target_bytes_per_job == 4096);
+        check!(build_query_frontend_router(&cli).await.is_ok());
     }
 }

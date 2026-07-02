@@ -305,7 +305,7 @@ pub struct RunOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
 
     #[test]
     fn stack_broker_pod_regex_distinguishes_stacks() {
@@ -321,19 +321,27 @@ mod tests {
     #[test]
     fn acks_map_to_producer_enum() {
         use crabka_client_producer::Acks as P;
-        assert!(Acks::None.into_producer() == P::Zero);
-        assert!(Acks::Leader.into_producer() == P::One);
-        assert!(Acks::All.into_producer() == P::All);
+        for (acks, want) in [
+            (Acks::None, P::Zero),
+            (Acks::Leader, P::One),
+            (Acks::All, P::All),
+        ] {
+            assert!(acks.into_producer() == want);
+        }
     }
 
     #[test]
     fn compression_maps_to_producer_enum() {
         use crabka_client_producer::Compression as PC;
-        assert!(Compression::None.into_producer() == PC::None);
-        assert!(Compression::Gzip.into_producer() == PC::Gzip);
-        assert!(Compression::Snappy.into_producer() == PC::Snappy);
-        assert!(Compression::Lz4.into_producer() == PC::Lz4);
-        assert!(Compression::Zstd.into_producer() == PC::Zstd);
+        for (compression, want) in [
+            (Compression::None, PC::None),
+            (Compression::Gzip, PC::Gzip),
+            (Compression::Snappy, PC::Snappy),
+            (Compression::Lz4, PC::Lz4),
+            (Compression::Zstd, PC::Zstd),
+        ] {
+            assert!(compression.into_producer() == want);
+        }
     }
 
     #[test]
@@ -361,8 +369,8 @@ duration_s: 60
 warmup_s: 10
 ";
         let s: Scenario = serde_yaml::from_str(y).expect("parse");
-        assert!(s.name == "small-msg-saturate");
-        assert!(s.partitions == 6);
+        check!(s.name == "small-msg-saturate");
+        check!(s.partitions == 6);
         assert!(matches!(s.mode, LoadMode::Saturate));
     }
 

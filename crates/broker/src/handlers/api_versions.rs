@@ -24,6 +24,10 @@ use crate::broker::Broker;
 use crate::codes;
 use crate::error::BrokerError;
 
+/// First `ApiVersions` request version that carries the KIP-511
+/// `client_software_name` / `client_software_version` fields.
+const CLIENT_INFO_MIN_VERSION: i16 = 3;
+
 // KIP-584 feature surface. `supported_features` advertises `metadata.version`
 // over the full Kafka-faithful range MIN=7 (3.3-IV3) .. MAX=25 (4.0-IV3),
 // sourced from the `crabka_metadata::metadata_version` table via
@@ -117,14 +121,12 @@ pub(crate) fn handle(
         // actually carries the fields. On reject, return a degraded
         // response (error code, empty api_keys); clients are expected
         // to retry with a fixed name/version or give up.
-        if version >= 3
+        if version >= CLIENT_INFO_MIN_VERSION
             && (!is_valid_client_info(&req.client_software_name)
                 || !is_valid_client_info(&req.client_software_version))
         {
             let resp = ApiVersionsResponse {
                 error_code: codes::INVALID_REQUEST,
-                api_keys: Vec::new(),
-                throttle_time_ms: 0,
                 ..Default::default()
             };
             let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
@@ -134,14 +136,12 @@ pub(crate) fn handle(
 
         // Accepted handshake. Bump the per-(name, version) counter on
         // v3+ only; older requests don't carry the fields.
-        if version >= 3 {
+        if version >= CLIENT_INFO_MIN_VERSION {
             metrics.record_client_software(&req.client_software_name, &req.client_software_version);
         }
 
         let resp = ApiVersionsResponse {
-            error_code: codes::NONE,
             api_keys: crate::api_catalog::supported_apis(),
-            throttle_time_ms: 0,
             // KIP-584 write-side. `supported_features` advertises the
             // broker's `crate::features` table; `finalized_features` + the
             // epoch are read from the live metadata image. A fresh broker
@@ -162,7 +162,60 @@ pub(crate) fn handle(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
+    use crabka_metadata::{FeatureLevelRecord, MetadataRecord};
+    use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
+
+    use crate::broker::Broker;
+    use crate::config::BrokerConfig;
+
+    const API_VERSIONS_V3: i16 = 3;
+
+    fn request(name: &str, version: &str) -> Bytes {
+        let req = ApiVersionsRequest {
+            client_software_name: name.into(),
+            client_software_version: version.into(),
+            ..Default::default()
+        };
+        let mut buf = BytesMut::with_capacity(req.encoded_len(API_VERSIONS_V3));
+        req.encode(&mut buf, API_VERSIONS_V3)
+            .expect("encode ApiVersionsRequest");
+        buf.freeze()
+    }
+
+    fn decode_response(version: i16, bytes: &Bytes) -> ApiVersionsResponse {
+        let mut cur: &[u8] = bytes.as_ref();
+        let resp =
+            ApiVersionsResponse::decode(&mut cur, version).expect("decode ApiVersionsResponse");
+        assert!(cur.is_empty(), "response decoder consumed all bytes");
+        resp
+    }
+
+    async fn start_broker() -> (crate::broker::BrokerHandle, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
+        let handle = Broker::start(cfg).await.expect("start broker");
+        (handle, dir)
+    }
+
+    async fn wait_for_leader(broker: &Broker) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if broker
+                .controller
+                .watch_leader()
+                .borrow()
+                .is_some_and(|n| n == broker.config.node_id)
+            {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() <= deadline,
+                "broker did not become controller leader"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }
 
     // ── KIP-584 feature surface ────────────────────────────────────────────
 
@@ -185,6 +238,35 @@ mod tests {
         let image = crabka_metadata::MetadataImage::new(uuid::Uuid::nil());
         assert!(finalized_feature_keys(&image).is_empty());
         assert!(image.finalized_features_epoch() == -1);
+    }
+
+    #[test]
+    fn finalized_feature_keys_preserve_names_and_levels() {
+        let mut image = crabka_metadata::MetadataImage::new(uuid::Uuid::nil());
+        image.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+            name: "metadata.version".into(),
+            level: 24,
+        }));
+        image.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+            name: "group.version".into(),
+            level: 1,
+        }));
+
+        let keys = finalized_feature_keys(&image);
+
+        assert!(keys.len() == 2, "{keys:?}");
+        let mv = keys
+            .iter()
+            .find(|k| k.name == "metadata.version")
+            .expect("metadata.version finalized");
+        assert!(mv.max_version_level == 24, "{keys:?}");
+        assert!(mv.min_version_level == 24, "{keys:?}");
+        let gv = keys
+            .iter()
+            .find(|k| k.name == "group.version")
+            .expect("group.version finalized");
+        assert!(gv.max_version_level == 1, "{keys:?}");
+        assert!(gv.min_version_level == 1, "{keys:?}");
     }
 
     #[test]
@@ -226,6 +308,91 @@ mod tests {
             "DescribeQuorum max tracks the codegen const"
         );
         assert!(dq.max_version == 2, "DescribeQuorum is v2 after KIP-853");
+    }
+
+    #[tokio::test]
+    async fn handle_rejects_each_invalid_v3_client_info_field() {
+        let (broker_handle, _dir) = start_broker().await;
+        let broker = broker_handle.broker_arc_for_test();
+
+        for (name, version) in [("", "1.0.0"), ("crabka-test", "")] {
+            let req = request(name, version);
+            let bytes = handle(&broker, API_VERSIONS_V3, 7, &req)
+                .await
+                .expect("ApiVersions handler");
+            let resp = decode_response(API_VERSIONS_V3, &bytes);
+            assert!(resp.error_code == codes::INVALID_REQUEST, "{resp:?}");
+            assert!(resp.api_keys.is_empty(), "{resp:?}");
+        }
+
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_accepts_legacy_request_without_client_info() {
+        let (broker_handle, _dir) = start_broker().await;
+        let broker = broker_handle.broker_arc_for_test();
+        let req = ApiVersionsRequest::default();
+        let mut req_bytes = BytesMut::with_capacity(req.encoded_len(0));
+        req.encode(&mut req_bytes, 0)
+            .expect("encode legacy ApiVersionsRequest");
+
+        let bytes = handle(&broker, 0, 7, &req_bytes)
+            .await
+            .expect("ApiVersions handler");
+        let resp = decode_response(0, &bytes);
+
+        assert!(resp.error_code == codes::NONE, "{resp:?}");
+        assert!(!resp.api_keys.is_empty(), "{resp:?}");
+
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_accepts_valid_v3_and_surfaces_catalog_and_features() {
+        let (broker_handle, _dir) = start_broker().await;
+        let broker = broker_handle.broker_arc_for_test();
+        wait_for_leader(&broker).await;
+        broker
+            .controller
+            .submit_change(vec![MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+                name: "metadata.version".into(),
+                level: 24,
+            })])
+            .await
+            .expect("submit finalized feature");
+        let image = broker.controller.current_image();
+        assert!(image.finalized_features_epoch() > 0);
+
+        let req = request("crabka-test", "1.0.0");
+        let bytes = handle(&broker, API_VERSIONS_V3, 7, &req)
+            .await
+            .expect("ApiVersions handler");
+        let resp = decode_response(API_VERSIONS_V3, &bytes);
+
+        check!(resp.error_code == codes::NONE, "{resp:?}");
+        check!(
+            resp.api_keys == crate::api_catalog::supported_apis(),
+            "{resp:?}"
+        );
+        check!(!resp.supported_features.is_empty(), "{resp:?}");
+        let mv = resp
+            .supported_features
+            .iter()
+            .find(|f| f.name == "metadata.version")
+            .expect("metadata.version supported");
+        check!(mv.min_version == crate::features::METADATA_VERSION_MIN);
+        check!(mv.max_version == crate::features::METADATA_VERSION_MAX);
+        check!(resp.finalized_features_epoch == image.finalized_features_epoch());
+        let finalized_mv = resp
+            .finalized_features
+            .iter()
+            .find(|f| f.name == "metadata.version")
+            .expect("metadata.version finalized");
+        assert!(finalized_mv.max_version_level == 24, "{resp:?}");
+        assert!(finalized_mv.min_version_level == 24, "{resp:?}");
+
+        broker_handle.shutdown().await;
     }
 
     // ── KIP-511 client-info validation ─────────────────────────────────────

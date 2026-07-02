@@ -258,7 +258,7 @@ async fn export(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt as _;
@@ -288,19 +288,13 @@ mod tests {
             "crabka_traces_blocks_flushed_total",
             "crabka_traces_query_requests_total",
             "crabka_traces_query_duration_seconds",
+            "status=\"ok\"",
+            "status=\"error\"",
+            "route=\"search\"",
+            "tenant=\"tenant-a\"",
         ] {
             assert!(buf.contains(needle), "missing {needle} in:\n{buf}");
         }
-        assert!(buf.contains("tenant=\"tenant-a\""), "tenant label missing");
-        assert!(buf.contains("status=\"ok\""), "ok status label missing");
-        assert!(
-            buf.contains("status=\"error\""),
-            "error status label missing"
-        );
-        assert!(
-            buf.contains("route=\"search\""),
-            "search route label missing"
-        );
     }
 
     #[test]
@@ -308,9 +302,9 @@ mod tests {
         let m = ServiceMetrics::new();
         m.record_ingest(true, 100, 3, 0.01);
         m.record_ingest(true, 50, 2, 0.01);
-        assert!(m.ingest_bytes.get() == 150);
-        assert!(m.ingest_items.get() == 5);
-        assert!(
+        check!(m.ingest_bytes.get() == 150);
+        check!(m.ingest_items.get() == 5);
+        check!(
             m.ingest_requests
                 .get_or_create(&StatusLabel {
                     status: "ok".into()
@@ -368,33 +362,22 @@ mod tests {
         m.record_query("search", true, 0.02);
         m.record_query("search", false, 0.03);
         m.record_query("tags", true, 0.01);
-        assert!(
-            m.query_requests
-                .get_or_create(&RouteStatusLabel {
-                    route: "search".into(),
-                    status: "ok".into()
-                })
-                .get()
-                == 2
-        );
-        assert!(
-            m.query_requests
-                .get_or_create(&RouteStatusLabel {
-                    route: "search".into(),
-                    status: "error".into()
-                })
-                .get()
-                == 1
-        );
-        assert!(
-            m.query_requests
-                .get_or_create(&RouteStatusLabel {
-                    route: "tags".into(),
-                    status: "ok".into()
-                })
-                .get()
-                == 1
-        );
+        for (route, status, want) in [
+            ("search", "ok", 2),
+            ("search", "error", 1),
+            ("tags", "ok", 1),
+        ] {
+            assert!(
+                m.query_requests
+                    .get_or_create(&RouteStatusLabel {
+                        route: route.into(),
+                        status: status.into()
+                    })
+                    .get()
+                    == want,
+                "case route={route} status={status}"
+            );
+        }
     }
 
     #[tokio::test]

@@ -111,27 +111,27 @@ impl Group {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::check;
 
     #[test]
     fn classic_container_exposes_classic_state_only() {
         let mut g = Group::new_classic("g");
-        assert!(g.is_classic());
-        assert!(!g.is_consumer());
-        assert!(g.as_classic().is_some());
-        assert!(g.as_consumer().is_none());
-        assert!(g.as_classic_mut().is_some());
-        assert!(g.group_id == "g");
+        check!(g.is_classic());
+        check!(!g.is_consumer());
+        check!(g.as_classic().is_some());
+        check!(g.as_consumer().is_none());
+        check!(g.as_classic_mut().is_some());
+        check!(g.group_id == "g");
     }
 
     #[test]
     fn consumer_container_exposes_consumer_state_only() {
         let mut g = Group::new_consumer("g");
-        assert!(g.is_consumer());
-        assert!(!g.is_classic());
-        assert!(g.as_consumer().is_some());
-        assert!(g.as_classic().is_none());
-        assert!(g.as_consumer_mut().is_some());
-        assert!(g.group_id == "g");
+        check!(g.is_consumer());
+        check!(!g.is_classic());
+        check!(g.as_consumer().is_some());
+        check!(g.as_classic().is_none());
+        check!(g.as_consumer_mut().is_some());
+        check!(g.group_id == "g");
     }
 }

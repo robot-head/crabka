@@ -185,7 +185,7 @@ by `KGroupedStream`.)
 1. **JVM fixture.** `KGroupedTableTopology.java` under
    `crates/client-streams/tests/jvm-capture/`, building
    `table.groupBy(mapper).{count,reduce,aggregate}(…, Materialized.as("store"))`
-   with explicit store names. Run against `apache/kafka:4.1.0` (single-broker
+   with explicit store names. Run against `mirror.gcr.io/apache/kafka:4.1.0` (single-broker
    Streams capture works on Mac — the emit-final precedent).
 2. **Topology golden.** Capture the wire topology; assert the repartition topic
    name, store name, changelog name/config, and copartition wiring match the

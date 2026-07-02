@@ -1968,10 +1968,17 @@ mod tests {
         )
         .unwrap();
 
-        assert!(rewritten.contains(r#"__query_shard__="1_of_2""#));
-        assert!(rewritten.contains(r#"job="api""#));
-        assert!(rewritten.contains("http_requests_total"));
-        assert!(rewritten.contains(r#"up{__query_shard__="1_of_2"}"#));
+        for needle in [
+            r#"__query_shard__="1_of_2""#,
+            r#"job="api""#,
+            "http_requests_total",
+            r#"up{__query_shard__="1_of_2"}"#,
+        ] {
+            assert!(
+                rewritten.contains(needle),
+                "missing {needle} in {rewritten}"
+            );
+        }
     }
 
     #[test]

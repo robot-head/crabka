@@ -10,7 +10,7 @@
 //! Fetch auto-negotiate to v13 (KIP-516 topic-id), so every batch travels the
 //! v≥3 native-v2 path the verbatim dispatch covers.
 
-use assert2::assert;
+use assert2::{assert, check};
 mod support;
 
 use bytes::Bytes;
@@ -244,15 +244,15 @@ async fn lz4_batch_passes_through_and_roundtrips() {
     // Fetch it back: the stored batch must still be Lz4-compressed (no
     // recompression to a different codec) and decode to the same records.
     let fetched = fetch_first_batch(&client, "lz4t", topic_id).await;
-    assert!(
+    check!(
         fetched.attributes.compression() == CompressionType::Lz4,
         "stored batch must keep producer's Lz4 codec; got {:?}",
         fetched.attributes.compression()
     );
     assert!(fetched.records.len() == 200, "all records round-trip");
-    assert!(fetched.records[0].value.as_deref() == Some(&value[..]));
-    assert!(fetched.records[199].value.as_deref() == Some(&value[..]));
-    assert!(fetched.base_offset == 0);
+    check!(fetched.records[0].value.as_deref() == Some(&value[..]));
+    check!(fetched.records[199].value.as_deref() == Some(&value[..]));
+    check!(fetched.base_offset == 0);
 
     broker.shutdown().await;
 }
@@ -287,16 +287,16 @@ async fn uncompressed_batch_roundtrips_byte_identically() {
 
     // The CRC-covered region (attributes onward) must be byte-identical to
     // what the producer sent — proving no decode/re-encode/recompress.
-    assert!(
+    check!(
         fetched_wire[HEADER_LEN..] == wire[HEADER_LEN..],
         "record body must be verbatim"
     );
-    assert!(
+    check!(
         fetched_wire[21..HEADER_LEN] == wire[21..HEADER_LEN],
         "CRC-covered header (attributes..records_count) must be verbatim"
     );
     // The producer's CRC bytes (17..21) are preserved (no recompute).
-    assert!(fetched_wire[17..21] == wire[17..21], "CRC field unchanged");
+    check!(fetched_wire[17..21] == wire[17..21], "CRC field unchanged");
 
     broker.shutdown().await;
 }
@@ -337,13 +337,13 @@ async fn recompression_config_takes_owned_path() {
 
     let fetched = fetch_first_batch(&client, "recmp", topic_id).await;
     // Owned path recompressed lz4 → zstd: stored batch carries the TOPIC codec.
-    assert!(
+    check!(
         fetched.attributes.compression() == CompressionType::Zstd,
         "recompression config must rewrite codec to zstd; got {:?}",
         fetched.attributes.compression()
     );
     assert!(fetched.records.len() == 10);
-    assert!(fetched.records[0].value.as_deref() == Some(&value[..]));
+    check!(fetched.records[0].value.as_deref() == Some(&value[..]));
 
     broker.shutdown().await;
 }

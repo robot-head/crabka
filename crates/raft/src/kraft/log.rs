@@ -155,7 +155,7 @@ impl LogView for KraftLog {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
 
     fn open_tmp() -> (KraftLog, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -190,9 +190,9 @@ mod tests {
     #[test]
     fn opens_empty_at_offset_zero() {
         let (log, _dir) = open_tmp();
-        assert!(log.log_start_offset() == 0);
-        assert!(log.log_end_offset() == 0);
-        assert!(log.hwm() == 0);
+        check!(log.log_start_offset() == 0);
+        check!(log.log_end_offset() == 0);
+        check!(log.hwm() == 0);
     }
 
     #[test]
@@ -216,13 +216,13 @@ mod tests {
         let second = log.append(&mut batch(0, 1, b"b")).unwrap();
         let decoded = log.read_decoded(0, 1 << 20).unwrap();
 
-        assert!(first == 0);
-        assert!(second == 1);
+        check!(first == 0);
+        check!(second == 1);
         assert!(decoded.len() == 2);
-        assert!(decoded[0].base_offset == first);
-        assert!(decoded[1].base_offset == second);
-        assert!(log.log_end_offset() == i64::try_from(decoded.len()).unwrap());
-        assert!(log.log_end_offset() == LogView::end_offset(&log));
+        check!(decoded[0].base_offset == first);
+        check!(decoded[1].base_offset == second);
+        check!(log.log_end_offset() == i64::try_from(decoded.len()).unwrap());
+        check!(log.log_end_offset() == LogView::end_offset(&log));
     }
 
     #[test]
@@ -235,9 +235,9 @@ mod tests {
         assert!(log.hwm() == 2);
 
         log.install_snapshot(9).unwrap();
-        assert!(log.hwm() == 9);
-        assert!(log.log_start_offset() == 9);
-        assert!(log.log_end_offset() == 9);
+        check!(log.hwm() == 9);
+        check!(log.log_start_offset() == 9);
+        check!(log.log_end_offset() == 9);
     }
 
     #[test]
@@ -264,10 +264,13 @@ mod tests {
         log.append(&mut batch(0, 1, b"a")).unwrap(); // epoch 1 @ [0,1)
         log.append(&mut batch(0, 2, b"b")).unwrap(); // epoch 2 @ [1,2)
         // epoch 1 ends where epoch 2 starts (offset 1); epoch 2 is current → end 2.
-        assert!(LogView::end_offset_for_epoch(&log, 1) == Some(1));
-        assert!(LogView::end_offset_for_epoch(&log, 2) == Some(2));
         // unknown future epoch → None
-        assert!(LogView::end_offset_for_epoch(&log, 9).is_none());
+        for (epoch, want) in [(1, Some(1)), (2, Some(2)), (9, None)] {
+            assert!(
+                LogView::end_offset_for_epoch(&log, epoch) == want,
+                "epoch {epoch}"
+            );
+        }
     }
 
     #[test]
@@ -287,10 +290,10 @@ mod tests {
         // bytes contain only batches with base_offset < 3 (offsets 0,1,2)
         let decoded = log.read_decoded(0, 1 << 20).unwrap();
         let committed: Vec<_> = decoded.into_iter().filter(|b| b.base_offset < 3).collect();
-        assert!(committed.len() == 3);
-        assert!(r.start_offset == 0);
+        check!(committed.len() == 3);
+        check!(r.start_offset == 0);
         // total committed bytes equals the size of the first 3 batches
-        assert!(!r.bytes.is_empty());
+        check!(!r.bytes.is_empty());
     }
 
     #[test]
@@ -324,9 +327,9 @@ mod tests {
             log.append(&mut batch(0, 1, b"x")).unwrap();
         }
         log.install_snapshot(100).unwrap();
-        assert!(log.log_start_offset() == 100);
-        assert!(log.log_end_offset() == 100);
-        assert!(log.hwm() == 100);
+        check!(log.log_start_offset() == 100);
+        check!(log.log_end_offset() == 100);
+        check!(log.hwm() == 100);
         let base = log.append(&mut batch(0, 1, b"x")).unwrap();
         assert!(base == 100);
     }

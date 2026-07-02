@@ -721,7 +721,7 @@ mod tests {
     use super::*;
     use crate::event::{Event, LogEnd};
     use crate::types::*;
-    use assert2::assert;
+    use assert2::{assert, check};
 
     struct FakeLog {
         end: i64,
@@ -961,7 +961,7 @@ mod tests {
                 .iter()
                 .any(|a| matches!(a, Action::SendVoteRequest { pre_vote: true, .. }))
         );
-        assert!(m.quorum_state().leader_epoch == 0); // pre-vote: epoch not bumped yet
+        check!(m.quorum_state().leader_epoch == 0); // pre-vote: epoch not bumped yet
     }
 
     #[test]
@@ -983,8 +983,8 @@ mod tests {
             SimInstant(2001),
         );
         assert!(matches!(m.role(), Role::Candidate { .. }));
-        assert!(m.quorum_state().leader_epoch == 1);
-        assert!(m.quorum_state().voted_key.map(|k| k.id) == Some(1)); // self-vote
+        check!(m.quorum_state().leader_epoch == 1);
+        check!(m.quorum_state().voted_key.map(|k| k.id) == Some(1)); // self-vote
         assert!(actions.iter().any(|a| matches!(
             a,
             Action::SendVoteRequest {
@@ -1020,8 +1020,8 @@ mod tests {
             &log,
             SimInstant(2002),
         );
-        assert!(m.role().is_leader());
-        assert!(m.quorum_state().leader_id == Some(1));
+        check!(m.role().is_leader());
+        check!(m.quorum_state().leader_id == Some(1));
         assert!(
             actions
                 .iter()
@@ -1066,8 +1066,8 @@ mod tests {
             SimInstant(10),
         );
         assert!(matches!(m.role(), Role::Follower { leader_id: 2, .. }));
-        assert!(m.quorum_state().leader_epoch == 4);
-        assert!(m.quorum_state().leader_id == Some(2));
+        check!(m.quorum_state().leader_epoch == 4);
+        check!(m.quorum_state().leader_id == Some(2));
         assert!(
             actions
                 .iter()
@@ -1415,7 +1415,7 @@ mod tests {
         );
         // Pre-vote majority (self + 2) → promote to Candidate and bump the epoch.
         assert!(matches!(m.role(), Role::Candidate { .. }));
-        assert!(m.quorum_state().leader_epoch == 1);
+        check!(m.quorum_state().leader_epoch == 1);
         assert!(actions.iter().any(|a| matches!(
             a,
             Action::SendVoteRequest {
@@ -1457,8 +1457,8 @@ mod tests {
         );
         // Epoch guard (0 != 1) drops it: we stay Candidate, do NOT become leader.
         assert!(matches!(m.role(), Role::Candidate { .. }));
-        assert!(!m.role().is_leader());
-        assert!(actions.is_empty());
+        check!(!m.role().is_leader());
+        check!(actions.is_empty());
         // The ignored stale grant must not have entered the real-vote tally:
         // after promotion the Candidate's grant set holds only our self-vote.
         if let Role::Candidate { granted, .. } = m.role() {
@@ -1487,9 +1487,9 @@ mod tests {
             &log,
             SimInstant(10),
         );
-        assert!(actions.is_empty());
-        assert!(m.quorum_state().leader_id.is_none());
-        assert!(m.quorum_state().leader_epoch == 0); // epoch not advanced
+        check!(actions.is_empty());
+        check!(m.quorum_state().leader_id.is_none());
+        check!(m.quorum_state().leader_epoch == 0); // epoch not advanced
         assert!(!matches!(m.role(), Role::Follower { .. }));
     }
 
@@ -1510,7 +1510,7 @@ mod tests {
             SimInstant(10),
         );
         assert!(matches!(m.role(), Role::Follower { leader_id: 2, .. }));
-        assert!(m.quorum_state().leader_id == Some(2));
+        check!(m.quorum_state().leader_id == Some(2));
         assert!(
             actions
                 .iter()

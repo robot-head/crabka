@@ -183,9 +183,13 @@ async fn pool_status_ready_when_sts_ready() {
     let body: serde_json::Value =
         serde_json::from_slice(status_patch.body()).expect("status PATCH body is JSON");
     let cond = &body["status"]["conditions"][0];
-    assert!(cond["type"] == "Ready", "body = {body}");
-    assert!(cond["status"] == "True", "body = {body}");
-    assert!(cond["reason"] == "Available", "body = {body}");
+    for (field, want) in [
+        ("type", "Ready"),
+        ("status", "True"),
+        ("reason", "Available"),
+    ] {
+        assert!(cond[field] == want, "field {field}; body = {body}");
+    }
 
     assert!(state.remaining_rules() == 0);
 }
@@ -230,9 +234,13 @@ async fn pool_validation_rejects_replicas_two() {
     let body: serde_json::Value =
         serde_json::from_slice(status_patch.body()).expect("status PATCH body is JSON");
     let cond = &body["status"]["conditions"][0];
-    assert!(cond["type"] == "Ready");
-    assert!(cond["status"] == "False");
-    assert!(cond["reason"] == "UnsupportedReplicaCount");
+    for (field, want) in [
+        ("type", "Ready"),
+        ("status", "False"),
+        ("reason", "UnsupportedReplicaCount"),
+    ] {
+        assert!(cond[field] == want, "field {field}; body = {body}");
+    }
 
     assert!(state.remaining_rules() == 0);
 }
@@ -317,9 +325,13 @@ async fn pool_status_parent_not_found() {
     let body: serde_json::Value =
         serde_json::from_slice(status_patch.body()).expect("status PATCH body is JSON");
     let cond = &body["status"]["conditions"][0];
-    assert!(cond["type"] == "Ready", "body = {body}");
-    assert!(cond["status"] == "False", "body = {body}");
-    assert!(cond["reason"] == "ParentNotFound", "body = {body}");
+    for (field, want) in [
+        ("type", "Ready"),
+        ("status", "False"),
+        ("reason", "ParentNotFound"),
+    ] {
+        assert!(cond[field] == want, "field {field}; body = {body}");
+    }
 
     assert!(state.remaining_rules() == 0);
 }
@@ -399,17 +411,15 @@ async fn pool_persistent_claim_renders_volume_claim_template() {
         .as_array()
         .unwrap_or_else(|| panic!("volumeClaimTemplates present; body = {body}"));
     assert!(vct.len() == 1, "body = {body}");
-    assert!(vct[0]["metadata"]["name"] == "data", "body = {body}");
+    let pvc = &vct[0];
+    assert!(pvc["metadata"]["name"] == "data", "body = {body}");
     assert!(
-        vct[0]["spec"]["resources"]["requests"]["storage"] == "10Gi",
-        "body = {body}"
-    );
-    assert!(
-        vct[0]["spec"]["accessModes"][0] == "ReadWriteOnce",
-        "body = {body}"
-    );
-    assert!(
-        vct[0]["spec"]["storageClassName"] == "fast-ssd",
+        pvc["spec"]
+            == serde_json::json!({
+                "accessModes": ["ReadWriteOnce"],
+                "resources": { "requests": { "storage": "10Gi" } },
+                "storageClassName": "fast-ssd"
+            }),
         "body = {body}"
     );
 
@@ -500,9 +510,13 @@ async fn pool_storage_shrink_is_rejected() {
     let body: serde_json::Value =
         serde_json::from_slice(status_patch.body()).expect("status PATCH body is JSON");
     let cond = &body["status"]["conditions"][0];
-    assert!(cond["type"] == "Ready", "body = {body}");
-    assert!(cond["status"] == "False", "body = {body}");
-    assert!(cond["reason"] == "StorageImmutable", "body = {body}");
+    for (field, want) in [
+        ("type", "Ready"),
+        ("status", "False"),
+        ("reason", "StorageImmutable"),
+    ] {
+        assert!(cond[field] == want, "field {field}; body = {body}");
+    }
 
     assert!(state.remaining_rules() == 0);
 }
@@ -595,24 +609,35 @@ async fn pool_jbod_renders_multiple_volume_claim_templates() {
         .as_array()
         .unwrap_or_else(|| panic!("volumeClaimTemplates present; body = {body}"));
     assert!(vct.len() == 2, "body = {body}");
-    assert!(vct[0]["metadata"]["name"] == "data", "body = {body}");
-    assert!(vct[1]["metadata"]["name"] == "data-1", "body = {body}");
-    assert!(
-        vct[0]["spec"]["resources"]["requests"]["storage"] == "1Gi",
-        "body = {body}"
-    );
-    assert!(
-        vct[1]["spec"]["resources"]["requests"]["storage"] == "2Gi",
-        "body = {body}"
-    );
-    assert!(
-        vct[1]["spec"]["storageClassName"] == "fast",
-        "body = {body}"
-    );
+    let want_templates = [
+        (
+            "data",
+            serde_json::json!({
+                "accessModes": ["ReadWriteOnce"],
+                "resources": { "requests": { "storage": "1Gi" } }
+            }),
+        ),
+        (
+            "data-1",
+            serde_json::json!({
+                "accessModes": ["ReadWriteOnce"],
+                "resources": { "requests": { "storage": "2Gi" } },
+                "storageClassName": "fast"
+            }),
+        ),
+    ];
+    for (i, (want_name, want_spec)) in want_templates.iter().enumerate() {
+        assert!(
+            vct[i]["metadata"]["name"] == *want_name,
+            "disk {i}; body = {body}"
+        );
+        assert!(vct[i]["spec"] == *want_spec, "disk {i}; body = {body}");
+    }
 
     // Set-wide retention honors the JBOD-level deleteClaim.
     assert!(
-        body["spec"]["persistentVolumeClaimRetentionPolicy"]["whenDeleted"] == "Delete",
+        body["spec"]["persistentVolumeClaimRetentionPolicy"]
+            == serde_json::json!({ "whenDeleted": "Delete", "whenScaled": "Retain" }),
         "body = {body}"
     );
 
@@ -832,9 +857,13 @@ async fn pool_blocks_pod_creation_when_parent_version_invalid() {
     let body: serde_json::Value =
         serde_json::from_slice(status_patch.body()).expect("status PATCH body is JSON");
     let cond = &body["status"]["conditions"][0];
-    assert!(cond["type"] == "Ready", "body = {body}");
-    assert!(cond["status"] == "False", "body = {body}");
-    assert!(cond["reason"] == "KafkaVersionInvalid", "body = {body}");
+    for (field, want) in [
+        ("type", "Ready"),
+        ("status", "False"),
+        ("reason", "KafkaVersionInvalid"),
+    ] {
+        assert!(cond[field] == want, "field {field}; body = {body}");
+    }
 
     assert!(state.remaining_rules() == 0);
 }

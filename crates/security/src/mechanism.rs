@@ -53,7 +53,7 @@ impl SaslMechanism {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
 
     #[test]
     fn wire_name_round_trip() {
@@ -69,9 +69,9 @@ mod tests {
 
     #[test]
     fn from_wire_unknown_returns_none() {
-        assert!(SaslMechanism::from_wire("SCRAM-SHA-128") == None);
-        assert!(SaslMechanism::from_wire("OAUTH") == None);
-        assert!(SaslMechanism::from_wire("") == None);
+        for wire in ["SCRAM-SHA-128", "OAUTH", ""] {
+            assert!(SaslMechanism::from_wire(wire) == None, "case {wire:?}");
+        }
     }
 
     /// Wire-exactness guard: only the canonical Kafka mechanism strings
@@ -80,18 +80,22 @@ mod tests {
     /// SASL handshake's accepted mechanism set.
     #[test]
     fn from_wire_rejects_variant_names_and_casing() {
-        assert!(SaslMechanism::from_wire("Plain") == None);
-        assert!(SaslMechanism::from_wire("plain") == None);
-        assert!(SaslMechanism::from_wire("ScramSha256") == None);
-        assert!(SaslMechanism::from_wire("scram-sha-256") == None);
-        assert!(SaslMechanism::from_wire("OAuthBearer") == None);
+        for wire in [
+            "Plain",
+            "plain",
+            "ScramSha256",
+            "scram-sha-256",
+            "OAuthBearer",
+        ] {
+            assert!(SaslMechanism::from_wire(wire) == None, "case {wire:?}");
+        }
     }
 
     #[test]
     fn oauthbearer_wire_round_trip() {
-        assert!(SaslMechanism::from_wire("OAUTHBEARER") == Some(SaslMechanism::OAuthBearer));
-        assert!(SaslMechanism::OAuthBearer.wire_name() == "OAUTHBEARER");
-        assert!(!SaslMechanism::OAuthBearer.is_scram());
+        check!(SaslMechanism::from_wire("OAUTHBEARER") == Some(SaslMechanism::OAuthBearer));
+        check!(SaslMechanism::OAuthBearer.wire_name() == "OAUTHBEARER");
+        check!(!SaslMechanism::OAuthBearer.is_scram());
     }
 
     #[test]
@@ -103,8 +107,12 @@ mod tests {
 
     #[test]
     fn is_scram_predicate() {
-        assert!(!SaslMechanism::Plain.is_scram());
-        assert!(SaslMechanism::ScramSha256.is_scram());
-        assert!(SaslMechanism::ScramSha512.is_scram());
+        for (mechanism, want) in [
+            (SaslMechanism::Plain, false),
+            (SaslMechanism::ScramSha256, true),
+            (SaslMechanism::ScramSha512, true),
+        ] {
+            assert!(mechanism.is_scram() == want, "case {mechanism:?}");
+        }
     }
 }

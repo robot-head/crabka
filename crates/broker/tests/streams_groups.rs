@@ -16,7 +16,7 @@
 //! `BrokerConfig::for_tests`). Every test therefore finalizes `streams.version`
 //! to level 1 via `UpdateFeatures` before issuing streams RPCs.
 
-use assert2::assert;
+use assert2::{assert, check};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -253,20 +253,20 @@ async fn stateless_single_member_converges() {
     )
     .await;
 
-    assert!(resp.error_code == 0, "heartbeat error: {resp:?}");
-    assert!(!member_id.is_empty(), "broker must mint a member id");
-    assert!(
+    check!(resp.error_code == 0, "heartbeat error: {resp:?}");
+    check!(!member_id.is_empty(), "broker must mint a member id");
+    check!(
         resp.member_epoch >= 1,
         "first join advances the member epoch, got {}",
         resp.member_epoch
     );
     // The single member owns both partitions of subtopology "0".
-    assert!(
+    check!(
         active_partition_count(&resp) == 2,
         "lone member must own both input partitions, got {:?}",
         resp.active_tasks
     );
-    assert!(
+    check!(
         active_partitions_for(&resp, "0") == vec![0, 1],
         "subtopology 0 must be assigned partitions [0, 1], got {:?}",
         resp.active_tasks
@@ -392,22 +392,22 @@ async fn describe_returns_the_group() {
         desc.groups.len()
     );
     let g = &desc.groups[0];
-    assert!(g.error_code == 0, "describe error: {:?}", g.error_code);
-    assert!(
+    check!(g.error_code == 0, "describe error: {:?}", g.error_code);
+    check!(
         g.group_id == "streams-app-3",
         "described group id mismatch: {:?}",
         g.group_id
     );
-    assert!(
+    check!(
         !g.members.is_empty(),
         "described group must list the joined member"
     );
-    assert!(
+    check!(
         g.members.iter().any(|m| m.member_id == member_id),
         "described group must contain member {member_id}, got {:?}",
         g.members.iter().map(|m| &m.member_id).collect::<Vec<_>>()
     );
-    assert!(
+    check!(
         !g.group_state.is_empty(),
         "group_state must be a non-empty phase string, got {:?}",
         g.group_state

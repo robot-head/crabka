@@ -28,7 +28,7 @@
 
 #![allow(clippy::default_trait_access)]
 
-use assert2::assert;
+use assert2::{assert, check};
 mod support;
 
 use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
@@ -185,31 +185,31 @@ async fn get_telemetry_subscriptions_with_nil_id_returns_assigned_id_and_no_subs
         .await
         .expect("GetTelemetrySubscriptions");
 
-    assert!(resp.error_code == 0, "handler must succeed: {resp:?}");
-    assert!(
+    check!(resp.error_code == 0, "handler must succeed: {resp:?}");
+    check!(
         resp.client_instance_id != WireUuid::ZERO,
         "broker must assign a fresh client_instance_id when caller sent nil"
     );
     // No subscriptions configured → empty requested_metrics (the "don't push" signal).
-    assert!(
+    check!(
         resp.requested_metrics.is_empty(),
         "no subscription configured → requested_metrics must be empty, got {:?}",
         resp.requested_metrics,
     );
     // Standard KIP-714 compression advertisement: ZSTD(4), LZ4(3), GZIP(1), SNAPPY(2).
-    assert!(
+    check!(
         resp.accepted_compression_types == vec![4i8, 3, 1, 2],
         "accepted_compression_types must be [4,3,1,2], got {:?}",
         resp.accepted_compression_types,
     );
-    assert!(
+    check!(
         resp.telemetry_max_bytes == 1_048_576,
         "telemetry_max_bytes must be 1 MiB, got {}",
         resp.telemetry_max_bytes,
     );
-    assert!(resp.delta_temporality, "delta_temporality must be true",);
+    check!(resp.delta_temporality, "delta_temporality must be true",);
     // Default interval when no subscription is matched: 300 000 ms (5 min).
-    assert!(
+    check!(
         resp.push_interval_ms == 300_000,
         "push_interval_ms must be 300_000 when no subscription configured, got {}",
         resp.push_interval_ms,
@@ -295,31 +295,31 @@ async fn push_telemetry_happy_path_after_subscription() {
         .await
         .expect("GetTelemetrySubscriptions");
 
-    assert!(
+    check!(
         get_resp.error_code == 0,
         "GetTelemetrySubscriptions must succeed: {get_resp:?}"
     );
-    assert!(
+    check!(
         get_resp.client_instance_id != WireUuid::ZERO,
         "broker must assign a fresh client_instance_id"
     );
-    assert!(
+    check!(
         get_resp.requested_metrics == vec!["*".to_string()],
         "match-all subscription must reflect as [\"*\"], got {:?}",
         get_resp.requested_metrics,
     );
-    assert!(
+    check!(
         get_resp.push_interval_ms == 100,
         "push_interval_ms must equal the configured interval (100), got {}",
         get_resp.push_interval_ms,
     );
-    assert!(
+    check!(
         get_resp.accepted_compression_types == vec![4i8, 3, 1, 2],
         "accepted_compression_types must be [4,3,1,2], got {:?}",
         get_resp.accepted_compression_types,
     );
-    assert!(get_resp.delta_temporality, "delta_temporality must be true");
-    assert!(
+    check!(get_resp.delta_temporality, "delta_temporality must be true");
+    check!(
         get_resp.telemetry_max_bytes == 1_048_576,
         "telemetry_max_bytes must be 1 MiB, got {}",
         get_resp.telemetry_max_bytes,

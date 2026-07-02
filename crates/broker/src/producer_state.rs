@@ -8,7 +8,14 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use tokio::sync::Mutex;
 
-#[derive(Debug, Clone, Copy)]
+use crate::partition::LogOffset;
+
+/// Kafka producer id (PID) assigned by `InitProducerId`. Alias only —
+/// distinguishes the id from the offset/timestamp `i64`s that travel
+/// alongside it in produce-path signatures.
+pub type ProducerId = i64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProducerEntry {
     pub epoch: i16,
     pub last_sequence: i32,
@@ -16,8 +23,8 @@ pub struct ProducerEntry {
     /// (`base_offset + last_offset_delta`). Read by
     /// [`ProducerState::truncate`] to drop entries whose batch was truncated
     /// off the log.
-    pub last_offset: i64,
-    pub base_offset: i64,
+    pub last_offset: LogOffset,
+    pub base_offset: LogOffset,
     /// Timestamp of the last accepted batch for this producer.
     #[allow(dead_code)]
     pub last_timestamp: i64,
@@ -30,7 +37,7 @@ pub struct ProducerEntry {
 
 #[derive(Debug, Default)]
 pub struct PartitionProducerState {
-    pub entries: HashMap<i64, ProducerEntry>,
+    pub entries: HashMap<ProducerId, ProducerEntry>,
 }
 
 /// Outcome of a dedup check.
@@ -41,7 +48,7 @@ pub enum Decision {
     Append,
     /// Previously-committed sequence range. Caller should respond with
     /// `error_code = NONE` and `base_offset = base_offset`.
-    Duplicate { base_offset: i64 },
+    Duplicate { base_offset: LogOffset },
     /// `base_sequence != last_sequence + 1`. Caller responds with
     /// `OUT_OF_ORDER_SEQUENCE_NUMBER (45)`.
     OutOfOrder,
@@ -112,7 +119,7 @@ impl ProducerState {
         &self,
         topic: &str,
         partition: i32,
-        producer_id: i64,
+        producer_id: ProducerId,
         producer_epoch: i16,
         base_sequence: i32,
         last_offset_delta: i32,
@@ -129,11 +136,11 @@ impl ProducerState {
         &self,
         topic: &str,
         partition: i32,
-        producer_id: i64,
+        producer_id: ProducerId,
         producer_epoch: i16,
         base_sequence: i32,
         last_offset_delta: i32,
-        base_offset: i64,
+        base_offset: LogOffset,
         last_timestamp: i64,
     ) {
         let handle = self.handle(topic, partition);
@@ -166,7 +173,7 @@ impl ProducerState {
     /// retry re-append fresh instead. Mirrors Kafka's
     /// `ProducerStateManager.truncateAndReload`. Does not create state for a
     /// partition that has never been tracked.
-    pub async fn truncate(&self, topic: &str, partition: i32, offset: i64) {
+    pub async fn truncate(&self, topic: &str, partition: i32, offset: LogOffset) {
         let Some(parts) = self.by_topic.get(topic).map(|e| e.value().clone()) else {
             return;
         };
@@ -210,7 +217,7 @@ impl ProducerState {
     ///
     /// The snapshot drops the mutex before returning, so callers don't
     /// hold the per-partition lock across response encoding.
-    pub async fn snapshot(&self, topic: &str, partition: i32) -> Vec<(i64, ProducerEntry)> {
+    pub async fn snapshot(&self, topic: &str, partition: i32) -> Vec<(ProducerId, ProducerEntry)> {
         // Cheaper to bypass `handle` (which inserts on miss): a snapshot
         // for an unknown partition should report "no producers", not
         // wire up an empty entry. The borrowed `&str` / `i32` lookups
@@ -251,7 +258,7 @@ impl ProducerState {
         partition: i32,
         now_ms: i64,
         expiration_ms: i64,
-    ) -> HashMap<i64, i64> {
+    ) -> HashMap<ProducerId, LogOffset> {
         // Mirror `snapshot`: avoid inserting an empty entry for an unknown
         // partition (the borrowed lookups allocate nothing on a miss).
         let Some(topic_ref) = self.by_topic.get(topic) else {
@@ -332,7 +339,7 @@ mod producer_state_model;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
 
     #[tokio::test]
     async fn first_batch_appends() {
@@ -395,6 +402,17 @@ mod tests {
             .await; // last_offset 104
         s.truncate("t", 0, 200).await;
         assert!(s.check("t", 0, 1000, 0, 0, 4).await == Decision::Duplicate { base_offset: 100 });
+    }
+
+    #[tokio::test]
+    async fn truncate_drops_dedup_entry_at_exact_offset_boundary() {
+        // Truncating at an entry's last_offset removes that entry: the last
+        // accepted record is no longer below the log end being retained.
+        let s = ProducerState::new();
+        s.commit("t", 0, 1000, 0, 0, 4, /*base_offset*/ 100, 1)
+            .await; // last_offset 104
+        s.truncate("t", 0, 104).await;
+        assert!(s.check("t", 0, 1000, 0, 0, 4).await == Decision::Append);
     }
 
     #[tokio::test]
@@ -466,12 +484,27 @@ mod tests {
         let s = ProducerState::new();
         s.commit("t", 3, 1000, 0, 0, 4, 7, 1).await;
         let snap = s.snapshot("t", 3).await;
-        assert!(snap.len() == 1);
-        assert!(snap[0].0 == 1000);
-        assert!(snap[0].1.base_offset == 7);
+        // `last_activity_ms` is wall-clock; copy it from the actual entry so
+        // the comparison stays deterministic.
+        let expected = vec![(
+            1000,
+            ProducerEntry {
+                epoch: 0,
+                last_sequence: 4,
+                last_offset: 11,
+                base_offset: 7,
+                last_timestamp: 1,
+                last_activity_ms: snap[0].1.last_activity_ms,
+            },
+        )];
+        assert!(snap == expected);
         // Untouched partition / topic report empty without panicking.
-        assert!(s.snapshot("t", 0).await.is_empty());
-        assert!(s.snapshot("other", 3).await.is_empty());
+        for (topic, partition) in [("t", 0), ("other", 3)] {
+            assert!(
+                s.snapshot(topic, partition).await == vec![],
+                "case: {topic}/{partition}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -498,6 +531,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn expire_evicts_entry_at_exact_ttl_boundary() {
+        let s = ProducerState::new();
+        s.commit("t", 0, 1, 0, 0, 0, 0, 0).await;
+        {
+            let h = s.handle("t", 0);
+            h.lock().await.entries.get_mut(&1).unwrap().last_activity_ms = 5_000;
+        }
+
+        let evicted = s.expire_older_than(10_000, 5_000).await;
+        assert!(evicted == 1);
+        assert!(s.snapshot("t", 0).await.is_empty());
+    }
+
+    #[tokio::test]
     async fn active_snapshot_excludes_expired_includes_active() {
         let s = ProducerState::new();
         // pid 1: last batch base_offset 10; pid 2: base_offset 20.
@@ -512,12 +559,15 @@ mod tests {
         // now = 10_000, expiration = 5_000 → pid 1 (age 9_000 > 5_000)
         // excluded; pid 2 (age 500 <= 5_000) included with its base_offset.
         let snap = s.active_snapshot("t", 0, 10_000, 5_000).await;
-        assert!(snap.len() == 1);
-        assert!(snap.get(&2) == Some(&20));
-        assert!(snap.get(&1) == None);
+        let expected: HashMap<i64, i64> = [(2, 20)].into_iter().collect();
+        assert!(snap == expected);
         // Unknown partition / topic → empty without panicking.
-        assert!(s.active_snapshot("t", 99, 10_000, 5_000).await.is_empty());
-        assert!(s.active_snapshot("nope", 0, 10_000, 5_000).await.is_empty());
+        for (topic, partition) in [("t", 99), ("nope", 0)] {
+            assert!(
+                s.active_snapshot(topic, partition, 10_000, 5_000).await == HashMap::new(),
+                "case: {topic}/{partition}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -529,14 +579,11 @@ mod tests {
             h.lock().await.entries.get_mut(&1).unwrap().last_activity_ms = 0;
         }
         let evicted = s.expire_older_than(1_000_000, 1).await;
-        assert!(evicted == 1);
-        // The empty partition and topic maps are pruned.
-        assert!(
-            s.by_topic.get("t").is_none(),
-            "empty topic slot must be removed"
-        );
-        // A subsequent produce still works after pruning.
-        assert!(s.check("t", 0, 1, 0, 0, 0).await == Decision::Append);
+        // The empty partition and topic maps are pruned (the empty topic slot
+        // must be removed), and a subsequent produce still works after pruning.
+        check!(evicted == 1);
+        check!(s.by_topic.get("t").is_none());
+        check!(s.check("t", 0, 1, 0, 0, 0).await == Decision::Append);
     }
 }
 

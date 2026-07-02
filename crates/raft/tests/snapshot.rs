@@ -10,7 +10,7 @@
 //! `FetchSnapshot` catch-up respectively — so the tests that exercised them are
 //! gone with openraft.
 
-use assert2::assert;
+use assert2::{assert, check};
 use std::time::Duration;
 
 use crabka_metadata::{FeatureLevelRecord, MetadataRecord, TopicRecord};
@@ -67,9 +67,9 @@ async fn snapshot_then_restart_recovers_image() {
             ])
             .await
             .expect("submit records");
-        assert!(controller.current_image().topic("t").is_some());
-        assert!(controller.current_image().finalized_metadata_version() == Some(25));
-        assert!(controller.current_image().voters().contains(1));
+        check!(controller.current_image().topic("t").is_some());
+        check!(controller.current_image().finalized_metadata_version() == Some(25));
+        check!(controller.current_image().voters().contains(1));
 
         controller
             .trigger_snapshot()
@@ -103,18 +103,18 @@ async fn snapshot_then_restart_recovers_image() {
         // The finalized feature + its epoch must be rebuilt from the on-disk
         // checkpoint, not silently dropped.
         let recovered = controller.current_image();
-        assert!(
+        check!(
             recovered.finalized_metadata_version() == Some(25),
             "finalized metadata.version must survive snapshot + restart"
         );
-        assert!(
+        check!(
             recovered.finalized_features_epoch() >= 0,
             "finalized-features epoch must survive snapshot + restart, got {}",
             recovered.finalized_features_epoch()
         );
         // The voter set is re-derived from config (`QuorumState`) on every boot
         // and mirrored into the image — it must be present after restart.
-        assert!(
+        check!(
             recovered.voters().contains(1),
             "voter set must survive snapshot + restart"
         );

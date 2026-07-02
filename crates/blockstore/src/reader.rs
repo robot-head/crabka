@@ -154,7 +154,7 @@ mod tests {
     use arrow::array::{Int64Array, StringArray, UInt64Array};
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
-    use assert2::assert;
+    use assert2::{assert, check};
     use object_store::ObjectStore;
     use object_store::memory::InMemory;
     use object_store::path::Path;
@@ -268,10 +268,10 @@ mod tests {
             .await
             .unwrap();
         assert!(meta.len() == 2);
-        assert!(meta[0].index == 0);
-        assert!(meta[1].index == 1);
-        assert!(meta[0].compressed_bytes > 0);
-        assert!(meta[1].compressed_bytes > 0);
+        for (i, want_index) in [(0, 0), (1, 1)] {
+            check!(meta[i].index == want_index);
+            check!(meta[i].compressed_bytes > 0);
+        }
 
         let got = read_row_group_metadata_with_cap(store.clone(), "meta.parquet", 1).await;
         assert!(got.is_err());
@@ -281,10 +281,10 @@ mod tests {
             .await
             .unwrap();
         assert!(meta.len() == 2);
-        assert!(meta[0].index == 0);
-        assert!(meta[1].index == 1);
-        assert!(meta[0].compressed_bytes > 0);
-        assert!(meta[1].compressed_bytes > 0);
+        for (i, want_index) in [(0, 0), (1, 1)] {
+            check!(meta[i].index == want_index);
+            check!(meta[i].compressed_bytes > 0);
+        }
     }
 
     #[tokio::test]

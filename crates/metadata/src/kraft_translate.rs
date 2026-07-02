@@ -1113,7 +1113,7 @@ mod tests {
         ClientMetricsConfigRecord, DeleteDelegationTokenRecord, FeaturesEpochRecord,
         KRaftVersionRecord, PartitionDirAssignmentRecord, VotersRecord,
     };
-    use assert2::assert;
+    use assert2::{assert, check};
 
     fn img() -> MetadataImage {
         MetadataImage::new(uuid::Uuid::nil())
@@ -1205,12 +1205,18 @@ mod tests {
             panic!("expected RegisterBroker");
         };
 
-        assert!(!k.fenced);
+        check!(!k.fenced);
         assert!(k.end_points.len() == 2);
-        assert!(k.end_points[0].name == "");
-        assert!(k.end_points[0].security_protocol == protocol_to_wire(ListenerProtocol::Plaintext));
-        assert!(k.end_points[1].name == "EXTERNAL");
-        assert!(k.end_points[1].security_protocol == protocol_to_wire(ListenerProtocol::SaslSsl));
+        for (i, name, protocol) in [
+            (0, "", ListenerProtocol::Plaintext),
+            (1, "EXTERNAL", ListenerProtocol::SaslSsl),
+        ] {
+            check!(k.end_points[i].name == name, "name of endpoint {i}");
+            check!(
+                k.end_points[i].security_protocol == protocol_to_wire(protocol),
+                "protocol of endpoint {i}"
+            );
+        }
     }
 
     #[test]
@@ -1345,10 +1351,10 @@ mod tests {
         let a = acl(ResourceType::Topic, "foo", "User:alice");
         let b = acl(ResourceType::Topic, "foo", "User:bob");
         let c = acl(ResourceType::Group, "foo", "User:alice");
-        assert!(acl_id(&a) != acl_id(&b));
-        assert!(acl_id(&a) != acl_id(&c));
+        check!(acl_id(&a) != acl_id(&b));
+        check!(acl_id(&a) != acl_id(&c));
         // Deterministic: same entry hashes identically.
-        assert!(acl_id(&a) == acl_id(&a.clone()));
+        check!(acl_id(&a) == acl_id(&a.clone()));
     }
 
     #[test]
@@ -1830,43 +1836,54 @@ mod tests {
 
     #[test]
     fn kraft_variant_name_reports_unmodeled_variants() {
-        assert!(
-            kraft_variant_name(&KraftMetadataRecord::BrokerRegistrationChange(
-                crabka_protocol::owned::broker_registration_change_record::BrokerRegistrationChangeRecord::default(),
-            )) == "BrokerRegistrationChange"
-        );
-        assert!(
-            kraft_variant_name(&KraftMetadataRecord::NoOp(
-                crabka_protocol::owned::no_op_record::NoOpRecord::default(),
-            )) == "NoOp"
-        );
-        assert!(
-            kraft_variant_name(&KraftMetadataRecord::BeginTransaction(
-                crabka_protocol::owned::begin_transaction_record::BeginTransactionRecord::default(),
-            )) == "BeginTransaction"
-        );
-        assert!(
-            kraft_variant_name(&KraftMetadataRecord::EndTransaction(
-                crabka_protocol::owned::end_transaction_record::EndTransactionRecord::default(),
-            )) == "EndTransaction"
-        );
-        assert!(
-            kraft_variant_name(&KraftMetadataRecord::RegisterController(
-                crabka_protocol::owned::register_controller_record::RegisterControllerRecord::default(),
-            )) == "RegisterController"
-        );
-        assert!(
-            kraft_variant_name(&KraftMetadataRecord::RemoveAccessControlEntry(
-                RemoveAccessControlEntryRecord::default(),
-            )) == "RemoveAccessControlEntry"
-        );
-        assert!(
-            kraft_variant_name(&KraftMetadataRecord::Unknown {
-                api_key: 42,
-                api_version: 0,
-                body: bytes::Bytes::new(),
-            }) == "Unknown"
-        );
+        for (record, want) in [
+            (
+                KraftMetadataRecord::BrokerRegistrationChange(
+                    crabka_protocol::owned::broker_registration_change_record::BrokerRegistrationChangeRecord::default(),
+                ),
+                "BrokerRegistrationChange",
+            ),
+            (
+                KraftMetadataRecord::NoOp(
+                    crabka_protocol::owned::no_op_record::NoOpRecord::default(),
+                ),
+                "NoOp",
+            ),
+            (
+                KraftMetadataRecord::BeginTransaction(
+                    crabka_protocol::owned::begin_transaction_record::BeginTransactionRecord::default(),
+                ),
+                "BeginTransaction",
+            ),
+            (
+                KraftMetadataRecord::EndTransaction(
+                    crabka_protocol::owned::end_transaction_record::EndTransactionRecord::default(),
+                ),
+                "EndTransaction",
+            ),
+            (
+                KraftMetadataRecord::RegisterController(
+                    crabka_protocol::owned::register_controller_record::RegisterControllerRecord::default(),
+                ),
+                "RegisterController",
+            ),
+            (
+                KraftMetadataRecord::RemoveAccessControlEntry(
+                    RemoveAccessControlEntryRecord::default(),
+                ),
+                "RemoveAccessControlEntry",
+            ),
+            (
+                KraftMetadataRecord::Unknown {
+                    api_key: 42,
+                    api_version: 0,
+                    body: bytes::Bytes::new(),
+                },
+                "Unknown",
+            ),
+        ] {
+            assert!(kraft_variant_name(&record) == want, "variant {want}");
+        }
     }
 
     #[test]

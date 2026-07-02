@@ -2086,13 +2086,13 @@ mod tests {
         t.add_sink("out", "out-topic", [&proc]);
         let wire = t.build("app").unwrap().to_wire();
         let blob = serde_json::to_value(&wire).unwrap().to_string();
-        assert!(blob.contains("vstore"), "changelog topic name not in wire");
-        assert!(
+        check!(blob.contains("vstore"), "changelog topic name not in wire");
+        check!(
             blob.contains("min.compaction.lag.ms"),
             "min.compaction.lag.ms key not in wire"
         );
         // history_retention_ms=600_000 → min_compaction_lag_ms = 600_000 + 86_400_000 = 87_000_000
-        assert!(blob.contains("87000000"), "lag value not in wire");
+        check!(blob.contains("87000000"), "lag value not in wire");
     }
 
     #[tokio::test]

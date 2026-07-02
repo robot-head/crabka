@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use assert2::assert;
+use assert2::{assert, check};
 use crabka_blockstore::{
     BlockDescriptor, BlockKey, LabelIndex, LabelPredicate, LogBlockIndex as BlockIndex,
     LogMatchOp as MatchOp, TimeRange, labels, series_fingerprint,
@@ -41,9 +41,13 @@ fn label_predicate_equal_matches_only_identical_label_value() {
     let matching = labels([("app", "api"), ("env", "prod")]);
     let different = labels([("app", "worker"), ("env", "prod")]);
 
-    assert!(predicate.matches(&matching));
-    assert!(!predicate.matches(&different));
-    assert!(!predicate.matches(&labels([("env", "prod")])));
+    for (candidate, want) in [
+        (matching, true),
+        (different, false),
+        (labels([("env", "prod")]), false),
+    ] {
+        assert!(predicate.matches(&candidate) == want, "for {candidate:?}");
+    }
 }
 
 #[test]
@@ -70,10 +74,10 @@ fn label_metadata_is_tenant_scoped() {
         labels([("service", "billing"), ("env", "prod")]),
     );
 
-    assert!(index.label_names("tenant-a") == BTreeSet::from(["app".into(), "env".into()]));
-    assert!(index.label_values("tenant-a", "app") == BTreeSet::from(["api".into()]));
-    assert!(index.label_names("tenant-b") == BTreeSet::from(["env".into(), "service".into()]));
-    assert!(index.label_values("tenant-b", "app").is_empty());
+    check!(index.label_names("tenant-a") == BTreeSet::from(["app".into(), "env".into()]));
+    check!(index.label_values("tenant-a", "app") == BTreeSet::from(["api".into()]));
+    check!(index.label_names("tenant-b") == BTreeSet::from(["env".into(), "service".into()]));
+    check!(index.label_values("tenant-b", "app").is_empty());
 }
 
 #[test]
@@ -85,16 +89,23 @@ fn label_index_returns_labels_and_tenant_series() {
     let worker = index.insert_series("tenant-a", worker_labels.clone());
     index.insert_series("tenant-b", labels([("app", "api")]));
 
-    assert!(index.labels_for("tenant-a", api) == Some(&api_labels));
-    assert!(index.labels_for("tenant-a", worker) == Some(&worker_labels));
-    assert!(index.labels_for("tenant-a", 0).is_none());
-    assert!(index.labels_for("tenant-b", api).is_none());
+    for (tenant, series_id, want) in [
+        ("tenant-a", api, Some(&api_labels)),
+        ("tenant-a", worker, Some(&worker_labels)),
+        ("tenant-a", 0, None),
+        ("tenant-b", api, None),
+    ] {
+        assert!(
+            index.labels_for(tenant, series_id) == want,
+            "labels_for({tenant}, {series_id})"
+        );
+    }
 
     let series = index.tenant_series("tenant-a");
-    assert!(series.len() == 2);
-    assert!(series.contains(&(api, api_labels)));
-    assert!(series.contains(&(worker, worker_labels)));
-    assert!(index.tenant_series("missing").is_empty());
+    check!(series.len() == 2);
+    check!(series.contains(&(api, api_labels)));
+    check!(series.contains(&(worker, worker_labels)));
+    check!(index.tenant_series("missing").is_empty());
 }
 
 #[test]

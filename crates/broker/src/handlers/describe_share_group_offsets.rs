@@ -22,6 +22,7 @@ use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
 use crate::codes;
 use crate::error::BrokerError;
+use crate::share_coordinator::coordinator::UNINITIALIZED_START_OFFSET;
 
 #[tracing::instrument(
     name = "handle_describe_share_group_offsets",
@@ -152,7 +153,7 @@ async fn describe_topic(
             .into_iter()
             .map(|p| DescribeShareGroupOffsetsResponsePartition {
                 partition_index: p,
-                start_offset: -1,
+                start_offset: UNINITIALIZED_START_OFFSET,
                 leader_epoch: -1,
                 lag: -1,
                 error_code: codes::UNKNOWN_TOPIC_OR_PARTITION,
@@ -209,8 +210,8 @@ async fn describe_partition(
 ) -> DescribeShareGroupOffsetsResponsePartition {
     let (start_offset, error_code) = match persister.read_state(gid, topic_id, p).await {
         Ok(Some(state)) => (state.start_offset, codes::NONE),
-        Ok(None) => (-1, codes::NONE),
-        Err(_) => (-1, codes::COORDINATOR_NOT_AVAILABLE),
+        Ok(None) => (UNINITIALIZED_START_OFFSET, codes::NONE),
+        Err(_) => (UNINITIALIZED_START_OFFSET, codes::COORDINATOR_NOT_AVAILABLE),
     };
     let (leader_epoch, lag) = if let Some(part) = broker.partitions.get(topic_name, p) {
         let hwm = part.high_watermark().await;
@@ -233,5 +234,288 @@ async fn describe_partition(
         lag,
         error_code,
         ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert2::assert;
+    use crabka_metadata::{MetadataImage, MetadataRecord, TopicRecord};
+    use crabka_protocol::UnknownTaggedFields;
+    use crabka_protocol::owned::describe_share_group_offsets_request::{
+        DescribeShareGroupOffsetsRequestGroup, DescribeShareGroupOffsetsRequestTopic,
+    };
+    use crabka_protocol::owned::describe_share_group_offsets_response;
+    use crabka_security::{AuthMethod, Principal};
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    use crate::authorizer::{AuthorizationRequest, Authorizer};
+    use crate::config::BrokerConfig;
+
+    #[derive(Debug)]
+    struct DenyAll;
+
+    type RequestTopic<'a> = (&'a str, Vec<i32>);
+    type RequestGroup<'a> = (&'a str, Vec<RequestTopic<'a>>);
+
+    impl Authorizer for DenyAll {
+        fn authorize(
+            &self,
+            _source: &dyn crabka_authz::AclSource,
+            _req: &AuthorizationRequest<'_>,
+        ) -> AuthorizationResult {
+            AuthorizationResult::Deny
+        }
+    }
+
+    fn request(groups: &[RequestGroup<'_>]) -> DescribeShareGroupOffsetsRequest {
+        DescribeShareGroupOffsetsRequest {
+            groups: groups
+                .iter()
+                .map(|(group_id, topics)| DescribeShareGroupOffsetsRequestGroup {
+                    group_id: (*group_id).into(),
+                    topics: Some(
+                        topics
+                            .iter()
+                            .map(
+                                |(topic_name, partitions)| DescribeShareGroupOffsetsRequestTopic {
+                                    topic_name: (*topic_name).into(),
+                                    partitions: partitions.clone(),
+                                    ..Default::default()
+                                },
+                            )
+                            .collect(),
+                    ),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    fn encode_request(req: &DescribeShareGroupOffsetsRequest) -> Bytes {
+        let version = describe_share_group_offsets_response::MAX_VERSION;
+        let mut buf = BytesMut::with_capacity(req.encoded_len(version));
+        req.encode(&mut buf, version).expect("encode request");
+        buf.freeze()
+    }
+
+    fn decode_response(bytes: &Bytes) -> DescribeShareGroupOffsetsResponse {
+        let version = describe_share_group_offsets_response::MAX_VERSION;
+        let mut cur: &[u8] = bytes.as_ref();
+        let resp =
+            DescribeShareGroupOffsetsResponse::decode(&mut cur, version).expect("decode response");
+        assert!(cur.is_empty(), "response decoder consumed all bytes");
+        resp
+    }
+
+    fn test_context<'a>(
+        principal: &'a Principal,
+        peer: &'a SocketAddr,
+    ) -> crate::handlers::RequestContext<'a> {
+        crate::handlers::RequestContext {
+            principal,
+            peer,
+            client_id: "admin-client",
+            sendfile_capable: false,
+            connection_listener_name: "PLAINTEXT",
+        }
+    }
+
+    async fn start_broker(
+        authorizer: Arc<dyn Authorizer>,
+        share_enabled: bool,
+    ) -> (crate::broker::BrokerHandle, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
+        cfg.authorizer = authorizer;
+        cfg.share_group.enable = share_enabled;
+        let handle = Broker::start(cfg).await.expect("start broker");
+        (handle, dir)
+    }
+
+    fn principal() -> Principal {
+        Principal {
+            name: "alice".into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        }
+    }
+
+    fn image_with_topic(name: &str, topic_id: uuid::Uuid) -> MetadataImage {
+        let mut image = MetadataImage::new(uuid::Uuid::nil());
+        image.apply(&MetadataRecord::V1Topic(TopicRecord {
+            name: name.into(),
+            topic_id,
+            partitions: 1,
+            replication_factor: 1,
+        }));
+        image
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn handle_error_scenarios_preserve_expected_rows() {
+        type Case<'a> = (
+            &'a str,
+            Arc<dyn Authorizer>,
+            bool,
+            Vec<RequestGroup<'a>>,
+            DescribeShareGroupOffsetsResponse,
+        );
+        let version = describe_share_group_offsets_response::MAX_VERSION;
+        let cases: Vec<Case<'_>> = vec![
+            (
+                "disabled feature preserves group error rows",
+                Arc::new(crate::authorizer::AllowAllAuthorizer),
+                false,
+                vec![("g1", vec![("t1", vec![0])]), ("g2", vec![("t2", vec![1])])],
+                DescribeShareGroupOffsetsResponse {
+                    throttle_time_ms: 0,
+                    groups: vec![
+                        DescribeShareGroupOffsetsResponseGroup {
+                            group_id: "g1".into(),
+                            topics: Vec::new(),
+                            error_code: codes::UNSUPPORTED_VERSION,
+                            error_message: None,
+                            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                        },
+                        DescribeShareGroupOffsetsResponseGroup {
+                            group_id: "g2".into(),
+                            topics: Vec::new(),
+                            error_code: codes::UNSUPPORTED_VERSION,
+                            error_message: None,
+                            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                        },
+                    ],
+                    unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                },
+            ),
+            (
+                "denied group preserves group id and error code",
+                Arc::new(DenyAll),
+                true,
+                vec![("g1", vec![("missing", vec![0])])],
+                DescribeShareGroupOffsetsResponse {
+                    throttle_time_ms: 0,
+                    groups: vec![DescribeShareGroupOffsetsResponseGroup {
+                        group_id: "g1".into(),
+                        topics: Vec::new(),
+                        error_code: codes::GROUP_AUTHORIZATION_FAILED,
+                        error_message: None,
+                        unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                    }],
+                    unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                },
+            ),
+            (
+                "unknown topic preserves partition error rows",
+                Arc::new(crate::authorizer::AllowAllAuthorizer),
+                true,
+                vec![("g1", vec![("missing-topic", vec![3, 5])])],
+                DescribeShareGroupOffsetsResponse {
+                    throttle_time_ms: 0,
+                    groups: vec![DescribeShareGroupOffsetsResponseGroup {
+                        group_id: "g1".into(),
+                        topics: vec![DescribeShareGroupOffsetsResponseTopic {
+                            topic_name: "missing-topic".into(),
+                            topic_id: Uuid::default(),
+                            partitions: vec![
+                                DescribeShareGroupOffsetsResponsePartition {
+                                    partition_index: 3,
+                                    start_offset: -1,
+                                    leader_epoch: -1,
+                                    lag: -1,
+                                    error_code: codes::UNKNOWN_TOPIC_OR_PARTITION,
+                                    error_message: None,
+                                    unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                                },
+                                DescribeShareGroupOffsetsResponsePartition {
+                                    partition_index: 5,
+                                    start_offset: -1,
+                                    leader_epoch: -1,
+                                    lag: -1,
+                                    error_code: codes::UNKNOWN_TOPIC_OR_PARTITION,
+                                    error_message: None,
+                                    unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                                },
+                            ],
+                            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                        }],
+                        error_code: codes::NONE,
+                        error_message: None,
+                        unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                    }],
+                    unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                },
+            ),
+        ];
+        for (case, authorizer, share_enabled, groups, expected) in cases {
+            let (broker_handle, _dir) = start_broker(authorizer, share_enabled).await;
+            let broker = broker_handle.broker_arc_for_test();
+            let principal = principal();
+            let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+            let ctx = test_context(&principal, &peer);
+            let req_bytes = encode_request(&request(&groups));
+
+            let resp = handle(&broker, version, 1, &req_bytes, &ctx)
+                .await
+                .expect("handle");
+            let resp = decode_response(&resp);
+
+            assert!(resp == expected, "case: {case}");
+            broker_handle.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn describe_topic_reads_persisted_partition_state() {
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer), true).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let persister = broker
+            .group_coordinator
+            .share_persister()
+            .cloned()
+            .expect("share persister");
+        let topic_id = uuid::Uuid::from_u128(0xD5C0);
+        let image = image_with_topic("orders", topic_id);
+        persister
+            .initialize("g-desc", topic_id, 0, 1, 33)
+            .await
+            .expect("seed state");
+
+        let topic = describe_topic(
+            &broker,
+            &persister,
+            &image,
+            None,
+            "g-desc",
+            DescribeShareGroupOffsetsRequestTopic {
+                topic_name: "orders".into(),
+                partitions: vec![0],
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let expected = DescribeShareGroupOffsetsResponseTopic {
+            topic_name: "orders".into(),
+            topic_id: Uuid(*topic_id.as_bytes()),
+            partitions: vec![DescribeShareGroupOffsetsResponsePartition {
+                partition_index: 0,
+                start_offset: 33,
+                leader_epoch: -1,
+                lag: -1,
+                error_code: codes::NONE,
+                error_message: None,
+                unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+            }],
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        };
+        assert!(topic == expected);
+        broker_handle.shutdown().await;
     }
 }

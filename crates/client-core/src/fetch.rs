@@ -39,7 +39,7 @@ impl FetchTransport for Connection {
 }
 
 /// One record decoded from a single-partition fetch.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FetchedRecord {
     /// Absolute offset within the partition.
     pub offset: i64,
@@ -272,6 +272,8 @@ fn decode_fetch_response(
 mod tests {
     use super::*;
     use assert2::assert;
+    use crabka_protocol::UnknownTaggedFields;
+    use crabka_protocol::owned::fetch_request::ReplicaState;
     use crabka_protocol::owned::fetch_response::{
         FetchResponse, FetchableTopicResponse, PartitionData,
     };
@@ -323,13 +325,22 @@ mod tests {
             ..Default::default()
         };
         let got = decode_fetch_response(&resp, 0).unwrap();
-        assert!(got.len() == 2);
-        assert!(got[0].offset == 5);
-        assert!(got[0].timestamp == 1_000);
-        assert!(got[0].value.as_deref() == Some(b"a".as_ref()));
-        assert!(got[1].offset == 6);
-        assert!(got[1].timestamp == 1_010);
-        assert!(got[1].value.as_deref() == Some(b"b".as_ref()));
+        assert!(
+            got == vec![
+                FetchedRecord {
+                    offset: 5,
+                    key: None,
+                    value: Some(Bytes::from_static(b"a")),
+                    timestamp: 1_000,
+                },
+                FetchedRecord {
+                    offset: 6,
+                    key: None,
+                    value: Some(Bytes::from_static(b"b")),
+                    timestamp: 1_010,
+                },
+            ]
+        );
     }
 
     #[test]
@@ -337,19 +348,42 @@ mod tests {
         let topic_id = WireUuid([7; 16]);
         let req = build_fetch_request("orders", topic_id, 3, 123, 250, 64 * 1024, 1);
 
-        assert!(req.max_wait_ms == 250);
-        assert!(req.min_bytes == 1);
-        assert!(req.max_bytes == 50 * 1024 * 1024);
-        assert!(req.isolation_level == 1);
-        assert!(req.topics.len() == 1);
-        let topic = &req.topics[0];
-        assert!(topic.topic == "orders");
-        assert!(topic.topic_id == topic_id);
-        assert!(topic.partitions.len() == 1);
-        let partition = &topic.partitions[0];
-        assert!(partition.partition == 3);
-        assert!(partition.fetch_offset == 123);
-        assert!(partition.partition_max_bytes == 64 * 1024);
+        assert!(
+            req == FetchRequest {
+                replica_id: -1,
+                max_wait_ms: 250,
+                min_bytes: 1,
+                max_bytes: 50 * 1024 * 1024,
+                isolation_level: 1,
+                session_id: 0,
+                session_epoch: -1,
+                topics: vec![FetchTopic {
+                    topic: "orders".to_string(),
+                    topic_id: WireUuid([7; 16]),
+                    partitions: vec![FetchPartition {
+                        partition: 3,
+                        current_leader_epoch: -1,
+                        fetch_offset: 123,
+                        last_fetched_epoch: -1,
+                        log_start_offset: -1,
+                        partition_max_bytes: 64 * 1024,
+                        replica_directory_id: WireUuid::ZERO,
+                        high_watermark: i64::MAX,
+                        unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                    }],
+                    unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                }],
+                forgotten_topics_data: vec![],
+                rack_id: String::new(),
+                cluster_id: None,
+                replica_state: ReplicaState {
+                    replica_id: -1,
+                    replica_epoch: -1,
+                    unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                },
+                unknown_tagged_fields: UnknownTaggedFields(vec![]),
+            }
+        );
     }
 
     #[test]
@@ -423,10 +457,22 @@ mod tests {
         let got = super::fetch_partition_on(&transport, "t", topic_id, 2, 5, 250, 4096)
             .await
             .unwrap();
-        assert!(got.len() == 2);
-        assert!(got[0].offset == 5);
-        assert!(got[0].value.as_deref() == Some(b"a".as_ref()));
-        assert!(got[1].offset == 6);
+        assert!(
+            got == vec![
+                FetchedRecord {
+                    offset: 5,
+                    key: None,
+                    value: Some(Bytes::from_static(b"a")),
+                    timestamp: 1_000,
+                },
+                FetchedRecord {
+                    offset: 6,
+                    key: None,
+                    value: Some(Bytes::from_static(b"b")),
+                    timestamp: 1_010,
+                },
+            ]
+        );
     }
 
     /// A caller-set isolation level (`READ_COMMITTED` = 1) must reach the wire.

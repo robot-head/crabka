@@ -359,7 +359,7 @@ pub enum AdminError {
 }
 
 /// A Kafka-level error attached to a single per-resource outcome.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KafkaError {
     pub code: i16,
     pub name: &'static str,
@@ -517,9 +517,13 @@ mod tests {
 
     #[test]
     fn kafka_error_name_known_codes() {
-        assert!(kafka_error_name(0) == "NONE");
-        assert!(kafka_error_name(36) == "TOPIC_ALREADY_EXISTS");
-        assert!(kafka_error_name(41) == "NOT_CONTROLLER");
+        for (code, want) in [
+            (0, "NONE"),
+            (36, "TOPIC_ALREADY_EXISTS"),
+            (41, "NOT_CONTROLLER"),
+        ] {
+            assert!(kafka_error_name(code) == want);
+        }
     }
 
     #[test]

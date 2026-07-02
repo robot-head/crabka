@@ -150,6 +150,7 @@ mod tests {
     use assert2::assert;
 
     use super::*;
+    use crate::span::EventRecord;
 
     const BODY: &str = r#"[
       {
@@ -168,20 +169,36 @@ mod tests {
     #[test]
     fn decodes_zipkin_span() {
         let spans = decode_zipkin(BODY.as_bytes()).unwrap();
-        assert!(spans.len() == 1);
-        let span = &spans[0];
-        assert!(span.trace_id[15] == 1);
-        assert!(span.span_id[7] == 2);
-        assert!(span.kind == SpanKind::Server);
-        assert!(span.start_ns == 1_000_000);
-        assert!(span.duration_ns == 500_000);
-        assert!(
-            span.resource_attrs.iter().any(
-                |attr| attr.key == "service.name" && attr.value == AttrValue::Str("api".into())
-            )
+        assert_eq!(
+            spans,
+            vec![Span {
+                trace_id: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+                span_id: [0, 0, 0, 0, 0, 0, 0, 2],
+                parent_span_id: None,
+                name: "get /".into(),
+                kind: SpanKind::Server,
+                start_ns: 1_000_000,
+                duration_ns: 500_000,
+                status: StatusCode::Unset,
+                status_message: String::new(),
+                resource_attrs: vec![KeyValue {
+                    key: "service.name".into(),
+                    value: AttrValue::Str("api".into()),
+                }],
+                span_attrs: vec![KeyValue {
+                    key: "http.method".into(),
+                    value: AttrValue::Str("GET".into()),
+                }],
+                events: vec![EventRecord {
+                    time_unix_nano: 1_100_000,
+                    name: "cache miss".into(),
+                    attrs: Vec::new(),
+                }],
+                links: Vec::new(),
+                instrumentation_scope: String::new(),
+                instrumentation_version: String::new(),
+            }]
         );
-        assert!(span.span_attrs.iter().any(|attr| attr.key == "http.method"));
-        assert!(span.events[0].time_unix_nano == 1_100_000);
     }
 
     #[test]

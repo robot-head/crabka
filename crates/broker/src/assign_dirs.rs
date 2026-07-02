@@ -15,6 +15,10 @@ use crabka_protocol::owned::assign_replicas_to_dirs_request::{
     AssignReplicasToDirsRequest, DirectoryData, PartitionData, TopicData,
 };
 
+/// Kafka sentinel for "broker epoch unknown" in `AssignReplicasToDirs`,
+/// matching the convention used by `send_alter_partition`.
+const UNKNOWN_BROKER_EPOCH: i64 = -1;
+
 /// Group flat `(topic_id, partition, dir_uuid)` assignments into the nested
 /// `AssignReplicasToDirs` wire shape:
 /// `directories[]` → `topics[]` → `partitions[]`.
@@ -71,9 +75,9 @@ pub(crate) fn build_request(
 
     AssignReplicasToDirsRequest {
         broker_id,
-        broker_epoch: -1,
+        broker_epoch: UNKNOWN_BROKER_EPOCH,
         directories,
-        ..Default::default()
+        unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
     }
 }
 
@@ -114,10 +118,13 @@ pub(crate) async fn send_assignments(
         .map_err(|e| format!("connect: {e}"))?;
 
     let resp = client.send(req).await.map_err(|e| format!("send: {e}"))?;
-    if resp.error_code != 0 {
+    validate_assign_response(resp.error_code)
+}
+
+fn validate_assign_response(error_code: i16) -> Result<(), String> {
+    if error_code != 0 {
         return Err(format!(
-            "AssignReplicasToDirs rejected by controller: error_code={}",
-            resp.error_code
+            "AssignReplicasToDirs rejected by controller: error_code={error_code}"
         ));
     }
     Ok(())
@@ -126,8 +133,83 @@ pub(crate) async fn send_assignments(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
+    use crabka_metadata::MetadataImage;
+    use crabka_protocol::{Decode, Encode};
+    use crabka_raft::{
+        AddVoter, Node, NodeId, QuorumState, RaftError, ReconfigOutcome, RemoveVoter,
+        SnapshotRange, UpdateVoter,
+    };
+    use std::{collections::BTreeSet, net::SocketAddr};
+    use tokio::sync::watch;
     use uuid::Uuid;
+
+    struct MockSource {
+        image: Arc<MetadataImage>,
+        leader: Option<NodeId>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::metadata_source::MetadataSource for MockSource {
+        fn current_image(&self) -> Arc<MetadataImage> {
+            self.image.clone()
+        }
+
+        fn watch_image(&self) -> watch::Receiver<Arc<MetadataImage>> {
+            let (_tx, rx) = watch::channel(self.image.clone());
+            rx
+        }
+
+        fn watch_leader(&self) -> watch::Receiver<Option<NodeId>> {
+            let (_tx, rx) = watch::channel(self.leader);
+            rx
+        }
+
+        fn quorum_state(&self) -> QuorumState {
+            panic!("not used by assign_dirs tests")
+        }
+
+        async fn submit_change(
+            &self,
+            _records: Vec<crabka_metadata::MetadataRecord>,
+        ) -> Result<(), RaftError> {
+            panic!("not used by assign_dirs tests")
+        }
+
+        async fn change_membership(&self, _new_voters: BTreeSet<NodeId>) -> Result<(), RaftError> {
+            panic!("not used by assign_dirs tests")
+        }
+
+        async fn add_learner(&self, _node_id: NodeId, _node: Node) -> Result<(), RaftError> {
+            panic!("not used by assign_dirs tests")
+        }
+
+        fn controller_bound_addr(&self) -> SocketAddr {
+            panic!("not used by assign_dirs tests")
+        }
+
+        fn read_snapshot_range(&self, _position: i64, _max_bytes: i32) -> SnapshotRange {
+            panic!("not used by assign_dirs tests")
+        }
+
+        async fn trigger_snapshot(&self) -> Result<(), RaftError> {
+            panic!("not used by assign_dirs tests")
+        }
+
+        async fn add_voter(&self, _req: AddVoter) -> Result<ReconfigOutcome, RaftError> {
+            panic!("not used by assign_dirs tests")
+        }
+
+        async fn remove_voter(&self, _req: RemoveVoter) -> Result<ReconfigOutcome, RaftError> {
+            panic!("not used by assign_dirs tests")
+        }
+
+        async fn update_voter(&self, _req: UpdateVoter) -> Result<ReconfigOutcome, RaftError> {
+            panic!("not used by assign_dirs tests")
+        }
+
+        async fn cancel(&self) {}
+    }
 
     #[test]
     fn build_request_groups_correctly() {
@@ -144,12 +226,10 @@ mod tests {
 
         let req = build_request(7, &assignments);
 
-        // broker_id and epoch
-        assert!(req.broker_id == 7);
-        assert!(req.broker_epoch == -1);
-
-        // Two directories
-        assert!(req.directories.len() == 2);
+        // broker_id, epoch, and two directories.
+        check!(req.broker_id == 7);
+        check!(req.broker_epoch == -1);
+        check!(req.directories.len() == 2);
 
         // Find dir dX and dY by their UUID bytes.
         let dir_x = req
@@ -192,7 +272,50 @@ mod tests {
     #[test]
     fn build_request_empty_assignments() {
         let req = build_request(1, &[]);
-        assert!(req.broker_id == 1);
-        assert!(req.directories.is_empty());
+        check!(req.broker_id == 1);
+        check!(req.broker_epoch == -1);
+        check!(req.directories.is_empty());
+    }
+
+    #[test]
+    fn build_request_encodes_unknown_broker_epoch() {
+        let req = build_request(3, &[]);
+        let mut bytes = bytes::BytesMut::new();
+
+        req.encode(&mut bytes, 0).expect("encode request");
+        let decoded =
+            AssignReplicasToDirsRequest::decode(&mut bytes.freeze(), 0).expect("decode request");
+
+        assert!(decoded.broker_id == 3);
+        assert!(decoded.broker_epoch == -1);
+    }
+
+    #[tokio::test]
+    async fn send_assignments_rejects_bad_controller_leader() {
+        let cases = [
+            // No controller leader elected at all.
+            (None, "no controller leader"),
+            // Leader elected but its broker record is missing from the image.
+            (Some(42), "controller leader not in image"),
+        ];
+        for (leader, expected) in cases {
+            let source: Arc<dyn crate::metadata_source::MetadataSource> = Arc::new(MockSource {
+                image: Arc::new(MetadataImage::new(uuid::Uuid::nil())),
+                leader,
+            });
+
+            let err = send_assignments(&source, "assign-test", build_request(1, &[]))
+                .await
+                .expect_err("bad controller leader must fail");
+
+            assert!(err == expected, "case: leader={leader:?}");
+        }
+    }
+
+    #[test]
+    fn validate_assign_response_rejects_controller_error() {
+        assert!(validate_assign_response(0).is_ok());
+        let err = validate_assign_response(42).expect_err("non-zero error_code must fail");
+        assert!(err.contains("error_code=42"));
     }
 }

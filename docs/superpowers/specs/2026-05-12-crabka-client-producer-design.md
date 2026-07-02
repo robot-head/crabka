@@ -348,7 +348,7 @@ Sender task is `tokio::spawn`'d under a `JoinHandle`. On panic: every queued one
 
 `crates/broker/tests/jvm_acceptance.rs` adds one test:
 
-- `rust_producer_to_console_consumer`: build a `crabka-client-producer` on the host pointed at the host broker; send 3 records; `docker run --rm --add-host=host.docker.internal:host-gateway confluentinc/cp-kafka:6.1.1 kafka-console-consumer --bootstrap-server host.docker.internal:9092 --topic crabka-rust-producer-itest --partition 0 --from-beginning --max-messages 3`; assert all 3 records appear. Joins the existing `broker-jvm-acceptance` job.
+- `rust_producer_to_console_consumer`: build a `crabka-client-producer` on the host pointed at the host broker; send 3 records; `docker run --rm --add-host=host.docker.internal:host-gateway mirror.gcr.io/confluentinc/cp-kafka:6.1.1 kafka-console-consumer --bootstrap-server host.docker.internal:9092 --topic crabka-rust-producer-itest --partition 0 --from-beginning --max-messages 3`; assert all 3 records appear. Joins the existing `broker-jvm-acceptance` job.
 
 ### Out of scope for testing
 

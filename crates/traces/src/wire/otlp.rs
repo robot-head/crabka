@@ -229,21 +229,32 @@ mod tests {
     #[test]
     fn decodes_one_span_with_resource_attrs() {
         let spans = decode_otlp(&data()).unwrap();
-        assert!(spans.len() == 1);
-        let span = &spans[0];
-        assert!(span.trace_id == [1; 16]);
-        assert!(span.span_id == [2; 8]);
-        assert!(span.parent_span_id == None);
-        assert!(span.kind == SpanKind::Server);
-        assert!(span.status == StatusCode::Ok);
-        assert!(span.start_ns == 1_000);
-        assert!(span.duration_ns == 500);
-        assert!(
-            span.resource_attrs.iter().any(
-                |attr| attr.key == "service.name" && attr.value == AttrValue::Str("api".into())
-            )
+        assert_eq!(
+            spans,
+            vec![Span {
+                trace_id: [1; 16],
+                span_id: [2; 8],
+                parent_span_id: None,
+                name: "GET /".into(),
+                kind: SpanKind::Server,
+                start_ns: 1_000,
+                duration_ns: 500,
+                status: StatusCode::Ok,
+                status_message: String::new(),
+                resource_attrs: vec![KeyValue {
+                    key: "service.name".into(),
+                    value: AttrValue::Str("api".into()),
+                }],
+                span_attrs: vec![KeyValue {
+                    key: "http.method".into(),
+                    value: AttrValue::Str("GET".into()),
+                }],
+                events: Vec::new(),
+                links: Vec::new(),
+                instrumentation_scope: String::new(),
+                instrumentation_version: String::new(),
+            }]
         );
-        assert!(span.span_attrs.iter().any(|attr| attr.key == "http.method"));
     }
 
     #[test]

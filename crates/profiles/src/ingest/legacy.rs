@@ -1059,7 +1059,7 @@ fn urldecode(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+    use assert2::{assert, check};
 
     use super::*;
 
@@ -1069,10 +1069,10 @@ mod tests {
             parse_ingest_query("name=myapp{env=\"prod\",team=\"core\"}&format=pprof&sampleRate=97")
                 .unwrap();
 
-        assert!(q.name == "myapp");
-        assert!(q.labels.contains(&("env".to_string(), "prod".to_string())));
+        check!(q.name == "myapp");
+        check!(q.labels.contains(&("env".to_string(), "prod".to_string())));
         assert!(matches!(q.format, IngestFormat::Pprof));
-        assert!(q.sample_rate == 97);
+        check!(q.sample_rate == 97);
     }
 
     #[test]
@@ -1103,9 +1103,9 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(raw.labels.get("__name__") == Some("myapp"));
-        assert!(raw.labels.get("env") == Some("prod"));
-        assert!(raw.profile.sample_types()[0].0 == "cpu");
+        check!(raw.labels.get("__name__") == Some("myapp"));
+        check!(raw.labels.get("env") == Some("prod"));
+        check!(raw.profile.sample_types()[0].0 == "cpu");
     }
 
     #[tokio::test]
@@ -1163,9 +1163,9 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(raw.labels.get("__name__") == Some("myapp"));
-        assert!(raw.profile.sample_types()[0] == ("samples".to_string(), "count".to_string()));
-        assert!(raw.profile.samples().len() == 2);
+        check!(raw.labels.get("__name__") == Some("myapp"));
+        check!(raw.profile.sample_types()[0] == ("samples".to_string(), "count".to_string()));
+        check!(raw.profile.samples().len() == 2);
     }
 
     #[tokio::test]
@@ -1290,11 +1290,11 @@ mod tests {
             .filter_map(|function| raw.profile.string(function.name))
             .collect::<Vec<_>>();
 
-        assert!(raw.profile.sample_types()[0] == ("samples".to_string(), "samples".to_string()));
-        assert!(values == vec![1, 2]);
-        assert!(functions.contains(&"a"));
-        assert!(functions.contains(&"b"));
-        assert!(functions.contains(&"c"));
+        check!(raw.profile.sample_types()[0] == ("samples".to_string(), "samples".to_string()));
+        check!(values == vec![1, 2]);
+        for function in ["a", "b", "c"] {
+            check!(functions.contains(&function));
+        }
     }
 
     #[tokio::test]
@@ -1323,11 +1323,11 @@ mod tests {
             .filter_map(|function| raw.profile.string(function.name))
             .collect::<Vec<_>>();
 
-        assert!(raw.profile.sample_types()[0] == ("samples".to_string(), "samples".to_string()));
-        assert!(values == vec![1, 2]);
-        assert!(functions.contains(&"a"));
-        assert!(functions.contains(&"b"));
-        assert!(functions.contains(&"c"));
+        check!(raw.profile.sample_types()[0] == ("samples".to_string(), "samples".to_string()));
+        check!(values == vec![1, 2]);
+        for function in ["a", "b", "c"] {
+            check!(functions.contains(&function));
+        }
     }
 
     #[tokio::test]
@@ -1384,11 +1384,15 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(raw.labels.get("__name__") == Some("myapp"));
-        assert!(raw.labels.get("service_name") == Some("payments"));
-        assert!(raw.labels.get("region") == Some("us-east"));
-        assert!(raw.profile.sample_types()[0] == ("samples".to_string(), "count".to_string()));
-        assert!(raw.profile.samples().len() == 2);
+        for (name, value) in [
+            ("__name__", "myapp"),
+            ("service_name", "payments"),
+            ("region", "us-east"),
+        ] {
+            check!(raw.labels.get(name) == Some(value));
+        }
+        check!(raw.profile.sample_types()[0] == ("samples".to_string(), "count".to_string()));
+        check!(raw.profile.samples().len() == 2);
     }
 
     #[tokio::test]

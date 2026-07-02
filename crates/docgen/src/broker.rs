@@ -159,16 +159,20 @@ pub fn protocol_apis_md() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     #[test]
     fn server_config_page_has_sectioned_field_tables() {
         let md = server_config_md();
-        // Sectioned layout: per-key `## ` headings + horizontal-rule separators.
-        assert!(md.contains("| Field | Type | Required | Default | Description |"));
-        assert!(md.contains("## "), "{md}");
-        assert!(md.contains("\n---\n"), "{md}");
-        // A known top-level table renders as its own section.
-        assert!(md.contains("## tls_config"), "{md}");
+        // Sectioned layout: per-key `## ` headings + horizontal-rule separators,
+        // and a known top-level table (`tls_config`) renders as its own section.
+        for needle in [
+            "| Field | Type | Required | Default | Description |",
+            "## ",
+            "\n---\n",
+            "## tls_config",
+        ] {
+            assert!(md.contains(needle), "missing {needle:?} in {md}");
+        }
     }
     #[test]
     fn topic_configs_page_lists_retention_ms() {
@@ -179,21 +183,22 @@ mod tests {
     #[test]
     fn protocol_apis_page_lists_named_apis() {
         let md = protocol_apis_md();
-        assert!(md.contains("| API Key | Name | Min Version | Max Version | Spec |"));
-        assert!(md.contains("| 18 | ApiVersions |"));
-        assert!(!md.contains("| ? |"));
+        check!(md.contains("| API Key | Name | Min Version | Max Version | Spec |"));
+        check!(md.contains("| 18 | ApiVersions |"));
+        check!(!md.contains("| ? |"));
     }
     #[test]
     fn protocol_apis_page_links_canonical_spec_and_kips() {
         let md = protocol_apis_md();
-        // Canonical protocol-guide permalink in the header.
-        assert!(md.contains("https://kafka.apache.org/protocol"), "{md}");
-        // At least one real KIP link in the Spec column.
-        assert!(md.contains("[KIP-"), "{md}");
-        assert!(
-            md.contains("cwiki.apache.org/confluence/display/KAFKA/KIP-"),
-            "{md}"
-        );
+        for needle in [
+            // Canonical protocol-guide permalink in the header.
+            "https://kafka.apache.org/protocol",
+            // At least one real KIP link in the Spec column.
+            "[KIP-",
+            "cwiki.apache.org/confluence/display/KAFKA/KIP-",
+        ] {
+            assert!(md.contains(needle), "missing {needle:?} in {md}");
+        }
         // Consumer-group heartbeat (68) maps to KIP-848.
         let row = md
             .lines()

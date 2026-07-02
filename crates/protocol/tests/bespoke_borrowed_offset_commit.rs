@@ -42,8 +42,7 @@ fn borrowed_offset_commit_request_max_version_specific_values() {
     let mut cur = &frozen[..];
     let decoded = OffsetCommitRequest::decode_borrow(&mut cur, MAX_VERSION).unwrap();
     assert!(cur.is_empty());
-    assert!(decoded.group_id == req.group_id);
-    assert!(decoded.topics == req.topics);
+    assert!(decoded == req);
 }
 
 #[test]

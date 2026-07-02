@@ -111,24 +111,26 @@ mod tests {
 
     #[test]
     fn result_type_strings_match_prometheus() {
-        assert!(
-            QueryResult::Scalar {
-                ts_ms: 0,
-                value: 1.0
-            }
-            .result_type()
-                == "scalar"
-        );
-        assert!(QueryResult::InstantVector(vec![]).result_type() == "vector");
-        assert!(QueryResult::RangeMatrix(vec![]).result_type() == "matrix");
-        assert!(
-            QueryResult::Str {
-                ts_ms: 0,
-                value: "x".into(),
-            }
-            .result_type()
-                == "string"
-        );
+        for (result, want) in [
+            (
+                QueryResult::Scalar {
+                    ts_ms: 0,
+                    value: 1.0,
+                },
+                "scalar",
+            ),
+            (QueryResult::InstantVector(vec![]), "vector"),
+            (QueryResult::RangeMatrix(vec![]), "matrix"),
+            (
+                QueryResult::Str {
+                    ts_ms: 0,
+                    value: "x".into(),
+                },
+                "string",
+            ),
+        ] {
+            assert!(result.result_type() == want, "case {result:?}");
+        }
     }
 
     #[test]
@@ -175,14 +177,17 @@ mod tests {
 
     #[test]
     fn annotations_empty_requires_no_warning_or_info_messages() {
-        assert!(Annotations::new().is_empty());
-
         let mut warnings = Annotations::new();
         warnings.warn("warn");
-        assert!(!warnings.is_empty());
-
         let mut infos = Annotations::new();
         infos.info("info");
-        assert!(!infos.is_empty());
+
+        for (case, annotations, want) in [
+            ("new", Annotations::new(), true),
+            ("warn", warnings, false),
+            ("info", infos, false),
+        ] {
+            assert!(annotations.is_empty() == want, "case {case}");
+        }
     }
 }

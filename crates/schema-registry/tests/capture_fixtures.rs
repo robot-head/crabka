@@ -1,6 +1,6 @@
 //! Golden-fixture capture harness for the Crabka Schema Registry slice.
 //!
-//! This test stands up a **real** `confluentinc/cp-schema-registry:7.4.0`
+//! This test stands up a **real** `mirror.gcr.io/confluentinc/cp-schema-registry:7.4.0`
 //! container pointed at an in-process Crabka broker, registers a handful of
 //! AVRO / PROTOBUF / JSON schemas through the official REST API, and captures
 //! the byte-exact REST responses **and** the raw `_schemas` Kafka log records
@@ -53,7 +53,7 @@ const ADVERTISED: &str = "host.docker.internal:9092";
 /// `host.docker.internal` address (unresolvable from a host process).
 const DIRECT_ADDR: &str = "127.0.0.1:9092";
 
-const SR_IMAGE: &str = "confluentinc/cp-schema-registry:7.4.0";
+const SR_IMAGE: &str = "mirror.gcr.io/confluentinc/cp-schema-registry:7.4.0";
 
 /// Content type cp-schema-registry expects on register POSTs.
 const SR_CONTENT_TYPE: &str = "application/vnd.schemaregistry.v1+json";
@@ -442,40 +442,58 @@ async fn run_capture(
     let js_id = extract_id(&js_reg);
     eprintln!("CAPTURE ids avro={avro_id} protobuf={pb_id} json={js_id}");
 
-    // ── GET version + by-id for each ──
-    let (st, body) = http_get(&http, &format!("{base}/subjects/av-value/versions/1")).await;
-    assert!(st.is_success(), "get av-value v1: {st} {body}");
-    write_fixture("rest_get_version_avro.json", &body);
-    let (st, body) = http_get(&http, &format!("{base}/schemas/ids/{avro_id}")).await;
-    assert!(st.is_success(), "get avro by id: {st} {body}");
-    write_fixture("rest_get_by_id_avro.json", &body);
-
-    let (st, body) = http_get(&http, &format!("{base}/subjects/pb-value/versions/1")).await;
-    assert!(st.is_success(), "get pb-value v1: {st} {body}");
-    write_fixture("rest_get_version_protobuf.json", &body);
-    let (st, body) = http_get(&http, &format!("{base}/schemas/ids/{pb_id}")).await;
-    assert!(st.is_success(), "get protobuf by id: {st} {body}");
-    write_fixture("rest_get_by_id_protobuf.json", &body);
-
-    let (st, body) = http_get(&http, &format!("{base}/subjects/js-value/versions/1")).await;
-    assert!(st.is_success(), "get js-value v1: {st} {body}");
-    write_fixture("rest_get_version_json.json", &body);
-    let (st, body) = http_get(&http, &format!("{base}/schemas/ids/{js_id}")).await;
-    assert!(st.is_success(), "get json by id: {st} {body}");
-    write_fixture("rest_get_by_id_json.json", &body);
-
-    // ── misc GETs ──
-    let (st, body) = http_get(&http, &format!("{base}/subjects")).await;
-    assert!(st.is_success(), "list subjects: {st} {body}");
-    write_fixture("rest_list_subjects.json", &body);
-
-    let (st, body) = http_get(&http, &format!("{base}/config")).await;
-    assert!(st.is_success(), "get config: {st} {body}");
-    write_fixture("rest_get_config.json", &body);
-
-    let (st, body) = http_get(&http, &format!("{base}/schemas/types")).await;
-    assert!(st.is_success(), "schema types: {st} {body}");
-    write_fixture("rest_schema_types.json", &body);
+    // ── GET version + by-id for each, then misc GETs ──
+    for (url, fixture, what) in [
+        (
+            format!("{base}/subjects/av-value/versions/1"),
+            "rest_get_version_avro.json",
+            "get av-value v1",
+        ),
+        (
+            format!("{base}/schemas/ids/{avro_id}"),
+            "rest_get_by_id_avro.json",
+            "get avro by id",
+        ),
+        (
+            format!("{base}/subjects/pb-value/versions/1"),
+            "rest_get_version_protobuf.json",
+            "get pb-value v1",
+        ),
+        (
+            format!("{base}/schemas/ids/{pb_id}"),
+            "rest_get_by_id_protobuf.json",
+            "get protobuf by id",
+        ),
+        (
+            format!("{base}/subjects/js-value/versions/1"),
+            "rest_get_version_json.json",
+            "get js-value v1",
+        ),
+        (
+            format!("{base}/schemas/ids/{js_id}"),
+            "rest_get_by_id_json.json",
+            "get json by id",
+        ),
+        (
+            format!("{base}/subjects"),
+            "rest_list_subjects.json",
+            "list subjects",
+        ),
+        (
+            format!("{base}/config"),
+            "rest_get_config.json",
+            "get config",
+        ),
+        (
+            format!("{base}/schemas/types"),
+            "rest_schema_types.json",
+            "schema types",
+        ),
+    ] {
+        let (st, body) = http_get(&http, &url).await;
+        assert!(st.is_success(), "{what}: {st} {body}");
+        write_fixture(fixture, &body);
+    }
 
     // ── provoke + capture errors (status + raw body) ──
     let (st, body) = http_get(&http, &format!("{base}/subjects/does-not-exist/versions/1")).await;

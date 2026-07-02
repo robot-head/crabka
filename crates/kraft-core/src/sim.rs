@@ -1088,7 +1088,7 @@ fn message_duplication() -> ScenarioTrace {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
 
     #[test]
     fn returns_three_traces() {
@@ -1152,9 +1152,9 @@ mod tests {
         );
 
         let snap = sim.snapshot();
-        assert!(snap.leaders.len() == 1);
-        assert!(snap.clock_ms > 0);
-        assert!(snap.step_count > 0);
+        check!(snap.leaders.len() == 1);
+        check!(snap.clock_ms > 0);
+        check!(snap.step_count > 0);
     }
 
     #[test]
@@ -1186,10 +1186,10 @@ mod tests {
         assert!(before > 0, "expected election messages on the bus");
 
         let steps_before = sim.steps().len();
-        assert!(sim.drop_next());
-        assert!(sim.in_flight().len() == before - 1);
+        check!(sim.drop_next());
+        check!(sim.in_flight().len() == before - 1);
         // The drop is recorded on the timeline.
-        assert!(sim.steps().len() == steps_before + 1);
+        check!(sim.steps().len() == steps_before + 1);
         let last = sim.steps().last().unwrap();
         assert!(matches!(last.action, TraceAction::Drop { .. }));
     }

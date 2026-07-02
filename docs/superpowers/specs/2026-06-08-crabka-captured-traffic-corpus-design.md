@@ -15,7 +15,7 @@ The coverage meta-spec's acceptance criterion #9 requires a captured-traffic
 corpus entry per `(api_key, version)` pair. Sub-plan 1d deferred building it,
 leaving an open `KNOWN_ISSUES.md` deviation. This design builds the corpus for
 real: a Rust TCP **tap** records genuine JVM wire bytes flowing between real
-Kafka clients and a pinned `apache/kafka:4.3.0` broker; a **driver** battery
+Kafka clients and a pinned `mirror.gcr.io/apache/kafka:4.3.0` broker; a **driver** battery
 exercises a broad set of operations to capture every pair real clients emit
 (`synthetic = false`); a **synthesis pass** fills the remainder via the existing
 JVM oracle (`synthetic = true`). The result is exactly one corpus entry per
@@ -50,7 +50,7 @@ re-capture job for drift detection.
 The schema pin is **Kafka 4.3.0** (`crates/protocol/schemas/VERSION` →
 `ref: 4.3.0`); the JVM oracle already uses `kafka-clients:4.3.0`. Therefore:
 
-- Broker image: `apache/kafka:4.3.0` (official Apache image ships the matching
+- Broker image: `mirror.gcr.io/apache/kafka:4.3.0` (official Apache image ships the matching
   broker **and** the bundled CLI tools; exact-version, unlike `confluentinc/
   cp-kafka` 7.x/8.x tag-to-Kafka-version drift).
 - Clients: the 4.3.0 bundled CLI tools + a 4.3.0 `AdminClient` driver, so
@@ -61,7 +61,7 @@ The schema pin is **Kafka 4.3.0** (`crates/protocol/schemas/VERSION` →
 ## Architecture
 
 ```
- JVM clients ──▶ kafka-tap (Rust) ──▶ apache/kafka:4.3.0 broker
+ JVM clients ──▶ kafka-tap (Rust) ──▶ mirror.gcr.io/apache/kafka:4.3.0 broker
  (CLI tools,      records every          advertises the tap
   console p/c,    length-prefixed        endpoint, so ALL
   AdminClient)    frame, both dirs       client conns traverse
@@ -116,7 +116,7 @@ Pure byte-level TCP relay + frame recorder. **No protocol-schema knowledge.**
 
 `#[ignore]`, Docker-gated integration test = the on-demand generator. Steps:
 
-1. Boot `apache/kafka:4.3.0` (single-node KRaft), wait for readiness.
+1. Boot `mirror.gcr.io/apache/kafka:4.3.0` (single-node KRaft), wait for readiness.
 2. Build + start `kafka-tap` pointed at the broker; configure the broker's
    advertised listener to the tap endpoint.
 3. Run the **driver battery** (below) against the tap's bootstrap address.
@@ -186,7 +186,7 @@ the existing single entry's contract.
 - **`crates/kafka-tap` unit tests:** `frame.rs` parses + correlates hand-built
   request/response byte fixtures (flexible and non-flexible) with no Docker.
 - **`.github/workflows/recapture-corpus.yml` (`workflow_dispatch`):** boots the
-  pinned `apache/kafka:4.3.0`, re-runs capture, and **fails if freshly-captured
+  pinned `mirror.gcr.io/apache/kafka:4.3.0`, re-runs capture, and **fails if freshly-captured
   bytes diverge from the committed `synthetic = false` entries** (drift
   detection when the image or schema pin moves). It does **not** auto-commit;
   divergence is a human signal to regenerate. Synthetic entries are excluded
@@ -221,7 +221,7 @@ The work ships when **all** hold:
 
 ## Open questions deferred to the plan
 
-- Exact `apache/kafka:4.3.0` KRaft single-node env + readiness probe (reuse the
+- Exact `mirror.gcr.io/apache/kafka:4.3.0` KRaft single-node env + readiness probe (reuse the
   existing broker-test boot pattern).
 - Whether the `AdminClient` driver is a tiny Gradle module under `tools/` or a
   `kafka-clients` snippet invoked from the harness — decided in the plan based

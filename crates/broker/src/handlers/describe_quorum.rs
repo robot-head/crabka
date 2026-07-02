@@ -78,7 +78,7 @@ pub(crate) async fn handle(
             principal: ctx.principal,
             host: ctx.peer,
             resource_type: crabka_metadata::ResourceType::Cluster,
-            resource_name: "kafka-cluster",
+            resource_name: crate::handlers::acl_wire::CLUSTER_RESOURCE_NAME,
             operation: AclOperation::Describe,
         },
     );
@@ -234,10 +234,23 @@ fn build_nodes(quorum: &QuorumState) -> Vec<Node> {
 mod tests {
     use super::*;
     use assert2::assert;
+    use crabka_protocol::UnknownTaggedFields;
     use crabka_protocol::owned::describe_quorum_request::{
         PartitionData as ReqPartitionData, TopicData as ReqTopicData,
     };
     use std::collections::BTreeMap;
+
+    /// Fully-specified expected voter row (no struct-update syntax).
+    fn expected_voter(replica_id: i32, log_end_offset: i64) -> ReplicaState {
+        ReplicaState {
+            replica_id,
+            replica_directory_id: Uuid::ZERO,
+            log_end_offset,
+            last_fetch_timestamp: -1,
+            last_caught_up_timestamp: -1,
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        }
+    }
 
     fn req_for(topic: &str, partition: i32) -> Vec<ReqTopicData> {
         vec![ReqTopicData {
@@ -279,22 +292,30 @@ mod tests {
             &[(1, 40), (2, 42), (3, 38)],
         );
         let out = build_topic_responses(&req, &q);
-        assert!(out.len() == 1);
-        assert!(out[0].topic_name == CLUSTER_METADATA_TOPIC);
-        let pd = &out[0].partitions[0];
-        assert!(pd.error_code == codes::NONE);
-        assert!(pd.leader_id == 2);
-        assert!(
-            pd.leader_epoch == 7,
-            "current_term surfaces as leader_epoch"
-        );
-        assert!(pd.high_watermark == 42, "last_applied_index surfaces as HW");
-        let voter_ids: Vec<i32> = pd.current_voters.iter().map(|v| v.replica_id).collect();
-        assert!(voter_ids == vec![1, 2, 3]);
-        // Each voter's `log_end_offset` comes from the per-voter map.
-        let leos: Vec<i64> = pd.current_voters.iter().map(|v| v.log_end_offset).collect();
-        assert!(leos == vec![40, 42, 38]);
-        assert!(pd.observers.is_empty(), "no observers in Crabka yet");
+        let expected = vec![TopicData {
+            topic_name: CLUSTER_METADATA_TOPIC.to_string(),
+            partitions: vec![PartitionData {
+                partition_index: 0,
+                error_code: codes::NONE,
+                error_message: None,
+                leader_id: 2,
+                // current_term surfaces as leader_epoch.
+                leader_epoch: 7,
+                // last_applied_index surfaces as HW.
+                high_watermark: 42,
+                // Each voter's `log_end_offset` comes from the per-voter map.
+                current_voters: vec![
+                    expected_voter(1, 40),
+                    expected_voter(2, 42),
+                    expected_voter(3, 38),
+                ],
+                // No observers in Crabka yet.
+                observers: Vec::new(),
+                unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+            }],
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        }];
+        assert!(out == expected);
     }
 
     #[test]
@@ -331,9 +352,16 @@ mod tests {
             .iter()
             .map(|v| (v.replica_id, v.log_end_offset))
             .collect();
-        assert!(by_id[&1] == 50, "matched index for voter 1");
-        assert!(by_id[&2] == UNKNOWN_LOG_END_OFFSET, "missing → -1");
-        assert!(by_id[&3] == UNKNOWN_LOG_END_OFFSET, "missing → -1");
+        // Voter 1 gets its matched index; voters missing from the
+        // replication map fall back to the -1 sentinel.
+        let expected: BTreeMap<i32, i64> = [
+            (1, 50),
+            (2, UNKNOWN_LOG_END_OFFSET),
+            (3, UNKNOWN_LOG_END_OFFSET),
+        ]
+        .into_iter()
+        .collect();
+        assert!(by_id == expected);
     }
 
     #[test]
@@ -342,15 +370,19 @@ mod tests {
         let q = quorum_state(Some(1), 1, 0, &[1], &[]);
         let out = build_topic_responses(&req, &q);
         let pd = &out[0].partitions[0];
-        assert!(pd.error_code == codes::INVALID_TOPIC_EXCEPTION);
-        assert!(pd.current_voters.is_empty());
-        assert!(
-            pd.error_message
-                .as_deref()
-                .unwrap_or("")
-                .contains(CLUSTER_METADATA_TOPIC),
-            "error_message names the only supported topic",
-        );
+        let expected = PartitionData {
+            partition_index: 0,
+            error_code: codes::INVALID_TOPIC_EXCEPTION,
+            // The message names the only supported topic.
+            error_message: Some("DescribeQuorum supports only `__cluster_metadata`".to_string()),
+            leader_id: -1,
+            leader_epoch: -1,
+            high_watermark: -1,
+            current_voters: Vec::new(),
+            observers: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        };
+        assert!(*pd == expected);
     }
 
     #[test]
@@ -407,9 +439,17 @@ mod tests {
         ];
         let q = quorum_state(Some(1), 1, 0, &[1], &[]);
         let out = build_topic_responses(&req, &q);
-        assert!(out.len() == 2);
-        assert!(out[0].partitions[0].error_code == codes::NONE);
-        assert!(out[1].partitions[0].error_code == codes::INVALID_TOPIC_EXCEPTION);
+        let codes_by_topic: Vec<(&str, i16)> = out
+            .iter()
+            .map(|t| (t.topic_name.as_str(), t.partitions[0].error_code))
+            .collect();
+        assert!(
+            codes_by_topic
+                == vec![
+                    (CLUSTER_METADATA_TOPIC, codes::NONE),
+                    ("other", codes::INVALID_TOPIC_EXCEPTION),
+                ]
+        );
     }
 
     #[test]
@@ -468,9 +508,13 @@ mod tests {
         let nodes = build_nodes(&q);
         assert!(nodes.len() == 2);
         let first_voter = nodes.iter().find(|n| n.node_id == 1).unwrap();
-        assert!(first_voter.listeners[0].name == "CONTROLLER");
-        assert!(first_voter.listeners[0].host == "10.0.0.1");
-        assert!(first_voter.listeners[0].port == 9093);
+        let expected_listener = Listener {
+            name: "CONTROLLER".to_string(),
+            host: "10.0.0.1".to_string(),
+            port: 9093,
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        };
+        assert!(first_voter.listeners == vec![expected_listener]);
     }
 
     #[test]

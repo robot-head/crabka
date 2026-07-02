@@ -347,7 +347,7 @@ Production slices promoted from spike: `crates/blockstore`, `crates/logql`,
   `detected_level` value when the log line carries a recognizable level token.
 - The integration suite now includes real-Loki differential coverage for Loki
   push plus `query_range` stream and metric queries and metadata discovery
-  endpoints: it starts a `grafana/loki` container, ingests the same payload into
+  endpoints: it starts a `mirror.gcr.io/grafana/loki` container, ingests the same payload into
   Loki and Crabka's distributor/compactor/querier loop, and compares the stable
   `resultType` / `result` response payload plus `labels`, label values, and
   `series` payloads. Metric range coverage now includes both

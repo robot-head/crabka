@@ -45,6 +45,26 @@ use crate::txn::state::{TopicPartition, TxnEntry, TxnState};
 use crate::txn::util::now_millis;
 use crate::txn::version::TxnVersion;
 
+/// A producer's identity pair as carried on the wire:
+/// (`producer_id`, `producer_epoch`).
+pub(crate) type ProducerIdentity = (i64, i16);
+
+/// Kafka wire sentinel: "no producer id" (`RecordBatch.NO_PRODUCER_ID`).
+/// Returned on `EndTxn` error responses, where the identity is meaningless.
+const NO_PRODUCER_ID: i64 = -1;
+
+/// Kafka wire sentinel: "no producer epoch" (`RecordBatch.NO_PRODUCER_EPOCH`).
+const NO_PRODUCER_EPOCH: i16 = -1;
+
+/// Coordinator epoch stamped on outgoing `WriteTxnMarkers`. Apache Kafka
+/// increments it on each coordinator leadership change; coordinator failover
+/// tracking is not implemented yet, so every marker carries the initial epoch.
+const INITIAL_COORDINATOR_EPOCH: i32 = 0;
+
+/// TLS SNI server name used on inter-broker dials — matches the convention
+/// of the replicator / heartbeat / auto-join inter-broker clients.
+const INTER_BROKER_SNI: &str = "localhost";
+
 #[allow(clippy::too_many_lines)]
 #[tracing::instrument(
     name = "handle_end_txn",
@@ -350,7 +370,7 @@ pub(crate) fn next_producer_identity(
     pid: i64,
     epoch: i16,
     ids: &crate::producer_id_manager::ProducerIdManager,
-) -> (i64, i16) {
+) -> ProducerIdentity {
     if !txnv.verified() {
         return (pid, epoch);
     }
@@ -565,22 +585,20 @@ async fn send_write_txn_markers(
             producer_epoch: entry.producer_epoch,
             transaction_result: marker_type == MarkerType::Commit,
             topics,
-            // Hard-coded to 0. Coordinator leader-change tracking (real
-            // epoch increment on failover) is not yet implemented.
-            coordinator_epoch: 0,
+            // Coordinator leader-change tracking (real epoch increment on
+            // failover) is not yet implemented; see the constant's doc.
+            coordinator_epoch: INITIAL_COORDINATOR_EPOCH,
             ..Default::default()
         }],
         ..Default::default()
     };
 
-    // SNI server_name "localhost" matches the convention used by the
-    // replicator / heartbeat / auto-join inter-broker dials.
     let opts = crabka_client_core::ConnectionOptions {
         client_id: format!("crabka-broker-txn-{my_node_id}"),
         ..crabka_client_core::ConnectionOptions::default()
     };
     let conn = inter_broker_client
-        .connect_as_connection(&host, port, inter_broker_protocol, "localhost", opts)
+        .connect_as_connection(&host, port, inter_broker_protocol, INTER_BROKER_SNI, opts)
         .await
         .map_err(|e| BrokerError::Txn(format!("EndTxn: connect to {host}:{port}: {e}")))?;
 
@@ -599,8 +617,8 @@ async fn send_write_txn_markers(
 
 fn encode_err(version: i16, error_code: i16) -> Result<Bytes, BrokerError> {
     // On the error path the producer_id/epoch fields are not meaningful;
-    // leave them at the response default (-1, -1).
-    encode_response(version, error_code, -1, -1)
+    // leave them at the "no producer" wire sentinels.
+    encode_response(version, error_code, NO_PRODUCER_ID, NO_PRODUCER_EPOCH)
 }
 
 /// Encode a successful `EndTxn` response. `producer_id` / `producer_epoch` are
@@ -636,18 +654,67 @@ mod tests {
     use super::*;
     use assert2::assert;
     use crabka_metadata::{BrokerEndpoint, BrokerRegistrationRecord, MetadataRecord};
+    use crabka_protocol::UnknownTaggedFields;
+    use crabka_protocol::owned::end_txn_response::EndTxnResponse;
+
+    fn decode_response(bytes: &Bytes, version: i16) -> EndTxnResponse {
+        let mut cur: &[u8] = bytes.as_ref();
+        let resp = EndTxnResponse::decode(&mut cur, version).expect("decode response");
+        assert!(cur.is_empty(), "response decoder consumed all bytes");
+        resp
+    }
 
     // ── KIP-890 TV_2 completion identity: next_producer_identity ────────────
+
+    #[test]
+    fn encode_err_leaves_producer_identity_at_error_sentinels() {
+        let bytes = encode_err(5, codes::NOT_COORDINATOR).expect("encode error");
+        assert!(!bytes.is_empty());
+        let resp = decode_response(&bytes, 5);
+
+        let expected = EndTxnResponse {
+            throttle_time_ms: 0,
+            error_code: codes::NOT_COORDINATOR,
+            producer_id: -1,
+            producer_epoch: -1,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
+    }
+
+    #[test]
+    fn encode_ok_returns_v5_producer_identity() {
+        let bytes = encode_ok(5, 42, 7).expect("encode ok");
+        assert!(!bytes.is_empty());
+        let resp = decode_response(&bytes, 5);
+
+        let expected = EndTxnResponse {
+            throttle_time_ms: 0,
+            error_code: codes::NONE,
+            producer_id: 42,
+            producer_epoch: 7,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
+    }
 
     #[test]
     fn epoch_bumps_only_at_tv2() {
         use crate::txn::version::TxnVersion;
         let ids = crate::producer_id_manager::ProducerIdManager::new();
-        // Below TV_2: pid + epoch unchanged.
-        assert!(next_producer_identity(TxnVersion::Classic, 7, 3, &ids) == (7, 3));
-        assert!(next_producer_identity(TxnVersion::Flexible, 7, 3, &ids) == (7, 3));
-        // TV_2 non-overflow: same pid, epoch + 1.
-        assert!(next_producer_identity(TxnVersion::Verified, 7, 3, &ids) == (7, 4));
+        let cases = [
+            // Below TV_2 (Classic, Flexible): pid + epoch unchanged.
+            (TxnVersion::Classic, (7, 3)),
+            (TxnVersion::Flexible, (7, 3)),
+            // TV_2 (Verified) non-overflow: same pid, epoch + 1.
+            (TxnVersion::Verified, (7, 4)),
+        ];
+        for (version, want) in cases {
+            assert!(
+                next_producer_identity(version, 7, 3, &ids) == want,
+                "txn version {version:?}"
+            );
+        }
     }
 
     #[test]
@@ -677,97 +744,72 @@ mod tests {
     }
 
     #[test]
-    fn proceeds_when_unchanged() {
-        // Entry is exactly as Phase 1 left it: same pid/epoch, still in Prepare.
-        let e = entry(7, 3, TxnState::PrepareCommit);
-        assert!(
-            validate_complete_reacquire(
+    fn commit_reacquire_decision_matrix() {
+        // Phase 1 left (pid=7, epoch=3, PrepareCommit); the reacquire always
+        // asks to drive PrepareCommit → CompleteCommit.
+        // (observed_pid, observed_epoch, observed_state, expected)
+        let cases = [
+            // Entry is exactly as Phase 1 left it: same pid/epoch, still in
+            // Prepare — proceed.
+            (7, 3, TxnState::PrepareCommit, ReacquireDecision::Proceed),
+            // A concurrent InitProducerId bumped the epoch during the marker
+            // fan-out. We must NOT overwrite with the stale epoch / Complete
+            // state.
+            (
+                7,
+                4,
+                TxnState::PrepareCommit,
+                ReacquireDecision::Reject(codes::INVALID_PRODUCER_EPOCH),
+            ),
+            // Producer id changed underneath us — fenced.
+            (
+                8,
+                3,
+                TxnState::PrepareCommit,
+                ReacquireDecision::Reject(codes::INVALID_PRODUCER_EPOCH),
+            ),
+            // Another caller (or an EndTxn retry that lost the race) already
+            // drove this exact transition. Report success, do not re-write.
+            (
+                7,
+                3,
+                TxnState::CompleteCommit,
+                ReacquireDecision::AlreadyComplete,
+            ),
+            // A concurrent AddPartitionsToTxn re-opened the txn
+            // (Complete→Ongoing reuse, or some other interleave). Our marker
+            // fan-out no longer reflects the live transaction; refuse to
+            // finalise.
+            (
+                7,
+                3,
+                TxnState::Ongoing,
+                ReacquireDecision::Reject(codes::INVALID_TXN_STATE),
+            ),
+            // We prepared a Commit, but the entry is now in PrepareAbort — a
+            // different finalisation kind raced us. Refuse to write
+            // CompleteCommit.
+            (
+                7,
+                3,
+                TxnState::PrepareAbort,
+                ReacquireDecision::Reject(codes::INVALID_TXN_STATE),
+            ),
+        ];
+        for (pid, epoch, state, expected) in cases {
+            let e = entry(pid, epoch, state);
+            let decision = validate_complete_reacquire(
                 &e,
                 7,
                 3,
                 TxnState::PrepareCommit,
-                TxnState::CompleteCommit
-            ) == ReacquireDecision::Proceed
-        );
-    }
-
-    #[test]
-    fn fenced_when_epoch_bumped() {
-        // A concurrent InitProducerId bumped the epoch during the marker
-        // fan-out. We must NOT overwrite with the stale epoch / Complete state.
-        let e = entry(7, 4, TxnState::PrepareCommit);
-        assert!(
-            validate_complete_reacquire(
-                &e,
-                7,
-                3,
-                TxnState::PrepareCommit,
-                TxnState::CompleteCommit
-            ) == ReacquireDecision::Reject(codes::INVALID_PRODUCER_EPOCH)
-        );
-    }
-
-    #[test]
-    fn fenced_when_pid_changed() {
-        let e = entry(8, 3, TxnState::PrepareCommit);
-        assert!(
-            validate_complete_reacquire(
-                &e,
-                7,
-                3,
-                TxnState::PrepareCommit,
-                TxnState::CompleteCommit
-            ) == ReacquireDecision::Reject(codes::INVALID_PRODUCER_EPOCH)
-        );
-    }
-
-    #[test]
-    fn idempotent_when_already_complete() {
-        // Another caller (or an EndTxn retry that lost the race) already drove
-        // this exact transition. Report success, do not re-write.
-        let e = entry(7, 3, TxnState::CompleteCommit);
-        assert!(
-            validate_complete_reacquire(
-                &e,
-                7,
-                3,
-                TxnState::PrepareCommit,
-                TxnState::CompleteCommit
-            ) == ReacquireDecision::AlreadyComplete
-        );
-    }
-
-    #[test]
-    fn rejects_when_advanced_to_ongoing() {
-        // A concurrent AddPartitionsToTxn re-opened the txn (Complete→Ongoing
-        // reuse, or some other interleave). Our marker fan-out no longer
-        // reflects the live transaction; refuse to finalise.
-        let e = entry(7, 3, TxnState::Ongoing);
-        assert!(
-            validate_complete_reacquire(
-                &e,
-                7,
-                3,
-                TxnState::PrepareCommit,
-                TxnState::CompleteCommit
-            ) == ReacquireDecision::Reject(codes::INVALID_TXN_STATE)
-        );
-    }
-
-    #[test]
-    fn rejects_when_opposite_prepare_kind() {
-        // We prepared a Commit, but the entry is now in PrepareAbort — a
-        // different finalisation kind raced us. Refuse to write CompleteCommit.
-        let e = entry(7, 3, TxnState::PrepareAbort);
-        assert!(
-            validate_complete_reacquire(
-                &e,
-                7,
-                3,
-                TxnState::PrepareCommit,
-                TxnState::CompleteCommit
-            ) == ReacquireDecision::Reject(codes::INVALID_TXN_STATE)
-        );
+                TxnState::CompleteCommit,
+            );
+            assert!(
+                decision == expected,
+                "observed pid {pid}, epoch {epoch}, state {state:?}"
+            );
+        }
     }
 
     #[test]

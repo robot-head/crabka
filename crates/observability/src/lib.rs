@@ -20198,6 +20198,8 @@ impl IntoResponse for HttpQueryError {
 
 #[cfg(test)]
 mod tests {
+    use assert2::check;
+
     use super::*;
 
     /// `ingest_tenant` returns a present non-empty `X-Scope-OrgID` verbatim,
@@ -20735,53 +20737,20 @@ mod tests {
         .await
         .unwrap();
 
+        // Exactly one PUT is allowed: the new shard manifest. The global
+        // tenant manifest, the shard catalog, and the old shard manifests
+        // must not be rewritten.
         let put_paths = store.put_paths();
-        assert!(
-            !put_paths.contains(
-                &crabka_blockstore::log_tenant_index_manifest_object_path(&prefix, tenant)
-                    .to_string()
-            ),
-            "global tenant manifest should not be rewritten: {put_paths:?}"
-        );
-        assert!(
-            !put_paths.contains(
-                &crabka_blockstore::log_tenant_index_shard_catalog_object_path(&prefix, tenant)
-                    .to_string()
-            ),
-            "shard catalog should not be rewritten: {put_paths:?}"
-        );
-        assert!(
-            put_paths.contains(
-                &crabka_blockstore::log_tenant_index_shard_manifest_object_path(
+        assert_eq!(
+            put_paths,
+            vec![
+                crabka_blockstore::log_tenant_index_shard_manifest_object_path(
                     &prefix, tenant, new_range
                 )
                 .to_string()
-            ),
-            "new shard manifest should be written: {put_paths:?}"
+            ],
+            "only the new shard manifest should be written"
         );
-        assert!(
-            !put_paths.contains(
-                &crabka_blockstore::log_tenant_index_shard_manifest_object_path(
-                    &prefix,
-                    tenant,
-                    old_range_a,
-                )
-                .to_string()
-            ),
-            "old shard A should not be rewritten: {put_paths:?}"
-        );
-        assert!(
-            !put_paths.contains(
-                &crabka_blockstore::log_tenant_index_shard_manifest_object_path(
-                    &prefix,
-                    tenant,
-                    old_range_b,
-                )
-                .to_string()
-            ),
-            "old shard B should not be rewritten: {put_paths:?}"
-        );
-        assert_eq!(put_paths.len(), 1, "unexpected PUT chatter: {put_paths:?}");
     }
 
     #[test]
@@ -21039,10 +21008,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(first.label_index.label_names(tenant) == BTreeSet::from(["app".to_string()]));
-        assert!(second.label_index.label_names(tenant) == BTreeSet::from(["app".to_string()]));
-        assert!(first.block_index.blocks().len() == 2);
-        assert!(second.block_index.blocks().len() == 2);
+        for state in [&first, &second] {
+            check!(state.label_index.label_names(tenant) == BTreeSet::from(["app".to_string()]));
+            check!(state.block_index.blocks().len() == 2);
+        }
 
         let shard_prefix =
             crabka_blockstore::log_tenant_index_shards_object_prefix(&prefix, tenant).to_string();
@@ -21074,12 +21043,12 @@ mod tests {
             .filter(|path| path == &shard_manifest_b)
             .count();
 
-        assert!(list_count == 1, "shard prefix should be listed once");
-        assert!(
+        check!(list_count == 1, "shard prefix should be listed once");
+        check!(
             shard_get_count_a == 1,
             "shard manifest A should be fetched once"
         );
-        assert!(
+        check!(
             shard_get_count_b == 1,
             "shard manifest B should be fetched once"
         );
@@ -21151,17 +21120,17 @@ mod tests {
         let range = metadata_index_range(&SeriesParams::default()).unwrap();
         let after = current_unix_time_ns();
 
-        assert!(
+        check!(
             range.start_ns >= before - SIX_HOURS_NS,
             "default metadata index start should be within Loki's default recent window"
         );
-        assert!(
+        check!(
             range.end_ns <= after,
             "default metadata index end should be now-ish, got {} after {}",
             range.end_ns,
             after
         );
-        assert!(
+        check!(
             range.end_ns - range.start_ns <= SIX_HOURS_NS,
             "default metadata index range should not be all time"
         );
@@ -21350,13 +21319,13 @@ mod tests {
                 "topic".to_string(),
             );
 
-        assert!(deps.metrics.is_some());
-        assert!(deps.wal_sink.is_some());
-        assert!(deps.ingest_limiter.is_some());
-        assert!(deps.query_authorizer.is_some());
-        assert!(deps.hot_tail.is_some());
-        assert!(deps.deferred_wal_consumer_connect.is_some());
-        assert!(Arc::ptr_eq(
+        check!(deps.metrics.is_some());
+        check!(deps.wal_sink.is_some());
+        check!(deps.ingest_limiter.is_some());
+        check!(deps.query_authorizer.is_some());
+        check!(deps.hot_tail.is_some());
+        check!(deps.deferred_wal_consumer_connect.is_some());
+        check!(Arc::ptr_eq(
             &deps.metrics.as_ref().unwrap().registry,
             &metrics.registry
         ));
@@ -21415,36 +21384,38 @@ mod tests {
             PermissionType::Deny,
         );
 
-        assert!(matches_acl_topic_pattern(
-            &allow_write,
-            "__crabka_observability_logs_wal"
-        ));
-        assert!(matches_acl_topic_pattern(
-            &allow_read,
-            "__crabka_observability_logs_wal"
-        ));
-        assert!(!matches_acl_topic_pattern(&allow_read, "other-topic"));
-        assert!(acl_matches_tenant_wal_write(
-            &allow_write,
-            "User:tenant-a",
-            "__crabka_observability_logs_wal"
-        ));
-        assert!(acl_matches_tenant_wal_read(
-            &allow_read,
-            "User:tenant-a",
-            "__crabka_observability_logs_wal"
-        ));
-        assert!(!acl_matches_tenant_wal_write(
-            &allow_read,
-            "User:tenant-a",
-            "__crabka_observability_logs_wal"
-        ));
-        assert!(!acl_matches_tenant_wal_read(
+        for (entry, topic, want) in [
+            (&allow_write, "__crabka_observability_logs_wal", true),
+            (&allow_read, "__crabka_observability_logs_wal", true),
+            (&allow_read, "other-topic", false),
+        ] {
+            check!(
+                matches_acl_topic_pattern(entry, topic) == want,
+                "pattern={} topic={topic}",
+                entry.resource_name
+            );
+        }
+        check!(acl_matches_tenant_wal_write(
             &allow_write,
             "User:tenant-a",
             "__crabka_observability_logs_wal"
         ));
-        assert!(!acl_matches_tenant_wal_write(
+        check!(acl_matches_tenant_wal_read(
+            &allow_read,
+            "User:tenant-a",
+            "__crabka_observability_logs_wal"
+        ));
+        check!(!acl_matches_tenant_wal_write(
+            &allow_read,
+            "User:tenant-a",
+            "__crabka_observability_logs_wal"
+        ));
+        check!(!acl_matches_tenant_wal_read(
+            &allow_write,
+            "User:tenant-a",
+            "__crabka_observability_logs_wal"
+        ));
+        check!(!acl_matches_tenant_wal_write(
             &acl_entry(
                 ResourceType::Group,
                 "__crabka_observability_logs_wal",
@@ -21456,7 +21427,7 @@ mod tests {
             "User:tenant-a",
             "__crabka_observability_logs_wal",
         ));
-        assert!(
+        check!(
             check_tenant_wal_write_acl(
                 "tenant-a",
                 "__crabka_observability_logs_wal",
@@ -21464,7 +21435,7 @@ mod tests {
             )
             .is_ok()
         );
-        assert!(
+        check!(
             check_tenant_wal_read_acl(
                 "tenant-a",
                 "__crabka_observability_logs_wal",
@@ -21472,7 +21443,7 @@ mod tests {
             )
             .is_ok()
         );
-        assert!(
+        check!(
             check_tenant_wal_write_acl(
                 "tenant-a",
                 "__crabka_observability_logs_wal",
@@ -21480,7 +21451,7 @@ mod tests {
             )
             .is_err()
         );
-        assert!(
+        check!(
             check_tenant_wal_read_acl(
                 "tenant-a",
                 "__crabka_observability_logs_wal",
@@ -21515,9 +21486,9 @@ mod tests {
         assert_eq!(ingest_quota_bytes(&[record]), expected_bytes);
 
         let mut bucket = IngestQuotaBucket::new(10.0);
-        assert!((bucket.capacity() - 10.0).abs() < f64::EPSILON);
-        assert!(bucket.consume(10.0));
-        assert!(!bucket.consume(0.1));
+        check!((bucket.capacity() - 10.0).abs() < f64::EPSILON);
+        check!(bucket.consume(10.0));
+        check!(!bucket.consume(0.1));
         bucket.update_rate(5.0);
         assert!(bucket.available <= 5.0);
         bucket.available = 4.0;
@@ -21538,27 +21509,19 @@ mod tests {
 
     #[test]
     fn native_header_detection_requires_native_log_shape() {
-        let record_type_log_line = KafkaWalHeader {
-            key: "crabka-wal-record-type".to_string(),
-            value: Some(b"log-line".to_vec()),
-        };
-        assert!(has_native_kafka_log_headers(&[record_type_log_line]));
-        assert!(has_native_kafka_log_headers(&[KafkaWalHeader {
-            key: "crabka-log-timestamp-ns".to_string(),
-            value: Some(b"1".to_vec()),
-        }]));
-        assert!(has_native_kafka_log_headers(&[KafkaWalHeader {
-            key: "crabka-log-label-app".to_string(),
-            value: Some(b"api".to_vec()),
-        }]));
-        assert!(!has_native_kafka_log_headers(&[KafkaWalHeader {
-            key: "crabka-wal-record-type".to_string(),
-            value: Some(b"log".to_vec()),
-        }]));
-        assert!(!has_native_kafka_log_headers(&[KafkaWalHeader {
-            key: "other".to_string(),
-            value: None,
-        }]));
+        for (key, value, want) in [
+            ("crabka-wal-record-type", Some(&b"log-line"[..]), true),
+            ("crabka-log-timestamp-ns", Some(&b"1"[..]), true),
+            ("crabka-log-label-app", Some(&b"api"[..]), true),
+            ("crabka-wal-record-type", Some(&b"log"[..]), false),
+            ("other", None, false),
+        ] {
+            let header = KafkaWalHeader {
+                key: key.to_string(),
+                value: value.map(<[u8]>::to_vec),
+            };
+            assert!(has_native_kafka_log_headers(&[header]) == want);
+        }
     }
 
     #[test]
@@ -21606,18 +21569,15 @@ mod tests {
             headers
         }
 
-        assert!(is_loki_json_content_type(&loki_content_type("application/json")).unwrap());
-        assert!(
-            is_loki_json_content_type(&loki_content_type("Application/JSON; charset=utf-8"))
-                .unwrap()
-        );
-        assert!(!is_loki_json_content_type(&loki_content_type("application/x-protobuf")).unwrap());
-        assert!(
-            is_loki_json_content_type(&loki_content_type("application/json; charset")).is_err()
-        );
-        assert!(
-            is_loki_json_content_type(&loki_content_type("application/json; charset=")).is_err()
-        );
+        for (value, want) in [
+            ("application/json", Some(true)),
+            ("Application/JSON; charset=utf-8", Some(true)),
+            ("application/x-protobuf", Some(false)),
+            ("application/json; charset", None),
+            ("application/json; charset=", None),
+        ] {
+            assert!(is_loki_json_content_type(&loki_content_type(value)).ok() == want);
+        }
     }
 
     #[test]
@@ -21648,13 +21608,13 @@ mod tests {
             loki_label_set(&rendered_labels),
             r#"{app="api",env="prod"}"#
         );
-        assert!(loki_push_label_parse_error(&rendered_labels, "bad-name").contains("1:5"));
-        assert!(
+        check!(loki_push_label_parse_error(&rendered_labels, "bad-name").contains("1:5"));
+        check!(
             loki_proto_label_parse_error(r#"{9bad="x"}"#)
                 .unwrap()
                 .contains("1:2")
         );
-        assert!(
+        check!(
             loki_proto_label_parse_error(r#"{app="api",9bad="x"}"#)
                 .unwrap()
                 .contains("1:12")
@@ -21669,14 +21629,17 @@ mod tests {
         let mut explicit = BTreeMap::from([("level".to_string(), "custom".to_string())]);
         discover_detected_level_label(&mut explicit, "api error happened");
         assert!(!explicit.contains_key("detected_level"));
-        assert!(contains_log_level_token("error happened", "error"));
-        assert!(contains_log_level_token("happened error", "error"));
-        assert!(!contains_log_level_token("terror", "error"));
-        assert!(!contains_log_level_token("error_code", "error"));
-        assert!(is_log_level_word_byte(b'a'));
-        assert!(is_log_level_word_byte(b'1'));
-        assert!(is_log_level_word_byte(b'_'));
-        assert!(!is_log_level_word_byte(b'-'));
+        for (line, want) in [
+            ("error happened", true),
+            ("happened error", true),
+            ("terror", false),
+            ("error_code", false),
+        ] {
+            assert!(contains_log_level_token(line, "error") == want);
+        }
+        for (byte, want) in [(b'a', true), (b'1', true), (b'_', true), (b'-', false)] {
+            assert!(is_log_level_word_byte(byte) == want);
+        }
     }
 
     #[test]
@@ -21761,29 +21724,31 @@ mod tests {
             status: "received".to_string(),
             created_at: 1,
         };
-        assert!(delete_request_overlaps_filter(&request, &list));
-        assert!(delete_request_overlaps_filter(
-            &request,
-            &ListDeleteRequestsParams {
-                start_time: Some(20),
-                end_time: Some(30),
-            }
-        ));
-        assert!(!delete_request_overlaps_filter(
-            &request,
-            &ListDeleteRequestsParams {
-                start_time: Some(21),
-                end_time: Some(30),
-            }
-        ));
-        assert!(ranges_overlap(
-            TimeRange::new(10, 20).unwrap(),
-            TimeRange::new(20, 30).unwrap()
-        ));
-        assert!(!ranges_overlap(
-            TimeRange::new(10, 20).unwrap(),
-            TimeRange::new(21, 30).unwrap()
-        ));
+        for (filter, want) in [
+            (list, true),
+            (
+                ListDeleteRequestsParams {
+                    start_time: Some(20),
+                    end_time: Some(30),
+                },
+                true,
+            ),
+            (
+                ListDeleteRequestsParams {
+                    start_time: Some(21),
+                    end_time: Some(30),
+                },
+                false,
+            ),
+        ] {
+            assert!(delete_request_overlaps_filter(&request, &filter) == want);
+        }
+        for (right, want) in [
+            (TimeRange::new(20, 30).unwrap(), true),
+            (TimeRange::new(21, 30).unwrap(), false),
+        ] {
+            assert!(ranges_overlap(TimeRange::new(10, 20).unwrap(), right) == want);
+        }
     }
 
     #[test]
@@ -21793,11 +21758,11 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(filters.rule_kind, Some("alerting"));
-        assert!(filters.exclude_alerts);
-        assert!(filters.evaluation_time.is_some());
-        assert!(filters.rule_names.contains("HighError"));
-        assert!(filters.rule_groups.contains("api"));
-        assert!(filters.files.contains("rules.yaml"));
+        check!(filters.exclude_alerts);
+        check!(filters.evaluation_time.is_some());
+        check!(filters.rule_names.contains("HighError"));
+        check!(filters.rule_groups.contains("api"));
+        check!(filters.files.contains("rules.yaml"));
         assert_eq!(filters.group_limit, Some(2));
         assert_eq!(filters.group_next_token.as_deref(), Some("next"));
         assert_eq!(filters.label_selectors.len(), 1);

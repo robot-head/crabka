@@ -933,7 +933,13 @@ struct CachedMetricBlockStore {
     cold: MetricBlockStore,
 }
 
+/// Lookback substituted for an unbounded (`i64::MIN..i64::MAX`) query range so
+/// metadata-style requests don't force a full cold-manifest scan.
 const UNBOUNDED_COMPATIBILITY_LOOKBACK: Duration = Duration::from_hours(1);
+
+/// How long a cached cold-block store snapshot is served before manifests are
+/// re-listed from the object store.
+const COLD_CACHE_TTL: Duration = Duration::from_secs(30);
 
 impl CachedMetricBlockStore {
     fn covers(&self, start_ms: i64, end_ms: i64, ttl: Duration) -> bool {
@@ -972,13 +978,12 @@ impl RefreshingMetricBlockStore {
         start_ms: i64,
         end_ms: i64,
     ) -> Result<MergedMetricStore<MetricBlockStore, WalHead>, MetricsServiceError> {
-        const TTL: Duration = Duration::from_secs(30);
         let (start_ms, end_ms) = normalize_refresh_range(start_ms, end_ms);
 
         {
             let guard = self.cold_cache.read().await;
             if let Some(entry) = guard.as_ref()
-                && entry.covers(start_ms, end_ms, TTL)
+                && entry.covers(start_ms, end_ms, COLD_CACHE_TTL)
             {
                 return Ok(MergedMetricStore::new(
                     entry.cold.clone(),
@@ -991,7 +996,7 @@ impl RefreshingMetricBlockStore {
         {
             let guard = self.cold_cache.read().await;
             if let Some(entry) = guard.as_ref()
-                && entry.covers(start_ms, end_ms, TTL)
+                && entry.covers(start_ms, end_ms, COLD_CACHE_TTL)
             {
                 return Ok(MergedMetricStore::new(
                     entry.cold.clone(),
@@ -1042,7 +1047,7 @@ fn unix_time_ms() -> i64 {
 }
 
 fn duration_ms(duration: Duration) -> i64 {
-    i64::try_from(duration.as_millis().min(i64::MAX as u128)).unwrap_or(i64::MAX)
+    i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
 }
 
 #[async_trait::async_trait]
@@ -1410,7 +1415,7 @@ impl From<MetricsServiceError> for crabka_promql::PromqlError {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+    use assert2::{assert, check};
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
     use bytes::Bytes;
@@ -1772,8 +1777,8 @@ rules:
         assert!(records.len() == 1);
         assert!(records[0].tenant == "tenant-a");
         let record_labels = records[0].labels();
-        assert!(record_labels.get("__name__") == Some("job:up:sum"));
-        assert!(record_labels.get("job") == Some("api"));
+        check!(record_labels.get("__name__") == Some("job:up:sum"));
+        check!(record_labels.get("job") == Some("api"));
         assert!(matches!(
             records[0].payload,
             crabka_metrics::SamplePayload::Float { value, .. } if (value - 1.0).abs() < f64::EPSILON
@@ -1892,12 +1897,19 @@ rules:
         let bodies = received.lock().expect("received alerts poisoned");
         assert!(bodies.len() == 1);
         let body: serde_json::Value = serde_json::from_slice(&bodies[0]).unwrap();
-        assert!(body[0]["labels"]["alertname"] == "InstanceDown");
-        assert!(body[0]["labels"]["severity"] == "page");
-        assert!(body[0]["annotations"]["summary"] == "instance is down");
-        assert!(body[0]["startsAt"] == "1970-01-01T00:01:00Z");
-        assert!(body[0]["endsAt"].is_null());
-        assert!(body[0]["generatorURL"] == "http://crabka.example/graph");
+        let expected = serde_json::json!([{
+            "labels": {
+                "alertname": "InstanceDown",
+                "severity": "page",
+            },
+            "annotations": {
+                "summary": "instance is down",
+            },
+            "startsAt": "1970-01-01T00:01:00Z",
+            "endsAt": null,
+            "generatorURL": "http://crabka.example/graph",
+        }]);
+        assert!(body == expected);
     }
 
     #[test]
@@ -2004,15 +2016,15 @@ rules:
         let result =
             super::replay_ruler_state_records(&state, super::RULER_STATE_TOPIC, &records).unwrap();
 
-        assert!(result.polled_records == 3);
-        assert!(result.replayed_records == 2);
-        assert!(
-            result.committed_offsets
-                == vec![super::WalHeadPartitionOffset {
-                    partition: 2,
-                    offset: 22,
-                }]
-        );
+        let expected = super::WalHeadReplayResult {
+            polled_records: 3,
+            replayed_records: 2,
+            committed_offsets: vec![super::WalHeadPartitionOffset {
+                partition: 2,
+                offset: 22,
+            }],
+        };
+        assert!(result == expected);
         let response = router
             .oneshot(
                 Request::builder()
@@ -2059,14 +2071,15 @@ rules:
         .await
         .unwrap();
 
-        assert!(result.replayed_records == 1);
-        assert!(
-            result.committed_offsets
-                == vec![super::WalHeadPartitionOffset {
-                    partition: 1,
-                    offset: 8,
-                }]
-        );
+        let expected = super::WalHeadReplayResult {
+            polled_records: 1,
+            replayed_records: 1,
+            committed_offsets: vec![super::WalHeadPartitionOffset {
+                partition: 1,
+                offset: 8,
+            }],
+        };
+        assert!(result == expected);
         assert!(consumer.commit_calls == 1);
     }
 
@@ -2264,10 +2277,10 @@ rules:
             metric_store.series("tenant-a", &matchers, 0, 20_000),
         );
 
-        assert!(a.unwrap().len() == 1);
-        assert!(b.unwrap().len() == 1);
-        assert!(c.unwrap().len() == 1);
-        assert!(d.unwrap().len() == 1);
+        let cases = [("a", a), ("b", b), ("c", c), ("d", d)];
+        for (name, result) in cases {
+            assert!(result.unwrap().len() == 1, "concurrent load: {name}");
+        }
         assert!(list_calls.load(Ordering::SeqCst) == 1);
     }
 
@@ -2430,12 +2443,15 @@ rules:
             .await
             .unwrap();
 
-        assert!(old.len() == 1);
-        assert!(old[0].get("job").unwrap() == "old");
-        assert!(new.len() == 1);
-        assert!(new[0].get("job").unwrap() == "new");
-        assert!(list_calls.load(Ordering::SeqCst) == 2);
-        assert!(
+        check!(old.len() == 1);
+        check!(old[0].get("job").unwrap() == "old");
+        check!(new.len() == 1);
+        check!(new[0].get("job").unwrap() == "new");
+        check!(
+            list_calls.load(Ordering::SeqCst) == 2,
+            "cold refresh should list for new manifest keys but not re-download known .index objects"
+        );
+        check!(
             get_calls.load(Ordering::SeqCst) == 2,
             "cold refresh should list for new manifest keys but not re-download known .index objects"
         );
@@ -2483,19 +2499,17 @@ rules:
 
         let stats = metric_store.tsdb_stats("tenant-a").await.unwrap();
 
-        assert!(stats.head_stats.num_series == 1);
-        assert!(
-            stats
-                .series_count_by_label_value_pair
-                .iter()
-                .any(|stat| stat.name == "job=recent" && stat.value == 1)
-        );
-        assert!(
-            stats
-                .series_count_by_label_value_pair
-                .iter()
-                .all(|stat| stat.name != "job=old")
-        );
+        let has_recent_series = stats
+            .series_count_by_label_value_pair
+            .iter()
+            .any(|stat| stat.name == "job=recent" && stat.value == 1);
+        let has_stale_series = stats
+            .series_count_by_label_value_pair
+            .iter()
+            .any(|stat| stat.name == "job=old");
+        check!(stats.head_stats.num_series == 1);
+        check!(has_recent_series);
+        check!(!has_stale_series);
     }
 
     #[tokio::test]
@@ -2641,7 +2655,7 @@ rules:
 
         let result = super::replay_wal_head_records(
             &head,
-            "__crabka_metrics_wal",
+            crabka_metrics::WAL_TOPIC,
             &[
                 super::WalHeadConsumerRecord {
                     topic: "other".to_string(),
@@ -2650,7 +2664,7 @@ rules:
                     value: Some(encoded.clone()),
                 },
                 super::WalHeadConsumerRecord {
-                    topic: "__crabka_metrics_wal".to_string(),
+                    topic: crabka_metrics::WAL_TOPIC.to_string(),
                     partition: 2,
                     offset: 41,
                     value: Some(encoded),
@@ -2659,15 +2673,15 @@ rules:
         )
         .unwrap();
 
-        assert!(result.polled_records == 2);
-        assert!(result.replayed_records == 1);
-        assert!(
-            result.committed_offsets
-                == vec![super::WalHeadPartitionOffset {
-                    partition: 2,
-                    offset: 42
-                }]
-        );
+        let expected = super::WalHeadReplayResult {
+            polled_records: 2,
+            replayed_records: 1,
+            committed_offsets: vec![super::WalHeadPartitionOffset {
+                partition: 2,
+                offset: 42,
+            }],
+        };
+        assert!(result == expected);
         let values = head
             .series("tenant-a", &[], 0, 20_000)
             .await
@@ -2694,16 +2708,16 @@ rules:
 
         super::replay_wal_head_records(
             &head,
-            "__crabka_metrics_wal",
+            crabka_metrics::WAL_TOPIC,
             &[
                 super::WalHeadConsumerRecord {
-                    topic: "__crabka_metrics_wal".to_string(),
+                    topic: crabka_metrics::WAL_TOPIC.to_string(),
                     partition: 0,
                     offset: 1,
                     value: Some(record("old", 1_000).encode().unwrap()),
                 },
                 super::WalHeadConsumerRecord {
-                    topic: "__crabka_metrics_wal".to_string(),
+                    topic: crabka_metrics::WAL_TOPIC.to_string(),
                     partition: 0,
                     offset: 2,
                     value: Some(record("new", 10_000).encode().unwrap()),
@@ -2730,9 +2744,9 @@ rules:
         let head = crabka_promql::WalHead::new();
         let error = super::replay_wal_head_records(
             &head,
-            "__crabka_metrics_wal",
+            crabka_metrics::WAL_TOPIC,
             &[super::WalHeadConsumerRecord {
-                topic: "__crabka_metrics_wal".to_string(),
+                topic: crabka_metrics::WAL_TOPIC.to_string(),
                 partition: 1,
                 offset: 9,
                 value: None,
@@ -2764,7 +2778,7 @@ rules:
         };
         let mut consumer = RecordingWalHeadConsumer {
             batches: vec![vec![consumer_record(
-                "__crabka_metrics_wal",
+                crabka_metrics::WAL_TOPIC,
                 0,
                 4,
                 Some(record.encode().unwrap()),
@@ -2775,21 +2789,22 @@ rules:
         let result = super::poll_wal_head_consumer_once(
             &mut consumer,
             &head,
-            "__crabka_metrics_wal",
+            crabka_metrics::WAL_TOPIC,
             std::time::Duration::from_millis(1),
         )
         .await
         .unwrap();
 
-        assert!(result.replayed_records == 1);
+        let expected = super::WalHeadReplayResult {
+            polled_records: 1,
+            replayed_records: 1,
+            committed_offsets: vec![super::WalHeadPartitionOffset {
+                partition: 0,
+                offset: 5,
+            }],
+        };
+        assert!(result == expected);
         assert!(consumer.commit_calls == 1);
-        assert!(
-            result.committed_offsets
-                == vec![super::WalHeadPartitionOffset {
-                    partition: 0,
-                    offset: 5
-                }]
-        );
     }
 
     #[tokio::test]
@@ -2803,7 +2818,7 @@ rules:
         let result = super::poll_wal_head_consumer_once(
             &mut consumer,
             &head,
-            "__crabka_metrics_wal",
+            crabka_metrics::WAL_TOPIC,
             std::time::Duration::from_millis(1),
         )
         .await
@@ -2830,12 +2845,17 @@ rules:
         let mut consumer = RecordingWalHeadConsumer {
             batches: vec![
                 vec![consumer_record(
-                    "__crabka_metrics_wal",
+                    crabka_metrics::WAL_TOPIC,
                     0,
                     4,
                     Some(encoded.clone()),
                 )],
-                vec![consumer_record("__crabka_metrics_wal", 0, 5, Some(encoded))],
+                vec![consumer_record(
+                    crabka_metrics::WAL_TOPIC,
+                    0,
+                    5,
+                    Some(encoded),
+                )],
             ],
             commit_calls: 0,
         };
@@ -2843,16 +2863,29 @@ rules:
         let summary = super::run_wal_head_consumer_loop(
             &mut consumer,
             &head,
-            "__crabka_metrics_wal",
+            crabka_metrics::WAL_TOPIC,
             std::time::Duration::from_millis(1),
             |summary| summary.polls == 2,
         )
         .await
         .unwrap();
 
-        assert!(summary.polls == 2);
-        assert!(summary.polled_records == 2);
-        assert!(summary.replayed_records == 2);
+        let expected = super::WalHeadConsumerLoopSummary {
+            polls: 2,
+            polled_records: 2,
+            replayed_records: 2,
+            committed_offsets: vec![
+                super::WalHeadPartitionOffset {
+                    partition: 0,
+                    offset: 5,
+                },
+                super::WalHeadPartitionOffset {
+                    partition: 0,
+                    offset: 6,
+                },
+            ],
+        };
+        assert!(summary == expected);
         assert!(consumer.commit_calls == 2);
     }
 

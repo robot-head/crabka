@@ -982,6 +982,7 @@ impl Segment {
 mod tests {
     use super::*;
     use assert2::assert;
+    use assert2::check;
     use bytes::Bytes;
     use crabka_protocol::records::{Record, RecordBatch};
     use tempfile::tempdir;
@@ -1016,11 +1017,15 @@ mod tests {
         // sample_batch sets per-record timestamp_delta = i, base_timestamp = ts_base.
         // Batch 1 records: (off0,ts100),(off1,ts101),(off2,ts102).
         // Batch 2 records: (off3,ts200),(off4,ts201).
-        assert!(seg.offset_for_timestamp(100) == Some((0, 100)));
-        assert!(seg.offset_for_timestamp(101) == Some((1, 101)));
-        assert!(seg.offset_for_timestamp(150) == Some((3, 200)));
-        assert!(seg.offset_for_timestamp(201) == Some((4, 201)));
-        assert!(seg.offset_for_timestamp(202) == None);
+        for (ts, want) in [
+            (100, Some((0, 100))),
+            (101, Some((1, 101))),
+            (150, Some((3, 200))),
+            (201, Some((4, 201))),
+            (202, None),
+        ] {
+            check!(seg.offset_for_timestamp(ts) == want, "ts={ts}");
+        }
         drop(dir);
     }
 
@@ -1113,9 +1118,8 @@ mod tests {
         seg.append(&b2, 4096).unwrap();
         assert!(seg.last_offset() == 4);
         let read = seg.read(0, usize::MAX).unwrap();
-        assert!(read.len() == 2);
-        assert!(read[0].records.len() == 3);
-        assert!(read[1].records.len() == 2);
+        let record_counts: Vec<usize> = read.iter().map(|b| b.records.len()).collect();
+        assert!(record_counts == [3, 2]);
     }
 
     #[test]
@@ -1133,10 +1137,8 @@ mod tests {
         assert!(position > 0);
         assert!(seg.last_offset() == 2);
         let read = seg.read(0, usize::MAX).unwrap();
-        assert!(read.len() == 3);
-        assert!(read[0].base_offset == 0);
-        assert!(read[1].base_offset == 1);
-        assert!(read[2].base_offset == 2);
+        let base_offsets: Vec<i64> = read.iter().map(|b| b.base_offset).collect();
+        assert!(base_offsets == [0, 1, 2]);
     }
 
     #[test]
@@ -1153,9 +1155,8 @@ mod tests {
         assert!(position == expected_position);
         assert!(seg.last_offset() == 1);
         let read = seg.read(0, usize::MAX).unwrap();
-        assert!(read.len() == 2);
-        assert!(read[0].base_offset == 0);
-        assert!(read[1].base_offset == 1);
+        let base_offsets: Vec<i64> = read.iter().map(|b| b.base_offset).collect();
+        assert!(base_offsets == [0, 1]);
     }
 
     #[test]
@@ -1233,9 +1234,9 @@ mod tests {
         }
         let wire = wire.freeze();
         let r = seg.read_raw(0, 3, 10 * 1024 * 1024).unwrap();
-        assert!(r.start_offset == 0);
-        assert!(r.last_offset == 2);
-        assert!(
+        check!(r.start_offset == 0);
+        check!(r.last_offset == 2);
+        check!(
             &r.bytes[..] == &wire[..],
             "raw bytes must equal the on-disk concatenation"
         );
@@ -1265,9 +1266,9 @@ mod tests {
         let (dir, mut seg) = test_segment();
         seg.append(&test_batch_at(0), 0).unwrap();
         let r = seg.read_raw(0, 1, 1).unwrap();
-        assert!(r.start_offset == 0);
-        assert!(r.last_offset == 0);
-        assert!(!r.bytes.is_empty());
+        check!(r.start_offset == 0);
+        check!(r.last_offset == 0);
+        check!(!r.bytes.is_empty());
         drop(dir);
     }
 
@@ -1384,16 +1385,16 @@ mod tests {
         assert!(on_disk.len() == wire.len(), "size must be unchanged");
 
         // base_offset (0..8) patched to the assigned value.
-        assert!(i64::from_be_bytes(on_disk[0..8].try_into().unwrap()) == assigned_base);
+        check!(i64::from_be_bytes(on_disk[0..8].try_into().unwrap()) == assigned_base);
         // partition_leader_epoch (12..16) patched to the stamped epoch.
-        assert!(i32::from_be_bytes(on_disk[12..16].try_into().unwrap()) == stamped_epoch);
+        check!(i32::from_be_bytes(on_disk[12..16].try_into().unwrap()) == stamped_epoch);
         // CRC field (17..21) byte-identical to the producer's.
-        assert!(
+        check!(
             on_disk[17..21] == wire[17..21],
             "CRC must NOT be recomputed"
         );
         // Everything from byte 21 (CRC-covered region) onward is identical.
-        assert!(
+        check!(
             on_disk[21..] == wire[21..],
             "CRC-covered region + body must be byte-for-byte verbatim"
         );

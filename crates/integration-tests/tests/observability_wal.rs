@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use assert2::assert;
+use assert2::{assert, check};
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use bytes::Bytes;
@@ -869,9 +869,9 @@ async fn config_built_distributor_compactor_querier_loop_serves_compacted_logs()
     .await
     .unwrap();
     assert!(descriptors.len() == 1);
-    assert!(descriptors[0].key.partition == 0);
-    assert!(descriptors[0].key.first_offset == 0);
-    assert!(descriptors[0].key.last_offset == 1);
+    check!(descriptors[0].key.partition == 0);
+    check!(descriptors[0].key.first_offset == 0);
+    check!(descriptors[0].key.last_offset == 1);
 
     let mut querier_config = service_config(Role::Querier, &bootstrap, topic, &data_root);
     querier_config.object_store_url = Some(object_store_url);
@@ -997,8 +997,8 @@ async fn otlp_http_log_flows_through_configured_distributor_compactor_and_querie
     .await
     .unwrap();
     assert!(descriptors.len() == 1);
-    assert!(descriptors[0].key.first_offset == 0);
-    assert!(descriptors[0].key.last_offset == 0);
+    check!(descriptors[0].key.first_offset == 0);
+    check!(descriptors[0].key.last_offset == 0);
 
     let mut querier_config = service_config(Role::Querier, &bootstrap, topic, &data_root);
     querier_config.object_store_url = Some(object_store_url);
@@ -1163,8 +1163,8 @@ async fn config_built_querier_merges_compacted_blocks_with_uncompacted_live_tail
     .await
     .unwrap();
     assert!(descriptors.len() == 1);
-    assert!(descriptors[0].key.first_offset == 0);
-    assert!(descriptors[0].key.last_offset == 0);
+    check!(descriptors[0].key.first_offset == 0);
+    check!(descriptors[0].key.last_offset == 0);
 
     push_api_log(distributor, &live_timestamp, "api live tail error").await;
 
@@ -1231,8 +1231,8 @@ async fn config_built_compactor_restart_resumes_from_committed_live_wal_offset()
     let first_descriptors =
         run_configured_compactor_for(&first_compactor, Duration::from_millis(750)).await;
     assert!(first_descriptors.len() == 1);
-    assert!(first_descriptors[0].key.first_offset == 0);
-    assert!(first_descriptors[0].key.last_offset == 0);
+    check!(first_descriptors[0].key.first_offset == 0);
+    check!(first_descriptors[0].key.last_offset == 0);
 
     push_api_log(distributor, &second_timestamp, "api second restart error").await;
 
@@ -1243,8 +1243,8 @@ async fn config_built_compactor_restart_resumes_from_committed_live_wal_offset()
     let second_descriptors =
         run_configured_compactor_for(&restarted_compactor, Duration::from_millis(750)).await;
     assert!(second_descriptors.len() == 1);
-    assert!(second_descriptors[0].key.first_offset == 1);
-    assert!(second_descriptors[0].key.last_offset == 1);
+    check!(second_descriptors[0].key.first_offset == 1);
+    check!(second_descriptors[0].key.last_offset == 1);
 
     let mut querier_config = service_config(Role::Querier, &bootstrap, topic, &data_root);
     querier_config.object_store_url = Some(object_store_url);
@@ -1302,8 +1302,8 @@ async fn native_kafka_produced_log_flows_through_configured_compactor_and_querie
     .await
     .unwrap();
     assert!(descriptors.len() == 1);
-    assert!(descriptors[0].key.first_offset == 0);
-    assert!(descriptors[0].key.last_offset == 0);
+    check!(descriptors[0].key.first_offset == 0);
+    check!(descriptors[0].key.last_offset == 0);
 
     let mut querier_config = service_config(Role::Querier, &bootstrap, topic, &data_root);
     querier_config.object_store_url = Some(object_store_url);

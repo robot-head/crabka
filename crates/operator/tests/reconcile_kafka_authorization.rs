@@ -109,26 +109,15 @@ async fn kafka_with_opa_authorization_renders_correct_broker_toml() {
     let observed = state.take_observed();
     let toml_str = broker_0_toml_from_observed(&observed, "c1");
 
-    assert!(
-        toml_str.contains("[authorization]"),
-        "[authorization] section missing;\n{toml_str}"
-    );
-    assert!(
-        toml_str.contains("type = \"opa\""),
-        "type = \"opa\" missing;\n{toml_str}"
-    );
-    assert!(
-        toml_str.contains("super_users = [\"ANONYMOUS\"]"),
-        "super_users = [\"ANONYMOUS\"] missing;\n{toml_str}"
-    );
-    assert!(
-        toml_str.contains("[authorization.opa]"),
-        "[authorization.opa] subtable missing;\n{toml_str}"
-    );
-    assert!(
-        toml_str.contains("url = \"http://opa:8181/v1/data/k/a\""),
-        "OPA url missing;\n{toml_str}"
-    );
+    for needle in [
+        "[authorization]",
+        "type = \"opa\"",
+        "super_users = [\"ANONYMOUS\"]",
+        "[authorization.opa]",
+        "url = \"http://opa:8181/v1/data/k/a\"",
+    ] {
+        assert!(toml_str.contains(needle), "{needle} missing;\n{toml_str}");
+    }
 
     // Round-trip parse through the broker's own FileConfig — sanity check
     // that the rendered TOML is structurally valid (matches the broker's
@@ -170,22 +159,18 @@ async fn kafka_with_simple_authorization_super_users_round_trip() {
     let observed = state.take_observed();
     let toml_str = broker_0_toml_from_observed(&observed, "c1");
 
-    assert!(
-        toml_str.contains("[authorization]"),
-        "[authorization] section missing;\n{toml_str}"
-    );
-    assert!(
-        toml_str.contains("type = \"simple\""),
-        "type = \"simple\" missing;\n{toml_str}"
-    );
-    assert!(
-        toml_str.contains("super_users = [\"User:admin\"]"),
-        "super_users = [\"User:admin\"] missing;\n{toml_str}"
-    );
-    assert!(
-        !toml_str.contains("[authorization.opa]"),
-        "[authorization.opa] must not appear for type = \"simple\";\n{toml_str}"
-    );
+    // `[authorization.opa]` must NOT appear for type = "simple".
+    for (needle, want) in [
+        ("[authorization]", true),
+        ("type = \"simple\"", true),
+        ("super_users = [\"User:admin\"]", true),
+        ("[authorization.opa]", false),
+    ] {
+        assert!(
+            toml_str.contains(needle) == want,
+            "{needle}: expected present={want} for type = \"simple\";\n{toml_str}"
+        );
+    }
 
     // Round-trip parse for structural validity.
     let parsed: crabka_broker::file_config::FileConfig =

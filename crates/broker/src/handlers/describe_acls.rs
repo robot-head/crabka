@@ -4,7 +4,7 @@
 //! the metadata image that matches the request's filter axes.
 
 use bytes::Bytes;
-use crabka_metadata::AclEntryFilter;
+use crabka_metadata::{AclEntry, AclEntryFilter};
 use crabka_protocol::Encode;
 use crabka_protocol::owned::describe_acls_request::DescribeAclsRequest;
 use crabka_protocol::owned::describe_acls_response::{
@@ -12,12 +12,56 @@ use crabka_protocol::owned::describe_acls_response::{
 };
 
 use super::acl_wire::{
-    operation_filter, operation_to_wire, pattern_type_filter, pattern_type_to_wire,
-    permission_filter, permission_to_wire, resource_type_filter, resource_type_to_wire,
+    CLUSTER_RESOURCE_NAME, PatternTypeCode, ResourceTypeCode, operation_filter, operation_to_wire,
+    pattern_type_filter, pattern_type_to_wire, permission_filter, permission_to_wire,
+    resource_type_filter, resource_type_to_wire,
 };
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
 use crate::codes;
+
+fn describe_acls_error_response(
+    error_code: i16,
+    error_message: &'static str,
+) -> DescribeAclsResponse {
+    DescribeAclsResponse {
+        error_code,
+        error_message: Some(error_message.into()),
+        ..Default::default()
+    }
+}
+
+fn acl_description(entry: &AclEntry) -> AclDescription {
+    AclDescription {
+        principal: entry.principal.clone(),
+        host: entry.host.clone(),
+        operation: operation_to_wire(entry.operation),
+        permission_type: permission_to_wire(entry.permission_type),
+        ..Default::default()
+    }
+}
+
+fn describe_acls_resource(
+    resource_type: ResourceTypeCode,
+    resource_name: String,
+    pattern_type: PatternTypeCode,
+    acls: Vec<AclDescription>,
+) -> DescribeAclsResource {
+    DescribeAclsResource {
+        resource_type,
+        resource_name,
+        pattern_type,
+        acls,
+        ..Default::default()
+    }
+}
+
+fn describe_acls_response(resources: Vec<DescribeAclsResource>) -> DescribeAclsResponse {
+    DescribeAclsResponse {
+        resources,
+        ..Default::default()
+    }
+}
 
 // `async` for symmetry with the other ACL wire handlers (CreateAcls /
 // DeleteAcls awaits `controller.submit_change`; read-only
@@ -43,38 +87,31 @@ pub(crate) async fn handle(
             principal: ctx.principal,
             host: ctx.peer,
             resource_type: crabka_metadata::ResourceType::Cluster,
-            resource_name: "kafka-cluster",
+            resource_name: CLUSTER_RESOURCE_NAME,
             operation: crabka_metadata::AclOperation::Describe,
         },
     );
     if allow == AuthorizationResult::Deny {
-        let resp = DescribeAclsResponse {
-            throttle_time_ms: 0,
-            error_code: codes::CLUSTER_AUTHORIZATION_FAILED,
-            error_message: Some("describe-acls denied".into()),
-            resources: vec![],
-            ..Default::default()
-        };
+        let resp = describe_acls_error_response(
+            codes::CLUSTER_AUTHORIZATION_FAILED,
+            "describe-acls denied",
+        );
         return encode_response(&resp, api_version);
     }
 
     // Decode filter axes from wire.
     let Ok(filter) = build_filter(&req) else {
-        let resp = DescribeAclsResponse {
-            throttle_time_ms: 0,
-            error_code: codes::INVALID_REQUEST,
-            error_message: Some("malformed filter axis".into()),
-            resources: vec![],
-            ..Default::default()
-        };
+        let resp = describe_acls_error_response(codes::INVALID_REQUEST, "malformed filter axis");
         return encode_response(&resp, api_version);
     };
 
     // Collect matching ACLs and group by (resource_type, resource_name,
     // pattern_type) so the wire response can mirror Kafka's nested
     // shape.
-    let mut by_resource: std::collections::HashMap<(i8, String, i8), Vec<AclDescription>> =
-        std::collections::HashMap::new();
+    let mut by_resource: std::collections::HashMap<
+        (ResourceTypeCode, String, PatternTypeCode),
+        Vec<AclDescription>,
+    > = std::collections::HashMap::new();
     for entry in image.all_acls() {
         if !filter.matches(entry) {
             continue;
@@ -84,33 +121,18 @@ pub(crate) async fn handle(
             entry.resource_name.clone(),
             pattern_type_to_wire(entry.pattern_type),
         );
-        by_resource.entry(key).or_default().push(AclDescription {
-            principal: entry.principal.clone(),
-            host: entry.host.clone(),
-            operation: operation_to_wire(entry.operation),
-            permission_type: permission_to_wire(entry.permission_type),
-            ..Default::default()
-        });
+        by_resource
+            .entry(key)
+            .or_default()
+            .push(acl_description(entry));
     }
 
     let resources: Vec<DescribeAclsResource> = by_resource
         .into_iter()
-        .map(|((rt, rn, pt), acls)| DescribeAclsResource {
-            resource_type: rt,
-            resource_name: rn,
-            pattern_type: pt,
-            acls,
-            ..Default::default()
-        })
+        .map(|((rt, rn, pt), acls)| describe_acls_resource(rt, rn, pt, acls))
         .collect();
 
-    let resp = DescribeAclsResponse {
-        throttle_time_ms: 0,
-        error_code: 0,
-        error_message: None,
-        resources,
-        ..Default::default()
-    };
+    let resp = describe_acls_response(resources);
     encode_response(&resp, api_version)
 }
 
@@ -147,4 +169,330 @@ fn encode_response<R: Encode>(
     resp.encode(&mut body, api_version)
         .map_err(|e| crate::error::BrokerError::Replication(format!("encode DescribeAcls: {e}")))?;
     Ok(Bytes::from(body))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert2::assert;
+    use crabka_metadata::{
+        AclOperation, MetadataRecord, PatternType, PermissionType, ResourceType,
+    };
+    use crabka_protocol::{Decode, UnknownTaggedFields};
+    use crabka_security::{AuthMethod, Principal};
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    use crate::authorizer::{AuthorizationRequest, Authorizer};
+    use crate::broker::{Broker, BrokerHandle};
+    use crate::config::BrokerConfig;
+
+    const VERSION: i16 = 3;
+    const RESOURCE_TYPE_TOPIC: i8 = 2;
+    const PATTERN_TYPE_ANY: i8 = 1;
+    const PATTERN_TYPE_LITERAL: i8 = 3;
+    const OPERATION_ANY: i8 = 1;
+    const OPERATION_READ: i8 = 3;
+    const OPERATION_WRITE: i8 = 4;
+    const PERMISSION_ANY: i8 = 1;
+    const PERMISSION_ALLOW: i8 = 3;
+
+    #[derive(Debug)]
+    struct DenyAll;
+
+    impl Authorizer for DenyAll {
+        fn authorize(
+            &self,
+            _source: &dyn crabka_authz::AclSource,
+            _req: &AuthorizationRequest<'_>,
+        ) -> AuthorizationResult {
+            AuthorizationResult::Deny
+        }
+    }
+
+    fn acl(resource_name: &str, principal: &str, operation: AclOperation) -> AclEntry {
+        AclEntry {
+            resource_type: ResourceType::Topic,
+            resource_name: resource_name.into(),
+            pattern_type: PatternType::Literal,
+            principal: principal.into(),
+            host: "*".into(),
+            operation,
+            permission_type: PermissionType::Allow,
+        }
+    }
+
+    fn request(
+        resource_name: Option<&str>,
+        principal: Option<&str>,
+        operation: i8,
+    ) -> DescribeAclsRequest {
+        DescribeAclsRequest {
+            resource_type_filter: RESOURCE_TYPE_TOPIC,
+            resource_name_filter: resource_name.map(Into::into),
+            pattern_type_filter: PATTERN_TYPE_LITERAL,
+            principal_filter: principal.map(Into::into),
+            host_filter: Some("*".into()),
+            operation,
+            permission_type: PERMISSION_ALLOW,
+            ..Default::default()
+        }
+    }
+
+    fn decode_response(bytes: &Bytes) -> DescribeAclsResponse {
+        let mut cur: &[u8] = bytes.as_ref();
+        let resp = DescribeAclsResponse::decode(&mut cur, VERSION).expect("decode response");
+        assert!(cur.is_empty(), "response decoder consumed all bytes");
+        resp
+    }
+
+    fn test_context<'a>(
+        principal: &'a Principal,
+        peer: &'a SocketAddr,
+    ) -> crate::handlers::RequestContext<'a> {
+        crate::handlers::RequestContext {
+            principal,
+            peer,
+            client_id: "admin-client",
+            sendfile_capable: false,
+            connection_listener_name: "PLAINTEXT",
+        }
+    }
+
+    fn principal(name: &str) -> Principal {
+        Principal {
+            name: name.into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        }
+    }
+
+    fn peer() -> SocketAddr {
+        "127.0.0.1:9092".parse().unwrap()
+    }
+
+    async fn start_broker(authorizer: Arc<dyn Authorizer>) -> (BrokerHandle, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
+        cfg.audit_enabled = false;
+        cfg.authorizer = authorizer;
+        let handle = Broker::start(cfg).await.expect("start broker");
+        (handle, dir)
+    }
+
+    async fn seed_acls(handle: &BrokerHandle, entries: Vec<AclEntry>) {
+        handle
+            .broker_arc_for_test()
+            .controller
+            .submit_change(
+                entries
+                    .into_iter()
+                    .map(MetadataRecord::V1AccessControlEntry)
+                    .collect(),
+            )
+            .await
+            .expect("seed ACLs");
+    }
+
+    #[test]
+    fn build_filter_collapses_empty_strings_and_decodes_axes() {
+        let req = DescribeAclsRequest {
+            resource_type_filter: RESOURCE_TYPE_TOPIC,
+            resource_name_filter: Some(String::new()),
+            pattern_type_filter: PATTERN_TYPE_ANY,
+            principal_filter: Some(String::new()),
+            host_filter: Some(String::new()),
+            operation: OPERATION_ANY,
+            permission_type: PERMISSION_ANY,
+            ..Default::default()
+        };
+
+        let built = build_filter(&req).expect("filter");
+
+        let expected = AclEntryFilter {
+            resource_type: Some(ResourceType::Topic),
+            resource_name: None,
+            pattern_type: None,
+            principal: None,
+            host: None,
+            operation: None,
+            permission_type: None,
+        };
+        assert!(built == expected);
+    }
+
+    #[test]
+    fn build_filter_rejects_malformed_axes() {
+        #[allow(clippy::type_complexity)]
+        let cases: [(&str, fn(&mut DescribeAclsRequest)); 3] = [
+            ("resource_type_filter", |r| r.resource_type_filter = 99),
+            ("pattern_type_filter", |r| r.pattern_type_filter = 99),
+            ("operation", |r| r.operation = 99),
+        ];
+        for (axis, corrupt) in cases {
+            let mut req = request(Some("orders"), Some("User:alice"), OPERATION_READ);
+            corrupt(&mut req);
+            assert!(build_filter(&req).is_err(), "axis {axis}");
+        }
+    }
+
+    #[test]
+    fn response_helpers_preserve_error_resource_and_acl_fields() {
+        let err = describe_acls_error_response(codes::INVALID_REQUEST, "malformed filter axis");
+        let expected_err = DescribeAclsResponse {
+            throttle_time_ms: 0,
+            error_code: codes::INVALID_REQUEST,
+            error_message: Some("malformed filter axis".into()),
+            resources: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(err == expected_err);
+
+        let desc = acl_description(&acl("orders", "User:alice", AclOperation::Read));
+        let expected_desc = AclDescription {
+            principal: "User:alice".into(),
+            host: "*".into(),
+            operation: OPERATION_READ,
+            permission_type: PERMISSION_ALLOW,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(desc == expected_desc);
+
+        let resource = describe_acls_resource(
+            RESOURCE_TYPE_TOPIC,
+            "orders".into(),
+            PATTERN_TYPE_LITERAL,
+            vec![desc.clone()],
+        );
+        let expected_resource = DescribeAclsResource {
+            resource_type: RESOURCE_TYPE_TOPIC,
+            resource_name: "orders".into(),
+            pattern_type: PATTERN_TYPE_LITERAL,
+            acls: vec![desc],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(resource == expected_resource);
+
+        let resp = describe_acls_response(vec![resource.clone()]);
+        let expected_resp = DescribeAclsResponse {
+            throttle_time_ms: 0,
+            error_code: codes::NONE,
+            error_message: None,
+            resources: vec![resource],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected_resp);
+    }
+
+    #[tokio::test]
+    async fn handle_denies_cluster_describe() {
+        let (broker_handle, _dir) = start_broker(Arc::new(DenyAll)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let p = principal("alice");
+        let peer = peer();
+        let ctx = test_context(&p, &peer);
+
+        let resp = handle(
+            &broker,
+            request(Some("orders"), Some("User:alice"), OPERATION_READ),
+            &ctx,
+            VERSION,
+        )
+        .await
+        .expect("handle");
+        let resp = decode_response(&resp);
+
+        let expected = DescribeAclsResponse {
+            throttle_time_ms: 0,
+            error_code: codes::CLUSTER_AUTHORIZATION_FAILED,
+            error_message: Some("describe-acls denied".into()),
+            resources: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_rejects_malformed_filter() {
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let p = principal("admin");
+        let peer = peer();
+        let ctx = test_context(&p, &peer);
+        let mut req = request(Some("orders"), Some("User:alice"), OPERATION_READ);
+        req.resource_type_filter = 99;
+
+        let resp = handle(&broker, req, &ctx, VERSION).await.expect("handle");
+        let resp = decode_response(&resp);
+
+        let expected = DescribeAclsResponse {
+            throttle_time_ms: 0,
+            error_code: codes::INVALID_REQUEST,
+            error_message: Some("malformed filter axis".into()),
+            resources: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_returns_only_matching_acl_fields() {
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer)).await;
+        seed_acls(
+            &broker_handle,
+            vec![
+                acl("orders", "User:alice", AclOperation::Read),
+                acl("payments", "User:bob", AclOperation::Write),
+            ],
+        )
+        .await;
+        let broker = broker_handle.broker_arc_for_test();
+        let p = principal("admin");
+        let peer = peer();
+        let ctx = test_context(&p, &peer);
+
+        let resp = handle(
+            &broker,
+            request(Some("orders"), Some("User:alice"), OPERATION_READ),
+            &ctx,
+            VERSION,
+        )
+        .await
+        .expect("handle");
+        let resp = decode_response(&resp);
+
+        let expected = DescribeAclsResponse {
+            throttle_time_ms: 0,
+            error_code: codes::NONE,
+            error_message: None,
+            resources: vec![DescribeAclsResource {
+                resource_type: RESOURCE_TYPE_TOPIC,
+                resource_name: "orders".into(),
+                pattern_type: PATTERN_TYPE_LITERAL,
+                acls: vec![AclDescription {
+                    principal: "User:alice".into(),
+                    host: "*".into(),
+                    operation: OPERATION_READ,
+                    permission_type: PERMISSION_ALLOW,
+                    unknown_tagged_fields: UnknownTaggedFields::default(),
+                }],
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            }],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
+        broker_handle.shutdown().await;
+    }
+
+    #[test]
+    fn acl_description_preserves_non_read_operations() {
+        let desc = acl_description(&acl("payments", "User:bob", AclOperation::Write));
+
+        assert!(desc.principal == "User:bob");
+        assert!(desc.operation == OPERATION_WRITE);
+    }
 }

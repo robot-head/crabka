@@ -42,7 +42,7 @@ migration**:
   `group.consumer.migration.policy` (a rollout-safety knob). Cold streams
   conversion is safe by construction (no live members), so Kafka gates it only by
   the `streams.version` feature, not a dedicated policy. This slice introduces
-  **no** new config. (Implementation note: empirically confirm `apache/kafka:4.2`
+  **no** new config. (Implementation note: empirically confirm `mirror.gcr.io/apache/kafka:4.2`
   exposes no `group.streams.migration.policy` before finalizing; if one exists,
   add it in a follow-up.)
 
@@ -153,7 +153,7 @@ k2 tombstoned), with the prior offsets intact — the recovery boundary is corre
 
 If the classic group has ≥1 live member when the `StreamsGroupHeartbeat` arrives,
 reject it (online streams migration is unsupported). The exact wire error code is
-**to be confirmed empirically** against `apache/kafka:4.2` (drive a classic
+**to be confirmed empirically** against `mirror.gcr.io/apache/kafka:4.2` (drive a classic
 Streams app + a streams-protocol instance at the same `group_id` without draining
 and capture the `StreamsGroupHeartbeat` response error). Spec placeholder:
 `GROUP_ID_NOT_FOUND` or a coordinator-load/unsupported error — **do not hard-code
@@ -214,10 +214,10 @@ not part of this slice; §6.3 covers the behavior in-process.
    JVM-validated against real clients in `#376`. The streams case is the same
    semantics ("this classic group can't serve the new-protocol heartbeat → report
    not-found, client falls back"), so the streams path mirrors it. A full
-   `apache/kafka:4.2` Streams-app coexistence capture remains a nice-to-have
+   `mirror.gcr.io/apache/kafka:4.2` Streams-app coexistence capture remains a nice-to-have
    confirmation but the JVM-validated consumer precedent is authoritative here.
 2. **Confirm no `group.streams.migration.policy`** config exists in
-   `apache/kafka:4.2`; if it does, add it (small follow-up) rather than diverge.
+   `mirror.gcr.io/apache/kafka:4.2`; if it does, add it (small follow-up) rather than diverge.
 3. **Confirm the conversion trigger boundary** — does Kafka convert on the first
    `StreamsGroupHeartbeat` for a drained classic `group_id`, or only after the
    classic group's `GroupMetadata` has been compaction-removed? The 4.2 docs say

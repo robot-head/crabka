@@ -90,6 +90,7 @@ fn run_rustfmt(src: &str) -> Result<String, FmtError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::check;
 
     #[test]
     fn split_banner_separates_leading_comment_block() {
@@ -120,11 +121,11 @@ mod tests {
             some_very_long_owning_message_name :: some_very_long_common_struct_name :: \
             SomeVeryLongCommonStructName { field_one : (self . field_one) , } } }";
         let out = rustfmt(&format!("{banner}{body}")).expect("rustfmt+prettyplease");
-        assert!(
+        check!(
             out.starts_with("// AUTO-GENERATED against deadbeef."),
             "banner must be preserved, got:\n{out}"
         );
-        assert!(!out.contains(" :: "), "spaced `::` survived:\n{out}");
-        assert!(!out.contains(" . "), "spaced `.` survived:\n{out}");
+        check!(!out.contains(" :: "), "spaced `::` survived:\n{out}");
+        check!(!out.contains(" . "), "spaced `.` survived:\n{out}");
     }
 }

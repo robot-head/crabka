@@ -282,7 +282,7 @@ Program-level gate — all must pass with **no test modified for the refactor**:
    unit suites.
 4. `cargo test --workspace -- --include-ignored` green — includes
    `jvm_acceptance` (classic produce/consume, cooperative-sticky, static
-   membership) and `jvm_consumer_group_next_gen` (apache/kafka:4.0.0
+   membership) and `jvm_consumer_group_next_gen` (mirror.gcr.io/apache/kafka:4.0.0
    `group.protocol=consumer`).
 5. `rg "GroupManager|NextGenCoordinator|mark_classic|mark_next_gen|group_types"
    crates/broker/src` returns **no hits** — the two coordinators are gone, not

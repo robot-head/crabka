@@ -336,9 +336,8 @@ mod tests {
         assert!(resp.error_code == 0);
         let ids: std::collections::HashSet<&str> =
             resp.tokens.iter().map(|t| t.token_id.as_str()).collect();
-        assert!(ids.len() == 2);
-        assert!(ids.contains("t-a"));
-        assert!(ids.contains("t-b"));
+        let expected: std::collections::HashSet<&str> = ["t-a", "t-b"].into_iter().collect();
+        assert!(ids == expected);
         controller.cancel().await;
     }
 

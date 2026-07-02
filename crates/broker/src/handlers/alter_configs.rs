@@ -12,7 +12,7 @@ use crabka_protocol::owned::alter_configs_request::AlterConfigsRequest;
 use crabka_protocol::owned::alter_configs_response::{
     AlterConfigsResourceResponse, AlterConfigsResponse,
 };
-use crabka_protocol::{Decode, Encode};
+use crabka_protocol::{Decode, Encode, UnknownTaggedFields};
 use crabka_raft::RaftError;
 
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
@@ -51,7 +51,7 @@ pub(crate) async fn handle(
             resource_name: resource.resource_name.clone(),
             error_code: codes::NONE,
             error_message: None,
-            ..Default::default()
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         };
 
         // ── ACL preamble ────────────────────────────────────────
@@ -76,7 +76,7 @@ pub(crate) async fn handle(
                     principal: ctx.principal,
                     host: ctx.peer,
                     resource_type: ResourceType::Cluster,
-                    resource_name: "kafka-cluster",
+                    resource_name: crate::handlers::acl_wire::CLUSTER_RESOURCE_NAME,
                     operation: AclOperation::AlterConfigs,
                 },
             ),
@@ -168,9 +168,195 @@ pub(crate) async fn handle(
     let resp = AlterConfigsResponse {
         responses,
         throttle_time_ms: 0,
-        ..Default::default()
+        unknown_tagged_fields: UnknownTaggedFields::default(),
     };
     let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
     resp.encode(&mut buf, version)?;
     Ok(buf.freeze())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert2::assert;
+    use crabka_protocol::owned::alter_configs_request::{
+        AlterConfigsRequest, AlterConfigsResource, AlterableConfig,
+    };
+    use crabka_security::{AuthMethod, Principal};
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    use crate::authorizer::{AuthorizationRequest, AuthorizationResult, Authorizer};
+    use crate::config::BrokerConfig;
+
+    #[derive(Debug)]
+    struct DenyAll;
+
+    impl Authorizer for DenyAll {
+        fn authorize(
+            &self,
+            _source: &dyn crabka_authz::AclSource,
+            _req: &AuthorizationRequest<'_>,
+        ) -> AuthorizationResult {
+            AuthorizationResult::Deny
+        }
+    }
+
+    fn encode_request(version: i16, req: &AlterConfigsRequest) -> Bytes {
+        let mut buf = BytesMut::with_capacity(req.encoded_len(version));
+        req.encode(&mut buf, version).expect("encode request");
+        buf.freeze()
+    }
+
+    fn decode_response(version: i16, bytes: &Bytes) -> AlterConfigsResponse {
+        let mut cur: &[u8] = bytes.as_ref();
+        let resp = AlterConfigsResponse::decode(&mut cur, version).expect("decode response");
+        assert!(cur.is_empty(), "response decoder consumed all bytes");
+        resp
+    }
+
+    fn test_context<'a>(
+        principal: &'a Principal,
+        peer: &'a SocketAddr,
+    ) -> crate::handlers::RequestContext<'a> {
+        crate::handlers::RequestContext {
+            principal,
+            peer,
+            client_id: "admin-client",
+            sendfile_capable: false,
+            connection_listener_name: "PLAINTEXT",
+        }
+    }
+
+    async fn start_broker(
+        authorizer: Arc<dyn Authorizer>,
+    ) -> (crate::broker::BrokerHandle, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
+        cfg.authorizer = authorizer;
+        let handle = Broker::start(cfg).await.expect("start broker");
+        (handle, dir)
+    }
+
+    fn resource(resource_type: i8, resource_name: &str) -> AlterConfigsResource {
+        AlterConfigsResource {
+            resource_type,
+            resource_name: resource_name.into(),
+            configs: vec![AlterableConfig {
+                name: "retention.ms".into(),
+                value: Some("60000".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    async fn drive_one(
+        authorizer: Arc<dyn Authorizer>,
+        resource: AlterConfigsResource,
+    ) -> AlterConfigsResponse {
+        let version = 2;
+        let (broker_handle, _dir) = start_broker(authorizer).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let principal = Principal {
+            name: "admin".into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        };
+        let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+        let ctx = test_context(&principal, &peer);
+        let req = AlterConfigsRequest {
+            resources: vec![resource],
+            validate_only: false,
+            ..Default::default()
+        };
+        let req_bytes = encode_request(version, &req);
+
+        let resp = handle(&broker, version, 123, &req_bytes, &ctx)
+            .await
+            .expect("handle");
+        let resp = decode_response(version, &resp);
+        broker_handle.shutdown().await;
+        resp
+    }
+
+    #[tokio::test]
+    async fn handle_preserves_resource_identity_for_unsupported_type() {
+        let resp = drive_one(
+            Arc::new(crate::authorizer::AllowAllAuthorizer),
+            resource(77, "mystery"),
+        )
+        .await;
+
+        let expected = AlterConfigsResponse {
+            throttle_time_ms: 0,
+            responses: vec![AlterConfigsResourceResponse {
+                error_code: codes::INVALID_RESOURCE_TYPE,
+                error_message: Some("resource_type=77 not supported".to_string()),
+                resource_type: 77,
+                resource_name: "mystery".to_string(),
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            }],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
+    }
+
+    #[tokio::test]
+    async fn topic_resource_denial_uses_topic_authorization_error() {
+        let resp = drive_one(Arc::new(DenyAll), resource(RESOURCE_TYPE_TOPIC, "orders")).await;
+
+        let expected = AlterConfigsResponse {
+            throttle_time_ms: 0,
+            responses: vec![AlterConfigsResourceResponse {
+                error_code: codes::TOPIC_AUTHORIZATION_FAILED,
+                error_message: None,
+                resource_type: RESOURCE_TYPE_TOPIC,
+                resource_name: "orders".to_string(),
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            }],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
+    }
+
+    #[tokio::test]
+    async fn broker_resource_denial_uses_cluster_authorization_error() {
+        let resp = drive_one(Arc::new(DenyAll), resource(RESOURCE_TYPE_BROKER, "1")).await;
+
+        let expected = AlterConfigsResponse {
+            throttle_time_ms: 0,
+            responses: vec![AlterConfigsResourceResponse {
+                error_code: codes::CLUSTER_AUTHORIZATION_FAILED,
+                error_message: None,
+                resource_type: RESOURCE_TYPE_BROKER,
+                resource_name: "1".to_string(),
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            }],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
+    }
+
+    #[tokio::test]
+    async fn authorized_broker_resource_is_reported_unsupported() {
+        let resp = drive_one(
+            Arc::new(crate::authorizer::AllowAllAuthorizer),
+            resource(RESOURCE_TYPE_BROKER, "1"),
+        )
+        .await;
+
+        let expected = AlterConfigsResponse {
+            throttle_time_ms: 0,
+            responses: vec![AlterConfigsResourceResponse {
+                error_code: codes::INVALID_RESOURCE_TYPE,
+                error_message: Some("resource_type=4 not supported".to_string()),
+                resource_type: RESOURCE_TYPE_BROKER,
+                resource_name: "1".to_string(),
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            }],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(resp == expected);
+    }
 }

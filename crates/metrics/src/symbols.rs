@@ -124,7 +124,7 @@ impl SymbolTable {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+    use assert2::{assert, check};
 
     use super::*;
 
@@ -134,9 +134,9 @@ mod tests {
         assert!(t.resolve(0) == Some(""));
         let a = t.intern("app");
         let b = t.intern("api");
-        assert!(t.intern("app") == a);
-        assert!(t.resolve(a) == Some("app"));
-        assert!(t.resolve(b) == Some("api"));
+        check!(t.intern("app") == a);
+        check!(t.resolve(a) == Some("app"));
+        check!(t.resolve(b) == Some("api"));
     }
 
     #[test]

@@ -730,7 +730,7 @@ fn anchored(pattern: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+    use assert2::{assert, check};
 
     use super::*;
     use crate::SpansetExpr;
@@ -747,13 +747,24 @@ mod tests {
     #[test]
     fn conjunctive_comparisons_become_prefilter_matchers() {
         let ms = field_expr_to_matchers(&selector("{ .a = 1 && .b =~ \"x\" }"));
-        assert!(ms.len() == 2);
-        assert!(ms[0].key == "a");
-        assert!(ms[0].op == MatchCmp::Eq);
-        assert!(ms[0].value == MatchValue::Int(1));
-        assert!(ms[1].key == "b");
-        assert!(ms[1].op == MatchCmp::Re);
-        assert!(ms[1].value == MatchValue::Str("x".into()));
+        assert!(
+            ms == vec![
+                SpanMatcher {
+                    scope: MatchScope::Both,
+                    key: "a".into(),
+                    op: MatchCmp::Eq,
+                    value: MatchValue::Int(1),
+                    negated: false,
+                },
+                SpanMatcher {
+                    scope: MatchScope::Both,
+                    key: "b".into(),
+                    op: MatchCmp::Re,
+                    value: MatchValue::Str("x".into()),
+                    negated: false,
+                },
+            ]
+        );
     }
 
     #[test]
@@ -804,10 +815,15 @@ mod tests {
     #[test]
     fn nil_comparison_is_presence_prefilter() {
         let ms = field_expr_to_matchers(&selector("{ .a != nil }"));
-        assert!(ms.len() == 1);
-        assert!(ms[0].key == "a");
-        assert!(ms[0].op == MatchCmp::Neq);
-        assert!(ms[0].value == MatchValue::Nil);
+        assert!(
+            ms == vec![SpanMatcher {
+                scope: MatchScope::Both,
+                key: "a".into(),
+                op: MatchCmp::Neq,
+                value: MatchValue::Nil,
+                negated: false,
+            }]
+        );
     }
 
     #[test]
@@ -971,14 +987,17 @@ mod tests {
 
     #[test]
     fn field_expr_to_sql_combines_boolean_operators() {
-        let sql = field_expr_to_sql(&selector("{ .a = 1 && .b = 2 }")).unwrap();
-        assert!(sql == "(\"attr.a\" = 1 AND \"attr.b\" = 2)");
-
-        let sql = field_expr_to_sql(&selector("{ .a = 1 || .b = 2 }")).unwrap();
-        assert!(sql == "(\"attr.a\" = 1 OR \"attr.b\" = 2)");
-
-        let sql = field_expr_to_sql(&selector("{ !(.a = 1) }")).unwrap();
-        assert!(sql == "(NOT \"attr.a\" = 1)");
+        for (query, expected) in [
+            (
+                "{ .a = 1 && .b = 2 }",
+                "(\"attr.a\" = 1 AND \"attr.b\" = 2)",
+            ),
+            ("{ .a = 1 || .b = 2 }", "(\"attr.a\" = 1 OR \"attr.b\" = 2)"),
+            ("{ !(.a = 1) }", "(NOT \"attr.a\" = 1)"),
+        ] {
+            let sql = field_expr_to_sql(&selector(query)).unwrap();
+            assert!(sql == expected, "{query} -> {sql}");
+        }
     }
 
     #[test]
@@ -1000,9 +1019,9 @@ mod tests {
         let sql = selector_sql("\"spans\"", &selector("{ parent.a = 1 }")).unwrap();
         // Parent scope joins the table to itself on trace_id / parent_id linkage
         // and qualifies the parent predicate with the `p` alias.
-        assert!(sql.contains("FROM \"spans\" AS s JOIN \"spans\" AS p"));
-        assert!(sql.contains("WHERE p.\"attr.a\" = 1"));
-        assert!(sql.contains("s.\"parent_id\" = p.\"nested_set_left\""));
+        check!(sql.contains("FROM \"spans\" AS s JOIN \"spans\" AS p"));
+        check!(sql.contains("WHERE p.\"attr.a\" = 1"));
+        check!(sql.contains("s.\"parent_id\" = p.\"nested_set_left\""));
     }
 
     #[test]
@@ -1112,21 +1131,21 @@ mod tests {
 
     #[test]
     fn qualified_sql_routes_parent_to_parent_alias() {
-        let fe = selector("{ parent.a = 1 && .b = 2 }");
-        let sql = field_expr_to_sql_qualified(&fe, "s", "p").unwrap();
-        assert!(sql == "(p.\"attr.a\" = 1 AND s.\"attr.b\" = 2)");
-
-        let fe = selector("{ parent.a = 1 || .b = 2 }");
-        let sql = field_expr_to_sql_qualified(&fe, "s", "p").unwrap();
-        assert!(sql == "(p.\"attr.a\" = 1 OR s.\"attr.b\" = 2)");
-
-        let fe = selector("{ !(parent.a = 1) }");
-        let sql = field_expr_to_sql_qualified(&fe, "s", "p").unwrap();
-        assert!(sql == "(NOT p.\"attr.a\" = 1)");
-
-        let bare = selector("{ parent.a }");
-        let sql = field_expr_to_sql_qualified(&bare, "s", "p").unwrap();
-        assert!(sql == "p.\"attr.a\" IS NOT NULL");
+        for (query, expected) in [
+            (
+                "{ parent.a = 1 && .b = 2 }",
+                "(p.\"attr.a\" = 1 AND s.\"attr.b\" = 2)",
+            ),
+            (
+                "{ parent.a = 1 || .b = 2 }",
+                "(p.\"attr.a\" = 1 OR s.\"attr.b\" = 2)",
+            ),
+            ("{ !(parent.a = 1) }", "(NOT p.\"attr.a\" = 1)"),
+            ("{ parent.a }", "p.\"attr.a\" IS NOT NULL"),
+        ] {
+            let sql = field_expr_to_sql_qualified(&selector(query), "s", "p").unwrap();
+            assert!(sql == expected, "{query} -> {sql}");
+        }
     }
 
     // ---- comparison_value_sql: enums, hex widths, errors ----
@@ -1218,10 +1237,15 @@ mod tests {
     #[test]
     fn comparison_value_sql_plain_field_uses_value_sql() {
         let field = attr_field(Scope::Both, "x");
-        assert!(comparison_value_sql(&field, &Value::Int(7)).unwrap() == "7");
-        assert!(comparison_value_sql(&field, &Value::Str("hi".into())).unwrap() == "'hi'");
-        assert!(comparison_value_sql(&field, &Value::Bool(true)).unwrap() == "true");
-        assert!(comparison_value_sql(&field, &Value::Duration(5)).unwrap() == "5");
+        for (value, expected) in [
+            (Value::Int(7), "7"),
+            (Value::Str("hi".into()), "'hi'"),
+            (Value::Bool(true), "true"),
+            (Value::Duration(5), "5"),
+        ] {
+            let sql = comparison_value_sql(&field, &value).unwrap();
+            assert!(sql == expected, "{value:?} -> {sql}");
+        }
     }
 
     // ---- value_sql: bool literal, nil error ----
@@ -1238,14 +1262,20 @@ mod tests {
 
     #[test]
     fn intrinsic_name_labels_known_intrinsics() {
-        assert!(intrinsic_name(&Scope::Intrinsic(Intrinsic::TraceId)) == "trace:id");
-        assert!(intrinsic_name(&Scope::Intrinsic(Intrinsic::Id)) == "span:id");
-        assert!(intrinsic_name(&Scope::Intrinsic(Intrinsic::ParentId)) == "span:parentID");
-        assert!(intrinsic_name(&Scope::Intrinsic(Intrinsic::Kind)) == "span:kind");
-        assert!(intrinsic_name(&Scope::Intrinsic(Intrinsic::Status)) == "span:status");
-        // Anything else collapses to the generic label.
-        assert!(intrinsic_name(&Scope::Both) == "intrinsic");
-        assert!(intrinsic_name(&Scope::Intrinsic(Intrinsic::Name)) == "intrinsic");
+        let cases = [
+            (Scope::Intrinsic(Intrinsic::TraceId), "trace:id"),
+            (Scope::Intrinsic(Intrinsic::Id), "span:id"),
+            (Scope::Intrinsic(Intrinsic::ParentId), "span:parentID"),
+            (Scope::Intrinsic(Intrinsic::Kind), "span:kind"),
+            (Scope::Intrinsic(Intrinsic::Status), "span:status"),
+            // Anything else collapses to the generic label.
+            (Scope::Both, "intrinsic"),
+            (Scope::Intrinsic(Intrinsic::Name), "intrinsic"),
+        ];
+        for (scope, expected) in cases {
+            let name = intrinsic_name(&scope);
+            assert!(name == expected, "{scope:?} -> {name}");
+        }
     }
 
     #[test]
@@ -1261,68 +1291,32 @@ mod tests {
     fn comparison_to_sql_qualified_covers_operators_nil_and_regex() {
         let field = attr_field(Scope::Parent, "a");
         let col = qualified_field_ident(&field, "s", "p");
-        assert!(
-            comparison_to_sql_qualified(&field, ComparisonOp::Eq, &Value::Int(1), "s", "p")
-                .unwrap()
-                == format!("{col} = 1")
-        );
-        assert!(
-            comparison_to_sql_qualified(&field, ComparisonOp::Neq, &Value::Int(1), "s", "p")
-                .unwrap()
-                == format!("{col} != 1")
-        );
-        assert!(
-            comparison_to_sql_qualified(&field, ComparisonOp::Lt, &Value::Int(1), "s", "p")
-                .unwrap()
-                == format!("{col} < 1")
-        );
-        assert!(
-            comparison_to_sql_qualified(&field, ComparisonOp::Lte, &Value::Int(1), "s", "p")
-                .unwrap()
-                == format!("{col} <= 1")
-        );
-        assert!(
-            comparison_to_sql_qualified(&field, ComparisonOp::Gt, &Value::Int(1), "s", "p")
-                .unwrap()
-                == format!("{col} > 1")
-        );
-        assert!(
-            comparison_to_sql_qualified(&field, ComparisonOp::Gte, &Value::Int(1), "s", "p")
-                .unwrap()
-                == format!("{col} >= 1")
-        );
-        // nil
-        assert!(
-            comparison_to_sql_qualified(&field, ComparisonOp::Eq, &Value::Nil, "s", "p").unwrap()
-                == format!("{col} IS NULL")
-        );
-        assert!(
-            comparison_to_sql_qualified(&field, ComparisonOp::Neq, &Value::Nil, "s", "p").unwrap()
-                == format!("{col} IS NOT NULL")
-        );
-        // regex
-        assert!(
-            comparison_to_sql_qualified(
-                &field,
+        let cases = [
+            (ComparisonOp::Eq, Value::Int(1), format!("{col} = 1")),
+            (ComparisonOp::Neq, Value::Int(1), format!("{col} != 1")),
+            (ComparisonOp::Lt, Value::Int(1), format!("{col} < 1")),
+            (ComparisonOp::Lte, Value::Int(1), format!("{col} <= 1")),
+            (ComparisonOp::Gt, Value::Int(1), format!("{col} > 1")),
+            (ComparisonOp::Gte, Value::Int(1), format!("{col} >= 1")),
+            // nil
+            (ComparisonOp::Eq, Value::Nil, format!("{col} IS NULL")),
+            (ComparisonOp::Neq, Value::Nil, format!("{col} IS NOT NULL")),
+            // regex
+            (
                 ComparisonOp::Re,
-                &Value::Str("x".into()),
-                "s",
-                "p"
-            )
-            .unwrap()
-                == format!("regexp_like({col}, '^(?:x)$')")
-        );
-        assert!(
-            comparison_to_sql_qualified(
-                &field,
+                Value::Str("x".into()),
+                format!("regexp_like({col}, '^(?:x)$')"),
+            ),
+            (
                 ComparisonOp::Nre,
-                &Value::Str("x".into()),
-                "s",
-                "p"
-            )
-            .unwrap()
-                == format!("NOT regexp_like({col}, '^(?:x)$')")
-        );
+                Value::Str("x".into()),
+                format!("NOT regexp_like({col}, '^(?:x)$')"),
+            ),
+        ];
+        for (op, value, expected) in cases {
+            let sql = comparison_to_sql_qualified(&field, op, &value, "s", "p").unwrap();
+            assert!(sql == expected, "{op:?} {value:?} -> {sql}");
+        }
         // regex against non-string errors
         let err = comparison_to_sql_qualified(&field, ComparisonOp::Re, &Value::Int(1), "s", "p");
         assert!(matches!(err, Err(TraceqlError::Plan(_))));
@@ -1343,11 +1337,15 @@ mod tests {
         // `!{ event.foo = 1 }` is a nested scope negation, which lowers to a
         // single disjunct of one negated matcher and is usable as a prefilter.
         let ms = field_expr_to_matchers(&selector("{ !(event.foo = 1) }"));
-        assert!(ms.len() == 1);
-        assert!(ms[0].scope == MatchScope::Event);
-        assert!(ms[0].key == "foo");
-        assert!(ms[0].negated);
-        assert!(ms[0].op == MatchCmp::Eq);
+        assert!(
+            ms == vec![SpanMatcher {
+                scope: MatchScope::Event,
+                key: "foo".into(),
+                op: MatchCmp::Eq,
+                value: MatchValue::Int(1),
+                negated: true,
+            }]
+        );
     }
 
     #[test]
@@ -1360,9 +1358,25 @@ mod tests {
     #[test]
     fn or_of_comparisons_produces_disjunct_per_branch() {
         let disjuncts = field_expr_to_matcher_disjuncts(&selector("{ .a = 1 || .b = 2 }")).unwrap();
-        assert!(disjuncts.len() == 2);
-        assert!(disjuncts[0][0].key == "a");
-        assert!(disjuncts[1][0].key == "b");
+        assert!(
+            disjuncts
+                == vec![
+                    vec![SpanMatcher {
+                        scope: MatchScope::Both,
+                        key: "a".into(),
+                        op: MatchCmp::Eq,
+                        value: MatchValue::Int(1),
+                        negated: false,
+                    }],
+                    vec![SpanMatcher {
+                        scope: MatchScope::Both,
+                        key: "b".into(),
+                        op: MatchCmp::Eq,
+                        value: MatchValue::Int(2),
+                        negated: false,
+                    }],
+                ]
+        );
     }
 
     #[test]
@@ -1385,9 +1399,25 @@ mod tests {
         let disjuncts =
             field_expr_to_matcher_disjuncts(&selector("{ !(event.a = 1 || event.b = 2) }"))
                 .unwrap();
-        assert!(disjuncts.len() == 1);
-        assert!(disjuncts[0].len() == 2);
-        assert!(disjuncts[0].iter().all(|m| m.negated));
+        assert!(
+            disjuncts
+                == vec![vec![
+                    SpanMatcher {
+                        scope: MatchScope::Event,
+                        key: "a".into(),
+                        op: MatchCmp::Eq,
+                        value: MatchValue::Int(1),
+                        negated: true,
+                    },
+                    SpanMatcher {
+                        scope: MatchScope::Event,
+                        key: "b".into(),
+                        op: MatchCmp::Eq,
+                        value: MatchValue::Int(2),
+                        negated: true,
+                    },
+                ]]
+        );
     }
 
     #[test]
@@ -1405,9 +1435,16 @@ mod tests {
         // !!(event.a = 1) -> back to a non-negated matcher.
         let disjuncts =
             field_expr_to_matcher_disjuncts(&selector("{ !(!(event.a = 1)) }")).unwrap();
-        assert!(disjuncts.len() == 1);
-        assert!(disjuncts[0].len() == 1);
-        assert!(!disjuncts[0][0].negated);
+        assert!(
+            disjuncts
+                == vec![vec![SpanMatcher {
+                    scope: MatchScope::Event,
+                    key: "a".into(),
+                    op: MatchCmp::Eq,
+                    value: MatchValue::Int(1),
+                    negated: false,
+                }]]
+        );
     }
 
     // ---- matcher_from_field_expr & friends: scope / cmp / value mapping ----
@@ -1415,52 +1452,81 @@ mod tests {
     #[test]
     fn matcher_from_bare_field_is_presence_neq_nil() {
         let m = matcher_from_field_expr(&selector("{ resource.region }")).unwrap();
-        assert!(m.scope == MatchScope::Resource);
-        assert!(m.key == "region");
-        assert!(m.op == MatchCmp::Neq);
-        assert!(m.value == MatchValue::Nil);
-        assert!(!m.negated);
+        assert!(
+            m == SpanMatcher {
+                scope: MatchScope::Resource,
+                key: "region".into(),
+                op: MatchCmp::Neq,
+                value: MatchValue::Nil,
+                negated: false,
+            }
+        );
     }
 
     #[test]
     fn matcher_from_boolean_expr_is_none() {
-        assert!(matcher_from_field_expr(&selector("{ .a = 1 && .b = 2 }")).is_none());
-        assert!(matcher_from_field_expr(&selector("{ .a = 1 || .b = 2 }")).is_none());
-        assert!(matcher_from_field_expr(&selector("{ !(.a = 1) }")).is_none());
+        for query in [
+            "{ .a = 1 && .b = 2 }",
+            "{ .a = 1 || .b = 2 }",
+            "{ !(.a = 1) }",
+        ] {
+            assert!(
+                matcher_from_field_expr(&selector(query)).is_none(),
+                "{query}"
+            );
+        }
     }
 
     #[test]
     fn match_scope_covers_every_scope() {
-        assert!(match_scope(&Scope::Both) == MatchScope::Both);
-        assert!(match_scope(&Scope::Span) == MatchScope::Span);
-        assert!(match_scope(&Scope::Resource) == MatchScope::Resource);
-        assert!(match_scope(&Scope::Parent) == MatchScope::Parent);
-        assert!(match_scope(&Scope::Event) == MatchScope::Event);
-        assert!(match_scope(&Scope::Link) == MatchScope::Link);
-        assert!(match_scope(&Scope::Instrumentation) == MatchScope::Instrumentation);
-        assert!(match_scope(&Scope::Intrinsic(Intrinsic::Name)) == MatchScope::Intrinsic);
+        let cases = [
+            (Scope::Both, MatchScope::Both),
+            (Scope::Span, MatchScope::Span),
+            (Scope::Resource, MatchScope::Resource),
+            (Scope::Parent, MatchScope::Parent),
+            (Scope::Event, MatchScope::Event),
+            (Scope::Link, MatchScope::Link),
+            (Scope::Instrumentation, MatchScope::Instrumentation),
+            (Scope::Intrinsic(Intrinsic::Name), MatchScope::Intrinsic),
+        ];
+        for (scope, expected) in cases {
+            let got = match_scope(&scope);
+            assert!(got == expected, "{scope:?} -> {got:?}");
+        }
     }
 
     #[test]
     fn match_cmp_covers_every_operator() {
-        assert!(match_cmp(ComparisonOp::Eq) == MatchCmp::Eq);
-        assert!(match_cmp(ComparisonOp::Neq) == MatchCmp::Neq);
-        assert!(match_cmp(ComparisonOp::Lt) == MatchCmp::Lt);
-        assert!(match_cmp(ComparisonOp::Lte) == MatchCmp::Lte);
-        assert!(match_cmp(ComparisonOp::Gt) == MatchCmp::Gt);
-        assert!(match_cmp(ComparisonOp::Gte) == MatchCmp::Gte);
-        assert!(match_cmp(ComparisonOp::Re) == MatchCmp::Re);
-        assert!(match_cmp(ComparisonOp::Nre) == MatchCmp::Nre);
+        let cases = [
+            (ComparisonOp::Eq, MatchCmp::Eq),
+            (ComparisonOp::Neq, MatchCmp::Neq),
+            (ComparisonOp::Lt, MatchCmp::Lt),
+            (ComparisonOp::Lte, MatchCmp::Lte),
+            (ComparisonOp::Gt, MatchCmp::Gt),
+            (ComparisonOp::Gte, MatchCmp::Gte),
+            (ComparisonOp::Re, MatchCmp::Re),
+            (ComparisonOp::Nre, MatchCmp::Nre),
+        ];
+        for (op, expected) in cases {
+            let got = match_cmp(op);
+            assert!(got == expected, "{op:?} -> {got:?}");
+        }
     }
 
     #[test]
     fn match_value_covers_every_value_kind() {
-        assert!(match_value(&Value::Str("x".into())) == MatchValue::Str("x".into()));
-        assert!(match_value(&Value::Int(3)) == MatchValue::Int(3));
-        assert!(match_value(&Value::Duration(9)) == MatchValue::Int(9));
-        assert!(match_value(&Value::Float(1.5)) == MatchValue::Float(1.5));
-        assert!(match_value(&Value::Bool(true)) == MatchValue::Bool(true));
-        assert!(match_value(&Value::Nil) == MatchValue::Nil);
+        let cases = [
+            (Value::Str("x".into()), MatchValue::Str("x".into())),
+            (Value::Int(3), MatchValue::Int(3)),
+            (Value::Duration(9), MatchValue::Int(9)),
+            (Value::Float(1.5), MatchValue::Float(1.5)),
+            (Value::Bool(true), MatchValue::Bool(true)),
+            (Value::Nil, MatchValue::Nil),
+        ];
+        for (value, expected) in cases {
+            let got = match_value(&value);
+            assert!(got == expected, "{value:?} -> {got:?}");
+        }
     }
 
     #[test]
@@ -1517,34 +1583,43 @@ mod tests {
 
     #[test]
     fn has_nested_scope_detects_event_link_and_intrinsics() {
-        assert!(has_nested_scope(&selector("{ event.foo = 1 }")));
-        assert!(has_nested_scope(&selector("{ link.foo = 1 }")));
-        assert!(has_nested_scope(&selector("{ event:name = \"x\" }")));
-        assert!(has_nested_scope(&selector("{ link:traceID = \"x\" }")));
-        assert!(has_nested_scope(&selector("{ .a = 1 || event.b = 2 }")));
-        assert!(has_nested_scope(&selector("{ !(link.b = 2) }")));
-        assert!(!has_nested_scope(&selector("{ .a = 1 && .b = 2 }")));
+        for (query, expected) in [
+            ("{ event.foo = 1 }", true),
+            ("{ link.foo = 1 }", true),
+            ("{ event:name = \"x\" }", true),
+            ("{ link:traceID = \"x\" }", true),
+            ("{ .a = 1 || event.b = 2 }", true),
+            ("{ !(link.b = 2) }", true),
+            ("{ .a = 1 && .b = 2 }", false),
+        ] {
+            let got = has_nested_scope(&selector(query));
+            assert!(got == expected, "{query} -> {got}");
+        }
     }
 
     #[test]
     fn has_parent_scope_detects_parent_across_combinators() {
-        assert!(has_parent_scope(&selector("{ parent.a = 1 }")));
-        assert!(has_parent_scope(&selector("{ .a = 1 && parent.b = 2 }")));
-        assert!(has_parent_scope(&selector("{ !(parent.b = 2) }")));
-        assert!(!has_parent_scope(&selector("{ .a = 1 }")));
+        for (query, expected) in [
+            ("{ parent.a = 1 }", true),
+            ("{ .a = 1 && parent.b = 2 }", true),
+            ("{ !(parent.b = 2) }", true),
+            ("{ .a = 1 }", false),
+        ] {
+            let got = has_parent_scope(&selector(query));
+            assert!(got == expected, "{query} -> {got}");
+        }
     }
 
     #[test]
     fn unfiltered_parent_table_is_needed_only_for_nested_parent_selectors() {
-        assert!(!needs_unfiltered_parent_table(&selector(
-            "{ event:name = \"x\" }"
-        )));
-        assert!(!needs_unfiltered_parent_table(&selector(
-            "{ parent.a = 1 }"
-        )));
-        assert!(needs_unfiltered_parent_table(&selector(
-            "{ event:name = \"x\" && parent.a = 1 }"
-        )));
+        for (query, expected) in [
+            ("{ event:name = \"x\" }", false),
+            ("{ parent.a = 1 }", false),
+            ("{ event:name = \"x\" && parent.a = 1 }", true),
+        ] {
+            let got = needs_unfiltered_parent_table(&selector(query));
+            assert!(got == expected, "{query} -> {got}");
+        }
     }
 
     #[test]

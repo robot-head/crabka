@@ -3,7 +3,7 @@
 //! triggers a controller snapshot, then fetches the `__cluster_metadata`
 //! snapshot byte range over the wire and asserts the page is served.
 
-use assert2::assert;
+use assert2::{assert, check};
 use std::time::{Duration, Instant};
 
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
@@ -69,12 +69,12 @@ async fn fetch_snapshot_serves_metadata_snapshot() {
         assert!(out.error_code == 0, "top-level error_code");
         let part = &out.topics[0].partitions[0];
         if part.error_code == 0 {
-            assert!(part.index == 0);
-            assert!(
+            check!(part.index == 0);
+            check!(
                 part.size > 0,
                 "served snapshot reports a non-zero total size"
             );
-            assert!(
+            check!(
                 part.unaligned_records.payload_len() > 0,
                 "served snapshot page carries bytes"
             );

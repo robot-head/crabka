@@ -37,6 +37,11 @@ const REQUEST_DURATION_BUCKETS: [f64; 12] = [
 /// to register and we want lazy registration from multiple init paths.
 pub type SharedRegistry = Arc<Mutex<Registry>>;
 
+/// Sentinel label value that folds unbounded inputs (unrecognised
+/// `api_key`s, `SaslAuthenticate` without a prior handshake) into one
+/// series, keeping label cardinality bounded.
+pub(crate) const UNKNOWN_LABEL: &str = "Unknown";
+
 /// Per-topic label set. `EncodeLabelSet` is the prometheus-client
 /// derive that produces the `topic="<name>"` label on emitted samples.
 #[derive(Debug, Clone, Hash, PartialEq, Eq, EncodeLabelSet)]
@@ -809,13 +814,9 @@ impl BrokerMetrics {
     /// Account one dispatched request for `api_key`. The
     /// label is the human-readable variant name from
     /// `ApiKey::IntoStaticStr`; unknown keys fold under `"Unknown"`.
-    pub fn record_api_request(&self, api_key: i16) {
-        let name: &'static str = match crabka_protocol::api_key::ApiKey::from_i16(api_key) {
-            Some(k) => k.into(),
-            None => "Unknown",
-        };
+    pub fn record_api_request(&self, api_key: crate::handlers::ApiKeyCode) {
         let lbl = ApiKeyLabel {
-            api_key: name.to_string(),
+            api_key: api_key_label_name(api_key).to_string(),
         };
         self.api_requests.get_or_create(&lbl).inc();
     }
@@ -824,13 +825,9 @@ impl BrokerMetrics {
     /// `UNSUPPORTED_VERSION` because no handler matched `api_key`
     /// (e.g. unknown `api_key`, or known `api_key` with no version
     /// negotiated). Mirrors the labelling of `record_api_request`.
-    pub fn record_unsupported_api_request(&self, api_key: i16) {
-        let name: &'static str = match crabka_protocol::api_key::ApiKey::from_i16(api_key) {
-            Some(k) => k.into(),
-            None => "Unknown",
-        };
+    pub fn record_unsupported_api_request(&self, api_key: crate::handlers::ApiKeyCode) {
         let lbl = ApiKeyLabel {
-            api_key: name.to_string(),
+            api_key: api_key_label_name(api_key).to_string(),
         };
         self.unsupported_api_requests.get_or_create(&lbl).inc();
     }
@@ -1035,6 +1032,15 @@ impl Default for BrokerMetrics {
     }
 }
 
+/// Resolve a wire `api_key` to the `ApiKey` variant name used as the
+/// metric label, folding unrecognised keys under [`UNKNOWN_LABEL`].
+fn api_key_label_name(api_key: crate::handlers::ApiKeyCode) -> &'static str {
+    match crabka_protocol::api_key::ApiKey::from_i16(api_key) {
+        Some(k) => k.into(),
+        None => UNKNOWN_LABEL,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1130,11 +1136,15 @@ mod tests {
         ] {
             assert!(buf.contains(needle), "missing {needle} in:\n{buf}");
         }
-        assert!(buf.contains("topic=\"topic-a\""), "topic label missing");
-        // Values made it through.
-        assert!(buf.contains("100"), "bytes_in=100 missing");
-        assert!(buf.contains("50"), "bytes_out=50 missing");
-        assert!(buf.contains('7'), "partitions_led=7 missing");
+        // Topic label and values made it through.
+        for (needle, what) in [
+            ("topic=\"topic-a\"", "topic label"),
+            ("100", "bytes_in=100"),
+            ("50", "bytes_out=50"),
+            ("7", "partitions_led=7"),
+        ] {
+            assert!(buf.contains(needle), "expected {what} in:\n{buf}");
+        }
     }
 
     #[test]
@@ -1195,16 +1205,66 @@ mod tests {
         m.record_authentication("PLAIN", false);
         m.record_authentication("SCRAM-SHA-256", true);
         m.record_authentication("Unknown", false);
-        // PLAIN: 2 successes, 1 failure.
-        assert!(m.successful_authentication.get_or_create(&plain).get() == 2);
-        assert!(m.failed_authentication.get_or_create(&plain).get() == 1);
-        // SCRAM-SHA-256: 1 success, 0 failures (must not lazily
-        // allocate a failure entry from the success bump).
-        assert!(m.successful_authentication.get_or_create(&scram).get() == 1);
-        // ILLEGAL_SASL_STATE: 0 successes, 1 failure under the
-        // `Unknown` sentinel.
-        assert!(m.failed_authentication.get_or_create(&unknown).get() == 1);
-        assert!(m.successful_authentication.get_or_create(&unknown).get() == 0);
+        // PLAIN: 2 successes, 1 failure. SCRAM-SHA-256: 1 success, 0
+        // failures (must not lazily allocate a failure entry from the
+        // success bump). ILLEGAL_SASL_STATE: 0 successes, 1 failure
+        // under the `Unknown` sentinel.
+        let cases = [
+            ("successful", &m.successful_authentication, &plain, 2),
+            ("failed", &m.failed_authentication, &plain, 1),
+            ("successful", &m.successful_authentication, &scram, 1),
+            ("failed", &m.failed_authentication, &unknown, 1),
+            ("successful", &m.successful_authentication, &unknown, 0),
+        ];
+        for (outcome, family, label, want) in cases {
+            // Each read is its own statement: `get_or_create` returns a
+            // read guard, and a first-materialization on the same family
+            // takes the write lock — holding several guards in one
+            // expression self-deadlocks.
+            let got = family.get_or_create(label).get();
+            assert!(got == want, "{outcome} auth for {:?}", label.mechanism);
+        }
+    }
+
+    #[test]
+    fn record_client_software_accumulates_per_name_version() {
+        let m = BrokerMetrics::new();
+        let crabka_100 = ClientSoftwareLabel {
+            software_name: "crabka".to_string(),
+            software_version: "1.0.0".to_string(),
+        };
+        let crabka_101 = ClientSoftwareLabel {
+            software_name: "crabka".to_string(),
+            software_version: "1.0.1".to_string(),
+        };
+        let other = ClientSoftwareLabel {
+            software_name: "other-lib".to_string(),
+            software_version: "1.0.0".to_string(),
+        };
+
+        m.record_client_software("crabka", "1.0.0");
+        m.record_client_software("crabka", "1.0.0");
+        m.record_client_software("crabka", "1.0.1");
+        m.record_client_software("other-lib", "1.0.0");
+
+        for (label, want) in [(&crabka_100, 2), (&crabka_101, 1), (&other, 1)] {
+            let got = m.client_software_versions.get_or_create(label).get();
+            assert!(got == want, "label {label:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn record_client_software_renders_labelled_openmetrics_counter() {
+        let m = BrokerMetrics::new();
+
+        m.record_client_software("render-lib", "2.0.0");
+
+        let mut body = String::new();
+        let registry = m.registry.lock().await;
+        prometheus_client::encoding::text::encode(&mut body, &registry).unwrap();
+        assert!(body.contains(
+            "crabka_broker_client_software_versions_total{software_name=\"render-lib\",software_version=\"2.0.0\"} 1"
+        ));
     }
 
     #[test]
@@ -1229,11 +1289,28 @@ mod tests {
             topic: "t".into(),
             partition: 1,
         };
-        assert!(m.partition_bytes_in.get_or_create(&lbl_p0).get() == 1024);
-        assert!(m.partition_bytes_in.get_or_create(&lbl_p1).get() == 512);
-        assert!(m.partition_bytes_out.get_or_create(&lbl_p0).get() == 2048);
-        assert!(m.partition_cpu_micros.get_or_create(&lbl_p0).get() == 500);
-        assert!(m.partition_disk_bytes.get_or_create(&lbl_p0).get() == 1_000_000);
+        let cases = [
+            ("bytes_in", &m.partition_bytes_in, &lbl_p0, 1024),
+            ("bytes_in", &m.partition_bytes_in, &lbl_p1, 512),
+            ("bytes_out", &m.partition_bytes_out, &lbl_p0, 2048),
+            ("cpu_micros", &m.partition_cpu_micros, &lbl_p0, 500),
+        ];
+        for (family_name, family, label, want) in cases {
+            // Each read is its own statement: `get_or_create` returns a
+            // read guard, and a first-materialization on the same family
+            // takes the write lock — holding several guards in one
+            // expression self-deadlocks.
+            let got = family.get_or_create(label).get();
+            assert!(
+                got == want,
+                "{family_name} for partition {}",
+                label.partition
+            );
+        }
+        // `partition_disk_bytes` is a Gauge family (i64), so it stays
+        // out of the Counter table above.
+        let disk_p0 = m.partition_disk_bytes.get_or_create(&lbl_p0).get();
+        assert!(disk_p0 == 1_000_000);
     }
 
     #[test]
@@ -1254,13 +1331,21 @@ mod tests {
         let bad = TopicLabel {
             topic: "t-bad".into(),
         };
-        assert!(m.topic_failed_produce_requests.get_or_create(&good).get() == 2);
-        assert!(m.topic_failed_produce_requests.get_or_create(&bad).get() == 1);
-        assert!(m.topic_failed_fetch_requests.get_or_create(&good).get() == 1);
         // t-bad never saw a failed fetch — series is materialized by
         // `get_or_create` at read time but its value is 0, which is
         // what `rate(failed_fetch{topic="t-bad"}[1m])` should compute.
-        assert!(m.topic_failed_fetch_requests.get_or_create(&bad).get() == 0);
+        let cases = [
+            ("failed_produce", &m.topic_failed_produce_requests, &good, 2),
+            ("failed_produce", &m.topic_failed_produce_requests, &bad, 1),
+            ("failed_fetch", &m.topic_failed_fetch_requests, &good, 1),
+            ("failed_fetch", &m.topic_failed_fetch_requests, &bad, 0),
+        ];
+        for (family_name, family, label, want) in cases {
+            // One `get_or_create` guard per statement (first
+            // materialization takes the family write lock).
+            let got = family.get_or_create(label).get();
+            assert!(got == want, "{family_name} for {:?}", label.topic);
+        }
     }
 
     #[test]
@@ -1326,10 +1411,38 @@ mod tests {
         let payments = TopicLabel {
             topic: "payments".into(),
         };
-        assert!(m.produce_message_conversions.get_or_create(&orders).get() == 2);
-        assert!(m.produce_message_conversions.get_or_create(&payments).get() == 1);
-        assert!(m.fetch_message_conversions.get_or_create(&orders).get() == 1);
-        assert!(m.fetch_message_conversions.get_or_create(&payments).get() == 2);
+        let cases = [
+            (
+                "produce_conversions",
+                &m.produce_message_conversions,
+                &orders,
+                2,
+            ),
+            (
+                "produce_conversions",
+                &m.produce_message_conversions,
+                &payments,
+                1,
+            ),
+            (
+                "fetch_conversions",
+                &m.fetch_message_conversions,
+                &orders,
+                1,
+            ),
+            (
+                "fetch_conversions",
+                &m.fetch_message_conversions,
+                &payments,
+                2,
+            ),
+        ];
+        for (family_name, family, label, want) in cases {
+            // One `get_or_create` guard per statement (first
+            // materialization takes the family write lock).
+            let got = family.get_or_create(label).get();
+            assert!(got == want, "{family_name} for {:?}", label.topic);
+        }
     }
 
     #[test]
@@ -1349,13 +1462,31 @@ mod tests {
         let unknown = ApiKeyLabel {
             api_key: "Unknown".into(),
         };
-        assert!(m.unsupported_api_requests.get_or_create(&produce).get() == 1);
-        assert!(m.unsupported_api_requests.get_or_create(&unknown).get() == 1);
         // `record_unsupported_api_request` does NOT also bump
         // `api_requests`; the dispatcher already did that for the
         // request in question via `record_api_request`.
-        assert!(m.api_requests.get_or_create(&produce).get() == 0);
-        assert!(m.api_requests.get_or_create(&unknown).get() == 0);
+        let cases = [
+            (
+                "unsupported_api_requests",
+                &m.unsupported_api_requests,
+                &produce,
+                1,
+            ),
+            (
+                "unsupported_api_requests",
+                &m.unsupported_api_requests,
+                &unknown,
+                1,
+            ),
+            ("api_requests", &m.api_requests, &produce, 0),
+            ("api_requests", &m.api_requests, &unknown, 0),
+        ];
+        for (family_name, family, label, want) in cases {
+            // One `get_or_create` guard per statement (first
+            // materialization takes the family write lock).
+            let got = family.get_or_create(label).get();
+            assert!(got == want, "{family_name} for {:?}", label.api_key);
+        }
     }
 
     #[test]
@@ -1376,9 +1507,10 @@ mod tests {
         let unknown = ApiKeyLabel {
             api_key: "Unknown".into(),
         };
-        assert!(m.api_requests.get_or_create(&produce).get() == 2);
-        assert!(m.api_requests.get_or_create(&fetch).get() == 1);
-        assert!(m.api_requests.get_or_create(&unknown).get() == 1);
+        for (label, want) in [(&produce, 2), (&fetch, 1), (&unknown, 1)] {
+            let got = m.api_requests.get_or_create(label).get();
+            assert!(got == want, "api_key {:?}", label.api_key);
+        }
     }
 
     #[test]
@@ -1410,10 +1542,22 @@ mod tests {
             topic: "orders".into(),
             partition: 4,
         };
-        assert!(m.replication_bytes_in.get_or_create(&lbl3).get() == 4_000);
-        assert!(m.replication_bytes_in.get_or_create(&lbl4).get() == 100);
-        assert!(m.replication_bytes_out.get_or_create(&lbl3).get() == 4_000);
-        assert!(m.replication_bytes_out.get_or_create(&lbl4).get() == 0);
+        let cases = [
+            ("replication_in", &m.replication_bytes_in, &lbl3, 4_000),
+            ("replication_in", &m.replication_bytes_in, &lbl4, 100),
+            ("replication_out", &m.replication_bytes_out, &lbl3, 4_000),
+            ("replication_out", &m.replication_bytes_out, &lbl4, 0),
+        ];
+        for (family_name, family, label, want) in cases {
+            // One `get_or_create` guard per statement (first
+            // materialization takes the family write lock).
+            let got = family.get_or_create(label).get();
+            assert!(
+                got == want,
+                "{family_name} for partition {}",
+                label.partition
+            );
+        }
     }
 
     #[tokio::test]

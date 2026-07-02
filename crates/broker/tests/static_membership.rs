@@ -12,7 +12,7 @@
 //!    group_instance_id: Some(...) }` resolves the static slot and
 //!    removes it.
 
-use assert2::assert;
+use assert2::{assert, check};
 use bytes::Bytes;
 use crabka_protocol::owned::heartbeat_request::HeartbeatRequest;
 use crabka_protocol::owned::join_group_request::{JoinGroupRequest, JoinGroupRequestProtocol};
@@ -140,12 +140,12 @@ async fn static_rejoin_preserves_assignment_and_generation() {
         .send(join_request("g-static-1", &mid1, Some("instance-A")))
         .await
         .expect("static rejoin");
-    assert!(rejoin.error_code == 0);
-    assert!(
+    check!(rejoin.error_code == 0);
+    check!(
         rejoin.generation_id == gen1,
         "static rejoin must NOT advance generation_id"
     );
-    assert!(rejoin.member_id == mid1);
+    check!(rejoin.member_id == mid1);
     drop(assignment);
 
     p.broker.shutdown().await;
@@ -239,10 +239,10 @@ async fn leave_group_resolves_static_member_by_instance_id() {
         })
         .await
         .expect("LeaveGroup");
-    assert!(resp.error_code == 0);
+    check!(resp.error_code == 0);
     assert!(resp.members.len() == 1);
-    assert!(resp.members[0].error_code == 0);
-    assert!(resp.members[0].group_instance_id.as_deref() == Some("instance-C"));
+    check!(resp.members[0].error_code == 0);
+    check!(resp.members[0].group_instance_id.as_deref() == Some("instance-C"));
 
     // A subsequent Heartbeat from the old member id should be rejected —
     // the slot is gone.

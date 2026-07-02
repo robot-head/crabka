@@ -171,6 +171,7 @@ pub fn diff_user_quotas(current: &UserQuotaConfig, desired: &UserQuotaConfig) ->
 mod tests {
     use super::*;
     use assert2::assert;
+    use crabka_protocol::UnknownTaggedFields;
 
     #[test]
     fn diff_no_change_returns_empty() {
@@ -187,11 +188,19 @@ mod tests {
         d.insert("producer_byte_rate".into(), 1_048_576.0);
         d.insert("request_percentage".into(), 25.0);
         let ops = diff_user_quotas(&c, &d);
-        assert!(ops.len() == 2);
-        assert!(ops.iter().any(|op| matches!(op, QuotaOp::Set { key, value }
-            if key == "producer_byte_rate" && (*value - 1_048_576.0).abs() < f64::EPSILON)));
-        assert!(ops.iter().any(|op| matches!(op, QuotaOp::Set { key, value }
-            if key == "request_percentage" && (*value - 25.0).abs() < f64::EPSILON)));
+        // `desired` is a BTreeMap, so `Set` ops come out in key order.
+        assert!(
+            ops == vec![
+                QuotaOp::Set {
+                    key: "producer_byte_rate".to_string(),
+                    value: 1_048_576.0,
+                },
+                QuotaOp::Set {
+                    key: "request_percentage".to_string(),
+                    value: 25.0,
+                },
+            ]
+        );
     }
 
     #[test]
@@ -234,18 +243,23 @@ mod tests {
         d.insert("request_percentage".into(), 25.0); // add
         // consumer_byte_rate dropped
         let ops = diff_user_quotas(&c, &d);
-        assert!(ops.len() == 3);
-        assert!(ops.contains(&QuotaOp::Set {
-            key: "producer_byte_rate".into(),
-            value: 5.0,
-        }));
-        assert!(ops.contains(&QuotaOp::Set {
-            key: "request_percentage".into(),
-            value: 25.0,
-        }));
-        assert!(ops.contains(&QuotaOp::Remove {
-            key: "consumer_byte_rate".into(),
-        }));
+        // Sets come first (in `desired` key order), then removes (in
+        // `current` key order) — both maps are BTreeMaps.
+        assert!(
+            ops == vec![
+                QuotaOp::Set {
+                    key: "producer_byte_rate".to_string(),
+                    value: 5.0,
+                },
+                QuotaOp::Set {
+                    key: "request_percentage".to_string(),
+                    value: 25.0,
+                },
+                QuotaOp::Remove {
+                    key: "consumer_byte_rate".to_string(),
+                },
+            ]
+        );
     }
 
     #[test]
@@ -255,9 +269,14 @@ mod tests {
             value: 1.0,
         };
         let w = op_to_wire(&op);
-        assert!(w.key == "producer_byte_rate");
-        assert!((w.value - 1.0).abs() < f64::EPSILON);
-        assert!(!w.remove);
+        assert!(
+            w == AlterOp {
+                key: "producer_byte_rate".to_string(),
+                value: 1.0,
+                remove: false,
+                unknown_tagged_fields: UnknownTaggedFields(vec![]),
+            }
+        );
     }
 
     #[test]
@@ -266,8 +285,13 @@ mod tests {
             key: "producer_byte_rate".into(),
         };
         let w = op_to_wire(&op);
-        assert!(w.key == "producer_byte_rate");
-        assert!(w.value.to_bits() == 0.0_f64.to_bits());
-        assert!(w.remove);
+        assert!(
+            w == AlterOp {
+                key: "producer_byte_rate".to_string(),
+                value: 0.0,
+                remove: true,
+                unknown_tagged_fields: UnknownTaggedFields(vec![]),
+            }
+        );
     }
 }

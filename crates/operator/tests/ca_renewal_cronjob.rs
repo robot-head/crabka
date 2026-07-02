@@ -5,7 +5,7 @@
 //! (using real PEM material from `crabka_security::ca`), calls
 //! `run_renewal_check`, and asserts on the observed request log.
 
-use assert2::assert;
+use assert2::{assert, check};
 #[path = "shared/mod.rs"]
 mod shared;
 
@@ -293,16 +293,16 @@ async fn cronjob_reissues_aging_broker_leafs() {
     );
     let event_body: serde_json::Value =
         serde_json::from_slice(event_post.unwrap().body()).expect("event body is JSON");
-    assert!(
+    check!(
         event_body["reason"].as_str().unwrap_or("") == "BrokerCertRenewed",
         "event reason must be BrokerCertRenewed; body = {event_body}"
     );
-    assert!(
+    check!(
         event_body["type"].as_str().unwrap_or("") == "Normal",
         "event type must be Normal; body = {event_body}"
     );
 
-    assert!(state.remaining_rules() == 0, "all rules consumed");
+    check!(state.remaining_rules() == 0, "all rules consumed");
 }
 
 // ---------------------------------------------------------------------------

@@ -251,12 +251,13 @@ fn max_option(left: Option<i64>, right: Option<i64>) -> Option<i64> {
 mod tests {
     use std::sync::Arc;
 
-    use assert2::assert;
+    use assert2::{assert, check};
     use datafusion::arrow::array::AsArray;
     use datafusion::arrow::datatypes::UInt64Type;
 
     use crate::{
-        EngineOpts, FlameEngine, FunctionRec, InMemoryProfileStore, LocationRec, ProfileStore,
+        EngineOpts, FlameEngine, FunctionRec, InMemoryProfileStore, LocationRec, ProfileStats,
+        ProfileStore,
     };
 
     const PT: &str = "process_cpu:cpu:nanoseconds:cpu:nanoseconds";
@@ -312,9 +313,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(flamegraph.total == 12);
-        assert!(flamegraph.names.iter().any(|name| name == "hot"));
-        assert!(flamegraph.names.iter().any(|name| name == "cold"));
+        check!(flamegraph.total == 12);
+        check!(flamegraph.names.iter().any(|name| name == "hot"));
+        check!(flamegraph.names.iter().any(|name| name == "cold"));
     }
 
     #[tokio::test]
@@ -344,19 +345,24 @@ mod tests {
             .unwrap();
         let stats = union.stats("tenant-a", 0, 100).await.unwrap();
 
-        assert!(
+        check!(
             types
                 == vec![
                     "memory:alloc_space:bytes:space:bytes".to_string(),
                     PT.to_string(),
                 ]
         );
-        assert!(names == vec!["service_name".to_string()]);
-        assert!(values == vec!["api".to_string(), "worker".to_string()]);
-        assert!(series.len() == 2);
-        assert!(stats.data_ingested);
-        assert!(stats.oldest_profile_time == Some(10));
-        assert!(stats.newest_profile_time == Some(40));
+        check!(names == vec!["service_name".to_string()]);
+        check!(values == vec!["api".to_string(), "worker".to_string()]);
+        check!(series.len() == 2);
+        check!(
+            stats
+                == ProfileStats {
+                    data_ingested: true,
+                    oldest_profile_time: Some(10),
+                    newest_profile_time: Some(40),
+                }
+        );
     }
 
     #[tokio::test]
@@ -367,9 +373,14 @@ mod tests {
 
         let stats = union.stats("tenant-a", 0, 100).await.unwrap();
 
-        assert!(stats.data_ingested);
-        assert!(stats.oldest_profile_time == Some(20));
-        assert!(stats.newest_profile_time == Some(20));
+        assert!(
+            stats
+                == ProfileStats {
+                    data_ingested: true,
+                    oldest_profile_time: Some(20),
+                    newest_profile_time: Some(20),
+                }
+        );
     }
 
     #[tokio::test]

@@ -103,7 +103,7 @@ async fn try_create_topic<A: TopicAdminClient + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use crabka_client_admin::{AdminError, CreateTopicOutcome, KafkaError};
     use std::collections::VecDeque;
 
@@ -156,14 +156,19 @@ mod tests {
 
         assert!(admin.calls.len() == 1);
         let (specs, timeout_ms) = &admin.calls[0];
-        assert!(*timeout_ms == 10_000);
+        check!(*timeout_ms == 10_000);
         assert!(specs.len() == 1);
-        assert!(specs[0].name == "__crabka_state");
-        assert!(specs[0].partitions == 1);
-        assert!(specs[0].replicas == 3);
-        assert!(specs[0].configs.get("cleanup.policy").unwrap() == "compact");
-        assert!(specs[0].configs.get("min.cleanable.dirty.ratio").unwrap() == "0.01");
-        assert!(specs[0].configs.get("segment.ms").unwrap() == "60000");
+        check!(specs[0].name == "__crabka_state");
+        check!(specs[0].partitions == 1);
+        check!(specs[0].replicas == 3);
+        check!(
+            specs[0].configs
+                == BTreeMap::from([
+                    ("cleanup.policy".to_string(), "compact".to_string()),
+                    ("min.cleanable.dirty.ratio".to_string(), "0.01".to_string()),
+                    ("segment.ms".to_string(), "60000".to_string()),
+                ])
+        );
     }
 
     #[tokio::test]
@@ -213,10 +218,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(effective == 1);
+        check!(effective == 1);
         assert!(admin.calls.len() == 2);
-        assert!(admin.calls[0].0[0].replicas == 3);
-        assert!(admin.calls[1].0[0].replicas == 1);
+        check!(admin.calls[0].0[0].replicas == 3);
+        check!(admin.calls[1].0[0].replicas == 1);
     }
 
     #[tokio::test]

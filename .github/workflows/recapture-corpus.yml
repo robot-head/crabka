@@ -17,7 +17,7 @@ jobs:
       # bytes; it skips the synthesis pass, so no JVM oracle (and no Java) is
       # needed here — only Docker + the broker image.
       - name: Pull broker image
-        run: docker pull apache/kafka:4.3.0
+        run: docker pull mirror.gcr.io/apache/kafka:4.3.0
       - name: Capture-and-compare (fails on drift)
         env:
           CORPUS_CHECK_ONLY: "1"

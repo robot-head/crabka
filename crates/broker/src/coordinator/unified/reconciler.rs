@@ -109,7 +109,7 @@ mod tests {
     use super::*;
     use crate::coordinator::unified::consumer_state::MemberState;
     use crate::coordinator::unified::persistence_next_gen::MemberAssignmentState;
-    use assert2::assert;
+    use assert2::{assert, check};
     use std::time::{Duration, Instant};
 
     fn fresh_member(id: &str, topic: &str) -> MemberState {
@@ -154,9 +154,9 @@ mod tests {
         g.add_or_update_member(fresh_member("m1", "t"));
         let (inp, t) = input("t", 4);
         let outcome = reconcile_if_dirty(&mut g, &inp, &UniformAssignor);
-        assert!(outcome == ReconcileOutcome::Recomputed);
-        assert!(g.target.per_member["m1"][&t] == vec![0, 1, 2, 3]);
-        assert!(!g.dirty);
+        check!(outcome == ReconcileOutcome::Recomputed);
+        check!(g.target.per_member["m1"][&t] == vec![0, 1, 2, 3]);
+        check!(!g.dirty);
     }
 
     #[test]
@@ -252,15 +252,10 @@ mod tests {
         let inp = input_with_topics(&[("orders-eu", 1), ("orders-us", 1), ("shipments", 1)]);
         let orders_eu = inp.topic_id_by_name["orders-eu"];
         let orders_us = inp.topic_id_by_name["orders-us"];
-        let shipments = inp.topic_id_by_name["shipments"];
         reconcile_if_dirty(&mut g, &inp, &UniformAssignor);
         let assigned: HashSet<Uuid> = g.target.per_member["m1"].keys().copied().collect();
-        assert!(assigned.contains(&orders_eu));
-        assert!(assigned.contains(&orders_us));
-        assert!(
-            !assigned.contains(&shipments),
-            "shipments shouldn't match `^orders-.*`"
-        );
+        // Both `orders-*` topics match; `shipments` must not.
+        assert!(assigned == HashSet::from([orders_eu, orders_us]));
     }
 
     #[test]
@@ -270,12 +265,11 @@ mod tests {
         let inp = input_with_topics(&[("orders-eu", 1), ("audit", 1), ("shipments", 1)]);
         let orders_eu = inp.topic_id_by_name["orders-eu"];
         let audit = inp.topic_id_by_name["audit"];
-        let shipments = inp.topic_id_by_name["shipments"];
         reconcile_if_dirty(&mut g, &inp, &UniformAssignor);
         let assigned: HashSet<Uuid> = g.target.per_member["m1"].keys().copied().collect();
-        assert!(assigned.contains(&orders_eu), "regex match");
-        assert!(assigned.contains(&audit), "explicit name");
-        assert!(!assigned.contains(&shipments));
+        // Union of the regex match (`orders-eu`) and the explicit name
+        // (`audit`); `shipments` must not appear.
+        assert!(assigned == HashSet::from([orders_eu, audit]));
     }
 
     #[test]

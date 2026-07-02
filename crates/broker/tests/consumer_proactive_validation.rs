@@ -66,7 +66,7 @@
 
 #![allow(clippy::too_many_lines)]
 
-use assert2::assert;
+use assert2::{assert, check};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -376,20 +376,20 @@ async fn consumer_proactively_validates_and_surfaces_truncation() {
             fetch_offset,
             safe_offset,
         } => {
-            assert!(t == topic, "wrong topic in LogTruncation: {t}");
-            assert!(
+            check!(t == topic, "wrong topic in LogTruncation: {t}");
+            check!(
                 partition == 0,
                 "wrong partition in LogTruncation: {partition}"
             );
             // fetch_offset = the consumer's pre-divergence position (4).
-            assert!(
+            check!(
                 fetch_offset == 4,
                 "fetch_offset must be the consumed position 4, got {fetch_offset}"
             );
             // safe_offset = the OFLE-derived epoch-0 boundary (2). A reactive
             // OFFSET_OUT_OF_RANGE reset would instead carry a fetch
             // log_start_offset; here the partition was never fetched.
-            assert!(
+            check!(
                 safe_offset == 2,
                 "safe_offset must be the OFLE epoch-0 boundary 2, got {safe_offset}"
             );

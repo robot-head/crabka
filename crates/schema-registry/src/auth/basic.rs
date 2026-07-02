@@ -78,9 +78,13 @@ mod tests {
                 .into_iter()
                 .collect(),
         );
-        assert!(s.verify("alice", "pw"));
-        assert!(!s.verify("alice", "bad"));
-        assert!(!s.verify("bob", "pw"));
+        for (user, pass, want) in [
+            ("alice", "pw", true),
+            ("alice", "bad", false),
+            ("bob", "pw", false),
+        ] {
+            assert_eq!(s.verify(user, pass), want, "case {user}:{pass}");
+        }
     }
 
     #[test]
@@ -111,13 +115,14 @@ mod tests {
         let store = BasicAuthStore::load(&cfg).unwrap();
         std::fs::remove_file(&path).ok();
 
-        assert!(store.verify("alice", "inlinepw"), "inline credential wins");
-        assert!(
-            !store.verify("alice", "filepw"),
-            "file credential is overridden"
-        );
-        // File-only entries (no inline override) still load.
-        assert!(store.verify("bob", "bobpw"), "file-only entry preserved");
+        for (user, pass, want, why) in [
+            ("alice", "inlinepw", true, "inline credential wins"),
+            ("alice", "filepw", false, "file credential is overridden"),
+            // File-only entries (no inline override) still load.
+            ("bob", "bobpw", true, "file-only entry preserved"),
+        ] {
+            assert_eq!(store.verify(user, pass), want, "{why} ({user}:{pass})");
+        }
     }
 
     #[test]
@@ -142,10 +147,14 @@ mod tests {
         let store = BasicAuthStore::load(&cfg).unwrap();
         std::fs::remove_file(&path).ok();
 
-        assert!(store.verify("alice", "pw"));
-        assert!(store.verify("bob", "bpw"), "leading/trailing ws trimmed");
-        // The colon-less line produced no entry, so nothing matches it.
-        assert!(!store.verify("malformed-no-colon", ""));
+        for (user, pass, want, why) in [
+            ("alice", "pw", true, "plain entry loads"),
+            ("bob", "bpw", true, "leading/trailing ws trimmed"),
+            // The colon-less line produced no entry, so nothing matches it.
+            ("malformed-no-colon", "", false, "colon-less line skipped"),
+        ] {
+            assert_eq!(store.verify(user, pass), want, "{why} ({user}:{pass})");
+        }
     }
 
     #[test]

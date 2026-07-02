@@ -30,13 +30,17 @@ async fn derive_builds_def_and_typed_config() {
         .map(|key| (key.name.as_str(), key.kind, key.required))
         .collect::<Vec<_>>();
 
-    assert!(keys.contains(&("database_url", ConfigKind::String, true)));
-    assert!(keys.contains(&("password", ConfigKind::Secret, true)));
-    assert!(keys.contains(&("rotation_token", ConfigKind::Secret, true)));
-    assert!(keys.contains(&("schema", ConfigKind::String, false)));
-    assert!(keys.contains(&("max_batch", ConfigKind::UnsignedInteger, false)));
-    assert!(keys.contains(&("topics", ConfigKind::StringList, true)));
-    assert!(keys.contains(&("omitted_note", ConfigKind::String, false)));
+    for expected in [
+        ("database_url", ConfigKind::String, true),
+        ("password", ConfigKind::Secret, true),
+        ("rotation_token", ConfigKind::Secret, true),
+        ("schema", ConfigKind::String, false),
+        ("max_batch", ConfigKind::UnsignedInteger, false),
+        ("topics", ConfigKind::StringList, true),
+        ("omitted_note", ConfigKind::String, false),
+    ] {
+        assert!(keys.contains(&expected), "missing key {expected:?}");
+    }
 
     let raw = serde_json::Map::from_iter([
         (

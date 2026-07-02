@@ -189,66 +189,93 @@ pub fn is_supported_level(level: i16) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
 
     #[test]
     fn min_max_levels() {
-        assert!(METADATA_VERSION_MIN == 7);
-        assert!(METADATA_VERSION_MAX == 25);
-        assert!(TABLE.first().unwrap().level == METADATA_VERSION_MIN);
-        assert!(TABLE.last().unwrap().level == METADATA_VERSION_MAX);
+        check!(METADATA_VERSION_MIN == 7);
+        check!(METADATA_VERSION_MAX == 25);
+        check!(TABLE.first().unwrap().level == METADATA_VERSION_MIN);
+        check!(TABLE.last().unwrap().level == METADATA_VERSION_MAX);
     }
 
     #[test]
     fn share_version_feature_levels() {
-        assert!(SHARE_VERSION_FEATURE == "share.version");
-        assert!(SHARE_VERSION_MIN == 0);
-        assert!(SHARE_VERSION_MAX == 1);
+        check!(SHARE_VERSION_FEATURE == "share.version");
+        check!(SHARE_VERSION_MIN == 0);
+        check!(SHARE_VERSION_MAX == 1);
     }
 
     #[test]
     fn streams_version_feature_levels() {
-        assert!(STREAMS_VERSION_FEATURE == "streams.version");
-        assert!(STREAMS_VERSION_MIN == 0);
-        assert!(STREAMS_VERSION_MAX == 1);
+        check!(STREAMS_VERSION_FEATURE == "streams.version");
+        check!(STREAMS_VERSION_MIN == 0);
+        check!(STREAMS_VERSION_MAX == 1);
     }
 
     #[test]
     fn from_feature_level_known_and_unknown() {
-        assert!(from_feature_level(7).unwrap().short() == "3.3");
-        assert!(from_feature_level(25).unwrap().ivn() == "4.0-IV3");
-        assert!(from_feature_level(6).is_none());
-        assert!(from_feature_level(26).is_none());
+        for (level, want) in [
+            (
+                7,
+                Some(MetadataVersion {
+                    level: 7,
+                    ivn: "3.3-IV3",
+                    short: "3.3",
+                }),
+            ),
+            (
+                25,
+                Some(MetadataVersion {
+                    level: 25,
+                    ivn: "4.0-IV3",
+                    short: "4.0",
+                }),
+            ),
+            (6, None),
+            (26, None),
+        ] {
+            assert!(from_feature_level(level) == want, "level {level}");
+        }
     }
 
     #[test]
     fn from_version_string_exact_ivn() {
-        assert!(from_version_string("3.5-IV2").unwrap().feature_level() == 11);
-        assert!(from_version_string("4.0-IV3").unwrap().feature_level() == 25);
-        assert!(from_version_string("3.5-IV9").is_none());
+        for (s, want) in [
+            ("3.5-IV2", Some(11)),
+            ("4.0-IV3", Some(25)),
+            ("3.5-IV9", None),
+        ] {
+            assert!(
+                from_version_string(s).map(super::MetadataVersion::feature_level) == want,
+                "version {s}"
+            );
+        }
     }
 
     #[test]
     fn from_version_string_short_picks_highest_in_minor() {
-        assert!(from_version_string("3.7").unwrap().feature_level() == 19);
-        assert!(from_version_string("4.0").unwrap().feature_level() == 25);
-        assert!(from_version_string("2.8").is_none());
+        for (s, want) in [("3.7", Some(19)), ("4.0", Some(25)), ("2.8", None)] {
+            assert!(
+                from_version_string(s).map(super::MetadataVersion::feature_level) == want,
+                "version {s}"
+            );
+        }
     }
 
     #[test]
     fn in_supported_range_predicate() {
-        assert!(is_supported_level(7));
-        assert!(is_supported_level(25));
-        assert!(!is_supported_level(6));
-        assert!(!is_supported_level(26));
+        for (level, want) in [(7, true), (25, true), (6, false), (26, false)] {
+            assert!(is_supported_level(level) == want, "level {level}");
+        }
     }
 
     #[test]
     fn gate_level_constants() {
-        assert!(SCRAM_MIN_LEVEL == 11);
-        assert!(DELEGATION_TOKEN_MIN_LEVEL == 14);
-        assert!(from_feature_level(SCRAM_MIN_LEVEL).unwrap().ivn() == "3.5-IV2");
-        assert!(
+        check!(SCRAM_MIN_LEVEL == 11);
+        check!(DELEGATION_TOKEN_MIN_LEVEL == 14);
+        check!(from_feature_level(SCRAM_MIN_LEVEL).unwrap().ivn() == "3.5-IV2");
+        check!(
             from_feature_level(DELEGATION_TOKEN_MIN_LEVEL)
                 .unwrap()
                 .ivn()

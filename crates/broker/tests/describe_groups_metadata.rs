@@ -16,7 +16,7 @@
 //! `group_protocol_negotiation.rs` (the MEMBER_ID_REQUIRED two-step +
 //! INITIAL_REBALANCE_DELAY wait) and `unit.rs` (the SyncGroup shape).
 
-use assert2::assert;
+use assert2::{assert, check};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -30,6 +30,10 @@ use crabka_protocol::owned::sync_group_request::{SyncGroupRequest, SyncGroupRequ
 const ERR_NONE: i16 = 0;
 const ERR_MEMBER_ID_REQUIRED: i16 = 79;
 
+/// Upper bound on a rejoin JoinGroup round-trip: covers the broker's ~3 s
+/// initial-rebalance delay with generous headroom.
+const JOIN_GROUP_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// A fixed, recognizable JoinGroup protocol-metadata blob. The byte
 /// shape is arbitrary (not a real `ConsumerProtocolSubscription`) — the
 /// point is exact round-trip through stored state into `member_metadata`.
@@ -39,7 +43,7 @@ const KNOWN_METADATA: &[u8] = b"\x00\x01rangemeta\xde\xad";
 const ASSIGN: &[u8] = b"assign-bytes";
 
 /// The EXACT `ConsumerProtocolSubscription` bytes a real `RangeAssignor`
-/// console-consumer sent to `confluentinc/cp-kafka:7.4.0` (captured by the
+/// console-consumer sent to `mirror.gcr.io/confluentinc/cp-kafka:7.4.0` (captured by the
 /// `describe_groups_jvm` Docker harness into
 /// `tests/fixtures/describe_groups/real_kafka_classic.json`, member
 /// `member_metadata_hex`). Wire shape: version `i16=3`, then one subscribed
@@ -116,23 +120,23 @@ async fn describe_groups_reports_member_metadata_and_protocol_name() {
     // ~3 s initial-rebalance-delay before the broker completes the
     // rebalance and returns NONE. This lone member is the leader. ──
     let r2 = tokio::time::timeout(
-        Duration::from_secs(10),
+        JOIN_GROUP_TIMEOUT,
         client.send(join_request(group_id, &member_id, KNOWN_METADATA)),
     )
     .await
     .expect("second JoinGroup timed out")
     .expect("second JoinGroup must round-trip");
-    assert!(
+    check!(
         r2.error_code == ERR_NONE,
         "second JoinGroup must succeed, got {r2:?}"
     );
-    assert!(
+    check!(
         r2.protocol_name.as_deref() == Some("range"),
-        "single member must land on 'range', got {r2:?}"
+        "second JoinGroup must select protocol 'range', got {r2:?}"
     );
-    assert!(
-        r2.leader == member_id,
-        "lone member must be the leader, got {r2:?}"
+    check!(
+        r2.leader.as_str() == member_id.as_str(),
+        "second JoinGroup must elect the lone member as leader, got {r2:?}"
     );
     let generation_id = r2.generation_id;
 
@@ -177,18 +181,22 @@ async fn describe_groups_reports_member_metadata_and_protocol_name() {
         "exactly one described group, got {resp:?}"
     );
     let g = &resp.groups[0];
-    assert!(g.error_code == ERR_NONE, "DescribeGroups error: {g:?}");
-    assert!(
-        g.protocol_type == "consumer",
-        "protocol_type must be 'consumer', got {:?}",
-        g.protocol_type
+    check!(
+        g.error_code == ERR_NONE,
+        "described group must be error-free: {g:?}"
     );
-    assert!(
-        g.protocol_data == "range",
-        "protocol_data must be the selected protocol name 'range', got {:?}",
-        g.protocol_data
+    check!(
+        g.protocol_type.as_str() == "consumer",
+        "described group must have protocol_type 'consumer': {g:?}"
     );
-    assert!(g.members.len() == 1, "exactly one member, got {g:?}");
+    check!(
+        g.protocol_data.as_str() == "range",
+        "described group must have protocol_data 'range' (the selected protocol name): {g:?}"
+    );
+    check!(
+        g.members.len() == 1,
+        "described group must have exactly one member: {g:?}"
+    );
     let m = &g.members[0];
     assert!(
         m.member_metadata.as_ref() == KNOWN_METADATA,
@@ -204,7 +212,7 @@ async fn describe_groups_reports_member_metadata_and_protocol_name() {
 
 /// cp/JVM cross-validation: drive the SAME classic flow but with the EXACT
 /// `ConsumerProtocolSubscription` / `ConsumerProtocolAssignment` bytes a real
-/// `RangeAssignor` console-consumer exchanged with `confluentinc/cp-kafka:7.4.0`
+/// `RangeAssignor` console-consumer exchanged with `mirror.gcr.io/confluentinc/cp-kafka:7.4.0`
 /// (captured by `describe_groups_jvm.rs` → `real_kafka_classic.json`). Crabka's
 /// `DescribeGroups` must reproduce real Kafka's authority semantics:
 /// `protocol_type == "consumer"`, `protocol_data == "range"`, and a byte-exact
@@ -233,7 +241,7 @@ async fn describe_groups_matches_real_kafka_range_subscription() {
     let member_id = r1.member_id;
 
     let r2 = tokio::time::timeout(
-        Duration::from_secs(10),
+        JOIN_GROUP_TIMEOUT,
         client.send(join_request(group_id, &member_id, REAL_KAFKA_SUBSCRIPTION)),
     )
     .await
@@ -281,17 +289,18 @@ async fn describe_groups_matches_real_kafka_range_subscription() {
     handle.shutdown().await;
 
     let g = &resp.groups[0];
-    assert!(g.error_code == ERR_NONE, "DescribeGroups error: {g:?}");
     // Real-Kafka authority (from real_kafka_classic.json).
-    assert!(
-        g.protocol_type == "consumer",
-        "protocol_type must match real Kafka 'consumer', got {:?}",
-        g.protocol_type
+    check!(
+        g.error_code == ERR_NONE,
+        "DescribeGroups must match real Kafka's authority (error-free), got {g:?}"
     );
-    assert!(
-        g.protocol_data == "range",
-        "protocol_data must match real Kafka's selected assignor 'range', got {:?}",
-        g.protocol_data
+    check!(
+        g.protocol_type.as_str() == "consumer",
+        "DescribeGroups must match real Kafka's authority (protocol_type 'consumer'), got {g:?}"
+    );
+    check!(
+        g.protocol_data.as_str() == "range",
+        "DescribeGroups must match real Kafka's authority (selected assignor 'range'), got {g:?}"
     );
     let m = &g.members[0];
     assert!(

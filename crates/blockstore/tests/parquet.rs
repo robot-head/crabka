@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use assert2::assert;
+use assert2::{assert, check};
 use crabka_blockstore::{
     BlockKey, LogRow, TimeRange, labels, log_block_object_path, read_log_block,
     read_log_block_from_object_store, series_fingerprint, write_log_block,
@@ -41,9 +41,9 @@ fn parquet_log_block_round_trips_rows_sorted_by_series_and_timestamp() {
     )
     .unwrap();
 
-    assert!(descriptor.key == key);
-    assert!(descriptor.fingerprints == BTreeSet::from([api, worker]));
-    assert!(descriptor.size_bytes > 0);
+    check!(descriptor.key == key);
+    check!(descriptor.fingerprints == BTreeSet::from([api, worker]));
+    check!(descriptor.size_bytes > 0);
 
     let rows = read_log_block(dir.path(), &key).unwrap();
     let mut expected = vec![
@@ -174,9 +174,9 @@ async fn parquet_log_block_round_trips_through_object_store() {
     .await
     .unwrap();
 
-    assert!(descriptor.key == key);
-    assert!(descriptor.fingerprints == BTreeSet::from([api, worker]));
-    assert!(descriptor.size_bytes > 0);
+    check!(descriptor.key == key);
+    check!(descriptor.fingerprints == BTreeSet::from([api, worker]));
+    check!(descriptor.size_bytes > 0);
 
     let rows = read_log_block_from_object_store(&store, &prefix, &key)
         .await

@@ -35,7 +35,7 @@ pub(crate) async fn handle(
             principal: ctx.principal,
             host: ctx.peer,
             resource_type: ResourceType::Cluster,
-            resource_name: "kafka-cluster",
+            resource_name: crate::handlers::acl_wire::CLUSTER_RESOURCE_NAME,
             operation: crabka_metadata::AclOperation::Alter,
         },
     );
@@ -138,6 +138,7 @@ mod tests {
     use super::*;
     use assert2::assert;
     use crabka_metadata::{MetadataRecord, ScramCredentialRecord};
+    use crabka_protocol::UnknownTaggedFields;
 
     fn img_with_scram(users: &[(&str, SaslMechanism, u32)]) -> MetadataImage {
         let mut img = MetadataImage::new(uuid::Uuid::nil());
@@ -223,10 +224,18 @@ mod tests {
                 ("bob", SaslMechanism::ScramSha512, 8192),
             ],
         );
-        assert!(resp.results.len() == 1);
-        assert!(resp.results[0].user == "alice");
-        assert!(resp.results[0].credential_infos.len() == 1);
-        assert!(resp.results[0].credential_infos[0].iterations == 4096);
+        let expected = vec![DescribeUserScramCredentialsResult {
+            user: "alice".to_string(),
+            error_code: 0,
+            error_message: None,
+            credential_infos: vec![CredentialInfo {
+                mechanism: 2,
+                iterations: 4096,
+                unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+            }],
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        }];
+        assert!(resp.results == expected);
     }
 
     #[test]
@@ -235,15 +244,24 @@ mod tests {
             Some(vec!["ghost".into()]),
             &[("alice", SaslMechanism::ScramSha512, 4096)],
         );
-        assert!(resp.results.len() == 1);
-        assert!(resp.results[0].user == "ghost");
-        assert!(resp.results[0].error_code == RESOURCE_NOT_FOUND_USER);
+        let expected = vec![DescribeUserScramCredentialsResult {
+            user: "ghost".to_string(),
+            error_code: RESOURCE_NOT_FOUND_USER,
+            error_message: Some("no such SCRAM user".to_string()),
+            credential_infos: Vec::new(),
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        }];
+        assert!(resp.results == expected);
     }
 
     #[test]
     fn sasl_mechanism_byte_mapping() {
-        assert!(sasl_mechanism_to_byte(SaslMechanism::ScramSha256) == 1);
-        assert!(sasl_mechanism_to_byte(SaslMechanism::ScramSha512) == 2);
-        assert!(sasl_mechanism_to_byte(SaslMechanism::Plain) == 0);
+        for (mechanism, want) in [
+            (SaslMechanism::ScramSha256, 1),
+            (SaslMechanism::ScramSha512, 2),
+            (SaslMechanism::Plain, 0),
+        ] {
+            assert!(sasl_mechanism_to_byte(mechanism) == want, "{mechanism:?}");
+        }
     }
 }

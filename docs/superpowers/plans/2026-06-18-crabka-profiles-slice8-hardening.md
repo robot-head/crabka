@@ -935,12 +935,12 @@ git commit -m "test(profiles): shared differential pprof corpus + flamegraph/ser
 - Create: `crates/profiles/tests/diff_pyroscope.rs`
 
 **Interfaces:**
-- Consumes: Task 5 in-process Crabka server; Task 8 corpus + differ; `testcontainers` `grafana/pyroscope`.
+- Consumes: Task 5 in-process Crabka server; Task 8 corpus + differ; `testcontainers` `mirror.gcr.io/grafana/pyroscope`.
 - Produces (`#[ignore = "requires Docker"]`) — the headline external test:
-  - Boot Crabka in-process; start `grafana/pyroscope:<pinned tag>` in **single-binary mode** (`-target=all`, filesystem/local storage, a mounted minimal config); push the **identical** gzipped-pprof `PushRequest` bytes (`to_pprof(seed_dataset())`) to **both** via `POST /push.v1.PusherService/Push` (`X-Scope-OrgID: diff`); run `merge_corpus()` against both `SelectMergeStacktraces` and `series_corpus()` against both `SelectSeries`; `assert_profile_query_equal` per case.
+  - Boot Crabka in-process; start `mirror.gcr.io/grafana/pyroscope:<pinned tag>` in **single-binary mode** (`-target=all`, filesystem/local storage, a mounted minimal config); push the **identical** gzipped-pprof `PushRequest` bytes (`to_pprof(seed_dataset())`) to **both** via `POST /push.v1.PusherService/Push` (`X-Scope-OrgID: diff`); run `merge_corpus()` against both `SelectMergeStacktraces` and `series_corpus()` against both `SelectSeries`; `assert_profile_query_equal` per case.
 
 > **Harness structure & data loading (explicit, since this is a Docker suite):**
-> - **Container:** `GenericImage::new("grafana/pyroscope", "<pinned tag>")` with cmd `-target=all -config.file=/etc/pyroscope.yaml`, a bind-mounted minimal `pyroscope.yaml` (`storage.backend: filesystem` / local blocks, a short flush/block timeout so blocks flush fast, a fixed single tenant). `WaitFor` on Pyroscope's readiness (`GET /ready` returns `200`, or `ProfileTypes` returns — Pyroscope uses `ProfileTypes` as the health probe per spec §7.1). Map the HTTP port (`4040`).
+> - **Container:** `GenericImage::new("mirror.gcr.io/grafana/pyroscope", "<pinned tag>")` with cmd `-target=all -config.file=/etc/pyroscope.yaml`, a bind-mounted minimal `pyroscope.yaml` (`storage.backend: filesystem` / local blocks, a short flush/block timeout so blocks flush fast, a fixed single tenant). `WaitFor` on Pyroscope's readiness (`GET /ready` returns `200`, or `ProfileTypes` returns — Pyroscope uses `ProfileTypes` as the health probe per spec §7.1). Map the HTTP port (`4040`).
 > - **Data load:** build the `PushRequest` once via `to_pprof(seed_dataset())`, serialize to protobuf, `POST /push.v1.PusherService/Push` (`Content-Type: application/proto`, `X-Scope-OrgID: diff`) to **both** Pyroscope (`http://localhost:<mapped 4040>/push.v1.PusherService/Push`) and Crabka — identical bytes, two destinations — guaranteeing identical input.
 > - **Settle / flush:** both engines serve recent profiles from the hot tier immediately; for cases that must read from a flushed block, either keep the corpus within the live/ingester window (simplest, deterministic — **default**) or poll until a `SelectMergeStacktraces` returns a non-empty flamegraph on both sides (bounded, ~15s, mirroring the `client-core` bootstrap-retry pattern). Do not assume instantaneous visibility.
 > - **Assert:** for each `MergeCase`, `SelectMergeStacktraces` on both, `assert_profile_query_equal(case.name, crabka_json, pyro_json)` via `normalize_flamegraph`. For each `SeriesCase`, `SelectSeries` on both and compare via `normalize_series`. A `PYRO_KNOWN_DIVERGENCE: &[(&str,&str)]` list (each entry justified) covers any Pyroscope-specific volatile metadata not dropped by `normalize_*` (e.g. a `metadata.appName` field, or a `units` echo).
@@ -973,9 +973,9 @@ git commit -m "test(profiles): headline differential vs real Pyroscope (ignored,
 - Create: `crates/profiles/tests/grafana_integration.rs`
 
 **Interfaces:**
-- Consumes: Task 5 in-process Crabka (querier + Connect `querier.v1` API + legacy `/pyroscope/render`); Task 8 seed dataset; `testcontainers` `grafana/grafana`.
+- Consumes: Task 5 in-process Crabka (querier + Connect `querier.v1` API + legacy `/pyroscope/render`); Task 8 seed dataset; `testcontainers` `mirror.gcr.io/grafana/grafana`.
 - Produces (`#[ignore = "requires Docker"]`):
-  - Boot Crabka in-process (seed `seed_dataset()`); start `grafana/grafana:<pinned tag>` with a **provisioned built-in Pyroscope datasource** whose `url` points at the Crabka Connect base URL. Drive Grafana's datasource **proxy/Explore query API** for each leg and assert each renders.
+  - Boot Crabka in-process (seed `seed_dataset()`); start `mirror.gcr.io/grafana/grafana:<pinned tag>` with a **provisioned built-in Pyroscope datasource** whose `url` points at the Crabka Connect base URL. Drive Grafana's datasource **proxy/Explore query API** for each leg and assert each renders.
 
 > **Harness structure & data loading (explicit):**
 > - **Datasource provisioning:** mount a `datasources.yaml` (`apiVersion: 1`) with a `grafana-pyroscope-datasource` (type `pyroscope`), `url: http://host.docker.internal:<crabka_port>`, a fixed `uid`, `httpHeaderName1: X-Scope-OrgID` / `httpHeaderValue1: grafana`. Set `GF_AUTH_ANONYMOUS_ENABLED=true`, `GF_AUTH_ANONYMOUS_ORG_ROLE=Admin` so the test calls the API without login.

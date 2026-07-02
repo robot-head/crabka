@@ -115,3 +115,173 @@ pub(crate) async fn handle(
     resp.encode(&mut buf, version)?;
     Ok(buf.freeze())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert2::assert;
+    use crabka_protocol::UnknownTaggedFields;
+    use crabka_protocol::owned::share_group_describe_response;
+    use crabka_security::{AuthMethod, Principal};
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    use crate::authorizer::{AuthorizationRequest, Authorizer};
+    use crate::config::BrokerConfig;
+
+    #[derive(Debug)]
+    struct DenyAll;
+
+    impl Authorizer for DenyAll {
+        fn authorize(
+            &self,
+            _source: &dyn crabka_authz::AclSource,
+            _req: &AuthorizationRequest<'_>,
+        ) -> AuthorizationResult {
+            AuthorizationResult::Deny
+        }
+    }
+
+    fn request(group_ids: &[&str]) -> ShareGroupDescribeRequest {
+        ShareGroupDescribeRequest {
+            group_ids: group_ids.iter().map(|g| (*g).to_string()).collect(),
+            include_authorized_operations: false,
+            ..Default::default()
+        }
+    }
+
+    fn encode_request(req: &ShareGroupDescribeRequest) -> Bytes {
+        let version = share_group_describe_response::MAX_VERSION;
+        let mut buf = BytesMut::with_capacity(req.encoded_len(version));
+        req.encode(&mut buf, version).expect("encode request");
+        buf.freeze()
+    }
+
+    fn decode_response(bytes: &Bytes) -> ShareGroupDescribeResponse {
+        let version = share_group_describe_response::MAX_VERSION;
+        let mut cur: &[u8] = bytes.as_ref();
+        let resp = ShareGroupDescribeResponse::decode(&mut cur, version).expect("decode response");
+        assert!(cur.is_empty(), "response decoder consumed all bytes");
+        resp
+    }
+
+    fn test_context<'a>(
+        principal: &'a Principal,
+        peer: &'a SocketAddr,
+    ) -> crate::handlers::RequestContext<'a> {
+        crate::handlers::RequestContext {
+            principal,
+            peer,
+            client_id: "admin-client",
+            sendfile_capable: false,
+            connection_listener_name: "PLAINTEXT",
+        }
+    }
+
+    async fn start_broker(
+        authorizer: Arc<dyn Authorizer>,
+        share_enabled: bool,
+    ) -> (crate::broker::BrokerHandle, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
+        cfg.authorizer = authorizer;
+        cfg.share_group.enable = share_enabled;
+        let handle = Broker::start(cfg).await.expect("start broker");
+        (handle, dir)
+    }
+
+    fn principal() -> Principal {
+        Principal {
+            name: "alice".into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_denied_groups_preserve_group_ids_and_error_codes() {
+        let version = share_group_describe_response::MAX_VERSION;
+        let (broker_handle, _dir) = start_broker(Arc::new(DenyAll), true).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let principal = principal();
+        let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+        let ctx = test_context(&principal, &peer);
+        let req_bytes = encode_request(&request(&["g1", "g2"]));
+
+        let resp = handle(&broker, version, 1, &req_bytes, &ctx)
+            .await
+            .expect("handle");
+        let resp = decode_response(&resp);
+
+        let expected = ShareGroupDescribeResponse {
+            throttle_time_ms: 0,
+            groups: vec![
+                DescribedGroup {
+                    error_code: codes::GROUP_AUTHORIZATION_FAILED,
+                    error_message: None,
+                    group_id: "g1".into(),
+                    group_state: String::new(),
+                    group_epoch: 0,
+                    assignment_epoch: 0,
+                    assignor_name: String::new(),
+                    members: Vec::new(),
+                    authorized_operations: i32::MIN,
+                    unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                },
+                DescribedGroup {
+                    error_code: codes::GROUP_AUTHORIZATION_FAILED,
+                    error_message: None,
+                    group_id: "g2".into(),
+                    group_state: String::new(),
+                    group_epoch: 0,
+                    assignment_epoch: 0,
+                    assignor_name: String::new(),
+                    members: Vec::new(),
+                    authorized_operations: i32::MIN,
+                    unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                },
+            ],
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_disabled_feature_wins_even_when_share_actor_exists() {
+        let version = share_group_describe_response::MAX_VERSION;
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer), false).await;
+        let broker = broker_handle.broker_arc_for_test();
+        broker.group_coordinator.mark_share("g1");
+        let _actor = broker.group_coordinator.get_or_create_share("g1");
+        let principal = principal();
+        let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+        let ctx = test_context(&principal, &peer);
+        let req_bytes = encode_request(&request(&["g1"]));
+
+        let resp = handle(&broker, version, 1, &req_bytes, &ctx)
+            .await
+            .expect("handle");
+        let resp = decode_response(&resp);
+
+        let expected = ShareGroupDescribeResponse {
+            throttle_time_ms: 0,
+            groups: vec![DescribedGroup {
+                error_code: codes::GROUP_ID_NOT_FOUND,
+                error_message: None,
+                group_id: "g1".into(),
+                group_state: String::new(),
+                group_epoch: 0,
+                assignment_epoch: 0,
+                assignor_name: String::new(),
+                members: Vec::new(),
+                authorized_operations: i32::MIN,
+                unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+            }],
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
+        broker_handle.shutdown().await;
+    }
+}

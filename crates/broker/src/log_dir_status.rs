@@ -205,16 +205,16 @@ fn probe_one(dir: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use tempfile::tempdir;
 
     #[test]
     fn probe_writable_tempdir_is_online() {
         let tmp = tempdir().unwrap();
         let reg = LogDirRegistry::probe(&[tmp.path().to_path_buf()]);
-        assert!(!reg.is_offline(tmp.path()));
-        assert!(reg.offline().is_empty());
-        assert!(reg.online_subset(&[tmp.path().to_path_buf()]).len() == 1);
+        check!(!reg.is_offline(tmp.path()));
+        check!(reg.offline().is_empty());
+        check!(reg.online_subset(&[tmp.path().to_path_buf()]) == vec![tmp.path().to_path_buf()]);
     }
 
     #[test]
@@ -248,11 +248,15 @@ mod tests {
         std::fs::write(&blocker, b"i am not a directory").unwrap();
         let reg = LogDirRegistry::probe(std::slice::from_ref(&blocker));
         assert!(reg.is_offline(&blocker));
-        let offline = reg.offline();
-        assert!(offline.len() == 1);
-        assert!(offline[0].0 == blocker);
+        // The reason string is OS-dependent, so pin (path, reason-is-empty)
+        // pairs instead of the raw message.
+        let offline: Vec<(PathBuf, bool)> = reg
+            .offline()
+            .iter()
+            .map(|(path, reason)| (path.clone(), reason.is_empty()))
+            .collect();
         assert!(
-            !offline[0].1.is_empty(),
+            offline == vec![(blocker, false)],
             "offline entry must carry a non-empty reason",
         );
     }
@@ -268,9 +272,9 @@ mod tests {
         let blocker = tmp.path().join("bad");
         std::fs::write(&blocker, b"file blocking the path").unwrap();
         let reg = LogDirRegistry::probe(&[good.clone(), blocker.clone()]);
-        assert!(!reg.is_offline(&good));
-        assert!(reg.is_offline(&blocker));
-        assert!(reg.online_subset(&[good.clone(), blocker]) == vec![good]);
+        check!(!reg.is_offline(&good));
+        check!(reg.is_offline(&blocker));
+        check!(reg.online_subset(&[good.clone(), blocker]) == vec![good]);
     }
 
     /// Unknown dirs (never probed) report `is_offline = false`. This
@@ -298,12 +302,9 @@ mod tests {
         let flipped = reg.mark_offline(&dir, "EIO from segment fsync");
         assert!(flipped, "first mark_offline must flip and return true");
 
-        assert!(reg.is_offline(&dir));
-        let offline = reg.offline();
-        assert!(offline.len() == 1);
-        assert!(offline[0].0 == dir);
-        assert!(offline[0].1 == "EIO from segment fsync");
-        assert!(reg.online_subset(&[dir]).is_empty());
+        check!(reg.is_offline(&dir));
+        check!(reg.offline() == vec![(dir.clone(), "EIO from segment fsync".to_string())]);
+        check!(reg.online_subset(std::slice::from_ref(&dir)).is_empty());
     }
 
     /// `mark_offline` is idempotent: a second call returns `false` and
@@ -317,9 +318,12 @@ mod tests {
         let reg = LogDirRegistry::probe(std::slice::from_ref(&dir));
         let first = reg.mark_offline(&dir, "first reason");
         let second = reg.mark_offline(&dir, "second reason");
-        assert!(first, "first call must flip");
-        assert!(!second, "second call must be a no-op");
-        assert!(reg.offline()[0].1 == "first reason");
+        check!(first, "first call must flip");
+        check!(!second, "second call must be a no-op");
+        check!(
+            reg.offline()[0].1 == "first reason",
+            "the original reason must win",
+        );
     }
 
     /// Marking an unknown dir (never probed) offline still records
@@ -333,5 +337,27 @@ mod tests {
         let ghost = Path::new("/tmp/crabka-ghost-dir");
         assert!(reg.mark_offline(ghost, "synthetic test"));
         assert!(reg.is_offline(ghost));
+    }
+
+    #[test]
+    fn debug_includes_offline_count_and_entries() {
+        let reg = LogDirRegistry::default();
+        let ghost = Path::new("/tmp/crabka-debug-offline-dir");
+        assert!(reg.mark_offline(ghost, "debug reason"));
+
+        let rendered = format!("{reg:?}");
+
+        let needles = [
+            "LogDirRegistry",
+            "offline_count",
+            "debug reason",
+            "crabka-debug-offline-dir",
+        ];
+        for needle in needles {
+            assert!(
+                rendered.contains(needle),
+                "missing {needle:?} in rendered: {rendered}"
+            );
+        }
     }
 }

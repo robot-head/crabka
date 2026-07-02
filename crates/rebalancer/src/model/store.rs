@@ -186,9 +186,9 @@ mod tests {
         s.insert(p("a"));
         s.insert(p("b"));
         s.insert(p("c"));
-        assert!(s.get("a").is_none());
-        assert!(s.get("b").is_some());
-        assert!(s.get("c").is_some());
+        for (id, want_present) in [("a", false), ("b", true), ("c", true)] {
+            assert!(s.get(id).is_some() == want_present, "proposal {id:?}");
+        }
     }
 
     #[test]
@@ -230,9 +230,20 @@ mod tests {
                 pp.started_at_ms = 42;
             })
             .expect("mutated");
-        assert!(updated.status == ProposalStatus::Executing);
-        assert!(updated.started_at_ms == 42);
-        assert!(s.get("a").unwrap().status == ProposalStatus::Executing);
+        let want = Proposal {
+            id: "a".into(),
+            status: ProposalStatus::Executing,
+            created_at_ms: 0,
+            goals_applied: vec![],
+            summary: ProposalSummary::default(),
+            movements: vec![],
+            started_at_ms: 42,
+            terminated_at_ms: 0,
+            failure_reason: None,
+            throttle_bytes_per_sec: 0,
+        };
+        assert!(updated == want);
+        assert!(s.get("a") == Some(want), "mutation must persist in store");
     }
 
     #[test]

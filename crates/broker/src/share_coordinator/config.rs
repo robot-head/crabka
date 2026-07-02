@@ -1,6 +1,6 @@
 //! KIP-932 share-coordinator (persister) configuration.
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShareCoordinatorConfig {
     pub state_topic_num_partitions: i32,
     pub state_topic_replication_factor: i16,
@@ -26,9 +26,12 @@ mod tests {
 
     #[test]
     fn defaults_match_kafka() {
-        let c = ShareCoordinatorConfig::default();
-        assert!(c.state_topic_num_partitions == 50);
-        assert!(c.snapshot_update_records_per_snapshot == 50);
-        assert!(c.state_topic_min_isr == 1);
+        let expected = ShareCoordinatorConfig {
+            state_topic_num_partitions: 50,
+            state_topic_replication_factor: 3,
+            state_topic_min_isr: 1,
+            snapshot_update_records_per_snapshot: 50,
+        };
+        assert!(ShareCoordinatorConfig::default() == expected);
     }
 }

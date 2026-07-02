@@ -629,7 +629,7 @@ impl RecordBatch {
 #[cfg(test)]
 mod batch_tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use crabka_compression::CompressionType;
 
     fn fixture_empty_batch() -> RecordBatch {
@@ -785,9 +785,9 @@ mod batch_tests {
 
         let stamped = b.with_delete_horizon(9999);
 
-        assert!(stamped.attributes.has_delete_horizon());
-        assert!(stamped.base_timestamp == 9999);
-        assert!(stamped.delete_horizon_ms() == Some(9999));
+        check!(stamped.attributes.has_delete_horizon());
+        check!(stamped.base_timestamp == 9999);
+        check!(stamped.delete_horizon_ms() == Some(9999));
 
         // Reconstructed absolutes (base + delta) must equal the ORIGINALS.
         let absolutes: Vec<i64> = stamped

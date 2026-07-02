@@ -5,7 +5,7 @@
 //! JoinGroup (offsets preserved); a streams group with a live member rejects it;
 //! and the admin handlers (List/Describe/Delete) respect the type lock.
 
-use assert2::assert;
+use assert2::{assert, check};
 use bytes::Bytes;
 use std::sync::Arc;
 use std::time::Duration;
@@ -35,9 +35,14 @@ use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 
 // ── error codes ──────────────────────────────────────────────────────────────
 const ERR_NONE: i16 = 0;
+const ERR_COORDINATOR_LOAD_IN_PROGRESS: i16 = 14;
 const ERR_MEMBER_ID_REQUIRED: i16 = 79;
 const ERR_GROUP_ID_NOT_FOUND: i16 = 69;
 const ERR_NON_EMPTY_GROUP: i16 = 68;
+
+/// Heartbeat rounds a streams member gets to converge on its assignment
+/// before the test proceeds with whatever state it reached.
+const CONVERGE_TRIES: usize = 15;
 
 // ── boot / connect helpers ────────────────────────────────────────────────────
 
@@ -256,7 +261,7 @@ async fn streams_join_and_converge(
     let mut member_id = resp.member_id.clone();
 
     for _ in 0..tries {
-        if resp.error_code == 14 {
+        if resp.error_code == ERR_COORDINATOR_LOAD_IN_PROGRESS {
             resp = client
                 .send(first_join(group, topology("")))
                 .await
@@ -367,12 +372,26 @@ async fn drained_streams_group_downgrades_and_preserves_offsets() {
 
     // ── Phase 1: form a streams group, commit offset 42, then leave. ──
     let (member_id, resp) =
-        streams_join_and_converge(&streams_client, "g", topology("in"), 1, 15).await;
-    assert!(resp.error_code == ERR_NONE, "streams converge: {resp:?}");
-    assert!(
-        broker.group_type_for_test("g")
-            == Some(crabka_broker::coordinator::unified::GroupType::Streams),
-        "precondition: group must be Streams before downgrade"
+        streams_join_and_converge(&streams_client, "g", topology("in"), 1, CONVERGE_TRIES).await;
+    let group_type = broker.group_type_for_test("g");
+    let empty_waiter_timed_out = tokio::time::timeout(
+        std::time::Duration::from_millis(75),
+        broker.wait_until_streams_group_empty("g"),
+    )
+    .await
+    .is_err();
+    check!(
+        resp.error_code == ERR_NONE,
+        "streams member must converge without error (precondition for the downgrade): {resp:?}"
+    );
+    check!(
+        group_type == Some(crabka_broker::coordinator::unified::GroupType::Streams),
+        "streams member must converge on a Streams-typed group (precondition for the \
+         downgrade): {resp:?}"
+    );
+    check!(
+        empty_waiter_timed_out,
+        "the streams-group-empty waiter must not complete while a member is live: {resp:?}"
     );
 
     // Commit offset 42 via the simple-consumer path (empty member_id, epoch
@@ -435,7 +454,7 @@ async fn streams_group_with_live_member_rejects_classic_join() {
 
     // Live streams member (converge, do NOT leave).
     let (_mid, resp) =
-        streams_join_and_converge(&streams_client, "g2", topology("in2"), 1, 15).await;
+        streams_join_and_converge(&streams_client, "g2", topology("in2"), 1, CONVERGE_TRIES).await;
     assert!(resp.error_code == ERR_NONE);
     assert!(
         broker.group_type_for_test("g2")
@@ -496,7 +515,8 @@ async fn converted_group_admin_views_respect_type_lock() {
     // Wait for the classic leave to propagate before upgrading to streams.
     broker.wait_until_group_empty("g3").await;
 
-    let (_sm, hb) = streams_join_and_converge(&streams_client, "g3", topology("in3"), 1, 15).await;
+    let (_sm, hb) =
+        streams_join_and_converge(&streams_client, "g3", topology("in3"), 1, CONVERGE_TRIES).await;
     assert!(hb.error_code == ERR_NONE);
     assert!(
         broker.group_type_for_test("g3")
@@ -555,7 +575,8 @@ async fn downgrade_survives_restart() {
         create_topic(&sc, "in4", 1).await;
         topic_id = topic_id_for(&sc, "in4").await;
 
-        let (mid, resp) = streams_join_and_converge(&sc, "g4", topology("in4"), 1, 15).await;
+        let (mid, resp) =
+            streams_join_and_converge(&sc, "g4", topology("in4"), 1, CONVERGE_TRIES).await;
         assert!(resp.error_code == ERR_NONE, "streams converge: {resp:?}");
 
         // Commit offset 42 via simple consumer path (see watch-item).

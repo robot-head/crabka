@@ -1,6 +1,6 @@
 //! Docker-backed differential probe against real Prometheus.
 //!
-//! Ignored by default because it pulls and runs `prom/prometheus`.
+//! Ignored by default because it pulls and runs `mirror.gcr.io/prom/prometheus`.
 //! Run with:
 //!
 //! `cargo test -p crabka-metrics-service --test diff_prometheus -- --ignored --nocapture`
@@ -98,19 +98,21 @@ async fn prometheus_compliance_corpus_matches_crabka() -> TestResult {
 
 async fn start_prometheus() -> TestResult<testcontainers::ContainerAsync<GenericImage>> {
     let tag = std::env::var("CRABKA_PROMETHEUS_IMAGE_TAG").unwrap_or_else(|_| "v3.8.0".to_string());
-    Ok(GenericImage::new("prom/prometheus".to_string(), tag)
-        .with_exposed_port(PROMETHEUS_PORT.tcp())
-        .with_wait_for(WaitFor::message_on_stderr(
-            "Server is ready to receive web requests",
-        ))
-        .with_cmd([
-            "--config.file=/etc/prometheus/prometheus.yml",
-            "--storage.tsdb.path=/prometheus",
-            "--web.enable-remote-write-receiver",
-            "--enable-feature=native-histograms",
-        ])
-        .start()
-        .await?)
+    Ok(
+        GenericImage::new("mirror.gcr.io/prom/prometheus".to_string(), tag)
+            .with_exposed_port(PROMETHEUS_PORT.tcp())
+            .with_wait_for(WaitFor::message_on_stderr(
+                "Server is ready to receive web requests",
+            ))
+            .with_cmd([
+                "--config.file=/etc/prometheus/prometheus.yml",
+                "--storage.tsdb.path=/prometheus",
+                "--web.enable-remote-write-receiver",
+                "--enable-feature=native-histograms",
+            ])
+            .start()
+            .await?,
+    )
 }
 
 async fn mapped_base_url(

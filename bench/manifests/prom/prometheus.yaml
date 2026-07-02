@@ -112,8 +112,8 @@ spec:
         fsGroup: 65534
       containers:
         - name: prometheus
-          # Renovate: datasource=docker depName=prom/prometheus
-          image: prom/prometheus:v2.55.1
+          # Renovate: datasource=docker depName=mirror.gcr.io/prom/prometheus
+          image: mirror.gcr.io/prom/prometheus:v2.55.1
           args:
             - --config.file=/etc/prometheus/prometheus.yml
             - --storage.tsdb.path=/data

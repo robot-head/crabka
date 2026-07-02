@@ -1,5 +1,5 @@
 //! Byte-identity: decode each captured KIP-595 RPC frame (header + body, from a
-//! real `apache/kafka:4.0.0` 3-node controller quorum) through the generated
+//! real `mirror.gcr.io/apache/kafka:4.0.0` 3-node controller quorum) through the generated
 //! types and re-encode, asserting the bytes are unchanged.
 
 use assert2::assert;

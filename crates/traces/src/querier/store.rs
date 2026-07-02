@@ -2570,7 +2570,7 @@ mod tests {
         StringDictionaryBuilder,
     };
     use arrow::datatypes::{DataType, Field, Int32Type, Schema, SchemaRef};
-    use assert2::assert;
+    use assert2::{assert, check};
     use crabka_blockstore::{
         AttrValue as BlockAttrValue, BlockWriter, NestedSet as BlockNestedSet, PromotedSpanAttr,
         SCOL_START_NANO, SCOL_TRACE_ID, ShardedTraceBloom, SpanAttr, SpanKind as BlockSpanKind,
@@ -2754,72 +2754,82 @@ mod tests {
     fn resource_matches_service_name_uses_root_service_column() {
         let batch = batch();
 
-        assert!(
-            resource_matches(
-                &batch,
-                0,
-                &resource_service_matcher(MatchCmp::Eq, MatchValue::Str("api".into()))
-            )
-            .unwrap()
-        );
-        assert!(
-            !resource_matches(
-                &batch,
-                0,
-                &resource_service_matcher(MatchCmp::Eq, MatchValue::Str("web".into()))
-            )
-            .unwrap()
-        );
-        assert!(
-            resource_matches(
-                &batch,
-                0,
-                &resource_service_matcher(MatchCmp::Neq, MatchValue::Nil)
-            )
-            .unwrap()
-        );
-        assert!(
-            !resource_matches(
-                &batch,
-                0,
-                &SpanMatcher {
+        for (i, (matcher, want)) in [
+            (
+                resource_service_matcher(MatchCmp::Eq, MatchValue::Str("api".into())),
+                true,
+            ),
+            (
+                resource_service_matcher(MatchCmp::Eq, MatchValue::Str("web".into())),
+                false,
+            ),
+            (
+                resource_service_matcher(MatchCmp::Neq, MatchValue::Nil),
+                true,
+            ),
+            (
+                SpanMatcher {
                     scope: MatchScope::Resource,
                     key: "missing".into(),
                     op: MatchCmp::Neq,
                     value: MatchValue::Nil,
                     negated: false,
                 },
-            )
-            .unwrap()
-        );
+                false,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            check!(
+                resource_matches(&batch, 0, &matcher).unwrap() == want,
+                "case {i}"
+            );
+        }
     }
 
     #[test]
     fn root_service_matches_preserves_nil_and_string_semantics() {
-        assert!(root_service_matches(
-            "api",
-            &resource_service_matcher(MatchCmp::Eq, MatchValue::Str("api".into()))
-        ));
-        assert!(!root_service_matches(
-            "api",
-            &resource_service_matcher(MatchCmp::Eq, MatchValue::Str("web".into()))
-        ));
-        assert!(root_service_matches(
-            "api",
-            &resource_service_matcher(MatchCmp::Neq, MatchValue::Nil)
-        ));
-        assert!(!root_service_matches(
-            "api",
-            &resource_service_matcher(MatchCmp::Eq, MatchValue::Nil)
-        ));
-        assert!(root_service_matches(
-            "",
-            &resource_service_matcher(MatchCmp::Eq, MatchValue::Nil)
-        ));
-        assert!(!root_service_matches(
-            "",
-            &resource_service_matcher(MatchCmp::Neq, MatchValue::Nil)
-        ));
+        for (i, (service, matcher, want)) in [
+            (
+                "api",
+                resource_service_matcher(MatchCmp::Eq, MatchValue::Str("api".into())),
+                true,
+            ),
+            (
+                "api",
+                resource_service_matcher(MatchCmp::Eq, MatchValue::Str("web".into())),
+                false,
+            ),
+            (
+                "api",
+                resource_service_matcher(MatchCmp::Neq, MatchValue::Nil),
+                true,
+            ),
+            (
+                "api",
+                resource_service_matcher(MatchCmp::Eq, MatchValue::Nil),
+                false,
+            ),
+            (
+                "",
+                resource_service_matcher(MatchCmp::Eq, MatchValue::Nil),
+                true,
+            ),
+            (
+                "",
+                resource_service_matcher(MatchCmp::Neq, MatchValue::Nil),
+                false,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            check!(
+                root_service_matches(service, &matcher) == want,
+                "case {i}: service {service:?}"
+            );
+        }
     }
 
     #[test]
@@ -2827,9 +2837,9 @@ mod tests {
         let got = trace_from_batches(&[7; 16], vec![batch()])
             .unwrap()
             .unwrap();
-        assert!(got.root_service_name == "api");
-        assert!(got.spans.len() == 1);
-        assert!(got.spans[0].attributes == vec![("svc".into(), AttrValue::Str("a".into()))]);
+        check!(got.root_service_name == "api");
+        check!(got.spans.len() == 1);
+        check!(got.spans[0].attributes == vec![("svc".into(), AttrValue::Str("a".into()))]);
     }
 
     #[test]
@@ -2869,19 +2879,19 @@ mod tests {
     #[test]
     fn cold_intrinsic_values_include_child_count_and_instrumentation() {
         let batches = vec![batch()];
-        assert!(
+        check!(
             intrinsic_values_from_batches("span:childCount", &batches)
                 .unwrap()
                 .iter()
                 .any(|value| value.type_ == "int" && value.value == "0")
         );
-        assert!(
+        check!(
             intrinsic_values_from_batches("instrumentation:name", &batches)
                 .unwrap()
                 .iter()
                 .any(|value| value.type_ == "string" && value.value == "tracer")
         );
-        assert!(
+        check!(
             intrinsic_values_from_batches("instrumentation:version", &batches)
                 .unwrap()
                 .iter()
@@ -2942,20 +2952,28 @@ mod tests {
 
         let out = recompute_batch_nested_sets(&batch).unwrap();
         // Per-trace `left` reset (collision confirms the multi-trace scenario).
-        assert!(int32_value(&out, COL_NS_LEFT, 0).unwrap() == 1);
-        assert!(int32_value(&out, COL_NS_LEFT, 2).unwrap() == 1);
+        for (row, want) in [(0, 1), (2, 1)] {
+            check!(
+                int32_value(&out, COL_NS_LEFT, row).unwrap() == want,
+                "row {row}"
+            );
+        }
         // Each root has exactly one child; children have none — NOT inflated to 2.
-        assert!(int32_value(&out, COL_CHILD_COUNT, 0).unwrap() == 1);
-        assert!(int32_value(&out, COL_CHILD_COUNT, 1).unwrap() == 0);
-        assert!(int32_value(&out, COL_CHILD_COUNT, 2).unwrap() == 1);
-        assert!(int32_value(&out, COL_CHILD_COUNT, 3).unwrap() == 0);
+        for (row, want) in [(0, 1), (1, 0), (2, 1), (3, 0)] {
+            check!(
+                int32_value(&out, COL_CHILD_COUNT, row).unwrap() == want,
+                "row {row}"
+            );
+        }
         // Roots encode nestedSetParent = -1 (Tempo no-parent sentinel) so the
         // Drilldown's `nestedSetParent < 0` primary signal selects them; each
         // child points at its root's `left` (1 after the per-trace reset).
-        assert!(int32_value(&out, COL_PARENT_ID, 0).unwrap() == -1);
-        assert!(int32_value(&out, COL_PARENT_ID, 1).unwrap() == 1);
-        assert!(int32_value(&out, COL_PARENT_ID, 2).unwrap() == -1);
-        assert!(int32_value(&out, COL_PARENT_ID, 3).unwrap() == 1);
+        for (row, want) in [(0, -1), (1, 1), (2, -1), (3, 1)] {
+            check!(
+                int32_value(&out, COL_PARENT_ID, row).unwrap() == want,
+                "row {row}"
+            );
+        }
     }
 
     #[test]
@@ -3257,22 +3275,22 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(
+        check!(
             event_values
                 == vec![TypedValue {
                     type_: "string".into(),
                     value: "timeout".into(),
                 }]
         );
-        assert!(scoped_event_values == event_values);
-        assert!(
+        check!(scoped_event_values == event_values);
+        check!(
             link_values
                 == vec![TypedValue {
                     type_: "string".into(),
                     value: "retry".into(),
                 }]
         );
-        assert!(scoped_link_values == link_values);
+        check!(scoped_link_values == link_values);
     }
 
     #[tokio::test]
@@ -3321,25 +3339,27 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(event_tags.len() == 1);
-        assert!(event_tags[0].scope == TagScope::Event);
-        assert!(
-            event_tags[0].tags
-                == vec![
-                    "event:name".to_string(),
-                    "event:timeSinceStart".to_string(),
-                    "exception.type".to_string(),
-                ]
+        check!(
+            event_tags
+                == vec![ScopedTag {
+                    scope: TagScope::Event,
+                    tags: vec![
+                        "event:name".to_string(),
+                        "event:timeSinceStart".to_string(),
+                        "exception.type".to_string(),
+                    ],
+                }]
         );
-        assert!(link_tags.len() == 1);
-        assert!(link_tags[0].scope == TagScope::Link);
-        assert!(
-            link_tags[0].tags
-                == vec![
-                    "link.kind".to_string(),
-                    "link:spanID".to_string(),
-                    "link:traceID".to_string(),
-                ]
+        check!(
+            link_tags
+                == vec![ScopedTag {
+                    scope: TagScope::Link,
+                    tags: vec![
+                        "link.kind".to_string(),
+                        "link:spanID".to_string(),
+                        "link:traceID".to_string(),
+                    ],
+                }]
         );
     }
 
@@ -3369,9 +3389,9 @@ mod tests {
             .await
             .unwrap();
         assert!(intrinsic.len() == 1);
-        assert!(intrinsic[0].scope == TagScope::Intrinsic);
-        assert!(intrinsic[0].tags.contains(&"span:duration".to_string()));
-        assert!(intrinsic[0].tags.contains(&"trace:id".to_string()));
+        check!(intrinsic[0].scope == TagScope::Intrinsic);
+        check!(intrinsic[0].tags.contains(&"span:duration".to_string()));
+        check!(intrinsic[0].tags.contains(&"trace:id".to_string()));
 
         let event = store
             .tag_names("tenant", Some(TagScope::Event), 0, 10)
@@ -3424,9 +3444,12 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(tags.len() == 1);
-        assert!(tags[0].scope == TagScope::Span);
-        assert!(tags[0].tags == vec!["http.method"]);
+        assert!(
+            tags == vec![ScopedTag {
+                scope: TagScope::Span,
+                tags: vec!["http.method".to_string()],
+            }]
+        );
     }
 
     #[tokio::test]
@@ -3769,14 +3792,14 @@ mod tests {
             .unwrap();
 
         assert!(trace.spans.len() == 1);
-        assert!(
+        check!(
             trace.spans[0].attributes
                 == vec![
                     ("http.status_code".into(), AttrValue::Int(504)),
                     ("retryable".into(), AttrValue::Bool(true)),
                 ]
         );
-        assert!(
+        check!(
             trace.spans[0].events
                 == vec![EventRef {
                     time_since_start_nano: 50,
@@ -3784,7 +3807,7 @@ mod tests {
                     attributes: vec![("exception.type".into(), AttrValue::Str("timeout".into()))],
                 }]
         );
-        assert!(
+        check!(
             trace.spans[0].links
                 == vec![LinkRef {
                     trace_id: [9; 16],
@@ -3990,9 +4013,9 @@ mod tests {
             .find(|span| span.span_id == child.span_id)
             .unwrap();
 
-        assert!(child.nested_set_parent == root.nested_set_left);
-        assert!(child.nested_set_left > root.nested_set_left);
-        assert!(child.nested_set_right < root.nested_set_right);
+        check!(child.nested_set_parent == root.nested_set_left);
+        check!(child.nested_set_left > root.nested_set_left);
+        check!(child.nested_set_right < root.nested_set_right);
     }
 
     #[tokio::test]
@@ -4052,9 +4075,9 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert!(trace.spans.len() == 2);
-        assert!(trace.spans.iter().any(|s| s.span_id == root.span_id));
-        assert!(trace.spans.iter().any(|s| s.span_id == child.span_id));
+        check!(trace.spans.len() == 2);
+        check!(trace.spans.iter().any(|s| s.span_id == root.span_id));
+        check!(trace.spans.iter().any(|s| s.span_id == child.span_id));
     }
 
     #[tokio::test]
@@ -4119,9 +4142,9 @@ mod tests {
             .unwrap();
 
         assert!(resp.traces.len() == 1);
-        assert!(resp.traces[0].trace_id == root.trace_id);
+        check!(resp.traces[0].trace_id == root.trace_id);
         assert!(resp.traces[0].span_sets[0].spans.len() == 1);
-        assert!(resp.traces[0].span_sets[0].spans[0].span_id == child.span_id);
+        check!(resp.traces[0].span_sets[0].spans[0].span_id == child.span_id);
     }
 
     #[tokio::test]
@@ -4211,13 +4234,13 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(resp.traces.len() == 2);
-        assert!(
+        check!(resp.traces.len() == 2);
+        check!(
             resp.traces
                 .iter()
                 .any(|trace| trace.trace_id == matching.trace_id)
         );
-        assert!(
+        check!(
             resp.traces
                 .iter()
                 .any(|trace| trace.trace_id == split_events.trace_id)
@@ -4234,18 +4257,18 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(resp.traces.len() == 3);
-        assert!(
+        check!(resp.traces.len() == 3);
+        check!(
             resp.traces
                 .iter()
                 .any(|trace| trace.trace_id == matching.trace_id)
         );
-        assert!(
+        check!(
             resp.traces
                 .iter()
                 .any(|trace| trace.trace_id == other.trace_id)
         );
-        assert!(
+        check!(
             resp.traces
                 .iter()
                 .any(|trace| trace.trace_id == split_events.trace_id)
@@ -4262,18 +4285,18 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(resp.traces.len() == 3);
-        assert!(
+        check!(resp.traces.len() == 3);
+        check!(
             resp.traces
                 .iter()
                 .any(|trace| trace.trace_id == matching.trace_id)
         );
-        assert!(
+        check!(
             resp.traces
                 .iter()
                 .any(|trace| trace.trace_id == other.trace_id)
         );
-        assert!(
+        check!(
             resp.traces
                 .iter()
                 .any(|trace| trace.trace_id == split_events.trace_id)
@@ -4298,23 +4321,23 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(resp.traces.len() == 3);
-        assert!(
+        check!(resp.traces.len() == 3);
+        check!(
             resp.traces
                 .iter()
                 .any(|trace| trace.trace_id == matching.trace_id)
         );
-        assert!(
+        check!(
             resp.traces
                 .iter()
                 .any(|trace| trace.trace_id == other.trace_id)
         );
-        assert!(
+        check!(
             resp.traces
                 .iter()
                 .any(|trace| trace.trace_id == split_events.trace_id)
         );
-        assert!(
+        check!(
             !resp
                 .traces
                 .iter()
@@ -4613,10 +4636,16 @@ mod tests {
 
         series.sort_by(|a, b| a.labels.cmp(&b.labels));
         assert!(series.len() == 2);
-        assert!(series[0].labels == vec![("resource.service.name".into(), "billing".into())]);
-        assert!(series[0].points == vec![(0, 1.0), (10_000, 0.0)]);
-        assert!(series[1].labels == vec![("resource.service.name".into(), "checkout".into())]);
-        assert!(series[1].points == vec![(0, 1.0), (10_000, 0.0)]);
+        for (i, service) in ["billing", "checkout"].into_iter().enumerate() {
+            check!(
+                series[i].labels == vec![("resource.service.name".into(), service.into())],
+                "series {i}"
+            );
+            check!(
+                series[i].points == vec![(0, 1.0), (10_000, 0.0)],
+                "series {i}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -4678,8 +4707,8 @@ mod tests {
             .await
             .unwrap();
         assert!(resp.traces.len() == 1);
-        assert!(resp.traces[0].trace_id == [1; 16]);
-        assert!(
+        check!(resp.traces[0].trace_id == [1; 16]);
+        check!(
             resp.traces[0].span_sets[0].spans[0].attributes
                 == vec![
                     ("http.method".into(), AttrValue::Str("GET".into())),

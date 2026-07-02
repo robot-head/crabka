@@ -11,13 +11,29 @@
 
 use bytes::Bytes;
 
+use crabka_protocol::api_key::ApiKey;
+
 use crate::error::BrokerError;
+
+/// Raw wire `api_key` (i16) selecting the RPC — the numeric form of a
+/// [`crabka_protocol::api_key::ApiKey`] variant, kept as `i16` because it
+/// arrives off the wire and may name an API this broker doesn't know.
+pub type ApiKeyCode = i16;
+
+/// Negotiated Kafka request/response schema version for a single RPC.
+pub type ApiVersion = i16;
+
+/// Kafka wire error code (`crate::codes::*`), `0` = NONE.
+pub type ErrorCode = i16;
+
+/// Client-chosen request correlation id, echoed verbatim in the response header.
+pub type CorrelationId = i32;
 
 /// Function signature every handler in this module exports.
 pub type HandlerFn = fn(
     broker: &crate::broker::Broker,
-    version: i16,
-    correlation_id: i32,
+    version: ApiVersion,
+    correlation_id: CorrelationId,
     req_bytes: &[u8],
 ) -> futures_util::future::BoxFuture<'static, Result<Bytes, BrokerError>>;
 
@@ -25,7 +41,7 @@ pub type HandlerFn = fn(
 /// per-API modules.
 #[derive(Default)]
 pub struct HandlerTable {
-    table: std::collections::HashMap<i16, HandlerFn>,
+    table: std::collections::HashMap<ApiKeyCode, HandlerFn>,
 }
 
 impl HandlerTable {
@@ -33,12 +49,12 @@ impl HandlerTable {
         Self::default()
     }
 
-    pub fn register(&mut self, api_key: i16, handler: HandlerFn) {
-        self.table.insert(api_key, handler);
+    pub fn register(&mut self, api_key: ApiKeyCode, handler: HandlerFn) -> bool {
+        self.table.insert(api_key, handler).is_none()
     }
 
     #[must_use]
-    pub fn get(&self, api_key: i16) -> Option<HandlerFn> {
+    pub fn get(&self, api_key: ApiKeyCode) -> Option<HandlerFn> {
         self.table.get(&api_key).copied()
     }
 }
@@ -161,28 +177,26 @@ pub(crate) mod update_raft_voter;
 /// has been applied and the set of successfully-affected resources is known.
 /// A no-op when `resources` is empty (caller guards with `if !resources.is_empty()`).
 pub(crate) fn audit_admin(
-    broker: &crate::broker::Broker,
+    audit_log: &crabka_audit::AuditLog,
     ctx: &RequestContext<'_>,
     operation: &str,
     outcome: crabka_audit::AuditOutcome,
     resources: Vec<crabka_audit::AuditResource>,
 ) {
-    broker
-        .audit_log
-        .emit(crabka_audit::AuditEvent::AdminOperation {
-            outcome,
-            principal: crabka_audit::AuditPrincipal {
-                name: ctx.principal.name.clone(),
-                auth_method: format!("{:?}", ctx.principal.auth_method),
-            },
-            source: crabka_audit::AuditEndpoint {
-                ip: ctx.peer.ip().to_string(),
-                port: ctx.peer.port(),
-            },
-            operation: operation.to_string(),
-            resources,
-            time_ms: crate::time_util::now_ms(),
-        });
+    audit_log.emit(crabka_audit::AuditEvent::AdminOperation {
+        outcome,
+        principal: crabka_audit::AuditPrincipal {
+            name: ctx.principal.name.clone(),
+            auth_method: format!("{:?}", ctx.principal.auth_method),
+        },
+        source: crabka_audit::AuditEndpoint {
+            ip: ctx.peer.ip().to_string(),
+            port: ctx.peer.port(),
+        },
+        operation: operation.to_string(),
+        resources,
+        time_ms: crate::time_util::now_ms(),
+    });
 }
 
 /// Build the dispatch table for plain 4-arg handlers. Inline-intercepted
@@ -270,14 +284,20 @@ pub(crate) fn build_table() -> HandlerTable {
     // 14 (SyncGroup) intercepted inline — Group Read ACL.
     // 15 (DescribeGroups) intercepted inline — see comment above.
     // 16 (ListGroups) intercepted inline — see comment above.
-    t.register(18, api_versions::handle);
+    t.register(ApiKey::ApiVersions as i16, api_versions::handle);
     // 21 (DeleteRecords) intercepted inline — see comment above.
     // 22 (InitProducerId) intercepted inline — see comment above.
     // 23 (OffsetForLeaderEpoch) intercepted inline — per-topic Describe ACL.
     // 24 (AddPartitionsToTxn) intercepted inline — see comment above.
-    t.register(25, crate::txn::handlers::add_offset_commits_to_txn::handle);
+    t.register(
+        ApiKey::AddOffsetsToTxn as i16,
+        crate::txn::handlers::add_offset_commits_to_txn::handle,
+    );
     // 26 (EndTxn) intercepted inline — see comment above.
-    t.register(27, crate::txn::handlers::write_txn_markers::handle);
+    t.register(
+        ApiKey::WriteTxnMarkers as i16,
+        crate::txn::handlers::write_txn_markers::handle,
+    );
     // 28 (TxnOffsetCommit) intercepted inline — see comment above.
     // 32 (DescribeConfigs) intercepted inline — per-resource DescribeConfigs ACL.
     // 33 (AlterConfigs) intercepted inline — see comment above.
@@ -286,33 +306,235 @@ pub(crate) fn build_table() -> HandlerTable {
     // 42 (DeleteGroups) intercepted inline — see comment above.
     // 44 (IncrementalAlterConfigs) intercepted inline — see comment above.
     // 56 (AlterPartition) intercepted inline — Cluster ClusterAction ACL.
-    t.register(73, assign_replicas_to_dirs::handle);
+    t.register(
+        ApiKey::AssignReplicasToDirs as i16,
+        assign_replicas_to_dirs::handle,
+    );
     // FetchSnapshot (api_key 59, KIP-630) — controller-snapshot byte-range
     // fetch. Plain 4-arg signature: no per-connection ACL context needed.
-    t.register(59, fetch_snapshot::handle);
+    t.register(ApiKey::FetchSnapshot as i16, fetch_snapshot::handle);
     // 60 (DescribeCluster) intercepted inline — see comment above.
     // 63 (BrokerHeartbeat) intercepted inline — Cluster ClusterAction ACL.
     // 93 (GetReplicaLogInfo, KIP-966) intercepted inline — Cluster
     // ClusterAction ACL. Inter-broker RPC the controller's unclean recovery
     // manager uses to read each replica's LEO + leader epoch.
     // 68 (ConsumerGroupHeartbeat) intercepted inline — Group Read ACL.
-    t.register(69, consumer_group_describe::handle);
+    t.register(
+        ApiKey::ConsumerGroupDescribe as i16,
+        consumer_group_describe::handle,
+    );
     // 76 (ShareGroupHeartbeat, KIP-932) intercepted inline — Group Read ACL.
     // 88 (StreamsGroupHeartbeat, KIP-1071) intercepted inline — Group Read ACL.
     // StreamsGroupDescribe (89) stays a plain 4-arg handler and does not apply
     // a per-group Describe ACL gate.
-    t.register(89, streams_group_describe::handle);
+    t.register(
+        ApiKey::StreamsGroupDescribe as i16,
+        streams_group_describe::handle,
+    );
     // KIP-932 share-state persister RPCs (api keys 83–87). Inter-broker
     // handlers, gated per-partition on local share-state leadership.
-    t.register(83, crate::share_coordinator::handlers::initialize::handle);
-    t.register(84, crate::share_coordinator::handlers::read::handle);
-    t.register(85, crate::share_coordinator::handlers::write::handle);
-    t.register(86, crate::share_coordinator::handlers::delete::handle);
-    t.register(87, crate::share_coordinator::handlers::read_summary::handle);
+    t.register(
+        ApiKey::InitializeShareGroupState as i16,
+        crate::share_coordinator::handlers::initialize::handle,
+    );
+    t.register(
+        ApiKey::ReadShareGroupState as i16,
+        crate::share_coordinator::handlers::read::handle,
+    );
+    t.register(
+        ApiKey::WriteShareGroupState as i16,
+        crate::share_coordinator::handlers::write::handle,
+    );
+    t.register(
+        ApiKey::DeleteShareGroupState as i16,
+        crate::share_coordinator::handlers::delete::handle,
+    );
+    t.register(
+        ApiKey::ReadShareGroupStateSummary as i16,
+        crate::share_coordinator::handlers::read_summary::handle,
+    );
     // 71 (GetTelemetrySubscriptions) intercepted inline in `network::dispatch`
     // so the handler receives the per-connection peer SocketAddr and software
     // name/version for KIP-714 subscription matching.
     // 72 (PushTelemetry) intercepted inline in `network::dispatch` for the
     // same reason — it needs the per-connection context to authorize pushes.
     t
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::SocketAddr;
+
+    use assert2::assert;
+    use crabka_security::{AuthMethod, Principal};
+
+    use super::*;
+
+    fn table_test_handler(
+        _broker: &crate::broker::Broker,
+        _version: i16,
+        _correlation_id: i32,
+        _req_bytes: &[u8],
+    ) -> futures_util::future::BoxFuture<'static, Result<Bytes, BrokerError>> {
+        Box::pin(async { Ok(Bytes::new()) })
+    }
+
+    #[test]
+    fn handler_table_register_get_round_trips_handler() {
+        let mut table = HandlerTable::new();
+
+        assert!(table.get(1234).is_none());
+        assert!(table.register(1234, table_test_handler));
+
+        let registered = table.get(1234).expect("registered handler");
+        assert!(std::ptr::fn_addr_eq(
+            registered,
+            table_test_handler as HandlerFn
+        ));
+        assert!(table.get(4321).is_none());
+    }
+
+    #[test]
+    fn handler_table_register_reports_replaced_handler() {
+        let mut table = HandlerTable::new();
+
+        assert!(table.register(1234, table_test_handler));
+        assert!(!table.register(1234, table_test_handler));
+
+        let registered = table.get(1234).expect("registered handler");
+        assert!(std::ptr::fn_addr_eq(
+            registered,
+            table_test_handler as HandlerFn
+        ));
+    }
+
+    #[test]
+    fn build_table_registers_required_plain_handlers() {
+        let table = build_table();
+
+        assert!(std::ptr::fn_addr_eq(
+            table.get(18).expect("ApiVersions is registered"),
+            api_versions::handle as HandlerFn
+        ));
+        for api_key in [59, 69, 89] {
+            assert!(table.get(api_key).is_some(), "api_key {api_key}");
+        }
+    }
+
+    #[test]
+    fn build_table_registers_the_complete_plain_dispatch_set() {
+        let table = build_table();
+
+        let expected: &[(i16, HandlerFn)] = &[
+            (18, api_versions::handle as HandlerFn),
+            (
+                25,
+                crate::txn::handlers::add_offset_commits_to_txn::handle as HandlerFn,
+            ),
+            (
+                27,
+                crate::txn::handlers::write_txn_markers::handle as HandlerFn,
+            ),
+            (59, fetch_snapshot::handle as HandlerFn),
+            (69, consumer_group_describe::handle as HandlerFn),
+            (73, assign_replicas_to_dirs::handle as HandlerFn),
+            (
+                83,
+                crate::share_coordinator::handlers::initialize::handle as HandlerFn,
+            ),
+            (
+                84,
+                crate::share_coordinator::handlers::read::handle as HandlerFn,
+            ),
+            (
+                85,
+                crate::share_coordinator::handlers::write::handle as HandlerFn,
+            ),
+            (
+                86,
+                crate::share_coordinator::handlers::delete::handle as HandlerFn,
+            ),
+            (
+                87,
+                crate::share_coordinator::handlers::read_summary::handle as HandlerFn,
+            ),
+            (89, streams_group_describe::handle as HandlerFn),
+        ];
+
+        assert!(table.table.len() == expected.len());
+        for &(api_key, handler) in expected {
+            assert!(std::ptr::fn_addr_eq(
+                table.get(api_key).expect("plain handler is registered"),
+                handler
+            ));
+        }
+        for intercepted_api_key in [0, 1, 3, 19, 20, 33, 44, 56, 60, 63, 71, 72] {
+            assert!(table.get(intercepted_api_key).is_none());
+        }
+    }
+
+    #[test]
+    fn audit_admin_emits_admin_operation_event() {
+        let (log, mut rx) = crabka_audit::AuditLog::new(8);
+        let principal = Principal {
+            name: "admin".into(),
+            auth_method: AuthMethod::SaslPlain,
+            groups: Vec::new(),
+        };
+        let peer: SocketAddr = "192.0.2.10:9092".parse().unwrap();
+        let ctx = RequestContext {
+            principal: &principal,
+            peer: &peer,
+            client_id: "admin-client",
+            sendfile_capable: false,
+            connection_listener_name: "PLAINTEXT",
+        };
+
+        audit_admin(
+            log.as_ref(),
+            &ctx,
+            "CreateTopics",
+            crabka_audit::AuditOutcome::Success,
+            vec![crabka_audit::AuditResource {
+                resource_type: "Topic".into(),
+                name: "orders".into(),
+            }],
+        );
+
+        match rx.try_recv().expect("admin audit event") {
+            crabka_audit::AuditEvent::AdminOperation {
+                outcome,
+                principal,
+                source,
+                operation,
+                resources,
+                ..
+            } => {
+                assert!(
+                    (
+                        outcome,
+                        principal.name.as_str(),
+                        principal.auth_method.as_str(),
+                        source.ip.as_str(),
+                        source.port,
+                        operation.as_str(),
+                        resources.len(),
+                        resources[0].resource_type.as_str(),
+                        resources[0].name.as_str()
+                    ) == (
+                        crabka_audit::AuditOutcome::Success,
+                        "admin",
+                        "SaslPlain",
+                        "192.0.2.10",
+                        9092,
+                        "CreateTopics",
+                        1,
+                        "Topic",
+                        "orders"
+                    )
+                );
+            }
+            other => panic!("expected admin operation event, got {other:?}"),
+        }
+    }
 }

@@ -24,7 +24,7 @@
 //!    answer over the wire via the Task-2 client helper.
 //!
 //! 2. [`kip320_jvm_follower_truncates_from_crabka_leader`] — induced divergence.
-//!    A mixed JVM+Crabka cluster (one `apache/kafka:4.0.0` broker + a Crabka
+//!    A mixed JVM+Crabka cluster (one `mirror.gcr.io/apache/kafka:4.0.0` broker + a Crabka
 //!    broker, sharing a Crabka-led `KRaft` metadata quorum per the Slice-6
 //!    mixed-quorum work in `jvm_static_quorum_spike.rs`). We force a real
 //!    divergent suffix: produce a committed prefix, take the partition offline
@@ -79,16 +79,16 @@ mod support;
 /// only negotiates Fetch up to v11 and predates client-side KIP-320 position
 /// validation, so it is NOT used for the Fetch-v12+ wire-conformance probe —
 /// that needs [`KAFKA_IMAGE_MODERN`].
-const KAFKA_IMAGE: &str = "confluentinc/cp-kafka:6.1.1";
+const KAFKA_IMAGE: &str = "mirror.gcr.io/confluentinc/cp-kafka:6.1.1";
 /// cp-kafka 7.5.0 (Kafka 3.5) — the modern client image. Its consumer
 /// negotiates Fetch v12+ and runs the full KIP-320 client path
 /// (`OffsetForLeaderEpoch` position validation + tagged `diverging_epoch` /
 /// `current_leader` decode), and it ships a JDK with `javac`. Used to compile
 /// and run the wire-conformance Java helper.
-const KAFKA_IMAGE_MODERN: &str = "confluentinc/cp-kafka:7.5.0";
-/// apache/kafka:4.0.0 is the `KRaft`-native broker used as the JVM member of the
+const KAFKA_IMAGE_MODERN: &str = "mirror.gcr.io/confluentinc/cp-kafka:7.5.0";
+/// mirror.gcr.io/apache/kafka:4.0.0 is the `KRaft`-native broker used as the JVM member of the
 /// mixed metadata quorum (same image as `jvm_static_quorum_spike.rs`).
-const KAFKA_IMAGE_KRAFT: &str = "apache/kafka:4.0.0";
+const KAFKA_IMAGE_KRAFT: &str = "mirror.gcr.io/apache/kafka:4.0.0";
 
 /// Kafka encodes a 16-byte UUID cluster id as URL-safe base64 with no
 /// padding. The JVM `--cluster-id` string and Crabka's `uuid::Uuid` must wrap
@@ -502,7 +502,7 @@ fn crabka_mixed_config(
 }
 
 /// Stand up two Crabka brokers (the metadata-quorum majority + data plane) and
-/// one apache/kafka:4.0.0 broker joined to the same static `KRaft` quorum.
+/// one mirror.gcr.io/apache/kafka:4.0.0 broker joined to the same static `KRaft` quorum.
 /// Returns once the Crabka voters have elected a shared leader; the JVM broker
 /// is started detached and the caller polls for it to register.
 async fn start_mixed_cluster(container: &str) -> MixedCluster {

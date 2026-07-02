@@ -7,7 +7,7 @@
 //! file only uses `support::start` which is cross-platform — no gate
 //! needed).
 
-use assert2::assert;
+use assert2::{assert, check};
 mod support;
 
 use bytes::BufMut;
@@ -148,20 +148,20 @@ async fn delete_offsets_from_empty_group_round_trip() {
         })
         .await
         .expect("OffsetDelete");
-    assert!(resp.error_code == 0, "top-level NONE");
+    check!(resp.error_code == 0, "top-level NONE");
     assert!(resp.topics.len() == 1);
     assert!(resp.topics[0].partitions.len() == 1);
-    assert!(
+    check!(
         resp.topics[0].partitions[0].error_code == 0,
         "partition 0 NONE"
     );
 
     // Verify partition 0 is gone, partition 1 still has its offset.
-    assert!(
+    check!(
         fetch_offset(&p, "g1", "t1", 0).await == OFFSET_ABSENT_SENTINEL,
         "partition 0 offset cleared"
     );
-    assert!(
+    check!(
         fetch_offset(&p, "g1", "t1", 1).await == 100,
         "partition 1 offset untouched"
     );
@@ -261,9 +261,9 @@ async fn delete_offsets_partition_out_of_range_returns_unknown_topic_or_partitio
         })
         .await
         .expect("OffsetDelete");
-    assert!(resp.error_code == 0);
-    assert!(resp.topics[0].partitions[0].error_code == 0, "p=0 deleted");
-    assert!(
+    check!(resp.error_code == 0);
+    check!(resp.topics[0].partitions[0].error_code == 0, "p=0 deleted");
+    check!(
         resp.topics[0].partitions[1].error_code == 3,
         "p=99 UNKNOWN_TOPIC_OR_PARTITION"
     );
@@ -350,14 +350,14 @@ async fn delete_offsets_for_subscribed_topic_returns_group_subscribed() {
         })
         .await
         .expect("OffsetDelete");
-    assert!(resp.error_code == 0, "top-level NONE");
-    assert!(
+    check!(resp.error_code == 0, "top-level NONE");
+    check!(
         resp.topics[0].partitions[0].error_code == 86,
         "GROUP_SUBSCRIBED_TO_TOPIC (86)"
     );
 
     // Offset is unchanged.
-    assert!(
+    check!(
         fetch_offset(&p, "g5", "t5", 0).await == 9,
         "offset survived"
     );

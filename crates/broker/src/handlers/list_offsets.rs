@@ -7,8 +7,9 @@
 //!
 //! Positive-timestamp lookups resolve against the remote tier first
 //! (it holds the oldest records) and fall back to the local log's
-//! time index (KIP-405/734). The `MAX_TIMESTAMP` (-3) and `EARLIEST_LOCAL`
-//! (-4) sentinels are resolved against the local log.
+//! time index (KIP-405/734). The `MAX_TIMESTAMP` (-3) and
+//! `EARLIEST_LOCAL_TIMESTAMP` (-4) sentinels are resolved against the
+//! local log.
 
 use bytes::{Bytes, BytesMut};
 
@@ -24,10 +25,24 @@ use crate::broker::Broker;
 use crate::codes;
 use crate::error::BrokerError;
 
-const EARLIEST: i64 = -2;
-const LATEST: i64 = -1;
-const MAX_TIMESTAMP: i64 = -3; // KIP-734
-const EARLIEST_LOCAL: i64 = -4; // KIP-405
+/// Request timestamp sentinel (-2): resolve the earliest available offset.
+/// Kafka's `ListOffsetsRequest.EARLIEST_TIMESTAMP`.
+const EARLIEST_TIMESTAMP: i64 = -2;
+/// Request timestamp sentinel (-1): resolve the log-end (next) offset.
+/// Kafka's `ListOffsetsRequest.LATEST_TIMESTAMP`.
+const LATEST_TIMESTAMP: i64 = -1;
+/// Request timestamp sentinel (-3, KIP-734): resolve the offset of the record
+/// with the highest timestamp. Kafka's `ListOffsetsRequest.MAX_TIMESTAMP`.
+const MAX_TIMESTAMP: i64 = -3;
+/// Request timestamp sentinel (-4, KIP-405): resolve the earliest offset still
+/// in local storage. Kafka's `ListOffsetsRequest.EARLIEST_LOCAL_TIMESTAMP`.
+const EARLIEST_LOCAL_TIMESTAMP: i64 = -4;
+/// Response placeholder (-1) meaning "no record timestamp matched/echoed".
+/// Kafka's `ListOffsetsResponse.UNKNOWN_TIMESTAMP`.
+const UNKNOWN_TIMESTAMP: i64 = -1;
+/// Response placeholder (-1) meaning "no offset was resolved".
+/// Kafka's `ListOffsetsResponse.UNKNOWN_OFFSET`.
+const UNKNOWN_OFFSET: i64 = -1;
 
 #[allow(clippy::too_many_lines)]
 #[tracing::instrument(
@@ -72,8 +87,8 @@ pub(crate) async fn handle(
                     .map(|part| ListOffsetsPartitionResponse {
                         partition_index: part.partition_index,
                         error_code: codes::TOPIC_AUTHORIZATION_FAILED,
-                        timestamp: -1,
-                        offset: -1,
+                        timestamp: UNKNOWN_TIMESTAMP,
+                        offset: UNKNOWN_OFFSET,
                         ..Default::default()
                     })
                     .collect();
@@ -90,7 +105,7 @@ pub(crate) async fn handle(
                 let idx = part.partition_index;
                 let mut out = ListOffsetsPartitionResponse {
                     partition_index: idx,
-                    timestamp: -1,
+                    timestamp: UNKNOWN_TIMESTAMP,
                     ..Default::default()
                 };
 
@@ -121,7 +136,7 @@ pub(crate) async fn handle(
                 };
 
                 let (offset, resp_timestamp) = match part.timestamp {
-                    EARLIEST => {
+                    EARLIEST_TIMESTAMP => {
                         let mut earliest = local_start;
                         if let (Some(reader), Some(tid)) = (remote_reader.as_ref(), topic_id) {
                             let tp = crabka_remote_storage::TopicIdPartition::new(
@@ -141,15 +156,15 @@ pub(crate) async fn handle(
                                 ),
                             }
                         }
-                        (earliest, -1)
+                        (earliest, UNKNOWN_TIMESTAMP)
                     }
-                    LATEST => (local_end, -1),
-                    EARLIEST_LOCAL => (local_log_start, -1),
+                    LATEST_TIMESTAMP => (local_end, UNKNOWN_TIMESTAMP),
+                    EARLIEST_LOCAL_TIMESTAMP => (local_log_start, UNKNOWN_TIMESTAMP),
                     MAX_TIMESTAMP => {
                         let log = p.log.lock().expect("log mutex poisoned");
                         match log.max_timestamp_offset_and_ts() {
                             Some((offset, ts)) => (offset, ts),
-                            None => (log.offset_of_max_timestamp(), -1),
+                            None => (log.offset_of_max_timestamp(), UNKNOWN_TIMESTAMP),
                         }
                     }
                     ts if ts > 0 => {
@@ -180,16 +195,18 @@ pub(crate) async fn handle(
                         if let Some(o) = remote_result {
                             // Remote hit covers the oldest records; the remote reader
                             // does not surface the matched record timestamp, so echo -1.
-                            (o, -1)
+                            (o, UNKNOWN_TIMESTAMP)
                         } else {
                             let local = {
                                 let log = p.log.lock().expect("log mutex poisoned");
                                 log.offset_for_timestamp(ts)
                             };
-                            local.map_or((-1, -1), |(o, matched_ts)| (o, matched_ts))
+                            local.map_or((UNKNOWN_OFFSET, UNKNOWN_TIMESTAMP), |(o, matched_ts)| {
+                                (o, matched_ts)
+                            })
                         }
                     }
-                    _ => (-1, -1),
+                    _ => (UNKNOWN_OFFSET, UNKNOWN_TIMESTAMP),
                 };
 
                 out.error_code = codes::NONE;
@@ -239,6 +256,87 @@ fn topic_describe_denied(
 mod tests {
     use super::*;
     use assert2::assert;
+    use crabka_protocol::owned::list_offsets_request::{ListOffsetsPartition, ListOffsetsTopic};
+    use crabka_security::{AuthMethod, Principal};
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    use crate::authorizer::Authorizer;
+    use crate::broker::{Broker, BrokerHandle};
+    use crate::config::BrokerConfig;
+
+    #[derive(Debug)]
+    struct DenyAll;
+
+    impl Authorizer for DenyAll {
+        fn authorize(
+            &self,
+            _source: &dyn crabka_authz::AclSource,
+            _req: &AuthorizationRequest<'_>,
+        ) -> AuthorizationResult {
+            AuthorizationResult::Deny
+        }
+    }
+
+    fn encode_request(req: &ListOffsetsRequest, version: i16) -> Bytes {
+        let mut buf = BytesMut::with_capacity(req.encoded_len(version));
+        req.encode(&mut buf, version).expect("encode request");
+        buf.freeze()
+    }
+
+    fn decode_response(bytes: &Bytes, version: i16) -> ListOffsetsResponse {
+        let mut cur: &[u8] = bytes.as_ref();
+        let resp = ListOffsetsResponse::decode(&mut cur, version).expect("decode response");
+        assert!(cur.is_empty(), "response decoder consumed all bytes");
+        resp
+    }
+
+    fn principal(name: &str) -> Principal {
+        Principal {
+            name: name.into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        }
+    }
+
+    fn peer() -> SocketAddr {
+        "127.0.0.1:9092".parse().unwrap()
+    }
+
+    fn test_context<'a>(
+        principal: &'a Principal,
+        peer: &'a SocketAddr,
+    ) -> crate::handlers::RequestContext<'a> {
+        crate::handlers::RequestContext {
+            principal,
+            peer,
+            client_id: "admin-client",
+            sendfile_capable: false,
+            connection_listener_name: "PLAINTEXT",
+        }
+    }
+
+    async fn start_broker(authorizer: Arc<dyn Authorizer>) -> (BrokerHandle, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
+        cfg.audit_enabled = false;
+        cfg.authorizer = authorizer;
+        let handle = Broker::start(cfg).await.expect("start broker");
+        (handle, dir)
+    }
+
+    #[test]
+    fn sentinel_constants_match_kafka_wire_values() {
+        let cases = [
+            ("EARLIEST_TIMESTAMP", EARLIEST_TIMESTAMP, -2),
+            ("LATEST_TIMESTAMP", LATEST_TIMESTAMP, -1),
+            ("MAX_TIMESTAMP", MAX_TIMESTAMP, -3),
+            ("EARLIEST_LOCAL_TIMESTAMP", EARLIEST_LOCAL_TIMESTAMP, -4),
+        ];
+        for (name, sentinel, want) in cases {
+            assert!(sentinel == want, "{name}");
+        }
+    }
 
     #[test]
     fn topic_describe_denied_yields_topic_authorization_failed_rows() {
@@ -288,5 +386,65 @@ mod tests {
         let decoded =
             ListOffsetsResponse::decode(&mut cur, list_offsets_response::MAX_VERSION).unwrap();
         assert!(decoded.topics[0].partitions[0].error_code == codes::TOPIC_AUTHORIZATION_FAILED);
+    }
+
+    #[tokio::test]
+    async fn denied_handler_preserves_topic_and_partition_response_fields() {
+        let version = crabka_protocol::owned::list_offsets_response::MAX_VERSION;
+        let (broker_handle, _dir) = start_broker(Arc::new(DenyAll)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let p = principal("alice");
+        let peer = peer();
+        let ctx = test_context(&p, &peer);
+        let req = ListOffsetsRequest {
+            replica_id: -1,
+            isolation_level: 0,
+            topics: vec![ListOffsetsTopic {
+                name: "orders".into(),
+                partitions: vec![
+                    ListOffsetsPartition {
+                        partition_index: 0,
+                        current_leader_epoch: -1,
+                        timestamp: LATEST_TIMESTAMP,
+                        ..Default::default()
+                    },
+                    ListOffsetsPartition {
+                        partition_index: 2,
+                        current_leader_epoch: -1,
+                        timestamp: EARLIEST_TIMESTAMP,
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }],
+            timeout_ms: 30_000,
+            ..Default::default()
+        };
+        let req = encode_request(&req, version);
+
+        let bytes = handle(&broker, version, 123, &req, &ctx)
+            .await
+            .expect("handle");
+        let resp = decode_response(&bytes, version);
+
+        let denied_row = |partition_index: i32| ListOffsetsPartitionResponse {
+            partition_index,
+            error_code: codes::TOPIC_AUTHORIZATION_FAILED,
+            timestamp: -1,
+            offset: -1,
+            leader_epoch: -1,
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+        };
+        let expected = ListOffsetsResponse {
+            throttle_time_ms: 0,
+            topics: vec![ListOffsetsTopicResponse {
+                name: "orders".to_string(),
+                partitions: vec![denied_row(0), denied_row(2)],
+                unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+            }],
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+        };
+        assert!(resp == expected, "{resp:?}");
+        broker_handle.shutdown().await;
     }
 }

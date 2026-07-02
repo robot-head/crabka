@@ -28,7 +28,7 @@
 //!   `parse_create_topics` / `parse_delete_topics` / `parse_create_partitions`
 //!   is fully exercised.
 
-use assert2::assert;
+use assert2::{assert, check};
 use std::collections::BTreeMap;
 use std::time::Duration;
 
@@ -74,9 +74,9 @@ async fn admin_round_trip_create_alter_delete() {
     // 3. Metadata reflects the create.
     let md = admin.metadata(&["foo"]).await.unwrap();
     let foo = md.topics.iter().find(|t| t.name == "foo").unwrap();
-    assert!(foo.error.is_none());
-    assert!(foo.partition_count == 3);
-    assert!(foo.replication_factor == 1);
+    check!(foo.error.is_none());
+    check!(foo.partition_count == 3);
+    check!(foo.replication_factor == 1);
 
     // 4. Increase partitions to 5.
     let outcomes = admin

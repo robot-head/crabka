@@ -143,7 +143,7 @@ fn build_response(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use crabka_raft::SnapshotSlice;
 
     #[test]
@@ -185,12 +185,12 @@ mod tests {
         };
         let resp = build_response(cid, &req, &resolve);
         let part = &resp.topics[0].partitions[0];
-        assert!(resp.error_code == 0);
-        assert!(part.error_code == 0);
-        assert!(part.snapshot_id.end_offset == 6);
-        assert!(part.snapshot_id.epoch == 1);
-        assert!(part.size == 100);
-        assert!(part.position == 0);
+        check!(resp.error_code == 0);
+        check!(part.error_code == 0);
+        check!(part.snapshot_id.end_offset == 6);
+        check!(part.snapshot_id.epoch == 1);
+        check!(part.size == 100);
+        check!(part.position == 0);
         let mut buf = bytes::BytesMut::new();
         part.unaligned_records.encode_to(&mut buf).unwrap();
         assert!(&buf[..] == b"abc");

@@ -32,7 +32,7 @@ topologies built with `optimization=all`. They are produced by the Dockerized
 capture harness in `../../jvm-capture/` (run `./jvm-capture/run.sh`), which drives
 Kafka's own `StreamThread.initBrokerTopology` +
 `StreamsGroupHeartbeatRequestManager.fromStreamsToHeartbeatRequest` conversion and
-was cross-validated against a live `apache/kafka:4.1.0` broker
+was cross-validated against a live `mirror.gcr.io/apache/kafka:4.1.0` broker
 (`./jvm-capture/run.sh --verify-broker`). See `../../jvm-capture/README.md` for the
 exact classes/methods, the 4.1.0-vs-4.0.0 rationale, and the `replication_factor:
 -1` / `topic_configs` caveat the Rust encoder must match.

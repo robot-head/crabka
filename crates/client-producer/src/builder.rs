@@ -276,11 +276,15 @@ mod security_arg_tests {
 
     #[test]
     fn coordinator_retry_classifier_matches_cold_start_codes_only() {
-        assert!(is_retriable_coordinator_code(COORDINATOR_LOAD_IN_PROGRESS));
-        assert!(is_retriable_coordinator_code(COORDINATOR_NOT_AVAILABLE));
-        assert!(is_retriable_coordinator_code(NOT_COORDINATOR));
-        assert!(!is_retriable_coordinator_code(0));
-        assert!(!is_retriable_coordinator_code(42));
+        for (code, want) in [
+            (COORDINATOR_LOAD_IN_PROGRESS, true),
+            (COORDINATOR_NOT_AVAILABLE, true),
+            (NOT_COORDINATOR, true),
+            (0, false),
+            (42, false),
+        ] {
+            assert!(is_retriable_coordinator_code(code) == want);
+        }
     }
 
     #[test]
@@ -297,16 +301,24 @@ mod security_arg_tests {
         assert!(!retry_deadline_elapsed(start, Duration::from_secs(30)));
         tokio::time::advance(Duration::from_secs(30)).await;
         assert!(retry_deadline_elapsed(start, Duration::from_secs(30)));
-        assert!(next_backoff(Duration::from_millis(100)) == Duration::from_millis(200));
-        assert!(next_backoff(Duration::from_millis(800)) == Duration::from_secs(1));
-        assert!(next_backoff(Duration::from_secs(1)) == Duration::from_secs(1));
+        for (current, want) in [
+            (Duration::from_millis(100), Duration::from_millis(200)),
+            (Duration::from_millis(800), Duration::from_secs(1)),
+            (Duration::from_secs(1), Duration::from_secs(1)),
+        ] {
+            assert!(next_backoff(current) == want);
+        }
     }
 
     #[test]
     fn validated_acks_forces_idempotence_to_all_and_rejects_zero() {
-        assert!(validated_acks(true, Acks::One).unwrap() == Acks::All);
-        assert!(validated_acks(false, Acks::One).unwrap() == Acks::One);
-        assert!(validated_acks(false, Acks::Zero).unwrap() == Acks::Zero);
+        for (idempotent, acks, want) in [
+            (true, Acks::One, Acks::All),
+            (false, Acks::One, Acks::One),
+            (false, Acks::Zero, Acks::Zero),
+        ] {
+            assert!(validated_acks(idempotent, acks).unwrap() == want);
+        }
         assert!(validated_acks(true, Acks::Zero).is_err());
     }
 

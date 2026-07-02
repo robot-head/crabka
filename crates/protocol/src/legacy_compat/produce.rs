@@ -98,6 +98,7 @@ impl From<crate::owned::produce_response::BatchIndexAndErrorMessage>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::UnknownTaggedFields;
     use crate::records::RecordsPayload;
     use assert2::assert;
     use bytes::Bytes;
@@ -112,22 +113,25 @@ mod tests {
         legacy.topic_data[0].partition_data[0].index = 73;
         legacy.topic_data[0].partition_data[0].records =
             Some(RecordsPayload::Legacy(Bytes::from_static(&[4, 5, 6])));
-        let converted = ProduceRequest::from(legacy.clone());
+        let converted = ProduceRequest::from(legacy);
 
-        assert!(converted.transactional_id == legacy.transactional_id);
-        assert!(converted.acks == legacy.acks);
-        assert!(converted.timeout_ms == legacy.timeout_ms);
-        assert!(converted.topic_data.len() == legacy.topic_data.len());
-
-        let topic = &converted.topic_data[0];
-        let legacy_topic = &legacy.topic_data[0];
-        assert!(topic.name == legacy_topic.name);
-        assert!(topic.partition_data.len() == legacy_topic.partition_data.len());
-
-        let partition = &topic.partition_data[0];
-        let legacy_partition = &legacy_topic.partition_data[0];
-        assert!(partition.index == legacy_partition.index);
-        assert!(partition.records == legacy_partition.records);
+        let expected = ProduceRequest {
+            transactional_id: Some("txn-a".to_string()),
+            acks: 1,
+            timeout_ms: 72,
+            topic_data: vec![crate::owned::produce_request::TopicProduceData {
+                name: "produce-topic".to_string(),
+                topic_id: crate::primitives::uuid::Uuid::ZERO,
+                partition_data: vec![crate::owned::produce_request::PartitionProduceData {
+                    index: 73,
+                    records: Some(RecordsPayload::Legacy(Bytes::from_static(&[4, 5, 6]))),
+                    unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                }],
+                unknown_tagged_fields: UnknownTaggedFields(vec![]),
+            }],
+            unknown_tagged_fields: UnknownTaggedFields(vec![]),
+        };
+        assert!(converted == expected);
     }
 
     #[test]
@@ -144,33 +148,34 @@ mod tests {
         canonical.responses[0].partition_responses[0].record_errors[0].batch_index = 87;
         canonical.responses[0].partition_responses[0].record_errors[0].batch_index_error_message =
             Some("batch-error".into());
-        let converted =
-            kafka_3_6_2::owned::produce_response::ProduceResponse::from(canonical.clone());
+        let converted = kafka_3_6_2::owned::produce_response::ProduceResponse::from(canonical);
 
-        assert!(converted.throttle_time_ms == canonical.throttle_time_ms);
-        assert!(converted.responses.len() == canonical.responses.len());
-
-        let topic = &converted.responses[0];
-        let canonical_topic = &canonical.responses[0];
-        assert!(topic.name == canonical_topic.name);
-        assert!(topic.partition_responses.len() == canonical_topic.partition_responses.len());
-
-        let partition = &topic.partition_responses[0];
-        let canonical_partition = &canonical_topic.partition_responses[0];
-        assert!(partition.index == canonical_partition.index);
-        assert!(partition.error_code == canonical_partition.error_code);
-        assert!(partition.base_offset == canonical_partition.base_offset);
-        assert!(partition.log_append_time_ms == canonical_partition.log_append_time_ms);
-        assert!(partition.log_start_offset == canonical_partition.log_start_offset);
-        assert!(partition.error_message == canonical_partition.error_message);
-        assert!(partition.record_errors.len() == canonical_partition.record_errors.len());
-
-        let record_error = &partition.record_errors[0];
-        let canonical_record_error = &canonical_partition.record_errors[0];
-        assert!(record_error.batch_index == canonical_record_error.batch_index);
-        assert!(
-            record_error.batch_index_error_message
-                == canonical_record_error.batch_index_error_message
-        );
+        let expected = kafka_3_6_2::owned::produce_response::ProduceResponse {
+            responses: vec![kafka_3_6_2::owned::produce_response::TopicProduceResponse {
+                name: "produce-response-topic".to_string(),
+                partition_responses: vec![
+                    kafka_3_6_2::owned::produce_response::PartitionProduceResponse {
+                        index: 82,
+                        error_code: 83,
+                        base_offset: 84,
+                        log_append_time_ms: 85,
+                        log_start_offset: 86,
+                        record_errors: vec![
+                            kafka_3_6_2::owned::produce_response::BatchIndexAndErrorMessage {
+                                batch_index: 87,
+                                batch_index_error_message: Some("batch-error".to_string()),
+                                unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                            },
+                        ],
+                        error_message: Some("produce-error".to_string()),
+                        unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                    },
+                ],
+                unknown_tagged_fields: UnknownTaggedFields(vec![]),
+            }],
+            throttle_time_ms: 81,
+            unknown_tagged_fields: UnknownTaggedFields(vec![]),
+        };
+        assert!(converted == expected);
     }
 }
