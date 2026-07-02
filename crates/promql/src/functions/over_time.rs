@@ -717,7 +717,7 @@ mod tests {
             // Out-of-range phi yields an exact signed infinity; in-range keeps
             // the epsilon comparison.
             let matches = if want.is_infinite() {
-                got == want
+                got.to_bits() == want.to_bits()
             } else {
                 approx_eq(got, want)
             };

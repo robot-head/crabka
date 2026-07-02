@@ -650,6 +650,11 @@ mod tests {
 
     #[test]
     fn build_request_preserves_topic_broker_epochs_and_isr_fields() {
+        use crabka_protocol::UnknownTaggedFields;
+        use crabka_protocol::owned::alter_partition_request::{
+            BrokerState, PartitionData, TopicData,
+        };
+
         let topic_id = uuid::Uuid::from_u128(0xA11CE);
         let mut image = MetadataImage::new(uuid::Uuid::nil());
         image.apply(&topic("orders", topic_id));
@@ -657,9 +662,6 @@ mod tests {
 
         let req = build_alter_partition_request(&image, 4, "orders", 6, &[1, 9], 12);
 
-        use crabka_protocol::owned::alter_partition_request::{
-            BrokerState, PartitionData, TopicData,
-        };
         let expected = AlterPartitionRequest {
             broker_id: 4,
             broker_epoch: -1,
@@ -673,21 +675,21 @@ mod tests {
                         BrokerState {
                             broker_id: 1,
                             broker_epoch: 1,
-                            unknown_tagged_fields: Default::default(),
+                            unknown_tagged_fields: UnknownTaggedFields::default(),
                         },
                         BrokerState {
                             broker_id: 9,
                             broker_epoch: -1,
-                            unknown_tagged_fields: Default::default(),
+                            unknown_tagged_fields: UnknownTaggedFields::default(),
                         },
                     ],
                     leader_recovery_state: 0,
                     partition_epoch: 0,
-                    unknown_tagged_fields: Default::default(),
+                    unknown_tagged_fields: UnknownTaggedFields::default(),
                 }],
-                unknown_tagged_fields: Default::default(),
+                unknown_tagged_fields: UnknownTaggedFields::default(),
             }],
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         };
         assert_eq!(req, expected);
     }

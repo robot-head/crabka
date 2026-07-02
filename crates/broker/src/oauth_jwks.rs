@@ -208,7 +208,7 @@ fn current_epoch_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use std::net::SocketAddr;
 
     /// Serve a fixed body at `/jwks` on an ephemeral port; returns the bound
@@ -547,7 +547,6 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        use assert2::check;
         check!(
             last_on_demand.load(Ordering::Relaxed) > 0,
             "on-demand timestamp should have advanced past sentinel 0",

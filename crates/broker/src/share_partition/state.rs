@@ -540,7 +540,7 @@ impl AcquisitionState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
 
     fn t0() -> Instant {
         Instant::now()
@@ -654,7 +654,6 @@ mod tests {
         s.materialize(5, 100);
         let _ = s.acquire("m1", 10, i32::MAX, t0(), LOCK, 5);
         let (start, dcc, batches) = s.to_persist_batches();
-        use assert2::check;
         check!(start == 0);
         check!(dcc == 0); // nothing terminal yet
         // Acquired persists as Available(0) but retains its delivery_count.
@@ -681,7 +680,6 @@ mod tests {
 
         let mut reloaded = AcquisitionState::new(0);
         reloaded.load_from(start, 7, 3, 0, &batches);
-        use assert2::check;
         check!(reloaded.start_offset == 4);
         check!(reloaded.end_offset == 10);
         check!(reloaded.state_epoch == 7);

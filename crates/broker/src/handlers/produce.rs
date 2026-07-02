@@ -1394,6 +1394,9 @@ mod tests {
 
     #[test]
     fn build_topic_error_response_preserves_topic_and_partition_fields() {
+        use crabka_protocol::owned::produce_response::{
+            LeaderIdAndEpoch, PartitionProduceResponse, TopicProduceResponse,
+        };
         let topic_id = crabka_protocol::primitives::uuid::Uuid([7; 16]);
         let topic = FramedTopic {
             name: "orders".into(),
@@ -1412,9 +1415,6 @@ mod tests {
 
         let resp = build_topic_error_response(&topic, crate::codes::UNKNOWN_TOPIC_ID);
 
-        use crabka_protocol::owned::produce_response::{
-            LeaderIdAndEpoch, PartitionProduceResponse, TopicProduceResponse,
-        };
         let error_partition = |index: i32| PartitionProduceResponse {
             index,
             error_code: crate::codes::UNKNOWN_TOPIC_ID,
@@ -1515,6 +1515,9 @@ mod tests {
 
     #[tokio::test]
     async fn process_partition_non_leader_preserves_current_leader_hint() {
+        use crabka_protocol::owned::produce_response::{
+            LeaderIdAndEpoch, PartitionProduceResponse,
+        };
         let mut img = image_with_topic("orders", &[2, 3]);
         img.apply(&MetadataRecord::V1Partition(PartitionRecord {
             topic: "orders".into(),
@@ -1568,9 +1571,6 @@ mod tests {
         .await
         .expect("process partition");
 
-        use crabka_protocol::owned::produce_response::{
-            LeaderIdAndEpoch, PartitionProduceResponse,
-        };
         let expected = PartitionProduceResponse {
             index: 0,
             error_code: crate::codes::NOT_LEADER_OR_FOLLOWER,

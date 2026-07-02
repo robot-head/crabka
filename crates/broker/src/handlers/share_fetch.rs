@@ -618,6 +618,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn group_responses_preserves_topic_order_and_partition_fields() {
         let first_topic = uuid::Uuid::from_u128(0xA1);
         let second_topic = uuid::Uuid::from_u128(0xB2);

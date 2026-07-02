@@ -1744,6 +1744,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn delta_histogram_accumulates_to_cumulative_classic_series() {
         let first = metrics_data(Metric {
             name: "rpc.server.duration".into(),

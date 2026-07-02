@@ -538,7 +538,7 @@ pub(crate) async fn select_new_leader_for_partition(
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+    use assert2::{assert, check};
     use std::collections::BTreeSet;
     use std::net::SocketAddr;
     use std::sync::Arc;
@@ -1497,7 +1497,6 @@ mod tests {
         let offline: std::collections::HashSet<uuid::Uuid> = [bad].into_iter().collect();
         let metrics = crate::metrics::BrokerMetrics::new();
         let plan = compute_offline_dir_failover_changes(&img, 1, &offline, &l, &metrics).await;
-        use assert2::check;
         check!(
             plan.changes.is_empty(),
             "no alive replica → no election; got {:?}",

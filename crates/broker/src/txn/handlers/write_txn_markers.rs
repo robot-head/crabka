@@ -125,6 +125,7 @@ mod tests {
     use assert2::assert;
     use bytes::Bytes;
     use crabka_log::{Log, LogConfig};
+    use crabka_protocol::UnknownTaggedFields;
     use crabka_protocol::owned::write_txn_markers_request::{
         WritableTxnMarker, WritableTxnMarkerTopic, WriteTxnMarkersRequest,
     };
@@ -208,19 +209,19 @@ mod tests {
                         WritableTxnMarkerPartitionResult {
                             partition_index: 1,
                             error_code: codes::NONE,
-                            unknown_tagged_fields: Default::default(),
+                            unknown_tagged_fields: UnknownTaggedFields::default(),
                         },
                         WritableTxnMarkerPartitionResult {
                             partition_index: 2,
                             error_code: codes::NOT_LEADER_OR_FOLLOWER,
-                            unknown_tagged_fields: Default::default(),
+                            unknown_tagged_fields: UnknownTaggedFields::default(),
                         },
                     ],
-                    unknown_tagged_fields: Default::default(),
+                    unknown_tagged_fields: UnknownTaggedFields::default(),
                 }],
-                unknown_tagged_fields: Default::default(),
+                unknown_tagged_fields: UnknownTaggedFields::default(),
             }],
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         };
         assert!(resp == expected);
         broker_handle.shutdown().await;

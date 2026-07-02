@@ -790,7 +790,7 @@ mod tests {
                 state: RebalanceState::ProposalReady,
                 reason: "ProposalReady".into(),
                 message: "proposal p1 computed: 3 replica / 1 leader movements".into(),
-                requeue: Duration::from_secs(300),
+                requeue: Duration::from_mins(5),
                 new_session: Some("p1".into()),
                 new_optimization: Some(OptimizationResult {
                     replica_movements: 3,

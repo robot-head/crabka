@@ -2164,6 +2164,7 @@ rules:
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn ruler_rule_group_evaluation_appends_recordings_and_dispatches_firing_alerts() {
         let group: serde_yaml::Value = serde_yaml::from_str(
             r"
@@ -2467,6 +2468,7 @@ rules:
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn ruler_rule_set_evaluation_runs_namespaced_groups() {
         let recording_group: serde_yaml::Value = serde_yaml::from_str(
             r"

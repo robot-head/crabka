@@ -4709,8 +4709,12 @@ mod tests {
         tune_accepted_socket(&server);
 
         check!(server.nodelay().expect("read TCP_NODELAY"));
-        check!(sock.send_buffer_size().expect("read send buffer") >= 512 * 1024);
-        check!(sock.recv_buffer_size().expect("read recv buffer") >= 512 * 1024);
+        // Linux clamps SO_SNDBUF/SO_RCVBUF at net.core.{w,r}mem_max (208 KiB
+        // by default, ~416 KiB after the kernel's readback doubling), so the
+        // 1 MiB request cannot be asserted verbatim; 128 KiB still proves the
+        // buffers grew far beyond the 4 KiB baseline set above.
+        check!(sock.send_buffer_size().expect("read send buffer") >= 128 * 1024);
+        check!(sock.recv_buffer_size().expect("read recv buffer") >= 128 * 1024);
         drop(client);
     }
 
@@ -5521,6 +5525,7 @@ mod tests {
         // Every wait helper must still be pending (time out) while its
         // condition is unmet. The futures are lazy async fns, so building the
         // table up front does no work; each is awaited sequentially below.
+        #[allow(clippy::type_complexity)]
         let pending_waits: [(
             &str,
             std::pin::Pin<Box<dyn std::future::Future<Output = ()> + '_>>,
@@ -5528,7 +5533,7 @@ mod tests {
             (
                 "wait_for_share_state_summary",
                 Box::pin(async {
-                    let _ = handle
+                    let () = handle
                         .wait_for_share_state_summary("missing-mutant-group", topic_id, 0)
                         .await;
                 }),
@@ -5606,6 +5611,7 @@ mod tests {
         // wait_until_partition_leader_changed must stay pending for each of
         // these submitted partitions:
         // (topic, topic_id, leader, replicas/isr, leader_epoch, excluded leader)
+        #[allow(clippy::type_complexity)]
         let leader_changed_cases: [(&str, u128, u64, &[u64], i32, u64); 4] = [
             // leader 0 means "no leader" — never counts as a change.
             ("leader-zero-mutant-topic", 0xF001, 0, &[1], 3, 1),

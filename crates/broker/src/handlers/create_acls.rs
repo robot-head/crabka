@@ -347,6 +347,7 @@ mod tests {
         };
         assert!(entry == expected);
 
+        #[allow(clippy::type_complexity)]
         let cases: [(fn(&mut AclCreation), &str); 4] = [
             (|c| c.resource_name.clear(), "empty resource_name"),
             (

@@ -77,7 +77,7 @@ pub fn api_name(api_key: i16) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
 
     #[test]
     fn api_name_known_and_unknown() {
@@ -146,7 +146,6 @@ mod tests {
         });
 
         let g = captured.lock().unwrap();
-        use assert2::check;
         check!(g.name.as_deref() == Some("Produce"));
         check!(g.kind.as_deref() == Some("server"));
         check!(g.api_key == Some(0));

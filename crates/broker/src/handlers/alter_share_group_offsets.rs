@@ -324,7 +324,6 @@ mod tests {
 
     #[tokio::test]
     async fn handle_error_scenarios_preserve_expected_rows() {
-        let version = alter_share_group_offsets_response::MAX_VERSION;
         type Case<'a> = (
             &'a str,
             Arc<dyn Authorizer>,
@@ -333,6 +332,7 @@ mod tests {
             Vec<i32>,
             AlterShareGroupOffsetsResponse,
         );
+        let version = alter_share_group_offsets_response::MAX_VERSION;
         let cases: Vec<Case<'_>> = vec![
             (
                 "disabled feature returns top-level unsupported version",

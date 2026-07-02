@@ -168,6 +168,7 @@ mod tests {
     use super::*;
     use assert2::assert;
     use crabka_metadata::{BrokerRegistrationRecord, MetadataImage, MetadataRecord, TopicRecord};
+    use crabka_protocol::UnknownTaggedFields;
     use crabka_security::{AuthMethod, Principal};
     use std::net::SocketAddr;
     use std::sync::Arc;
@@ -327,22 +328,22 @@ mod tests {
             ConfigResource {
                 resource_name: "t-a".to_string(),
                 resource_type: RESOURCE_TYPE_TOPIC,
-                unknown_tagged_fields: Default::default(),
+                unknown_tagged_fields: UnknownTaggedFields::default(),
             },
             ConfigResource {
                 resource_name: "t-b".to_string(),
                 resource_type: RESOURCE_TYPE_TOPIC,
-                unknown_tagged_fields: Default::default(),
+                unknown_tagged_fields: UnknownTaggedFields::default(),
             },
             ConfigResource {
                 resource_name: "1".to_string(),
                 resource_type: RESOURCE_TYPE_BROKER,
-                unknown_tagged_fields: Default::default(),
+                unknown_tagged_fields: UnknownTaggedFields::default(),
             },
             ConfigResource {
                 resource_name: "2".to_string(),
                 resource_type: RESOURCE_TYPE_BROKER,
-                unknown_tagged_fields: Default::default(),
+                unknown_tagged_fields: UnknownTaggedFields::default(),
             },
         ];
         assert!(out == expected);
@@ -355,7 +356,7 @@ mod tests {
         let expected = vec![ConfigResource {
             resource_name: "t-a".to_string(),
             resource_type: RESOURCE_TYPE_TOPIC,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }];
         assert!(out == expected);
     }
@@ -368,12 +369,12 @@ mod tests {
             ConfigResource {
                 resource_name: "5".to_string(),
                 resource_type: RESOURCE_TYPE_BROKER,
-                unknown_tagged_fields: Default::default(),
+                unknown_tagged_fields: UnknownTaggedFields::default(),
             },
             ConfigResource {
                 resource_name: "7".to_string(),
                 resource_type: RESOURCE_TYPE_BROKER,
-                unknown_tagged_fields: Default::default(),
+                unknown_tagged_fields: UnknownTaggedFields::default(),
             },
         ];
         assert!(out == expected);
@@ -406,12 +407,12 @@ mod tests {
             ConfigResource {
                 resource_name: "t-a".to_string(),
                 resource_type: RESOURCE_TYPE_TOPIC,
-                unknown_tagged_fields: Default::default(),
+                unknown_tagged_fields: UnknownTaggedFields::default(),
             },
             ConfigResource {
                 resource_name: "1".to_string(),
                 resource_type: RESOURCE_TYPE_BROKER,
-                unknown_tagged_fields: Default::default(),
+                unknown_tagged_fields: UnknownTaggedFields::default(),
             },
         ];
         assert!(out == expected);
@@ -448,7 +449,7 @@ mod tests {
             throttle_time_ms: 0,
             error_code: codes::CLUSTER_AUTHORIZATION_FAILED,
             config_resources: vec![],
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         };
         assert!(resp == expected);
         broker_handle.shutdown().await;

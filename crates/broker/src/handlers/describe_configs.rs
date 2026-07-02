@@ -265,6 +265,7 @@ pub(crate) async fn handle(
 #[cfg(test)]
 mod tests {
     use assert2::assert;
+    use crabka_protocol::UnknownTaggedFields;
     use std::collections::BTreeMap;
 
     use crabka_metadata::{BrokerConfigRecord, MetadataImage, MetadataRecord};
@@ -320,7 +321,7 @@ mod tests {
             synonyms: Vec::new(),
             config_type: 0,
             documentation: None,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         };
         assert!(entry == expected);
     }
@@ -361,9 +362,9 @@ mod tests {
                 synonyms: Vec::new(),
                 config_type: 0,
                 documentation: None,
-                unknown_tagged_fields: Default::default(),
+                unknown_tagged_fields: UnknownTaggedFields::default(),
             }],
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         };
         assert!(result == expected);
     }
@@ -389,7 +390,7 @@ mod tests {
             resource_type: super::RESOURCE_TYPE_BROKER,
             resource_name: "not-a-number".to_string(),
             configs: Vec::new(),
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         };
         assert!(result == expected);
     }
@@ -505,7 +506,7 @@ mod tests {
             resource_type: super::RESOURCE_TYPE_TOPIC,
             resource_name: "t".to_string(),
             configs: Vec::new(),
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         };
         assert!(res == expected);
     }

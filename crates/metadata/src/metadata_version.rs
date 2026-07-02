@@ -247,7 +247,7 @@ mod tests {
             ("3.5-IV9", None),
         ] {
             assert!(
-                from_version_string(s).map(|m| m.feature_level()) == want,
+                from_version_string(s).map(super::MetadataVersion::feature_level) == want,
                 "version {s}"
             );
         }
@@ -257,7 +257,7 @@ mod tests {
     fn from_version_string_short_picks_highest_in_minor() {
         for (s, want) in [("3.7", Some(19)), ("4.0", Some(25)), ("2.8", None)] {
             assert!(
-                from_version_string(s).map(|m| m.feature_level()) == want,
+                from_version_string(s).map(super::MetadataVersion::feature_level) == want,
                 "version {s}"
             );
         }

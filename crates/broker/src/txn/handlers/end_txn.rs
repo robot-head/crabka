@@ -654,6 +654,7 @@ mod tests {
     use super::*;
     use assert2::assert;
     use crabka_metadata::{BrokerEndpoint, BrokerRegistrationRecord, MetadataRecord};
+    use crabka_protocol::UnknownTaggedFields;
     use crabka_protocol::owned::end_txn_response::EndTxnResponse;
 
     fn decode_response(bytes: &Bytes, version: i16) -> EndTxnResponse {
@@ -676,7 +677,7 @@ mod tests {
             error_code: codes::NOT_COORDINATOR,
             producer_id: -1,
             producer_epoch: -1,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         };
         assert!(resp == expected);
     }
@@ -692,7 +693,7 @@ mod tests {
             error_code: codes::NONE,
             producer_id: 42,
             producer_epoch: 7,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         };
         assert!(resp == expected);
     }

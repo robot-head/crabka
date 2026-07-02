@@ -374,7 +374,7 @@ fn encode(version: i16, resp: &OffsetDeleteResponse) -> Result<Bytes, BrokerErro
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use bytes::BufMut;
     use crabka_protocol::UnknownTaggedFields;
     use crabka_protocol::owned::consumer_protocol_subscription::ConsumerProtocolSubscription;
@@ -629,7 +629,6 @@ mod tests {
                 expected_row(-1, codes::UNKNOWN_TOPIC_OR_PARTITION),
             ],
         )];
-        use assert2::check;
         check!(out == expected);
         check!(tombs.len() == 1, "only p=0 queued");
         check!(to_remove == vec![("t1".to_string(), 0)]);
