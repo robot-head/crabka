@@ -2923,6 +2923,7 @@ jobs:
           helm repo add bitnami https://charts.bitnami.com/bitnami
           helm repo update bitnami
           imgs=$(helm template kc bitnami/keycloak --version 25.2.0 \
+            --set global.security.allowInsecureImages=true \
             --set image.repository=mirror.gcr.io/bitnamilegacy/keycloak \
             --set postgresql.image.repository=mirror.gcr.io/bitnamilegacy/postgresql \
             | grep -oE 'image: [^ ]+' | awk '{print $2}' | tr -d '"' \
@@ -2997,6 +2998,7 @@ jobs:
           helm repo add bitnami https://charts.bitnami.com/bitnami
           helm repo update bitnami
           helm install kc bitnami/keycloak \
+            --set global.security.allowInsecureImages=true \
             --namespace keycloak --create-namespace \
             --version 25.2.0 \
             --set auth.adminUser=admin \
@@ -3667,6 +3669,7 @@ jobs:
           helm repo add bitnami https://charts.bitnami.com/bitnami
           helm repo update bitnami
           imgs=$(helm template kc bitnami/keycloak --version 25.2.0 \
+            --set global.security.allowInsecureImages=true \
             --set image.repository=mirror.gcr.io/bitnamilegacy/keycloak \
             --set postgresql.image.repository=mirror.gcr.io/bitnamilegacy/postgresql \
             | grep -oE 'image: [^ ]+' | awk '{print $2}' | tr -d '"' \
@@ -3699,6 +3702,7 @@ jobs:
           helm repo add bitnami https://charts.bitnami.com/bitnami
           helm repo update bitnami
           helm install kc bitnami/keycloak \
+            --set global.security.allowInsecureImages=true \
             --namespace keycloak --create-namespace \
             --version 25.2.0 \
             --set auth.adminUser=admin \
