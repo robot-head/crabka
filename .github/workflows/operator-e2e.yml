@@ -135,7 +135,7 @@ jobs:
         with:
           cluster_name: crabka-e2e
           version: v0.24.0
-          node_image: mirror.gcr.io/kindest/node:v1.30.0
+          node_image: kindest/node:v1.30.0
 
       - name: Install MetalLB (so LoadBalancer Services get an IP in kind)
         run: |
@@ -748,7 +748,7 @@ jobs:
           for i in $(seq 1 30); do
             pod="curl-metrics-$i"
             if kubectl run "$pod" -n default --rm -i --restart=Never \
-              --image=mirror.gcr.io/curlimages/curl:8.10.1 --quiet -- \
+              --image=curlimages/curl:8.10.1 --quiet -- \
               -sf "$url" > /tmp/metrics.out; then
               if grep -q '^# TYPE crabka_broker' /tmp/metrics.out; then
                 exit 0
@@ -865,7 +865,7 @@ jobs:
         with:
           cluster_name: crabka-sr-e2e
           version: v0.24.0
-          node_image: mirror.gcr.io/kindest/node:v1.30.0
+          node_image: kindest/node:v1.30.0
       - name: Load images into kind
         run: |
           for img in crabka-operator crabka-broker crabka-schema-registry; do
@@ -878,8 +878,8 @@ jobs:
           # Pre-load the curl image used in the schema round-trip test so the
           # pod doesn't need to pull from DockerHub mid-test (rate-limits / slow
           # pulls cause spurious failures in that step).
-          docker pull mirror.gcr.io/curlimages/curl:8.10.1
-          kind load docker-image mirror.gcr.io/curlimages/curl:8.10.1 --name crabka-sr-e2e
+          docker pull curlimages/curl:8.10.1
+          kind load docker-image curlimages/curl:8.10.1 --name crabka-sr-e2e
       - name: Install prometheus-operator CRDs
         run: |
           PROM_OP_TAG=v0.79.2
@@ -944,7 +944,7 @@ jobs:
       - name: Register + fetch a schema (round-trip) via an in-cluster curl pod
         run: |
           BASE=http://sr-sr.default.svc.cluster.local:8081
-          run_curl() { kubectl run sr-curl-$RANDOM -n default --image=mirror.gcr.io/curlimages/curl:8.10.1 --restart=Never --rm -i --quiet --command -- "$@"; }
+          run_curl() { kubectl run sr-curl-$RANDOM -n default --image=curlimages/curl:8.10.1 --restart=Never --rm -i --quiet --command -- "$@"; }
           # POST a subject version.
           run_curl curl -sf -X POST "$BASE/subjects/orders-value/versions" \
             -H 'Content-Type: application/vnd.schemaregistry.v1+json' \
@@ -989,7 +989,7 @@ jobs:
           - role: control-plane
           EOF
           kind create cluster --config /tmp/kind-config.yaml \
-            --image mirror.gcr.io/kindest/node:v1.30.0 \
+            --image kindest/node:v1.30.0 \
             --wait 60s || true
 
       - name: Install Calico
@@ -1134,7 +1134,7 @@ jobs:
       - name: Probe from a LABELED namespace (must succeed)
         run: |
           set -e
-          kubectl run nc-allowed -n clients --image=mirror.gcr.io/library/alpine:3 --restart=Never -- \
+          kubectl run nc-allowed -n clients --image=alpine:3 --restart=Never -- \
             sh -c 'apk add --no-cache busybox-extras > /dev/null && \
                    nc -zv -w 5 demo-broker-headless.default.svc.cluster.local 9092'
           # Wait for completion; expect exit 0.
@@ -1157,7 +1157,7 @@ jobs:
         run: |
           set -e
           # Run with a short connect timeout so the probe terminates cleanly.
-          kubectl run nc-denied -n default --image=mirror.gcr.io/library/alpine:3 --restart=Never -- \
+          kubectl run nc-denied -n default --image=alpine:3 --restart=Never -- \
             sh -c 'apk add --no-cache busybox-extras > /dev/null && \
                    nc -zv -w 5 demo-broker-headless.default.svc.cluster.local 9092; echo exit=$?'
           for i in $(seq 1 30); do
@@ -1226,7 +1226,7 @@ jobs:
         with:
           cluster_name: crabka-kt-e2e
           version: v0.24.0
-          node_image: mirror.gcr.io/kindest/node:v1.30.0
+          node_image: kindest/node:v1.30.0
 
       - name: Load images into kind
         run: |
@@ -1348,7 +1348,7 @@ jobs:
           run_kt() {
             local name=$1 out=$2; shift 2
             kubectl run "$name" -n default --restart=Never \
-              --image=mirror.gcr.io/apache/kafka:3.8.0 --command -- "$@" >/dev/null
+              --image=apache/kafka:3.8.0 --command -- "$@" >/dev/null
             for i in $(seq 1 60); do
               phase=$(kubectl get pod "$name" -n default \
                 -o jsonpath='{.status.phase}' 2>/dev/null || true)
@@ -1400,7 +1400,7 @@ jobs:
           # See "Assert partition count + config" above for the rationale
           # behind create→wait→logs instead of `kubectl run --rm -i`.
           kubectl run kt-describe2 -n default --restart=Never \
-            --image=mirror.gcr.io/apache/kafka:3.8.0 --command -- \
+            --image=apache/kafka:3.8.0 --command -- \
             /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$bootstrap" \
               --describe --topic demo-topic >/dev/null
           for i in $(seq 1 60); do
@@ -1452,7 +1452,7 @@ jobs:
           bootstrap="demo-broker-headless.default.svc.cluster.local:9092"
           for i in $(seq 1 20); do
             kubectl run kt-list-$i -n default --rm -i --restart=Never \
-              --image=mirror.gcr.io/apache/kafka:3.8.0 --command -- \
+              --image=apache/kafka:3.8.0 --command -- \
               /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$bootstrap" \
                 --list > /tmp/list.txt
             if ! grep -q "demo-topic" /tmp/list.txt; then exit 0; fi
@@ -1509,7 +1509,7 @@ jobs:
         with:
           cluster_name: crabka-auth-e2e
           version: v0.24.0
-          node_image: mirror.gcr.io/kindest/node:v1.30.0
+          node_image: kindest/node:v1.30.0
 
       - name: Load images into kind
         run: |
@@ -1647,7 +1647,7 @@ jobs:
                 restartPolicy: Never
                 containers:
                   - name: producer
-                    image: mirror.gcr.io/apache/kafka:3.8.0
+                    image: apache/kafka:3.8.0
                     command:
                       - bash
                       - -c
@@ -1710,7 +1710,7 @@ jobs:
                 restartPolicy: Never
                 containers:
                   - name: producer
-                    image: mirror.gcr.io/apache/kafka:3.8.0
+                    image: apache/kafka:3.8.0
                     command:
                       - bash
                       - -c
@@ -1980,7 +1980,7 @@ jobs:
                 restartPolicy: Never
                 initContainers:
                   - name: pem-to-pkcs12
-                    image: mirror.gcr.io/library/alpine:3.20
+                    image: alpine:3.20
                     command:
                       - sh
                       - -c
@@ -2002,7 +2002,7 @@ jobs:
                         mountPath: /shared
                 containers:
                   - name: producer
-                    image: mirror.gcr.io/apache/kafka:3.8.0
+                    image: apache/kafka:3.8.0
                     command:
                       - bash
                       - -c
@@ -2065,7 +2065,7 @@ jobs:
                 restartPolicy: Never
                 containers:
                   - name: producer
-                    image: mirror.gcr.io/apache/kafka:3.8.0
+                    image: apache/kafka:3.8.0
                     command:
                       - bash
                       - -c
@@ -2204,7 +2204,7 @@ jobs:
         with:
           cluster_name: crabka-dt-e2e
           version: v0.24.0
-          node_image: mirror.gcr.io/kindest/node:v1.30.0
+          node_image: kindest/node:v1.30.0
 
       - name: Load images into kind
         run: |
@@ -2434,7 +2434,7 @@ jobs:
   #     the rendered `broker-N.toml` `[authorization]` block matches the
   #     CR spec.
   #
-  # Stands up an `mirror.gcr.io/openpolicyagent/opa:0.65.0` Deployment in-cluster with a
+  # Stands up an `openpolicyagent/opa:0.65.0` Deployment in-cluster with a
   # hardcoded Rego policy mounted via a ConfigMap (kept for future
   # produce-level expansion; today only its `/health` endpoint is hit by
   # the smoke assertion).
@@ -2474,7 +2474,7 @@ jobs:
         with:
           cluster_name: crabka-opa-e2e
           version: v0.24.0
-          node_image: mirror.gcr.io/kindest/node:v1.30.0
+          node_image: kindest/node:v1.30.0
 
       - name: Load images into kind
         run: |
@@ -2566,7 +2566,7 @@ jobs:
               spec:
                 containers:
                   - name: opa
-                    image: mirror.gcr.io/openpolicyagent/opa:0.65.0
+                    image: openpolicyagent/opa:0.65.0
                     args:
                       - "run"
                       - "--server"
@@ -2745,7 +2745,7 @@ jobs:
         run: |
           set -e
           kubectl run opa-health-probe -n default --rm -i --restart=Never \
-            --image=mirror.gcr.io/curlimages/curl:8.10.1 --command -- \
+            --image=curlimages/curl:8.10.1 --command -- \
             curl -fsS --max-time 10 http://opa.default.svc.cluster.local:8181/health
 
       - name: Smoke — broker ConfigMap renders [authorization] + [authorization.opa]
@@ -2882,7 +2882,7 @@ jobs:
         with:
           cluster_name: crabka-oauth-e2e
           version: v0.24.0
-          node_image: mirror.gcr.io/kindest/node:v1.30.0
+          node_image: kindest/node:v1.30.0
 
       - name: Load images into kind
         run: |
@@ -2923,9 +2923,8 @@ jobs:
           helm repo add bitnami https://charts.bitnami.com/bitnami
           helm repo update bitnami
           imgs=$(helm template kc bitnami/keycloak --version 25.2.0 \
-            --set global.security.allowInsecureImages=true \
-            --set image.repository=mirror.gcr.io/bitnamilegacy/keycloak \
-            --set postgresql.image.repository=mirror.gcr.io/bitnamilegacy/postgresql \
+            --set image.repository=bitnamilegacy/keycloak \
+            --set postgresql.image.repository=bitnamilegacy/postgresql \
             | grep -oE 'image: [^ ]+' | awk '{print $2}' | tr -d '"' \
             | grep bitnamilegacy | sort -u)
           if [ -z "$imgs" ]; then echo "::error::no bitnamilegacy images resolved from chart"; exit 1; fi
@@ -2955,13 +2954,13 @@ jobs:
       # operator surface + slice 49c broker trust knob). Broker now talks
       # HTTPS to the JWKS endpoint, so no `WeakAuth` Event fires.
       #
-      # `image.repository=mirror.gcr.io/bitnamilegacy/keycloak` +
-      # `postgresql.image.repository=mirror.gcr.io/bitnamilegacy/postgresql` — Bitnami's
-      # 2025 "Secure Images" migration emptied the free `mirror.gcr.io/bitnami/*`
-      # namespace, so the chart's default `mirror.gcr.io/bitnami/{keycloak,
+      # `image.repository=bitnamilegacy/keycloak` +
+      # `postgresql.image.repository=bitnamilegacy/postgresql` — Bitnami's
+      # 2025 "Secure Images" migration emptied the free `docker.io/bitnami/*`
+      # namespace, so the chart's default `docker.io/bitnami/{keycloak,
       # postgresql}` tags now 404 → ImagePullBackOff → the install's
-      # `--wait` times out. The old images live on at `mirror.gcr.io/
-      # mirror.gcr.io/bitnamilegacy/*` (same tags); repoint both there. (`bitnamilegacy`
+      # `--wait` times out. The old images live on at `docker.io/
+      # bitnamilegacy/*` (same tags); repoint both there. (`bitnamilegacy`
       # is itself unmaintained — if it disappears, swap to the upstream
       # `quay.io/keycloak/keycloak` image and a hand-rolled Deployment.)
       #
@@ -2998,7 +2997,6 @@ jobs:
           helm repo add bitnami https://charts.bitnami.com/bitnami
           helm repo update bitnami
           helm install kc bitnami/keycloak \
-            --set global.security.allowInsecureImages=true \
             --namespace keycloak --create-namespace \
             --version 25.2.0 \
             --set auth.adminUser=admin \
@@ -3006,8 +3004,8 @@ jobs:
             --set service.type=ClusterIP \
             --set tls.enabled=true \
             --set tls.autoGenerated.enabled=true \
-            --set image.repository=mirror.gcr.io/bitnamilegacy/keycloak \
-            --set postgresql.image.repository=mirror.gcr.io/bitnamilegacy/postgresql \
+            --set image.repository=bitnamilegacy/keycloak \
+            --set postgresql.image.repository=bitnamilegacy/postgresql \
             --set production=false \
             --set proxy=edge \
             --set startupProbe.enabled=true \
@@ -3359,7 +3357,7 @@ jobs:
                 restartPolicy: Never
                 containers:
                   - name: producer
-                    image: mirror.gcr.io/apache/kafka:3.8.0
+                    image: apache/kafka:3.8.0
                     command:
                       - bash
                       - -c
@@ -3472,7 +3470,7 @@ jobs:
                 restartPolicy: Never
                 containers:
                   - name: producer
-                    image: mirror.gcr.io/apache/kafka:3.8.0
+                    image: apache/kafka:3.8.0
                     command:
                       - bash
                       - -c
@@ -3632,7 +3630,7 @@ jobs:
         with:
           cluster_name: crabka-oauth-introspection-e2e
           version: v0.24.0
-          node_image: mirror.gcr.io/kindest/node:v1.30.0
+          node_image: kindest/node:v1.30.0
 
       - name: Load images into kind
         run: |
@@ -3669,9 +3667,8 @@ jobs:
           helm repo add bitnami https://charts.bitnami.com/bitnami
           helm repo update bitnami
           imgs=$(helm template kc bitnami/keycloak --version 25.2.0 \
-            --set global.security.allowInsecureImages=true \
-            --set image.repository=mirror.gcr.io/bitnamilegacy/keycloak \
-            --set postgresql.image.repository=mirror.gcr.io/bitnamilegacy/postgresql \
+            --set image.repository=bitnamilegacy/keycloak \
+            --set postgresql.image.repository=bitnamilegacy/postgresql \
             | grep -oE 'image: [^ ]+' | awk '{print $2}' | tr -d '"' \
             | grep bitnamilegacy | sort -u)
           if [ -z "$imgs" ]; then echo "::error::no bitnamilegacy images resolved from chart"; exit 1; fi
@@ -3702,7 +3699,6 @@ jobs:
           helm repo add bitnami https://charts.bitnami.com/bitnami
           helm repo update bitnami
           helm install kc bitnami/keycloak \
-            --set global.security.allowInsecureImages=true \
             --namespace keycloak --create-namespace \
             --version 25.2.0 \
             --set auth.adminUser=admin \
@@ -3710,8 +3706,8 @@ jobs:
             --set service.type=ClusterIP \
             --set tls.enabled=true \
             --set tls.autoGenerated.enabled=true \
-            --set image.repository=mirror.gcr.io/bitnamilegacy/keycloak \
-            --set postgresql.image.repository=mirror.gcr.io/bitnamilegacy/postgresql \
+            --set image.repository=bitnamilegacy/keycloak \
+            --set postgresql.image.repository=bitnamilegacy/postgresql \
             --set production=false \
             --set proxy=edge \
             --set startupProbe.enabled=true \
@@ -4045,7 +4041,7 @@ jobs:
                 restartPolicy: Never
                 containers:
                   - name: producer
-                    image: mirror.gcr.io/apache/kafka:3.8.0
+                    image: apache/kafka:3.8.0
                     command:
                       - bash
                       - -c
@@ -4150,7 +4146,7 @@ jobs:
                 restartPolicy: Never
                 containers:
                   - name: producer
-                    image: mirror.gcr.io/apache/kafka:3.8.0
+                    image: apache/kafka:3.8.0
                     command:
                       - bash
                       - -c
