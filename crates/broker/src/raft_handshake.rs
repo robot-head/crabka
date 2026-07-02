@@ -750,6 +750,16 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn read_kafka_request_accepts_exact_header_prefix_frame() {
+        // A null client id and empty body make the frame exactly
+        // REQUEST_HEADER_PREFIX_LEN bytes — the minimum legal frame and the
+        // only length where the short-header guard's strict `<` matters.
+        let frame = request_frame(17, 1, 46, None, false, b"");
+        let decoded = read_request_from_frame(frame).await.expect("exact prefix");
+        assert!(decoded == (17, 1, 46, Vec::new()));
+    }
+
+    #[tokio::test]
     async fn write_response_uses_expected_header_versions() {
         let (mut client, mut server) = tokio::io::duplex(128);
         let writer = tokio::spawn(async move {
