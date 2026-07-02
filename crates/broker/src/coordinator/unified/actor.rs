@@ -2454,7 +2454,7 @@ mod tests {
         m.classic = Some(super::super::consumer_state::ClassicMemberFacade {
             generation_id: 7,
             supported_protocols: vec![("range".to_string(), bytes::Bytes::from_static(b"meta"))],
-            session_timeout: Duration::from_millis(45_000),
+            session_timeout: Duration::from_secs(45),
             last_synced_assignment: bytes::Bytes::from_static(b"assigned"),
             awaiting_sync: false,
         });

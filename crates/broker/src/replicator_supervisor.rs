@@ -779,7 +779,11 @@ mod tests {
         let source: Arc<dyn crate::metadata_source::MetadataSource> =
             Arc::new(StaticMetadataSource::new(MetadataImage::new(Uuid::nil())));
         let err = NetworkAssignDirsReporter
-            .send(&source, "test", Default::default())
+            .send(
+                &source,
+                "test",
+                crabka_protocol::owned::assign_replicas_to_dirs_request::AssignReplicasToDirsRequest::default(),
+            )
             .await
             .expect_err("no controller leader must fail");
         assert!(err == "no controller leader");
