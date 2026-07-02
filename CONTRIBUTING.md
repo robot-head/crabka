@@ -1,5 +1,18 @@
 # Contributing to Crabka
 
+## Code & documentation style
+
+Code and docs follow the [style guides](docs/style_guides/README.md) in `docs/style_guides/`:
+[code style](docs/style_guides/code_style_guide.md), [rustdoc](docs/style_guides/rustdoc_style_guide.md),
+[README](docs/style_guides/readme_style_guide.md), [design docs](docs/style_guides/design_doc_style_guide.md),
+and [coverage reports](docs/style_guides/coverage_report_style_guide.md). Read the code style guide before your
+first change. Formatting and linting are enforced in CI:
+
+```bash
+cargo +nightly fmt --all -- --check              # nightly: rustfmt.toml enables format_code_in_doc_comments
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
 ## Prerequisites
 
 - Rust toolchain pinned by `rust-toolchain.toml`.

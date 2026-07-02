@@ -20,6 +20,12 @@ When a schema, enum, wire format, or interface changes, just change it. Wipe loc
 
 When in doubt, match Kafka. When Kafka's behavior is undocumented or version-dependent, check the latest released cp-kafka image's behavior empirically rather than reading the wiki.
 
+## Code & Documentation Style
+
+Follow the style guides in [`docs/style_guides/`](docs/style_guides/README.md) — [code](docs/style_guides/code_style_guide.md), [rustdoc](docs/style_guides/rustdoc_style_guide.md), [README](docs/style_guides/readme_style_guide.md), [design docs](docs/style_guides/design_doc_style_guide.md), and [coverage reports](docs/style_guides/coverage_report_style_guide.md). They record Crabka's actual conventions (pinned stable toolchain, `cargo +nightly fmt`, `unsafe` forbidden, `clippy::pedantic`, workspace lints/deps, `crabka-<name>` crates, thiserror error enums, tokio, `assert2`/`nextest`/mutation testing).
+
+Don't make style-only sweeps across untouched files — bring a file into line with the guides only when you're already editing it, keeping the tidy-up proportionate to the change.
+
 ## Execution
 
 When executing implementation plans, always use **subagent-driven development in parallel batches** where the per-task file sets don't overlap. The plan groups tasks into batches; dispatch all tasks within a batch concurrently (single message, multiple Agent calls), wait for the batch to complete, review, then move to the next batch. Sequential dispatch one-task-at-a-time is wasted wall-clock — use it only when later tasks genuinely depend on earlier ones in the same batch.
