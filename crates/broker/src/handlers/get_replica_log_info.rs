@@ -11,18 +11,23 @@
 use std::sync::atomic::Ordering;
 
 use bytes::Bytes;
-
 use crabka_metadata::{AclOperation, ResourceType};
-use crabka_protocol::owned::get_replica_log_info_request::GetReplicaLogInfoRequest;
-use crabka_protocol::owned::get_replica_log_info_response::{
-    GetReplicaLogInfoResponse, PartitionLogInfo, TopicPartitionLogInfo,
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        get_replica_log_info_request::GetReplicaLogInfoRequest,
+        get_replica_log_info_response::{
+            GetReplicaLogInfoResponse, PartitionLogInfo, TopicPartitionLogInfo,
+        },
+    },
 };
-use crabka_protocol::{Decode, Encode};
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes,
+    error::BrokerError,
+};
 
 #[allow(clippy::unused_async)] // async to match the inline-intercept handler shape.
 #[tracing::instrument(
@@ -181,8 +186,9 @@ fn denied_response(version: i16, req_bytes: &[u8]) -> Result<Bytes, BrokerError>
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     /// Empty ACLs + no super-users → every principal is denied
     /// `ClusterAction`, so the denied response carries
@@ -190,10 +196,10 @@ mod tests {
     #[test]
     fn cluster_action_denied_yields_cluster_authorization_failed() {
         use bytes::BytesMut;
-        use crabka_protocol::owned::get_replica_log_info_request::{
-            self, GetReplicaLogInfoRequest, TopicPartitions,
+        use crabka_protocol::owned::{
+            get_replica_log_info_request::{self, GetReplicaLogInfoRequest, TopicPartitions},
+            get_replica_log_info_response::GetReplicaLogInfoResponse,
         };
-        use crabka_protocol::owned::get_replica_log_info_response::GetReplicaLogInfoResponse;
 
         let authorizer =
             crate::authorizer::SimpleAclAuthorizer::new(std::collections::HashSet::new());

@@ -5,8 +5,10 @@
 
 use std::sync::Arc;
 
-use super::codec::BatchCodec;
-use super::operator::{BuiltinOp, ColumnarProcessor};
+use super::{
+    codec::BatchCodec,
+    operator::{BuiltinOp, ColumnarProcessor},
+};
 
 /// Opaque handle to a node, returned by `add_*` and passed as a parent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -165,9 +167,12 @@ impl ColumnarTopology {
     }
 }
 
-use super::codec::{BatchError, ConsumedRecord, ProduceRecord};
-use super::operator::ColumnarContext;
 use std::collections::HashMap;
+
+use super::{
+    codec::{BatchError, ConsumedRecord, ProduceRecord},
+    operator::ColumnarContext,
+};
 
 /// A built, runnable columnar topology (single task in v1). Cheap to construct.
 pub struct BuiltColumnarTopology<'t> {
@@ -261,13 +266,20 @@ impl BuiltColumnarTopology<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::columnar::serde::polars::PolarsIpcSerde;
-    use crate::columnar::topology::codec::{BlobCodec, ConsumedRecord};
-    use crate::columnar::topology::operator::BuiltinOp;
-    use crate::processor::serde::Serde;
     use ::polars::prelude::*;
     use assert2::check;
+
+    use super::*;
+    use crate::{
+        columnar::{
+            serde::polars::PolarsIpcSerde,
+            topology::{
+                codec::{BlobCodec, ConsumedRecord},
+                operator::BuiltinOp,
+            },
+        },
+        processor::serde::Serde,
+    };
 
     #[test]
     fn builds_and_validates_linear_topology() {

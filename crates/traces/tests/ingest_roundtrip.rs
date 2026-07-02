@@ -2,24 +2,29 @@
 
 mod support;
 
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use assert2::{assert, check};
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::{
+    body::Body,
+    http::{Request, StatusCode},
+};
 use crabka_blockstore::{BlockWriter, TraceIndex};
 use crabka_client_consumer::{AutoOffsetReset, Consumer};
 use crabka_client_producer::Producer;
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-use crabka_traces::distributor::{DistributorState, KafkaSink, router};
-use crabka_traces::{SpanRecord, TRACES_WAL_TOPIC, blockbuilder};
-use object_store::ObjectStore;
-use object_store::memory::InMemory;
-use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue};
-use opentelemetry_proto::tonic::resource::v1::Resource;
-use opentelemetry_proto::tonic::trace::v1::{
-    ResourceSpans, ScopeSpans, Span as OtlpSpan, TracesData,
+use crabka_traces::{
+    SpanRecord, TRACES_WAL_TOPIC, blockbuilder,
+    distributor::{DistributorState, KafkaSink, router},
+};
+use object_store::{ObjectStore, memory::InMemory};
+use opentelemetry_proto::tonic::{
+    common::v1::{AnyValue, KeyValue},
+    resource::v1::Resource,
+    trace::v1::{ResourceSpans, ScopeSpans, Span as OtlpSpan, TracesData},
 };
 use prost::Message as _;
 use tower::ServiceExt as _;

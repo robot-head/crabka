@@ -291,10 +291,11 @@ pub enum MetadataRecord {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
     use serde_wincode::SerdeCompat;
     use wincode::{Deserialize as _, Serialize as _};
+
+    use super::*;
 
     fn round_trip(r: &MetadataRecord) -> MetadataRecord {
         let bytes = <SerdeCompat<MetadataRecord>>::serialize(r).unwrap();

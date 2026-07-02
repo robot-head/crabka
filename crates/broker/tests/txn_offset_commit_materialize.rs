@@ -21,19 +21,24 @@ use assert2::assert;
 
 mod support;
 
-use crabka_protocol::owned::add_offsets_to_txn_request::AddOffsetsToTxnRequest;
-use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-use crabka_protocol::owned::end_txn_request::EndTxnRequest;
-use crabka_protocol::owned::find_coordinator_request::FindCoordinatorRequest;
-use crabka_protocol::owned::init_producer_id_request::InitProducerIdRequest;
-use crabka_protocol::owned::metadata_request::{MetadataRequest, MetadataRequestTopic};
-use crabka_protocol::owned::offset_fetch_request::{
-    OffsetFetchRequest, OffsetFetchRequestGroup, OffsetFetchRequestTopic, OffsetFetchRequestTopics,
+use crabka_protocol::{
+    owned::{
+        add_offsets_to_txn_request::AddOffsetsToTxnRequest,
+        create_topics_request::{CreatableTopic, CreateTopicsRequest},
+        end_txn_request::EndTxnRequest,
+        find_coordinator_request::FindCoordinatorRequest,
+        init_producer_id_request::InitProducerIdRequest,
+        metadata_request::{MetadataRequest, MetadataRequestTopic},
+        offset_fetch_request::{
+            OffsetFetchRequest, OffsetFetchRequestGroup, OffsetFetchRequestTopic,
+            OffsetFetchRequestTopics,
+        },
+        txn_offset_commit_request::{
+            TxnOffsetCommitRequest, TxnOffsetCommitRequestPartition, TxnOffsetCommitRequestTopic,
+        },
+    },
+    primitives::uuid::Uuid as WireUuid,
 };
-use crabka_protocol::owned::txn_offset_commit_request::{
-    TxnOffsetCommitRequest, TxnOffsetCommitRequestPartition, TxnOffsetCommitRequestTopic,
-};
-use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 
 /// `NOT_COORDINATOR` — the `__transaction_state` partition leader is elected
 /// lazily on first access, so an early `InitProducerId` can race ahead of it.

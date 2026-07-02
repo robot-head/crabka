@@ -1,20 +1,29 @@
+use std::{
+    net::SocketAddr,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+};
+
 use assert2::assert;
 use bytes::BytesMut;
 use crabka_client_admin::{AclEntryFilter, AdminClient};
-use crabka_protocol::Encode;
-use crabka_protocol::owned::api_versions_request;
-use crabka_protocol::owned::api_versions_response::{ApiVersion, ApiVersionsResponse};
-use crabka_protocol::owned::describe_acls_request;
-use crabka_protocol::owned::describe_acls_response::DescribeAclsResponse;
-use futures_util::{SinkExt, StreamExt};
-use std::net::SocketAddr;
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, AtomicUsize, Ordering},
+use crabka_protocol::{
+    Encode,
+    owned::{
+        api_versions_request,
+        api_versions_response::{ApiVersion, ApiVersionsResponse},
+        describe_acls_request,
+        describe_acls_response::DescribeAclsResponse,
+    },
 };
+use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpListener;
-use tokio_util::codec::{Framed, LengthDelimitedCodec};
-use tokio_util::sync::CancellationToken;
+use tokio_util::{
+    codec::{Framed, LengthDelimitedCodec},
+    sync::CancellationToken,
+};
 
 fn kafka_frame(
     stream: tokio::net::TcpStream,

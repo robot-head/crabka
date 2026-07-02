@@ -17,19 +17,22 @@
 //! so the mapping is trivial.
 
 use bytes::{Bytes, BytesMut};
-
 use crabka_metadata::{AclOperation, ResourceType};
-use crabka_protocol::owned::list_transactions_request::ListTransactionsRequest;
-use crabka_protocol::owned::list_transactions_response::{
-    ListTransactionsResponse, TransactionState,
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        list_transactions_request::ListTransactionsRequest,
+        list_transactions_response::{ListTransactionsResponse, TransactionState},
+    },
 };
-use crabka_protocol::{Decode, Encode};
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
-use crate::txn::state::TxnState;
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes,
+    error::BrokerError,
+    txn::state::TxnState,
+};
 
 /// Every transaction state the coordinator can report. Filter strings outside
 /// this set (via [`txn_state_str`]) are echoed back in the KIP-664
@@ -148,12 +151,14 @@ pub(crate) async fn handle(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::assert;
     use std::sync::Arc;
 
-    use crate::test_support::start_broker_with_authorizer_no_audit as start_broker;
-    use crate::test_support::{peer, principal};
+    use assert2::assert;
+
+    use super::*;
+    use crate::test_support::{
+        peer, principal, start_broker_with_authorizer_no_audit as start_broker,
+    };
 
     #[test]
     fn txn_state_str_matches_jvm_names() {

@@ -13,8 +13,10 @@ mod sim_harness;
 use std::cell::RefCell;
 
 use crabka_protocol::records::{Attributes, Record, RecordBatch};
-use crabka_raft::kraft::KraftLog;
-use crabka_raft::kraft::types::{LeaderEpoch, LogView};
+use crabka_raft::kraft::{
+    KraftLog,
+    types::{LeaderEpoch, LogView},
+};
 use sim_harness::{Sim, SimNodeLog};
 
 // --------------------------------------------------------------------------

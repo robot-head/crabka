@@ -3,22 +3,24 @@
 //! the input is a `Change<V>` change-stream and the repartition topic carries a
 //! `Change<VR>` (via the `Changed` serde). `KTable.groupBy` always repartitions.
 
-use std::any::Any;
-use std::cell::RefCell;
-use std::marker::PhantomData;
-use std::rc::Rc;
+use std::{any::Any, cell::RefCell, marker::PhantomData, rc::Rc};
 
-use crate::dsl::builder::InternalStreamsBuilder;
-use crate::dsl::config::Materialized;
-use crate::dsl::graph::{GraphNodeKind, LowerState, NodeId};
-use crate::dsl::kgrouped::mint_store_name;
-use crate::dsl::ktable::KTable;
-use crate::dsl::names;
-use crate::dsl::processors::change::Change;
-use crate::dsl::processors::table_aggregate::KTableAggregateProcessor;
-use crate::dsl::processors::tuple_forwarder::TupleForwarder;
-use crate::processor::serde::{Changed, Consumed, DefaultSerde, I64Serde, Produced, Serde};
-use crate::topology::NodeHandle;
+use crate::{
+    dsl::{
+        builder::InternalStreamsBuilder,
+        config::Materialized,
+        graph::{GraphNodeKind, LowerState, NodeId},
+        kgrouped::mint_store_name,
+        ktable::KTable,
+        names,
+        processors::{
+            change::Change, table_aggregate::KTableAggregateProcessor,
+            tuple_forwarder::TupleForwarder,
+        },
+    },
+    processor::serde::{Changed, Consumed, DefaultSerde, I64Serde, Produced, Serde},
+    topology::NodeHandle,
+};
 
 /// Erased thunk wiring the `Change`-carrying repartition `sink → topic → source`.
 /// Args: `(state, parent_name, sink_name, source_name, topic)`. The parent node

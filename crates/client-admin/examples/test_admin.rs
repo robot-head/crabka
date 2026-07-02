@@ -1,5 +1,6 @@
-use crabka_client_admin::{AdminClient, CreateTopicSpec};
 use std::collections::BTreeMap;
+
+use crabka_client_admin::{AdminClient, CreateTopicSpec};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

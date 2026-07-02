@@ -14,9 +14,9 @@
 //! 9092, so it must not run concurrently with `jvm_acceptance` (single test
 //! here keeps it self-contained).
 
-use assert2::assert;
 use std::process::Command;
 
+use assert2::assert;
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_log::LogConfig;
 

@@ -6,15 +6,16 @@
 
 pub mod scan;
 
-use std::path::PathBuf;
-use std::time::Duration;
+use std::{path::PathBuf, time::Duration};
 
 use tokio::time::interval;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use crate::log_dir;
-use crate::metrics::{BrokerMetrics, PartitionLabel};
+use crate::{
+    log_dir,
+    metrics::{BrokerMetrics, PartitionLabel},
+};
 
 pub struct DiskScanner {
     pub log_dirs: Vec<PathBuf>,
@@ -70,9 +71,11 @@ impl DiskScanner {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::assert;
     use std::io::Write;
+
+    use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn tick_once_sets_gauge_for_each_partition() {

@@ -13,18 +13,23 @@
 //! supplies an explicit key list, only those keys are returned.
 
 use bytes::{Bytes, BytesMut};
-
 use crabka_metadata::{AclOperation, ResourceType};
-use crabka_protocol::owned::describe_configs_request::DescribeConfigsRequest;
-use crabka_protocol::owned::describe_configs_response::{
-    DescribeConfigsResourceResult, DescribeConfigsResponse, DescribeConfigsResult,
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        describe_configs_request::DescribeConfigsRequest,
+        describe_configs_response::{
+            DescribeConfigsResourceResult, DescribeConfigsResponse, DescribeConfigsResult,
+        },
+    },
 };
-use crabka_protocol::{Decode, Encode};
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes,
+    error::BrokerError,
+};
 
 /// `ConfigSource::DYNAMIC_TOPIC_CONFIG` — the value Kafka uses for per-topic
 /// overrides stored in `ZooKeeper` / `KRaft` metadata.
@@ -264,13 +269,13 @@ pub(crate) async fn handle(
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
-    use crabka_protocol::UnknownTaggedFields;
     use std::collections::BTreeMap;
 
+    use assert2::assert;
     use crabka_metadata::{BrokerConfigRecord, MetadataImage, MetadataRecord};
-    use crabka_protocol::owned::describe_configs_response::{
-        DescribeConfigsResourceResult, DescribeConfigsResult,
+    use crabka_protocol::{
+        UnknownTaggedFields,
+        owned::describe_configs_response::{DescribeConfigsResourceResult, DescribeConfigsResult},
     };
     use uuid::Uuid;
 

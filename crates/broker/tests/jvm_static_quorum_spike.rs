@@ -26,16 +26,13 @@
 //! - Shared cluster id: a `uuid::Uuid` whose 16 bytes are the same bytes the JVM
 //!   sees as the base64-url-no-pad `--cluster-id` string.
 
-use std::net::SocketAddr;
-use std::process::Command;
-use std::time::Duration;
+use std::{net::SocketAddr, process::Command, time::Duration};
 
 use assert2::check;
 use base64::Engine as _;
+use crabka_broker::{BootstrapMode, Broker, BrokerConfig, BrokerHandle};
 use tempfile::TempDir;
 use uuid::Uuid;
-
-use crabka_broker::{BootstrapMode, Broker, BrokerConfig, BrokerHandle};
 
 mod support;
 

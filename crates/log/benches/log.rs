@@ -5,18 +5,21 @@
 //! rolling. Intentionally exercises both the active-segment hot path and the
 //! sealed-segment scan path.
 
-use bytes::Bytes;
-use crabka_log::{Log, LogConfig, VerbatimBatch};
-use crabka_protocol::records::{Record, RecordBatch};
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
 #[cfg(unix)]
 use std::fs::OpenOptions;
 #[cfg(unix)]
 use std::io::{IoSlice, Seek, SeekFrom, Write};
 #[cfg(unix)]
 use std::os::unix::fs::FileExt;
-use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::{
+    sync::{Arc, Mutex},
+    time::Instant,
+};
+
+use bytes::Bytes;
+use crabka_log::{Log, LogConfig, VerbatimBatch};
+use crabka_protocol::records::{Record, RecordBatch};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use tempfile::tempdir;
 
 fn make_batch(n: i32, payload_size: usize) -> RecordBatch {

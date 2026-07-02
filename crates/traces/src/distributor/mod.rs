@@ -1,43 +1,51 @@
 //! Distributor role: push-door HTTP routes into the traces WAL.
 
-use std::collections::BTreeMap;
-use std::io::Read;
-use std::net::SocketAddr;
-use std::sync::Arc;
+use std::{collections::BTreeMap, io::Read, net::SocketAddr, sync::Arc};
 
-use axum::Router;
-use axum::body::Bytes;
-use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode, header};
-use axum::response::{IntoResponse, Response};
-use axum::routing::post;
+use axum::{
+    Router,
+    body::Bytes,
+    extract::State,
+    http::{HeaderMap, StatusCode, header},
+    response::{IntoResponse, Response},
+    routing::post,
+};
 use crabka_client_producer::{Header, Producer, ProducerRecord};
 use flate2::read::GzDecoder;
-use opentelemetry_proto::tonic::collector::trace::v1::{
-    ExportTraceServiceRequest, ExportTraceServiceResponse,
-    trace_service_server::{TraceService, TraceServiceServer},
+use opentelemetry_proto::tonic::{
+    collector::trace::v1::{
+        ExportTraceServiceRequest, ExportTraceServiceResponse,
+        trace_service_server::{TraceService, TraceServiceServer},
+    },
+    trace::v1::TracesData,
 };
-use opentelemetry_proto::tonic::trace::v1::TracesData;
 use prost::Message as _;
 use tokio_util::sync::CancellationToken;
-use tonic::metadata::MetadataMap;
-use tonic::transport::Server as GrpcServer;
-use tonic::{Request as GrpcRequest, Response as GrpcResponse, Status as GrpcStatus};
+use tonic::{
+    Request as GrpcRequest, Response as GrpcResponse, Status as GrpcStatus, metadata::MetadataMap,
+    transport::Server as GrpcServer,
+};
 use tracing::Instrument as _;
 
-use crate::error::{TracesError, tempo_error_response};
-use crate::limits::{IngestEnforcer, LimitError, Limits, OverridesProvider};
-use crate::metrics::ServiceMetrics;
-use crate::span::{AttrValue, KeyValue, Span};
-use crate::wal::{SpanRecord, TRACES_WAL_TOPIC, partition_key};
-use crate::wire::jaeger::{decode_jaeger_binary_thrift, decode_jaeger_thrift};
-use crate::wire::jaeger_grpc::api_v2::{
-    PostSpansRequest, PostSpansResponse,
-    collector_service_server::{CollectorService, CollectorServiceServer},
+use crate::{
+    error::{TracesError, tempo_error_response},
+    limits::{IngestEnforcer, LimitError, Limits, OverridesProvider},
+    metrics::ServiceMetrics,
+    span::{AttrValue, KeyValue, Span},
+    wal::{SpanRecord, TRACES_WAL_TOPIC, partition_key},
+    wire::{
+        jaeger::{decode_jaeger_binary_thrift, decode_jaeger_thrift},
+        jaeger_grpc::{
+            api_v2::{
+                PostSpansRequest, PostSpansResponse,
+                collector_service_server::{CollectorService, CollectorServiceServer},
+            },
+            decode_jaeger_grpc_batch,
+        },
+        otlp::decode_otlp,
+        zipkin::decode_zipkin,
+    },
 };
-use crate::wire::jaeger_grpc::decode_jaeger_grpc_batch;
-use crate::wire::otlp::decode_otlp;
-use crate::wire::zipkin::decode_zipkin;
 
 const TENANT_HEADER: &str = "x-scope-orgid";
 const CONTENT_ENCODING: &str = "content-encoding";
@@ -778,20 +786,17 @@ fn error_response(err: &TracesError) -> Response {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::{io::Write as _, sync::Mutex};
 
     use assert2::{assert, check};
-    use axum::body::Body;
-    use axum::http::Request;
-    use flate2::Compression;
-    use flate2::write::GzEncoder;
+    use axum::{body::Body, http::Request};
+    use flate2::{Compression, write::GzEncoder};
     use http_body_util::BodyExt as _;
-    use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
-    use opentelemetry_proto::tonic::trace::v1::{
-        ResourceSpans, ScopeSpans, Span as OtlpSpan, TracesData,
+    use opentelemetry_proto::tonic::{
+        collector::trace::v1::ExportTraceServiceRequest,
+        trace::v1::{ResourceSpans, ScopeSpans, Span as OtlpSpan, TracesData},
     };
     use prost::Message as _;
-    use std::io::Write as _;
     use tonic::Request as GrpcRequest;
     use tower::ServiceExt as _;
 

@@ -4,18 +4,23 @@
 //! Apache Kafka model.
 
 use bytes::{Bytes, BytesMut};
-
 use crabka_metadata::AclOperation;
-use crabka_protocol::owned::delete_records_request::DeleteRecordsRequest;
-use crabka_protocol::owned::delete_records_response::{
-    DeleteRecordsPartitionResult, DeleteRecordsResponse, DeleteRecordsTopicResult,
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        delete_records_request::DeleteRecordsRequest,
+        delete_records_response::{
+            DeleteRecordsPartitionResult, DeleteRecordsResponse, DeleteRecordsTopicResult,
+        },
+    },
 };
-use crabka_protocol::{Decode, Encode};
 
-use crate::authorizer::{AuthorizationResult, authorize_topics};
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
+use crate::{
+    authorizer::{AuthorizationResult, authorize_topics},
+    broker::Broker,
+    codes,
+    error::BrokerError,
+};
 
 fn denied_topic_names(
     acl_results: &std::collections::HashMap<&str, AuthorizationResult>,
@@ -198,18 +203,19 @@ pub(crate) async fn handle(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::assert;
-    use assert2::check;
+    use std::{net::SocketAddr, sync::Arc};
+
+    use assert2::{assert, check};
     use crabka_protocol::owned::delete_records_request::{
         DeleteRecordsPartition, DeleteRecordsTopic,
     };
     use crabka_security::Principal;
-    use std::net::SocketAddr;
-    use std::sync::Arc;
 
-    use crate::broker::Broker;
-    use crate::test_support::{DenyAll, peer, principal};
+    use super::*;
+    use crate::{
+        broker::Broker,
+        test_support::{DenyAll, peer, principal},
+    };
 
     const VERSION: i16 = 2;
 

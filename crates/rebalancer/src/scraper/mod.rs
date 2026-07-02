@@ -5,16 +5,17 @@ pub mod parse;
 pub mod targets;
 pub mod window;
 
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+
 pub use parse::{MetricKind, ParsedSample};
 pub use targets::{ScrapeTarget, TargetParseError, TargetSource, parse_targets};
-pub use window::{UsageStore, Window, WindowConfig};
-
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
+pub use window::{UsageStore, Window, WindowConfig};
 
 /// Edge-triggered log level for a scrape outcome.
 ///
@@ -194,9 +195,10 @@ enum Outcome {
 mod tests {
     use std::collections::BTreeSet;
 
-    use super::*;
     use assert2::assert;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    use super::*;
 
     async fn one_response_server(status: &str, body: &str) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -276,8 +278,9 @@ mod tests {
 
     #[tokio::test]
     async fn tick_once_prunes_last_ok_for_brokers_no_longer_in_source() {
-        use crate::model::{BrokerView, ClusterState};
         use arc_swap::ArcSwap;
+
+        use crate::model::{BrokerView, ClusterState};
 
         let snapshot: Arc<ArcSwap<Option<ClusterState>>> =
             Arc::new(ArcSwap::from_pointee(Some(ClusterState {

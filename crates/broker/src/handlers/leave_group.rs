@@ -3,18 +3,20 @@
 //! rebalance.
 
 use bytes::{Bytes, BytesMut};
+use crabka_metadata::{AclOperation, ResourceType};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{leave_group_request::LeaveGroupRequest, leave_group_response::LeaveGroupResponse},
+};
 use tokio::sync::oneshot;
 
-use crabka_metadata::{AclOperation, ResourceType};
-use crabka_protocol::owned::leave_group_request::LeaveGroupRequest;
-use crabka_protocol::owned::leave_group_response::LeaveGroupResponse;
-use crabka_protocol::{Decode, Encode};
-
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes;
-use crate::coordinator::unified::actor::GroupActorMessage;
-use crate::error::BrokerError;
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes,
+    coordinator::unified::actor::GroupActorMessage,
+    error::BrokerError,
+};
 
 #[tracing::instrument(
     name = "handle_leave_group",
@@ -119,8 +121,9 @@ fn encode(version: i16, resp: &LeaveGroupResponse) -> Result<Bytes, BrokerError>
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn group_read_denied_yields_group_authorization_failed() {

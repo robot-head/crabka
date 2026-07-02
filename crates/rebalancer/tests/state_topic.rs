@@ -4,16 +4,16 @@
 
 #![allow(clippy::pedantic)]
 
-use assert2::assert;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
+use assert2::assert;
 use crabka_broker::{Broker, BrokerConfig};
 use crabka_client_admin::AdminClient;
 use crabka_client_core::Client;
-use crabka_rebalancer::executor::state::{InFlightFile, Phase};
-use crabka_rebalancer::state_topic::topic_admin;
-use crabka_rebalancer::state_topic::{LoadedState, StateBackend, StateTopic, StateTopicLoader};
+use crabka_rebalancer::{
+    executor::state::{InFlightFile, Phase},
+    state_topic::{LoadedState, StateBackend, StateTopic, StateTopicLoader, topic_admin},
+};
 use tokio_util::sync::CancellationToken;
 
 /// Boot a single-broker in-process Crabka, return its bootstrap address.

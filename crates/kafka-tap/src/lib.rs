@@ -2,10 +2,12 @@
 //! `Recorder` while forwarding bytes byte-for-byte to a real broker.
 pub mod frame;
 
-use std::io::{self, Read, Write};
-use std::net::{TcpListener, TcpStream, ToSocketAddrs};
-use std::sync::{Arc, Mutex};
-use std::thread;
+use std::{
+    io::{self, Read, Write},
+    net::{TcpListener, TcpStream, ToSocketAddrs},
+    sync::{Arc, Mutex},
+    thread,
+};
 
 use frame::{CapturedFrame, Pending, parse_request_prefix, read_correlation_id};
 

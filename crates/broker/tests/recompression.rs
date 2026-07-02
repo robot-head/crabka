@@ -14,31 +14,35 @@
 //! Gated to non-Windows to match the multi-broker test convention used
 //! by the other replication and compaction tests.
 
-use assert2::{assert, check};
-use std::io;
-use std::net::SocketAddr;
-use std::time::{Duration, Instant};
+use std::{
+    io,
+    net::SocketAddr,
+    time::{Duration, Instant},
+};
 
+use assert2::{assert, check};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_compression::CompressionType;
-use crabka_protocol::owned::create_topics_request::{
-    CreatableTopic, CreatableTopicConfig, CreateTopicsRequest,
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        create_topics_request::{CreatableTopic, CreatableTopicConfig, CreateTopicsRequest},
+        create_topics_response::CreateTopicsResponse,
+        fetch_request::{FetchPartition, FetchRequest, FetchTopic},
+        fetch_response::FetchResponse,
+        metadata_request::{MetadataRequest, MetadataRequestTopic},
+        metadata_response::MetadataResponse,
+        produce_request::{PartitionProduceData, ProduceRequest, TopicProduceData},
+        produce_response::ProduceResponse,
+    },
+    primitives::uuid::Uuid,
+    records::{Attributes, Record, RecordBatch},
 };
-use crabka_protocol::owned::create_topics_response::CreateTopicsResponse;
-use crabka_protocol::owned::fetch_request::{FetchPartition, FetchRequest, FetchTopic};
-use crabka_protocol::owned::fetch_response::FetchResponse;
-use crabka_protocol::owned::metadata_request::{MetadataRequest, MetadataRequestTopic};
-use crabka_protocol::owned::metadata_response::MetadataResponse;
-use crabka_protocol::owned::produce_request::{
-    PartitionProduceData, ProduceRequest, TopicProduceData,
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
 };
-use crabka_protocol::owned::produce_response::ProduceResponse;
-use crabka_protocol::primitives::uuid::Uuid;
-use crabka_protocol::records::{Attributes, Record, RecordBatch};
-use crabka_protocol::{Decode, Encode};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
 
 const CLIENT_ID: &str = "crabka-recompression-test";
 

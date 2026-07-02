@@ -15,21 +15,24 @@
 //! crash mid-move leaves it behind; broker startup re-discovers it via
 //! `log_dir::scan_future` and re-spawns the replicator.
 
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::{
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use crabka_log::{Log, LogConfig};
 use dashmap::DashMap;
-use tokio::sync::oneshot;
-use tokio::task::JoinHandle;
+use tokio::{sync::oneshot, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
-use crate::error::BrokerError;
-use crate::log_dir;
-use crate::partition::{Partition, SwapOutcome, WriterMessage};
-use crate::partition_registry::PartitionRegistry;
+use crate::{
+    error::BrokerError,
+    log_dir,
+    partition::{Partition, SwapOutcome, WriterMessage},
+    partition_registry::PartitionRegistry,
+};
 
 /// One in-progress intra-broker log-dir move. Inserted into
 /// `Broker.future_logs` keyed by `(topic, partition)`.
@@ -410,9 +413,10 @@ fn canonicalize_or_self(p: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
     use tempfile::tempdir;
+
+    use super::*;
 
     #[test]
     fn move_read_chunk_size_is_one_mib() {

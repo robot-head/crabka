@@ -1,12 +1,12 @@
-use std::net::SocketAddr;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::{
+    net::SocketAddr,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
-use axum::Router;
-use axum::extract::State;
-use axum::http::StatusCode;
-use axum::response::IntoResponse;
-use axum::routing::get;
+use axum::{Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
 
 use crate::telemetry::SharedRegistry;
 
@@ -80,13 +80,13 @@ async fn metrics(State(s): State<HealthState>) -> impl IntoResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
-    use axum::body::Body;
-    use axum::http::Request;
+    use axum::{body::Body, http::Request};
     use http::StatusCode as Code;
     use tokio::sync::Mutex;
     use tower::ServiceExt as _;
+
+    use super::*;
 
     fn fixture() -> HealthState {
         HealthState::new(Arc::new(Mutex::new(crate::telemetry::new_registry())))

@@ -14,13 +14,15 @@
 //! `reconcile_listener_auth.rs`) and that the rendered TOML actually
 //! lands in the broker-config ConfigMap.
 
-use assert2::{assert, check};
 use std::sync::Arc;
 
-use crabka_operator::controller::kafka::reconcile;
-use crabka_operator::crd::{
-    Kafka, KafkaSpec, Listener, ListenerAuthentication, ListenerAuthenticationOAuth, ListenerType,
-    OauthClientSecretRef, TlsTrustedCertificate,
+use assert2::{assert, check};
+use crabka_operator::{
+    controller::kafka::reconcile,
+    crd::{
+        Kafka, KafkaSpec, Listener, ListenerAuthentication, ListenerAuthenticationOAuth,
+        ListenerType, OauthClientSecretRef, TlsTrustedCertificate,
+    },
 };
 use http::Method;
 

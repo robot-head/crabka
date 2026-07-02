@@ -5,25 +5,25 @@
 //! lineage + window store, but the aggregate processor implements the KIP-450
 //! left/right-window algorithm and the windows are data-defined inclusive
 //! windows of size `time_difference_ms`.
-use std::any::Any;
-use std::cell::RefCell;
-use std::marker::PhantomData;
-use std::rc::Rc;
+use std::{any::Any, cell::RefCell, marker::PhantomData, rc::Rc};
 
-use crate::dsl::builder::InternalStreamsBuilder;
-use crate::dsl::config::Materialized;
-use crate::dsl::emit::EmitStrategy;
-use crate::dsl::graph::{GraphNodeKind, LowerState, NodeId};
-use crate::dsl::kgrouped::{KGroupedStream, RepartitionLowerFn, mint_store_name};
-use crate::dsl::ktable::KTable;
-use crate::dsl::ktable::SuppressStoreFactory;
-use crate::dsl::names;
-use crate::dsl::processors::sliding_window_aggregate::{
-    KStreamSlidingWindowAggregateProcessor, KStreamSlidingWindowReduceProcessor,
+use crate::{
+    dsl::{
+        builder::InternalStreamsBuilder,
+        config::Materialized,
+        emit::EmitStrategy,
+        graph::{GraphNodeKind, LowerState, NodeId},
+        kgrouped::{KGroupedStream, RepartitionLowerFn, mint_store_name},
+        ktable::{KTable, SuppressStoreFactory},
+        names,
+        processors::sliding_window_aggregate::{
+            KStreamSlidingWindowAggregateProcessor, KStreamSlidingWindowReduceProcessor,
+        },
+        windows::{SlidingWindows, TimeWindowedSerde, Windowed},
+    },
+    processor::serde::{DefaultSerde, Serde},
+    topology::NodeHandle,
 };
-use crate::dsl::windows::{SlidingWindows, TimeWindowedSerde, Windowed};
-use crate::processor::serde::{DefaultSerde, Serde};
-use crate::topology::NodeHandle;
 
 /// Handle produced by [`KGroupedStream::windowed_by_sliding`]; terminal sliding
 /// aggregations consume it.

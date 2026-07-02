@@ -8,27 +8,29 @@
 // the transaction wire handlers. Remove this attribute once those land.
 #![allow(dead_code)]
 
-use std::collections::HashSet;
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use crabka_metadata::MetadataImage;
+use crabka_protocol::records::{Record, RecordBatch};
 use dashmap::DashMap;
 use tokio::sync::{Mutex, RwLock};
 use tracing::{info, warn};
 
-use crabka_metadata::MetadataImage;
-use crabka_protocol::records::{Record, RecordBatch};
-
-use crate::coordinator::unified::classic_state::OffsetEntry;
-use crate::error::BrokerError;
-use crate::partition_registry::PartitionRegistry;
-use crate::txn::bootstrap;
-use crate::txn::handlers::end_txn::next_producer_identity;
-use crate::txn::partitioner::partition_for_tid;
-use crate::txn::state::{TxnEntry, TxnState};
-use crate::txn::two_pc::should_abort_idle_txn;
-use crate::txn::version::TxnVersion;
+use crate::{
+    coordinator::unified::classic_state::OffsetEntry,
+    error::BrokerError,
+    partition_registry::PartitionRegistry,
+    txn::{
+        bootstrap,
+        handlers::end_txn::next_producer_identity,
+        partitioner::partition_for_tid,
+        state::{TxnEntry, TxnState},
+        two_pc::should_abort_idle_txn,
+        version::TxnVersion,
+    },
+};
 
 /// A consumer-group committed-offset key: `(topic, partition)`.
 pub(crate) type OffsetKey = (String, i32);

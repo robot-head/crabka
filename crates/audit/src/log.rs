@@ -1,21 +1,27 @@
 //! The `AuditLog` handle (synchronous, non-blocking emit) and the background
 //! `AuditWriter` that drains events into a sink.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
 use qubit_clock::sleep::AsyncSleeper;
 use tokio::sync::mpsc;
 
-use crate::chain::ChainState;
-use crate::checkpoint::Checkpoint;
-use crate::event::AuditEvent;
-use crate::ocsf::ProductInfo;
-use crate::signing::SigningKeyProvider;
-use crate::sink::{AuditRecord, AuditSink};
-use crate::spool::Spool;
-use crate::stats::AuditStats;
+use crate::{
+    chain::ChainState,
+    checkpoint::Checkpoint,
+    event::AuditEvent,
+    ocsf::ProductInfo,
+    signing::SigningKeyProvider,
+    sink::{AuditRecord, AuditSink},
+    spool::Spool,
+    stats::AuditStats,
+};
 
 /// Cloneable, cheap handle that broker code calls to record events.
 ///
@@ -318,23 +324,27 @@ fn now_ms() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-    use std::sync::atomic::Ordering::SeqCst;
-    use std::sync::atomic::{AtomicBool, AtomicI64};
-    use std::time::Duration;
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicI64, Ordering::SeqCst},
+        },
+        time::Duration,
+    };
 
     use assert2::check;
-    use qubit_clock::MockTimeline;
-    use qubit_clock::sleep::MockSleeper;
+    use qubit_clock::{MockTimeline, sleep::MockSleeper};
 
     use super::*;
-    use crate::checkpoint::Checkpoint;
-    use crate::event::*;
-    use crate::ocsf::ProductInfo;
-    use crate::signing::FileEd25519Signer;
-    use crate::sink::{AuditRecord, AuditSink, MemorySink};
-    use crate::spool::Spool;
-    use crate::stats::AuditStats;
+    use crate::{
+        checkpoint::Checkpoint,
+        event::*,
+        ocsf::ProductInfo,
+        signing::FileEd25519Signer,
+        sink::{AuditRecord, AuditSink, MemorySink},
+        spool::Spool,
+        stats::AuditStats,
+    };
 
     fn product() -> ProductInfo {
         ProductInfo {

@@ -10,23 +10,23 @@
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-use std::net::SocketAddr;
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
 use clap::Parser;
+use crabka_client_admin::AdminClient;
+use crabka_schema_registry::{
+    auth::{AuthState, basic::BasicAuthStore},
+    authz::SchemaRegistryAuthz,
+    cli::SecurityCliInput,
+    config::RegistryConfig,
+    kafkastore::KafkaStore,
+    rest::{
+        self, AppState, SecurityLayers,
+        serve::{serve_http, serve_https},
+    },
+};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
-
-use crabka_client_admin::AdminClient;
-use crabka_schema_registry::auth::AuthState;
-use crabka_schema_registry::auth::basic::BasicAuthStore;
-use crabka_schema_registry::authz::SchemaRegistryAuthz;
-use crabka_schema_registry::cli::SecurityCliInput;
-use crabka_schema_registry::config::RegistryConfig;
-use crabka_schema_registry::kafkastore::KafkaStore;
-use crabka_schema_registry::rest::serve::{serve_http, serve_https};
-use crabka_schema_registry::rest::{self, AppState, SecurityLayers};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -376,8 +376,9 @@ async fn run_jwks_refresher(
     jwks: crabka_schema_registry::cli::JwksHandleForRefresh,
     cancel: CancellationToken,
 ) {
-    use crabka_security::Jwks;
     use std::time::Duration;
+
+    use crabka_security::Jwks;
 
     let client = build_jwks_client(jwks.ca_path.as_ref()).unwrap_or_else(|e| {
         tracing::error!(error = %e, "JWKS client build failed; using default TLS roots");

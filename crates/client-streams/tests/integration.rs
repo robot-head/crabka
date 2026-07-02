@@ -6,8 +6,10 @@ use std::time::Duration;
 use crabka_broker::{Broker, BrokerConfig};
 use crabka_client_core::Client;
 use crabka_client_streams::{NodeHandle, StreamsEvent, StreamsMembership, Topology};
-use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-use crabka_protocol::owned::update_features_request::{FeatureUpdateKey, UpdateFeaturesRequest};
+use crabka_protocol::owned::{
+    create_topics_request::{CreatableTopic, CreateTopicsRequest},
+    update_features_request::{FeatureUpdateKey, UpdateFeaturesRequest},
+};
 
 async fn finalize_streams_version(client: &Client) {
     let resp = client

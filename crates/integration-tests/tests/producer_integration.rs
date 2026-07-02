@@ -7,17 +7,16 @@
 //! runtime can't drive the broker's accept loop concurrently with the
 //! producer's sender task and the test body.
 
-use assert2::assert;
 use std::time::Duration;
 
+use assert2::assert;
 use bytes::Bytes;
-use tempfile::TempDir;
-
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_consumer::{AutoOffsetReset, Consumer};
 use crabka_client_core::Client;
 use crabka_client_producer::{Acks, Producer, ProducerError, ProducerRecord};
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
+use tempfile::TempDir;
 
 /// Spin up an in-process broker and return its handle, bootstrap address,
 /// and the `TempDir` (kept alive by the caller to control log-dir lifetime).

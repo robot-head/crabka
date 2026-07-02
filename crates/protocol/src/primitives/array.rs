@@ -6,9 +6,13 @@
 
 use bytes::{Buf, BufMut};
 
-use crate::ProtocolError;
-use crate::primitives::fixed::{get_i32, put_i32};
-use crate::primitives::varint::{get_uvarint, put_uvarint, uvarint_len};
+use crate::{
+    ProtocolError,
+    primitives::{
+        fixed::{get_i32, put_i32},
+        varint::{get_uvarint, put_uvarint, uvarint_len},
+    },
+};
 
 /// Write a non-nullable array-length prefix.
 pub fn put_array_len<B: BufMut>(buf: &mut B, n: usize, flexible: bool) {
@@ -113,9 +117,10 @@ pub fn get_nullable_array_len<B: Buf>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
     use bytes::BytesMut;
+
+    use super::*;
 
     // --- non-nullable, non-flexible -----------------------------------------
 

@@ -17,10 +17,9 @@
 // named helpers would obscure the per-test narrative.
 #![allow(clippy::cast_possible_truncation, clippy::default_trait_access)]
 
-use assert2::assert;
-use std::sync::OnceLock;
-use std::time::Duration;
+use std::{sync::OnceLock, time::Duration};
 
+use assert2::assert;
 use crabka_broker::{BrokerConfig, BrokerHandle};
 use tokio::sync::Mutex;
 
@@ -41,8 +40,10 @@ fn cluster_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 use crabka_client_core::Client;
-use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-use crabka_protocol::owned::metadata_request::MetadataRequest;
+use crabka_protocol::owned::{
+    create_topics_request::{CreatableTopic, CreateTopicsRequest},
+    metadata_request::MetadataRequest,
+};
 use tempfile::TempDir;
 
 /// Await every broker reporting an elected (non-zero) controller leader.

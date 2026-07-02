@@ -17,8 +17,9 @@
 
 use bytes::Bytes;
 use prost::Message as _;
-use prost_reflect::prost_types::FileDescriptorSet;
-use prost_reflect::{DescriptorPool, DynamicMessage, MessageDescriptor};
+use prost_reflect::{
+    DescriptorPool, DynamicMessage, MessageDescriptor, prost_types::FileDescriptorSet,
+};
 use serde::Serialize as _;
 
 use crate::codec::CodecError;

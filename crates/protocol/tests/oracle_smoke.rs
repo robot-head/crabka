@@ -1,8 +1,7 @@
 use assert2::assert;
 mod support;
-use support::oracle;
-
 use serde_json::json;
+use support::oracle;
 
 #[test]
 #[ignore = "requires JVM oracle built; see CONTRIBUTING"]

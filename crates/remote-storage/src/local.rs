@@ -5,14 +5,18 @@
 //! production deployments swap in an object-store-backed implementation
 //! behind the same trait.
 
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use tracing::instrument;
 
-use crate::error::RemoteStorageError;
-use crate::metadata::{CustomMetadata, RemoteLogSegmentMetadata};
-use crate::storage_manager::{IndexType, LogSegmentData, RemoteStorageManager};
+use crate::{
+    error::RemoteStorageError,
+    metadata::{CustomMetadata, RemoteLogSegmentMetadata},
+    storage_manager::{IndexType, LogSegmentData, RemoteStorageManager},
+};
 
 /// A [`RemoteStorageManager`] that keeps offloaded segments on a local
 /// filesystem under `root`.
@@ -212,15 +216,13 @@ impl RemoteStorageManager for LocalTieredStorage {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::assert;
-    use assert2::check;
-    use std::collections::BTreeMap;
-    use std::io::Write;
+    use std::{collections::BTreeMap, io::Write};
 
+    use assert2::{assert, check};
     use bytes::Bytes;
     use uuid::Uuid;
 
+    use super::*;
     use crate::metadata::{RemoteLogSegmentId, RemoteLogSegmentState, TopicIdPartition};
 
     fn metadata(id: u128) -> RemoteLogSegmentMetadata {

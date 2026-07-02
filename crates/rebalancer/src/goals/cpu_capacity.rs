@@ -9,9 +9,11 @@
 
 use std::collections::HashMap;
 
-use crate::goals::{Goal, GoalContext, GoalPriority};
-use crate::model::{ClusterState, Movement, PartitionView};
-use crate::scraper::Window;
+use crate::{
+    goals::{Goal, GoalContext, GoalPriority},
+    model::{ClusterState, Movement, PartitionView},
+    scraper::Window,
+};
 
 /// Conversion factor from `cpu_micros_rate` (micros/sec) to cores.
 const MICROS_PER_CORE_SECOND: f64 = 1_000_000.0;
@@ -186,14 +188,16 @@ impl Goal for CpuCapacity {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::capacity::{BrokerCapacities, BrokerCapacity};
-    use crate::model::BrokerView;
-    use crate::scraper::parse::ParsedSample;
-    use crate::scraper::{MetricKind, UsageStore, WindowConfig};
+    use std::{sync::Arc, time::Duration};
+
     use assert2::{assert, check};
-    use std::sync::Arc;
-    use std::time::Duration;
+
+    use super::*;
+    use crate::{
+        capacity::{BrokerCapacities, BrokerCapacity},
+        model::BrokerView,
+        scraper::{MetricKind, UsageStore, WindowConfig, parse::ParsedSample},
+    };
 
     fn ctx_with(caps: BrokerCapacities, store: Arc<UsageStore>) -> GoalContext {
         GoalContext {

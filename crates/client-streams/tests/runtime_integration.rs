@@ -8,8 +8,10 @@ use crabka_client_core::{Client, Connection, ConnectionOptions, FetchedRecord, f
 use crabka_client_streams::{
     KafkaStreams, NodeHandle, Processor, ProcessorContext, Record, Topology,
 };
-use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-use crabka_protocol::owned::update_features_request::{FeatureUpdateKey, UpdateFeaturesRequest};
+use crabka_protocol::owned::{
+    create_topics_request::{CreatableTopic, CreateTopicsRequest},
+    update_features_request::{FeatureUpdateKey, UpdateFeaturesRequest},
+};
 
 // ─── helpers (identical to tests/integration.rs) ─────────────────────────────
 

@@ -5,19 +5,25 @@
 //! contribution is: ordered acks back to producers + waking long-poll
 //! Fetch consumers via a shared `Notify` after every successful append.
 
-use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::{
+    panic::{AssertUnwindSafe, catch_unwind},
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 use arc_swap::ArcSwap;
 use crabka_log::Log;
-use tokio::runtime::{Handle, RuntimeFlavor};
-use tokio::sync::{Notify, mpsc};
+use tokio::{
+    runtime::{Handle, RuntimeFlavor},
+    sync::{Notify, mpsc},
+};
 
-use crate::log_dir_status::LogDirRegistry;
-use crate::partition::{ProduceData, ProduceJob, SwapOutcome, WriterMessage};
-use crate::producer_state::ProducerState;
-use crate::replica_state::ReplicaState;
+use crate::{
+    log_dir_status::LogDirRegistry,
+    partition::{ProduceData, ProduceJob, SwapOutcome, WriterMessage},
+    producer_state::ProducerState,
+    replica_state::ReplicaState,
+};
 
 /// Inactivity window after which an idempotent / transactional producer's
 /// in-memory entry is considered expired and excluded from the
@@ -541,13 +547,14 @@ fn swap_future_log(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
     use crabka_compression::CompressionType;
     use crabka_log::LogConfig;
     use crabka_protocol::records::{Record, RecordBatch};
     use tempfile::tempdir;
     use tokio::sync::oneshot;
+
+    use super::*;
 
     fn sample_batch(n: i32) -> RecordBatch {
         let mut b = RecordBatch {

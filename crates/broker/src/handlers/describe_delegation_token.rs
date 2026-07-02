@@ -29,14 +29,18 @@
 use std::net::SocketAddr;
 
 use crabka_metadata::{AclOperation, ResourceType};
-use crabka_protocol::owned::describe_delegation_token_request::DescribeDelegationTokenRequest;
-use crabka_protocol::owned::describe_delegation_token_response::{
-    DescribeDelegationTokenResponse, DescribedDelegationToken, DescribedDelegationTokenRenewer,
+use crabka_protocol::owned::{
+    describe_delegation_token_request::DescribeDelegationTokenRequest,
+    describe_delegation_token_response::{
+        DescribeDelegationTokenResponse, DescribedDelegationToken, DescribedDelegationTokenRenewer,
+    },
 };
 use crabka_security::{KafkaPrincipal, SecretBytes};
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult, Authorizer};
-use crate::network::auth::ConnectionAuth;
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult, Authorizer},
+    network::auth::ConnectionAuth,
+};
 
 // `async` matches the call-site shape used by every other
 // `crate::handlers::*::handle`; today the body is purely synchronous.
@@ -198,16 +202,16 @@ fn err_response(code: i16) -> DescribeDelegationTokenResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::{net::SocketAddr, sync::Arc, time::Duration};
+
     use assert2::assert;
     use crabka_metadata::{DelegationTokenRecord, MetadataRecord};
     use crabka_protocol::owned::describe_delegation_token_request::DescribeDelegationTokenOwner;
     use crabka_raft::ControllerHandle;
     use crabka_security::{AuthMethod, Principal, SaslMechanism};
-    use std::net::SocketAddr;
-    use std::sync::Arc;
-    use std::time::Duration;
     use tempfile::TempDir;
+
+    use super::*;
 
     /// Spin up a single-voter `Controller` for tests, wait for leader.
     async fn test_controller(log_dir: std::path::PathBuf) -> Arc<ControllerHandle> {

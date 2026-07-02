@@ -3,11 +3,13 @@
 
 use assert2::assert;
 use bytes::BytesMut;
-use crabka_protocol::borrowed::metadata_request::{MAX_VERSION, MIN_VERSION, MetadataRequest};
-use crabka_protocol::borrowed::metadata_response::{
-    MAX_VERSION as RESP_MAX, MIN_VERSION as RESP_MIN, MetadataResponse,
+use crabka_protocol::{
+    DecodeBorrow, Encode, UnknownTaggedFields,
+    borrowed::{
+        metadata_request::{MAX_VERSION, MIN_VERSION, MetadataRequest},
+        metadata_response::{MAX_VERSION as RESP_MAX, MIN_VERSION as RESP_MIN, MetadataResponse},
+    },
 };
-use crabka_protocol::{DecodeBorrow, Encode, UnknownTaggedFields};
 
 #[test]
 fn borrowed_metadata_request_min_version_none_topics_encodes_as_empty() {

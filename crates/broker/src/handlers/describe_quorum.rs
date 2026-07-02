@@ -25,21 +25,26 @@
 //! a non-metadata topic.
 
 use bytes::{Bytes, BytesMut};
-
 use crabka_metadata::AclOperation;
-use crabka_protocol::owned::common::describe_quorum_response::replica_state::ReplicaState;
-use crabka_protocol::owned::describe_quorum_request::DescribeQuorumRequest;
-use crabka_protocol::owned::describe_quorum_response::{
-    DescribeQuorumResponse, Listener, Node, PartitionData, TopicData,
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        common::describe_quorum_response::replica_state::ReplicaState,
+        describe_quorum_request::DescribeQuorumRequest,
+        describe_quorum_response::{
+            DescribeQuorumResponse, Listener, Node, PartitionData, TopicData,
+        },
+    },
+    primitives::uuid::Uuid,
 };
-use crabka_protocol::primitives::uuid::Uuid;
-use crabka_protocol::{Decode, Encode};
 use crabka_raft::QuorumState;
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes,
+    error::BrokerError,
+};
 
 /// JVM "Unknown" sentinel for a voter's `log_end_offset` when openraft
 /// isn't tracking peer progress (i.e. this node is a follower — only
@@ -232,13 +237,17 @@ fn build_nodes(quorum: &QuorumState) -> Vec<Node> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::assert;
-    use crabka_protocol::UnknownTaggedFields;
-    use crabka_protocol::owned::describe_quorum_request::{
-        PartitionData as ReqPartitionData, TopicData as ReqTopicData,
-    };
     use std::collections::BTreeMap;
+
+    use assert2::assert;
+    use crabka_protocol::{
+        UnknownTaggedFields,
+        owned::describe_quorum_request::{
+            PartitionData as ReqPartitionData, TopicData as ReqTopicData,
+        },
+    };
+
+    use super::*;
 
     /// Fully-specified expected voter row (no struct-update syntax).
     fn expected_voter(replica_id: i32, log_end_offset: i64) -> ReplicaState {

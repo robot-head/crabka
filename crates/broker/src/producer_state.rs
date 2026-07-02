@@ -2,8 +2,7 @@
 //! idempotent-producer dedup / out-of-order / epoch-fence checks in
 //! `handlers::produce`.
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use dashmap::DashMap;
 use tokio::sync::Mutex;
@@ -338,8 +337,9 @@ mod producer_state_model;
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
+
+    use super::*;
 
     #[tokio::test]
     async fn first_batch_appends() {

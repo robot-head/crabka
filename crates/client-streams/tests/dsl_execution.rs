@@ -6,8 +6,9 @@
 //! is Task 8 — this test's gate is *execution correctness*, so it uses
 //! `group_by_key` with no preceding key change (single subtopology, no
 //! repartition) to stay robust.
-use crabka_client_streams::dsl::StreamsBuilder;
-use crabka_client_streams::{Consumed, Grouped, I64Serde, Materialized, Produced, StringSerde};
+use crabka_client_streams::{
+    Consumed, Grouped, I64Serde, Materialized, Produced, StringSerde, dsl::StreamsBuilder,
+};
 
 #[test]
 fn dsl_count_executes() {
@@ -767,8 +768,7 @@ fn dsl_table_map_values_executes() {
 /// sends to the sink. The materialized store holds the latest value per key.
 #[test]
 fn dsl_to_table_executes() {
-    use crabka_client_streams::dsl::StreamsBuilder;
-    use crabka_client_streams::{Consumed, Produced, StringSerde};
+    use crabka_client_streams::{Consumed, Produced, StringSerde, dsl::StreamsBuilder};
     let b = StreamsBuilder::new();
     b.stream::<String, String>(["in"])
         .to_table("store")
@@ -953,8 +953,7 @@ fn dsl_stream_table_left_join_executes() {
 /// table first (no output yet), then the right table (join emits "AB").
 #[test]
 fn dsl_ktable_ktable_inner_join_executes() {
-    use crabka_client_streams::dsl::StreamsBuilder;
-    use crabka_client_streams::{Consumed, Produced, StringSerde};
+    use crabka_client_streams::{Consumed, Produced, StringSerde, dsl::StreamsBuilder};
     let b = StreamsBuilder::new();
     let ta = b.table::<String, String>("a", "sa");
     let tb = b.table::<String, String>("b", "sb");
@@ -996,8 +995,7 @@ fn dsl_ktable_ktable_inner_join_executes() {
 /// left value with an empty right side.
 #[test]
 fn dsl_ktable_ktable_left_join_executes() {
-    use crabka_client_streams::dsl::StreamsBuilder;
-    use crabka_client_streams::{Consumed, Produced, StringSerde};
+    use crabka_client_streams::{Consumed, Produced, StringSerde, dsl::StreamsBuilder};
     let b = StreamsBuilder::new();
     let ta = b.table::<String, String>("a", "sa");
     let tb = b.table::<String, String>("b", "sb");
@@ -1028,8 +1026,7 @@ fn dsl_ktable_ktable_left_join_executes() {
 /// the right table → output reflects the right value with an empty left side.
 #[test]
 fn dsl_ktable_ktable_outer_join_executes() {
-    use crabka_client_streams::dsl::StreamsBuilder;
-    use crabka_client_streams::{Consumed, Produced, StringSerde};
+    use crabka_client_streams::{Consumed, Produced, StringSerde, dsl::StreamsBuilder};
     let b = StreamsBuilder::new();
     let ta = b.table::<String, String>("a", "sa");
     let tb = b.table::<String, String>("b", "sb");
@@ -1123,9 +1120,9 @@ fn dsl_to_table_no_logging_omits_changelog() {
 /// record at ts=12 falls into a new window `[10,20)`, so its count restarts.
 #[test]
 fn dsl_windowed_count_tumbling_executes() {
-    use crabka_client_streams::dsl::StreamsBuilder;
     use crabka_client_streams::{
-        Consumed, I64Serde, Produced, StringSerde, TimeWindowedSerde, TimeWindows, Window, Windowed,
+        Consumed, I64Serde, Produced, StringSerde, TimeWindowedSerde, TimeWindows, Window,
+        Windowed, dsl::StreamsBuilder,
     };
     let b = StreamsBuilder::new();
     b.stream::<String, String>(["in"])
@@ -1198,9 +1195,9 @@ fn dsl_windowed_count_tumbling_executes() {
 /// one count per overlapping window.
 #[test]
 fn dsl_windowed_count_hopping_executes() {
-    use crabka_client_streams::dsl::StreamsBuilder;
     use crabka_client_streams::{
-        Consumed, I64Serde, Produced, StringSerde, TimeWindowedSerde, TimeWindows, Window, Windowed,
+        Consumed, I64Serde, Produced, StringSerde, TimeWindowedSerde, TimeWindows, Window,
+        Windowed, dsl::StreamsBuilder,
     };
     let b = StreamsBuilder::new();
     b.stream::<String, String>(["in"])
@@ -1249,9 +1246,9 @@ fn dsl_windowed_count_hopping_executes() {
 /// the first value in a window seeds the accumulator, later values fold.
 #[test]
 fn dsl_windowed_reduce_executes() {
-    use crabka_client_streams::dsl::StreamsBuilder;
     use crabka_client_streams::{
         Consumed, Produced, StringSerde, TimeWindowedSerde, TimeWindows, Window, Windowed,
+        dsl::StreamsBuilder,
     };
     let b = StreamsBuilder::new();
     b.stream::<String, String>(["in"])
@@ -1323,9 +1320,9 @@ fn dsl_windowed_reduce_executes() {
 /// values per window.
 #[test]
 fn dsl_windowed_aggregate_executes() {
-    use crabka_client_streams::dsl::StreamsBuilder;
     use crabka_client_streams::{
-        Consumed, I64Serde, Produced, StringSerde, TimeWindowedSerde, TimeWindows, Window, Windowed,
+        Consumed, I64Serde, Produced, StringSerde, TimeWindowedSerde, TimeWindows, Window,
+        Windowed, dsl::StreamsBuilder,
     };
     let b = StreamsBuilder::new();
     b.stream::<String, i64>(["in"])
@@ -1403,8 +1400,9 @@ fn dsl_windowed_aggregate_executes() {
 /// timestamp in `[t - before, t + after]` (and symmetrically the other side).
 #[test]
 fn dsl_stream_stream_inner_join_executes() {
-    use crabka_client_streams::dsl::StreamsBuilder;
-    use crabka_client_streams::{Consumed, JoinWindows, Produced, StreamJoined, StringSerde};
+    use crabka_client_streams::{
+        Consumed, JoinWindows, Produced, StreamJoined, StringSerde, dsl::StreamsBuilder,
+    };
     let b = StreamsBuilder::new();
     let left = b.stream::<String, String>(["left"]);
     let right = b.stream::<String, String>(["right"]);
@@ -1464,8 +1462,9 @@ fn dsl_stream_stream_inner_join_executes() {
 /// `before`/`after` so this holds for whichever side drives the record.
 #[test]
 fn dsl_stream_stream_join_swap_asymmetric() {
-    use crabka_client_streams::dsl::StreamsBuilder;
-    use crabka_client_streams::{Consumed, JoinWindows, Produced, StreamJoined, StringSerde};
+    use crabka_client_streams::{
+        Consumed, JoinWindows, Produced, StreamJoined, StringSerde, dsl::StreamsBuilder,
+    };
     let b = StreamsBuilder::new();
     let left = b.stream::<String, String>(["left"]);
     let right = b.stream::<String, String>(["right"]);
@@ -1539,8 +1538,9 @@ fn dsl_stream_stream_join_swap_asymmetric() {
 /// records at the same timestamp, then one right record in the window → TWO joins.
 #[test]
 fn dsl_stream_stream_join_duplicates() {
-    use crabka_client_streams::dsl::StreamsBuilder;
-    use crabka_client_streams::{Consumed, JoinWindows, Produced, StreamJoined, StringSerde};
+    use crabka_client_streams::{
+        Consumed, JoinWindows, Produced, StreamJoined, StringSerde, dsl::StreamsBuilder,
+    };
     let b = StreamsBuilder::new();
     let left = b.stream::<String, String>(["left"]);
     let right = b.stream::<String, String>(["right"]);
@@ -1607,8 +1607,9 @@ fn dsl_stream_stream_join_duplicates() {
 /// emits `joiner(a, Some(b))` and is NOT later re-emitted as a null.
 #[test]
 fn dsl_stream_stream_left_join_executes() {
-    use crabka_client_streams::dsl::StreamsBuilder;
-    use crabka_client_streams::{Consumed, JoinWindows, Produced, StreamJoined, StringSerde};
+    use crabka_client_streams::{
+        Consumed, JoinWindows, Produced, StreamJoined, StringSerde, dsl::StreamsBuilder,
+    };
     let b = StreamsBuilder::new();
     let left = b.stream::<String, String>(["left"]);
     let right = b.stream::<String, String>(["right"]);
@@ -1691,8 +1692,9 @@ fn dsl_stream_stream_left_join_executes() {
 /// closes (driven by a later right record advancing stream-time).
 #[test]
 fn dsl_stream_stream_outer_join_executes() {
-    use crabka_client_streams::dsl::StreamsBuilder;
-    use crabka_client_streams::{Consumed, JoinWindows, Produced, StreamJoined, StringSerde};
+    use crabka_client_streams::{
+        Consumed, JoinWindows, Produced, StreamJoined, StringSerde, dsl::StreamsBuilder,
+    };
     let b = StreamsBuilder::new();
     let left = b.stream::<String, String>(["left"]);
     let right = b.stream::<String, String>(["right"]);
@@ -2833,9 +2835,9 @@ fn dsl_process_values_unknown_store_panics() {
 /// `KStreamSlidingWindowAggregate` behavior.
 #[test]
 fn sliding_window_count_matches_jvm_behavior() {
-    use crabka_client_streams::dsl::StreamsBuilder;
     use crabka_client_streams::{
         Consumed, I64Serde, Produced, SlidingWindows, StringSerde, TimeWindowedSerde,
+        dsl::StreamsBuilder,
     };
     #[derive(serde::Deserialize, PartialEq, Debug)]
     struct Row {
@@ -2907,9 +2909,9 @@ struct EmitFinalRow {
 /// strict close boundary: a window emits only once stream-time moves PAST its end.
 #[test]
 fn emit_final_time_window_matches_jvm_behavior() {
-    use crabka_client_streams::dsl::{EmitStrategy, StreamsBuilder};
     use crabka_client_streams::{
         Consumed, I64Serde, Produced, StringSerde, TimeWindowedSerde, TimeWindows,
+        dsl::{EmitStrategy, StreamsBuilder},
     };
     let inputs: &[(&str, i64)] = &[("a", 1), ("a", 5), ("a", 11), ("a", 21), ("a", 40)];
     let b = StreamsBuilder::new();
@@ -2956,9 +2958,9 @@ fn emit_final_time_window_matches_jvm_behavior() {
 /// Emit-final SLIDING-window count must match `testdata/emit_final/sliding.json`.
 #[test]
 fn emit_final_sliding_window_matches_jvm_behavior() {
-    use crabka_client_streams::dsl::{EmitStrategy, StreamsBuilder};
     use crabka_client_streams::{
         Consumed, I64Serde, Produced, SlidingWindows, StringSerde, TimeWindowedSerde,
+        dsl::{EmitStrategy, StreamsBuilder},
     };
     let inputs: &[(&str, i64)] = &[("a", 1), ("a", 5), ("a", 11), ("a", 21), ("a", 40)];
     let b = StreamsBuilder::new();
@@ -3011,9 +3013,9 @@ fn emit_final_sliding_window_matches_jvm_behavior() {
 /// the JVM emits NO zero-width `[0,0]` at stream-time 0.
 #[test]
 fn emit_final_session_window_matches_jvm_behavior() {
-    use crabka_client_streams::dsl::{EmitStrategy, StreamsBuilder};
     use crabka_client_streams::{
         Consumed, I64Serde, Produced, SessionWindowedSerde, SessionWindows, StringSerde,
+        dsl::{EmitStrategy, StreamsBuilder},
     };
     let inputs: &[(&str, i64)] = &[("a", 0), ("a", 4), ("a", 20), ("a", 100)];
     let b = StreamsBuilder::new();
@@ -3062,9 +3064,9 @@ fn emit_final_session_window_matches_jvm_behavior() {
 
 #[test]
 fn sliding_window_count_builds() {
-    use crabka_client_streams::dsl::StreamsBuilder;
     use crabka_client_streams::{
         I64Serde, Materialized, Produced, SlidingWindows, StringSerde, TimeWindowedSerde,
+        dsl::StreamsBuilder,
     };
     let b = StreamsBuilder::new();
     b.stream::<String, String>(["in"])
@@ -3089,9 +3091,8 @@ fn sliding_window_count_builds() {
 /// "v", "v|v", "v|v|v", … matching the JVM `(a, v) -> a + "|" + v` reducer.
 #[test]
 fn sliding_window_reduce_matches_jvm_behavior() {
-    use crabka_client_streams::dsl::StreamsBuilder;
     use crabka_client_streams::{
-        Consumed, Produced, SlidingWindows, StringSerde, TimeWindowedSerde,
+        Consumed, Produced, SlidingWindows, StringSerde, TimeWindowedSerde, dsl::StreamsBuilder,
     };
     #[derive(serde::Deserialize, PartialEq, Debug)]
     struct Row {
@@ -3152,10 +3153,9 @@ fn sliding_window_reduce_matches_jvm_behavior() {
 /// is correct for two in-order records.
 #[test]
 fn sliding_window_aggregate_executes() {
-    use crabka_client_streams::dsl::StreamsBuilder;
     use crabka_client_streams::{
         Consumed, I64Serde, Produced, SlidingWindows, StringSerde, TimeWindowedSerde, Window,
-        Windowed,
+        Windowed, dsl::StreamsBuilder,
     };
     let b = StreamsBuilder::new();
     b.stream::<String, String>(["in"])
@@ -3207,10 +3207,9 @@ fn sliding_window_aggregate_executes() {
 /// first two records produce NO output.
 #[test]
 fn sliding_window_emit_final_emits_only_on_close() {
-    use crabka_client_streams::dsl::EmitStrategy;
-    use crabka_client_streams::dsl::StreamsBuilder;
     use crabka_client_streams::{
         Consumed, I64Serde, Produced, SlidingWindows, StringSerde, TimeWindowedSerde,
+        dsl::{EmitStrategy, StreamsBuilder},
     };
     let b = StreamsBuilder::new();
     b.stream::<String, String>(["in"])
@@ -3256,10 +3255,9 @@ fn sliding_window_emit_final_emits_only_on_close() {
 /// `count_explicit` called directly.
 #[test]
 fn sliding_window_count_nonexplicit_builds_and_runs() {
-    use crabka_client_streams::dsl::StreamsBuilder;
     use crabka_client_streams::{
         Consumed, I64Serde, Produced, SlidingWindows, StringSerde, TimeWindowedSerde, Window,
-        Windowed,
+        Windowed, dsl::StreamsBuilder,
     };
     let b = StreamsBuilder::new();
     b.stream::<String, String>(["in"])
@@ -3301,9 +3299,9 @@ fn sliding_window_count_nonexplicit_builds_and_runs() {
 /// asserting the single left-window emission.
 #[test]
 fn sliding_window_reduce_nonexplicit() {
-    use crabka_client_streams::dsl::StreamsBuilder;
     use crabka_client_streams::{
         Consumed, Produced, SlidingWindows, StringSerde, TimeWindowedSerde, Window, Windowed,
+        dsl::StreamsBuilder,
     };
     let b = StreamsBuilder::new();
     b.stream::<String, String>(["in"])

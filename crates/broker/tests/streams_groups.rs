@@ -16,22 +16,22 @@
 //! `BrokerConfig::for_tests`). Every test therefore finalizes `streams.version`
 //! to level 1 via `UpdateFeatures` before issuing streams RPCs.
 
-use assert2::{assert, check};
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
+use assert2::{assert, check};
 use crabka_broker::{Broker, BrokerConfig};
 use crabka_client_core::Client;
-use crabka_protocol::owned::common::streams_group_heartbeat_request::task_ids::TaskIds as ReqTaskIds;
-use crabka_protocol::owned::common::streams_group_heartbeat_request::topic_info::TopicInfo;
-use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-use crabka_protocol::owned::list_groups_request::ListGroupsRequest;
-use crabka_protocol::owned::streams_group_describe_request::StreamsGroupDescribeRequest;
-use crabka_protocol::owned::streams_group_heartbeat_request::{
-    StreamsGroupHeartbeatRequest, Subtopology, Topology,
+use crabka_protocol::owned::{
+    common::streams_group_heartbeat_request::{
+        task_ids::TaskIds as ReqTaskIds, topic_info::TopicInfo,
+    },
+    create_topics_request::{CreatableTopic, CreateTopicsRequest},
+    list_groups_request::ListGroupsRequest,
+    streams_group_describe_request::StreamsGroupDescribeRequest,
+    streams_group_heartbeat_request::{StreamsGroupHeartbeatRequest, Subtopology, Topology},
+    streams_group_heartbeat_response::StreamsGroupHeartbeatResponse,
+    update_features_request::{FeatureUpdateKey, UpdateFeaturesRequest},
 };
-use crabka_protocol::owned::streams_group_heartbeat_response::StreamsGroupHeartbeatResponse;
-use crabka_protocol::owned::update_features_request::{FeatureUpdateKey, UpdateFeaturesRequest};
 
 async fn boot() -> (crabka_broker::BrokerHandle, String, tempfile::TempDir) {
     let dir = tempfile::TempDir::new().unwrap();

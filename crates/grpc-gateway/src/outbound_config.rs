@@ -2,9 +2,8 @@
 //! the target URL's scheme/host is checked against an allow-list (SSRF guard)
 //! and any filter `JSONPath` is parsed once.
 
-use serde::Deserialize;
-
 use jsonpath_rust::parser::model::JpQuery;
+use serde::Deserialize;
 
 /// Top-level structure of the outbound webhook TOML config file.
 #[derive(Debug, Clone, Deserialize)]

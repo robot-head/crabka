@@ -1,25 +1,26 @@
 //! Object-store backed cold-block `ProfileStore`.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::{Arc, RwLock};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    sync::{Arc, RwLock},
+};
 
-use arrow::array::{ArrayRef, AsArray, UInt64Array};
-use arrow::datatypes::{Int64Type, UInt64Type};
-use arrow::record_batch::RecordBatch;
+use arrow::{
+    array::{ArrayRef, AsArray, UInt64Array},
+    datatypes::{Int64Type, UInt64Type},
+    record_batch::RecordBatch,
+};
 use crabka_blockstore::{LabelMatcher, ProfileIndex, SeriesFingerprint};
 use crabka_pprof::{
-    ChainedResolver, DebuginfodResolver, FileSystemResolver, Frame, NativeResolver, ProfileError,
-    ProfileScan, ProfileStats, ProfileStore, SymbolDb, SymbolSource, profile_samples_schema,
+    ChainedResolver, DebuginfodResolver, FileSystemResolver, Frame, LazySymbolizer, NativeResolver,
+    ProfileError, ProfileScan, ProfileStats, ProfileStore, SymbolDb, SymbolSource,
+    profile_samples_schema,
 };
-use datafusion::catalog::MemTable;
-use datafusion::prelude::SessionContext;
-use object_store::path::Path;
-use object_store::{ObjectStore, ObjectStoreExt};
+use datafusion::{catalog::MemTable, prelude::SessionContext};
+use object_store::{ObjectStore, ObjectStoreExt, path::Path};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
-use crate::blockbuilder::STACKTRACE_PARTITION;
-use crate::symbolizer::AddressFallbackResolver;
-use crabka_pprof::LazySymbolizer;
+use crate::{blockbuilder::STACKTRACE_PARTITION, symbolizer::AddressFallbackResolver};
 
 #[derive(Clone)]
 pub struct ColdProfileStore {
@@ -520,12 +521,13 @@ mod tests {
     use assert2::{assert, check};
     use crabka_blockstore::{BlockIndex, Labels, MatchOp};
     use crabka_pprof::{EngineOpts, FlameEngine, SymbolizeRequest};
-    use object_store::ObjectStore;
-    use object_store::memory::InMemory;
+    use object_store::{ObjectStore, memory::InMemory};
 
     use super::*;
-    use crate::blockbuilder::build_block;
-    use crate::wal::{ProfileRecord, WalSample, WalSymbolSet};
+    use crate::{
+        blockbuilder::build_block,
+        wal::{ProfileRecord, WalSample, WalSymbolSet},
+    };
 
     const PT: &str = "process_cpu:cpu:nanoseconds:cpu:nanoseconds";
 

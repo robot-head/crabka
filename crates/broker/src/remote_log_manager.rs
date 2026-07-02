@@ -13,16 +13,13 @@
 //! remote-storage SPIs are blocking, so each copy / delete
 //! runs on the `tokio` blocking pool.
 
-use std::collections::{BTreeMap, HashSet};
-use std::sync::Arc;
-use std::sync::atomic::Ordering;
-use std::time::{Duration, SystemTime};
+use std::{
+    collections::{BTreeMap, HashSet},
+    sync::{Arc, atomic::Ordering},
+    time::{Duration, SystemTime},
+};
 
 use bytes::Bytes;
-use tokio_util::sync::CancellationToken;
-use tracing::{debug, warn};
-use uuid::Uuid;
-
 use crabka_log::{LogConfig, SegmentExport};
 use crabka_metadata::NodeId;
 use crabka_remote_storage::{
@@ -30,9 +27,11 @@ use crabka_remote_storage::{
     RemoteLogSegmentMetadataUpdate, RemoteLogSegmentState, RemotePartitionDeleteMetadata,
     RemotePartitionDeleteState, RemoteStorageManager, TopicIdPartition,
 };
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, warn};
+use uuid::Uuid;
 
-use crate::partition::Partition;
-use crate::partition_registry::PartitionRegistry;
+use crate::{partition::Partition, partition_registry::PartitionRegistry};
 
 /// Default cadence of the tiered-storage sweep (copy + retention passes).
 const DEFAULT_TIERING_INTERVAL: Duration = Duration::from_secs(30);
@@ -687,9 +686,7 @@ fn now_ms() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
-
     use crabka_log::{Log, LogConfig};
     use crabka_metadata::{MetadataImage, MetadataRecord, TopicRecord};
     use crabka_protocol::records::{Record, RecordBatch};
@@ -697,6 +694,8 @@ mod tests {
         CustomMetadata, IndexType, InmemoryRemoteLogMetadataManager, LocalTieredStorage,
         RemoteStorageError,
     };
+
+    use super::*;
 
     /// An RSM whose copy always fails (delete succeeds). Used to exercise
     /// the failure rollback path.

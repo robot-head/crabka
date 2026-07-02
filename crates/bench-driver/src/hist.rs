@@ -37,8 +37,9 @@ pub fn percentiles(h: &Histogram<u64>) -> LatencyPercentiles {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
+
+    use super::*;
 
     #[test]
     fn percentiles_basic() {

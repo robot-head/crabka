@@ -19,15 +19,18 @@
 use std::collections::BTreeMap;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-
-use crabka_protocol::ProtocolError;
-use crabka_protocol::records::{Record, RecordBatch};
-
-use crate::coordinator::unified::persistence::{
-    get_bytes, get_i16, get_i32, get_nullable_string, get_string, put_bytes, put_nullable_string,
-    put_string,
+use crabka_protocol::{
+    ProtocolError,
+    records::{Record, RecordBatch},
 };
-use crate::error::BrokerError;
+
+use crate::{
+    coordinator::unified::persistence::{
+        get_bytes, get_i16, get_i32, get_nullable_string, get_string, put_bytes,
+        put_nullable_string, put_string,
+    },
+    error::BrokerError,
+};
 
 pub const KEY_STREAMS_GROUP_METADATA: i16 = 15;
 pub const KEY_STREAMS_MEMBER_METADATA: i16 = 16;
@@ -797,8 +800,9 @@ impl PendingStreamsRecords {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
+
+    use super::*;
 
     /// Split a freshly encoded key into its leading version and the remaining
     /// body, mirroring how `__consumer_offsets` keys are dispatched on the

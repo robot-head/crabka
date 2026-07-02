@@ -3,8 +3,7 @@
 
 use async_trait::async_trait;
 
-use crate::error::ConnectError;
-use crate::record::ConnectRecord;
+use crate::{error::ConnectError, record::ConnectRecord};
 
 /// A connector that pushes records consumed from Kafka into an external system
 /// (a data warehouse, a search index, a telemetry backend).

@@ -4,9 +4,9 @@
 
 #![allow(clippy::pedantic)]
 
-use assert2::assert;
 use std::process::{Command, Stdio};
 
+use assert2::assert;
 use crabka_broker::{Broker, BrokerConfig};
 use crabka_log::LogConfig;
 

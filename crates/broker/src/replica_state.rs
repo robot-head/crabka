@@ -8,8 +8,10 @@
 
 #![allow(dead_code)] // wired in by the ISR-maintenance path
 
-use std::collections::{HashMap, HashSet};
-use std::time::Instant;
+use std::{
+    collections::{HashMap, HashSet},
+    time::Instant,
+};
 
 use crabka_raft::NodeId;
 
@@ -115,9 +117,11 @@ impl ReplicaState {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::assert;
     use std::time::{Duration, Instant};
+
+    use assert2::assert;
+
+    use super::*;
 
     fn fresh() -> ReplicaState {
         ReplicaState::new()

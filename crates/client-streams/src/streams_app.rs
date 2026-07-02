@@ -45,15 +45,19 @@
 
 use std::sync::Arc;
 
-use crabka_schema_serde::cache::{CacheConfig, SchemaCache};
-use crabka_schema_serde::{RegistryClient, set_default_registry};
+use crabka_schema_serde::{
+    RegistryClient,
+    cache::{CacheConfig, SchemaCache},
+    set_default_registry,
+};
 
-use crate::dsl::StreamsBuilder;
-use crate::error::StreamsClientError;
-use crate::runtime::KafkaStreams;
-use crate::runtime::eos::ProcessingGuarantee;
-use crate::store::StoreBackend;
-use crate::topology::BuiltTopology;
+use crate::{
+    dsl::StreamsBuilder,
+    error::StreamsClientError,
+    runtime::{KafkaStreams, eos::ProcessingGuarantee},
+    store::StoreBackend,
+    topology::BuiltTopology,
+};
 
 /// Owns the schema-registry lifecycle (cache + process default + pre-warm) and
 /// the [`KafkaStreams`] wiring for a streams application. Construct via

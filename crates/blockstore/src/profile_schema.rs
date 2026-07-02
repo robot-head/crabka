@@ -9,8 +9,10 @@ use std::sync::Arc;
 
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 
-use crate::block::{COL_FINGERPRINT, COL_TIMESTAMP};
-use crate::block_index::{BlockSchema, RequiredColumn};
+use crate::{
+    block::{COL_FINGERPRINT, COL_TIMESTAMP},
+    block_index::{BlockSchema, RequiredColumn},
+};
 
 /// The 5-part `name:sample_type:sample_unit:period_type:period_unit` string.
 pub const PCOL_PROFILE_TYPE: &str = "profile_type";

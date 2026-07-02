@@ -4,11 +4,13 @@
 //! (Kafka GET, Service/Deployment SSA applies, status patch) and the
 //! rendered Deployment container args / env / Secret mounts.
 
-use assert2::assert;
 use std::sync::Arc;
 
-use crabka_operator::controller::schema_registry::reconcile;
-use crabka_operator::crd::{SchemaRegistry, SchemaRegistrySpec};
+use assert2::assert;
+use crabka_operator::{
+    controller::schema_registry::reconcile,
+    crd::{SchemaRegistry, SchemaRegistrySpec},
+};
 use http::Method;
 
 #[path = "shared/mod.rs"]

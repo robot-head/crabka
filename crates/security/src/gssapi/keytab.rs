@@ -270,8 +270,9 @@ pub fn load_service_keys(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     /// Fields needed to synthesize a keytab entry body in tests.
     struct EntrySpec<'a> {

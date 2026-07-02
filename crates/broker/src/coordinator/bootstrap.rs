@@ -2,24 +2,29 @@
 //! startup, then synchronously replay every record into the in-memory
 //! `GroupCoordinator`.
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use crabka_metadata::{MetadataRecord, PartitionRecord, TopicRecord};
 use crabka_protocol::records::RecordBatch;
 use crabka_raft::RaftError;
 
-use crate::broker::spawn_partition;
-use crate::config::BrokerConfig;
-use crate::coordinator::GroupCoordinator;
-use crate::coordinator::persistence::{self, GroupMetadataValue, Key, OffsetCommitValue};
-use crate::coordinator::unified::classic_state::{
-    Group as ClassicState, GroupState as ClassicGroupState, Member, OffsetEntry,
+use crate::{
+    broker::spawn_partition,
+    config::BrokerConfig,
+    coordinator::{
+        GroupCoordinator,
+        persistence::{self, GroupMetadataValue, Key, OffsetCommitValue},
+        unified::{
+            classic_state::{
+                Group as ClassicState, GroupState as ClassicGroupState, Member, OffsetEntry,
+            },
+            group::{Group, GroupKind},
+        },
+    },
+    error::BrokerError,
+    log_dir,
+    partition_registry::PartitionRegistry,
 };
-use crate::coordinator::unified::group::{Group, GroupKind};
-use crate::error::BrokerError;
-use crate::log_dir;
-use crate::partition_registry::PartitionRegistry;
 
 pub const OFFSETS_TOPIC: &str = "__consumer_offsets";
 pub const OFFSETS_PARTITION: i32 = 0;
@@ -639,13 +644,17 @@ fn apply_group_metadata(g: &mut ClassicState, v: GroupMetadataValue, replay_time
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::config::BrokerConfig;
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+
     use assert2::{assert, check};
     use crabka_raft::ControllerHandle;
-    use std::sync::Arc;
-    use std::time::{Duration, Instant};
     use tempfile::tempdir;
+
+    use super::*;
+    use crate::config::BrokerConfig;
 
     /// Spin up a controller, wait until it reports a leader, return the handle.
     async fn controller_with_leader(log_dir: std::path::PathBuf) -> Arc<ControllerHandle> {
@@ -670,11 +679,12 @@ mod tests {
     /// freshly-spawned actor restores the same membership after a restart.
     #[tokio::test]
     async fn share_group_records_replay_into_seed() {
-        use crate::coordinator::unified::GroupCoordinator;
-        use crate::coordinator::unified::offsets_log::fake::InMemoryOffsetsLog;
-        use crate::coordinator::unified::reconciler::ReconcileInput;
-        use crate::coordinator::unified::share::persistence as sp;
         use crabka_protocol::primitives::uuid::Uuid;
+
+        use crate::coordinator::unified::{
+            GroupCoordinator, offsets_log::fake::InMemoryOffsetsLog, reconciler::ReconcileInput,
+            share::persistence as sp,
+        };
 
         #[derive(Debug)]
         struct EmptyMeta;
@@ -758,11 +768,12 @@ mod tests {
     /// the cached seed; a member tombstone scrubs that member from the seed.
     #[tokio::test]
     async fn streams_group_records_replay_into_seed() {
-        use crate::coordinator::unified::GroupCoordinator;
-        use crate::coordinator::unified::offsets_log::fake::InMemoryOffsetsLog;
-        use crate::coordinator::unified::reconciler::ReconcileInput;
-        use crate::coordinator::unified::streams::persistence as sp;
         use std::collections::BTreeMap;
+
+        use crate::coordinator::unified::{
+            GroupCoordinator, offsets_log::fake::InMemoryOffsetsLog, reconciler::ReconcileInput,
+            streams::persistence as sp,
+        };
 
         #[derive(Debug)]
         struct EmptyMeta;
@@ -961,8 +972,9 @@ mod tests {
 
     #[test]
     fn apply_group_metadata_rebuilds_members_and_state() {
-        use crate::coordinator::persistence::MemberMetadata;
         use bytes::Bytes;
+
+        use crate::coordinator::persistence::MemberMetadata;
 
         let mut g = ClassicState::new("g");
         let v = GroupMetadataValue {
@@ -1012,8 +1024,9 @@ mod tests {
     /// same shape the share/streams replay tests use. Suitable for driving the
     /// `apply_record` / `apply_tombstone` / `finalize` replay path directly.
     fn bare_coordinator() -> Arc<GroupCoordinator> {
-        use crate::coordinator::unified::offsets_log::fake::InMemoryOffsetsLog;
-        use crate::coordinator::unified::reconciler::ReconcileInput;
+        use crate::coordinator::unified::{
+            offsets_log::fake::InMemoryOffsetsLog, reconciler::ReconcileInput,
+        };
 
         #[derive(Debug)]
         struct EmptyMeta;
@@ -1066,8 +1079,9 @@ mod tests {
     /// group. Log order wins.
     #[tokio::test]
     async fn downgraded_group_replays_as_classic() {
-        use crate::coordinator::unified::persistence_next_gen as ng;
-        use crate::coordinator::unified::{GroupType, persistence_next_gen};
+        use crate::coordinator::unified::{
+            GroupType, persistence_next_gen as ng, persistence_next_gen,
+        };
 
         let coord = bare_coordinator();
 
@@ -1165,8 +1179,7 @@ mod tests {
     /// post-compaction shape and asserts the group replays CLASSIC.
     #[tokio::test]
     async fn compacted_downgrade_residue_replays_as_classic() {
-        use crate::coordinator::unified::GroupType;
-        use crate::coordinator::unified::persistence_next_gen as ng;
+        use crate::coordinator::unified::{GroupType, persistence_next_gen as ng};
 
         let coord = bare_coordinator();
 
@@ -1275,8 +1288,9 @@ mod tests {
     /// over-eager seed removal.
     #[tokio::test]
     async fn upgraded_group_without_tombstone_replays_as_consumer() {
-        use crate::coordinator::unified::persistence_next_gen as ng;
-        use crate::coordinator::unified::{GroupType, persistence_next_gen};
+        use crate::coordinator::unified::{
+            GroupType, persistence_next_gen as ng, persistence_next_gen,
+        };
 
         let coord = bare_coordinator();
         let stream: Vec<(bytes::Bytes, bytes::Bytes)> = vec![
@@ -1324,11 +1338,12 @@ mod tests {
     /// "m1" must report `is_classic == true` via the next-gen `Describe` view.
     #[tokio::test]
     async fn member_with_classic_block_replays_facade() {
-        use crate::coordinator::unified::actor::GroupActorMessage;
-        use crate::coordinator::unified::actor::GroupKindTag;
-        use crate::coordinator::unified::persistence_next_gen as ng;
-        use crate::coordinator::unified::persistence_next_gen;
         use tokio::sync::oneshot;
+
+        use crate::coordinator::unified::{
+            actor::{GroupActorMessage, GroupKindTag},
+            persistence_next_gen as ng, persistence_next_gen,
+        };
 
         let coord = bare_coordinator();
         let stream: Vec<(bytes::Bytes, bytes::Bytes)> = vec![

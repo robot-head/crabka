@@ -50,39 +50,37 @@
 //!   form.
 
 use bytes::Bytes;
+use crabka_protocol::{
+    owned::{
+        access_control_entry_record::AccessControlEntryRecord,
+        client_quota_record::{ClientQuotaRecord as KClientQuotaRecord, EntityData},
+        config_record::ConfigRecord,
+        delegation_token_record::DelegationTokenRecord as KDelegationTokenRecord,
+        feature_level_record::FeatureLevelRecord as KFeatureLevelRecord,
+        partition_record::PartitionRecord as KPartitionRecord,
+        register_broker_record::{BrokerEndpoint as KBrokerEndpoint, RegisterBrokerRecord},
+        remove_access_control_entry_record::RemoveAccessControlEntryRecord,
+        remove_topic_record::RemoveTopicRecord,
+        remove_user_scram_credential_record::RemoveUserScramCredentialRecord,
+        topic_record::TopicRecord as KTopicRecord,
+        unregister_broker_record::UnregisterBrokerRecord as KUnregisterBrokerRecord,
+        user_scram_credential_record::UserScramCredentialRecord,
+    },
+    primitives::uuid::Uuid as KUuid,
+    records::metadata::KraftMetadataRecord,
+};
+use crabka_security::{KafkaPrincipal, ListenerProtocol, SaslMechanism};
 use wincode::{Deserialize as _, Serialize as _};
 
-use crabka_protocol::owned::access_control_entry_record::AccessControlEntryRecord;
-use crabka_protocol::owned::client_quota_record::{
-    ClientQuotaRecord as KClientQuotaRecord, EntityData,
-};
-use crabka_protocol::owned::config_record::ConfigRecord;
-use crabka_protocol::owned::delegation_token_record::DelegationTokenRecord as KDelegationTokenRecord;
-use crabka_protocol::owned::feature_level_record::FeatureLevelRecord as KFeatureLevelRecord;
-use crabka_protocol::owned::partition_record::PartitionRecord as KPartitionRecord;
-use crabka_protocol::owned::register_broker_record::{
-    BrokerEndpoint as KBrokerEndpoint, RegisterBrokerRecord,
-};
-use crabka_protocol::owned::remove_access_control_entry_record::RemoveAccessControlEntryRecord;
-use crabka_protocol::owned::remove_topic_record::RemoveTopicRecord;
-use crabka_protocol::owned::remove_user_scram_credential_record::RemoveUserScramCredentialRecord;
-use crabka_protocol::owned::topic_record::TopicRecord as KTopicRecord;
-use crabka_protocol::owned::unregister_broker_record::UnregisterBrokerRecord as KUnregisterBrokerRecord;
-use crabka_protocol::owned::user_scram_credential_record::UserScramCredentialRecord;
-use crabka_protocol::primitives::uuid::Uuid as KUuid;
-use crabka_protocol::records::metadata::KraftMetadataRecord;
-
-use crabka_security::{KafkaPrincipal, ListenerProtocol, SaslMechanism};
-
-use crate::MetadataImage;
-use crate::acl::{
-    AclEntry, AclEntryFilter, AclOperation, PatternType, PermissionType, ResourceType,
-};
-use crate::records::{
-    BrokerConfigRecord, BrokerEndpoint, BrokerRegistrationRecord, ClientQuotaRecord,
-    DelegationTokenRecord, DeleteScramCredentialRecord, DeleteTopicRecord, FeatureLevelRecord,
-    MetadataRecord, PartitionRecord, QuotaEntity, ScramCredentialRecord, TopicConfigRecord,
-    TopicRecord, UnregisterBrokerRecord,
+use crate::{
+    MetadataImage,
+    acl::{AclEntry, AclEntryFilter, AclOperation, PatternType, PermissionType, ResourceType},
+    records::{
+        BrokerConfigRecord, BrokerEndpoint, BrokerRegistrationRecord, ClientQuotaRecord,
+        DelegationTokenRecord, DeleteScramCredentialRecord, DeleteTopicRecord, FeatureLevelRecord,
+        MetadataRecord, PartitionRecord, QuotaEntity, ScramCredentialRecord, TopicConfigRecord,
+        TopicRecord, UnregisterBrokerRecord,
+    },
 };
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -1107,13 +1105,16 @@ fn topic_name_for_id(image: &MetadataImage, id: uuid::Uuid) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::acl::AclEntryFilter;
-    use crate::records::{
-        ClientMetricsConfigRecord, DeleteDelegationTokenRecord, FeaturesEpochRecord,
-        KRaftVersionRecord, PartitionDirAssignmentRecord, VotersRecord,
-    };
     use assert2::{assert, check};
+
+    use super::*;
+    use crate::{
+        acl::AclEntryFilter,
+        records::{
+            ClientMetricsConfigRecord, DeleteDelegationTokenRecord, FeaturesEpochRecord,
+            KRaftVersionRecord, PartitionDirAssignmentRecord, VotersRecord,
+        },
+    };
 
     fn img() -> MetadataImage {
         MetadataImage::new(uuid::Uuid::nil())

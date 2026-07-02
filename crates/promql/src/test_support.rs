@@ -5,10 +5,9 @@ use std::sync::Arc;
 use crabka_blockstore::Labels;
 use crabka_metrics::{BucketSpan, NativeHistogram, ResetHint};
 
-use crate::conformance::testkit::metric_to_labels;
-use crate::error::Result;
 use crate::{
     EngineOpts, InMemoryMetricStore, InstantSample, PromqlEngine, QueryResult, SampleValue,
+    conformance::testkit::metric_to_labels, error::Result,
 };
 
 const TENANT: &str = "test";

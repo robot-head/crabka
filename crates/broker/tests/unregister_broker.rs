@@ -8,8 +8,9 @@
 use assert2::assert;
 mod support;
 
-use crabka_protocol::owned::metadata_request::MetadataRequest;
-use crabka_protocol::owned::unregister_broker_request::UnregisterBrokerRequest;
+use crabka_protocol::owned::{
+    metadata_request::MetadataRequest, unregister_broker_request::UnregisterBrokerRequest,
+};
 
 #[tokio::test]
 async fn unregister_known_broker_drops_it_from_metadata() {

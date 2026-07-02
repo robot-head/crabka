@@ -2,9 +2,11 @@
 //! folds records into the shared store, and publishes the last-applied offset
 //! (for read-your-writes). Mirrors remote-storage-topic's `partition_fetch_loop`.
 
-use std::net::{SocketAddr, ToSocketAddrs};
-use std::sync::Arc;
-use std::time::Duration;
+use std::{
+    net::{SocketAddr, ToSocketAddrs},
+    sync::Arc,
+    time::Duration,
+};
 
 use crabka_client_core::{
     ClientError, ClientSecurity, Connection, ConnectionOptions, fetch_partition,
@@ -14,9 +16,7 @@ use parking_lot::RwLock;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use crate::config::RegistryConfig;
-use crate::kafkastore::record::SchemaRecord;
-use crate::store::StoreState;
+use crate::{config::RegistryConfig, kafkastore::record::SchemaRecord, store::StoreState};
 
 /// Shared state + offset watch returned by [`spawn`].
 pub struct StoreReader {
@@ -198,11 +198,12 @@ pub fn spawn(
 
 #[cfg(test)]
 mod tests {
+    use std::{io, time::Duration};
+
+    use crabka_client_core::ClientError;
+
     use super::*;
     use crate::kafkastore::record::{SchemaKey, SchemaValue};
-    use crabka_client_core::ClientError;
-    use std::io;
-    use std::time::Duration;
 
     #[test]
     fn apply_record_folds_schema_and_ignores_noop() {

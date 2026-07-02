@@ -4,22 +4,23 @@
 //! store. Unlike the time- and sliding-windowed variants, the session aggregate
 //! requires a **merger** that combines two sessions when they are merged together.
 
-use std::any::Any;
-use std::cell::RefCell;
-use std::marker::PhantomData;
-use std::rc::Rc;
-use std::sync::Arc;
+use std::{any::Any, cell::RefCell, marker::PhantomData, rc::Rc, sync::Arc};
 
-use crate::dsl::builder::InternalStreamsBuilder;
-use crate::dsl::cogrouped::{
-    CogroupInput, CogroupKind, CogroupSpec, CogroupedKStream, StoreRegistrarFn, lower_cogroup,
+use crate::{
+    dsl::{
+        builder::InternalStreamsBuilder,
+        cogrouped::{
+            CogroupInput, CogroupKind, CogroupSpec, CogroupedKStream, StoreRegistrarFn,
+            lower_cogroup,
+        },
+        config::Materialized,
+        kgrouped::mint_store_name,
+        ktable::KTable,
+        names,
+        windows::{SessionWindowedSerde, SessionWindows, Windowed},
+    },
+    processor::serde::Serde,
 };
-use crate::dsl::config::Materialized;
-use crate::dsl::kgrouped::mint_store_name;
-use crate::dsl::ktable::KTable;
-use crate::dsl::names;
-use crate::dsl::windows::{SessionWindowedSerde, SessionWindows, Windowed};
-use crate::processor::serde::Serde;
 
 impl<K, VOut> CogroupedKStream<K, VOut>
 where
@@ -134,10 +135,11 @@ where
 mod caching_tests {
     use assert2::check;
 
-    use crate::dsl::StreamsBuilder;
-    use crate::dsl::windows::SessionWindowedSerde;
-    use crate::store::backend::StoreBackend;
-    use crate::{I64Serde, Materialized, Produced, SessionWindows, StringSerde};
+    use crate::{
+        I64Serde, Materialized, Produced, SessionWindows, StringSerde,
+        dsl::{StreamsBuilder, windows::SessionWindowedSerde},
+        store::backend::StoreBackend,
+    };
 
     #[test]
     fn session_windowed_cogroup_marks_store_cached() {

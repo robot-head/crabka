@@ -7,18 +7,22 @@
 //! SSA / merge-patch wrappers, and the labels / owner-ref helpers are
 //! shared verbatim.
 
-use std::collections::BTreeMap;
-use std::fmt::Debug;
+use std::{collections::BTreeMap, fmt::Debug};
 
-use k8s_openapi::ByteString;
-use k8s_openapi::api::apps::v1::StatefulSet;
-use k8s_openapi::api::core::v1::{ConfigMap, Secret, Service};
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference};
-use kube::Resource;
-use kube::api::{Api, DynamicObject, Patch, PatchParams, PostParams};
-use kube::core::{ApiResource, GroupVersionKind};
-use serde::Serialize;
-use serde::de::DeserializeOwned;
+use k8s_openapi::{
+    ByteString,
+    api::{
+        apps::v1::StatefulSet,
+        core::v1::{ConfigMap, Secret, Service},
+    },
+    apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference},
+};
+use kube::{
+    Resource,
+    api::{Api, DynamicObject, Patch, PatchParams, PostParams},
+    core::{ApiResource, GroupVersionKind},
+};
+use serde::{Serialize, de::DeserializeOwned};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -796,8 +800,9 @@ pub(crate) fn parse_quantity(s: &str) -> Result<i128, &'static str> {
 
 #[cfg(test)]
 mod config_hash_tests {
-    use super::*;
     use assert2::{assert, check};
+
+    use super::*;
 
     #[test]
     fn config_hash_is_truncated_sha256_hex() {
@@ -994,8 +999,10 @@ mod config_hash_tests {
 
     #[test]
     fn configmap_has_one_toml_key_per_broker() {
-        use crate::controller::listeners::{AdvertisedAddress, synthesized_default_listener};
-        use crate::crd::KafkaSpec;
+        use crate::{
+            controller::listeners::{AdvertisedAddress, synthesized_default_listener},
+            crd::KafkaSpec,
+        };
 
         let mut k = Kafka::new(
             "demo",
@@ -1089,8 +1096,10 @@ mod config_hash_tests {
 
     #[test]
     fn configmap_never_injects_metadata_version_into_server_properties() {
-        use crate::controller::listeners::{AdvertisedAddress, synthesized_default_listener};
-        use crate::crd::KafkaSpec;
+        use crate::{
+            controller::listeners::{AdvertisedAddress, synthesized_default_listener},
+            crd::KafkaSpec,
+        };
 
         // Even with an explicit `spec.metadataVersion` pin, the rendered
         // broker config must not carry `metadata.version` — it is finalized
@@ -1142,8 +1151,9 @@ mod config_hash_tests {
 
 #[cfg(test)]
 mod rollout_tests {
-    use super::{PoolRolloutState, plan_rollout};
     use assert2::assert;
+
+    use super::{PoolRolloutState, plan_rollout};
 
     fn st(name: &str, hash: Option<&str>, ready: bool) -> PoolRolloutState {
         PoolRolloutState {
@@ -1238,8 +1248,9 @@ mod rollout_tests {
 
 #[cfg(test)]
 mod parse_quantity_tests {
-    use super::parse_quantity;
     use assert2::assert;
+
+    use super::parse_quantity;
 
     #[test]
     fn quantity_parse_binary_suffixes() {
@@ -1292,10 +1303,13 @@ mod parse_quantity_tests {
 
 #[cfg(test)]
 mod cluster_object_tests {
-    use super::*;
-    use crate::controller::listeners::AdvertisedAddress;
-    use crate::crd::{KafkaSpec, Listener, ListenerType};
     use assert2::{assert, check};
+
+    use super::*;
+    use crate::{
+        controller::listeners::AdvertisedAddress,
+        crd::{KafkaSpec, Listener, ListenerType},
+    };
 
     fn test_kafka() -> Kafka {
         let mut k = Kafka::new(

@@ -102,10 +102,12 @@ async fn try_create_topic<A: TopicAdminClient + ?Sized>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::collections::VecDeque;
+
     use assert2::{assert, check};
     use crabka_client_admin::{AdminError, CreateTopicOutcome, KafkaError};
-    use std::collections::VecDeque;
+
+    use super::*;
 
     #[derive(Default)]
     struct FakeAdmin {

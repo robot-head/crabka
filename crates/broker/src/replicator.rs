@@ -9,31 +9,32 @@
 // is a false positive here.
 #![allow(clippy::struct_field_names)]
 
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::Duration;
-
-use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use crabka_client_core::{ClientError, Connection, ConnectionOptions};
 use crabka_log::{Log, LogConfig};
-use crabka_protocol::owned::fetch_request::{
-    FetchPartition, FetchRequest, FetchTopic, ReplicaState,
+use crabka_protocol::{
+    owned::{
+        fetch_request::{FetchPartition, FetchRequest, FetchTopic, ReplicaState},
+        fetch_response::FetchResponse,
+        offset_for_leader_epoch_request::{
+            OffsetForLeaderEpochRequest, OffsetForLeaderPartition, OffsetForLeaderTopic,
+        },
+    },
+    primitives::uuid::Uuid as WireUuid,
+    records::RecordsPayload,
 };
-use crabka_protocol::owned::fetch_response::FetchResponse;
-use crabka_protocol::owned::offset_for_leader_epoch_request::{
-    OffsetForLeaderEpochRequest, OffsetForLeaderPartition, OffsetForLeaderTopic,
-};
-use crabka_protocol::primitives::uuid::Uuid as WireUuid;
-use crabka_protocol::records::RecordsPayload;
 use crabka_raft::NodeId;
 use crabka_security::ListenerProtocol;
+use tokio_util::sync::CancellationToken;
+use tracing::{info, warn};
 
-use crate::broker::spawn_partition;
-use crate::codes;
-use crate::partition_registry::PartitionRegistry;
-use crate::throttle::{ThrottleState, TopicThrottle};
+use crate::{
+    broker::spawn_partition,
+    codes,
+    partition_registry::PartitionRegistry,
+    throttle::{ThrottleState, TopicThrottle},
+};
 
 const FETCH_MAX_BYTES: i32 = 1 << 20;
 const FETCH_MAX_WAIT_MS: i32 = 500;
@@ -740,12 +741,12 @@ fn next_reconnect_delay(delay: Duration, cap: Duration) -> Duration {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::assert;
-    use std::collections::{BTreeMap, BTreeSet};
-    use std::net::SocketAddr;
-    use tokio::sync::watch;
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        net::SocketAddr,
+    };
 
+    use assert2::assert;
     use crabka_metadata::{
         MetadataImage, MetadataRecord, PartitionRecord, TopicConfigRecord, TopicRecord,
     };
@@ -756,6 +757,9 @@ mod tests {
         AddVoter, Node, QuorumState, RaftError, ReconfigOutcome, RemoveVoter, SnapshotRange,
         UpdateVoter,
     };
+    use tokio::sync::watch;
+
+    use super::*;
 
     const TOPIC: &str = "orders";
     const PARTITION: i32 = 0;

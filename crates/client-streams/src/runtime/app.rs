@@ -5,26 +5,27 @@
 //! `StreamThread` while polling/committing on intervals. `close()` stops the
 //! supervisor (flush+commit+leave).
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
-use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
+use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
-use crate::error::StreamsClientError;
-use crate::membership::{StreamsEvent, StreamsMembership};
-use crate::processor::serde::Serde;
-use crate::runtime::eos::{ProcessingGuarantee, TransactionalProducer};
-use crate::runtime::io::{OffsetStore, RecordFetcher, RecordProducer};
-use crate::runtime::io_broker;
-use crate::runtime::iq::IqRequest;
-use crate::runtime::iq_view::ReadOnlyKeyValueStore;
-use crate::runtime::iqv2::dispatch::Iq2Request;
-use crate::runtime::iqv2::{Query, StateQuery, StateQueryResult};
-use crate::runtime::thread::StreamThread;
-use crate::store::iq::StoreKind;
-use crate::topology::BuiltTopology;
+use crate::{
+    error::StreamsClientError,
+    membership::{StreamsEvent, StreamsMembership},
+    processor::serde::Serde,
+    runtime::{
+        eos::{ProcessingGuarantee, TransactionalProducer},
+        io::{OffsetStore, RecordFetcher, RecordProducer},
+        io_broker,
+        iq::IqRequest,
+        iq_view::ReadOnlyKeyValueStore,
+        iqv2::{Query, StateQuery, StateQueryResult, dispatch::Iq2Request},
+        thread::StreamThread,
+    },
+    store::iq::StoreKind,
+    topology::BuiltTopology,
+};
 
 /// A managed Kafka Streams runtime: joins a streams group, runs assigned tasks
 /// (fetch → process → produce → commit, at-least-once), and reacts to rebalances.

@@ -4,12 +4,16 @@
 //! in-process Crabka broker, proving the distributor-facing WAL sink and the
 //! querier/compactor-facing WAL consumer agree on the durable record boundary.
 
-use std::collections::BTreeMap;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::{
+    collections::BTreeMap,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
 
 use assert2::{assert, check};
-use axum::body::{Body, to_bytes};
-use axum::http::{Request, StatusCode};
+use axum::{
+    body::{Body, to_bytes},
+    http::{Request, StatusCode},
+};
 use bytes::Bytes;
 use crabka_blockstore::{
     BlockDescriptor, LabelIndex, LogBlockIndex as BlockIndex, labels, write_log_index_manifest,
@@ -31,8 +35,7 @@ use futures_util::StreamExt;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tokio::net::TcpListener;
-use tokio_tungstenite::connect_async;
-use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
+use tokio_tungstenite::{connect_async, tungstenite::client::IntoClientRequest as _};
 use tower::ServiceExt;
 
 async fn boot() -> (BrokerHandle, String, TempDir) {

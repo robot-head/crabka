@@ -2,15 +2,19 @@
 //! instantiated graph + per-partition fetch offsets. At-least-once: produce →
 //! flush → commit.
 
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
-use crate::error::StreamsClientError;
-use crate::membership::TopicPartition;
-use crate::processor::graph::Graph;
-use crate::runtime::eos::ProcessingGuarantee;
-use crate::runtime::io::{
-    BeginTxnGate, IsolationLevel, OffsetStore, RecordFetcher, RecordProducer,
+use crate::{
+    error::StreamsClientError,
+    membership::TopicPartition,
+    processor::graph::Graph,
+    runtime::{
+        eos::ProcessingGuarantee,
+        io::{BeginTxnGate, IsolationLevel, OffsetStore, RecordFetcher, RecordProducer},
+    },
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -524,18 +528,23 @@ impl StreamTask {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::membership::TopicPartition;
-    use crate::processor::api::{Processor, ProcessorContext};
-    use crate::processor::record::Record;
-    use crate::processor::serde::{I64Serde, StringSerde};
-    use crate::runtime::io::{
-        FetchBatch, FetchedRec, IsolationLevel, OffsetStore, RecordFetcher, RecordProducer,
-    };
-    use crate::topology::{NodeHandle, Topology};
+    use std::{collections::HashMap, sync::Mutex as StdMutex};
+
     use assert2::check;
-    use std::collections::HashMap;
-    use std::sync::Mutex as StdMutex;
+
+    use super::*;
+    use crate::{
+        membership::TopicPartition,
+        processor::{
+            api::{Processor, ProcessorContext},
+            record::Record,
+            serde::{I64Serde, StringSerde},
+        },
+        runtime::io::{
+            FetchBatch, FetchedRec, IsolationLevel, OffsetStore, RecordFetcher, RecordProducer,
+        },
+        topology::{NodeHandle, Topology},
+    };
 
     // --- stateful topology helpers ---
 

@@ -8,32 +8,36 @@
 //! `RecordBatch`. Clients that send a single v2 batch per partition (the
 //! typical modern case) are fully supported.
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use bytes::{Bytes, BytesMut};
-
+use crabka_log::VerbatimBatch;
 use crabka_metadata::{AclOperation, ResourceType};
-use crabka_protocol::owned::produce_request::ProduceRequest;
-use crabka_protocol::owned::produce_response::{
-    LeaderIdAndEpoch, PartitionProduceResponse, ProduceResponse, TopicProduceResponse,
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        produce_request::ProduceRequest,
+        produce_response::{
+            LeaderIdAndEpoch, PartitionProduceResponse, ProduceResponse, TopicProduceResponse,
+        },
+    },
+    primitives::uuid::Uuid as WireUuid,
+    records::{
+        Attributes, RecordBatch, RecordsPayload, TimestampType, ValidatedBatch,
+        count_records_in_v2_batches, produce_framing, validate_one_v2_batch,
+    },
 };
-use crabka_protocol::primitives::uuid::Uuid as WireUuid;
-use crabka_protocol::records::{
-    Attributes, RecordBatch, RecordsPayload, TimestampType, ValidatedBatch,
-    count_records_in_v2_batches, produce_framing, validate_one_v2_batch,
-};
-use crabka_protocol::{Decode, Encode};
 use tokio::sync::oneshot;
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize_topics};
-use crate::broker::Broker;
-use crate::codes;
-use crate::config_keys::{COMPRESSION_TYPE, MIN_INSYNC_REPLICAS, parse_compression_type};
-use crate::error::BrokerError;
-use crate::partition::{Partition, ProduceData, ProduceJob, WriterMessage};
-use crate::partition_registry::PartitionRegistry;
-use crabka_log::VerbatimBatch;
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult, authorize_topics},
+    broker::Broker,
+    codes,
+    config_keys::{COMPRESSION_TYPE, MIN_INSYNC_REPLICAS, parse_compression_type},
+    error::BrokerError,
+    partition::{Partition, ProduceData, ProduceJob, WriterMessage},
+    partition_registry::PartitionRegistry,
+};
 
 /// Kafka `acks` sentinel `-1` (producer `acks=all`): the leader must hold
 /// the response until the high watermark covers the append, i.e. every
@@ -1236,11 +1240,8 @@ fn build_produce_data(prepared: PreparedBatch, leader_epoch: i32) -> ProduceData
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        FramedPartition, FramedTopic, MIN_INSYNC_REPLICAS, PartitionPayload,
-        build_topic_error_response, decode_owned_batch, process_partition,
-        produce_bytes_by_qos_tier, resolve_topic_compression, topic_min_insync_replicas,
-    };
+    use std::{collections::BTreeMap, sync::Arc, time::Duration};
+
     use assert2::{assert, check};
     use bytes::{Bytes, BytesMut};
     use crabka_compression::CompressionType;
@@ -1248,10 +1249,13 @@ mod tests {
         MetadataImage, MetadataRecord, PartitionRecord, TopicConfigRecord, TopicRecord,
     };
     use crabka_protocol::records::{Record, RecordBatch, RecordsPayload};
-    use std::collections::BTreeMap;
-    use std::sync::Arc;
-    use std::time::Duration;
     use uuid::Uuid;
+
+    use super::{
+        FramedPartition, FramedTopic, MIN_INSYNC_REPLICAS, PartitionPayload,
+        build_topic_error_response, decode_owned_batch, process_partition,
+        produce_bytes_by_qos_tier, resolve_topic_compression, topic_min_insync_replicas,
+    };
 
     fn image_with_topic(topic: &str, isr: &[u64]) -> MetadataImage {
         let mut img = MetadataImage::new(Uuid::nil());
@@ -1633,13 +1637,14 @@ mod tests {
     // verbatim-vs-owned; `build_produce_data` maps the result to the writer's
     // `ProduceData`, stamping the leader epoch.
     mod verbatim {
-        use super::super::{
-            PartitionPayload, PreparedSource, ProduceData, build_produce_data, prepare_batch,
-        };
         use assert2::{assert, check};
         use bytes::{Bytes, BytesMut};
         use crabka_compression::CompressionType;
         use crabka_protocol::records::{Attributes, Record, RecordBatch, TimestampType};
+
+        use super::super::{
+            PartitionPayload, PreparedSource, ProduceData, build_produce_data, prepare_batch,
+        };
 
         fn encode(b: &RecordBatch) -> Bytes {
             let mut buf = BytesMut::new();

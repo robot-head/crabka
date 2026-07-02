@@ -4,22 +4,26 @@
 //! becoming Ready wakes pending topic reconciles). Diff-and-apply
 //! against the live cluster via `crabka_client_admin::AdminClient`.
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use crabka_client_admin::{CreatePartitionsOp, CreateTopicSpec, IncrementalAlterOp};
 use futures::StreamExt as _;
-use kube::api::{Api, Patch, PatchParams};
-use kube::runtime::controller::{Action, Controller};
-use kube::runtime::reflector::ObjectRef;
-use kube::runtime::watcher;
-use kube::{Resource, ResourceExt as _};
+use kube::{
+    Resource, ResourceExt as _,
+    api::{Api, Patch, PatchParams},
+    runtime::{
+        controller::{Action, Controller},
+        reflector::ObjectRef,
+        watcher,
+    },
+};
 use serde_json::json;
 
-use crate::context::Context;
-use crate::controller::common::{FIELD_MANAGER, ReconcileError, condition};
-use crate::crd::{Kafka, KafkaTopic};
+use crate::{
+    context::Context,
+    controller::common::{FIELD_MANAGER, ReconcileError, condition},
+    crd::{Kafka, KafkaTopic},
+};
 
 const FINALIZER: &str = "crabka.io/topic-finalizer";
 
@@ -544,9 +548,10 @@ async fn patch_status(
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
+
     use super::*;
     use crate::crd::{KafkaCondition, KafkaSpec, KafkaStatus, ListenerStatus, ListenerType};
-    use assert2::assert;
 
     fn kafka_ready(name: &str, namespace: &str, listener_port: i32) -> Kafka {
         let mut k = Kafka::new(

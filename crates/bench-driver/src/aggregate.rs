@@ -315,12 +315,13 @@ fn series_from_buckets(
 
 #[cfg(test)]
 mod tests {
+    use assert2::{assert, check};
+
     use super::*;
     use crate::scenario::{
         Acks, Compression, LatencyPercentiles, LoadMode, ModeTag, Resource, Scenario, Throughput,
         Topology,
     };
-    use assert2::{assert, check};
 
     fn run(
         stack: Stack,

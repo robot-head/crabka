@@ -1,18 +1,21 @@
 //! In-memory label/series/block index.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
-use object_store::path::Path;
-use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
+use object_store::{ObjectStore, ObjectStoreExt, PutPayload, path::Path};
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
-use crate::block::BlockMeta;
-use crate::block_index::BlockIndex;
-use crate::error::{BlockStoreError, Result};
-use crate::labels::{Labels, SeriesFingerprint};
-use crate::matcher::{LabelMatcher, MatchOp, QUERY_SHARD_LABEL, parse_query_shard_selector};
+use crate::{
+    block::BlockMeta,
+    block_index::BlockIndex,
+    error::{BlockStoreError, Result},
+    labels::{Labels, SeriesFingerprint},
+    matcher::{LabelMatcher, MatchOp, QUERY_SHARD_LABEL, parse_query_shard_selector},
+};
 
 /// Maximum byte size of an index snapshot object accepted by [`Index::load`].
 ///
@@ -676,9 +679,11 @@ mod tests {
     use assert2::{assert, check};
 
     use super::*;
-    use crate::block::BlockMeta;
-    use crate::labels::Labels;
-    use crate::matcher::{LabelMatcher, MatchOp};
+    use crate::{
+        block::BlockMeta,
+        labels::Labels,
+        matcher::{LabelMatcher, MatchOp},
+    };
 
     fn labels(pairs: &[(&str, &str)]) -> Labels {
         let mut labels = Labels::new();
@@ -1480,8 +1485,7 @@ mod tests {
     async fn snapshot_round_trips() {
         use std::sync::Arc;
 
-        use object_store::ObjectStore;
-        use object_store::memory::InMemory;
+        use object_store::{ObjectStore, memory::InMemory};
 
         let idx = seed();
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -1499,9 +1503,7 @@ mod tests {
     async fn load_rejects_over_cap_snapshot() {
         use std::sync::Arc;
 
-        use object_store::ObjectStore;
-        use object_store::memory::InMemory;
-        use object_store::path::Path;
+        use object_store::{ObjectStore, memory::InMemory, path::Path};
 
         let idx = seed();
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());

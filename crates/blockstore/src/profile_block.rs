@@ -2,12 +2,16 @@
 
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, BinaryBuilder, Int64Builder, StringDictionaryBuilder, UInt64Builder};
-use arrow::datatypes::Int32Type;
-use arrow::record_batch::RecordBatch;
+use arrow::{
+    array::{ArrayRef, BinaryBuilder, Int64Builder, StringDictionaryBuilder, UInt64Builder},
+    datatypes::Int32Type,
+    record_batch::RecordBatch,
+};
 
-use crate::error::{BlockStoreError, Result};
-use crate::profile_schema::profile_samples_schema;
+use crate::{
+    error::{BlockStoreError, Result},
+    profile_schema::profile_samples_schema,
+};
 
 /// One flattened profile sample row.
 #[derive(Clone, Debug, PartialEq)]

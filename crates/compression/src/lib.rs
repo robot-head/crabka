@@ -33,10 +33,9 @@
 mod codec_type;
 mod error;
 
+use bytes::Bytes;
 pub use codec_type::CompressionType;
 pub use error::CompressionError;
-
-use bytes::Bytes;
 
 /// Compress `data` using the codec identified by `ct`.
 ///
@@ -138,8 +137,9 @@ fn zstd_decompress(_: &[u8], _: usize) -> Result<Bytes, CompressionError> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn passthrough_none_compress() {

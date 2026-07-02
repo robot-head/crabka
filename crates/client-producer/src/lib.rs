@@ -13,9 +13,10 @@
 //! ## Quick start
 //!
 //! ```no_run
+//! use std::time::Duration;
+//!
 //! use bytes::Bytes;
 //! use crabka_client_producer::{Acks, Compression, Producer, ProducerRecord};
-//! use std::time::Duration;
 //!
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let producer = Producer::builder()

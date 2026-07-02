@@ -296,9 +296,11 @@ pub fn is_supported_level(name: &str, level: i16) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::{assert, check};
     use std::collections::BTreeMap;
+
+    use assert2::{assert, check};
+
+    use super::*;
 
     #[test]
     fn registry_contains_metadata_version() {

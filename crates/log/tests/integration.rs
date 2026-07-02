@@ -6,10 +6,12 @@
 //! The companion scenario `jvm_consumes_rust_written_log_dir` is currently
 //! deferred — see `crates/log/tests/KNOWN_ISSUES.md`.
 
-use assert2::assert;
-use std::path::Path;
-use std::process::{Command, Stdio};
+use std::{
+    path::Path,
+    process::{Command, Stdio},
+};
 
+use assert2::assert;
 use crabka_log::{Log, LogConfig};
 use tempfile::tempdir;
 use testcontainers::runners::AsyncRunner;

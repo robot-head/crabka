@@ -6,9 +6,11 @@
 
 use std::collections::HashMap;
 
-use crate::consumer::Consumer;
-use crate::error::ConsumerError;
-use crate::position::{PartitionPosition, ValidationOutcome, classify};
+use crate::{
+    consumer::Consumer,
+    error::ConsumerError,
+    position::{PartitionPosition, ValidationOutcome, classify},
+};
 
 fn update_leader_epoch(pos: &mut PartitionPosition, leader_epoch: i32) {
     if leader_epoch > pos.leader_epoch {
@@ -206,9 +208,9 @@ impl Consumer {
 
 #[cfg(test)]
 mod tests {
+    use assert2::{assert, check};
+
     use super::*;
-    use assert2::assert;
-    use assert2::check;
 
     fn pos(offset_epoch: i32, leader_epoch: i32, awaiting_validation: bool) -> PartitionPosition {
         PartitionPosition {

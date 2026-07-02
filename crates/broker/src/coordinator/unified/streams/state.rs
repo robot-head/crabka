@@ -26,8 +26,10 @@
 //! [`StreamsMemberAssignmentState`] are provided here so the actor can persist
 //! the state without coupling the two files.
 
-use std::collections::{BTreeMap, HashMap};
-use std::time::{Duration, Instant};
+use std::{
+    collections::{BTreeMap, HashMap},
+    time::{Duration, Instant},
+};
 
 /// The reconciliation state of a single streams-group member's **active** task
 /// set, mirroring KIP-848's `MemberAssignmentState`. Standby/warmup tasks do
@@ -423,8 +425,9 @@ fn compute_active_revoke_split(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
+
+    use super::*;
 
     fn task_map(entries: &[(&str, &[i32])]) -> BTreeMap<String, Vec<i32>> {
         entries

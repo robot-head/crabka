@@ -6,19 +6,24 @@
 use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
-
 use crabka_metadata::{AclOperation, MetadataImage, MetadataRecord, ResourceType};
-use crabka_protocol::owned::broker_heartbeat_request::BrokerHeartbeatRequest;
-use crabka_protocol::owned::broker_heartbeat_response::BrokerHeartbeatResponse;
-use crabka_protocol::{Decode, Encode};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        broker_heartbeat_request::BrokerHeartbeatRequest,
+        broker_heartbeat_response::BrokerHeartbeatResponse,
+    },
+};
 use crabka_raft::NodeId;
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
-use crate::heartbeat::controller_state::ControllerLivenessState;
-use crate::leader_election::select_replacement_leader_for_shutdown;
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes,
+    error::BrokerError,
+    heartbeat::controller_state::ControllerLivenessState,
+    leader_election::select_replacement_leader_for_shutdown,
+};
 
 #[tracing::instrument(
     name = "handle_broker_heartbeat",
@@ -282,7 +287,13 @@ async fn drain_leaderships_for_shutdown(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::{
+        collections::BTreeSet,
+        net::SocketAddr,
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
+
     use assert2::assert;
     use crabka_metadata::{MetadataRecord, PartitionRecord, TopicRecord};
     use crabka_protocol::primitives::uuid::Uuid as ProtocolUuid;
@@ -290,12 +301,10 @@ mod tests {
         AddVoter, Node, QuorumState, RaftError, ReconfigOutcome, RemoveVoter, SnapshotRange,
         UpdateVoter,
     };
-    use std::collections::BTreeSet;
-    use std::net::SocketAddr;
-    use std::sync::{Arc, Mutex};
-    use std::time::Duration;
     use tokio::sync::watch;
     use uuid::Uuid;
+
+    use super::*;
 
     /// Minimal `MetadataSource` that captures `submit_change` calls for
     /// inspection. Returns a fixed image; `watch_leader` always reports

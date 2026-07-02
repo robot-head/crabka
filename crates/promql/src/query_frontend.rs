@@ -1,26 +1,31 @@
 //! Query-frontend range splitting, sharding, and merge helpers.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::fmt::Write as _;
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt::Write as _,
+    sync::{Arc, Mutex},
+};
 
 use async_trait::async_trait;
+pub use crabka_blockstore::QUERY_SHARD_LABEL;
 use crabka_blockstore::{LabelMatcher, Labels, MatchOp, SeriesFingerprint};
 use crabka_metrics::{BucketSpan, NativeHistogram};
-use object_store::path::Path;
-use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
-use promql_parser::label as prom_label;
-use promql_parser::parser::token::{
-    T_AVG, T_BOTTOMK, T_COUNT, T_GROUP, T_MAX, T_MIN, T_STDDEV, T_STDVAR, T_SUM, T_TOPK, TokenType,
+use object_store::{ObjectStore, ObjectStoreExt, PutPayload, path::Path};
+use promql_parser::{
+    label as prom_label,
+    parser::{
+        AggregateExpr, Expr, LabelModifier, VectorSelector,
+        token::{
+            T_AVG, T_BOTTOMK, T_COUNT, T_GROUP, T_MAX, T_MIN, T_STDDEV, T_STDVAR, T_SUM, T_TOPK,
+            TokenType,
+        },
+    },
 };
-use promql_parser::parser::{AggregateExpr, Expr, LabelModifier, VectorSelector};
 
 use crate::{
     MetricStore, PromqlEngine, PromqlError, QueryResult, RangeSeries, SampleValue,
     engine::MAX_RESOLUTION_POINTS, parse_promql,
 };
-
-pub use crabka_blockstore::QUERY_SHARD_LABEL;
 
 /// Query-frontend range splitting and sharding options.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1547,11 +1552,10 @@ mod tests {
     use crabka_blockstore::{Labels, MatchOp};
     use crabka_metrics::{BucketSpan, ResetHint};
 
+    use super::*;
     use crate::{
         EngineOpts, InMemoryMetricStore, PromqlEngine, QueryResult, RangeSeries, SampleValue,
     };
-
-    use super::*;
 
     fn labels(pairs: &[(&str, &str)]) -> Labels {
         let mut labels = Labels::new();

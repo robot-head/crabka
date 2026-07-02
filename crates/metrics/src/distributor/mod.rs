@@ -2,47 +2,55 @@
 
 pub mod ha;
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::future::Future;
-use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    future::Future,
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
-use axum::Router;
-use axum::body::Bytes as BodyBytes;
-use axum::extract::{DefaultBodyLimit, State};
-use axum::http::{HeaderMap, HeaderValue, StatusCode};
-use axum::response::{IntoResponse, Response};
-use axum::routing::post;
+use axum::{
+    Router,
+    body::Bytes as BodyBytes,
+    extract::{DefaultBodyLimit, State},
+    http::{HeaderMap, HeaderValue, StatusCode},
+    response::{IntoResponse, Response},
+    routing::post,
+};
 use bytes::Bytes;
 use crabka_blockstore::SeriesFingerprint;
 use crabka_client_consumer::{Consumer, ConsumerRecord};
 use crabka_client_producer::{Header as ProducerHeader, Producer, ProducerRecord};
 use crabka_telemetry::propagation::current_trace_headers;
-use opentelemetry_proto::tonic::collector::metrics::v1::{
-    ExportMetricsServiceRequest, ExportMetricsServiceResponse,
-    metrics_service_server::{MetricsService, MetricsServiceServer},
+pub use ha::{
+    HA_TRACKER_TOPIC, HaDecision, HaElection, HaElectionRecord, HaTracker, ha_decision,
+    ha_election, strip_replica_label,
 };
-use opentelemetry_proto::tonic::metrics::v1::MetricsData;
+use opentelemetry_proto::tonic::{
+    collector::metrics::v1::{
+        ExportMetricsServiceRequest, ExportMetricsServiceResponse,
+        metrics_service_server::{MetricsService, MetricsServiceServer},
+    },
+    metrics::v1::MetricsData,
+};
 use tokio::net::TcpListener;
 use tonic::{Request as TonicRequest, Response as TonicResponse, Status};
 use tracing::Instrument as _;
 
-use crate::metrics::ServiceMetrics;
-use crate::otlp::{
-    DeltaAccumulator, OtlpError, TranslationStrategy, decode_otlp_stateful,
-    decode_otlp_stateful_bytes,
-};
-use crate::wal::{SamplePayload, WAL_TOPIC, WalExemplar, WalRecord, partition_key};
-use crate::wire::{
-    DecodedExemplar, DecodedSeries, WireError, WireFormat, WrittenCounts, decode_v1, decode_v2,
-    negotiate,
-};
-use crate::{IngestEnforcer, LimitError, Limits, OverridesProvider, validate_tenant};
-
-pub use ha::{
-    HA_TRACKER_TOPIC, HaDecision, HaElection, HaElectionRecord, HaTracker, ha_decision,
-    ha_election, strip_replica_label,
+use crate::{
+    IngestEnforcer, LimitError, Limits, OverridesProvider,
+    metrics::ServiceMetrics,
+    otlp::{
+        DeltaAccumulator, OtlpError, TranslationStrategy, decode_otlp_stateful,
+        decode_otlp_stateful_bytes,
+    },
+    validate_tenant,
+    wal::{SamplePayload, WAL_TOPIC, WalExemplar, WalRecord, partition_key},
+    wire::{
+        DecodedExemplar, DecodedSeries, WireError, WireFormat, WrittenCounts, decode_v1, decode_v2,
+        negotiate,
+    },
 };
 
 const MAX_EXEMPLAR_LABEL_CODEPOINTS: usize = 128;
@@ -1241,27 +1249,26 @@ fn label_pairs(series: &DecodedSeries) -> Vec<(String, String)> {
 mod tests {
     use std::sync::Mutex;
 
-    use assert2::assert;
-    use assert2::check;
-    use axum::body::Body;
-    use axum::http::Request;
+    use assert2::{assert, check};
+    use axum::{body::Body, http::Request};
     use crabka_blockstore::Labels;
-    use opentelemetry_proto::tonic::collector::metrics::v1::{
-        ExportMetricsServiceRequest, metrics_service_client::MetricsServiceClient,
-        metrics_service_server::MetricsService,
+    use opentelemetry_proto::tonic::{
+        collector::metrics::v1::{
+            ExportMetricsServiceRequest, metrics_service_client::MetricsServiceClient,
+            metrics_service_server::MetricsService,
+        },
+        common::v1::{AnyValue, KeyValue, any_value},
+        metrics::v1::{
+            AggregationTemporality, Gauge, Metric, MetricsData, NumberDataPoint, ResourceMetrics,
+            ScopeMetrics, Sum, metric, number_data_point,
+        },
+        resource::v1::Resource,
     };
-    use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue, any_value};
-    use opentelemetry_proto::tonic::metrics::v1::{
-        AggregationTemporality, Gauge, Metric, MetricsData, NumberDataPoint, ResourceMetrics,
-        ScopeMetrics, Sum, metric, number_data_point,
-    };
-    use opentelemetry_proto::tonic::resource::v1::Resource;
     use prost::Message;
     use tower::ServiceExt as _;
 
-    use crate::wire::DecodedSample;
-
     use super::*;
+    use crate::wire::DecodedSample;
 
     /// Pins `tenant_for_span`'s span-label logic: a present non-empty header is
     /// echoed verbatim, while a missing OR empty `X-Scope-OrgID` falls back to

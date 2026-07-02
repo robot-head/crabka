@@ -3,15 +3,15 @@
 //! version preamble.
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use crabka_protocol::{ProtocolError, primitives::uuid::Uuid};
 
-use crabka_protocol::ProtocolError;
-use crabka_protocol::primitives::uuid::Uuid;
-
-use crate::coordinator::unified::persistence::{
-    get_bytes, get_i16, get_i32, get_nullable_string, get_string, put_bytes, put_nullable_string,
-    put_string,
+use crate::{
+    coordinator::unified::persistence::{
+        get_bytes, get_i16, get_i32, get_nullable_string, get_string, put_bytes,
+        put_nullable_string, put_string,
+    },
+    error::BrokerError,
 };
-use crate::error::BrokerError;
 
 pub const KEY_GROUP_METADATA: i16 = 3;
 pub const KEY_MEMBER_METADATA: i16 = 5;
@@ -422,8 +422,9 @@ fn decode_topic_partitions(buf: &mut &[u8]) -> Result<Vec<AssignedTopicPartition
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn group_metadata_value_roundtrip() {

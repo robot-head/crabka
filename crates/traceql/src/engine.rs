@@ -1,36 +1,42 @@
 //! Public `TraceQL` engine.
 
-use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
-
-use arrow::array::{
-    Array, BooleanArray, DictionaryArray, Float64Array, Int64Array, LargeStringArray, ListArray,
-    StringArray, StringViewArray,
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
 };
-use arrow::datatypes::{DataType, Int32Type};
-use arrow::record_batch::RecordBatch;
+
+use arrow::{
+    array::{
+        Array, BooleanArray, DictionaryArray, Float64Array, Int64Array, LargeStringArray,
+        ListArray, StringArray, StringViewArray,
+    },
+    datatypes::{DataType, Int32Type},
+    record_batch::RecordBatch,
+};
 use datafusion::arrow::array::AsArray;
 
-use crate::ast::{
-    Aggregate, ComparisonOp, Field, FieldExpr, Intrinsic, Pipeline, Query, QueryHints, Scope,
-    SpansetExpr, Value,
+use crate::{
+    ast::{
+        Aggregate, ComparisonOp, Field, FieldExpr, Intrinsic, Pipeline, Query, QueryHints, Scope,
+        SpansetExpr, Value,
+    },
+    error::{Result, TraceqlError},
+    parser::parse,
+    planner::{PlannerContext, plan_query},
+    result::{
+        AttrValue, ScopedTag, SearchResponse, SpanRef, SpanSet, TagScope, TraceMetricExemplar,
+        TraceMetricSeries, TraceMetricsResponse, TraceResult, TraceSpans, TypedValue,
+    },
+    span_columns::{
+        ATTR_PREFIX, COL_CHILD_COUNT, COL_DURATION, COL_EVENT_NAME, COL_EVENT_TIME_SINCE_START,
+        COL_INSTRUMENTATION_NAME, COL_INSTRUMENTATION_VERSION, COL_KIND, COL_LINK_SPAN_ID,
+        COL_LINK_TRACE_ID, COL_NAME, COL_NS_LEFT, COL_NS_RIGHT, COL_PARENT_ID, COL_PARENT_SPAN_ID,
+        COL_ROOT_SERVICE_NAME, COL_ROOT_SPAN_NAME, COL_SPAN_ID, COL_START, COL_STATUS_CODE,
+        COL_STATUS_MESSAGE, COL_TRACE_DURATION, COL_TRACE_ID, COL_TRACE_START, EVENT_ATTR_PREFIX,
+        LINK_ATTR_PREFIX,
+    },
+    store::{MatchCmp, MatchScope, MatchValue, ScanOptions, SpanMatcher, SpanStore},
 };
-use crate::error::{Result, TraceqlError};
-use crate::parser::parse;
-use crate::planner::{PlannerContext, plan_query};
-use crate::result::{
-    AttrValue, ScopedTag, SearchResponse, SpanRef, SpanSet, TagScope, TraceMetricExemplar,
-    TraceMetricSeries, TraceMetricsResponse, TraceResult, TraceSpans, TypedValue,
-};
-use crate::span_columns::{
-    ATTR_PREFIX, COL_CHILD_COUNT, COL_DURATION, COL_EVENT_NAME, COL_EVENT_TIME_SINCE_START,
-    COL_INSTRUMENTATION_NAME, COL_INSTRUMENTATION_VERSION, COL_KIND, COL_LINK_SPAN_ID,
-    COL_LINK_TRACE_ID, COL_NAME, COL_NS_LEFT, COL_NS_RIGHT, COL_PARENT_ID, COL_PARENT_SPAN_ID,
-    COL_ROOT_SERVICE_NAME, COL_ROOT_SPAN_NAME, COL_SPAN_ID, COL_START, COL_STATUS_CODE,
-    COL_STATUS_MESSAGE, COL_TRACE_DURATION, COL_TRACE_ID, COL_TRACE_START, EVENT_ATTR_PREFIX,
-    LINK_ATTR_PREFIX,
-};
-use crate::store::{MatchCmp, MatchScope, MatchValue, ScanOptions, SpanMatcher, SpanStore};
 
 const DEFAULT_HISTOGRAM_BUCKETS_NS: &[f64] = &[
     2_000_000.0,
@@ -2517,20 +2523,23 @@ fn u64_from_i64(v: i64) -> Result<u64> {
 mod tests {
     use std::sync::Arc;
 
-    use arrow::array::{
-        ArrayRef, FixedSizeBinaryBuilder, Int32Array, Int64Array, StringArray,
-        StringDictionaryBuilder,
+    use arrow::{
+        array::{
+            ArrayRef, FixedSizeBinaryBuilder, Int32Array, Int64Array, StringArray,
+            StringDictionaryBuilder,
+        },
+        datatypes::{Field as ArrowField, Int32Type, Schema},
     };
-    use arrow::datatypes::{Field as ArrowField, Int32Type, Schema};
     use assert2::{assert, check};
-    use datafusion::catalog::MemTable;
-    use datafusion::prelude::SessionContext;
+    use datafusion::{catalog::MemTable, prelude::SessionContext};
 
     use super::*;
-    use crate::in_memory::InMemorySpanStore;
-    use crate::result::{AttrValue, EventRef, LinkRef, TypedValue};
-    use crate::span_columns::InputSpan;
-    use crate::store::ScanResult;
+    use crate::{
+        in_memory::InMemorySpanStore,
+        result::{AttrValue, EventRef, LinkRef, TypedValue},
+        span_columns::InputSpan,
+        store::ScanResult,
+    };
 
     fn sp(tid: u8, id: u8, parent: Option<u8>, svc: &str) -> InputSpan {
         sp_at(tid, id, parent, svc, 1000 + i64::from(id))

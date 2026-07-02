@@ -27,8 +27,9 @@ pub mod types;
 #[cfg(feature = "sim")]
 pub mod sim;
 
-pub use action::{Action, TimerKind};
 pub use core::{QuorumStateMachine, election_jitter_ms};
+
+pub use action::{Action, TimerKind};
 pub use event::{Event, LogEnd};
 pub use role::{ReplicaProgress, Role};
 pub use types::{

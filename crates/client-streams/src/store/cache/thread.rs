@@ -1,11 +1,14 @@
 //! Thread-wide record cache: a byte budget shared across `NamedCache`s. Ports
 //! Kafka `ThreadCache`. One per task; budget = `statestore.cache.max.bytes` /
 //! `task_count`.
-use crate::store::cache::entry::LruCacheEntry;
-use crate::store::cache::named::NamedCache;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
+
 use bytes::Bytes;
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+
+use crate::store::cache::{entry::LruCacheEntry, named::NamedCache};
 
 pub(crate) struct ThreadCache {
     caches: HashMap<String, Arc<Mutex<NamedCache>>>,

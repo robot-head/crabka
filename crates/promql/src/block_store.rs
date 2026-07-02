@@ -12,11 +12,13 @@ use crabka_metrics::{
 };
 use datafusion::prelude::SessionContext;
 
-use crate::PromqlError;
-use crate::error::Result;
-use crate::store::{
-    ExemplarRecord, LabelNameCardinality, LabelValueCardinality, MetadataRecord, MetricStore,
-    NamedTsdbStat, ScanResult, TsdbBlock, TsdbHeadStats, TsdbStats,
+use crate::{
+    PromqlError,
+    error::Result,
+    store::{
+        ExemplarRecord, LabelNameCardinality, LabelValueCardinality, MetadataRecord, MetricStore,
+        NamedTsdbStat, ScanResult, TsdbBlock, TsdbHeadStats, TsdbStats,
+    },
 };
 
 const FLOAT_TABLE: &str = "metric_float_samples";
@@ -642,28 +644,24 @@ fn named_stats(values: BTreeMap<String, usize>) -> Vec<NamedTsdbStat> {
 mod tests {
     use std::sync::Arc;
 
-    use arrow::array::{
-        ArrayRef, Float64Builder, Int64Builder, MapBuilder, StringBuilder, UInt64Builder,
+    use arrow::{
+        array::{ArrayRef, Float64Builder, Int64Builder, MapBuilder, StringBuilder, UInt64Builder},
+        datatypes::{DataType, Field},
+        record_batch::RecordBatch,
     };
-    use arrow::datatypes::{DataType, Field};
-    use arrow::record_batch::RecordBatch;
-    use assert2::assert;
+    use assert2::{assert, check};
     use crabka_blockstore::{BlockStore, Labels};
     use crabka_metrics::{
         CompactionIndexManifest, CompactionObjectPlan, CompactionSeriesLabels, MetricBlockKind,
         encode_float_samples, exemplar_schema, float_sample_schema, metadata_schema,
     };
-    use object_store::ObjectStore;
-    use object_store::memory::InMemory;
+    use object_store::{ObjectStore, memory::InMemory};
 
-    use assert2::check;
-
+    use super::MetricBlockStore;
     use crate::{
         EngineOpts, InstantSample, MetadataRecord, MetricStore, NamedTsdbStat, PromqlEngine,
         QueryResult, SampleValue, TsdbBlock, TsdbHeadStats, TsdbStats,
     };
-
-    use super::MetricBlockStore;
 
     fn labels(pairs: &[(&str, &str)]) -> Labels {
         let mut labels = Labels::new();

@@ -4,17 +4,14 @@
 //! `MetadataObserver` (true `KRaft` observer) plus a write-forwarding path
 //! to the controller quorum. Handlers depend only on this trait.
 
-use std::collections::BTreeSet;
-use std::net::SocketAddr;
-use std::sync::Arc;
-
-use tokio::sync::watch;
+use std::{collections::BTreeSet, net::SocketAddr, sync::Arc};
 
 use crabka_metadata::{MetadataImage, MetadataRecord};
 use crabka_raft::{
     AddVoter, ControllerHandle, Node, NodeId, OutboundDialer, QuorumState, RaftError,
     ReconfigOutcome, RemoveVoter, SnapshotRange, UpdateVoter,
 };
+use tokio::sync::watch;
 
 use crate::metadata_observer::MetadataObserver;
 
@@ -296,26 +293,36 @@ impl MetadataWriter for QuorumForwarder {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        MetadataSource, MetadataWriter, ObserverSource, QuorumForwarder, build_forward_order,
+    use std::{
+        collections::BTreeSet,
+        net::SocketAddr,
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
     };
+
     use assert2::assert;
     use bytes::BytesMut;
     use crabka_metadata::{MetadataRecord, TopicRecord};
-    use crabka_protocol::Encode;
-    use crabka_protocol::owned::api_versions_request;
-    use crabka_protocol::owned::api_versions_response::{ApiVersion, ApiVersionsResponse};
+    use crabka_protocol::{
+        Encode,
+        owned::{
+            api_versions_request,
+            api_versions_response::{ApiVersion, ApiVersionsResponse},
+        },
+    };
     use crabka_raft::{
         BootstrapMode, Controller, ControllerConfig, Node, NodeId, OutboundDialer, RaftError,
         SnapshotRange,
     };
-    use std::collections::BTreeSet;
-    use std::net::SocketAddr;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
     use tempfile::TempDir;
     use tokio::sync::watch;
     use uuid::Uuid;
+
+    use super::{
+        MetadataSource, MetadataWriter, ObserverSource, QuorumForwarder, build_forward_order,
+    };
 
     fn voters() -> Vec<(crabka_raft::NodeId, String)> {
         vec![

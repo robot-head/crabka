@@ -24,8 +24,7 @@
 //!   downstream = 742
 //!   metadata   = "" (empty string)
 
-use std::collections::HashMap;
-use std::fmt::Write as _;
+use std::{collections::HashMap, fmt::Write as _};
 
 use crabka_replicator::mm2::{Checkpoint, Heartbeat, OffsetSync};
 

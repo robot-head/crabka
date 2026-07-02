@@ -1,13 +1,14 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use crabka_protocol::records::RecordBatch;
 use tokio::sync::oneshot;
 
-use crabka_protocol::records::RecordBatch;
-
-use crate::error::BrokerError;
-use crate::partition::{ProduceData, ProduceJob, WriterMessage};
-use crate::partition_registry::PartitionRegistry;
+use crate::{
+    error::BrokerError,
+    partition::{ProduceData, ProduceJob, WriterMessage},
+    partition_registry::PartitionRegistry,
+};
 
 pub const OFFSETS_TOPIC: &str = "__consumer_offsets";
 pub const OFFSETS_PARTITION: i32 = 0;
@@ -68,9 +69,10 @@ impl OffsetsLog for ProductionOffsetsLog {
 }
 
 pub mod fake {
-    use super::{BrokerError, OFFSETS_PARTITION, OFFSETS_TOPIC, OffsetsLog, async_trait};
     use crabka_protocol::records::RecordBatch;
     use tokio::sync::Mutex;
+
+    use super::{BrokerError, OFFSETS_PARTITION, OFFSETS_TOPIC, OffsetsLog, async_trait};
 
     #[derive(Debug, Default)]
     pub struct InMemoryOffsetsLog {
@@ -125,8 +127,10 @@ pub mod fake {
         /// assert the downgrade flip atomically removed the next-gen group
         /// record. `parse_key` dispatches version 3 to the next-gen family.
         pub async fn has_next_gen_group_metadata_tombstone(&self, group_id: &str) -> bool {
-            use crate::coordinator::unified::persistence::{Key, parse_key};
-            use crate::coordinator::unified::persistence_next_gen::NextGenKey;
+            use crate::coordinator::unified::{
+                persistence::{Key, parse_key},
+                persistence_next_gen::NextGenKey,
+            };
             self.appended.lock().await.iter().any(|batch| {
                 batch.records.iter().any(|rec| {
                     rec.value.is_none()
@@ -149,8 +153,10 @@ pub mod fake {
         /// next-gen on replay. `parse_key` dispatches version 6 to the next-gen
         /// family.
         pub async fn has_next_gen_target_metadata_tombstone(&self, group_id: &str) -> bool {
-            use crate::coordinator::unified::persistence::{Key, parse_key};
-            use crate::coordinator::unified::persistence_next_gen::NextGenKey;
+            use crate::coordinator::unified::{
+                persistence::{Key, parse_key},
+                persistence_next_gen::NextGenKey,
+            };
             self.appended.lock().await.iter().any(|batch| {
                 batch.records.iter().any(|rec| {
                     rec.value.is_none()
@@ -170,8 +176,9 @@ pub mod fake {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[tokio::test]
     async fn fake_records_in_order() {

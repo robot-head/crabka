@@ -1,21 +1,24 @@
 //! `Log` — a sorted collection of `Segment`s with append/read/truncate.
 
-use std::collections::{HashMap, HashSet};
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    path::{Path, PathBuf},
+    time::SystemTime,
+};
 
 use bytes::{Bytes, BytesMut};
 use crabka_protocol::records::{HEADER_LEN, RecordBatch};
 use tracing::instrument;
 
-use crate::config::LogConfig;
-use crate::error::LogError;
-use crate::leader_epoch_checkpoint::LeaderEpochCheckpoint;
-use crate::name;
-use crate::retention;
-use crate::segment::{RawSegmentRead, Segment};
-use crate::txn_index::{AbortedTxn, TxnIndex};
+use crate::{
+    config::LogConfig,
+    error::LogError,
+    leader_epoch_checkpoint::LeaderEpochCheckpoint,
+    name, retention,
+    segment::{RawSegmentRead, Segment},
+    txn_index::{AbortedTxn, TxnIndex},
+};
 
 /// A Kafka-format log: a sorted collection of [`Segment`]s plus a single
 /// active segment that accepts appends.
@@ -1458,13 +1461,13 @@ fn parse_control_marker_type(key: &[u8]) -> Option<i16> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::leader_epoch_checkpoint::EpochEntry;
-    use assert2::assert;
-    use assert2::check;
+    use assert2::{assert, check};
     use bytes::Bytes;
     use crabka_protocol::records::{Attributes, Record};
     use tempfile::tempdir;
+
+    use super::*;
+    use crate::leader_epoch_checkpoint::EpochEntry;
 
     fn sample_batch(n: i32) -> RecordBatch {
         let mut b = RecordBatch {

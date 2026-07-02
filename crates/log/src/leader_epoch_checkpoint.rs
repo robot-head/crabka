@@ -13,10 +13,7 @@
 
 #![allow(dead_code)]
 
-use std::fmt::Write as _;
-use std::fs;
-use std::io::Write;
-use std::path::PathBuf;
+use std::{fmt::Write as _, fs, io::Write, path::PathBuf};
 
 use tracing::instrument;
 
@@ -278,10 +275,10 @@ mod leader_epoch_model;
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::assert;
-    use assert2::check;
+    use assert2::{assert, check};
     use tempfile::TempDir;
+
+    use super::*;
 
     fn fresh() -> (TempDir, PathBuf) {
         let dir = TempDir::new().unwrap();

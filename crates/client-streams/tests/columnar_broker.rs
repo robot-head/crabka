@@ -13,18 +13,22 @@ use bytes::Bytes;
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_core::{Client, Connection, ConnectionOptions, fetch_partition};
 use crabka_client_producer::{Producer, ProducerRecord};
-use crabka_client_streams::StreamsClientError;
-use crabka_client_streams::columnar::serde::polars::PolarsIpcSerde;
-use crabka_client_streams::columnar::topology::codec::BlobCodec;
-use crabka_client_streams::columnar::topology::operator::BuiltinOp;
-use crabka_client_streams::columnar::topology::{ColumnarTopology, run_partition_once};
-use crabka_client_streams::processor::serde::Serde;
-use crabka_client_streams::runtime::io::{
-    FetchBatch, FetchedRec, IsolationLevel, RecordFetcher, RecordProducer,
+use crabka_client_streams::{
+    StreamsClientError,
+    columnar::{
+        serde::polars::PolarsIpcSerde,
+        topology::{ColumnarTopology, codec::BlobCodec, operator::BuiltinOp, run_partition_once},
+    },
+    processor::serde::Serde,
+    runtime::io::{FetchBatch, FetchedRec, IsolationLevel, RecordFetcher, RecordProducer},
 };
-use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-use crabka_protocol::owned::update_features_request::{FeatureUpdateKey, UpdateFeaturesRequest};
-use crabka_protocol::primitives::uuid::Uuid as WireUuid;
+use crabka_protocol::{
+    owned::{
+        create_topics_request::{CreatableTopic, CreateTopicsRequest},
+        update_features_request::{FeatureUpdateKey, UpdateFeaturesRequest},
+    },
+    primitives::uuid::Uuid as WireUuid,
+};
 use polars::prelude::*;
 
 // ─── broker boot helpers (mirror tests/runtime_integration.rs) ────────────────

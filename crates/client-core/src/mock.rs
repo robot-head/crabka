@@ -16,12 +16,13 @@
 
 #![cfg(any(test, feature = "mock"))]
 
-use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::{
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+};
 
 use bytes::BytesMut;
-use tokio::net::TcpListener;
-use tokio::task::JoinHandle;
+use tokio::{net::TcpListener, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
 /// A simple in-process mock Kafka broker for unit testing.

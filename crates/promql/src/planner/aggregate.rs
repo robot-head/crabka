@@ -31,13 +31,17 @@
 
 use std::collections::BTreeSet;
 
-use datafusion::functions_aggregate::expr_fn::{avg, count, max, sum};
-use datafusion::logical_expr::{Expr, LogicalPlan, LogicalPlanBuilder, cast, col, lit};
+use datafusion::{
+    functions_aggregate::expr_fn::{avg, count, max, sum},
+    logical_expr::{Expr, LogicalPlan, LogicalPlanBuilder, cast, col, lit},
+};
 
-use crate::PromqlError;
-use crate::error::Result;
-use crate::functions::{prom_max_udaf, prom_min_udaf};
-use crate::planner::leaf::{SAMPLE_TIME_COLUMN, TIME_COLUMN, VALUE_COLUMN};
+use crate::{
+    PromqlError,
+    error::Result,
+    functions::{prom_max_udaf, prom_min_udaf},
+    planner::leaf::{SAMPLE_TIME_COLUMN, TIME_COLUMN, VALUE_COLUMN},
+};
 
 /// Result-value column emitted by the aggregation projection. Reuses the
 /// leaf/rate `value` name so the engine's batch-label reader treats every other
@@ -219,12 +223,13 @@ fn resolve_group_labels(input_labels: &[String], grouping: &Grouping) -> Vec<Str
 mod tests {
     use std::sync::Arc;
 
-    use arrow::array::{Float64Array, Int64Array, StringArray};
-    use arrow::datatypes::{DataType, Field, Schema};
-    use arrow::record_batch::RecordBatch;
+    use arrow::{
+        array::{Float64Array, Int64Array, StringArray},
+        datatypes::{DataType, Field, Schema},
+        record_batch::RecordBatch,
+    };
     use assert2::assert;
-    use datafusion::catalog::MemTable;
-    use datafusion::prelude::SessionContext;
+    use datafusion::{catalog::MemTable, prelude::SessionContext};
 
     use super::*;
 

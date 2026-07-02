@@ -15,32 +15,31 @@
 //! Gated to non-Windows to match the multi-broker test convention from
 //! slices 10b/12b/14/15.
 
-use assert2::assert;
-use std::io;
-use std::net::SocketAddr;
-use std::time::Duration;
+use std::{io, net::SocketAddr, time::Duration};
 
+use assert2::assert;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use crabka_broker::metrics::PartitionLabel;
-use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
-use crabka_protocol::owned::create_topics_request::{
-    CreatableTopic, CreatableTopicConfig, CreateTopicsRequest,
+use crabka_broker::{Broker, BrokerConfig, BrokerHandle, metrics::PartitionLabel};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        create_topics_request::{CreatableTopic, CreatableTopicConfig, CreateTopicsRequest},
+        create_topics_response::CreateTopicsResponse,
+        fetch_request::{FetchPartition, FetchRequest, FetchTopic},
+        fetch_response::FetchResponse,
+        metadata_request::{MetadataRequest, MetadataRequestTopic},
+        metadata_response::MetadataResponse,
+        produce_request::{PartitionProduceData, ProduceRequest, TopicProduceData},
+        produce_response::ProduceResponse,
+    },
+    primitives::uuid::Uuid,
+    records::{Record, RecordBatch},
 };
-use crabka_protocol::owned::create_topics_response::CreateTopicsResponse;
-use crabka_protocol::owned::fetch_request::{FetchPartition, FetchRequest, FetchTopic};
-use crabka_protocol::owned::fetch_response::FetchResponse;
-use crabka_protocol::owned::metadata_request::{MetadataRequest, MetadataRequestTopic};
-use crabka_protocol::owned::metadata_response::MetadataResponse;
-use crabka_protocol::owned::produce_request::{
-    PartitionProduceData, ProduceRequest, TopicProduceData,
-};
-use crabka_protocol::owned::produce_response::ProduceResponse;
-use crabka_protocol::primitives::uuid::Uuid;
-use crabka_protocol::records::{Record, RecordBatch};
-use crabka_protocol::{Decode, Encode};
 use tempfile::TempDir;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Wire helpers

@@ -6,18 +6,15 @@
 //! each record batch through the `crabka_metadata` Kafka-record bridge, and
 //! applying records exactly as the controller state machine would.
 
-use std::sync::Arc;
-use std::time::Duration;
-
-use qubit_clock::sleep::AsyncSleeper;
-use tokio::sync::watch;
-use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
-use tracing::{debug, warn};
+use std::{sync::Arc, time::Duration};
 
 use crabka_metadata::{MetadataImage, from_kraft_value};
 use crabka_protocol::records::RecordBatch;
 use crabka_raft::{NodeId, OutboundDialer};
+use qubit_clock::sleep::AsyncSleeper;
+use tokio::{sync::watch, task::JoinHandle};
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, warn};
 
 /// Static configuration for the observer.
 #[derive(Clone)]
@@ -263,21 +260,28 @@ async fn run_loop(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use assert2::assert;
     use bytes::{Bytes, BytesMut};
     use crabka_metadata::{MetadataRecord, TopicRecord, to_kraft_values};
-    use crabka_protocol::Encode;
-    use crabka_protocol::owned::api_versions_request;
-    use crabka_protocol::owned::api_versions_response::{ApiVersion, ApiVersionsResponse};
-    use crabka_protocol::records::header::Attributes;
-    use crabka_protocol::records::{Record, RecordBatch};
+    use crabka_protocol::{
+        Encode,
+        owned::{
+            api_versions_request,
+            api_versions_response::{ApiVersion, ApiVersionsResponse},
+        },
+        records::{Record, RecordBatch, header::Attributes},
+    };
     use crabka_raft::{BootstrapMode, Controller, ControllerConfig};
-    use qubit_clock::MockWaiterKind;
-    use qubit_clock::sleep::{MockSleeper, SystemSleeper};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use qubit_clock::{
+        MockWaiterKind,
+        sleep::{MockSleeper, SystemSleeper},
+    };
     use tempfile::TempDir;
     use uuid::Uuid;
+
+    use super::*;
 
     #[derive(Clone)]
     struct RecordingDialer {

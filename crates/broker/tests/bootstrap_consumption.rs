@@ -20,26 +20,27 @@
 //! helpers, a verbatim copy keeps blast radius small and avoids touching
 //! the (1500+ line) auth test file.
 
-use assert2::assert;
-use std::io;
-use std::net::SocketAddr;
-use std::process::Command;
+use std::{io, net::SocketAddr, process::Command};
 
+use assert2::assert;
 use bytes::{Buf, BufMut, BytesMut};
-use crabka_broker::config::ListenerSpec;
-use crabka_broker::{Broker, BrokerConfig};
-use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
-use crabka_protocol::owned::api_versions_response::ApiVersionsResponse;
-use crabka_protocol::owned::metadata_request::MetadataRequest;
-use crabka_protocol::owned::metadata_response::MetadataResponse;
-use crabka_protocol::owned::sasl_authenticate_request::SaslAuthenticateRequest;
-use crabka_protocol::owned::sasl_authenticate_response::SaslAuthenticateResponse;
-use crabka_protocol::owned::sasl_handshake_request::SaslHandshakeRequest;
-use crabka_protocol::owned::sasl_handshake_response::SaslHandshakeResponse;
-use crabka_protocol::{Decode, Encode};
+use crabka_broker::{Broker, BrokerConfig, config::ListenerSpec};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        api_versions_request::ApiVersionsRequest, api_versions_response::ApiVersionsResponse,
+        metadata_request::MetadataRequest, metadata_response::MetadataResponse,
+        sasl_authenticate_request::SaslAuthenticateRequest,
+        sasl_authenticate_response::SaslAuthenticateResponse,
+        sasl_handshake_request::SaslHandshakeRequest,
+        sasl_handshake_response::SaslHandshakeResponse,
+    },
+};
 use crabka_security::{ListenerProtocol, SaslMechanism};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+};
 
 /// Run the `crabka format` binary as a subprocess.
 ///

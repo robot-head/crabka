@@ -6,15 +6,19 @@ use std::any::Any;
 use async_trait::async_trait;
 use bytes::Bytes;
 
-use crate::dsl::processors::fk::combined_key::{
-    combined_key, foreign_prefix, range_upper, split_combined_key,
-};
-use crate::dsl::processors::fk::subscription::SubscriptionWrapper;
-use crate::store::api::StateStore;
-use crate::store::byte::ByteKeyValueStore;
 #[cfg(test)]
 use crate::store::byte::InMemoryBytes;
-use crate::store::window_schema::{unwrap_value, wrap_value};
+use crate::{
+    dsl::processors::fk::{
+        combined_key::{combined_key, foreign_prefix, range_upper, split_combined_key},
+        subscription::SubscriptionWrapper,
+    },
+    store::{
+        api::StateStore,
+        byte::ByteKeyValueStore,
+        window_schema::{unwrap_value, wrap_value},
+    },
+};
 
 /// Subscription store keyed by `combined_key(fk, pk)` → `ValueAndTimestamp`
 /// wrapped `SubscriptionWrapper` bytes. `range_by_foreign` scans every primary
@@ -140,9 +144,10 @@ impl StateStore for SubscriptionBytesStore {
 
 #[cfg(test)]
 mod tests {
+    use bytes::Bytes;
+
     use super::*;
     use crate::dsl::processors::fk::subscription::{Instruction, SubscriptionWrapper};
-    use bytes::Bytes;
 
     fn wrapper(pk: &str) -> SubscriptionWrapper {
         SubscriptionWrapper {

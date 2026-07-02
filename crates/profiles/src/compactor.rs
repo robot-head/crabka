@@ -1,25 +1,26 @@
 //! Profile block compaction.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::io::Cursor;
-use std::sync::Arc;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io::Cursor,
+    sync::Arc,
+};
 
-use arrow::array::{Array, ArrayRef, AsArray, BinaryArray, UInt64Array};
-use arrow::datatypes::{Int32Type, Int64Type, UInt64Type};
-use arrow::record_batch::RecordBatch;
+use arrow::{
+    array::{Array, ArrayRef, AsArray, BinaryArray, UInt64Array},
+    datatypes::{Int32Type, Int64Type, UInt64Type},
+    record_batch::RecordBatch,
+};
 use crabka_blockstore::{
     BlockMeta, COL_FINGERPRINT, COL_TIMESTAMP, PCOL_PROFILE_TYPE, PCOL_SPAN_ID, PCOL_STACKTRACE_ID,
     PCOL_STACKTRACE_PARTITION, PCOL_TOTAL_VALUE, PCOL_TRACE_ID, PCOL_VALUE, ProfileIndex,
     ProfileSampleRow, encode_profile_samples,
 };
 use crabka_pprof::SymbolDb;
-use object_store::path::Path;
-use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
-use parquet::arrow::ArrowWriter;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use object_store::{ObjectStore, ObjectStoreExt, PutPayload, path::Path};
+use parquet::arrow::{ArrowWriter, arrow_reader::ParquetRecordBatchReaderBuilder};
 
-use crate::blockbuilder::STACKTRACE_PARTITION;
-use crate::error::ProfilesError;
+use crate::{blockbuilder::STACKTRACE_PARTITION, error::ProfilesError};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompactionJob {
@@ -488,13 +489,14 @@ mod tests {
     use assert2::{assert, check};
     use crabka_blockstore::{BlockIndex, Labels};
     use crabka_pprof::{EngineOpts, FlameEngine};
-    use object_store::ObjectStore;
-    use object_store::memory::InMemory;
+    use object_store::{ObjectStore, memory::InMemory};
 
     use super::*;
-    use crate::blockbuilder::build_block;
-    use crate::cold_store::ColdProfileStore;
-    use crate::wal::{ProfileRecord, WalSample, WalSymbolSet};
+    use crate::{
+        blockbuilder::build_block,
+        cold_store::ColdProfileStore,
+        wal::{ProfileRecord, WalSample, WalSymbolSet},
+    };
 
     const PT: &str = "process_cpu:cpu:nanoseconds:cpu:nanoseconds";
 

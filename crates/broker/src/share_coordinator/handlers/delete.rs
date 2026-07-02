@@ -5,18 +5,20 @@
 use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        delete_share_group_state_request::DeleteShareGroupStateRequest,
+        delete_share_group_state_response::{
+            DeleteShareGroupStateResponse, DeleteStateResult, PartitionResult,
+        },
+    },
+};
 use futures_util::future::BoxFuture;
 
-use crabka_protocol::owned::delete_share_group_state_request::DeleteShareGroupStateRequest;
-use crabka_protocol::owned::delete_share_group_state_response::{
-    DeleteShareGroupStateResponse, DeleteStateResult, PartitionResult,
+use crate::{
+    broker::Broker, codes, error::BrokerError, share_coordinator::coordinator::ShareCoordinator,
 };
-use crabka_protocol::{Decode, Encode};
-
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
-use crate::share_coordinator::coordinator::ShareCoordinator;
 
 pub(crate) fn handle(
     broker: &Broker,
@@ -79,14 +81,17 @@ async fn handle_request(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
-    use crabka_protocol::UnknownTaggedFields;
-    use crabka_protocol::owned::delete_share_group_state_request::{
-        DeleteStateData, PartitionData,
+    use crabka_protocol::{
+        UnknownTaggedFields,
+        owned::{
+            delete_share_group_state_request::{DeleteStateData, PartitionData},
+            delete_share_group_state_response::DeleteShareGroupStateResponse,
+        },
+        primitives::uuid::Uuid as ProtoUuid,
     };
-    use crabka_protocol::owned::delete_share_group_state_response::DeleteShareGroupStateResponse;
-    use crabka_protocol::primitives::uuid::Uuid as ProtoUuid;
+
+    use super::*;
 
     fn decode(bytes: &Bytes) -> DeleteShareGroupStateResponse {
         let mut cur: &[u8] = bytes.as_ref();

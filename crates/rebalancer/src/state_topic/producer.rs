@@ -6,17 +6,18 @@
 use std::time::Duration;
 
 use bytes::Bytes;
-use tracing::debug;
-
 use crabka_client_core::Client;
-use crabka_protocol::owned::metadata_request::{MetadataRequest, MetadataRequestTopic};
-use crabka_protocol::owned::metadata_response::MetadataResponse;
-use crabka_protocol::owned::produce_request::{
-    PartitionProduceData, ProduceRequest, TopicProduceData,
+use crabka_protocol::{
+    owned::{
+        metadata_request::{MetadataRequest, MetadataRequestTopic},
+        metadata_response::MetadataResponse,
+        produce_request::{PartitionProduceData, ProduceRequest, TopicProduceData},
+        produce_response::ProduceResponse,
+    },
+    primitives::uuid::Uuid,
+    records::{Record, RecordBatch},
 };
-use crabka_protocol::owned::produce_response::ProduceResponse;
-use crabka_protocol::primitives::uuid::Uuid;
-use crabka_protocol::records::{Record, RecordBatch};
+use tracing::debug;
 
 use crate::state_topic::error::StateTopicError;
 
@@ -185,13 +186,16 @@ fn classify_send_result(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
-    use crabka_protocol::owned::metadata_response::{MetadataResponse, MetadataResponseTopic};
-    use crabka_protocol::owned::produce_response::{
-        PartitionProduceResponse, ProduceResponse, TopicProduceResponse,
+    use crabka_protocol::{
+        owned::{
+            metadata_response::{MetadataResponse, MetadataResponseTopic},
+            produce_response::{PartitionProduceResponse, ProduceResponse, TopicProduceResponse},
+        },
+        records::RecordsPayload,
     };
-    use crabka_protocol::records::RecordsPayload;
+
+    use super::*;
 
     fn response_with_error(code: i16) -> ProduceResponse {
         ProduceResponse {

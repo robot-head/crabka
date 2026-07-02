@@ -2,21 +2,28 @@
 //! each trait method to the corresponding admin RPC via raw
 //! `Client::send`, mirroring the ingester pattern.
 
-use async_trait::async_trait;
-use crabka_client_core::Client;
-use crabka_protocol::owned::alter_partition_reassignments_request::{
-    AlterPartitionReassignmentsRequest, ReassignablePartition, ReassignableTopic,
-};
-use crabka_protocol::owned::incremental_alter_configs_request::{
-    AlterConfigsResource, AlterableConfig, IncrementalAlterConfigsRequest,
-};
-use crabka_protocol::owned::list_partition_reassignments_request::ListPartitionReassignmentsRequest;
-use crabka_protocol::owned::list_partition_reassignments_response::ListPartitionReassignmentsResponse;
 use std::collections::BTreeMap;
 
-use crate::executor::phases::{ClientFacade, ConfigOp, PhaseError};
-use crate::executor::throttle::ThrottleTargets;
-use crate::model::Movement;
+use async_trait::async_trait;
+use crabka_client_core::Client;
+use crabka_protocol::owned::{
+    alter_partition_reassignments_request::{
+        AlterPartitionReassignmentsRequest, ReassignablePartition, ReassignableTopic,
+    },
+    incremental_alter_configs_request::{
+        AlterConfigsResource, AlterableConfig, IncrementalAlterConfigsRequest,
+    },
+    list_partition_reassignments_request::ListPartitionReassignmentsRequest,
+    list_partition_reassignments_response::ListPartitionReassignmentsResponse,
+};
+
+use crate::{
+    executor::{
+        phases::{ClientFacade, ConfigOp, PhaseError},
+        throttle::ThrottleTargets,
+    },
+    model::Movement,
+};
 
 /// Kafka admin resource type ids.
 const RESOURCE_TYPE_TOPIC: i8 = 2;
@@ -323,21 +330,29 @@ impl ClientFacade for LiveClient {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        time::Duration,
+    };
+
     use assert2::{assert, check};
-    use crabka_protocol::UnknownTaggedFields;
-    use crabka_protocol::owned::alter_partition_reassignments_response::{
-        AlterPartitionReassignmentsResponse, ReassignablePartitionResponse,
-        ReassignableTopicResponse,
+    use crabka_protocol::{
+        UnknownTaggedFields,
+        owned::{
+            alter_partition_reassignments_response::{
+                AlterPartitionReassignmentsResponse, ReassignablePartitionResponse,
+                ReassignableTopicResponse,
+            },
+            incremental_alter_configs_response::{
+                AlterConfigsResourceResponse, IncrementalAlterConfigsResponse,
+            },
+            list_partition_reassignments_response::{
+                OngoingPartitionReassignment, OngoingTopicReassignment,
+            },
+        },
     };
-    use crabka_protocol::owned::incremental_alter_configs_response::{
-        AlterConfigsResourceResponse, IncrementalAlterConfigsResponse,
-    };
-    use crabka_protocol::owned::list_partition_reassignments_response::{
-        OngoingPartitionReassignment, OngoingTopicReassignment,
-    };
-    use std::collections::{BTreeMap, BTreeSet};
-    use std::time::Duration;
+
+    use super::*;
 
     fn movement(topic: &str, partition: i32, old: Vec<i32>, new: Vec<i32>) -> Movement {
         Movement {

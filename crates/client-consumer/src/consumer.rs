@@ -2,33 +2,41 @@
 //! Subscribe-only — no `assign()`. Use `crabka-client-core` directly for
 //! manual partition consumption.
 
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicI32, Ordering};
-use std::time::Duration;
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicI32, Ordering},
+    },
+    time::Duration,
+};
 
 use bytes::Bytes;
-use tokio::sync::Mutex;
-use tokio::task::JoinHandle;
+use crabka_client_core::Client;
+use crabka_protocol::{
+    owned::{
+        join_group_request::{JoinGroupRequest, JoinGroupRequestProtocol},
+        join_group_response::JoinGroupResponse,
+        sync_group_request::{SyncGroupRequest, SyncGroupRequestAssignment},
+        sync_group_response::SyncGroupResponse,
+    },
+    primitives::uuid::Uuid as WireUuid,
+};
+use tokio::{sync::Mutex, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
-use crabka_client_core::Client;
-use crabka_protocol::owned::join_group_request::{JoinGroupRequest, JoinGroupRequestProtocol};
-use crabka_protocol::owned::join_group_response::JoinGroupResponse;
-use crabka_protocol::owned::sync_group_request::{SyncGroupRequest, SyncGroupRequestAssignment};
-use crabka_protocol::owned::sync_group_response::SyncGroupResponse;
-use crabka_protocol::primitives::uuid::Uuid as WireUuid;
-
-use crate::assignor::Assignor;
-use crate::builder::{
-    AutoOffsetReset, IsolationLevel, decode_assignment, decode_subscription, encode_assignment,
-    encode_subscription,
+use crate::{
+    assignor::Assignor,
+    builder::{
+        AutoOffsetReset, IsolationLevel, decode_assignment, decode_subscription, encode_assignment,
+        encode_subscription,
+    },
+    coordinator::{
+        COORDINATOR_RETRY_TIMEOUT, CoordinatorState, find_coordinator, with_coordinator_refind,
+    },
+    error::ConsumerError,
+    group_metadata::ConsumerGroupMetadata,
 };
-use crate::coordinator::{
-    COORDINATOR_RETRY_TIMEOUT, CoordinatorState, find_coordinator, with_coordinator_refind,
-};
-use crate::error::ConsumerError;
-use crate::group_metadata::ConsumerGroupMetadata;
 
 /// Subscribe-style consumer handle. Construct via [`Consumer::builder`].
 #[allow(dead_code)] // `session_timeout` / `heartbeat_interval`
@@ -855,16 +863,23 @@ impl Consumer {
 
 #[cfg(test)]
 mod security_arg_tests {
-    use super::*;
     use assert2::{assert, check};
-    use crabka_client_core::security::{ClientSecurity, SaslCredentials};
-    use crabka_client_core::{ClientError, MockBroker};
-    use crabka_protocol::owned::api_versions_request;
-    use crabka_protocol::owned::api_versions_response::{ApiVersion, ApiVersionsResponse};
-    use crabka_protocol::owned::leave_group_request;
-    use crabka_protocol::owned::leave_group_response::{self, LeaveGroupResponse};
-    use crabka_protocol::{Encode, UnknownTaggedFields};
+    use crabka_client_core::{
+        ClientError, MockBroker,
+        security::{ClientSecurity, SaslCredentials},
+    };
+    use crabka_protocol::{
+        Encode, UnknownTaggedFields,
+        owned::{
+            api_versions_request,
+            api_versions_response::{ApiVersion, ApiVersionsResponse},
+            leave_group_request,
+            leave_group_response::{self, LeaveGroupResponse},
+        },
+    };
     use crabka_security::ListenerProtocol;
+
+    use super::*;
 
     fn api_versions_for_startup_cleanup() -> Vec<u8> {
         let resp = ApiVersionsResponse {
@@ -1257,8 +1272,9 @@ mod security_arg_tests {
 
     #[test]
     fn retriable_error_classification() {
-        use crabka_client_core::ClientError;
         use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+        use crabka_client_core::ClientError;
 
         // Transient group-protocol server codes.
         let transient_codes: &[i16] = &[14, 15, 16, 22, 25, 27, 79];

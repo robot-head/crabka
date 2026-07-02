@@ -3,11 +3,13 @@
 
 use std::sync::Arc;
 
-use crate::bootstrap;
-use crate::connection::ConnectionOptions;
-use crate::error::ClientError;
-use crate::pool::{BrokerInfo, BrokerPool};
-use crate::request::ProtocolRequest;
+use crate::{
+    bootstrap,
+    connection::ConnectionOptions,
+    error::ClientError,
+    pool::{BrokerInfo, BrokerPool},
+    request::ProtocolRequest,
+};
 
 /// A Kafka client backed by a [`BrokerPool`].
 ///
@@ -335,18 +337,26 @@ impl BrokerHandle<'_> {
 
 #[cfg(test)]
 mod bootstrap_failover_tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU16, Ordering},
+    };
+
+    use bytes::BytesMut;
+    use crabka_protocol::{
+        Encode,
+        owned::{
+            api_versions_request,
+            api_versions_response::{ApiVersion, ApiVersionsResponse},
+            metadata_request,
+            metadata_response::{
+                FLEXIBLE_MIN as META_FLEXIBLE_MIN, MetadataResponse, MetadataResponseBroker,
+            },
+        },
+    };
+
     use super::*;
     use crate::mock::MockBroker;
-    use bytes::BytesMut;
-    use crabka_protocol::Encode;
-    use crabka_protocol::owned::api_versions_request;
-    use crabka_protocol::owned::api_versions_response::{ApiVersion, ApiVersionsResponse};
-    use crabka_protocol::owned::metadata_request;
-    use crabka_protocol::owned::metadata_response::{
-        FLEXIBLE_MIN as META_FLEXIBLE_MIN, MetadataResponse, MetadataResponseBroker,
-    };
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicU16, Ordering};
 
     fn api_versions_v0() -> Vec<u8> {
         let resp = ApiVersionsResponse {

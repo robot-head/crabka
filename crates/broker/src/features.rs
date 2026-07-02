@@ -4,6 +4,7 @@
 //! can never disagree. Behavioral gating helpers (`require_feature`) live here
 //! because they return broker error codes.
 
+use crabka_metadata::MetadataImage;
 pub(crate) use crabka_metadata::metadata_version::METADATA_VERSION_FEATURE as METADATA_VERSION;
 // Re-exported for `ApiVersions` tests / range-bound assertions; consumed only
 // from `#[cfg(test)]` modules, so the non-test lib target sees them as unused.
@@ -11,8 +12,6 @@ pub(crate) use crabka_metadata::metadata_version::METADATA_VERSION_FEATURE as ME
 pub(crate) use crabka_metadata::metadata_version::METADATA_VERSION_MAX;
 #[allow(unused_imports)]
 pub(crate) use crabka_metadata::metadata_version::METADATA_VERSION_MIN;
-
-use crabka_metadata::MetadataImage;
 /// The `share.version` feature name (KIP-932). Consumed only from the
 /// `#[cfg(test)]` module that asserts share.version is advertised.
 #[allow(unused_imports)]
@@ -90,8 +89,9 @@ pub(crate) fn feature_enabled(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn feature_enabled_treats_absence_as_disabled() {

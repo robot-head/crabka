@@ -15,9 +15,11 @@
 
 use std::sync::Arc;
 
-use prometheus_client::encoding::EncodeLabelSet;
-use prometheus_client::metrics::{counter::Counter, family::Family, histogram::Histogram};
-use prometheus_client::registry::Registry;
+use prometheus_client::{
+    encoding::EncodeLabelSet,
+    metrics::{counter::Counter, family::Family, histogram::Histogram},
+    registry::Registry,
+};
 use tokio::sync::Mutex;
 
 pub type SharedRegistry = Arc<Mutex<Registry>>;
@@ -204,8 +206,9 @@ async fn export(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[tokio::test]
     async fn registry_has_demo_prefix_and_all_metrics() {

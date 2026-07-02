@@ -7,12 +7,11 @@
 //! is `Clone` and can be shared between the ingester tick and the RPC
 //! handlers without further wrapping.
 
-use prometheus_client::encoding::EncodeLabelSet;
-use prometheus_client::metrics::counter::Counter;
-use prometheus_client::metrics::family::Family;
-use prometheus_client::metrics::gauge::Gauge;
-use prometheus_client::metrics::histogram::Histogram;
-use prometheus_client::registry::Registry;
+use prometheus_client::{
+    encoding::EncodeLabelSet,
+    metrics::{counter::Counter, family::Family, gauge::Gauge, histogram::Histogram},
+    registry::Registry,
+};
 
 /// Label for a rebalance-compute outcome (`"ok"`, `"no_movements"`,
 /// `"error"`).
@@ -172,9 +171,10 @@ impl RebalancerMetrics {
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
+
     use super::*;
     use crate::health::new_registry;
-    use assert2::assert;
 
     #[test]
     fn register_emits_three_metric_names_with_crate_prefix() {

@@ -12,24 +12,25 @@
 //! `change_membership`/`add_learner` return [`RaftError::Unsupported`]
 //! ("dynamic reconfig unsupported").
 
-use std::collections::BTreeMap;
-use std::net::SocketAddr;
-use std::sync::Arc;
+use std::{collections::BTreeMap, net::SocketAddr, sync::Arc};
 
-use tokio::sync::{Mutex, watch};
-use tokio::task::JoinHandle;
+use crabka_metadata::{MetadataImage, MetadataRecord};
+use tokio::{
+    sync::{Mutex, watch},
+    task::JoinHandle,
+};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 use uuid::Uuid;
 
-use crabka_metadata::{MetadataImage, MetadataRecord};
-
-use crate::config::{BootstrapMode, ControllerConfig};
-use crate::error::RaftError;
-use crate::kraft::KraftController;
-use crate::network::{OutboundDialer, PlaintextDialer, RealPeerSender};
-use crate::server;
-use crate::types::{Node, NodeId};
+use crate::{
+    config::{BootstrapMode, ControllerConfig},
+    error::RaftError,
+    kraft::KraftController,
+    network::{OutboundDialer, PlaintextDialer, RealPeerSender},
+    server,
+    types::{Node, NodeId},
+};
 
 /// Crabka-native view of the controller's current quorum state. Surfaced by
 /// [`ControllerHandle::quorum_state`] for the broker's `DescribeQuorum` admin
@@ -773,9 +774,10 @@ pub fn metadata_log_nonempty(dir: &std::path::Path) -> bool {
 
 #[cfg(test)]
 mod bootstrap_mode_tests {
-    use super::*;
     use assert2::{assert, check};
     use tempfile::TempDir;
+
+    use super::*;
 
     const TEST_OP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 

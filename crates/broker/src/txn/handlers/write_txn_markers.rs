@@ -15,20 +15,24 @@
 //! Wire format: v1 flexible (tagged fields), v2 flexible + `transaction_version`.
 
 use bytes::{Bytes, BytesMut};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        write_txn_markers_request::WriteTxnMarkersRequest,
+        write_txn_markers_response::{
+            WritableTxnMarkerPartitionResult, WritableTxnMarkerResult,
+            WritableTxnMarkerTopicResult, WriteTxnMarkersResponse,
+        },
+    },
+};
 use futures_util::future::BoxFuture;
 
-use crabka_protocol::Decode;
-use crabka_protocol::Encode;
-use crabka_protocol::owned::write_txn_markers_request::WriteTxnMarkersRequest;
-use crabka_protocol::owned::write_txn_markers_response::{
-    WritableTxnMarkerPartitionResult, WritableTxnMarkerResult, WritableTxnMarkerTopicResult,
-    WriteTxnMarkersResponse,
+use crate::{
+    broker::Broker,
+    codes,
+    error::BrokerError,
+    txn::marker::{MarkerType, build_marker_batch},
 };
-
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
-use crate::txn::marker::{MarkerType, build_marker_batch};
 
 pub(crate) fn handle(
     broker: &Broker,
@@ -119,16 +123,19 @@ pub(crate) fn handle(
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-    use std::sync::Arc;
+    use std::{path::Path, sync::Arc};
 
     use assert2::assert;
     use crabka_log::{Log, LogConfig};
-    use crabka_protocol::UnknownTaggedFields;
-    use crabka_protocol::owned::write_txn_markers_request::{
-        WritableTxnMarker, WritableTxnMarkerTopic, WriteTxnMarkersRequest,
+    use crabka_protocol::{
+        UnknownTaggedFields,
+        owned::{
+            write_txn_markers_request::{
+                WritableTxnMarker, WritableTxnMarkerTopic, WriteTxnMarkersRequest,
+            },
+            write_txn_markers_response::WriteTxnMarkersResponse,
+        },
     };
-    use crabka_protocol::owned::write_txn_markers_response::WriteTxnMarkersResponse;
 
     use super::*;
     use crate::broker::{Broker, BrokerHandle};

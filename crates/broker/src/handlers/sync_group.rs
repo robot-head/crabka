@@ -10,18 +10,20 @@
 use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
+use crabka_metadata::{AclOperation, ResourceType};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{sync_group_request::SyncGroupRequest, sync_group_response::SyncGroupResponse},
+};
 use tokio::sync::oneshot;
 
-use crabka_metadata::{AclOperation, ResourceType};
-use crabka_protocol::owned::sync_group_request::SyncGroupRequest;
-use crabka_protocol::owned::sync_group_response::SyncGroupResponse;
-use crabka_protocol::{Decode, Encode};
-
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes;
-use crate::coordinator::unified::actor::GroupActorMessage;
-use crate::error::BrokerError;
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes,
+    coordinator::unified::actor::GroupActorMessage,
+    error::BrokerError,
+};
 
 /// Upper bound on how long a follower's `SyncGroup` is parked waiting for the
 /// leader's call to install assignments before giving up with
@@ -141,21 +143,22 @@ fn encode(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::assert;
-    use crabka_protocol::owned::join_group_request::{JoinGroupRequest, JoinGroupRequestProtocol};
-    use crabka_protocol::owned::join_group_response::{self, JoinGroupResponse};
-    use crabka_protocol::owned::sync_group_request::{
-        SyncGroupRequest, SyncGroupRequestAssignment,
-    };
-    use crabka_protocol::owned::sync_group_response::{self, SyncGroupResponse};
-    use crabka_security::Principal;
-    use std::net::SocketAddr;
-    use std::sync::Arc;
+    use std::{net::SocketAddr, sync::Arc};
 
-    use crate::authorizer::Authorizer;
-    use crate::broker::{Broker, BrokerHandle};
-    use crate::test_support::{DenyAll, encode_request};
+    use assert2::assert;
+    use crabka_protocol::owned::{
+        join_group_request::{JoinGroupRequest, JoinGroupRequestProtocol},
+        join_group_response::{self, JoinGroupResponse},
+        sync_group_request::{SyncGroupRequest, SyncGroupRequestAssignment},
+        sync_group_response::{self, SyncGroupResponse},
+    };
+    use crabka_security::Principal;
+
+    use crate::{
+        authorizer::Authorizer,
+        broker::{Broker, BrokerHandle},
+        test_support::{DenyAll, encode_request},
+    };
 
     const GROUP: &str = "sync-group-unit";
     const PROTOCOL_TYPE: &str = "consumer";
@@ -240,6 +243,8 @@ mod tests {
         );
         (r2.member_id, r2.generation_id)
     }
+
+    use super::*;
 
     #[test]
     fn group_read_denied_yields_group_authorization_failed() {

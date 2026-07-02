@@ -4,10 +4,8 @@
 
 use anyhow::Context as _;
 use clap::Parser;
-use crabka_replicator::config::ReplicatorConfig;
-use crabka_replicator::supervisor::FlowSupervisor;
-use tracing_subscriber::layer::SubscriberExt as _;
-use tracing_subscriber::util::SubscriberInitExt as _;
+use crabka_replicator::{config::ReplicatorConfig, supervisor::FlowSupervisor};
+use tracing_subscriber::{layer::SubscriberExt as _, util::SubscriberInitExt as _};
 
 #[derive(Debug, Parser)]
 #[command(name = "crabka-replicator", version, about)]

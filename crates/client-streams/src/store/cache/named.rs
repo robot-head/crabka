@@ -15,10 +15,11 @@
 //! monotonically increasing insertion counter, so `flush` visits dirty keys in
 //! the order they first became dirty.
 
-use crate::processor::record::RecordContext;
-use crate::store::cache::entry::LruCacheEntry;
-use bytes::Bytes;
 use std::collections::BTreeMap;
+
+use bytes::Bytes;
+
+use crate::{processor::record::RecordContext, store::cache::entry::LruCacheEntry};
 
 /// Callback invoked per dirty entry on flush/evict.
 pub(crate) type FlushListener<'a> = dyn FnMut(&Bytes, &LruCacheEntry) + 'a;
@@ -265,8 +266,9 @@ impl NamedCache {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::check;
+
+    use super::*;
 
     fn ctx() -> RecordContext {
         RecordContext {

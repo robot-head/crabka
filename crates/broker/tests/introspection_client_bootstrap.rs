@@ -14,8 +14,7 @@
 //! binary did in the kind-oauth-introspection e2e job.
 
 use assert2::assert;
-use crabka_broker::config::BrokerConfig;
-use crabka_broker::file_config::FileConfig;
+use crabka_broker::{config::BrokerConfig, file_config::FileConfig};
 
 /// A self-contained CA cert. Avoids depending on the security crate's
 /// fixtures (which live behind `#[cfg(test)]`-only paths).

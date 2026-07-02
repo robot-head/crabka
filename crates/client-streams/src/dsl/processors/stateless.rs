@@ -10,13 +10,14 @@
 //! out), and every captured closure is `Fn(..) + Send + Sync + 'static` (so the
 //! enclosing `move ||` supplier satisfies `ProcessorSupplier: Send + Sync`).
 
-use std::any::Any;
-use std::marker::PhantomData;
+use std::{any::Any, marker::PhantomData};
 
 use async_trait::async_trait;
 
-use crate::processor::api::{Processor, ProcessorContext};
-use crate::processor::record::Record;
+use crate::processor::{
+    api::{Processor, ProcessorContext},
+    record::Record,
+};
 
 /// Variance-neutral (always `Send + Sync`, contravariant-free) marker that "uses"
 /// the otherwise-unconstrained type params of a processor struct. Factored out so

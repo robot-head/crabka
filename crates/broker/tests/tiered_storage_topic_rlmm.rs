@@ -28,12 +28,14 @@ use crabka_broker::{
     Broker, BrokerConfig, BrokerHandle, KafkaRlmmConfig, RemoteStorageBackend, RlmmKind,
 };
 use crabka_client_core::Client;
-use crabka_protocol::owned::create_topics_request::{
-    CreatableTopic, CreatableTopicConfig, CreateTopicsRequest,
+use crabka_protocol::{
+    owned::{
+        create_topics_request::{CreatableTopic, CreatableTopicConfig, CreateTopicsRequest},
+        fetch_request::{FetchPartition, FetchRequest, FetchTopic},
+        metadata_request::{MetadataRequest, MetadataRequestTopic},
+    },
+    primitives::uuid::Uuid as WireUuid,
 };
-use crabka_protocol::owned::fetch_request::{FetchPartition, FetchRequest, FetchTopic};
-use crabka_protocol::owned::metadata_request::{MetadataRequest, MetadataRequestTopic};
-use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 use tempfile::TempDir;
 
 const METADATA_TOPIC: &str = "__remote_log_metadata";

@@ -8,7 +8,6 @@
 //! Record value is empty.
 
 use bytes::Bytes;
-
 use crabka_protocol::records::{Attributes, Record, RecordBatch};
 
 // `MarkerType` and `build_marker_batch` are intentionally `pub` for reuse
@@ -63,8 +62,9 @@ pub fn build_marker_batch(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn commit_marker_attribute_bits_set() {

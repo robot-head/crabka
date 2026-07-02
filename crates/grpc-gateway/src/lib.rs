@@ -7,9 +7,10 @@
 //! ## Serving the gateway
 //!
 //! ```no_run
+//! use std::sync::Arc;
+//!
 //! use axum::Router;
 //! use crabka_grpc_gateway::{router, state::AppState};
-//! use std::sync::Arc;
 //!
 //! # async fn run(state: Arc<AppState>) -> Result<(), Box<dyn std::error::Error>> {
 //! let app: Router = router(state);

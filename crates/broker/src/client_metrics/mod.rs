@@ -6,13 +6,11 @@ pub(crate) mod manager;
 pub(crate) mod otlp;
 pub(crate) mod otlp_sink;
 pub(crate) mod prometheus_sink;
+use std::{sync::Arc, time::Duration};
+
 pub(crate) use manager::ClientMetricsManager;
 
-use std::sync::Arc;
-use std::time::Duration;
-
-use self::otlp_sink::OtlpForwarder;
-use self::prometheus_sink::ClientMetricsCollector;
+use self::{otlp_sink::OtlpForwarder, prometheus_sink::ClientMetricsCollector};
 
 /// Default `telemetry.max.bytes` (1 MiB), matching Kafka.
 pub(crate) const DEFAULT_TELEMETRY_MAX_BYTES: i32 = 1_048_576;

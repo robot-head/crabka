@@ -18,20 +18,27 @@
 use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
-
 use crabka_metadata::{AclOperation, ResourceType};
-use crabka_protocol::owned::init_producer_id_request::InitProducerIdRequest;
-use crabka_protocol::owned::init_producer_id_response::InitProducerIdResponse;
-use crabka_protocol::{Decode, Encode};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        init_producer_id_request::InitProducerIdRequest,
+        init_producer_id_response::InitProducerIdResponse,
+    },
+};
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
-use crate::replicator_supervisor::materialize_partition;
-use crate::txn::coordinator::TxnCoordinator;
-use crate::txn::state::{TxnEntry, TxnState};
-use crate::txn::util::now_millis;
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes,
+    error::BrokerError,
+    replicator_supervisor::materialize_partition,
+    txn::{
+        coordinator::TxnCoordinator,
+        state::{TxnEntry, TxnState},
+        util::now_millis,
+    },
+};
 
 #[allow(clippy::too_many_lines)]
 #[tracing::instrument(

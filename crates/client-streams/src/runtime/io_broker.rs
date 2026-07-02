@@ -14,32 +14,33 @@
 //! multi-broker deployments (look up `leader_id` from metadata, dial the
 //! correct broker connection from a pool).
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use bytes::Bytes;
-use tokio::sync::Mutex;
-use tokio::sync::oneshot;
-
 use crabka_client_core::{Client, Connection, ConnectionOptions, fetch_partition_with_isolation};
 use crabka_client_producer::{Acks, Producer, ProducerError, ProducerRecord, RecordMetadata};
-use crabka_protocol::primitives::uuid::Uuid as WireUuid;
+use crabka_protocol::{
+    owned::{
+        list_offsets_request::{ListOffsetsPartition, ListOffsetsRequest, ListOffsetsTopic},
+        metadata_request::{MetadataRequest, MetadataRequestTopic},
+        offset_commit_request::{
+            OffsetCommitRequest, OffsetCommitRequestPartition, OffsetCommitRequestTopic,
+        },
+        offset_fetch_request::{
+            OffsetFetchRequest, OffsetFetchRequestGroup, OffsetFetchRequestTopic,
+            OffsetFetchRequestTopics,
+        },
+    },
+    primitives::uuid::Uuid as WireUuid,
+};
+use tokio::sync::{Mutex, oneshot};
 
-use crabka_protocol::owned::list_offsets_request::{
-    ListOffsetsPartition, ListOffsetsRequest, ListOffsetsTopic,
-};
-use crabka_protocol::owned::metadata_request::{MetadataRequest, MetadataRequestTopic};
-use crabka_protocol::owned::offset_commit_request::{
-    OffsetCommitRequest, OffsetCommitRequestPartition, OffsetCommitRequestTopic,
-};
-use crabka_protocol::owned::offset_fetch_request::{
-    OffsetFetchRequest, OffsetFetchRequestGroup, OffsetFetchRequestTopic, OffsetFetchRequestTopics,
-};
-
-use crate::error::StreamsClientError;
-use crate::runtime::eos::{StreamsGroupMeta, TransactionalProducer};
-use crate::runtime::io::{
-    FetchBatch, FetchedRec, IsolationLevel, OffsetStore, RecordFetcher, RecordProducer,
+use crate::{
+    error::StreamsClientError,
+    runtime::{
+        eos::{StreamsGroupMeta, TransactionalProducer},
+        io::{FetchBatch, FetchedRec, IsolationLevel, OffsetStore, RecordFetcher, RecordProducer},
+    },
 };
 
 // ─── BrokerFetcher ────────────────────────────────────────────────────────────
@@ -868,9 +869,13 @@ mod tests {
     use tokio::sync::Mutex;
 
     use super::{BrokerOffsetStore, BrokerTransactionalProducer};
-    use crate::error::StreamsClientError;
-    use crate::runtime::eos::TransactionalProducer as _;
-    use crate::runtime::io::{OffsetStore as _, RecordProducer as _};
+    use crate::{
+        error::StreamsClientError,
+        runtime::{
+            eos::TransactionalProducer as _,
+            io::{OffsetStore as _, RecordProducer as _},
+        },
+    };
 
     async fn boot() -> (crabka_broker::BrokerHandle, String, tempfile::TempDir) {
         let dir = tempfile::TempDir::new().unwrap();

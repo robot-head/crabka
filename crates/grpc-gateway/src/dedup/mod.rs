@@ -22,15 +22,15 @@ pub fn partition_for(key: &str, partitions: u32) -> u32 {
 use std::sync::Arc;
 
 use bytes::Bytes;
+use crabka_client_producer::{Acks, Producer, ProducerRecord, RecordMetadata};
 use tokio::sync::Mutex;
 
-use crabka_client_producer::{Acks, Producer, ProducerRecord, RecordMetadata};
-
-use crate::error::GatewayError;
-use crate::produce::to_producer_record;
-use crate::types::{GatewayRecord, RecordOutcome};
-
 use self::store::{ClaimValue, DedupStore};
+use crate::{
+    error::GatewayError,
+    produce::to_producer_record,
+    types::{GatewayRecord, RecordOutcome},
+};
 
 /// A lazily-initialized transactional producer pinned to one dedup partition.
 /// One in-flight transaction at a time ⇒ the `Mutex` serializes that

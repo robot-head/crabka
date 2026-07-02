@@ -1,13 +1,17 @@
-use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
-use std::ops::Range;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+    ops::Range,
+    sync::Arc,
+    time::Duration,
+};
 
 use assert2::{assert, check};
 use async_trait::async_trait;
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::{
+    body::Body,
+    http::{Request, StatusCode},
+};
 use crabka_blockstore::{
     BlockKey, LabelIndex, LogBlockIndex as BlockIndex, LogBlockStoreError, LogRow, TimeRange,
     labels, list_tenant_log_index_shard_ranges_from_object_store, log_block_object_path,
@@ -29,15 +33,16 @@ use crabka_observability::{
     write_compaction_frontier_to_object_store,
 };
 use futures_util::stream::BoxStream;
-use object_store::local::LocalFileSystem;
-use object_store::path::Path as ObjectPath;
 use object_store::{
     CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
-    ObjectStoreExt, PutMultipartOptions, PutOptions, PutPayload, PutResult,
+    ObjectStoreExt, PutMultipartOptions, PutOptions, PutPayload, PutResult, local::LocalFileSystem,
+    path::Path as ObjectPath,
 };
 use prost::bytes::Bytes;
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::{
+    io::{AsyncReadExt as _, AsyncWriteExt as _},
+    net::{TcpListener, TcpStream},
+};
 use tower::ServiceExt as _;
 
 #[derive(Clone)]

@@ -4,19 +4,25 @@
 //! window, emits `joiner(this, Some(other))` per match, and — for left/outer —
 //! buffers unmatched records in a shared outer KV store and emits the null-padded
 //! result once their window closes (stream-time-driven; no wall-clock throttle).
-use std::marker::PhantomData;
-use std::sync::{Arc, Mutex};
+use std::{
+    marker::PhantomData,
+    sync::{Arc, Mutex},
+};
 
 use async_trait::async_trait;
 use bytes::Bytes;
 
-use crate::dsl::processors::outer_join_store::{
-    TimeTracker, outer_key, outer_key_key_bytes, outer_key_side_left, outer_key_ts,
-    outer_value_decode, outer_value_left, outer_value_right,
+use crate::{
+    dsl::processors::outer_join_store::{
+        TimeTracker, outer_key, outer_key_key_bytes, outer_key_side_left, outer_key_ts,
+        outer_value_decode, outer_value_left, outer_value_right,
+    },
+    processor::{
+        api::{Processor, ProcessorContext},
+        record::Record,
+        serde::Serde,
+    },
 };
-use crate::processor::api::{Processor, ProcessorContext};
-use crate::processor::record::Record;
-use crate::processor::serde::Serde;
 
 type Marker<T> = PhantomData<fn() -> T>;
 
@@ -198,20 +204,26 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::collections::VecDeque;
-    use std::marker::PhantomData;
-    use std::sync::{Arc, Mutex};
+    use std::{
+        collections::VecDeque,
+        marker::PhantomData,
+        sync::{Arc, Mutex},
+    };
 
     use bytes::Bytes;
 
     use super::*;
-    use crate::processor::api::ProcessorContext;
-    use crate::processor::erased::{Dispatch, ErasedRecord};
-    use crate::processor::record::{Record, RecordContext};
-    use crate::processor::serde::{BytesSerde, StringSerde};
-    use crate::store::join_window::JoinWindowBytesStore;
-    use crate::store::kv::KeyValueBytesStore;
-    use crate::store::registry::StoreRegistry;
+    use crate::{
+        processor::{
+            api::ProcessorContext,
+            erased::{Dispatch, ErasedRecord},
+            record::{Record, RecordContext},
+            serde::{BytesSerde, StringSerde},
+        },
+        store::{
+            join_window::JoinWindowBytesStore, kv::KeyValueBytesStore, registry::StoreRegistry,
+        },
+    };
 
     fn make_stores() -> StoreRegistry {
         let mut stores = StoreRegistry::default();

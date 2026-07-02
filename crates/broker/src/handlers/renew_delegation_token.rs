@@ -14,16 +14,16 @@
 //! via act-as, then must be able to renew/expire them despite being
 //! neither the owner nor a listed renewer.
 
-use std::collections::HashSet;
-use std::hash::BuildHasher;
+use std::{collections::HashSet, hash::BuildHasher};
 
 use crabka_metadata::{DelegationTokenRecord, MetadataRecord};
-use crabka_protocol::owned::renew_delegation_token_request::RenewDelegationTokenRequest;
-use crabka_protocol::owned::renew_delegation_token_response::RenewDelegationTokenResponse;
+use crabka_protocol::owned::{
+    renew_delegation_token_request::RenewDelegationTokenRequest,
+    renew_delegation_token_response::RenewDelegationTokenResponse,
+};
 use crabka_security::SecretBytes;
 
-use crate::network::auth::ConnectionAuth;
-use crate::time_util::now_ms;
+use crate::{network::auth::ConnectionAuth, time_util::now_ms};
 
 #[tracing::instrument(
     name = "handle_renew_delegation_token",
@@ -113,14 +113,14 @@ fn err_response(code: i16) -> RenewDelegationTokenResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::{collections::HashSet, sync::Arc, time::Duration};
+
     use assert2::assert;
     use crabka_raft::ControllerHandle;
     use crabka_security::{AuthMethod, KafkaPrincipal, Principal, SaslMechanism};
-    use std::collections::HashSet;
-    use std::sync::Arc;
-    use std::time::Duration;
     use tempfile::TempDir;
+
+    use super::*;
 
     /// Helper: empty super-users set for the pre-existing tests, which
     /// all exercise the owner/renewer path.

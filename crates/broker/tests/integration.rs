@@ -5,17 +5,17 @@ use assert2::{assert, check};
 mod support;
 
 use bytes::Bytes;
-use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
-use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-use crabka_protocol::owned::fetch_request::{FetchPartition, FetchRequest, FetchTopic};
-use crabka_protocol::owned::list_offsets_request::{
-    ListOffsetsPartition, ListOffsetsRequest, ListOffsetsTopic,
+use crabka_protocol::{
+    owned::{
+        api_versions_request::ApiVersionsRequest,
+        create_topics_request::{CreatableTopic, CreateTopicsRequest},
+        fetch_request::{FetchPartition, FetchRequest, FetchTopic},
+        list_offsets_request::{ListOffsetsPartition, ListOffsetsRequest, ListOffsetsTopic},
+        metadata_request::{MetadataRequest, MetadataRequestTopic},
+        produce_request::{PartitionProduceData, ProduceRequest, TopicProduceData},
+    },
+    records::{Record, RecordBatch},
 };
-use crabka_protocol::owned::metadata_request::{MetadataRequest, MetadataRequestTopic};
-use crabka_protocol::owned::produce_request::{
-    PartitionProduceData, ProduceRequest, TopicProduceData,
-};
-use crabka_protocol::records::{Record, RecordBatch};
 
 /// Build a `RecordBatch` with one entry per provided value. Codegen's
 /// `PartitionProduceData.records` is `Option<RecordsPayload>`; callers

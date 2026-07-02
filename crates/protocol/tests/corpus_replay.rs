@@ -1,7 +1,6 @@
-use assert2::assert;
-use std::fs;
-use std::path::Path;
+use std::{fs, path::Path};
 
+use assert2::assert;
 use serde::Deserialize;
 
 include!(concat!(

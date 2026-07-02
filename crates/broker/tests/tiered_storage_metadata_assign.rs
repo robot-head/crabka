@@ -17,8 +17,10 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
-use crabka_remote_storage_topic::kafka_log::{KafkaMetadataEventLog, KafkaMetadataLogConfig};
-use crabka_remote_storage_topic::log::{MetadataEventLog, PartitionStart};
+use crabka_remote_storage_topic::{
+    kafka_log::{KafkaMetadataEventLog, KafkaMetadataLogConfig},
+    log::{MetadataEventLog, PartitionStart},
+};
 use futures_util::StreamExt;
 use tempfile::TempDir;
 

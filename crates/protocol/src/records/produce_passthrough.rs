@@ -17,15 +17,17 @@
 
 use bytes::{Buf, Bytes};
 
-use crate::ProtocolError;
-use crate::primitives::array::get_array_len;
-use crate::primitives::fixed::{get_i16, get_i32};
-use crate::primitives::string_bytes::{
-    get_compact_nullable_string_owned, get_nullable_string_owned,
+use crate::{
+    ProtocolError,
+    primitives::{
+        array::get_array_len,
+        fixed::{get_i16, get_i32},
+        string_bytes::{get_compact_nullable_string_owned, get_nullable_string_owned},
+        uuid::{Uuid, get_uuid},
+        varint::get_uvarint,
+    },
+    tagged_fields::read_tagged_fields,
 };
-use crate::primitives::uuid::{Uuid, get_uuid};
-use crate::primitives::varint::get_uvarint;
-use crate::tagged_fields::read_tagged_fields;
 
 /// `ProduceRequest`: flexible (KIP-482 tagged fields / compact encodings)
 /// at version 9 and above. Mirrors `is_flexible` in the generated code.
@@ -283,12 +285,15 @@ fn skip(buf: &mut Bytes, n: usize) -> Result<(), ProtocolError> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::Encode;
-    use crate::owned::produce_request::{PartitionProduceData, ProduceRequest, TopicProduceData};
-    use crate::records::{Record, RecordBatch, RecordsPayload};
     use assert2::{assert, check};
     use bytes::BytesMut;
+
+    use super::*;
+    use crate::{
+        Encode,
+        owned::produce_request::{PartitionProduceData, ProduceRequest, TopicProduceData},
+        records::{Record, RecordBatch, RecordsPayload},
+    };
 
     fn batch_with_value(v: &[u8], base_offset: i64) -> RecordBatch {
         RecordBatch {

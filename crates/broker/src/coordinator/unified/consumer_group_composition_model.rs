@@ -30,21 +30,27 @@
 //!
 //! Memory safety: run under the host memory watchdog while bounds are tuned.
 
-use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::time::{Duration, Instant};
-
-use crabka_protocol::owned::consumer_group_heartbeat_request::{
-    ConsumerGroupHeartbeatRequest, TopicPartitions,
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    time::{Duration, Instant},
 };
-use crabka_protocol::primitives::uuid::Uuid;
+
+use crabka_protocol::{
+    owned::consumer_group_heartbeat_request::{ConsumerGroupHeartbeatRequest, TopicPartitions},
+    primitives::uuid::Uuid,
+};
 use stateright::{Checker, Model, Property};
 
-use super::super::config::NextGenConfig;
-use super::super::consumer_state::{GroupState, MemberState};
-use super::super::persistence_next_gen::MemberAssignmentState;
-use super::super::reconciler::ReconcileInput;
-use super::{HeartbeatStep, MetadataProvider, step_heartbeat};
+use super::{
+    super::{
+        config::NextGenConfig,
+        consumer_state::{GroupState, MemberState},
+        persistence_next_gen::MemberAssignmentState,
+        reconciler::ReconcileInput,
+    },
+    HeartbeatStep, MetadataProvider, step_heartbeat,
+};
 
 const TOPIC: Uuid = Uuid([7; 16]);
 const TOPIC_NAME: &str = "t";

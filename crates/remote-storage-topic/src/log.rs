@@ -14,15 +14,18 @@
 //! with its own start offset) and returns an [`AssignmentHandle`] that
 //! can mutate the live assignment at runtime.
 
-use std::collections::HashMap;
-use std::pin::Pin;
-use std::sync::atomic::AtomicU64;
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::HashMap,
+    pin::Pin,
+    sync::{Arc, Mutex, atomic::AtomicU64},
+};
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures_util::stream::{Stream, unfold};
-use futures_util::{StreamExt, stream};
+use futures_util::{
+    StreamExt, stream,
+    stream::{Stream, unfold},
+};
 use tokio::sync::{broadcast, mpsc};
 
 use crate::error::MetadataLogError;
@@ -474,10 +477,10 @@ fn filtered_broadcast(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::assert;
-    use assert2::check;
+    use assert2::{assert, check};
     use futures_util::StreamExt;
+
+    use super::*;
 
     #[tokio::test]
     async fn publish_assigns_monotonic_offsets() {

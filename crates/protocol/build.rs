@@ -1,5 +1,4 @@
-use std::fs;
-use std::path::PathBuf;
+use std::{fs, path::PathBuf};
 
 fn main() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

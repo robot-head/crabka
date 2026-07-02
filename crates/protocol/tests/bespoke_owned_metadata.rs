@@ -4,11 +4,16 @@
 
 use assert2::assert;
 use bytes::BytesMut;
-use crabka_protocol::owned::metadata_request::{MAX_VERSION, MIN_VERSION, MetadataRequest};
-use crabka_protocol::owned::metadata_response::{
-    MAX_VERSION as RESP_MAX, MIN_VERSION as RESP_MIN, MetadataResponse, MetadataResponseBroker,
+use crabka_protocol::{
+    Decode, Encode, UnknownTaggedFields,
+    owned::{
+        metadata_request::{MAX_VERSION, MIN_VERSION, MetadataRequest},
+        metadata_response::{
+            MAX_VERSION as RESP_MAX, MIN_VERSION as RESP_MIN, MetadataResponse,
+            MetadataResponseBroker,
+        },
+    },
 };
-use crabka_protocol::{Decode, Encode, UnknownTaggedFields};
 
 #[test]
 fn owned_metadata_request_v0_topics_none_encodes_as_empty_array() {

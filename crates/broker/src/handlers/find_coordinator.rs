@@ -11,16 +11,21 @@
 use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
-
 use crabka_metadata::{AclOperation, ResourceType};
-use crabka_protocol::owned::find_coordinator_request::FindCoordinatorRequest;
-use crabka_protocol::owned::find_coordinator_response::{Coordinator, FindCoordinatorResponse};
-use crabka_protocol::{Decode, Encode};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        find_coordinator_request::FindCoordinatorRequest,
+        find_coordinator_response::{Coordinator, FindCoordinatorResponse},
+    },
+};
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes,
+    error::BrokerError,
+};
 
 const KEY_TYPE_GROUP: i8 = 0;
 const KEY_TYPE_TRANSACTION: i8 = 1;
@@ -463,8 +468,9 @@ fn parse_host_port(addr: &str) -> (String, u16) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     fn deny_authorizer() -> crate::authorizer::SimpleAclAuthorizer {
         crate::authorizer::SimpleAclAuthorizer::new(std::collections::HashSet::new())

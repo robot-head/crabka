@@ -3,34 +3,36 @@
 //! phases, optionally triggers a failover mid-measurement, and merges
 //! per-task histograms into the public `LatencyPercentiles` shape.
 
-use std::future::Future;
-use std::path::PathBuf;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
-use std::time::Duration;
+use std::{
+    future::Future,
+    path::PathBuf,
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicU8, AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use futures::stream::FuturesUnordered;
-use futures::{FutureExt, StreamExt};
-use hdrhistogram::Histogram;
-use tokio::task::JoinSet;
-use tokio::time::Instant;
-use tracing::{info, warn};
-
 use crabka_client_consumer::{AutoOffsetReset, Consumer};
 use crabka_client_core::security::{ClientSecurity, TlsConnectorConfig};
 use crabka_client_producer::{Producer, ProducerError, ProducerRecord, RecordMetadata};
 use crabka_security::ListenerProtocol;
+use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
+use hdrhistogram::Histogram;
+use tokio::{task::JoinSet, time::Instant};
+use tracing::{info, warn};
 
-use crate::hist;
-use crate::payload;
-use crate::prom::PromClient;
-use crate::rate::Pacer;
-use crate::scenario::{
-    BrokerSample, Disturbance, LoadMode, ModeTag, Resource, RunOutput, Sample, Scenario, Stack,
-    Throughput, Topology,
+use crate::{
+    hist, payload,
+    prom::PromClient,
+    rate::Pacer,
+    scenario::{
+        BrokerSample, Disturbance, LoadMode, ModeTag, Resource, RunOutput, Sample, Scenario, Stack,
+        Throughput, Topology,
+    },
 };
 
 /// Width of one time-series sample bucket. The measurement window is split
@@ -900,9 +902,10 @@ async fn build_consumer_with_retry(
 
 #[cfg(test)]
 mod tests {
+    use assert2::{assert, check};
+
     use super::*;
     use crate::scenario::{Acks, Compression, FailoverSpec, LoadMode, ModeTag};
-    use assert2::{assert, check};
 
     fn cfg(broker_count: u32) -> DriverConfig {
         DriverConfig {

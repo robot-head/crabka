@@ -3,18 +3,20 @@
 //! the consumer has seen no new records for 5 consecutive 100ms polls
 //! (the "quiet period" end-of-log heuristic).
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use crabka_client_core::Client;
-use crabka_protocol::owned::fetch_request::{FetchPartition, FetchRequest, FetchTopic};
-use crabka_protocol::owned::fetch_response::FetchResponse;
-use crabka_protocol::records::RecordsPayload;
+use crabka_protocol::{
+    owned::{
+        fetch_request::{FetchPartition, FetchRequest, FetchTopic},
+        fetch_response::FetchResponse,
+    },
+    records::RecordsPayload,
+};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use crate::state_topic::error::StateTopicError;
-use crate::state_topic::{LoadedState, STATE_KEY, serde_format};
+use crate::state_topic::{LoadedState, STATE_KEY, error::StateTopicError, serde_format};
 
 /// Kafka partition error codes treated as "topic exists but has no records
 /// visible yet" — counts as a quiet poll rather than a hard error. Covers
@@ -171,18 +173,21 @@ fn fetched_records_from_response(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::assert;
-    use bytes::Bytes;
-    use crabka_protocol::UnknownTaggedFields;
-    use crabka_protocol::owned::fetch_request::ReplicaState;
-    use crabka_protocol::owned::fetch_response::{
-        FetchResponse, FetchableTopicResponse, PartitionData,
-    };
-    use crabka_protocol::primitives::uuid::Uuid;
-    use crabka_protocol::records::{Record, RecordBatch, RecordsPayload};
     use std::time::Duration;
 
+    use assert2::assert;
+    use bytes::Bytes;
+    use crabka_protocol::{
+        UnknownTaggedFields,
+        owned::{
+            fetch_request::ReplicaState,
+            fetch_response::{FetchResponse, FetchableTopicResponse, PartitionData},
+        },
+        primitives::uuid::Uuid,
+        records::{Record, RecordBatch, RecordsPayload},
+    };
+
+    use super::*;
     use crate::executor::state::{InFlightFile, Phase};
 
     fn in_flight(id: &str) -> InFlightFile {

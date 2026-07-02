@@ -32,16 +32,18 @@
 //!   cargo test -p crabka-broker --test gssapi_e2e -- --ignored
 //! ```
 
-use assert2::assert;
-use std::io::Write;
-use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::{
+    io::Write,
+    path::PathBuf,
+    process::{Command, Stdio},
+};
 
-use crabka_broker::config::ListenerSpec;
-use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
-use crabka_security::gssapi::GssapiConfig;
-use crabka_security::gssapi::name::Rule;
-use crabka_security::{ListenerProtocol, SaslMechanism};
+use assert2::assert;
+use crabka_broker::{Broker, BrokerConfig, BrokerHandle, config::ListenerSpec};
+use crabka_security::{
+    ListenerProtocol, SaslMechanism,
+    gssapi::{GssapiConfig, name::Rule},
+};
 
 /// cp-kafka image bundling the GSSAPI-capable console tools.
 const KAFKA_IMAGE: &str = "mirror.gcr.io/confluentinc/cp-kafka:6.1.1";

@@ -8,28 +8,32 @@
 //! Dedup tests spin up a real single-owner store and wait for `has_warmed_once`
 //! before the first produce — exactly the pattern in `tests/integration_dedup.rs`.
 
-use std::collections::{BTreeMap, HashSet};
-use std::net::SocketAddr;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{
+    collections::{BTreeMap, HashSet},
+    net::SocketAddr,
+    sync::Arc,
+    time::Duration,
+};
 
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::{
+    body::Body,
+    http::{Request, StatusCode},
+};
 use bytes::Bytes;
 use crabka_authz::{AuthorizationRequest, AuthorizationResult, SimpleAclAuthorizer};
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_admin::{AdminClient, CreateTopicSpec};
 use crabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
-use crabka_grpc_gateway::authz::GatewayAuthz;
-use crabka_grpc_gateway::codec::RawCodec;
-use crabka_grpc_gateway::config::GatewayConfig;
-use crabka_grpc_gateway::dedup::DedupEngine;
-use crabka_grpc_gateway::dedup::store::DedupStore;
-use crabka_grpc_gateway::dedup::topic::ensure_dedup_topic;
-use crabka_grpc_gateway::produce::ProduceCore;
-use crabka_grpc_gateway::state::AppState;
-use crabka_grpc_gateway::webhook::webhook_router;
-use crabka_grpc_gateway::webhook_config::WebhooksFile;
+use crabka_grpc_gateway::{
+    authz::GatewayAuthz,
+    codec::RawCodec,
+    config::GatewayConfig,
+    dedup::{DedupEngine, store::DedupStore, topic::ensure_dedup_topic},
+    produce::ProduceCore,
+    state::AppState,
+    webhook::webhook_router,
+    webhook_config::WebhooksFile,
+};
 use crabka_metadata::{AclOperation, ResourceType};
 use crabka_security::{AuthMethod, Principal};
 use hmac::{Hmac, KeyInit, Mac};

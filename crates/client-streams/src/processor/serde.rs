@@ -1,4 +1,4 @@
-﻿//! `Serde<T>`: typed (de)serialization at source/sink boundaries.
+//! `Serde<T>`: typed (de)serialization at source/sink boundaries.
 
 use bytes::Bytes;
 
@@ -383,8 +383,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::check;
+
+    use super::*;
 
     #[test]
     fn string_serde_round_trips() {

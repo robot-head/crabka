@@ -4,14 +4,15 @@
 //! corruption is visible) and recomputes the chain with the same primitives the
 //! writer used, validating each checkpoint signature against a trusted key.
 
-use std::collections::HashMap;
-use std::path::Path;
+use std::{collections::HashMap, path::Path};
 
 use crabka_protocol::records::{Record, RecordBatch};
 
-use crate::chain::{GENESIS_HEAD, chain_hash, from_hex32};
-use crate::checkpoint::{Checkpoint, EVENT_CLASS_CHECKPOINT};
-use crate::sink::{AuditError, HEADER_PREV_HASH, HEADER_SEQ};
+use crate::{
+    chain::{GENESIS_HEAD, chain_hash, from_hex32},
+    checkpoint::{Checkpoint, EVENT_CLASS_CHECKPOINT},
+    sink::{AuditError, HEADER_PREV_HASH, HEADER_SEQ},
+};
 
 /// Trusted public keys, keyed by `key_id`.
 #[derive(Debug, Default)]
@@ -300,10 +301,9 @@ mod tests {
     use crabka_protocol::records::{Record, RecordBatch, RecordHeader};
 
     use super::*;
-    use crate::chain::ChainState;
-    use crate::checkpoint::Checkpoint;
-    use crate::signing::FileEd25519Signer;
-    use crate::sink::AuditRecord;
+    use crate::{
+        chain::ChainState, checkpoint::Checkpoint, signing::FileEd25519Signer, sink::AuditRecord,
+    };
 
     fn signer() -> (Arc<FileEd25519Signer>, Vec<u8>) {
         use ring::signature::{Ed25519KeyPair, KeyPair};

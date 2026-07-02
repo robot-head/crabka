@@ -7,8 +7,9 @@
 
 #![doc(html_root_url = "https://docs.rs/crabka-voters/0.3.8")]
 
-use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// A broker/controller node id (Kafka's `int32`, widened to `u64` here because
@@ -107,8 +108,9 @@ impl VoterSet {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
+
+    use super::*;
 
     fn sample(id: NodeId) -> Voter {
         Voter {

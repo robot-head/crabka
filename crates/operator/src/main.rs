@@ -1,7 +1,5 @@
 use clap::{Parser, Subcommand};
-
-use crabka_operator::config::OperatorConfig;
-use crabka_operator::{gen_crds, run};
+use crabka_operator::{config::OperatorConfig, gen_crds, run};
 
 #[derive(Debug, Parser)]
 #[command(name = "crabka-operator", version, about)]
@@ -64,9 +62,10 @@ async fn main() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
     use clap::Parser;
+
+    use super::*;
 
     #[test]
     fn ca_renewal_check_parses() {

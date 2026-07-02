@@ -1,8 +1,10 @@
 //! Block-builder helpers for turning WAL span records into span blocks.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
-use std::time::Duration;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+    time::Duration,
+};
 
 use arrow::compute::concat_batches;
 use crabka_blockstore::{
@@ -12,15 +14,16 @@ use crabka_blockstore::{
 };
 use crabka_client_consumer::{Consumer, ConsumerRecord};
 use object_store::ObjectStore;
-use tokio::sync::Mutex;
-use tokio::time::Instant;
+use tokio::{sync::Mutex, time::Instant};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument as _;
 
-use crate::error::TracesError;
-use crate::metrics::ServiceMetrics;
-use crate::span::{AttrValue, Span, batch::span_batch_with_promoted_attrs};
-use crate::wal::SpanRecord;
+use crate::{
+    error::TracesError,
+    metrics::ServiceMetrics,
+    span::{AttrValue, Span, batch::span_batch_with_promoted_attrs},
+    wal::SpanRecord,
+};
 
 /// W3C trace-context header key carried on WAL records by the distributor's
 /// ingest span; used to continue the same distributed trace on the consume side.

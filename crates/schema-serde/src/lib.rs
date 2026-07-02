@@ -15,12 +15,11 @@ pub mod format;
 
 pub use cache::{CacheConfig, RegisterMode, SchemaCache, default_registry, set_default_registry};
 pub use error::SchemaSerdeError;
-pub use registry::RegistryClient;
-pub use subject::{Role, SchemaKind, SubjectStrategy, TopicNameStrategy};
-
 #[cfg(feature = "avro")]
 pub use format::avro::AvroSerde;
 #[cfg(feature = "json")]
 pub use format::json::JsonSerde;
 #[cfg(feature = "protobuf")]
 pub use format::protobuf::ProtobufSerde;
+pub use registry::RegistryClient;
+pub use subject::{Role, SchemaKind, SubjectStrategy, TopicNameStrategy};

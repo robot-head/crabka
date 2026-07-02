@@ -60,17 +60,18 @@
 // enforces the full lint gate.
 #![allow(clippy::pedantic)]
 
-use std::net::SocketAddr;
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::{
+    net::SocketAddr,
+    process::{Command, Stdio},
+    time::{Duration, Instant},
+};
 
 use base64::Engine as _;
-use tempfile::TempDir;
-use uuid::Uuid;
-
 use crabka_broker::{BootstrapMode, Broker, BrokerConfig, BrokerHandle};
 use crabka_log::LogConfig;
 use crabka_metadata::{MetadataRecord, PartitionRecord};
+use tempfile::TempDir;
+use uuid::Uuid;
 
 mod support;
 

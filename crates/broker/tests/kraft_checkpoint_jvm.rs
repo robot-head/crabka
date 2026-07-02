@@ -5,8 +5,7 @@
 //! cargo test -p crabka-broker --test kraft_checkpoint_jvm -- --ignored --nocapture
 //! ```
 
-use std::io::Write;
-use std::process::Command;
+use std::{io::Write, process::Command};
 
 use assert2::assert;
 use crabka_protocol::records::metadata::checkpoint::build_bootstrap_checkpoint;

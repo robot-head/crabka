@@ -29,9 +29,11 @@ use std::time::Duration;
 
 use stateright::{Checker, Model, Property};
 
-use super::decision::decide_phase1_transition;
-use super::state::{TxnEntry, TxnState};
-use super::two_pc::{NO_TIMEOUT_MS, should_abort_idle_txn};
+use super::{
+    decision::decide_phase1_transition,
+    state::{TxnEntry, TxnState},
+    two_pc::{NO_TIMEOUT_MS, should_abort_idle_txn},
+};
 
 const MAX_STATES: usize = 300_000;
 const MAX_DEPTH: usize = 80;

@@ -7,19 +7,20 @@
 //! Leader-only (`NOT_CONTROLLER` otherwise), mirroring `alter_partition`.
 
 use bytes::{Bytes, BytesMut};
+use crabka_metadata::{MetadataImage, MetadataRecord, PartitionDirAssignmentRecord};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        assign_replicas_to_dirs_request::AssignReplicasToDirsRequest,
+        assign_replicas_to_dirs_response::{
+            AssignReplicasToDirsResponse, DirectoryData as RespDirData,
+            PartitionData as RespPartData, TopicData as RespTopicData,
+        },
+    },
+};
 use futures_util::future::BoxFuture;
 
-use crabka_metadata::{MetadataImage, MetadataRecord, PartitionDirAssignmentRecord};
-use crabka_protocol::owned::assign_replicas_to_dirs_request::AssignReplicasToDirsRequest;
-use crabka_protocol::owned::assign_replicas_to_dirs_response::{
-    AssignReplicasToDirsResponse, DirectoryData as RespDirData, PartitionData as RespPartData,
-    TopicData as RespTopicData,
-};
-use crabka_protocol::{Decode, Encode};
-
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
+use crate::{broker::Broker, codes, error::BrokerError};
 
 pub(crate) fn handle(
     broker: &Broker,
@@ -188,14 +189,16 @@ fn encode_resp(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
     use crabka_metadata::{MetadataImage, MetadataRecord, PartitionRecord, TopicRecord};
-    use crabka_protocol::owned::assign_replicas_to_dirs_request::{
-        DirectoryData as ReqDirData, PartitionData as ReqPartData, TopicData as ReqTopicData,
+    use crabka_protocol::{
+        owned::assign_replicas_to_dirs_request::{
+            DirectoryData as ReqDirData, PartitionData as ReqPartData, TopicData as ReqTopicData,
+        },
+        primitives::uuid::Uuid as ProtocolUuid,
     };
-    use crabka_protocol::primitives::uuid::Uuid as ProtocolUuid;
 
+    use super::*;
     use crate::broker::Broker;
 
     const VERSION: i16 = 0;

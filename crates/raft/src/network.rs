@@ -12,19 +12,21 @@
 //! Peer addresses are resolved from the static voter set's CONTROLLER
 //! endpoints.
 
-use std::net::SocketAddr;
-use std::sync::Arc;
+use std::{net::SocketAddr, sync::Arc};
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use dashmap::DashMap;
-
 use crabka_client_core::{ClientError, Connection, ConnectionOptions};
 use crabka_metadata::voters::VoterSet;
+use dashmap::DashMap;
 
-use crate::error::RaftError;
-use crate::kraft::transport::{PeerSender, api_key};
-use crate::kraft::types::NodeId;
+use crate::{
+    error::RaftError,
+    kraft::{
+        transport::{PeerSender, api_key},
+        types::NodeId,
+    },
+};
 
 /// Outbound dialer the controller hands to the peer sender.
 ///
@@ -166,12 +168,15 @@ impl PeerSender for RealPeerSender {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
     use bytes::BufMut;
-    use crabka_protocol::Encode;
-    use crabka_protocol::owned::api_versions_response::{ApiVersion, ApiVersionsResponse};
+    use crabka_protocol::{
+        Encode,
+        owned::api_versions_response::{ApiVersion, ApiVersionsResponse},
+    };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    use super::*;
 
     fn voter_set_with_controller(id: NodeId, host: &str, port: u16) -> VoterSet {
         VoterSet::from_voters([crabka_metadata::Voter {

@@ -1,9 +1,9 @@
 //! `BatchCodec`: bridges a per-partition batch of Kafka records ↔ a polars `DataFrame`.
 
-use crate::columnar::serde::polars::PolarsIpcSerde;
-use crate::processor::serde::Serde;
 use ::polars::prelude::*;
 use bytes::Bytes;
+
+use crate::{columnar::serde::polars::PolarsIpcSerde, processor::serde::Serde};
 
 /// Reserved metadata column names carried on every assembled `DataFrame` so the
 /// sink codec can faithfully reconstruct Kafka records and the runtime can commit
@@ -169,9 +169,9 @@ fn chunk_by_size(df: &DataFrame, cap: usize) -> Vec<DataFrame> {
     out
 }
 
-use crate::columnar::topology::row_bridge::RowBridge;
-use crate::processor::serde::SerdeAssociate;
 use std::marker::PhantomData;
+
+use crate::{columnar::topology::row_bridge::RowBridge, processor::serde::SerdeAssociate};
 
 /// `BatchCodec` over ordinary row records: deserialize each `(key, value)` with
 /// the inner serdes, assemble payload columns via a [`RowBridge`], and attach the
@@ -274,8 +274,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::check;
+
+    use super::*;
 
     #[test]
     fn reserved_columns_are_distinct_and_underscored() {
@@ -291,8 +292,7 @@ mod tests {
         check!(reject_reserved_payload_columns(&["id", "__key"]).is_err());
     }
 
-    use crate::columnar::serde::polars::PolarsIpcSerde;
-    use crate::processor::serde::Serde;
+    use crate::{columnar::serde::polars::PolarsIpcSerde, processor::serde::Serde};
 
     fn ipc_bytes(df: &DataFrame) -> Bytes {
         PolarsIpcSerde.serialize("t", df)
@@ -351,9 +351,9 @@ mod tests {
         check!(codec.decode(&[]).is_err());
     }
 
-    use crate::columnar::topology::row_bridge::JsonRowBridge;
-    use crate::processor::serde::StringSerde;
     use std::marker::PhantomData;
+
+    use crate::{columnar::topology::row_bridge::JsonRowBridge, processor::serde::StringSerde};
 
     #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
     struct Txn {

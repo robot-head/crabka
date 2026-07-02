@@ -29,20 +29,22 @@
 use std::collections::{BTreeMap, HashSet};
 
 use bytes::{Bytes, BytesMut};
-use crabka_protocol::ProtocolError;
-use crabka_protocol::primitives::array::{
-    get_array_len, get_nullable_array_len, put_array_len, put_nullable_array_len,
+use crabka_protocol::{
+    ProtocolError,
+    primitives::{
+        array::{get_array_len, get_nullable_array_len, put_array_len, put_nullable_array_len},
+        fixed::{get_i8, get_i16, get_i32, get_i64, put_i8, put_i16, put_i32, put_i64},
+        string_bytes::{
+            get_compact_string_owned, get_string_owned, put_compact_string, put_string,
+        },
+    },
+    tagged_fields::{UnknownTaggedFields, WriteTaggedFields, read_tagged_fields},
 };
-use crabka_protocol::primitives::fixed::{
-    get_i8, get_i16, get_i32, get_i64, put_i8, put_i16, put_i32, put_i64,
-};
-use crabka_protocol::primitives::string_bytes::{
-    get_compact_string_owned, get_string_owned, put_compact_string, put_string,
-};
-use crabka_protocol::tagged_fields::{UnknownTaggedFields, WriteTaggedFields, read_tagged_fields};
 
-use crate::error::BrokerError;
-use crate::txn::state::{TopicPartition, TxnEntry, TxnState};
+use crate::{
+    error::BrokerError,
+    txn::state::{TopicPartition, TxnEntry, TxnState},
+};
 
 /// Tagged-field tags for `TransactionLogValue` v1.
 const TAG_PREV_PRODUCER_ID: u32 = 0;

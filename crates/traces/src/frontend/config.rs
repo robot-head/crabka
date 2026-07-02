@@ -1,7 +1,6 @@
 //! Query-frontend configuration.
 
-use std::net::SocketAddr;
-use std::time::Duration;
+use std::{net::SocketAddr, time::Duration};
 
 /// Static configuration for the `query-frontend` role. Ports the fields the
 /// legacy `QueryFrontendConfig` carried (querier addrs, live frontier, queue

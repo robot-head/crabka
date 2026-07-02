@@ -7,8 +7,10 @@
 //! lifecycle, and the partition-delete lifecycle
 //! ([`RemotePartitionDeleteMetadata`] / [`RemotePartitionDeleteState`]).
 
-use std::collections::BTreeMap;
-use std::hash::{Hash, Hasher};
+use std::{
+    collections::BTreeMap,
+    hash::{Hash, Hasher},
+};
 
 use uuid::Uuid;
 
@@ -382,10 +384,11 @@ pub struct RemotePartitionDeleteMetadata {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::assert;
-    use assert2::check;
     use std::collections::HashSet;
+
+    use assert2::{assert, check};
+
+    use super::*;
 
     fn tp() -> TopicIdPartition {
         TopicIdPartition::new(Uuid::from_u128(1), "orders", 0)

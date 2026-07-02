@@ -1,16 +1,16 @@
 //! `SeriesDivide`: split sorted input into contiguous single-series batches.
 
-use std::fmt;
-use std::sync::Arc;
+use std::{fmt, sync::Arc};
 
-use arrow::record_batch::RecordBatch;
-use arrow::util::display::array_value_to_string;
-use datafusion::common::{DataFusionError, Result as DfResult};
-use datafusion::execution::TaskContext;
-use datafusion::logical_expr::{Expr, LogicalPlan, UserDefinedLogicalNodeCore};
-use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
-use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, SendableRecordBatchStream,
+use arrow::{record_batch::RecordBatch, util::display::array_value_to_string};
+use datafusion::{
+    common::{DataFusionError, Result as DfResult},
+    execution::TaskContext,
+    logical_expr::{Expr, LogicalPlan, UserDefinedLogicalNodeCore},
+    physical_plan::{
+        DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, SendableRecordBatchStream,
+        stream::RecordBatchStreamAdapter,
+    },
 };
 use futures::StreamExt;
 
@@ -198,15 +198,18 @@ impl ExecutionPlan for SeriesDivideExec {
 
 #[cfg(test)]
 mod tests {
-    use arrow::array::{Array, Int64Array, StringArray};
-    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::{
+        array::{Array, Int64Array, StringArray},
+        datatypes::{DataType, Field, Schema},
+    };
     use assert2::{assert, check};
-    use datafusion::catalog::MemTable;
-    use datafusion::datasource::memory::MemorySourceConfig;
-    use datafusion::logical_expr::{Extension, UserDefinedLogicalNodeCore, col};
-    use datafusion::physical_plan::collect;
-    use datafusion::physical_plan::display::DisplayableExecutionPlan;
-    use datafusion::prelude::SessionContext;
+    use datafusion::{
+        catalog::MemTable,
+        datasource::memory::MemorySourceConfig,
+        logical_expr::{Extension, UserDefinedLogicalNodeCore, col},
+        physical_plan::{collect, display::DisplayableExecutionPlan},
+        prelude::SessionContext,
+    };
 
     use super::*;
 

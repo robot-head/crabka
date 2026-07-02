@@ -1,9 +1,11 @@
 use std::collections::BTreeMap;
 
-use crate::model::{
-    ColumnSchema, ColumnValue, EntityDifference, EntityKey, Operation, ScalarValue, TableSchema,
+use crate::{
+    PgLsn, PostgresConnectError,
+    model::{
+        ColumnSchema, ColumnValue, EntityDifference, EntityKey, Operation, ScalarValue, TableSchema,
+    },
 };
-use crate::{PgLsn, PostgresConnectError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelationEvent {
@@ -636,9 +638,10 @@ mod tests {
         RelationCache, RelationEvent, RowEvent, RowEventKind, RowTupleKind, coerce_bytea,
         coerce_value,
     };
-    use crate::PgLsn;
-    use crate::PostgresConnectError;
-    use crate::model::{ColumnSchema, ColumnValue, Operation, ScalarValue, TableSchema};
+    use crate::{
+        PgLsn, PostgresConnectError,
+        model::{ColumnSchema, ColumnValue, Operation, ScalarValue, TableSchema},
+    };
 
     fn orders_relation(type_name: &str) -> RelationEvent {
         RelationEvent {
@@ -1093,8 +1096,10 @@ mod decode_tests {
     use assert2::check;
 
     use super::{DecodedMessage, RowEventKind, RowTupleKind, decode_pgoutput_message};
-    use crate::model::{ColumnSchema, ScalarValue};
-    use crate::{PgLsn, PostgresConnectError};
+    use crate::{
+        PgLsn, PostgresConnectError,
+        model::{ColumnSchema, ScalarValue},
+    };
 
     fn put_i16(bytes: &mut Vec<u8>, value: i16) {
         bytes.extend_from_slice(&value.to_be_bytes());

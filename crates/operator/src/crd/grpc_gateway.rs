@@ -333,9 +333,10 @@ pub struct KafkaGrpcGatewayStatus {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
     use kube::CustomResourceExt as _;
+
+    use super::*;
 
     #[test]
     fn crd_metadata_is_correct() {

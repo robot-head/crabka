@@ -14,39 +14,53 @@
 //! - all ready          -> `Ready=True`,  reason `Available`
 //! - otherwise          -> `Ready=False`, reason `PartiallyReady`
 
-use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
-use std::time::Duration;
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+    time::Duration,
+};
 
 use futures::StreamExt as _;
-use k8s_openapi::ByteString;
-use k8s_openapi::api::core::v1::{ConfigMap, Node, Pod, Secret, Service};
-use k8s_openapi::api::networking::v1::Ingress;
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-use kube::api::{Api, ListParams, Patch, PatchParams};
-use kube::runtime::controller::{Action, Controller};
-use kube::runtime::reflector::ObjectRef;
-use kube::runtime::watcher;
-use kube::{Resource, ResourceExt as _};
+use k8s_openapi::{
+    ByteString,
+    api::{
+        core::v1::{ConfigMap, Node, Pod, Secret, Service},
+        networking::v1::Ingress,
+    },
+    apimachinery::pkg::apis::meta::v1::ObjectMeta,
+};
+use kube::{
+    Resource, ResourceExt as _,
+    api::{Api, ListParams, Patch, PatchParams},
+    runtime::{
+        controller::{Action, Controller},
+        reflector::ObjectRef,
+        watcher,
+    },
+};
 use serde_json::json;
 
-use crate::context::Context;
-use crate::controller::cluster_ca;
-use crate::controller::common::{
-    self, FIELD_MANAGER, ReconcileError, apply_dynamic, apply_object, condition,
-    ensure_cluster_id_secret, owner_ref, patch_status, render_service,
-};
-use crate::controller::listeners::{
-    self, AdvertisedAddress, INGRESS_PORT, compute_advertised,
-    effective_inter_broker_listener_name, ingress_bootstrap_host, render_bootstrap_ingress,
-    render_bootstrap_route, render_bootstrap_service, render_broker_ingress, render_broker_route,
-    render_broker_service, synthesized_default_listener, validate_listeners,
-};
-use crate::controller::logging;
-use crate::controller::network_policy;
-use crate::crd::{
-    Kafka, KafkaCondition, KafkaNodePool, KafkaStatus, Listener, ListenerAddress,
-    ListenerAuthentication, ListenerAuthenticationOAuth, ListenerStatus, ListenerType,
+use crate::{
+    context::Context,
+    controller::{
+        cluster_ca,
+        common::{
+            self, FIELD_MANAGER, ReconcileError, apply_dynamic, apply_object, condition,
+            ensure_cluster_id_secret, owner_ref, patch_status, render_service,
+        },
+        listeners::{
+            self, AdvertisedAddress, INGRESS_PORT, compute_advertised,
+            effective_inter_broker_listener_name, ingress_bootstrap_host, render_bootstrap_ingress,
+            render_bootstrap_route, render_bootstrap_service, render_broker_ingress,
+            render_broker_route, render_broker_service, synthesized_default_listener,
+            validate_listeners,
+        },
+        logging, network_policy,
+    },
+    crd::{
+        Kafka, KafkaCondition, KafkaNodePool, KafkaStatus, Listener, ListenerAddress,
+        ListenerAuthentication, ListenerAuthenticationOAuth, ListenerStatus, ListenerType,
+    },
 };
 
 /// Rolled-up view of a cluster's pools. Computed by
@@ -1837,9 +1851,10 @@ fn cm_name(kafka: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
+
     use super::*;
     use crate::crd::{KafkaNodePoolSpec, KafkaNodePoolStatus, NodeRole};
-    use assert2::assert;
 
     fn pool_with_status(name: &str, replicas: i32, ready: i32) -> KafkaNodePool {
         let mut p = KafkaNodePool::new(

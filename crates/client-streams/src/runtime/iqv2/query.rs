@@ -1,11 +1,12 @@
 //! `IQv2` query objects. Each builder lowers (serde-free) to a
 //! `store::iq::Iq2Query`; the store supplies the actual serdes.
 
-use std::any::Any;
-use std::marker::PhantomData;
+use std::{any::Any, marker::PhantomData};
 
-use crate::store::iq::{Iq2Query, StoreKind};
-use crate::store::versioned::VersionedRecord;
+use crate::store::{
+    iq::{Iq2Query, StoreKind},
+    versioned::VersionedRecord,
+};
 
 mod sealed {
     pub trait Sealed {}

@@ -38,36 +38,40 @@
 //! Gated to non-Windows to match the multi-broker test convention from
 //! slices 10b/12b/14/15/15b.
 
-use assert2::assert;
-use std::io;
-use std::net::SocketAddr;
-use std::time::{Duration, Instant};
+use std::{
+    io,
+    net::SocketAddr,
+    time::{Duration, Instant},
+};
 
+use assert2::assert;
 use bytes::{Buf, BufMut, BytesMut};
-use crabka_broker::authorizer::SimpleAclAuthorizer;
-use crabka_broker::config::ListenerSpec;
-use crabka_broker::{Broker, BrokerHandle};
+use crabka_broker::{Broker, BrokerHandle, authorizer::SimpleAclAuthorizer, config::ListenerSpec};
 use crabka_metadata::{
     AclEntry, AclOperation, MetadataRecord, PatternType, PermissionType, ResourceType,
 };
-use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
-use crabka_protocol::owned::api_versions_response::ApiVersionsResponse;
-use crabka_protocol::owned::fetch_request::{FetchPartition, FetchRequest, FetchTopic};
-use crabka_protocol::owned::fetch_response::FetchResponse;
-use crabka_protocol::owned::produce_request::{
-    PartitionProduceData, ProduceRequest, TopicProduceData,
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        api_versions_request::ApiVersionsRequest,
+        api_versions_response::ApiVersionsResponse,
+        fetch_request::{FetchPartition, FetchRequest, FetchTopic},
+        fetch_response::FetchResponse,
+        produce_request::{PartitionProduceData, ProduceRequest, TopicProduceData},
+        produce_response::ProduceResponse,
+        sasl_authenticate_request::SaslAuthenticateRequest,
+        sasl_authenticate_response::SaslAuthenticateResponse,
+        sasl_handshake_request::SaslHandshakeRequest,
+        sasl_handshake_response::SaslHandshakeResponse,
+    },
+    records::{Record, RecordBatch},
 };
-use crabka_protocol::owned::produce_response::ProduceResponse;
-use crabka_protocol::owned::sasl_authenticate_request::SaslAuthenticateRequest;
-use crabka_protocol::owned::sasl_authenticate_response::SaslAuthenticateResponse;
-use crabka_protocol::owned::sasl_handshake_request::SaslHandshakeRequest;
-use crabka_protocol::owned::sasl_handshake_response::SaslHandshakeResponse;
-use crabka_protocol::records::{Record, RecordBatch};
-use crabka_protocol::{Decode, Encode};
 use crabka_security::{ListenerProtocol, SaslMechanism};
 use tempfile::TempDir;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Wire helpers — single length-prefixed request/response exchange.
@@ -230,8 +234,10 @@ async fn create_topic_as_admin(
     partitions: i32,
     replication_factor: i16,
 ) {
-    use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-    use crabka_protocol::owned::create_topics_response::CreateTopicsResponse;
+    use crabka_protocol::owned::{
+        create_topics_request::{CreatableTopic, CreateTopicsRequest},
+        create_topics_response::CreateTopicsResponse,
+    };
 
     let req = CreateTopicsRequest {
         topics: vec![CreatableTopic {
@@ -286,10 +292,10 @@ async fn drive_alter_client_quotas_sasl(
     entries: Vec<(Vec<(String, Option<String>)>, Vec<(String, f64, bool)>)>,
     validate_only: bool,
 ) -> Vec<(Vec<(String, Option<String>)>, i16)> {
-    use crabka_protocol::owned::alter_client_quotas_request::{
-        AlterClientQuotasRequest, EntityData, EntryData, OpData,
+    use crabka_protocol::owned::{
+        alter_client_quotas_request::{AlterClientQuotasRequest, EntityData, EntryData, OpData},
+        alter_client_quotas_response::AlterClientQuotasResponse,
     };
-    use crabka_protocol::owned::alter_client_quotas_response::AlterClientQuotasResponse;
 
     let req = AlterClientQuotasRequest {
         entries: entries
@@ -360,10 +366,10 @@ async fn drive_describe_client_quotas_sasl(
     components: Vec<(String, i8, Option<String>)>,
     strict: bool,
 ) -> Vec<(Vec<(String, Option<String>)>, Vec<(String, f64)>)> {
-    use crabka_protocol::owned::describe_client_quotas_request::{
-        ComponentData, DescribeClientQuotasRequest,
+    use crabka_protocol::owned::{
+        describe_client_quotas_request::{ComponentData, DescribeClientQuotasRequest},
+        describe_client_quotas_response::DescribeClientQuotasResponse,
     };
-    use crabka_protocol::owned::describe_client_quotas_response::DescribeClientQuotasResponse;
 
     let req = DescribeClientQuotasRequest {
         components: components

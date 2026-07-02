@@ -1,7 +1,9 @@
 //! Runtime configuration for the registry service.
 
-use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+};
 
 /// Resolved configuration for a running registry node.
 #[derive(Debug, Clone)]
@@ -82,8 +84,9 @@ impl Default for AuthzConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::SecurityConfig;
     use assert2::check;
+
+    use super::SecurityConfig;
 
     #[test]
     fn default_security_is_fully_open() {

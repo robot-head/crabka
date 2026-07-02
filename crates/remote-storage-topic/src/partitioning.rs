@@ -6,8 +6,7 @@
 //! `partition`) match the identity of `TopicIdPartition`, which means a
 //! topic rename does not move the bucket.
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::Hasher;
+use std::{collections::hash_map::DefaultHasher, hash::Hasher};
 
 use crabka_remote_storage::TopicIdPartition;
 
@@ -59,9 +58,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
     use uuid::Uuid;
+
+    use super::*;
 
     fn tp(name: &str, partition: i32) -> TopicIdPartition {
         TopicIdPartition::new(

@@ -1,13 +1,14 @@
 //! The typed Processor API: `Processor`, `ProcessorSupplier`, and the
 //! `ProcessorContext` users call `forward` on.
 
-use std::any::Any;
-use std::marker::PhantomData;
+use std::{any::Any, marker::PhantomData};
 
 use async_trait::async_trait;
 
-use super::erased::{Dispatch, ErasedRecord};
-use super::record::{Record, RecordContext};
+use super::{
+    erased::{Dispatch, ErasedRecord},
+    record::{Record, RecordContext},
+};
 
 /// A stateless record processor. One instance is created per task via
 /// [`ProcessorSupplier::get`]. Mirrors `org.apache.kafka.streams.processor.api.Processor`.
@@ -296,11 +297,15 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::processor::erased::{Dispatch, ErasedRecord};
-    use crate::processor::record::{Record, RecordContext};
-    use assert2::check;
     use std::collections::VecDeque;
+
+    use assert2::check;
+
+    use super::*;
+    use crate::processor::{
+        erased::{Dispatch, ErasedRecord},
+        record::{Record, RecordContext},
+    };
 
     struct Upper;
     crate::impl_processor! {

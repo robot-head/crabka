@@ -13,29 +13,32 @@
 //! so the first `Initialize` may briefly return a coordinator-not-ready code; the
 //! `*_ready` helpers retry, exactly as a real client would.
 
-use assert2::{assert, check};
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
+use assert2::{assert, check};
 use crabka_broker::{BootstrapMode, Broker, BrokerConfig};
 use crabka_client_core::Client;
-use crabka_protocol::owned::delete_share_group_state_request::{
-    DeleteShareGroupStateRequest, DeleteStateData, PartitionData as DeletePart,
+use crabka_protocol::{
+    owned::{
+        delete_share_group_state_request::{
+            DeleteShareGroupStateRequest, DeleteStateData, PartitionData as DeletePart,
+        },
+        find_coordinator_request::FindCoordinatorRequest,
+        initialize_share_group_state_request::{
+            InitializeShareGroupStateRequest, InitializeStateData, PartitionData as InitPart,
+        },
+        read_share_group_state_request::{
+            PartitionData as ReadPart, ReadShareGroupStateRequest, ReadStateData,
+        },
+        read_share_group_state_summary_request::{
+            PartitionData as SummaryPart, ReadShareGroupStateSummaryRequest, ReadStateSummaryData,
+        },
+        write_share_group_state_request::{
+            PartitionData as WritePart, StateBatch, WriteShareGroupStateRequest, WriteStateData,
+        },
+    },
+    primitives::uuid::Uuid as WireUuid,
 };
-use crabka_protocol::owned::find_coordinator_request::FindCoordinatorRequest;
-use crabka_protocol::owned::initialize_share_group_state_request::{
-    InitializeShareGroupStateRequest, InitializeStateData, PartitionData as InitPart,
-};
-use crabka_protocol::owned::read_share_group_state_request::{
-    PartitionData as ReadPart, ReadShareGroupStateRequest, ReadStateData,
-};
-use crabka_protocol::owned::read_share_group_state_summary_request::{
-    PartitionData as SummaryPart, ReadShareGroupStateSummaryRequest, ReadStateSummaryData,
-};
-use crabka_protocol::owned::write_share_group_state_request::{
-    PartitionData as WritePart, StateBatch, WriteShareGroupStateRequest, WriteStateData,
-};
-use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 
 const KEY_TYPE_SHARE: i8 = 2;
 const COORDINATOR_LOAD_IN_PROGRESS: i16 = 14;

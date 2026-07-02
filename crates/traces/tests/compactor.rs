@@ -8,8 +8,7 @@ use crabka_traces::{
     blockbuilder::build_blocks,
     compactor::{compact_block_keys, compacted_object_key},
 };
-use object_store::ObjectStore;
-use object_store::memory::InMemory;
+use object_store::{ObjectStore, memory::InMemory};
 
 fn span(trace_id: [u8; 16], span_id: u8, parent: Option<u8>, start_ns: i64) -> Span {
     Span {

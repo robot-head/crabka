@@ -1,5 +1,6 @@
-use assert2::check;
 use std::path::{Path, PathBuf};
+
+use assert2::check;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

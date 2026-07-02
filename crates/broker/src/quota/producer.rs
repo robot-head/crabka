@@ -4,8 +4,7 @@ use std::time::Duration;
 
 use crabka_metadata::MetadataImage;
 
-use super::buckets::QuotaBuckets;
-use super::lookup::lookup_quota_with_key;
+use super::{buckets::QuotaBuckets, lookup::lookup_quota_with_key};
 
 #[allow(
     clippy::cast_possible_truncation,
@@ -50,9 +49,8 @@ mod tests {
     use assert2::{assert, check};
     use crabka_metadata::{ClientQuotaRecord, MetadataImage, MetadataRecord, QuotaEntity};
 
-    use crate::quota::QuotaBuckets;
-
     use super::consume_producer_quota;
+    use crate::quota::QuotaBuckets;
 
     fn img_with_quota(entity: Vec<(&str, Option<&str>)>, rate: f64) -> MetadataImage {
         let mut img = MetadataImage::new(uuid::Uuid::nil());

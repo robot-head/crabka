@@ -23,24 +23,33 @@
 use std::net::SocketAddr;
 
 use bytes::{Bytes, BytesMut};
-
 use crabka_metadata::{AclOperation, MetadataImage, ResourceType};
-use crabka_protocol::owned::add_partitions_to_txn_request::AddPartitionsToTxnRequest;
-use crabka_protocol::owned::add_partitions_to_txn_response::{
-    AddPartitionsToTxnResponse, AddPartitionsToTxnResult,
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        add_partitions_to_txn_request::AddPartitionsToTxnRequest,
+        add_partitions_to_txn_response::{AddPartitionsToTxnResponse, AddPartitionsToTxnResult},
+        common::{
+            add_partitions_to_txn_request::add_partitions_to_txn_topic::AddPartitionsToTxnTopic,
+            add_partitions_to_txn_response::{
+                add_partitions_to_txn_partition_result::AddPartitionsToTxnPartitionResult,
+                add_partitions_to_txn_topic_result::AddPartitionsToTxnTopicResult,
+            },
+        },
+    },
 };
-use crabka_protocol::owned::common::add_partitions_to_txn_response::add_partitions_to_txn_partition_result::AddPartitionsToTxnPartitionResult;
-use crabka_protocol::owned::common::add_partitions_to_txn_request::add_partitions_to_txn_topic::AddPartitionsToTxnTopic;
-use crabka_protocol::owned::common::add_partitions_to_txn_response::add_partitions_to_txn_topic_result::AddPartitionsToTxnTopicResult;
-use crabka_protocol::{Decode, Encode};
 use crabka_security::Principal;
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult, Authorizer, authorize_topics};
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
-use crate::txn::state::{TopicPartition, TxnState};
-use crate::txn::util::now_millis;
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult, Authorizer, authorize_topics},
+    broker::Broker,
+    codes,
+    error::BrokerError,
+    txn::{
+        state::{TopicPartition, TxnState},
+        util::now_millis,
+    },
+};
 
 #[tracing::instrument(
     name = "handle_add_partitions_to_txn",
@@ -455,16 +464,17 @@ fn encode_response(resp: &AddPartitionsToTxnResponse, version: i16) -> Result<By
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
-    use std::sync::Arc;
+    use std::{collections::HashSet, sync::Arc};
 
     use assert2::assert;
     use crabka_protocol::owned::add_partitions_to_txn_request::AddPartitionsToTxnTransaction;
     use crabka_security::Principal;
 
     use super::*;
-    use crate::test_support::{DenyAll, peer};
-    use crate::txn::state::TxnEntry;
+    use crate::{
+        test_support::{DenyAll, peer},
+        txn::state::TxnEntry,
+    };
 
     #[test]
     fn verify_only_codes_present_vs_absent() {

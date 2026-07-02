@@ -1,4 +1,4 @@
-﻿//! Broker integration test: DSL counting topology + restart-restore.
+//! Broker integration test: DSL counting topology + restart-restore.
 //!
 //! Proves that a `StreamsBuilder`-based counting app (DSL path) works
 //! end-to-end against a real broker and that a fresh `KafkaStreams` instance
@@ -10,8 +10,10 @@ use std::time::Duration;
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_core::{Client, Connection, ConnectionOptions, FetchedRecord, fetch_partition};
 use crabka_client_streams::{I64Serde, KafkaStreams, StreamsBuilder, StringSerde};
-use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-use crabka_protocol::owned::update_features_request::{FeatureUpdateKey, UpdateFeaturesRequest};
+use crabka_protocol::owned::{
+    create_topics_request::{CreatableTopic, CreateTopicsRequest},
+    update_features_request::{FeatureUpdateKey, UpdateFeaturesRequest},
+};
 
 // ─── broker helpers ───────────────────────────────────────────────────────────
 

@@ -3,13 +3,14 @@
 //! state is in-memory (KIP-714 is per-broker — a client pins telemetry to
 //! one broker, so no raft replication is needed).
 
-use std::collections::HashMap;
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
-
-use uuid::Uuid;
+use std::{
+    collections::HashMap,
+    sync::Mutex,
+    time::{Duration, Instant},
+};
 
 use crabka_metadata::MetadataImage;
+use uuid::Uuid;
 
 use super::config::{self, ALL_METRICS};
 
@@ -318,10 +319,12 @@ fn uuid_hashcode(id: Uuid) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crabka_metadata::{ClientMetricsConfigRecord, MetadataImage, MetadataRecord};
     use std::collections::BTreeMap;
+
+    use crabka_metadata::{ClientMetricsConfigRecord, MetadataImage, MetadataRecord};
     use uuid::Uuid;
+
+    use super::*;
 
     fn img_with(name: &str, kvs: &[(&str, &str)]) -> MetadataImage {
         let mut img = MetadataImage::new(Uuid::nil());

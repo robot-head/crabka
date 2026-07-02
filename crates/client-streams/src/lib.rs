@@ -19,8 +19,9 @@
 //! ## Quick start
 //!
 //! ```no_run
-//! use crabka_client_streams::{NodeHandle, StreamsEvent, StreamsMembership, Topology};
 //! use std::time::Duration;
+//!
+//! use crabka_client_streams::{NodeHandle, StreamsEvent, StreamsMembership, Topology};
 //!
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut topo = Topology::new();
@@ -373,9 +374,12 @@
 //! ```
 //! use apache_avro::AvroSchema;
 //! use crabka_client_streams::{DefaultSerde, SchemaSerde, StreamsBuilder};
-//! use crabka_schema_serde::cache::{CacheConfig, SchemaCache};
-//! use crabka_schema_serde::format::avro::AvroSerde;
-//! use crabka_schema_serde::{RegistryClient, set_default_registry};
+//! use crabka_schema_serde::{
+//!     RegistryClient,
+//!     cache::{CacheConfig, SchemaCache},
+//!     format::avro::AvroSerde,
+//!     set_default_registry,
+//! };
 //! use serde::{Deserialize, Serialize};
 //!
 //! #[derive(Clone, Serialize, Deserialize, AvroSchema)]
@@ -474,9 +478,12 @@
 //! use crabka_client_streams::{
 //!     BufferConfig, DefaultSerde, SchemaSerde, StreamsBuilder, Suppressed, TimeWindows,
 //! };
-//! use crabka_schema_serde::cache::{CacheConfig, SchemaCache};
-//! use crabka_schema_serde::format::avro::AvroSerde;
-//! use crabka_schema_serde::{RegistryClient, set_default_registry};
+//! use crabka_schema_serde::{
+//!     RegistryClient,
+//!     cache::{CacheConfig, SchemaCache},
+//!     format::avro::AvroSerde,
+//!     set_default_registry,
+//! };
 //! use serde::{Deserialize, Serialize};
 //!
 //! #[derive(Clone, Serialize, Deserialize, AvroSchema)]
@@ -586,9 +593,12 @@
 //! ```
 //! use apache_avro::AvroSchema;
 //! use crabka_client_streams::{DefaultSerde, SchemaSerde, StreamsBuilder};
-//! use crabka_schema_serde::cache::{CacheConfig, SchemaCache};
-//! use crabka_schema_serde::format::avro::AvroSerde;
-//! use crabka_schema_serde::{RegistryClient, set_default_registry};
+//! use crabka_schema_serde::{
+//!     RegistryClient,
+//!     cache::{CacheConfig, SchemaCache},
+//!     format::avro::AvroSerde,
+//!     set_default_registry,
+//! };
 //! use serde::{Deserialize, Serialize};
 //!
 //! #[derive(Clone, Serialize, Deserialize, AvroSchema)]
@@ -674,12 +684,13 @@
 //! `TopologyTestDriver`.)
 //!
 //! ```
+//! use std::time::Duration;
+//!
 //! use async_trait::async_trait;
 //! use crabka_client_streams::{
 //!     I64Serde, NodeHandle, Processor, ProcessorContext, PunctuationType, Punctuator, Record,
 //!     StringSerde, Topology, TopologyTestDriver,
 //! };
-//! use std::time::Duration;
 //!
 //! // A punctuator that forwards the fire timestamp downstream.
 //! struct Emit;
@@ -891,7 +902,6 @@ pub mod topology;
 
 #[doc(hidden)]
 pub use async_trait::async_trait as __async_trait;
-
 pub use dsl::{
     BranchedStream, BufferConfig, CogroupedKStream, GlobalKTable, Grouped, JoinWindows, Joined,
     KGroupedStream, KStream, KTable, Materialized, Repartitioned, SessionWindowedCogroupedStream,
@@ -905,24 +915,26 @@ pub use membership::{
     SchemaPrewarm, StreamsAssignment, StreamsEvent, StreamsMembership, StreamsStatus,
     TaskAssignment, TaskOffsetTracker, TopicPartition,
 };
-pub use processor::schema_serde::SchemaSerde;
 pub use processor::{
     BytesSerde, Cancellable, Consumed, DefaultSerde, FixedKeyProcessor, FixedKeyProcessorContext,
     FixedKeyProcessorSupplier, FixedKeyRecord, I64Serde, Processor, ProcessorContext,
     ProcessorError, ProcessorSupplier, Produced, PunctuationType, Punctuator, Record,
-    RecordContext, Serde, SerdeError, StringSerde,
+    RecordContext, Serde, SerdeError, StringSerde, schema_serde::SchemaSerde,
 };
-pub use runtime::eos::ProcessingGuarantee;
-pub use runtime::iq::IqError;
-pub use runtime::iqv2::{
-    FailureReason, KeyQuery, MultiVersionedKeyQuery, Position, PositionBound, Query, QueryResult,
-    RangeQuery, StateQuery, StateQueryRequest, StateQueryResult, VersionedKeyQuery, WindowKeyQuery,
-    WindowRangeQuery,
+pub use runtime::{
+    KafkaStreams, ReadOnlyKeyValueStore, ReadOnlySessionStore, ReadOnlyWindowStore,
+    eos::ProcessingGuarantee,
+    iq::IqError,
+    iqv2::{
+        FailureReason, KeyQuery, MultiVersionedKeyQuery, Position, PositionBound, Query,
+        QueryResult, RangeQuery, StateQuery, StateQueryRequest, StateQueryResult,
+        VersionedKeyQuery, WindowKeyQuery, WindowRangeQuery,
+    },
 };
-pub use runtime::{KafkaStreams, ReadOnlyKeyValueStore, ReadOnlySessionStore, ReadOnlyWindowStore};
-pub use store::iq::StoreKind;
-pub use store::versioned::VersionedRecord;
-pub use store::{KeyValueBytesStore, KeyValueStore, StateStore, StoreBackend};
+pub use store::{
+    KeyValueBytesStore, KeyValueStore, StateStore, StoreBackend, iq::StoreKind,
+    versioned::VersionedRecord,
+};
 pub use streams_app::StreamsApp;
 pub use test_driver::TopologyTestDriver;
 pub use topology::{BuiltTopology, NodeHandle, Topology, TopologyError};

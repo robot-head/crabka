@@ -165,10 +165,12 @@ pub fn resolve_message(spec: &MessageSpec) -> Result<HashMap<String, Resolution>
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
+    use assert2::assert;
+
     use super::*;
     use crate::ir;
-    use assert2::assert;
-    use std::path::PathBuf;
 
     fn load(name: &str) -> MessageSpec {
         let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))

@@ -1,9 +1,11 @@
 mod support;
 
 use crabka_broker::coordinator::AUDIT_TOPIC;
-use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-use crabka_protocol::owned::fetch_request::{FetchPartition, FetchRequest, FetchTopic};
-use crabka_protocol::owned::metadata_request::{MetadataRequest, MetadataRequestTopic};
+use crabka_protocol::owned::{
+    create_topics_request::{CreatableTopic, CreateTopicsRequest},
+    fetch_request::{FetchPartition, FetchRequest, FetchTopic},
+    metadata_request::{MetadataRequest, MetadataRequestTopic},
+};
 
 #[tokio::test]
 async fn audit_topic_exists_after_startup() {

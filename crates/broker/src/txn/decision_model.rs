@@ -25,9 +25,13 @@ use std::time::Duration;
 
 use stateright::{Checker, Model, Property};
 
-use super::super::state::{TxnEntry, TxnState};
-use super::super::version::TxnVersion;
-use super::{CompletionDecision, decide_end_txn_completion, decide_phase1_transition};
+use super::{
+    super::{
+        state::{TxnEntry, TxnState},
+        version::TxnVersion,
+    },
+    CompletionDecision, decide_end_txn_completion, decide_phase1_transition,
+};
 use crate::producer_id_manager::ProducerIdManager;
 
 const MAX_STATES: usize = 200_000;

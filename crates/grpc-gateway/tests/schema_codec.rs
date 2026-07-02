@@ -5,21 +5,21 @@
 //! No broker, no Docker, no real registry. The mock server is a tiny in-process
 //! axum server that serves the three endpoints the codec calls.
 
-use std::collections::HashMap;
-use std::net::SocketAddr;
-use std::sync::Arc;
+use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
-use axum::extract::{Path, State};
-use axum::response::IntoResponse;
-use axum::routing::get;
-use axum::{Json, Router};
+use axum::{
+    Json, Router,
+    extract::{Path, State},
+    response::IntoResponse,
+    routing::get,
+};
 use bytes::Bytes;
+use crabka_grpc_gateway::{
+    codec::{EncodeBody, RecordCodec, SchemaFormat, SchemaSelector},
+    schema::{client::SchemaRegistryClient, codec::SchemaRegistryCodec},
+};
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
-
-use crabka_grpc_gateway::codec::{EncodeBody, RecordCodec, SchemaFormat, SchemaSelector};
-use crabka_grpc_gateway::schema::client::SchemaRegistryClient;
-use crabka_grpc_gateway::schema::codec::SchemaRegistryCodec;
 
 // ── Schemas served by the mock registry ────────────────────────────────────
 

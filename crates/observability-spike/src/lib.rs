@@ -5,8 +5,10 @@
 //! canonical stream fingerprints, an inverted label index, and Loki-shaped
 //! stream results.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+};
 
 use regex::Regex;
 use serde_json::{Value, json};

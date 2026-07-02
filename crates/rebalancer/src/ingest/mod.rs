@@ -4,16 +4,17 @@
 
 pub mod admin_client;
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use arc_swap::ArcSwap;
 use crabka_client_core::Client;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use crate::metrics::RebalancerMetrics;
-use crate::model::{BrokerView, ClusterState, InFlightReassignment, PartitionView};
+use crate::{
+    metrics::RebalancerMetrics,
+    model::{BrokerView, ClusterState, InFlightReassignment, PartitionView},
+};
 
 pub type SharedSnapshot = Arc<ArcSwap<Option<ClusterState>>>;
 
@@ -152,8 +153,9 @@ fn now_ms() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn snapshot_starts_as_none() {

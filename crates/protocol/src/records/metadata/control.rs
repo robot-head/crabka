@@ -56,9 +56,10 @@ pub fn encode_control_batch(base_offset: i64, key: Bytes, value: Bytes) -> Bytes
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
     use bytes::Buf;
+
+    use super::*;
 
     #[test]
     fn control_key_is_version_then_type() {

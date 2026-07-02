@@ -28,29 +28,32 @@
 //! [`MetadataEventLog::high_water_marks`] does not require any fetch
 //! task to have made progress.
 
-use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
-use std::sync::Mutex as StdMutex;
-use std::time::Duration;
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::{Arc, Mutex as StdMutex},
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use crabka_client_admin::{AdminClient, CreateTopicSpec};
+use crabka_client_core::Client;
+use crabka_client_producer::{Acks, Producer, ProducerRecord};
+use crabka_protocol::{
+    owned::list_offsets_request::{ListOffsetsPartition, ListOffsetsRequest, ListOffsetsTopic},
+    primitives::uuid::Uuid as WireUuid,
+};
 use futures_util::stream::{StreamExt, unfold};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, instrument, warn};
 
-use crabka_client_admin::{AdminClient, CreateTopicSpec};
-use crabka_client_core::Client;
-use crabka_client_producer::{Acks, Producer, ProducerRecord};
-use crabka_protocol::owned::list_offsets_request::{
-    ListOffsetsPartition, ListOffsetsRequest, ListOffsetsTopic,
-};
-use crabka_protocol::primitives::uuid::Uuid as WireUuid;
-
-use crate::error::MetadataLogError;
-use crate::log::{
-    AssignmentHandle, MetadataEventLog, MetadataEventRecord, MetadataEventStream, PartitionStart,
+use crate::{
+    error::MetadataLogError,
+    log::{
+        AssignmentHandle, MetadataEventLog, MetadataEventRecord, MetadataEventStream,
+        PartitionStart,
+    },
 };
 
 /// Default name of the internal metadata topic.
@@ -483,8 +486,9 @@ async fn partition_fetch_loop(
     start_offset: i64,
     cancel: CancellationToken,
 ) {
-    use crabka_client_core::{Connection, ConnectionOptions, fetch_partition};
     use std::net::ToSocketAddrs;
+
+    use crabka_client_core::{Connection, ConnectionOptions, fetch_partition};
 
     // Dedicated connection for this partition's fetch loop. Resolve the
     // bootstrap address; on failure, warn and exit. The partition then
@@ -575,9 +579,9 @@ fn usize_count(n: i32) -> Result<usize, MetadataLogError> {
 
 #[cfg(test)]
 mod tests {
+    use assert2::{assert, check};
+
     use super::*;
-    use assert2::assert;
-    use assert2::check;
 
     #[test]
     fn config_defaults_match_kafka() {

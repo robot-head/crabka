@@ -49,19 +49,17 @@
 //! then [`close`](Source::close)s both ends. These pause/resume + drain hooks are
 //! the seam a contact-window scheduler plugs into.
 
-use std::marker::PhantomData;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::{
+    marker::PhantomData,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
 use async_trait::async_trait;
 use qubit_clock::sleep::{AsyncSleeper, SystemSleeper};
-use tokio::sync::watch;
-use tokio::task::JoinHandle;
+use tokio::{sync::watch, task::JoinHandle};
 
-use crate::error::ConnectError;
-use crate::record::SourceOffset;
-use crate::sink::Sink;
-use crate::source::Source;
+use crate::{error::ConnectError, record::SourceOffset, sink::Sink, source::Source};
 
 /// Where the runtime persists source [`checkpoint`](Source::checkpoint)s so a
 /// restart can [`seek`](Source::seek) back to the last committed position.
@@ -609,8 +607,7 @@ mod tests {
     use assert2::check;
     use async_trait::async_trait;
     use bytes::Bytes;
-    use qubit_clock::MockTimeline;
-    use qubit_clock::sleep::MockSleeper;
+    use qubit_clock::{MockTimeline, sleep::MockSleeper};
     use tokio::sync::mpsc;
 
     use super::*;

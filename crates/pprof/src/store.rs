@@ -5,8 +5,7 @@ use std::sync::Arc;
 use crabka_blockstore::LabelMatcher;
 use datafusion::prelude::SessionContext;
 
-use crate::error::ProfileError;
-use crate::frame::SymbolSource;
+use crate::{error::ProfileError, frame::SymbolSource};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ProfileStats {

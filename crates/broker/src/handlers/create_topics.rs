@@ -8,18 +8,24 @@ use bytes::{Bytes, BytesMut};
 use crabka_metadata::{
     AclOperation, MetadataRecord, PartitionRecord, TopicConfigRecord, TopicRecord,
 };
-use crabka_protocol::owned::create_topics_request::CreateTopicsRequest;
-use crabka_protocol::owned::create_topics_response::{CreatableTopicResult, CreateTopicsResponse};
-use crabka_protocol::primitives::uuid::Uuid as ProtoUuid;
-use crabka_protocol::{Decode, Encode};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        create_topics_request::CreateTopicsRequest,
+        create_topics_response::{CreatableTopicResult, CreateTopicsResponse},
+    },
+    primitives::uuid::Uuid as ProtoUuid,
+};
 use crabka_raft::RaftError;
 use uuid::Uuid;
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
-use crate::replicator_supervisor::materialize_partition;
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes,
+    error::BrokerError,
+    replicator_supervisor::materialize_partition,
+};
 
 /// Leader epoch a freshly created partition starts at; the committed
 /// `PartitionRecord` and the handler-side leader-cache install must agree.
@@ -411,8 +417,9 @@ pub(crate) async fn handle(
 
 #[cfg(test)]
 mod replica_assignment_tests {
-    use super::round_robin_replicas;
     use assert2::assert;
+
+    use super::round_robin_replicas;
 
     #[test]
     fn three_brokers_three_partitions_rf_three() {
@@ -491,19 +498,20 @@ mod replica_assignment_tests {
 
 #[cfg(test)]
 mod handler_tests {
-    use super::*;
-    use assert2::assert;
-    use assert2::check;
-    use crabka_protocol::UnknownTaggedFields;
-    use crabka_protocol::owned::create_topics_request::{
-        CreatableTopic, CreatableTopicConfig, CreateTopicsRequest,
+    use std::{net::SocketAddr, sync::Arc};
+
+    use assert2::{assert, check};
+    use crabka_protocol::{
+        UnknownTaggedFields,
+        owned::create_topics_request::{CreatableTopic, CreatableTopicConfig, CreateTopicsRequest},
     };
     use crabka_security::Principal;
-    use std::net::SocketAddr;
-    use std::sync::Arc;
 
-    use crate::broker::BrokerHandle;
-    use crate::test_support::{DenyAll, peer, principal};
+    use super::*;
+    use crate::{
+        broker::BrokerHandle,
+        test_support::{DenyAll, peer, principal},
+    };
 
     const VERSION: i16 = 7;
 

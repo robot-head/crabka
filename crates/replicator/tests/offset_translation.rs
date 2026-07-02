@@ -5,17 +5,16 @@
 
 mod common;
 
-use std::collections::BTreeMap;
-use std::time::Duration;
+use std::{collections::BTreeMap, time::Duration};
 
-use crabka_replicator::config::{
-    ClusterConfig, Delivery, FlowConfig, NamingPolicy, ReplicatorConfig, Selectors,
+use crabka_replicator::{
+    config::{ClusterConfig, Delivery, FlowConfig, NamingPolicy, ReplicatorConfig, Selectors},
+    mm2::{Checkpoint, OffsetSync},
+    offset_sync_store::OffsetSyncStore,
+    selector::Selector,
+    supervisor::FlowSupervisor,
+    tasks::checkpoint::{CheckpointParams, run_once},
 };
-use crabka_replicator::mm2::{Checkpoint, OffsetSync};
-use crabka_replicator::offset_sync_store::OffsetSyncStore;
-use crabka_replicator::selector::Selector;
-use crabka_replicator::supervisor::FlowSupervisor;
-use crabka_replicator::tasks::checkpoint::{CheckpointParams, run_once};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::too_many_lines)]

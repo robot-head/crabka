@@ -1,10 +1,11 @@
 //! Block-builder helpers for WAL records -> profile sample blocks.
 
-use std::collections::BTreeMap;
-use std::collections::BTreeSet;
-use std::io::Cursor;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io::Cursor,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use arrow::record_batch::RecordBatch;
 use crabka_blockstore::{
@@ -12,14 +13,15 @@ use crabka_blockstore::{
 };
 use crabka_client_consumer::{AutoOffsetReset, Consumer, ConsumerRecord};
 use crabka_pprof::{FunctionRec, LineRec, LocationRec, MappingRec, SymbolDb};
-use object_store::path::Path;
-use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
+use object_store::{ObjectStore, ObjectStoreExt, PutPayload, path::Path};
 use parquet::arrow::ArrowWriter;
 use tracing::Instrument as _;
 
-use crate::error::ProfilesError;
-use crate::metrics::ServiceMetrics;
-use crate::wal::{PROFILES_WAL_TOPIC, ProfileRecord, WalMapping, WalSymbolSet};
+use crate::{
+    error::ProfilesError,
+    metrics::ServiceMetrics,
+    wal::{PROFILES_WAL_TOPIC, ProfileRecord, WalMapping, WalSymbolSet},
+};
 
 pub const STACKTRACE_PARTITION: u64 = 0;
 const NANOS_PER_MILLI: i64 = 1_000_000;
@@ -498,8 +500,7 @@ mod tests {
     use bytes::Bytes;
     use crabka_client_consumer::ConsumerRecord;
     use crabka_pprof::SymbolDb;
-    use object_store::memory::InMemory;
-    use object_store::{ObjectStore, ObjectStoreExt};
+    use object_store::{ObjectStore, ObjectStoreExt, memory::InMemory};
 
     use super::*;
     use crate::wal::{ProfileRecord, WalMapping, WalSample, WalSymbolSet};

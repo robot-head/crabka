@@ -12,9 +12,9 @@ use std::collections::BTreeSet;
 
 use crabka_traceql::{ScopedTag, TagScope, TypedValue};
 
-use crate::frontend::backend::{SearchPartial, TagNamesPartial, TagValuesPartial, TracePartial};
-use crate::frontend::wire::{
-    Metrics, SearchResponseJson, SpanSetJson, TraceByIdResponseJson, TraceJson,
+use crate::frontend::{
+    backend::{SearchPartial, TagNamesPartial, TagValuesPartial, TracePartial},
+    wire::{Metrics, SearchResponseJson, SpanSetJson, TraceByIdResponseJson, TraceJson},
 };
 
 /// The v2 by-id status: a fully-returned trace is `COMPLETE`; one exceeding the

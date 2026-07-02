@@ -13,8 +13,9 @@
 //! 20 → 21), so a wrong as-of timestamp would surface as a wrong value.
 
 use assert2::check;
-use crabka_client_streams::dsl::StreamsBuilder;
-use crabka_client_streams::{Consumed, I64Serde, Materialized, Produced, StringSerde};
+use crabka_client_streams::{
+    Consumed, I64Serde, Materialized, Produced, StringSerde, dsl::StreamsBuilder,
+};
 use serde::Deserialize;
 
 /// One output record in the table-table golden `out` array (String value).

@@ -16,9 +16,10 @@ pub mod controller;
 pub mod log;
 pub mod transport;
 
+pub use core::QuorumStateMachine;
+
 pub use action::Action;
 pub use controller::{KraftConfig, KraftController, checkpoint_dir};
-pub use core::QuorumStateMachine;
 pub use event::Event;
 pub use log::KraftLog;
 pub use role::Role;

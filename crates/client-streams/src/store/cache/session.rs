@@ -35,18 +35,21 @@
 //! collision and a cached tombstone hides the inner value. Same approach as
 //! `CachingKeyValueStore`.
 
-use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+};
 
 use bytes::Bytes;
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::processor::record::RecordContext;
-use crate::store::byte::ByteKeyValueStore;
-use crate::store::cache::entry::LruCacheEntry;
-use crate::store::cache::named::NamedCache;
-use crate::store::session_schema::{
-    session_end_of, session_key, session_key_bytes_of, session_start_of,
+use crate::{
+    processor::record::RecordContext,
+    store::{
+        byte::ByteKeyValueStore,
+        cache::{entry::LruCacheEntry, named::NamedCache},
+        session_schema::{session_end_of, session_key, session_key_bytes_of, session_start_of},
+    },
 };
 
 pub(crate) struct CachingSessionStore {
@@ -317,9 +320,10 @@ impl CachingSessionStore {
 
 #[cfg(test)]
 mod tests {
+    use assert2::check;
+
     use super::*;
     use crate::store::byte::InMemoryBytes;
-    use assert2::check;
 
     fn ctx() -> RecordContext {
         RecordContext {

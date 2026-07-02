@@ -12,20 +12,26 @@
 //! Reference: KIP-101 (Alter Replication Protocol to use Leader Epoch
 //! rather than High Watermark for Truncation).
 
-use bytes::{Bytes, BytesMut};
 use std::sync::atomic::Ordering;
 
+use bytes::{Bytes, BytesMut};
 use crabka_metadata::{AclOperation, ResourceType};
-use crabka_protocol::owned::offset_for_leader_epoch_request::OffsetForLeaderEpochRequest;
-use crabka_protocol::owned::offset_for_leader_epoch_response::{
-    EpochEndOffset, OffsetForLeaderEpochResponse, OffsetForLeaderTopicResult,
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        offset_for_leader_epoch_request::OffsetForLeaderEpochRequest,
+        offset_for_leader_epoch_response::{
+            EpochEndOffset, OffsetForLeaderEpochResponse, OffsetForLeaderTopicResult,
+        },
+    },
 };
-use crabka_protocol::{Decode, Encode};
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes,
+    error::BrokerError,
+};
 
 #[allow(clippy::unused_async)] // async to match the inline-intercept handler shape.
 #[tracing::instrument(
@@ -174,8 +180,9 @@ fn topic_describe_denied(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn topic_describe_denied_yields_topic_authorization_failed_rows() {

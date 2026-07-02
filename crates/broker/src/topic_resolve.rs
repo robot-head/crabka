@@ -32,9 +32,10 @@ pub(crate) fn resolve<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
     use crabka_metadata::{MetadataRecord, TopicRecord};
+
+    use super::*;
 
     fn image_with(name: &str, id: uuid::Uuid) -> MetadataImage {
         let mut img = MetadataImage::new(uuid::Uuid::nil());

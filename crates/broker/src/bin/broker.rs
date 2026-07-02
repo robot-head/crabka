@@ -8,11 +8,12 @@
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::{
+    net::SocketAddr,
+    path::{Path, PathBuf},
+};
 
 use clap::Parser;
-
 use crabka_broker::{BootstrapMode, Broker, BrokerConfig};
 use crabka_log::LogConfig;
 
@@ -360,9 +361,10 @@ fn detect_bootstrap_mode(log_dir: &Path) -> BootstrapMode {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
     use tempfile::tempdir;
+
+    use super::*;
 
     #[test]
     fn detect_bootstrap_when_log_dir_is_empty() {

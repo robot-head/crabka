@@ -18,17 +18,22 @@
 // file is deliberately narrow — see the `tests` module docstring.
 #![allow(dead_code)]
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
-use crabka_protocol::owned::sasl_authenticate_request::SaslAuthenticateRequest;
-use crabka_protocol::owned::sasl_handshake_request::SaslHandshakeRequest;
-use crabka_protocol::{Decode, Encode};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        sasl_authenticate_request::SaslAuthenticateRequest,
+        sasl_handshake_request::SaslHandshakeRequest,
+    },
+};
 use crabka_raft::{ControllerHandle, DuplexStream, RaftHandshakeError, RaftListenerHandshake};
 use crabka_security::{ListenerProtocol, SaslMechanism};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
-use tokio::sync::OnceCell;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+    sync::OnceCell,
+};
 use tokio_rustls::TlsAcceptor;
 
 use crate::network::auth::{
@@ -110,8 +115,9 @@ impl BrokerRaftHandshake {
         principal: &crabka_security::Principal,
         peer: &std::net::SocketAddr,
     ) -> Result<(), RaftHandshakeError> {
-        use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
         use crabka_metadata::{AclOperation, ResourceType};
+
+        use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 
         // The image is reached through the late-bound controller handle
         // (the same cell used for SCRAM lookup). If it is not yet wired the
@@ -470,11 +476,12 @@ mod tests {
     //! Plaintext short-circuit predicate so a regression that flips
     //! `requires_*` would be caught at this layer.
 
-    use super::*;
     use assert2::assert;
     use bytes::BufMut;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::time::{Duration, timeout};
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        time::{Duration, timeout},
+    };
 
     use crate::test_support::DenyAll;
 
@@ -591,6 +598,8 @@ mod tests {
         .expect("encode sasl authenticate");
         body.to_vec()
     }
+
+    use super::*;
 
     #[test]
     fn plaintext_passthrough_short_circuits() {

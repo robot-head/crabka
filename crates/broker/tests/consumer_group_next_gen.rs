@@ -3,15 +3,17 @@
 
 #![allow(clippy::pedantic)]
 
-use assert2::{assert, check};
 use std::sync::Arc;
 
+use assert2::{assert, check};
 use crabka_broker::{Broker, BrokerConfig};
 use crabka_client_core::Client;
-use crabka_protocol::owned::consumer_group_describe_request::ConsumerGroupDescribeRequest;
-use crabka_protocol::owned::consumer_group_heartbeat_request::ConsumerGroupHeartbeatRequest;
-use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-use crabka_protocol::owned::list_groups_request::ListGroupsRequest;
+use crabka_protocol::owned::{
+    consumer_group_describe_request::ConsumerGroupDescribeRequest,
+    consumer_group_heartbeat_request::ConsumerGroupHeartbeatRequest,
+    create_topics_request::{CreatableTopic, CreateTopicsRequest},
+    list_groups_request::ListGroupsRequest,
+};
 
 async fn boot() -> (crabka_broker::BrokerHandle, String, tempfile::TempDir) {
     let dir = tempfile::TempDir::new().unwrap();

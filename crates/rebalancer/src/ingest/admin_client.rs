@@ -3,12 +3,13 @@
 //! keeps the `Ingester` free of `crabka_protocol` imports.
 
 use crabka_client_core::{Client, ClientError};
-use crabka_protocol::owned::describe_cluster_request::DescribeClusterRequest;
-use crabka_protocol::owned::describe_cluster_response::DescribeClusterResponse;
-use crabka_protocol::owned::list_partition_reassignments_request::ListPartitionReassignmentsRequest;
-use crabka_protocol::owned::list_partition_reassignments_response::ListPartitionReassignmentsResponse;
-use crabka_protocol::owned::metadata_request::MetadataRequest;
-use crabka_protocol::owned::metadata_response::MetadataResponse;
+use crabka_protocol::owned::{
+    describe_cluster_request::DescribeClusterRequest,
+    describe_cluster_response::DescribeClusterResponse,
+    list_partition_reassignments_request::ListPartitionReassignmentsRequest,
+    list_partition_reassignments_response::ListPartitionReassignmentsResponse,
+    metadata_request::MetadataRequest, metadata_response::MetadataResponse,
+};
 
 pub async fn fetch_metadata(client: &Client) -> Result<MetadataResponse, ClientError> {
     client.send(metadata_request()).await
@@ -48,9 +49,11 @@ fn list_reassignments_request() -> ListPartitionReassignmentsRequest {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::check;
     use std::time::Duration;
+
+    use assert2::check;
+
+    use super::*;
 
     #[test]
     fn metadata_request_fetches_all_topics_without_auto_creation() {

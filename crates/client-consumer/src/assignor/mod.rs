@@ -34,8 +34,9 @@ impl Assignor {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn assignor_protocol_names_match_kafka_protocols() {

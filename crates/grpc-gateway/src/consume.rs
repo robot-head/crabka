@@ -2,13 +2,14 @@
 //! offsets. The streaming/poll wire (later plan) drives this. Records are
 //! decoded through the codec on the way out.
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use crabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
 
-use crate::codec::{RecordCodec, SchemaMeta};
-use crate::error::GatewayError;
+use crate::{
+    codec::{RecordCodec, SchemaMeta},
+    error::GatewayError,
+};
 
 #[derive(Debug, Clone)]
 pub struct DecodedConsumerRecord {

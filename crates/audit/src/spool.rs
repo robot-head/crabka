@@ -12,13 +12,17 @@
 //! `std::fs` (degraded, low-frequency path); a truncated tail frame is treated
 //! as end-of-data.
 
-use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::{
+    fs::{File, OpenOptions},
+    io::{Read, Seek, SeekFrom, Write},
+    path::{Path, PathBuf},
+};
 
-use crate::chain::{chain_hash, from_hex32};
-use crate::event::AuditEventClass;
-use crate::sink::{AuditError, AuditRecord, HEADER_PREV_HASH, HEADER_SEQ};
+use crate::{
+    chain::{chain_hash, from_hex32},
+    event::AuditEventClass,
+    sink::{AuditError, AuditRecord, HEADER_PREV_HASH, HEADER_SEQ},
+};
 
 const SPOOL_FILE: &str = "audit.spool";
 
@@ -300,9 +304,11 @@ mod tests {
     use assert2::check;
 
     use super::*;
-    use crate::chain::{GENESIS_HEAD, chain_hash, to_hex};
-    use crate::event::AuditEventClass;
-    use crate::sink::{AuditRecord, HEADER_PREV_HASH, HEADER_SEQ};
+    use crate::{
+        chain::{GENESIS_HEAD, chain_hash, to_hex},
+        event::AuditEventClass,
+        sink::{AuditRecord, HEADER_PREV_HASH, HEADER_SEQ},
+    };
 
     fn chained_record(seq: u64, prev: &[u8; 32], value: &[u8]) -> AuditRecord {
         let mut r = AuditRecord {

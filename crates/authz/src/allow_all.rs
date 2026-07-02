@@ -23,12 +23,14 @@ impl Authorizer for AllowAllAuthorizer {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::net::SocketAddr;
+
     use assert2::assert;
     use crabka_metadata::{AclOperation, MetadataImage, ResourceType};
     use crabka_security::{AuthMethod, Principal};
-    use std::net::SocketAddr;
     use uuid::Uuid;
+
+    use super::*;
 
     #[test]
     fn allow_all_returns_allow_for_any_request() {

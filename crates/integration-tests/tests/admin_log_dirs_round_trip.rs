@@ -7,10 +7,9 @@
 //! wrappers in `crates/client-admin/src/log_dirs.rs` get exercised
 //! end-to-end against a live broker.
 
-use assert2::assert;
-use std::collections::BTreeMap;
-use std::time::Duration;
+use std::{collections::BTreeMap, time::Duration};
 
+use assert2::assert;
 use crabka_broker::{Broker, BrokerConfig};
 use crabka_client_admin::AdminClient;
 

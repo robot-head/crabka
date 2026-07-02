@@ -192,8 +192,9 @@ impl AdminClient {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
+
+    use super::*;
 
     #[test]
     fn dynamic_topic_config_source_is_one() {

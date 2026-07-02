@@ -27,21 +27,26 @@
 //! always encodes this field (no opt-in flag, unlike Metadata).
 
 use bytes::{Bytes, BytesMut};
-
 use crabka_metadata::{AclOperation, ResourceType};
-use crabka_protocol::owned::describe_topic_partitions_request::DescribeTopicPartitionsRequest;
-use crabka_protocol::owned::describe_topic_partitions_response::{
-    Cursor as ResponseCursor, DescribeTopicPartitionsResponse,
-    DescribeTopicPartitionsResponsePartition, DescribeTopicPartitionsResponseTopic,
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        describe_topic_partitions_request::DescribeTopicPartitionsRequest,
+        describe_topic_partitions_response::{
+            Cursor as ResponseCursor, DescribeTopicPartitionsResponse,
+            DescribeTopicPartitionsResponsePartition, DescribeTopicPartitionsResponseTopic,
+        },
+    },
+    primitives::uuid::Uuid as WireUuid,
 };
-use crabka_protocol::primitives::uuid::Uuid as WireUuid;
-use crabka_protocol::{Decode, Encode};
 
-use crate::authorizer::{AuthorizationResult, authorize_topics};
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
-use crate::handlers::authorized_operations::authorized_operations_bits;
+use crate::{
+    authorizer::{AuthorizationResult, authorize_topics},
+    broker::Broker,
+    codes,
+    error::BrokerError,
+    handlers::authorized_operations::authorized_operations_bits,
+};
 
 /// Crabka's three internal topics. JVM clients display these with the
 /// `is_internal` flag set so `kafka-topics --list` and friends don't
@@ -265,8 +270,9 @@ pub(crate) async fn handle(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn is_internal_topic_matches_known_internal_names() {

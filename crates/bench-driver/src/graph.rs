@@ -14,14 +14,18 @@
 
 use std::collections::BTreeMap;
 
-use plotly::common::{ErrorData, ErrorType, Line, Mode, Title};
-use plotly::layout::{Axis, BarMode};
-use plotly::{Bar, Layout, Plot, Scatter};
-
-use crate::aggregate::{
-    CellAgg, ScalarMetric, TsSeries, aggregate_cells, averaged_timeseries, scalar_metrics,
+use plotly::{
+    Bar, Layout, Plot, Scatter,
+    common::{ErrorData, ErrorType, Line, Mode, Title},
+    layout::{Axis, BarMode},
 };
-use crate::scenario::{RunOutput, Stack};
+
+use crate::{
+    aggregate::{
+        CellAgg, ScalarMetric, TsSeries, aggregate_cells, averaged_timeseries, scalar_metrics,
+    },
+    scenario::{RunOutput, Stack},
+};
 
 /// plotly.js version the `plotly` crate (0.14) renders against; pin the same
 /// one in the page `<head>` so the inline figures find a compatible global.
@@ -355,12 +359,13 @@ fn escape(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
+
     use super::*;
     use crate::scenario::{
         Acks, Compression, LatencyPercentiles, LoadMode, ModeTag, Resource, Sample, Scenario,
         Throughput, Topology,
     };
-    use assert2::assert;
 
     fn run(
         stack: Stack,

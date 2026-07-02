@@ -72,8 +72,9 @@ impl SharePartitionState {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     fn batch(first: i64, last: i64) -> StateBatch {
         StateBatch {

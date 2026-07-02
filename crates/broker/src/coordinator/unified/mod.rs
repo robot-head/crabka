@@ -21,17 +21,20 @@ pub mod streams;
 
 use std::sync::Arc;
 
-use dashmap::DashMap;
-use tokio::sync::oneshot;
-
 use actor::{GroupActorHandle, GroupActorMessage, GroupKindTag, MetadataProvider};
 use config::NextGenConfig;
+use dashmap::DashMap;
 use group::Group;
 use offsets_log::OffsetsLog;
-use share::actor::{ShareGroupActorHandle, ShareGroupActorMessage};
-use share::config::ShareGroupConfig;
-use streams::actor::{StreamsGroupActorHandle, StreamsGroupActorMessage};
-use streams::config::StreamsGroupConfig;
+use share::{
+    actor::{ShareGroupActorHandle, ShareGroupActorMessage},
+    config::ShareGroupConfig,
+};
+use streams::{
+    actor::{StreamsGroupActorHandle, StreamsGroupActorMessage},
+    config::StreamsGroupConfig,
+};
+use tokio::sync::oneshot;
 
 use crate::coordinator::{DeleteGroupError, GroupSnapshot};
 
@@ -488,8 +491,10 @@ impl GroupCoordinator {
         group_id: &str,
         now_ms: i64,
     ) -> Result<streams::migration::DowngradeOutcome, crate::error::BrokerError> {
-        use streams::actor::StreamsGroupActorMessage;
-        use streams::migration::{DowngradeOutcome, streams_records_tombstone_batch};
+        use streams::{
+            actor::StreamsGroupActorMessage,
+            migration::{DowngradeOutcome, streams_records_tombstone_batch},
+        };
 
         if self.group_type(group_id) != Some(GroupType::Streams) {
             return Ok(DowngradeOutcome::NotStreams);
@@ -1225,8 +1230,9 @@ pub struct StreamsGroupSeed {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
+
+    use super::*;
 
     /// Yield-poll until `cond` holds, with a bounded hang-guard so a genuine
     /// stall fails the test deterministically instead of spinning forever.

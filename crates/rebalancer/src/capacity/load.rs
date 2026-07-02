@@ -1,7 +1,6 @@
 //! YAML loader for the broker-capacity file. Schema versioned at 1.
 
-use std::fs;
-use std::path::Path;
+use std::{fs, path::Path};
 
 use serde::Deserialize;
 
@@ -57,10 +56,12 @@ pub fn load_from_path(path: &Path) -> Result<BrokerCapacities, CapacityError> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+
+    use assert2::assert;
+
     use super::*;
     use crate::capacity::BrokerCapacity;
-    use assert2::assert;
-    use std::io::Write;
 
     fn write_yaml(content: &str) -> tempfile::NamedTempFile {
         let mut f = tempfile::NamedTempFile::new().expect("tempfile");

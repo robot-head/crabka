@@ -1,8 +1,10 @@
 #![allow(clippy::unreadable_literal)]
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
-use std::time::Duration;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+    time::Duration,
+};
 
 use assert2::assert;
 use async_trait::async_trait;
@@ -21,9 +23,7 @@ use crabka_observability::{
     execute_tail_query_with_frontier, metric_plan_scan_sql, poll_log_hot_tail_once,
     stream_plan_scan_sql,
 };
-use object_store::ObjectStore;
-use object_store::local::LocalFileSystem;
-use object_store::path::Path as ObjectPath;
+use object_store::{ObjectStore, local::LocalFileSystem, path::Path as ObjectPath};
 use serde_json::json;
 
 #[tokio::test]

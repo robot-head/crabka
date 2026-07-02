@@ -1,5 +1,7 @@
-use super::security_layer::{SecurityLayer, decode_choice, encode_offer};
-use super::{AcceptStep, GssAcceptor, GssError};
+use super::{
+    AcceptStep, GssAcceptor, GssError,
+    security_layer::{SecurityLayer, decode_choice, encode_offer},
+};
 
 /// Result of feeding one client token to the exchange.
 #[derive(Debug)]
@@ -201,9 +203,10 @@ impl GssapiServerExchange {
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
+
     use super::*;
     use crate::gssapi::{AcceptStep, GssAcceptor, GssError};
-    use assert2::assert;
 
     /// Fake that establishes after one token and echoes wrap/unwrap as identity.
     struct FakeAcceptor {

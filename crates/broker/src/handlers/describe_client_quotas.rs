@@ -2,18 +2,22 @@
 
 use bytes::Bytes;
 use crabka_metadata::{EntityKey, ResourceType};
-use crabka_protocol::Encode;
-use crabka_protocol::owned::describe_client_quotas_request::{
-    ComponentData, DescribeClientQuotasRequest,
-};
-use crabka_protocol::owned::describe_client_quotas_response::{
-    DescribeClientQuotasResponse, EntityData, EntryData, ValueData,
+use crabka_protocol::{
+    Encode,
+    owned::{
+        describe_client_quotas_request::{ComponentData, DescribeClientQuotasRequest},
+        describe_client_quotas_response::{
+            DescribeClientQuotasResponse, EntityData, EntryData, ValueData,
+        },
+    },
 };
 
 use super::acl_wire::CLUSTER_RESOURCE_NAME;
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes::{CLUSTER_AUTHORIZATION_FAILED, NONE};
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes::{CLUSTER_AUTHORIZATION_FAILED, NONE},
+};
 
 /// Wire `match_type`: entity name must equal `match_` exactly (KIP-546 `EXACT`).
 const MATCH_TYPE_EXACT: i8 = 0;
@@ -132,14 +136,16 @@ fn encode_response<R: Encode>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::assert;
-    use assert2::check;
-    use crabka_metadata::{ClientQuotaRecord, MetadataRecord, QuotaEntity};
     use std::sync::Arc;
 
-    use crate::broker::BrokerHandle;
-    use crate::test_support::{DenyAll, peer, principal};
+    use assert2::{assert, check};
+    use crabka_metadata::{ClientQuotaRecord, MetadataRecord, QuotaEntity};
+
+    use super::*;
+    use crate::{
+        broker::BrokerHandle,
+        test_support::{DenyAll, peer, principal},
+    };
 
     const VERSION: i16 = 1;
 

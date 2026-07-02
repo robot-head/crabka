@@ -8,21 +8,26 @@
 //! ACL gate.
 
 use bytes::{Bytes, BytesMut};
-
 use crabka_metadata::{AclOperation, ResourceType};
-use crabka_protocol::owned::describe_share_group_offsets_request::DescribeShareGroupOffsetsRequest;
-use crabka_protocol::owned::describe_share_group_offsets_response::{
-    DescribeShareGroupOffsetsResponse, DescribeShareGroupOffsetsResponseGroup,
-    DescribeShareGroupOffsetsResponsePartition, DescribeShareGroupOffsetsResponseTopic,
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        describe_share_group_offsets_request::DescribeShareGroupOffsetsRequest,
+        describe_share_group_offsets_response::{
+            DescribeShareGroupOffsetsResponse, DescribeShareGroupOffsetsResponseGroup,
+            DescribeShareGroupOffsetsResponsePartition, DescribeShareGroupOffsetsResponseTopic,
+        },
+    },
+    primitives::uuid::Uuid,
 };
-use crabka_protocol::primitives::uuid::Uuid;
-use crabka_protocol::{Decode, Encode};
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
-use crate::share_coordinator::coordinator::UNINITIALIZED_START_OFFSET;
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes,
+    error::BrokerError,
+    share_coordinator::coordinator::UNINITIALIZED_START_OFFSET,
+};
 
 #[tracing::instrument(
     name = "handle_describe_share_group_offsets",
@@ -239,20 +244,23 @@ async fn describe_partition(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::{net::SocketAddr, sync::Arc};
+
     use assert2::assert;
     use crabka_metadata::{MetadataImage, MetadataRecord, TopicRecord};
-    use crabka_protocol::UnknownTaggedFields;
-    use crabka_protocol::owned::describe_share_group_offsets_request::{
-        DescribeShareGroupOffsetsRequestGroup, DescribeShareGroupOffsetsRequestTopic,
+    use crabka_protocol::{
+        UnknownTaggedFields,
+        owned::{
+            describe_share_group_offsets_request::{
+                DescribeShareGroupOffsetsRequestGroup, DescribeShareGroupOffsetsRequestTopic,
+            },
+            describe_share_group_offsets_response,
+        },
     };
-    use crabka_protocol::owned::describe_share_group_offsets_response;
     use crabka_security::Principal;
-    use std::net::SocketAddr;
-    use std::sync::Arc;
 
-    use crate::authorizer::Authorizer;
-    use crate::test_support::DenyAll;
+    use super::*;
+    use crate::{authorizer::Authorizer, test_support::DenyAll};
 
     type RequestTopic<'a> = (&'a str, Vec<i32>);
     type RequestGroup<'a> = (&'a str, Vec<RequestTopic<'a>>);

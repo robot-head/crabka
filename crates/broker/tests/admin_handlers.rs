@@ -18,30 +18,27 @@ mod support;
 use std::time::Duration;
 
 use bytes::Bytes;
-use crabka_protocol::owned::alter_configs_request::{
-    AlterConfigsRequest, AlterConfigsResource, AlterableConfig,
+use crabka_protocol::{
+    owned::{
+        alter_configs_request::{AlterConfigsRequest, AlterConfigsResource, AlterableConfig},
+        create_partitions_request::{CreatePartitionsRequest, CreatePartitionsTopic},
+        create_topics_request::{CreatableTopic, CreateTopicsRequest},
+        delete_records_request::{
+            DeleteRecordsPartition, DeleteRecordsRequest, DeleteRecordsTopic,
+        },
+        describe_cluster_request::DescribeClusterRequest,
+        describe_quorum_request::{
+            DescribeQuorumRequest, PartitionData as DescribeQuorumReqPartition,
+            TopicData as DescribeQuorumReqTopic,
+        },
+        list_config_resources_request::ListConfigResourcesRequest,
+        list_groups_request::ListGroupsRequest,
+        metadata_request::{MetadataRequest, MetadataRequestTopic},
+        produce_request::{PartitionProduceData, ProduceRequest, TopicProduceData},
+    },
+    primitives::uuid::Uuid as WireUuid,
+    records::{Record, RecordBatch},
 };
-use crabka_protocol::owned::create_partitions_request::{
-    CreatePartitionsRequest, CreatePartitionsTopic,
-};
-use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-use crabka_protocol::owned::delete_records_request::{
-    DeleteRecordsPartition, DeleteRecordsRequest, DeleteRecordsTopic,
-};
-use crabka_protocol::owned::describe_cluster_request::DescribeClusterRequest;
-use crabka_protocol::owned::describe_quorum_request::{
-    DescribeQuorumRequest, PartitionData as DescribeQuorumReqPartition,
-    TopicData as DescribeQuorumReqTopic,
-};
-use crabka_protocol::owned::list_config_resources_request::ListConfigResourcesRequest;
-use crabka_protocol::owned::list_groups_request::ListGroupsRequest;
-use crabka_protocol::owned::metadata_request::{MetadataRequest, MetadataRequestTopic};
-use crabka_protocol::owned::produce_request::{
-    PartitionProduceData, ProduceRequest, TopicProduceData,
-};
-use crabka_protocol::primitives::uuid::Uuid as WireUuid;
-use crabka_protocol::records::{Record, RecordBatch};
-
 use support::start_n_node;
 
 /// Kafka resource type id for a topic.

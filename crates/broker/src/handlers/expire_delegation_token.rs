@@ -16,18 +16,18 @@
 //!   - `> 0`  → set expiry to `now + period`, clamped to the token's
 //!     `max_timestamp_ms` (record-replace).
 
-use std::collections::HashSet;
-use std::hash::BuildHasher;
+use std::{collections::HashSet, hash::BuildHasher};
 
 use crabka_metadata::{
     DelegationToken, DelegationTokenRecord, DeleteDelegationTokenRecord, MetadataRecord,
 };
-use crabka_protocol::owned::expire_delegation_token_request::ExpireDelegationTokenRequest;
-use crabka_protocol::owned::expire_delegation_token_response::ExpireDelegationTokenResponse;
+use crabka_protocol::owned::{
+    expire_delegation_token_request::ExpireDelegationTokenRequest,
+    expire_delegation_token_response::ExpireDelegationTokenResponse,
+};
 use crabka_security::SecretBytes;
 
-use crate::network::auth::ConnectionAuth;
-use crate::time_util::now_ms;
+use crate::{network::auth::ConnectionAuth, time_util::now_ms};
 
 #[tracing::instrument(
     name = "handle_expire_delegation_token",
@@ -140,14 +140,14 @@ fn token_to_record(t: &DelegationToken) -> DelegationTokenRecord {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::{collections::HashSet, sync::Arc, time::Duration};
+
     use assert2::assert;
     use crabka_raft::ControllerHandle;
     use crabka_security::{AuthMethod, KafkaPrincipal, Principal, SaslMechanism};
-    use std::collections::HashSet;
-    use std::sync::Arc;
-    use std::time::Duration;
     use tempfile::TempDir;
+
+    use super::*;
 
     /// Helper: empty super-users set for the pre-existing tests, which
     /// all exercise the owner/renewer path.

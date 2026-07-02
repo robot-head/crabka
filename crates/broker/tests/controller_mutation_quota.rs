@@ -12,27 +12,30 @@
 //! 3. `controller_mutation_rate_throttles_delete_topics` — Pre-create topic with 10
 //!    partitions; set rate=2.0 for alice; alice deletes; assert throttle_time_ms > 0.
 
-use assert2::{assert, check};
-use std::io;
-use std::net::SocketAddr;
+use std::{io, net::SocketAddr};
 
+use assert2::{assert, check};
 use bytes::{Buf, BufMut, BytesMut};
-use crabka_broker::config::ListenerSpec;
-use crabka_broker::{Broker, BrokerHandle};
+use crabka_broker::{Broker, BrokerHandle, config::ListenerSpec};
 use crabka_metadata::{
     AclEntry, AclOperation, MetadataRecord, PatternType, PermissionType, ResourceType,
 };
-use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
-use crabka_protocol::owned::api_versions_response::ApiVersionsResponse;
-use crabka_protocol::owned::sasl_authenticate_request::SaslAuthenticateRequest;
-use crabka_protocol::owned::sasl_authenticate_response::SaslAuthenticateResponse;
-use crabka_protocol::owned::sasl_handshake_request::SaslHandshakeRequest;
-use crabka_protocol::owned::sasl_handshake_response::SaslHandshakeResponse;
-use crabka_protocol::{Decode, Encode};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        api_versions_request::ApiVersionsRequest, api_versions_response::ApiVersionsResponse,
+        sasl_authenticate_request::SaslAuthenticateRequest,
+        sasl_authenticate_response::SaslAuthenticateResponse,
+        sasl_handshake_request::SaslHandshakeRequest,
+        sasl_handshake_response::SaslHandshakeResponse,
+    },
+};
 use crabka_security::{ListenerProtocol, SaslMechanism};
 use tempfile::TempDir;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Wire helpers — single length-prefixed request/response exchange.
@@ -196,10 +199,10 @@ async fn drive_alter_client_quotas_sasl(
     entries: Vec<(Vec<(String, Option<String>)>, Vec<(String, f64, bool)>)>,
     validate_only: bool,
 ) -> Vec<(Vec<(String, Option<String>)>, i16)> {
-    use crabka_protocol::owned::alter_client_quotas_request::{
-        AlterClientQuotasRequest, EntityData, EntryData, OpData,
+    use crabka_protocol::owned::{
+        alter_client_quotas_request::{AlterClientQuotasRequest, EntityData, EntryData, OpData},
+        alter_client_quotas_response::AlterClientQuotasResponse,
     };
-    use crabka_protocol::owned::alter_client_quotas_response::AlterClientQuotasResponse;
 
     let req = AlterClientQuotasRequest {
         entries: entries
@@ -270,8 +273,10 @@ async fn drive_create_topics_sasl(
     topic: &str,
     partitions: i32,
 ) -> (i32, i16) {
-    use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-    use crabka_protocol::owned::create_topics_response::CreateTopicsResponse;
+    use crabka_protocol::owned::{
+        create_topics_request::{CreatableTopic, CreateTopicsRequest},
+        create_topics_response::CreateTopicsResponse,
+    };
 
     const VERSION: i16 = 7; // MAX_VERSION; flexible (>= 5)
 
@@ -310,8 +315,9 @@ async fn drive_delete_topics_sasl(
     pass: &str,
     topic: &str,
 ) -> (i32, i16) {
-    use crabka_protocol::owned::delete_topics_request::DeleteTopicsRequest;
-    use crabka_protocol::owned::delete_topics_response::DeleteTopicsResponse;
+    use crabka_protocol::owned::{
+        delete_topics_request::DeleteTopicsRequest, delete_topics_response::DeleteTopicsResponse,
+    };
 
     // Use version 3 (flexible=4+, topic_names field for versions 0-5).
     // Flexible starts at version 4; use version 4 to get throttle_time_ms (v1+)

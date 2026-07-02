@@ -4,17 +4,18 @@
 
 use std::collections::{BTreeMap, HashMap};
 
+use crabka_security::{KafkaPrincipal, SaslMechanism, ScramCredential};
 use uuid::Uuid;
 
-use crabka_security::{KafkaPrincipal, SaslMechanism, ScramCredential};
-
-use crate::acl::{AclEntry, PatternType, ResourceType};
-use crate::error::MetadataError;
-use crate::records::{
-    BrokerConfigRecord, BrokerRegistrationRecord, ClientMetricsConfigRecord, ClientQuotaRecord,
-    DelegationTokenRecord, FeatureLevelRecord, FeaturesEpochRecord, KRaftVersionRecord,
-    MetadataRecord, NodeId, PartitionRecord, QuotaEntity, ScramCredentialRecord, TopicConfigRecord,
-    TopicRecord, VotersRecord,
+use crate::{
+    acl::{AclEntry, PatternType, ResourceType},
+    error::MetadataError,
+    records::{
+        BrokerConfigRecord, BrokerRegistrationRecord, ClientMetricsConfigRecord, ClientQuotaRecord,
+        DelegationTokenRecord, FeatureLevelRecord, FeaturesEpochRecord, KRaftVersionRecord,
+        MetadataRecord, NodeId, PartitionRecord, QuotaEntity, ScramCredentialRecord,
+        TopicConfigRecord, TopicRecord, VotersRecord,
+    },
 };
 
 pub type EntityKey = Vec<(String, Option<String>)>;
@@ -956,13 +957,16 @@ mod tests {
         assert!(record_variant(&feature) == "V1FeatureLevel");
     }
 
-    use crate::acl::{AclEntryFilter, AclOperation, PermissionType};
-    use crate::records::{
-        BrokerConfigRecord, ClientQuotaRecord, DeleteDelegationTokenRecord,
-        DeleteScramCredentialRecord, DeleteTopicRecord, FeatureLevelRecord, QuotaEntity,
-        ScramCredentialRecord,
-    };
     use assert2::{assert, check};
+
+    use crate::{
+        acl::{AclEntryFilter, AclOperation, PermissionType},
+        records::{
+            BrokerConfigRecord, ClientQuotaRecord, DeleteDelegationTokenRecord,
+            DeleteScramCredentialRecord, DeleteTopicRecord, FeatureLevelRecord, QuotaEntity,
+            ScramCredentialRecord,
+        },
+    };
 
     fn img() -> MetadataImage {
         MetadataImage::new(Uuid::nil())
@@ -1348,8 +1352,10 @@ mod tests {
     /// can only round-trip through a `V1KRaftVersion` record.
     #[test]
     fn to_records_preserves_voters_and_kraft_version() {
-        use crate::records::{KRaftVersionRecord, VotersRecord};
-        use crate::voters::{KRaftVersionRange, Voter, VoterEndpoint, VoterSet};
+        use crate::{
+            records::{KRaftVersionRecord, VotersRecord},
+            voters::{KRaftVersionRange, Voter, VoterEndpoint, VoterSet},
+        };
 
         let cid = Uuid::new_v4();
         let mut image = MetadataImage::new(cid);
@@ -2383,8 +2389,9 @@ mod tests {
 
     #[test]
     fn min_required_metadata_version_rises_with_scram_and_tokens() {
-        use crate::metadata_version::{DELEGATION_TOKEN_MIN_LEVEL, SCRAM_MIN_LEVEL};
         use crabka_security::{KafkaPrincipal, SaslMechanism};
+
+        use crate::metadata_version::{DELEGATION_TOKEN_MIN_LEVEL, SCRAM_MIN_LEVEL};
         let mut m = img();
         m.apply(&MetadataRecord::V1ScramCredential(
             crate::records::ScramCredentialRecord {

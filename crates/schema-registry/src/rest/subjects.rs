@@ -1,15 +1,19 @@
 //! `/subjects/*` endpoints.
 
-use axum::extract::{Path, Query, State};
-use axum::response::Response;
+use axum::{
+    extract::{Path, Query, State},
+    response::Response,
+};
 use serde::Deserialize;
 
-use crate::error::SrError;
-use crate::format::SchemaType;
-use crate::kafkastore::RegisterSchema;
-use crate::rest::{
-    AppState, DeletedQ,
-    response::{ok_json, ok_raw},
+use crate::{
+    error::SrError,
+    format::SchemaType,
+    kafkastore::RegisterSchema,
+    rest::{
+        AppState, DeletedQ,
+        response::{ok_json, ok_raw},
+    },
 };
 
 #[derive(Deserialize)]

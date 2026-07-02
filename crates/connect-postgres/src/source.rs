@@ -4,13 +4,13 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use crabka_connect::{ConnectError, ConnectRecord, OffsetValue, Source, SourceOffset};
 
-use crate::catalog::{PgCatalog, TokioPgCatalog};
-use crate::model::Operation;
-use crate::pgoutput::{
-    DecodedMessage, RelationCache, RelationEvent, RowEvent, decode_pgoutput_message,
+use crate::{
+    PgLsn, PostgresSourceConfig,
+    catalog::{PgCatalog, TokioPgCatalog},
+    model::Operation,
+    pgoutput::{DecodedMessage, RelationCache, RelationEvent, RowEvent, decode_pgoutput_message},
+    schema::PostgresProtoEncoder,
 };
-use crate::schema::PostgresProtoEncoder;
-use crate::{PgLsn, PostgresSourceConfig};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LogicalEvent {
@@ -704,9 +704,11 @@ mod tests {
     use crabka_schema_serde::wire::MAGIC;
 
     use super::{LogicalEvent, PostgresWalSource, validate_database};
-    use crate::model::{ColumnSchema, ColumnValue, ScalarValue};
-    use crate::pgoutput::{RelationEvent, RowEvent, RowEventKind, RowTupleKind};
-    use crate::{PgLsn, PostgresSourceConfig};
+    use crate::{
+        PgLsn, PostgresSourceConfig,
+        model::{ColumnSchema, ColumnValue, ScalarValue},
+        pgoutput::{RelationEvent, RowEvent, RowEventKind, RowTupleKind},
+    };
 
     fn header_value(
         record: &crabka_connect::ConnectRecord<bytes::Bytes, bytes::Bytes>,
@@ -1106,8 +1108,10 @@ mod catalog_tests {
         PostgresWalSource, ensure_slot, initialize, validate_publication_settings,
         validate_publication_tables,
     };
-    use crate::catalog::{MockPgCatalog, SlotChange, SlotMetadata};
-    use crate::{PgLsn, PostgresSourceConfig};
+    use crate::{
+        PgLsn, PostgresSourceConfig,
+        catalog::{MockPgCatalog, SlotChange, SlotMetadata},
+    };
 
     fn config_with_tables(tables: Vec<String>) -> PostgresSourceConfig {
         PostgresSourceConfig {

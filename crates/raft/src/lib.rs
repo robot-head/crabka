@@ -12,9 +12,10 @@
 //! ## Quick start
 //!
 //! ```no_run
+//! use std::time::Duration;
+//!
 //! use crabka_metadata::{MetadataRecord, TopicRecord};
 //! use crabka_raft::{Controller, ControllerConfig};
-//! use std::time::Duration;
 //! use uuid::Uuid;
 //!
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {

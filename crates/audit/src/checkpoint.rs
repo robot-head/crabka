@@ -7,10 +7,12 @@
 
 use serde_json::json;
 
-use crate::chain::{from_hex32, to_hex};
-use crate::event::AuditEventClass;
-use crate::signing::{SigningKeyProvider, checkpoint_signing_bytes, verify_signature};
-use crate::sink::AuditRecord;
+use crate::{
+    chain::{from_hex32, to_hex},
+    event::AuditEventClass,
+    signing::{SigningKeyProvider, checkpoint_signing_bytes, verify_signature},
+    sink::AuditRecord,
+};
 
 /// `event_class` header value identifying a checkpoint record.
 pub const EVENT_CLASS_CHECKPOINT: &str = "checkpoint";
@@ -120,11 +122,13 @@ fn hex_vec(s: &str) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::check;
-    use ring::rand::SystemRandom;
-    use ring::signature::{Ed25519KeyPair, KeyPair};
+    use ring::{
+        rand::SystemRandom,
+        signature::{Ed25519KeyPair, KeyPair},
+    };
 
+    use super::*;
     use crate::signing::FileEd25519Signer;
 
     fn signer() -> (FileEd25519Signer, Vec<u8>) {

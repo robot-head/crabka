@@ -9,12 +9,14 @@ use crabka_client_admin::AdminClient;
 use crabka_client_producer::{Acks, Producer, ProducerRecord};
 use tracing::warn;
 
-use crate::config::NamingPolicy;
-use crate::error::ReplicatorError;
-use crate::mm2::{Checkpoint, OffsetSync};
-use crate::naming::Renamer;
-use crate::offset_sync_store::OffsetSyncStore;
-use crate::selector::Selector;
+use crate::{
+    config::NamingPolicy,
+    error::ReplicatorError,
+    mm2::{Checkpoint, OffsetSync},
+    naming::Renamer,
+    offset_sync_store::OffsetSyncStore,
+    selector::Selector,
+};
 
 /// Parameters required to run the checkpoint task.
 pub struct CheckpointParams {
@@ -250,8 +252,10 @@ mod tests {
     use assert2::assert;
 
     use super::*;
-    use crate::mm2::{Checkpoint, OffsetSync};
-    use crate::offset_sync_store::OffsetSyncStore;
+    use crate::{
+        mm2::{Checkpoint, OffsetSync},
+        offset_sync_store::OffsetSyncStore,
+    };
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn writes_translated_checkpoints() {

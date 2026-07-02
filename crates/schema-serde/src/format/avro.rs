@@ -1,20 +1,21 @@
 //! Avro serde over `apache-avro`. The local type provides its schema via the
 //! `AvroSchema` derive; deserialize resolves the writer schema against it.
 
-use std::marker::PhantomData;
-use std::sync::Arc;
+use std::{marker::PhantomData, sync::Arc};
 
-use apache_avro::schema::Schema;
-use apache_avro::{AvroSchema, from_avro_datum, from_value, to_avro_datum, to_value};
+use apache_avro::{
+    AvroSchema, from_avro_datum, from_value, schema::Schema, to_avro_datum, to_value,
+};
 use bytes::Bytes;
-use serde::Serialize;
-use serde::de::DeserializeOwned;
+use serde::{Serialize, de::DeserializeOwned};
 
-use crate::cache::SchemaCache;
-use crate::error::SchemaSerdeError;
-use crate::format::{Binding, SchemaDeserializer, SchemaSerializer, SchemaSubject};
-use crate::subject::{Role, SchemaKind};
-use crate::wire;
+use crate::{
+    cache::SchemaCache,
+    error::SchemaSerdeError,
+    format::{Binding, SchemaDeserializer, SchemaSerializer, SchemaSubject},
+    subject::{Role, SchemaKind},
+    wire,
+};
 
 /// Avro serializer/deserializer for `T: AvroSchema`, bound to a key/value role.
 /// The subject is derived from the topic at (de)serialize time.
@@ -110,12 +111,15 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::cache::{CacheConfig, SchemaCache};
-    use crate::registry::RegistryClient;
     use apache_avro::AvroSchema;
     use assert2::check;
     use serde::{Deserialize, Serialize};
+
+    use super::*;
+    use crate::{
+        cache::{CacheConfig, SchemaCache},
+        registry::RegistryClient,
+    };
 
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, AvroSchema)]
     struct Order {

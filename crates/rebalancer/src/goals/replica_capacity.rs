@@ -13,8 +13,10 @@
 
 use std::collections::HashMap;
 
-use crate::goals::{Goal, GoalContext, GoalPriority};
-use crate::model::{ClusterState, Movement, PartitionView};
+use crate::{
+    goals::{Goal, GoalContext, GoalPriority},
+    model::{ClusterState, Movement, PartitionView},
+};
 
 pub struct ReplicaCapacity;
 
@@ -219,12 +221,16 @@ impl Goal for ReplicaCapacity {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::capacity::{BrokerCapacities, BrokerCapacity};
-    use crate::model::BrokerView;
-    use crate::scraper::UsageStore;
-    use assert2::assert;
     use std::sync::Arc;
+
+    use assert2::assert;
+
+    use super::*;
+    use crate::{
+        capacity::{BrokerCapacities, BrokerCapacity},
+        model::BrokerView,
+        scraper::UsageStore,
+    };
 
     fn ctx_with(caps: BrokerCapacities) -> GoalContext {
         GoalContext {

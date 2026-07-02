@@ -6,17 +6,23 @@
 
 use bytes::Bytes;
 use crabka_metadata::{AclEntry, MetadataRecord};
-use crabka_protocol::Encode;
-use crabka_protocol::owned::create_acls_request::CreateAclsRequest;
-use crabka_protocol::owned::create_acls_response::{AclCreationResult, CreateAclsResponse};
+use crabka_protocol::{
+    Encode,
+    owned::{
+        create_acls_request::CreateAclsRequest,
+        create_acls_response::{AclCreationResult, CreateAclsResponse},
+    },
+};
 
 use super::acl_wire::{
     CLUSTER_RESOURCE_NAME, operation_concrete, pattern_type_concrete, permission_concrete,
     resource_type_concrete,
 };
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes;
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes,
+};
 
 /// Maximum accepted length (bytes) of an ACL principal string.
 const MAX_PRINCIPAL_LEN: usize = 256;
@@ -206,15 +212,17 @@ fn encode_response<R: Encode>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::assert;
-    use crabka_metadata::{AclOperation, PatternType, PermissionType, ResourceType};
-    use crabka_protocol::UnknownTaggedFields;
-    use crabka_protocol::owned::create_acls_request::AclCreation;
     use std::sync::Arc;
 
-    use crate::broker::BrokerHandle;
-    use crate::test_support::{DenyAll, peer, principal};
+    use assert2::assert;
+    use crabka_metadata::{AclOperation, PatternType, PermissionType, ResourceType};
+    use crabka_protocol::{UnknownTaggedFields, owned::create_acls_request::AclCreation};
+
+    use super::*;
+    use crate::{
+        broker::BrokerHandle,
+        test_support::{DenyAll, peer, principal},
+    };
 
     const VERSION: i16 = 3;
     const RESOURCE_TYPE_TOPIC: i8 = 2;

@@ -19,26 +19,31 @@
 //! fixture path resolution and tempfile semantics are easier to keep
 //! consistent with the existing TLS integration tests.
 
-use assert2::assert;
-use std::io;
-use std::sync::Arc;
+use std::{io, sync::Arc};
 
+use assert2::assert;
 use bytes::{Buf, BufMut, BytesMut};
-use crabka_broker::config::ListenerSpec;
-use crabka_broker::{Broker, BrokerConfig};
-use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-use crabka_protocol::owned::create_topics_response::CreateTopicsResponse;
-use crabka_protocol::{Decode, Encode};
-use crabka_security::{ClientAuthMode, ListenerProtocol, TlsConfig};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
-use tokio_rustls::TlsConnector;
-use tokio_rustls::rustls::client::danger::{
-    HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
+use crabka_broker::{Broker, BrokerConfig, config::ListenerSpec};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        create_topics_request::{CreatableTopic, CreateTopicsRequest},
+        create_topics_response::CreateTopicsResponse,
+    },
 };
-use tokio_rustls::rustls::pki_types::pem::PemObject;
-use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
-use tokio_rustls::rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
+use crabka_security::{ClientAuthMode, ListenerProtocol, TlsConfig};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+};
+use tokio_rustls::{
+    TlsConnector,
+    rustls::{
+        ClientConfig, DigitallySignedStruct, SignatureScheme,
+        client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
+        pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime, pem::PemObject},
+    },
+};
 
 const DEV_CERT: &str = include_str!("../../../crates/security/tests/fixtures/dev_cert.pem");
 const DEV_KEY: &str = include_str!("../../../crates/security/tests/fixtures/dev_key.pem");

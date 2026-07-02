@@ -1,10 +1,9 @@
 //! Core data types for the `KRaft` consensus state machine (KIP-595/996).
 //! Pure, sans-IO: no clock, no wire, no log bytes.
 
+pub use crabka_voters::NodeId;
 use crabka_voters::VoterSet;
 use uuid::Uuid;
-
-pub use crabka_voters::NodeId;
 
 /// A simulated/logical instant in milliseconds. Time is always injected, never
 /// read from the system clock (keeps the state machine deterministic).
@@ -81,8 +80,9 @@ impl QuorumState {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn quorum_state_starts_unattached_at_epoch_zero() {

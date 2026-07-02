@@ -2,18 +2,22 @@
 
 use std::sync::Arc;
 
-use super::store::SharedTraceIndex;
-use arrow::ipc::reader::StreamReader;
-use arrow::ipc::writer::StreamWriter;
-use arrow::record_batch::RecordBatch;
+use arrow::{
+    ipc::{reader::StreamReader, writer::StreamWriter},
+    record_batch::RecordBatch,
+};
 use crabka_traceql::{
     AttrValue, EventRef, LinkRef, ScopedTag, SpanRef, TagScope, TraceSpans, TraceqlError,
     TypedValue,
 };
-use opentelemetry_proto::tonic::common::v1::{AnyValue, any_value::Value as OtlpValue};
-use opentelemetry_proto::tonic::trace::v1::TracesData;
+use opentelemetry_proto::tonic::{
+    common::v1::{AnyValue, any_value::Value as OtlpValue},
+    trace::v1::TracesData,
+};
 use prost::Message as _;
 use reqwest::Url;
+
+use super::store::SharedTraceIndex;
 
 pub type Result<T> = std::result::Result<T, TraceqlError>;
 const LIVE_SPAN_BATCHES_PATH: &str = "/api/crabka/live/span-batches";
@@ -508,8 +512,7 @@ impl LiveTier {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-    use std::sync::Arc;
+    use std::{collections::BTreeMap, sync::Arc};
 
     use arrow::record_batch::RecordBatch;
     use assert2::check;

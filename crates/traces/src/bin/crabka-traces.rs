@@ -2,10 +2,7 @@
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-use std::net::SocketAddr;
-use std::process::ExitCode;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{net::SocketAddr, process::ExitCode, sync::Arc, time::Duration};
 
 use arc_swap::ArcSwap;
 use clap::{ArgAction, Parser, ValueEnum};
@@ -33,8 +30,7 @@ use crabka_traces::{
     },
     span::batch::RESOURCE_ATTR_PREFIX,
 };
-use object_store::ObjectStore;
-use object_store::path::Path;
+use object_store::{ObjectStore, path::Path};
 use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use url::Url;
@@ -851,8 +847,10 @@ async fn wal_consumer(
 #[cfg(test)]
 mod tests {
     use assert2::{assert, check};
-    use axum::body::Body;
-    use axum::http::{Request, StatusCode as HttpStatusCode};
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode as HttpStatusCode},
+    };
     use clap::Parser;
     use http_body_util::BodyExt;
     use tower::ServiceExt;

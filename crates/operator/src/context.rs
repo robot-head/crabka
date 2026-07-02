@@ -1,13 +1,14 @@
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use crabka_client_admin::{AdminClient, AdminClientLike};
 use kube::Client;
 use tokio::sync::Mutex;
 
-use crate::config::OperatorConfig;
-use crate::rebalancer_client::{ConnectRebalancerClient, RebalancerClientLike};
-use crate::telemetry::{ControllerMetrics, SharedRegistry};
+use crate::{
+    config::OperatorConfig,
+    rebalancer_client::{ConnectRebalancerClient, RebalancerClientLike},
+    telemetry::{ControllerMetrics, SharedRegistry},
+};
 
 /// Boxed-dyn admin client handle: tests substitute a fake here without
 /// opening a TCP connection, while production code wraps a real

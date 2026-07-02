@@ -10,19 +10,23 @@
 
 use std::sync::Arc;
 
-use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
-use axum::routing::post;
-use axum::{Extension, Json, Router};
+use axum::{
+    Extension, Json, Router,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    routing::post,
+};
 use crabka_authz::{AuthorizationRequest, AuthorizationResult};
 use crabka_metadata::{AclOperation, ResourceType};
 use crabka_security::{AuthMethod, Principal};
 use serde::{Deserialize, Serialize};
 
-use crate::error::GatewayError;
-use crate::metrics::metrics;
-use crate::state::AppState;
-use crate::types::{GatewayRecord, RecordOutcome};
+use crate::{
+    error::GatewayError,
+    metrics::metrics,
+    state::AppState,
+    types::{GatewayRecord, RecordOutcome},
+};
 
 /// Wire form of a forwarded record (bytes as JSON arrays — no extra deps).
 #[derive(Debug, Clone, Serialize, Deserialize)]

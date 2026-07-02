@@ -61,8 +61,9 @@ impl ShareAckType {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn ack_wire_codes() {

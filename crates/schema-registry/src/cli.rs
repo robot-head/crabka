@@ -7,12 +7,16 @@
 //! assembly's many `bail!` branches uncovered). The mapping is intentionally
 //! mechanical — behaviour is identical to the previous in-binary helpers.
 
-use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+    sync::Arc,
+};
 
-use crabka_client_core::ClientSecurity;
-use crabka_client_core::security::{SaslCredentials, TlsConnectorConfig};
+use crabka_client_core::{
+    ClientSecurity,
+    security::{SaslCredentials, TlsConnectorConfig},
+};
 use crabka_security::{
     ClientAuthMode, Jwks, JwksHandle, ListenerProtocol, OAuthBearerValidator, SaslMechanism,
     SignedJwsValidator, TlsConfig,
@@ -326,8 +330,9 @@ fn build_sasl(input: &SecurityCliInput) -> anyhow::Result<SaslCredentials> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::check;
+
+    use super::*;
 
     /// Convenience: the binary's clap defaults for the string-typed knobs, so a
     /// test sets only the fields it exercises. Mirrors the `Args` `default_value`

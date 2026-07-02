@@ -2,11 +2,13 @@
 //! elected primary; reads + primary-side writes pass through. A forwarded
 //! request carries `X-Forwarded-For-Registry` so the primary never re-forwards.
 
-use axum::body::Body;
-use axum::extract::{Request, State};
-use axum::http::{HeaderValue, Method, StatusCode, header};
-use axum::middleware::Next;
-use axum::response::{IntoResponse, Response};
+use axum::{
+    body::Body,
+    extract::{Request, State},
+    http::{HeaderValue, Method, StatusCode, header},
+    middleware::Next,
+    response::{IntoResponse, Response},
+};
 use tokio::sync::watch;
 
 use crate::election::PrimaryState;

@@ -188,8 +188,9 @@ pub fn is_supported_level(level: i16) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
+
+    use super::*;
 
     #[test]
     fn min_max_levels() {

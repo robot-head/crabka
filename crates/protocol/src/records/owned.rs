@@ -3,12 +3,16 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use zerocopy::FromBytes as _;
 
-use crate::primitives::varint::{
-    get_varint, get_varlong, put_varint, put_varlong, varint_len, varlong_len,
+use crate::{
+    primitives::varint::{
+        get_varint, get_varlong, put_varint, put_varlong, varint_len, varlong_len,
+    },
+    records::{
+        RecordsError,
+        crc::{crc32c, crc32c_append},
+        header::{Attributes, HEADER_LEN},
+    },
 };
-use crate::records::RecordsError;
-use crate::records::crc::{crc32c, crc32c_append};
-use crate::records::header::{Attributes, HEADER_LEN};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RecordHeader {
@@ -285,9 +289,10 @@ fn decode_record_header<B: Buf>(buf: &mut B) -> Result<RecordHeader, String> {
 
 #[cfg(test)]
 mod record_tests {
-    use super::*;
     use assert2::assert;
     use bytes::BytesMut;
+
+    use super::*;
 
     fn fixture_minimal_record() -> Record {
         Record {
@@ -628,9 +633,10 @@ impl RecordBatch {
 
 #[cfg(test)]
 mod batch_tests {
-    use super::*;
     use assert2::{assert, check};
     use crabka_compression::CompressionType;
+
+    use super::*;
 
     fn fixture_empty_batch() -> RecordBatch {
         RecordBatch::default()

@@ -3,14 +3,17 @@
 //! `Family`s) that renders a live, staleness-pruned snapshot at scrape time
 //! as `crabka_client_*` series.
 
-use std::collections::HashMap;
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashMap,
+    sync::Mutex,
+    time::{Duration, Instant},
+};
 
-use prometheus_client::collector::Collector;
-use prometheus_client::encoding::{DescriptorEncoder, EncodeMetric};
-use prometheus_client::metrics::MetricType;
-use prometheus_client::metrics::gauge::ConstGauge;
+use prometheus_client::{
+    collector::Collector,
+    encoding::{DescriptorEncoder, EncodeMetric},
+    metrics::{MetricType, gauge::ConstGauge},
+};
 
 /// A single decoded client metric data point destined for Prometheus.
 #[derive(Debug, Clone)]
@@ -145,8 +148,9 @@ fn sanitize(metric: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::time::Duration;
+
+    use super::*;
 
     #[test]
     fn ingest_then_encode_contains_series() {

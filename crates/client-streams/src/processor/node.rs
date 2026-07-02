@@ -18,10 +18,12 @@ use std::any::{Any, type_name};
 
 use async_trait::async_trait;
 
-use super::api::{Processor, ProcessorContext, ProcessorSupplier};
-use super::erased::{Dispatch, ErasedRecord, OutputRecord, ProcessorError};
-use super::record::Record;
-use super::serde::Serde;
+use super::{
+    api::{Processor, ProcessorContext, ProcessorSupplier},
+    erased::{Dispatch, ErasedRecord, OutputRecord, ProcessorError},
+    record::Record,
+    serde::Serde,
+};
 
 // ──────────────────────────────────────────────────────────────────────────────
 // ErasedNode trait
@@ -295,13 +297,17 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::processor::api::{Processor, ProcessorContext};
-    use crate::processor::erased::{Dispatch, ErasedRecord};
-    use crate::processor::record::{Record, RecordContext};
-    use crate::processor::serde::{I64Serde, StringSerde};
-    use assert2::check;
     use std::collections::VecDeque;
+
+    use assert2::check;
+
+    use super::*;
+    use crate::processor::{
+        api::{Processor, ProcessorContext},
+        erased::{Dispatch, ErasedRecord},
+        record::{Record, RecordContext},
+        serde::{I64Serde, StringSerde},
+    };
 
     struct Upper;
     #[async_trait]

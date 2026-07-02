@@ -1,4 +1,4 @@
-﻿//! Broker regression test for the `REUSE_KTABLE_SOURCE_TOPICS` changelog
+//! Broker regression test for the `REUSE_KTABLE_SOURCE_TOPICS` changelog
 //! write-back loop.
 //!
 //! Under `build_optimized()`, the `REUSE_KTABLE_SOURCE_TOPICS` optimizer points a
@@ -21,8 +21,10 @@ use std::time::Duration;
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_core::{Client, Connection, ConnectionOptions, FetchedRecord, fetch_partition};
 use crabka_client_streams::{KafkaStreams, StreamsBuilder};
-use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-use crabka_protocol::owned::update_features_request::{FeatureUpdateKey, UpdateFeaturesRequest};
+use crabka_protocol::owned::{
+    create_topics_request::{CreatableTopic, CreateTopicsRequest},
+    update_features_request::{FeatureUpdateKey, UpdateFeaturesRequest},
+};
 
 // ─── broker helpers (mirror fk_join_broker.rs / dsl_integration.rs) ─────────────
 

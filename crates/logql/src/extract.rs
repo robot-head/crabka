@@ -1,8 +1,6 @@
 use std::collections::BTreeSet;
 
-use crate::ParseError;
-use crate::template::template_parse_error;
-use crate::util::decode_quoted_escape;
+use crate::{ParseError, template::template_parse_error, util::decode_quoted_escape};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct JsonParserConfig {

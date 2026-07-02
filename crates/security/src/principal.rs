@@ -1,6 +1,7 @@
-use crate::SaslMechanism;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+use crate::SaslMechanism;
 
 /// How a [`Principal`] was authenticated. A strict superset of
 /// [`SaslMechanism`] that also covers mTLS client-cert authentication
@@ -129,8 +130,9 @@ pub enum AuthError {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn from_sasl_mapping() {

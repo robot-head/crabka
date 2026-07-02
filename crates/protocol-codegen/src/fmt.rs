@@ -17,8 +17,10 @@
 //! malformed generated code fails to parse / exits non-zero here, surfacing
 //! codegen bugs at regeneration time rather than three crates downstream.
 
-use std::io::Write;
-use std::process::{Command, Stdio};
+use std::{
+    io::Write,
+    process::{Command, Stdio},
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum FmtError {
@@ -89,8 +91,9 @@ fn run_rustfmt(src: &str) -> Result<String, FmtError> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::check;
+
+    use super::*;
 
     #[test]
     fn split_banner_separates_leading_comment_block() {

@@ -10,30 +10,32 @@
 //! batches stay in the byte stream and the consumer drops them client-side
 //! using the `aborted_transactions` list, matching Apache Kafka.
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use bytes::BytesMut;
+use crabka_metadata::AclOperation;
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        fetch_request::FetchRequest,
+        fetch_response::{
+            AbortedTransaction, EpochEndOffset, FetchResponse, FetchableTopicResponse,
+            LeaderIdAndEpoch, PartitionData,
+        },
+    },
+    primitives::uuid::Uuid as WireUuid,
+    records::{RecordBatch, RecordsPayload},
+};
 use tokio::sync::Notify;
 
-use crabka_metadata::AclOperation;
-use crabka_protocol::owned::fetch_request::FetchRequest;
-use crabka_protocol::owned::fetch_response::{
-    AbortedTransaction, EpochEndOffset, FetchResponse, FetchableTopicResponse, LeaderIdAndEpoch,
-    PartitionData,
+use crate::{
+    authorizer::{AuthorizationResult, authorize_topics},
+    broker::Broker,
+    codes,
+    error::BrokerError,
+    fetch_session::{CachedPartitionState, FetchSessionKey, INVALID_SESSION_ID, SessionDecision},
+    partition::Partition,
 };
-use crabka_protocol::primitives::uuid::Uuid as WireUuid;
-use crabka_protocol::records::{RecordBatch, RecordsPayload};
-use crabka_protocol::{Decode, Encode};
-
-use crate::authorizer::{AuthorizationResult, authorize_topics};
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
-use crate::fetch_session::{
-    CachedPartitionState, FetchSessionKey, INVALID_SESSION_ID, SessionDecision,
-};
-use crate::partition::Partition;
 
 type WaitFut = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
 

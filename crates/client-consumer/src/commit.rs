@@ -1,19 +1,24 @@
 //! `Consumer::commit_sync` and `commit_async`.
 
-use std::collections::HashMap;
-use std::sync::{Arc, atomic::Ordering};
-
-use crabka_protocol::owned::offset_commit_request::OffsetCommitRequest;
-use crabka_protocol::owned::offset_commit_response::OffsetCommitResponse;
-
-use crate::consumer::Consumer;
-use crate::coordinator::{
-    COORDINATOR_RETRY_TIMEOUT, find_coordinator, is_retriable_transport_error,
-    with_coordinator_refind,
+use std::{
+    collections::HashMap,
+    sync::{Arc, atomic::Ordering},
 };
-use crate::error::ConsumerError;
-use crate::offset_wire::build_commit_topics;
-use crate::position::PartitionPosition;
+
+use crabka_protocol::owned::{
+    offset_commit_request::OffsetCommitRequest, offset_commit_response::OffsetCommitResponse,
+};
+
+use crate::{
+    consumer::Consumer,
+    coordinator::{
+        COORDINATOR_RETRY_TIMEOUT, find_coordinator, is_retriable_transport_error,
+        with_coordinator_refind,
+    },
+    error::ConsumerError,
+    offset_wire::build_commit_topics,
+    position::PartitionPosition,
+};
 
 /// First non-zero per-partition `error_code` in an `OffsetCommitResponse`, or
 /// `0` if every partition committed cleanly. `with_coordinator_refind` reads
@@ -242,14 +247,17 @@ impl Consumer {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
-    use crabka_protocol::UnknownTaggedFields;
-    use crabka_protocol::owned::offset_commit_request::OffsetCommitRequestPartition;
-    use crabka_protocol::owned::offset_commit_response::{
-        OffsetCommitResponsePartition, OffsetCommitResponseTopic,
+    use crabka_protocol::{
+        UnknownTaggedFields,
+        owned::{
+            offset_commit_request::OffsetCommitRequestPartition,
+            offset_commit_response::{OffsetCommitResponsePartition, OffsetCommitResponseTopic},
+        },
+        primitives::uuid::Uuid,
     };
-    use crabka_protocol::primitives::uuid::Uuid;
+
+    use super::*;
 
     fn response(errors: &[i16]) -> OffsetCommitResponse {
         OffsetCommitResponse {

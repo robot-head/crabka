@@ -21,25 +21,35 @@
 //! `over_time_sample_from_series` (which filters on `range_start < ts <=
 //! range_end`).
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
-use arrow::array::{ArrayRef, Float64Array, Int64Array, StringArray};
-use arrow::datatypes::{DataType, Field, Schema};
-use arrow::record_batch::RecordBatch;
+use arrow::{
+    array::{ArrayRef, Float64Array, Int64Array, StringArray},
+    datatypes::{DataType, Field, Schema},
+    record_batch::RecordBatch,
+};
 use crabka_blockstore::{Labels, SeriesFingerprint};
-use datafusion::catalog::MemTable;
-use datafusion::execution::FunctionRegistry;
-use datafusion::logical_expr::{Expr, Extension, LogicalPlan, LogicalPlanBuilder, col, lit};
-use datafusion::prelude::SessionContext;
+use datafusion::{
+    catalog::MemTable,
+    execution::FunctionRegistry,
+    logical_expr::{Expr, Extension, LogicalPlan, LogicalPlanBuilder, col, lit},
+    prelude::SessionContext,
+};
 
-use crate::PromqlError;
-use crate::error::Result;
-use crate::extension::normalize::SeriesNormalize;
-use crate::extension::planner::prom_session_context;
-use crate::extension::range_manipulate::{RANGE_SUFFIX, RangeManipulate};
-use crate::extension::series_divide::SeriesDivide;
-use crate::functions::OverTimeFamily;
+use crate::{
+    PromqlError,
+    error::Result,
+    extension::{
+        normalize::SeriesNormalize,
+        planner::prom_session_context,
+        range_manipulate::{RANGE_SUFFIX, RangeManipulate},
+        series_divide::SeriesDivide,
+    },
+    functions::OverTimeFamily,
+};
 
 /// Leaf-batch column carrying the per-sample timestamp in epoch milliseconds.
 pub const TIME_COLUMN: &str = "timestamp";
@@ -242,8 +252,7 @@ fn build_leaf_batch(
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
-    use assert2::check;
+    use assert2::{assert, check};
 
     use super::*;
 

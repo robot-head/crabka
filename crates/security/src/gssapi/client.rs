@@ -1,5 +1,7 @@
-use super::security_layer::{SecurityLayer, decode_offer_layers};
-use super::{GssError, GssInitiator, InitStep};
+use super::{
+    GssError, GssInitiator, InitStep,
+    security_layer::{SecurityLayer, decode_offer_layers},
+};
 
 /// Result of feeding one server token to the initiate exchange.
 #[derive(Debug)]
@@ -167,9 +169,10 @@ impl GssapiClientExchange {
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
+
     use super::*;
     use crate::gssapi::{GssError, GssInitiator, InitStep};
-    use assert2::assert;
 
     struct FakeInitiator {
         done: bool,

@@ -8,20 +8,18 @@
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
+use crabka_protocol::owned::{
+    heartbeat_request::HeartbeatRequest, join_group_request::JoinGroupRequest,
+    leave_group_request::LeaveGroupRequest, leave_group_response::MemberResponse,
+    sync_group_request::SyncGroupRequest,
+};
 use uuid::Uuid;
 
-use crabka_protocol::owned::heartbeat_request::HeartbeatRequest;
-use crabka_protocol::owned::join_group_request::JoinGroupRequest;
-use crabka_protocol::owned::leave_group_request::LeaveGroupRequest;
-use crabka_protocol::owned::leave_group_response::MemberResponse;
-use crabka_protocol::owned::sync_group_request::SyncGroupRequest;
-
-use crate::codes;
-
-use super::actor::{JoinResult, JoinResultMember, SyncResult};
-use super::classic_state::{
-    AddMemberOutcome, Group as ClassicState, GroupState, Member, select_protocol,
+use super::{
+    actor::{JoinResult, JoinResultMember, SyncResult},
+    classic_state::{AddMemberOutcome, Group as ClassicState, GroupState, Member, select_protocol},
 };
+use crate::codes;
 
 const DEFAULT_SESSION_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_REBALANCE_TIMEOUT_MS: u64 = 60_000;
@@ -470,11 +468,13 @@ pub(super) fn validate_commit(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
-    use crabka_protocol::owned::join_group_request::JoinGroupRequestProtocol;
-    use crabka_protocol::owned::leave_group_request::MemberIdentity;
-    use crabka_protocol::owned::sync_group_request::SyncGroupRequestAssignment;
+    use crabka_protocol::owned::{
+        join_group_request::JoinGroupRequestProtocol, leave_group_request::MemberIdentity,
+        sync_group_request::SyncGroupRequestAssignment,
+    };
+
+    use super::*;
 
     fn join_req(member_id: &str, instance: Option<&str>) -> JoinGroupRequest {
         JoinGroupRequest {

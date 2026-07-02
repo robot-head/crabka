@@ -98,8 +98,7 @@ pub fn assign_nested_set(spans: &[SpanNode]) -> Vec<NestedSet> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::mpsc;
-    use std::time::Duration;
+    use std::{sync::mpsc, time::Duration};
 
     use assert2::assert;
 

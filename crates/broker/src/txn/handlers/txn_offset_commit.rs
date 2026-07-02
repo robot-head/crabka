@@ -23,26 +23,34 @@
 //!   `TOPIC_AUTHORIZATION_FAILED (29)` on the rows of that topic.
 
 use bytes::{Bytes, BytesMut};
-
 use crabka_metadata::{AclOperation, ResourceType};
-use crabka_protocol::owned::txn_offset_commit_request::TxnOffsetCommitRequest;
-use crabka_protocol::owned::txn_offset_commit_response::{
-    TxnOffsetCommitResponse, TxnOffsetCommitResponsePartition, TxnOffsetCommitResponseTopic,
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        txn_offset_commit_request::TxnOffsetCommitRequest,
+        txn_offset_commit_response::{
+            TxnOffsetCommitResponse, TxnOffsetCommitResponsePartition, TxnOffsetCommitResponseTopic,
+        },
+    },
+    records::{Attributes, Record, RecordBatch},
 };
-use crabka_protocol::records::{Attributes, Record, RecordBatch};
-use crabka_protocol::{Decode, Encode};
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize_topics};
-use crate::broker::Broker;
-use crate::codes;
-use crate::coordinator::bootstrap::{OFFSETS_PARTITION, OFFSETS_TOPIC};
-use crate::coordinator::persistence::OffsetCommitValue;
-use crate::coordinator::unified::actor::{GroupKindTag, validate_group_commit};
-use crate::coordinator::unified::classic_state::OffsetEntry;
-use crate::coordinator::unified::streams::actor::validate_streams_group_commit;
-use crate::error::BrokerError;
-use crate::txn::coordinator::OffsetKey;
-use crate::txn::util::now_millis;
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult, authorize_topics},
+    broker::Broker,
+    codes,
+    coordinator::{
+        bootstrap::{OFFSETS_PARTITION, OFFSETS_TOPIC},
+        persistence::OffsetCommitValue,
+        unified::{
+            actor::{GroupKindTag, validate_group_commit},
+            classic_state::OffsetEntry,
+            streams::actor::validate_streams_group_commit,
+        },
+    },
+    error::BrokerError,
+    txn::{coordinator::OffsetKey, util::now_millis},
+};
 
 #[tracing::instrument(
     name = "handle_txn_offset_commit",
@@ -333,16 +341,14 @@ fn encode_err_all(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
-    use std::path::Path;
-    use std::sync::Arc;
+    use std::{collections::HashSet, path::Path, sync::Arc};
 
     use assert2::{assert, check};
     use crabka_log::{Log, LogConfig};
-    use crabka_protocol::owned::txn_offset_commit_request::{
-        TxnOffsetCommitRequestPartition, TxnOffsetCommitRequestTopic,
+    use crabka_protocol::owned::{
+        txn_offset_commit_request::{TxnOffsetCommitRequestPartition, TxnOffsetCommitRequestTopic},
+        txn_offset_commit_response::TxnOffsetCommitResponse,
     };
-    use crabka_protocol::owned::txn_offset_commit_response::TxnOffsetCommitResponse;
 
     use super::*;
     use crate::partition_registry::PartitionRegistry;

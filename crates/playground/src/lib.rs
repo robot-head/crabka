@@ -135,8 +135,9 @@ fn voter_ids(voters: u32) -> Vec<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serde_json::Value;
+
+    use super::*;
 
     fn state(p: &Playground) -> Value {
         serde_json::from_str(&p.state()).expect("state is valid JSON")

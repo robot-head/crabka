@@ -1,20 +1,22 @@
 //! Session store over the byte backend — `SessionKeySchema` keys (`key‖end‖start`),
 //! raw aggregate values. Third typed store beside `KeyValueBytesStore` and
 //! `WindowBytesStore`. Supports the JVM session-merge fetch (`find_sessions`).
-use std::any::Any;
-use std::sync::{Arc, Mutex};
+use std::{
+    any::Any,
+    sync::{Arc, Mutex},
+};
 
 use async_trait::async_trait;
 use bytes::Bytes;
 
-use crate::processor::record::RecordContext;
-use crate::processor::serde::Serde;
-use crate::store::api::StateStore;
-use crate::store::byte::{ByteKeyValueStore, InMemoryBytes};
-use crate::store::cache::named::NamedCache;
-use crate::store::cache::session::CachingSessionStore;
-use crate::store::session_schema::{
-    session_end_of, session_key, session_key_bytes_of, session_start_of,
+use crate::{
+    processor::{record::RecordContext, serde::Serde},
+    store::{
+        api::StateStore,
+        byte::{ByteKeyValueStore, InMemoryBytes},
+        cache::{named::NamedCache, session::CachingSessionStore},
+        session_schema::{session_end_of, session_key, session_key_bytes_of, session_start_of},
+    },
 };
 
 /// The session store's backing: either a plain boxed byte store or a record-cache
@@ -231,9 +233,13 @@ impl<K: Send + 'static, V: Send + 'static> StateStore for SessionBytesStore<K, V
         buffer: &mut std::collections::VecDeque<(usize, crate::processor::erased::ErasedRecord)>,
         children: &[usize],
     ) {
-        use crate::dsl::processors::change::Change;
-        use crate::dsl::windows::{Window, Windowed};
-        use crate::processor::erased::ErasedRecord;
+        use crate::{
+            dsl::{
+                processors::change::Change,
+                windows::{Window, Windowed},
+            },
+            processor::erased::ErasedRecord,
+        };
         let Backing::Cached(cache) = &self.backing else {
             return;
         };
@@ -528,8 +534,10 @@ mod tests {
 
     #[tokio::test]
     async fn flush_cache_into_emits_deduped_session_change() {
-        use crate::dsl::processors::change::Change;
-        use crate::dsl::windows::{Window, Windowed};
+        use crate::dsl::{
+            processors::change::Change,
+            windows::{Window, Windowed},
+        };
         let mut s = cached_store();
         // Seed a committed value (flush it through + clear the changelog buffer).
         s.set_record_context(ctx_at(0));

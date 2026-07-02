@@ -17,18 +17,19 @@ pub(crate) mod write;
 
 #[cfg(test)]
 pub(crate) mod test_support {
-    use std::path::Path;
-    use std::sync::Arc;
+    use std::{path::Path, sync::Arc};
 
     use crabka_log::{Log, LogConfig};
 
-    use crate::broker::{Broker, BrokerHandle};
-    use crate::config::BrokerConfig;
-    use crate::partition_registry::PartitionRegistry;
-    use crate::share_coordinator::bootstrap;
-    use crate::share_coordinator::config::ShareCoordinatorConfig;
-    use crate::share_coordinator::coordinator::ShareCoordinator;
-    use crate::share_coordinator::persistence::StateBatch;
+    use crate::{
+        broker::{Broker, BrokerHandle},
+        config::BrokerConfig,
+        partition_registry::PartitionRegistry,
+        share_coordinator::{
+            bootstrap, config::ShareCoordinatorConfig, coordinator::ShareCoordinator,
+            persistence::StateBatch,
+        },
+    };
 
     pub(crate) const VERSION: i16 = 0;
 

@@ -28,10 +28,9 @@
 //!   `parse_create_topics` / `parse_delete_topics` / `parse_create_partitions`
 //!   is fully exercised.
 
-use assert2::{assert, check};
-use std::collections::BTreeMap;
-use std::time::Duration;
+use std::{collections::BTreeMap, time::Duration};
 
+use assert2::{assert, check};
 use crabka_client_admin::{AdminClient, CreatePartitionsOp, CreateTopicSpec, IncrementalAlterOp};
 
 #[path = "../../broker/tests/support/mod.rs"]

@@ -16,10 +16,12 @@ use std::collections::{BTreeMap, HashMap};
 
 use uuid::Uuid;
 
-use crate::error::RemoteStorageError;
-use crate::metadata::{
-    RemoteLogSegmentMetadata, RemoteLogSegmentMetadataUpdate, RemoteLogSegmentState,
-    RemotePartitionDeleteState,
+use crate::{
+    error::RemoteStorageError,
+    metadata::{
+        RemoteLogSegmentMetadata, RemoteLogSegmentMetadataUpdate, RemoteLogSegmentState,
+        RemotePartitionDeleteState,
+    },
 };
 
 #[derive(Debug, Default)]
@@ -209,10 +211,10 @@ fn sort_by_start_offset(segments: &mut [RemoteLogSegmentMetadata]) {
 
 #[cfg(test)]
 mod tests {
+    use assert2::{assert, check};
+
     use super::*;
     use crate::metadata::{CustomMetadata, RemoteLogSegmentId, TopicIdPartition};
-    use assert2::assert;
-    use assert2::check;
 
     fn tp() -> TopicIdPartition {
         TopicIdPartition::new(Uuid::from_u128(1), "t", 0)

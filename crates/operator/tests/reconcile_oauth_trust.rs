@@ -9,15 +9,18 @@
 //! integration tests exercise the Secret-touching code paths and the
 //! status-condition wiring end-to-end.
 
-use assert2::assert;
 use std::sync::Arc;
 
+use assert2::assert;
 use base64::Engine as _;
-use crabka_operator::controller::kafka::reconcile as reconcile_kafka;
-use crabka_operator::controller::kafka_node_pool::reconcile as reconcile_pool;
-use crabka_operator::crd::{
-    Kafka, KafkaSpec, Listener, ListenerAuthentication, ListenerAuthenticationOAuth, ListenerType,
-    TlsTrustedCertificate,
+use crabka_operator::{
+    controller::{
+        kafka::reconcile as reconcile_kafka, kafka_node_pool::reconcile as reconcile_pool,
+    },
+    crd::{
+        Kafka, KafkaSpec, Listener, ListenerAuthentication, ListenerAuthenticationOAuth,
+        ListenerType, TlsTrustedCertificate,
+    },
 };
 use http::Method;
 

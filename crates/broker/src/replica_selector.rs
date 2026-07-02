@@ -66,8 +66,9 @@ impl ReplicaSelectorKind {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     fn view(node_id: i32, rack: &str, in_isr: bool) -> ReplicaView {
         ReplicaView {

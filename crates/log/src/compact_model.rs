@@ -50,8 +50,10 @@
 //! and a `#[should_panic]` test proves the control-not-deduped assert fires
 //! against it (RED witness).
 
-use std::collections::{HashMap, HashSet};
-use std::time::Duration;
+use std::{
+    collections::{HashMap, HashSet},
+    time::Duration,
+};
 
 use stateright::{Checker, Model, Property};
 

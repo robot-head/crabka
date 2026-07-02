@@ -233,10 +233,10 @@ fn get_nullable_bytes(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::assert;
-    use assert2::check;
+    use assert2::{assert, check};
     use bytes::BytesMut;
+
+    use super::*;
 
     fn fixture_v0() -> Message {
         Message {

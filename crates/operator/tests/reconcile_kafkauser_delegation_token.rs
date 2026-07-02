@@ -16,12 +16,13 @@
 //! broker-side act-as wire path is covered by `crabka_broker`'s own
 //! integration tests.
 
-use assert2::{assert, check};
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
-use crabka_operator::controller::user::reconcile;
-use crabka_operator::crd::{Authentication, DelegationTokenAuth, KafkaUser, KafkaUserSpec};
+use assert2::{assert, check};
+use crabka_operator::{
+    controller::user::reconcile,
+    crd::{Authentication, DelegationTokenAuth, KafkaUser, KafkaUserSpec},
+};
 use http::Method;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
 use serde_json::json;
@@ -29,8 +30,11 @@ use serde_json::json;
 #[path = "shared/mod.rs"]
 mod shared;
 
-use shared::fake_admin::{FakeAdminClient, RecordedCall};
-use shared::{MockRule, MockState, fixture_ctx, json_response, mock_client};
+use shared::{
+    MockRule, MockState,
+    fake_admin::{FakeAdminClient, RecordedCall},
+    fixture_ctx, json_response, mock_client,
+};
 
 const CLUSTER: &str = "demo";
 const NS: &str = "y";

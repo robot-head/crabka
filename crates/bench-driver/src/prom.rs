@@ -2,8 +2,7 @@
 //! queries at scenario end to capture resource usage on the broker pods
 //! and (Strimzi only) JVM heap / non-heap from the JMX exporter.
 
-use std::collections::BTreeMap;
-use std::time::Duration;
+use std::{collections::BTreeMap, time::Duration};
 
 use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
@@ -287,8 +286,9 @@ struct PromResult {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn parses_success_with_one_result() {

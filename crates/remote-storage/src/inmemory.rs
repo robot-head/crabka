@@ -2,17 +2,18 @@
 //! [`RemoteLogMetadataManager`], mirroring Kafka's test fixture of the same
 //! name. Tiered-storage tests run against this manager.
 
-use std::collections::HashMap;
-use std::sync::Mutex;
+use std::{collections::HashMap, sync::Mutex};
 
-use crate::cache::RemoteLogMetadataCache;
-use crate::dump::{PartitionDump, RlmmCacheDump};
-use crate::error::RemoteStorageError;
-use crate::metadata::{
-    RemoteLogSegmentMetadata, RemoteLogSegmentMetadataUpdate, RemotePartitionDeleteMetadata,
-    RemotePartitionDeleteState, TopicIdPartition,
+use crate::{
+    cache::RemoteLogMetadataCache,
+    dump::{PartitionDump, RlmmCacheDump},
+    error::RemoteStorageError,
+    metadata::{
+        RemoteLogSegmentMetadata, RemoteLogSegmentMetadataUpdate, RemotePartitionDeleteMetadata,
+        RemotePartitionDeleteState, TopicIdPartition,
+    },
+    metadata_manager::RemoteLogMetadataManager,
 };
-use crate::metadata_manager::RemoteLogMetadataManager;
 
 /// In-memory [`RemoteLogMetadataManager`]: one
 /// `RemoteLogMetadataCache` per partition behind a single
@@ -175,12 +176,12 @@ impl RemoteLogMetadataManager for InmemoryRemoteLogMetadataManager {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::assert;
-    use assert2::check;
     use std::collections::BTreeMap;
+
+    use assert2::{assert, check};
     use uuid::Uuid;
 
+    use super::*;
     use crate::metadata::{
         CustomMetadata, RemoteLogSegmentId, RemoteLogSegmentState, RemotePartitionDeleteState,
     };

@@ -5,13 +5,11 @@
 //! - [`swap_orphan_recover`] handles `.swap` files left behind by an
 //!   interrupted [`crate::compact::atomic_swap`].
 
-use std::collections::HashSet;
-use std::path::Path;
+use std::{collections::HashSet, path::Path};
 
 use tracing::instrument;
 
-use crate::error::LogError;
-use crate::name;
+use crate::{error::LogError, name};
 
 /// Heal any `<base>.log.swap` triples found in `dir`:
 ///
@@ -106,9 +104,10 @@ fn swap_triple(dir: &Path, base: i64, ext: &str) -> std::path::PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::check;
     use tempfile::tempdir;
+
+    use super::*;
 
     fn touch(path: &std::path::Path) {
         std::fs::File::create(path).unwrap();

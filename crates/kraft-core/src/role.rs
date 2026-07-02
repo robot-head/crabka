@@ -84,8 +84,9 @@ impl Role {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
     #[test]
     fn role_defaults_to_unattached() {
         let r = Role::default();

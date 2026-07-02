@@ -15,25 +15,25 @@
 //! The result is a `KTable<Windowed<K>, _>` whose changelog is logged with
 //! `compact,delete` retention derived from the window size and grace.
 
-use std::any::Any;
-use std::cell::RefCell;
-use std::marker::PhantomData;
-use std::rc::Rc;
+use std::{any::Any, cell::RefCell, marker::PhantomData, rc::Rc};
 
-use crate::dsl::builder::InternalStreamsBuilder;
-use crate::dsl::config::Materialized;
-use crate::dsl::emit::EmitStrategy;
-use crate::dsl::graph::{GraphNodeKind, LowerState, NodeId};
-use crate::dsl::kgrouped::{KGroupedStream, RepartitionLowerFn, mint_store_name};
-use crate::dsl::ktable::KTable;
-use crate::dsl::ktable::SuppressStoreFactory;
-use crate::dsl::names;
-use crate::dsl::processors::window_aggregate::{
-    KStreamWindowAggregateProcessor, KStreamWindowReduceProcessor,
+use crate::{
+    dsl::{
+        builder::InternalStreamsBuilder,
+        config::Materialized,
+        emit::EmitStrategy,
+        graph::{GraphNodeKind, LowerState, NodeId},
+        kgrouped::{KGroupedStream, RepartitionLowerFn, mint_store_name},
+        ktable::{KTable, SuppressStoreFactory},
+        names,
+        processors::window_aggregate::{
+            KStreamWindowAggregateProcessor, KStreamWindowReduceProcessor,
+        },
+        windows::{TimeWindowedSerde, TimeWindows, Windowed},
+    },
+    processor::serde::{DefaultSerde, Serde},
+    topology::NodeHandle,
 };
-use crate::dsl::windows::{TimeWindowedSerde, TimeWindows, Windowed};
-use crate::processor::serde::{DefaultSerde, Serde};
-use crate::topology::NodeHandle;
 
 /// Handle produced by [`KGroupedStream::windowed_by`]; terminal windowed
 /// aggregations consume it.
@@ -506,11 +506,15 @@ where
 mod tests {
     use assert2::check;
 
-    use crate::dsl::StreamsBuilder;
-    use crate::dsl::emit::EmitStrategy;
-    use crate::dsl::windows::{TimeWindowedSerde, TimeWindows, Window, Windowed};
-    use crate::processor::serde::{Consumed, I64Serde, Produced, StringSerde};
-    use crate::test_driver::TopologyTestDriver;
+    use crate::{
+        dsl::{
+            StreamsBuilder,
+            emit::EmitStrategy,
+            windows::{TimeWindowedSerde, TimeWindows, Window, Windowed},
+        },
+        processor::serde::{Consumed, I64Serde, Produced, StringSerde},
+        test_driver::TopologyTestDriver,
+    };
 
     /// Sub-task 3d-ii: an emit-on-update (default) windowed aggregate store is
     /// marked caching, so with a positive cache budget it lands in `cache_owner`.

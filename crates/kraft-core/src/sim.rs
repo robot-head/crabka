@@ -17,11 +17,13 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use crate::action::{Action, TimerKind};
-use crate::core::QuorumStateMachine;
-use crate::event::{Event, LogEnd};
-use crate::role::Role;
-use crate::types::{LeaderEpoch, LogView, NodeId, QuorumState, SimInstant};
+use crate::{
+    action::{Action, TimerKind},
+    core::QuorumStateMachine,
+    event::{Event, LogEnd},
+    role::Role,
+    types::{LeaderEpoch, LogView, NodeId, QuorumState, SimInstant},
+};
 
 // --------------------------------------------------------------------------
 // Recorded trace types
@@ -1087,8 +1089,9 @@ fn message_duplication() -> ScenarioTrace {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
+
+    use super::*;
 
     #[test]
     fn returns_three_traces() {

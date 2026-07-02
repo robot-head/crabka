@@ -4,8 +4,10 @@
 
 use assert2::assert;
 use bytes::BytesMut;
-use crabka_protocol::owned::request_header::{MAX_VERSION, MIN_VERSION, RequestHeader};
-use crabka_protocol::{Decode, Encode, UnknownTaggedFields};
+use crabka_protocol::{
+    Decode, Encode, UnknownTaggedFields,
+    owned::request_header::{MAX_VERSION, MIN_VERSION, RequestHeader},
+};
 
 #[test]
 fn owned_request_header_null_client_id_roundtrips() {

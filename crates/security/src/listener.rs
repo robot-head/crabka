@@ -22,8 +22,9 @@ impl ListenerProtocol {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn tls_and_sasl_flags_per_protocol() {

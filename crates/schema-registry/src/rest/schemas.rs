@@ -1,12 +1,16 @@
 //! `/schemas/*` read endpoints.
 
-use axum::extract::{Path, Query, State};
-use axum::response::Response;
+use axum::{
+    extract::{Path, Query, State},
+    response::Response,
+};
 
-use crate::error::SrError;
-use crate::rest::{
-    AppState, DeletedQ,
-    response::{ok_json, ok_raw},
+use crate::{
+    error::SrError,
+    rest::{
+        AppState, DeletedQ,
+        response::{ok_json, ok_raw},
+    },
 };
 
 /// GET /schemas/ids/{id}

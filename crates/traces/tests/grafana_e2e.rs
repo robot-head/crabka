@@ -45,45 +45,48 @@
 //! consumer (Kafka is out of scope for a Grafana E2E). This is strictly
 //! stronger than the two-ends approximation in `tempo_differential.rs` LEG 5.
 
-use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
 
 use assert2::{assert, check};
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::{
+    body::Body,
+    http::{Request, StatusCode},
+};
 use base64::Engine as _;
 use crabka_traceql::{
     AttrValue as TraceqlAttrValue, EngineOpts, InMemorySpanStore, InputSpan, TraceqlEngine,
 };
-use crabka_traces::distributor::{
-    self, DistributorState, JaegerGrpcService, OtlpGrpcService, WalSink,
+use crabka_traces::{
+    AttrValue, Span, SpanRecord, TracesError,
+    distributor::{self, DistributorState, JaegerGrpcService, OtlpGrpcService, WalSink},
+    metricsgen::{
+        MetricsGenConfig, MetricsGenService, MockSpanSource, PrometheusRemoteWriteSink,
+        SpanKind as MetricsSpanKind, SpanRecord as MetricsSpanRecord,
+        StatusCode as MetricsStatusCode, SystemClock,
+    },
+    querier::http::{HttpConfig, router_with_config},
+    wire::jaeger_grpc::api_v2::collector_service_server::CollectorService,
 };
-use crabka_traces::metricsgen::{
-    MetricsGenConfig, MetricsGenService, MockSpanSource, PrometheusRemoteWriteSink,
-    SpanKind as MetricsSpanKind, SpanRecord as MetricsSpanRecord, StatusCode as MetricsStatusCode,
-    SystemClock,
-};
-use crabka_traces::querier::http::{HttpConfig, router_with_config};
-use crabka_traces::wire::jaeger_grpc::api_v2::collector_service_server::CollectorService;
-use crabka_traces::{AttrValue, Span, SpanRecord, TracesError};
 use http_body_util::BodyExt as _;
-use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
-use opentelemetry_proto::tonic::collector::trace::v1::trace_service_server::TraceService;
-use opentelemetry_proto::tonic::common::v1::{
-    AnyValue, InstrumentationScope, KeyValue as OtlpKeyValue, any_value::Value,
-};
-use opentelemetry_proto::tonic::resource::v1::Resource;
-use opentelemetry_proto::tonic::trace::v1::{
-    ResourceSpans, ScopeSpans, Span as OtlpSpan, Status as OtlpStatus, TracesData,
+use opentelemetry_proto::tonic::{
+    collector::trace::v1::{ExportTraceServiceRequest, trace_service_server::TraceService},
+    common::v1::{AnyValue, InstrumentationScope, KeyValue as OtlpKeyValue, any_value::Value},
+    resource::v1::Resource,
+    trace::v1::{ResourceSpans, ScopeSpans, Span as OtlpSpan, Status as OtlpStatus, TracesData},
 };
 use prost::Message as _;
 use prost_types::{Duration as ProstDuration, Timestamp as ProstTimestamp};
 use reqwest::StatusCode as ReqwestStatusCode;
 use serde_json::{Value as JsonValue, json};
-use testcontainers::core::{Host, IntoContainerPort, WaitFor};
-use testcontainers::runners::AsyncRunner;
-use testcontainers::{ContainerAsync, CopyDataSource, CopyTargetOptions, GenericImage, ImageExt};
+use testcontainers::{
+    ContainerAsync, CopyDataSource, CopyTargetOptions, GenericImage, ImageExt,
+    core::{Host, IntoContainerPort, WaitFor},
+    runners::AsyncRunner,
+};
 use tonic::Request as GrpcRequest;
 use tower::ServiceExt as _;
 

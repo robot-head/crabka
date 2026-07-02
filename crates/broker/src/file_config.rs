@@ -7,10 +7,9 @@
 
 use std::net::SocketAddr;
 
+use crabka_security::ListenerProtocol;
 use schemars::JsonSchema;
 use serde::Deserialize;
-
-use crabka_security::ListenerProtocol;
 
 use crate::config::ListenerSpec;
 
@@ -1490,8 +1489,9 @@ impl FileListener {
 
 #[cfg(test)]
 mod listener_auth_tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn file_listener_parses_per_listener_tls_config_inline() {
@@ -1575,9 +1575,11 @@ client_auth = "Required"
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::{assert, check};
     use std::sync::{Mutex, OnceLock};
+
+    use assert2::{assert, check};
+
+    use super::*;
 
     /// Serializes any test that mutates process-wide env vars. Tests in
     /// the same `cargo test` process run on multiple threads by default,
@@ -2782,8 +2784,9 @@ super_users = ["ANONYMOUS", "admin"]
 
     #[test]
     fn authorization_section_simple_builds_simple_acl_authorizer() {
-        use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
         use crabka_metadata::{AclOperation, MetadataImage, ResourceType};
+
+        use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 
         let toml = r#"
 [authorization]
@@ -2833,8 +2836,9 @@ super_users = ["admin"]
 
     #[test]
     fn authorization_section_opa_builds_opa_authorizer() {
-        use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
         use crabka_metadata::{AclOperation, MetadataImage, ResourceType};
+
+        use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 
         // `OpaAuthorizer::new` captures `Handle::try_current()` — needs
         // an active tokio runtime. `Runtime::new()` defaults to
@@ -2894,8 +2898,9 @@ expire_after_ms = 60000
         // And the built authorizer must Deny on OPA error (fail-closed).
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            use crate::authorizer::{AuthorizationRequest, AuthorizationResult, Authorizer};
             use crabka_metadata::{AclOperation, MetadataImage, ResourceType};
+
+            use crate::authorizer::{AuthorizationRequest, AuthorizationResult, Authorizer};
 
             let auth = crate::authorizer::opa::OpaAuthorizer::new(
                 std::collections::HashSet::new(),
@@ -2936,8 +2941,9 @@ url = "http://opa.invalid:8181/v1/data/k/a"
 
     #[test]
     fn authorization_section_absent_defaults_to_allow_all() {
-        use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
         use crabka_metadata::{AclOperation, MetadataImage, ResourceType};
+
+        use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 
         let file: FileConfig = toml::from_str("").unwrap();
         let mut cfg = crate::config::BrokerConfig::default();

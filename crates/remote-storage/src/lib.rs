@@ -38,13 +38,13 @@
 //! ## Filesystem-backed remote tier
 //!
 //! ```no_run
+//! use std::{collections::BTreeMap, path::PathBuf};
+//!
 //! use bytes::Bytes;
 //! use crabka_remote_storage::{
 //!     IndexType, LocalTieredStorage, LogSegmentData, RemoteLogSegmentId,
 //!     RemoteLogSegmentMetadata, RemoteLogSegmentState, RemoteStorageManager, TopicIdPartition,
 //! };
-//! use std::collections::BTreeMap;
-//! use std::path::PathBuf;
 //! use uuid::Uuid;
 //!
 //! # fn run() -> Result<(), Box<dyn std::error::Error>> {

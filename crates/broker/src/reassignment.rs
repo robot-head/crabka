@@ -167,13 +167,19 @@ pub(crate) async fn compute_reassignment_progress(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::{
+        sync::{
+            Mutex,
+            atomic::{AtomicBool, Ordering},
+        },
+        time::Duration,
+    };
+
     use assert2::{assert, check};
     use crabka_metadata::{BrokerRegistrationRecord, MetadataImage, MetadataRecord, TopicRecord};
-    use std::sync::Mutex;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::time::Duration;
     use uuid::Uuid;
+
+    use super::*;
 
     struct MockReassignmentController {
         is_leader: AtomicBool,

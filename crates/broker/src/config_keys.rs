@@ -23,8 +23,7 @@
 // modules land they appear unused to the compiler.
 #![allow(dead_code)]
 
-use std::collections::BTreeMap;
-use std::time::Duration;
+use std::{collections::BTreeMap, time::Duration};
 
 use crabka_log::LogConfig;
 
@@ -474,8 +473,9 @@ pub fn topic_config_docs() -> Vec<TopicConfigDoc> {
 
 #[cfg(test)]
 mod doc_tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn topic_config_docs_cover_known_keys() {
@@ -523,8 +523,9 @@ mod doc_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn validate_retention_ms_boundary_cases() {
@@ -952,8 +953,9 @@ mod tests {
 
     #[test]
     fn resolve_recovery_strategy_defaults_none_and_reads_override() {
-        use crabka_metadata::{MetadataImage, MetadataRecord, TopicConfigRecord};
         use std::collections::BTreeMap;
+
+        use crabka_metadata::{MetadataImage, MetadataRecord, TopicConfigRecord};
         use uuid::Uuid;
         let mut img = MetadataImage::new(Uuid::nil());
         assert!(resolve_recovery_strategy(&img, "t") == RecoveryStrategy::None);

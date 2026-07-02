@@ -3,8 +3,9 @@
 //! `group_by`/`agg`. Reserved metadata columns (`__key`, …) are preserved across
 //! stateless operators and dropped/recomputed by aggregations (documented below).
 
-use super::codec::{BatchError, RESERVED_COLUMNS};
 use ::polars::prelude::*;
+
+use super::codec::{BatchError, RESERVED_COLUMNS};
 
 /// Sink for batches forwarded by a `ColumnarProcessor`.
 pub struct ColumnarContext {
@@ -96,8 +97,9 @@ impl ColumnarProcessor for BuiltinOp {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::check;
+
+    use super::*;
 
     fn batch() -> DataFrame {
         df!(

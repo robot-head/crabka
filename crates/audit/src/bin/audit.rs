@@ -1,7 +1,6 @@
 //! `crabka-audit` — offline audit-log tools.
 
-use std::path::PathBuf;
-use std::process::ExitCode;
+use std::{path::PathBuf, process::ExitCode};
 
 use clap::{Parser, Subcommand};
 use crabka_audit::{TrustedKeys, verify_partition_dir};

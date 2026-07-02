@@ -4,8 +4,10 @@
 //! The UUID is generated once on first boot, written to `{log_dir}/incarnation_id`
 //! as a lowercase hex string, and reloaded on every subsequent start.
 
-use std::io::{Read, Write};
-use std::path::Path;
+use std::{
+    io::{Read, Write},
+    path::Path,
+};
 
 use uuid::Uuid;
 

@@ -2,11 +2,13 @@
 use assert2::assert;
 mod support;
 
-use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-use crabka_protocol::owned::produce_request::{
-    PartitionProduceData, ProduceRequest, TopicProduceData,
+use crabka_protocol::{
+    owned::{
+        create_topics_request::{CreatableTopic, CreateTopicsRequest},
+        produce_request::{PartitionProduceData, ProduceRequest, TopicProduceData},
+    },
+    primitives::uuid::Uuid as WireUuid,
 };
-use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 
 #[tokio::test]
 async fn produce_unknown_topic_id_returns_unknown_topic_id() {

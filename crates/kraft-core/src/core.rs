@@ -2,11 +2,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::action::{Action, TimerKind};
-use crate::event::{Event, LogEnd};
-use crate::role::{ReplicaProgress, Role};
-use crate::types::{
-    LeaderEpoch, LogOffsetMetadata, LogView, NodeId, QuorumState, ReplicaKey, SimInstant,
+use crate::{
+    action::{Action, TimerKind},
+    event::{Event, LogEnd},
+    role::{ReplicaProgress, Role},
+    types::{LeaderEpoch, LogOffsetMetadata, LogView, NodeId, QuorumState, ReplicaKey, SimInstant},
 };
 
 /// Deterministic per-`(node, epoch)` election-timeout jitter in
@@ -718,10 +718,13 @@ impl QuorumStateMachine {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::event::{Event, LogEnd};
-    use crate::types::*;
     use assert2::{assert, check};
+
+    use super::*;
+    use crate::{
+        event::{Event, LogEnd},
+        types::*,
+    };
 
     struct FakeLog {
         end: i64,

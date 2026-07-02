@@ -2,15 +2,18 @@
 //! membership topic, and a later claim of the same partition (higher offset)
 //! supersedes an earlier one.
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_producer::{Acks, Producer, ProducerRecord};
-use crabka_grpc_gateway::config::GatewayConfig;
-use crabka_grpc_gateway::dedup::membership::{MembershipStore, NodeInfo};
-use crabka_grpc_gateway::dedup::topic::ensure_membership_topic;
+use crabka_grpc_gateway::{
+    config::GatewayConfig,
+    dedup::{
+        membership::{MembershipStore, NodeInfo},
+        topic::ensure_membership_topic,
+    },
+};
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 
@@ -127,6 +130,7 @@ async fn run_membership_builds_routing_with_offset_tiebreak() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn run_membership_tombstone_and_malformed_skip() {
     use std::time::Duration;
+
     use tokio_util::sync::CancellationToken;
 
     let (broker, bootstrap, _dir) = boot().await;

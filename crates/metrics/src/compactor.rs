@@ -1,28 +1,31 @@
 //! Deterministic compactor core for metrics WAL records.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
-use std::time::Duration;
-
-use arrow::array::{
-    ArrayRef, Float64Builder, Int64Builder, MapBuilder, StringBuilder, UInt64Builder,
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+    time::Duration,
 };
-use arrow::datatypes::{DataType, Field};
-use arrow::record_batch::RecordBatch;
+
+use arrow::{
+    array::{ArrayRef, Float64Builder, Int64Builder, MapBuilder, StringBuilder, UInt64Builder},
+    datatypes::{DataType, Field},
+    record_batch::RecordBatch,
+};
 use async_trait::async_trait;
 use crabka_blockstore::{BlockMeta, BlockStoreError, BlockWriter};
 use crabka_client_consumer::{AutoOffsetReset, Consumer, ConsumerError, ConsumerRecord};
 use crabka_telemetry::propagation::{TRACEPARENT, set_remote_parent};
 use futures::TryStreamExt;
-use object_store::path::Path;
-use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
+use object_store::{ObjectStore, ObjectStoreExt, PutPayload, path::Path};
 use serde::{Deserialize, Serialize};
 use tracing::Instrument as _;
 
-use crate::histogram::HistogramCodecError;
-use crate::schema::{exemplar_schema, metadata_schema};
-use crate::wal::{SamplePayload, WalError, WalExemplar, WalRecord};
-use crate::{NativeHistogram, encode_float_samples, encode_native_histograms};
+use crate::{
+    NativeHistogram, encode_float_samples, encode_native_histograms,
+    histogram::HistogramCodecError,
+    schema::{exemplar_schema, metadata_schema},
+    wal::{SamplePayload, WalError, WalExemplar, WalRecord},
+};
 
 /// One sorted float sample row ready for block encoding.
 #[derive(Clone, Debug, PartialEq)]
@@ -1955,23 +1958,23 @@ fn exemplar_row(fingerprint: u64, exemplar: &WalExemplar) -> ExemplarRow {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-    use std::sync::{Arc, Mutex};
+    use std::{
+        collections::BTreeMap,
+        sync::{Arc, Mutex},
+    };
 
     use assert2::{assert, check};
     use async_trait::async_trait;
     use crabka_blockstore::Labels;
-    use object_store::ObjectStore;
-    use object_store::ObjectStoreExt;
-    use object_store::memory::InMemory;
-
-    use crate::FloatRow;
-    use crate::distributor::wal_records_from_series;
-    use crate::wal::{SamplePayload, WalExemplar, WalRecord};
-    use crate::wire::{DecodedExemplar, DecodedSample, DecodedSeries};
-    use crate::{BucketSpan, NativeHistogram, ResetHint};
+    use object_store::{ObjectStore, ObjectStoreExt, memory::InMemory};
 
     use super::{compact_wal_records, encode_tenant_batches};
+    use crate::{
+        BucketSpan, FloatRow, NativeHistogram, ResetHint,
+        distributor::wal_records_from_series,
+        wal::{SamplePayload, WalExemplar, WalRecord},
+        wire::{DecodedExemplar, DecodedSample, DecodedSeries},
+    };
 
     fn labels(pairs: &[(&str, &str)]) -> Labels {
         pairs

@@ -1,15 +1,15 @@
 //! `IQv2` supervisor channel message and per-partition result assembly. This is
 //! the bridge between the public envelope and the byte-level store hook.
 
-use std::any::Any;
-use std::collections::BTreeMap;
+use std::{any::Any, collections::BTreeMap};
 
 use tokio::sync::oneshot;
 
+use super::{
+    request::{PartitionSel, Position, PositionBound},
+    result::{FailureReason, QueryResult, StateQueryResult},
+};
 use crate::store::iq::{Iq2Query, StoreKind};
-
-use super::request::{PartitionSel, Position, PositionBound};
-use super::result::{FailureReason, QueryResult, StateQueryResult};
 
 /// One `IQv2` query addressed to the supervisor (sent on the dedicated `iq2`
 /// channel; the v1 byte channel is untouched).
@@ -68,8 +68,7 @@ pub(crate) fn assemble<R: 'static>(outcome: Iq2Outcome) -> StateQueryResult<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::iqv2::request::Position;
-    use crate::runtime::iqv2::result::FailureReason;
+    use crate::runtime::iqv2::{request::Position, result::FailureReason};
 
     #[test]
     fn assemble_downcasts_success_and_maps_failures() {

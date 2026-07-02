@@ -8,13 +8,12 @@
 //! Byte layout matches Apache Kafka's `TransactionIndex`, so
 //! `kafka-dump-log --offsets-decoder` can dump it.
 
-use std::fs::OpenOptions;
-use std::io::Write;
-use std::path::PathBuf;
+use std::{fs::OpenOptions, io::Write, path::PathBuf};
 
 use tracing::instrument;
-use zerocopy::byteorder::I64;
-use zerocopy::{BigEndian, FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
+use zerocopy::{
+    BigEndian, FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned, byteorder::I64,
+};
 
 use crate::error::LogError;
 
@@ -125,9 +124,10 @@ impl TxnIndex {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
     use tempfile::TempDir;
+
+    use super::*;
 
     #[test]
     fn empty_file_yields_empty_entries() {

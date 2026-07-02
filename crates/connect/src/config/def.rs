@@ -1,11 +1,15 @@
-use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+};
 
 use serde_json::{Map, Value};
 
-use super::error::{ConfigError, ConfigResult};
-use super::resolved::ResolvedConfig;
-use super::secret::{ResolveOptions, SecretRef, SecretResolver, SecretString};
+use super::{
+    error::{ConfigError, ConfigResult},
+    resolved::ResolvedConfig,
+    secret::{ResolveOptions, SecretRef, SecretResolver, SecretString},
+};
 
 /// Incoming connector configuration as a JSON object.
 pub type RawConfig = Map<String, Value>;

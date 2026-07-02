@@ -11,18 +11,16 @@
 //! which client libraries are connecting.
 
 use bytes::{Bytes, BytesMut};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        api_versions_request::ApiVersionsRequest,
+        api_versions_response::{ApiVersionsResponse, FinalizedFeatureKey, SupportedFeatureKey},
+    },
+};
 use futures_util::future::BoxFuture;
 
-use crabka_protocol::Decode;
-use crabka_protocol::Encode;
-use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
-use crabka_protocol::owned::api_versions_response::{
-    ApiVersionsResponse, FinalizedFeatureKey, SupportedFeatureKey,
-};
-
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
+use crate::{broker::Broker, codes, error::BrokerError};
 
 /// First `ApiVersions` request version that carries the KIP-511
 /// `client_software_name` / `client_software_version` fields.
@@ -161,11 +159,11 @@ pub(crate) fn handle(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
     use crabka_metadata::{FeatureLevelRecord, MetadataRecord};
     use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
 
+    use super::*;
     use crate::broker::Broker;
 
     const API_VERSIONS_V3: i16 = 3;

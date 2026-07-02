@@ -52,8 +52,9 @@ impl SaslMechanism {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
+
+    use super::*;
 
     #[test]
     fn wire_name_round_trip() {

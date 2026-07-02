@@ -24,20 +24,25 @@
 //! `ShareFetch` / `ShareAcknowledge` (sequence 0 → 1 → 2 → …). Getting this wrong
 //! makes the broker drop the session (`INVALID_SHARE_SESSION_EPOCH`).
 
-use std::collections::HashMap;
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 
-use crabka_protocol::owned::share_acknowledge_request::{
-    AcknowledgePartition, AcknowledgeTopic, AcknowledgementBatch as AckAckBatch,
-    ShareAcknowledgeRequest,
+use crabka_protocol::{
+    owned::{
+        share_acknowledge_request::{
+            AcknowledgePartition, AcknowledgeTopic, AcknowledgementBatch as AckAckBatch,
+            ShareAcknowledgeRequest,
+        },
+        share_fetch_request::{
+            AcknowledgementBatch as FetchAckBatch, FetchPartition, FetchTopic, ShareFetchRequest,
+        },
+    },
+    primitives::uuid::Uuid as WireUuid,
 };
-use crabka_protocol::owned::share_fetch_request::{
-    AcknowledgementBatch as FetchAckBatch, FetchPartition, FetchTopic, ShareFetchRequest,
-};
-use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 
-use super::consumer::ShareConsumer;
-use super::types::{ShareAckMode, ShareAckType, ShareConsumerRecord};
+use super::{
+    consumer::ShareConsumer,
+    types::{ShareAckMode, ShareAckType, ShareConsumerRecord},
+};
 use crate::error::ConsumerError;
 
 /// `partition_max_bytes` / `max_bytes` budget for a `ShareFetch` (mirrors the

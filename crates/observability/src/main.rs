@@ -6,8 +6,9 @@
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 use clap::Parser;
-use crabka_observability::metrics::ServiceMetrics;
-use crabka_observability::{ServiceConfig, build_service_dependencies, serve_service};
+use crabka_observability::{
+    ServiceConfig, build_service_dependencies, metrics::ServiceMetrics, serve_service,
+};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

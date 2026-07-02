@@ -2,8 +2,10 @@
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
-use crate::ProtocolError;
-use crate::primitives::varint::{get_uvarint, put_uvarint, uvarint_len};
+use crate::{
+    ProtocolError,
+    primitives::varint::{get_uvarint, put_uvarint, uvarint_len},
+};
 
 /// An unknown tagged field that was preserved verbatim during decode.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -157,8 +159,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn empty_tagged_fields() {

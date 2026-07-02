@@ -30,13 +30,13 @@
 //! their own length, and the inline ops are already-built `Bytes`.
 
 use bytes::{BufMut, Bytes, BytesMut};
+use crabka_protocol::{
+    owned::fetch_response::{FetchResponse, FetchWriteOp},
+    records::RecordsPayload,
+};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
-use crabka_protocol::owned::fetch_response::{FetchResponse, FetchWriteOp};
-use crabka_protocol::records::RecordsPayload;
-
-use crate::error::BrokerError;
-use crate::network::codec::MAX_FRAME_BYTES;
+use crate::{error::BrokerError, network::codec::MAX_FRAME_BYTES};
 
 crate::sendfile_cfg! {
     /// Records runs at or above this size on a plaintext connection take the
@@ -595,10 +595,13 @@ fn bsd_sendfile(
 
 #[cfg(test)]
 mod tests {
+    use crabka_protocol::{
+        Encode,
+        owned::fetch_response::{FetchableTopicResponse, PartitionData},
+        records::{Record, RecordBatch, RecordsPayload},
+    };
+
     use super::*;
-    use crabka_protocol::Encode;
-    use crabka_protocol::owned::fetch_response::{FetchableTopicResponse, PartitionData};
-    use crabka_protocol::records::{Record, RecordBatch, RecordsPayload};
 
     fn raw_batch(base: i64) -> Bytes {
         let rb = RecordBatch {
@@ -766,10 +769,11 @@ mod tests {
         target_os = "dragonfly",
     ))]
     mod sendfile_tests {
-        use super::*;
+        use std::{io::Write as _, sync::Arc};
+
         use crabka_protocol::records::FileRegion;
-        use std::io::Write as _;
-        use std::sync::Arc;
+
+        use super::*;
 
         /// Write `bytes` to a temp file and return a single-region
         /// `RecordsPayload::FileRegions` describing the whole file (offset 0).
@@ -905,8 +909,10 @@ mod tests {
         /// partial-write loop in `write_fetch_plan` for real.
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         async fn sendfile_roundtrip_over_tcp_is_byte_exact() {
-            use tokio::io::AsyncReadExt;
-            use tokio::net::{TcpListener, TcpStream};
+            use tokio::{
+                io::AsyncReadExt,
+                net::{TcpListener, TcpStream},
+            };
 
             // A payload comfortably larger than a typical socket buffer so the
             // sendfile loop must iterate across several partial writes.
@@ -960,8 +966,11 @@ mod tests {
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         async fn ktls_sendfile_over_tls_is_byte_exact() {
             use std::sync::Arc;
-            use tokio::io::{AsyncReadExt, AsyncWriteExt};
-            use tokio::net::{TcpListener, TcpStream};
+
+            use tokio::{
+                io::{AsyncReadExt, AsyncWriteExt},
+                net::{TcpListener, TcpStream},
+            };
 
             // The request the client sends before reading the response —
             // mirrors the real broker flow (client sends ApiVersions/Fetch, the

@@ -1,10 +1,11 @@
-use std::collections::BTreeMap;
-use std::fmt;
+use std::{collections::BTreeMap, fmt};
 
 use serde_json::Value;
 
-use super::error::{ConfigError, ConfigResult};
-use super::secret::SecretString;
+use super::{
+    error::{ConfigError, ConfigResult},
+    secret::SecretString,
+};
 
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) enum ResolvedValue {

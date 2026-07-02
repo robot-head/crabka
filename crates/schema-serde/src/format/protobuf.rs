@@ -2,18 +2,19 @@
 //! its descriptor via `ReflectMessage`; the registered schema is the
 //! normalized `.proto` text of its file descriptor.
 
-use std::marker::PhantomData;
-use std::sync::Arc;
+use std::{marker::PhantomData, sync::Arc};
 
 use bytes::Bytes;
 use prost::Message;
 use prost_reflect::ReflectMessage;
 
-use crate::cache::SchemaCache;
-use crate::error::SchemaSerdeError;
-use crate::format::{Binding, SchemaDeserializer, SchemaSerializer, SchemaSubject};
-use crate::subject::{Role, SchemaKind};
-use crate::wire;
+use crate::{
+    cache::SchemaCache,
+    error::SchemaSerdeError,
+    format::{Binding, SchemaDeserializer, SchemaSerializer, SchemaSubject},
+    subject::{Role, SchemaKind},
+    wire,
+};
 
 /// Protobuf serializer/deserializer for a `prost` message `T: ReflectMessage`,
 /// bound to a key/value role; the subject is derived from the topic at call time.
@@ -135,8 +136,9 @@ fn message_index(descriptor: &prost_reflect::MessageDescriptor) -> Vec<i32> {
 pub(crate) mod print {
     use std::fmt::Write as _;
 
-    use prost_reflect::prost_types::field_descriptor_proto::Type;
-    use prost_reflect::prost_types::{FieldDescriptorProto, FileDescriptorProto};
+    use prost_reflect::prost_types::{
+        FieldDescriptorProto, FileDescriptorProto, field_descriptor_proto::Type,
+    };
 
     pub fn file_to_proto(file: &FileDescriptorProto) -> String {
         let mut out = String::new();
@@ -193,11 +195,11 @@ pub(crate) mod print {
 
 #[cfg(test)]
 mod tests {
-    use super::ProtobufSerde;
-    use super::print::file_to_proto;
-    use crate::format::SchemaDeserializer;
     use assert2::check;
     use prost_reflect::prost_types::{DescriptorProto, FieldDescriptorProto, FileDescriptorProto};
+
+    use super::{ProtobufSerde, print::file_to_proto};
+    use crate::format::SchemaDeserializer;
 
     #[test]
     fn renders_minimal_proto_text() {
@@ -280,15 +282,21 @@ mod tests {
 
     #[test]
     fn message_type_metadata_mismatch_rejects_typed_decode() {
-        use crate::cache::{CacheConfig, SchemaCache};
-        use crate::registry::RegistryClient;
-        use crate::wire;
         use bytes::{Buf, BufMut};
-        use prost::encoding::{DecodeContext, WireType};
-        use prost::{DecodeError, Message};
-        use prost_reflect::ReflectMessage;
-        use prost_reflect::prost_types::{DescriptorProto, FileDescriptorProto, FileDescriptorSet};
-        use prost_reflect::{DescriptorPool, MessageDescriptor};
+        use prost::{
+            DecodeError, Message,
+            encoding::{DecodeContext, WireType},
+        };
+        use prost_reflect::{
+            DescriptorPool, MessageDescriptor, ReflectMessage,
+            prost_types::{DescriptorProto, FileDescriptorProto, FileDescriptorSet},
+        };
+
+        use crate::{
+            cache::{CacheConfig, SchemaCache},
+            registry::RegistryClient,
+            wire,
+        };
 
         #[derive(Clone, Debug, Default, PartialEq, Eq)]
         struct TestOrder;

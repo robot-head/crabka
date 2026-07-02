@@ -6,8 +6,10 @@
 #![allow(dead_code)]
 
 use bytes::BufMut;
-use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::TcpStream;
+use tokio::{
+    io::{AsyncRead, AsyncWrite},
+    net::TcpStream,
+};
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 /// Maximum frame size we'll accept (matches Kafka's default
@@ -55,13 +57,15 @@ pub(crate) fn put_uvarint<B: BufMut>(buf: &mut B, mut v: u32) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
     use bytes::{Bytes, BytesMut};
-    use futures_util::SinkExt;
-    use futures_util::StreamExt;
-    use tokio::io::AsyncWriteExt;
-    use tokio::net::{TcpListener, TcpStream};
+    use futures_util::{SinkExt, StreamExt};
+    use tokio::{
+        io::AsyncWriteExt,
+        net::{TcpListener, TcpStream},
+    };
+
+    use super::*;
 
     #[tokio::test]
     async fn roundtrips_a_frame() {

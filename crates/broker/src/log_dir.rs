@@ -193,9 +193,10 @@ pub fn scan_all(log_dirs: &[PathBuf]) -> Result<Vec<(String, i32, PathBuf)>, Bro
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
     use tempfile::tempdir;
+
+    use super::*;
 
     #[test]
     fn round_trip_partition_dir() {

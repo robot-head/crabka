@@ -15,20 +15,24 @@
 //! crate and is path-included below, exactly as `diff_prometheus.rs` does it, so
 //! both differential suites share one corpus definition.
 
-use std::net::SocketAddr;
-use std::sync::Arc;
+use std::{net::SocketAddr, sync::Arc};
 
 use bytes::Bytes;
-use crabka_metrics::distributor::{DistributorState, ProduceError, WalSink};
-use crabka_metrics::{WalRecord, wire::pb};
+use crabka_metrics::{
+    WalRecord,
+    distributor::{DistributorState, ProduceError, WalSink},
+    wire::pb,
+};
 use crabka_promql::WalHead;
 use diff_corpus::{QueryKind, assert_query_equal, query_corpus, seed_dataset};
 use prost::Message;
 use reqwest::StatusCode;
 use serde_json::Value;
-use testcontainers::core::{Host, IntoContainerPort, WaitFor};
-use testcontainers::runners::AsyncRunner;
-use testcontainers::{GenericImage, ImageExt};
+use testcontainers::{
+    GenericImage, ImageExt,
+    core::{Host, IntoContainerPort, WaitFor},
+    runners::AsyncRunner,
+};
 use tokio::sync::oneshot;
 
 #[path = "../../metrics/tests/support/diff_corpus.rs"]

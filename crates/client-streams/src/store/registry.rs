@@ -3,8 +3,10 @@
 
 use std::collections::HashMap;
 
-use crate::store::api::{KeyValueStore, StateStore};
-use crate::store::kv::KeyValueBytesStore;
+use crate::store::{
+    api::{KeyValueStore, StateStore},
+    kv::KeyValueBytesStore,
+};
 
 #[derive(Default)]
 pub(crate) struct StoreRegistry {
@@ -170,10 +172,13 @@ impl StoreRegistry {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::processor::serde::{I64Serde, StringSerde};
-    use crate::store::kv::KeyValueBytesStore;
     use assert2::check;
+
+    use super::*;
+    use crate::{
+        processor::serde::{I64Serde, StringSerde},
+        store::kv::KeyValueBytesStore,
+    };
 
     #[tokio::test]
     async fn register_and_downcast_versioned_store() {

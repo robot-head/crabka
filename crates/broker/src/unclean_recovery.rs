@@ -45,9 +45,7 @@ pub(crate) fn has_newer_leader(responses: &[ReplicaLogInfo], known_leader_epoch:
 // Unclean Recovery Manager (URM): the controller-side orchestrator.
 // ---------------------------------------------------------------------------
 
-use std::collections::HashSet;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use crabka_metadata::{MetadataRecord, PartitionRecord};
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
@@ -55,9 +53,10 @@ use futures_util::FutureExt as _;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tracing::warn;
 
-use crate::config_keys::RecoveryStrategy;
-use crate::heartbeat::controller_state::ControllerLivenessState;
-use crate::network::client::InterBrokerClient;
+use crate::{
+    config_keys::RecoveryStrategy, heartbeat::controller_state::ControllerLivenessState,
+    network::client::InterBrokerClient,
+};
 
 /// Aggressive recovery takes whatever responses arrive within this short
 /// window — it does not wait for slow/unreachable replicas.
@@ -389,8 +388,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     fn ri(broker_id: NodeId, epoch: i32, leo: i64) -> ReplicaLogInfo {
         ReplicaLogInfo {
@@ -440,9 +440,11 @@ mod tests {
 
 #[cfg(test)]
 mod urm_tests {
-    use super::*;
-    use assert2::assert;
     use std::time::Duration;
+
+    use assert2::assert;
+
+    use super::*;
 
     fn info(id: NodeId, leo: i64) -> ReplicaLogInfo {
         ReplicaLogInfo {
@@ -491,9 +493,8 @@ mod urm_tests {
 
 #[cfg(test)]
 mod run_recovery_tests {
-    use super::*;
-    use crate::heartbeat::controller_state::ControllerLivenessState;
-    use crate::metadata_source::MetadataSource;
+    use std::{collections::BTreeSet, net::SocketAddr};
+
     use assert2::assert;
     use crabka_metadata::{
         BrokerRegistrationRecord, MetadataImage, MetadataRecord, PartitionRecord, TopicRecord,
@@ -502,10 +503,13 @@ mod run_recovery_tests {
         AddVoter, Node, QuorumState, RaftError, ReconfigOutcome, RemoveVoter, SnapshotRange,
         UpdateVoter,
     };
-    use std::collections::BTreeSet;
-    use std::net::SocketAddr;
     use tokio::sync::watch;
     use uuid::Uuid;
+
+    use super::*;
+    use crate::{
+        heartbeat::controller_state::ControllerLivenessState, metadata_source::MetadataSource,
+    };
 
     /// Minimal `MetadataSource` for driving `run_recovery`'s control flow. Only
     /// `watch_leader`, `current_image`, and `submit_change` are exercised; the

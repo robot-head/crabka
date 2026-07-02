@@ -93,12 +93,13 @@ pub fn load_bootstrap_records(log_dir: &Path) -> Result<Vec<MetadataRecord>, Bro
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
     use crabka_metadata::ScramCredentialRecord;
     use crabka_security::SaslMechanism;
     use serde_wincode::SerdeCompat;
     use wincode::Serialize;
+
+    use super::*;
 
     fn write_frame(out: &mut Vec<u8>, rec: &MetadataRecord) {
         let bytes = <SerdeCompat<MetadataRecord>>::serialize(rec).unwrap();

@@ -1,13 +1,14 @@
 //! Per-group state for KIP-848 next-gen consumer groups. Owned by exactly
 //! one `actor::GroupActor` task; never shared.
 
-use std::collections::{HashMap, HashSet};
-use std::time::{Duration, Instant};
+use std::{
+    collections::{HashMap, HashSet},
+    time::{Duration, Instant},
+};
 
 use bytes::Bytes;
-use regex::Regex;
-
 use crabka_protocol::primitives::uuid::Uuid;
+use regex::Regex;
 
 use super::persistence_next_gen::MemberAssignmentState;
 
@@ -388,8 +389,9 @@ fn compute_revoke_split(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
+
+    use super::*;
 
     fn member(id: &str) -> MemberState {
         MemberState {

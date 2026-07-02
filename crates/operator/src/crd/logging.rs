@@ -51,8 +51,9 @@ pub struct ConfigMapKeyRef {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn logging_defaults_type_inline() {

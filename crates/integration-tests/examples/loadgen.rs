@@ -14,9 +14,13 @@
 //!   LOAD_ACKS        0 | 1 | all (default 1)
 //!   LOAD_CONSUME     1 to also run a consumer group (default 0)
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    time::{Duration, Instant},
+};
 
 use bytes::Bytes;
 use crabka_client_consumer::{AutoOffsetReset, Consumer};

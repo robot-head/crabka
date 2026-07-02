@@ -42,8 +42,9 @@ pub fn section_front_matter(title: &str, weight: u32, body: &str) -> String {
 /// Returns an error if any directory cannot be created or any file cannot be
 /// written.
 pub fn write_reference_tree(out_dir: &Path) -> anyhow::Result<()> {
-    use crate::{broker, operator, scenarios};
     use std::fs;
+
+    use crate::{broker, operator, scenarios};
     let op_dir = out_dir.join("operator");
     let br_dir = out_dir.join("broker");
     let concepts_dir = out_dir.join("concepts");
@@ -116,9 +117,10 @@ pub fn write_reference_tree(out_dir: &Path) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
     use tempfile::tempdir;
+
+    use super::*;
     #[test]
     fn page_front_matter_wraps_body() {
         let s = page_front_matter("Kafka", 10, "hello");

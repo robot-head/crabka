@@ -6,16 +6,20 @@
 //! each run is fenced with `within_boundary` + `target_state_count` + `timeout`
 //! and MUST be executed under the host memory watchdog while bounds are tuned.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::time::Duration;
+use std::{
+    collections::{BTreeMap, BTreeSet, HashSet},
+    time::Duration,
+};
 
 use crabka_metadata::PartitionRecord;
 use crabka_raft::NodeId;
 use stateright::{Checker, Model, Property};
 
 use super::{FailoverDecision, failover_one};
-use crate::config_keys::RecoveryStrategy;
-use crate::unclean_recovery::{ReplicaLogInfo, has_newer_leader, select_best_replica};
+use crate::{
+    config_keys::RecoveryStrategy,
+    unclean_recovery::{ReplicaLogInfo, has_newer_leader, select_best_replica},
+};
 
 const MAX_STATES: usize = 200_000;
 const MAX_DEPTH: usize = 80;

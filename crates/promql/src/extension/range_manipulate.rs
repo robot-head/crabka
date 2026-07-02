@@ -36,20 +36,23 @@
 //! (`ts == t - range`) is **excluded**. This matches `PromQL` range-selector
 //! semantics. Empty windows produce empty (zero-length) `RangeArray` cells.
 
-use std::fmt;
-use std::sync::Arc;
+use std::{fmt, sync::Arc};
 
-use arrow::array::{ArrayRef, Float64Array, Int64Array, UInt32Array};
-use arrow::compute::take;
-use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
-use arrow::record_batch::RecordBatch;
-use datafusion::common::{DataFusionError, Result as DfResult};
-use datafusion::execution::TaskContext;
-use datafusion::logical_expr::{Expr, LogicalPlan, UserDefinedLogicalNodeCore};
-use datafusion::physical_expr::EquivalenceProperties;
-use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
-use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, SendableRecordBatchStream,
+use arrow::{
+    array::{ArrayRef, Float64Array, Int64Array, UInt32Array},
+    compute::take,
+    datatypes::{DataType, Field, Schema, SchemaRef},
+    record_batch::RecordBatch,
+};
+use datafusion::{
+    common::{DataFusionError, Result as DfResult},
+    execution::TaskContext,
+    logical_expr::{Expr, LogicalPlan, UserDefinedLogicalNodeCore},
+    physical_expr::EquivalenceProperties,
+    physical_plan::{
+        DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, SendableRecordBatchStream,
+        stream::RecordBatchStreamAdapter,
+    },
 };
 use futures::StreamExt;
 
@@ -517,13 +520,15 @@ impl ExecutionPlan for RangeManipulateExec {
 
 #[cfg(test)]
 mod tests {
-    use arrow::array::{Array, DictionaryArray, Float64Array, Int64Array, StringArray};
-    use arrow::compute::concat_batches;
-    use arrow::datatypes::{DataType, Field, Int64Type, Schema};
+    use arrow::{
+        array::{Array, DictionaryArray, Float64Array, Int64Array, StringArray},
+        compute::concat_batches,
+        datatypes::{DataType, Field, Int64Type, Schema},
+    };
     use assert2::{assert, check};
-    use datafusion::datasource::memory::MemorySourceConfig;
-    use datafusion::physical_plan::collect;
-    use datafusion::prelude::SessionContext;
+    use datafusion::{
+        datasource::memory::MemorySourceConfig, physical_plan::collect, prelude::SessionContext,
+    };
 
     use super::*;
 

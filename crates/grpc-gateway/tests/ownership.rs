@@ -3,20 +3,18 @@
 //! retriable Unavailable. Timing-sensitive (group join/rebalance) — generous
 //! waits; the repo has prior consumer-group test-flake history.
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_admin::{AdminClient, CreateTopicSpec};
-use crabka_grpc_gateway::codec::RawCodec;
-use crabka_grpc_gateway::dedup::store::DedupStore;
-use crabka_grpc_gateway::dedup::topic::ensure_dedup_topic;
-use crabka_grpc_gateway::dedup::{DedupEngine, partition_for};
-use crabka_grpc_gateway::error::GatewayError;
-use crabka_grpc_gateway::produce::ProduceCore;
-use crabka_grpc_gateway::types::GatewayRecord;
+use crabka_grpc_gateway::{
+    codec::RawCodec,
+    dedup::{DedupEngine, partition_for, store::DedupStore, topic::ensure_dedup_topic},
+    error::GatewayError,
+    produce::ProduceCore,
+    types::GatewayRecord,
+};
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 

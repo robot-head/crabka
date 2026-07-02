@@ -2,8 +2,7 @@
 //! records; sticky-per-topic for null-key records, rotating only when the
 //! current accumulator drains.
 
-use std::collections::HashMap;
-use std::sync::Mutex;
+use std::{collections::HashMap, sync::Mutex};
 
 #[derive(Debug, Default)]
 pub struct UniformStickyPartitioner {
@@ -106,8 +105,9 @@ fn murmur2(data: &[u8]) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
+
+    use super::*;
 
     #[test]
     fn key_hash_is_stable_across_calls() {

@@ -1,17 +1,24 @@
 //! Distributor role: decode ingress doors, split profiles, and append WAL records.
 
-use std::collections::{BTreeSet, HashMap};
-use std::future::Future;
-use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::{BTreeSet, HashMap},
+    future::Future,
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+};
 
-use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, RawQuery};
-use axum::http::{HeaderMap, StatusCode};
-use axum::response::{IntoResponse, Response};
-use axum::{Extension, Router, routing::post};
-use connectrpc_axum::message::{Code, ConnectError, ConnectRequest, ConnectResponse};
-use connectrpc_axum::{MakeServiceBuilder, MessageLimits};
+use axum::{
+    Extension, Router,
+    body::Bytes,
+    extract::{DefaultBodyLimit, RawQuery},
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
+    routing::post,
+};
+use connectrpc_axum::{
+    MakeServiceBuilder, MessageLimits,
+    message::{Code, ConnectError, ConnectRequest, ConnectResponse},
+};
 use crabka_broker::throttle::TokenBucket;
 use crabka_client_producer::{Header, Producer, ProducerRecord};
 use crabka_pprof::PprofProfile;
@@ -19,19 +26,21 @@ use prost::Message;
 use tokio::net::TcpListener;
 use tracing::Instrument as _;
 
-use crate::error::ProfilesError;
-use crate::ingest::{
-    RelabelConfig, TenantLimitConfig, apply_relabel, cap_session_id, decode_ingest_body,
-    decode_otlp, decode_push, enforce_limits, parse_ingest_query, require_service_name,
-    split_sample_types,
+use crate::{
+    error::ProfilesError,
+    ingest::{
+        RelabelConfig, TenantLimitConfig, apply_relabel, cap_session_id, decode_ingest_body,
+        decode_otlp, decode_push, enforce_limits, parse_ingest_query, require_service_name,
+        split_sample_types,
+    },
+    limits::{Limits, OverridesProvider},
+    metrics::ServiceMetrics,
+    wal::{
+        PROFILES_WAL_TOPIC, ProfileRecord, WalFunction, WalLocation, WalMapping, WalSample,
+        WalSymbolSet, partition_key,
+    },
+    wire::pb,
 };
-use crate::limits::{Limits, OverridesProvider};
-use crate::metrics::ServiceMetrics;
-use crate::wal::{
-    PROFILES_WAL_TOPIC, ProfileRecord, WalFunction, WalLocation, WalMapping, WalSample,
-    WalSymbolSet, partition_key,
-};
-use crate::wire::pb;
 
 /// Maximum decompressed/decoded request body the distributor will accept, in
 /// bytes (16 MiB). This is wired into both the axum `DefaultBodyLimit` for the
@@ -852,10 +861,12 @@ mod tests {
         assert!(ingest_span_tenant(&empty) == "unknown");
     }
 
-    use crate::error::ProfilesError;
-    use crate::ingest::{RelabelAction, RelabelConfig, TenantLimitConfig, TenantLimits};
-    use crate::limits::OverridesProvider;
-    use crate::wal::ProfileRecord;
+    use crate::{
+        error::ProfilesError,
+        ingest::{RelabelAction, RelabelConfig, TenantLimitConfig, TenantLimits},
+        limits::OverridesProvider,
+        wal::ProfileRecord,
+    };
 
     #[derive(Default)]
     struct RecordingSink(Mutex<Vec<ProfileRecord>>);
@@ -895,11 +906,15 @@ mod tests {
     }
 
     fn otlp_export_request() -> pb::otlp_profiles::ExportProfilesServiceRequest {
-        use pb::opentelemetry::proto::common::v1::{AnyValue, KeyValue, any_value::Value};
-        use pb::opentelemetry::proto::resource::v1::Resource;
-        use pb::otlp_profiles::{
-            Function, Line, Location, Profile, ProfilesDictionary, ResourceProfiles, Sample,
-            ScopeProfiles, Stack, ValueType,
+        use pb::{
+            opentelemetry::proto::{
+                common::v1::{AnyValue, KeyValue, any_value::Value},
+                resource::v1::Resource,
+            },
+            otlp_profiles::{
+                Function, Line, Location, Profile, ProfilesDictionary, ResourceProfiles, Sample,
+                ScopeProfiles, Stack, ValueType,
+            },
         };
 
         let dictionary = ProfilesDictionary {

@@ -6,8 +6,10 @@
 //! `crabka-broker` / `crabka-security`.
 
 use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::TcpStream;
+use tokio::{
+    io::{AsyncRead, AsyncWrite},
+    net::TcpStream,
+};
 
 /// Type-erased duplex stream returned by [`RaftListenerHandshake::upgrade`].
 /// The raft connection handler is generic over `AsyncRead + AsyncWrite +

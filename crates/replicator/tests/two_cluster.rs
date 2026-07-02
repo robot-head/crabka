@@ -5,14 +5,15 @@
 
 mod common;
 
-use std::collections::BTreeMap;
-use std::time::Duration;
+use std::{collections::BTreeMap, time::Duration};
 
-use crabka_replicator::config::{
-    ClusterConfig, Delivery, FlowConfig, NamingPolicy, PolicyConfig, ReplicatorConfig, Residency,
-    Selectors,
+use crabka_replicator::{
+    config::{
+        ClusterConfig, Delivery, FlowConfig, NamingPolicy, PolicyConfig, ReplicatorConfig,
+        Residency, Selectors,
+    },
+    supervisor::FlowSupervisor,
 };
-use crabka_replicator::supervisor::FlowSupervisor;
 
 // ---------------------------------------------------------------------------
 // Test 1 — selective replication, remote-topic naming, residency

@@ -1,8 +1,9 @@
 //! In-memory `MetricStore` used by conformance and engine tests.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::Arc;
-use std::sync::RwLock;
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    sync::{Arc, RwLock},
+};
 
 use crabka_blockstore::{
     LabelMatcher, Labels, MatchOp, QUERY_SHARD_LABEL, QueryShardSelector, SeriesFingerprint,
@@ -12,14 +13,15 @@ use crabka_metrics::{
     NativeHistogram, SamplePayload, WalRecord, encode_float_samples, encode_native_histograms,
     float_sample_schema, native_histogram_schema,
 };
-use datafusion::catalog::MemTable;
-use datafusion::prelude::SessionContext;
+use datafusion::{catalog::MemTable, prelude::SessionContext};
 
-use crate::PromqlError;
-use crate::error::Result;
-use crate::store::{
-    ExemplarRecord, LabelNameCardinality, LabelValueCardinality, MetadataRecord, MetricStore,
-    NamedTsdbStat, ScanResult, TsdbBlock, TsdbHeadStats, TsdbStats,
+use crate::{
+    PromqlError,
+    error::Result,
+    store::{
+        ExemplarRecord, LabelNameCardinality, LabelValueCardinality, MetadataRecord, MetricStore,
+        NamedTsdbStat, ScanResult, TsdbBlock, TsdbHeadStats, TsdbStats,
+    },
 };
 
 /// Shared hot-head metric store rebuilt from the metrics WAL tail.
@@ -1012,8 +1014,7 @@ fn named_stats(values: BTreeMap<String, usize>) -> Vec<NamedTsdbStat> {
 
 #[cfg(test)]
 mod tests {
-    use arrow::array::AsArray;
-    use arrow::datatypes::Int64Type;
+    use arrow::{array::AsArray, datatypes::Int64Type};
     use assert2::{assert, check};
     use crabka_blockstore::{LabelMatcher, Labels, MatchOp};
     use crabka_metrics::{

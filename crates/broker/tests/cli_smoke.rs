@@ -1,5 +1,6 @@
-use assert2::assert;
 use std::process::Command;
+
+use assert2::assert;
 
 fn broker_bin() -> std::path::PathBuf {
     let exe = std::env::var_os("CARGO_BIN_EXE_crabka-broker")

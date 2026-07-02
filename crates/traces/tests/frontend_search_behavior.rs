@@ -9,24 +9,29 @@
 //! authoritative slice-5 querier contract). Stub queriers therefore distinguish
 //! the tiers by the presence of a `block=` param, not by a tier header.
 
-use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use assert2::{assert, check};
-use axum::Router;
-use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode, Uri};
-use axum::routing::get;
-use crabka_traces::frontend::QueryFrontend;
-use crabka_traces::frontend::config::FrontendConfig;
-use crabka_traces::frontend::http_backend::HttpQuerier;
-use crabka_traces::frontend::job::{BlockMetaInfo, RowGroupInfo, TraceIndexCatalog};
-use crabka_traces::frontend::server::router_with_backend;
+use axum::{
+    Router,
+    extract::State,
+    http::{HeaderMap, StatusCode, Uri},
+    routing::get,
+};
+use crabka_traces::frontend::{
+    QueryFrontend,
+    config::FrontendConfig,
+    http_backend::HttpQuerier,
+    job::{BlockMetaInfo, RowGroupInfo, TraceIndexCatalog},
+    server::router_with_backend,
+};
 use http_body_util::BodyExt as _;
 use serde_json::{Value, json};
-use tokio::sync::Barrier;
-use tokio::time::timeout;
+use tokio::{sync::Barrier, time::timeout};
 use tower::ServiceExt as _;
 
 /// Mirror the role binary's builder: build the new query-frontend router from a

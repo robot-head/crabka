@@ -19,28 +19,36 @@
 //!   one is delivered).
 //! - **SSRF guard**: a target host outside `allowed_targets` fails to compile.
 
-use std::collections::BTreeMap;
-use std::collections::VecDeque;
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicU16, Ordering};
-use std::time::Duration;
+use std::{
+    collections::{BTreeMap, VecDeque},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU16, Ordering},
+    },
+    time::Duration,
+};
 
-use axum::Router;
-use axum::body::Bytes as AxumBytes;
-use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
-use axum::routing::post;
+use axum::{
+    Router,
+    body::Bytes as AxumBytes,
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    routing::post,
+};
 use bytes::Bytes;
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_admin::{AdminClient, CreateTopicSpec};
 use crabka_client_core::Client;
 use crabka_client_producer::{Acks, Producer, ProducerRecord};
-use crabka_grpc_gateway::codec::RawCodec;
-use crabka_grpc_gateway::outbound;
-use crabka_grpc_gateway::outbound_config::{CompiledSubscription, OutboundFile};
-use crabka_protocol::owned::fetch_request::{FetchPartition, FetchRequest, FetchTopic};
-use crabka_protocol::owned::metadata_request::MetadataRequest;
+use crabka_grpc_gateway::{
+    codec::RawCodec,
+    outbound,
+    outbound_config::{CompiledSubscription, OutboundFile},
+};
+use crabka_protocol::owned::{
+    fetch_request::{FetchPartition, FetchRequest, FetchTopic},
+    metadata_request::MetadataRequest,
+};
 use hmac::{Hmac, KeyInit, Mac};
 use serde_json::Value;
 use sha2::Sha256;

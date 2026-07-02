@@ -5,9 +5,11 @@
 
 use std::collections::VecDeque;
 
-use super::erased::{Dispatch, ErasedRecord, OutputRecord, ProcessorError};
-use super::node::ErasedNode;
-use super::record::RecordContext;
+use super::{
+    erased::{Dispatch, ErasedRecord, OutputRecord, ProcessorError},
+    node::ErasedNode,
+    record::RecordContext,
+};
 use crate::store::registry::StoreRegistry;
 
 /// Closure type used by [`GraphSource`] to deserialize raw bytes into an
@@ -436,13 +438,16 @@ impl crate::processor::punctuation::ErasedPunctuator for NoopPunctuator {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::processor::api::{Processor, ProcessorContext};
-    use crate::processor::node::{ErasedNode, ProcessorNode, SinkNode, SourceNode};
-    use crate::processor::record::Record;
-    use crate::processor::serde::StringSerde;
     use assert2::check;
     use async_trait::async_trait;
+
+    use super::*;
+    use crate::processor::{
+        api::{Processor, ProcessorContext},
+        node::{ErasedNode, ProcessorNode, SinkNode, SourceNode},
+        record::Record,
+        serde::StringSerde,
+    };
 
     struct Upper;
     #[async_trait]
@@ -515,12 +520,15 @@ mod tests {
 
     #[tokio::test]
     async fn stateful_processor_accumulates_via_store() {
-        use crate::processor::api::{Processor, ProcessorContext};
-        use crate::processor::node::{ProcessorNode, SinkNode, SourceNode};
-        use crate::processor::record::Record;
-        use crate::processor::serde::{I64Serde, StringSerde};
-        use crate::store::kv::KeyValueBytesStore;
-        use crate::store::registry::StoreRegistry;
+        use crate::{
+            processor::{
+                api::{Processor, ProcessorContext},
+                node::{ProcessorNode, SinkNode, SourceNode},
+                record::Record,
+                serde::{I64Serde, StringSerde},
+            },
+            store::{kv::KeyValueBytesStore, registry::StoreRegistry},
+        };
 
         struct Counter;
         #[async_trait]
@@ -595,9 +603,12 @@ mod tests {
 
     #[tokio::test]
     async fn stream_time_punctuator_fires_once_at_current_stream_time() {
-        use crate::processor::punctuation::{PunctuationType, Punctuator};
-        use crate::processor::serde::I64Serde;
         use std::time::Duration;
+
+        use crate::processor::{
+            punctuation::{PunctuationType, Punctuator},
+            serde::I64Serde,
+        };
 
         // A punctuator that, when fired at `ts`, forwards a record whose value is
         // that fired timestamp (`Record::new(None, ts, ts)`), so the sink emits
@@ -682,13 +693,16 @@ mod tests {
 
     #[tokio::test]
     async fn flush_caches_roots_and_forwards_deduped_change() {
-        use crate::dsl::processors::change::Change;
-        use crate::processor::record::RecordContext;
-        use crate::processor::serde::{I64Serde, StringSerde};
-        use crate::store::cache::named::NamedCache;
-        use crate::store::kv::KeyValueBytesStore;
-        use crate::store::registry::StoreRegistry;
         use std::sync::{Arc, Mutex};
+
+        use crate::{
+            dsl::processors::change::Change,
+            processor::{
+                record::RecordContext,
+                serde::{I64Serde, StringSerde},
+            },
+            store::{cache::named::NamedCache, kv::KeyValueBytesStore, registry::StoreRegistry},
+        };
 
         // A recording child: stashes every `Change<i64>` it receives so the test
         // can assert flush_caches forwarded the deduped change here.

@@ -2,13 +2,12 @@
 //! `/readyz` returns 503 until the dedup store has warmed up, so load
 //! balancers don't route dedup'd traffic to a cold replica.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
-use axum::Router;
-use axum::extract::State;
-use axum::http::StatusCode;
-use axum::routing::get;
+use axum::{Router, extract::State, http::StatusCode, routing::get};
 
 /// Shared readiness flag, flipped to `true` once the gateway can serve
 /// dedup'd traffic correctly (dedup store warmed). Cheaply cloneable.

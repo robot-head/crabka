@@ -15,15 +15,16 @@
 use std::path::Path;
 
 use bytes::{BufMut, BytesMut};
-use tracing::instrument;
-
 use crabka_remote_storage::{
     PartitionDump, RemoteLogSegmentMetadata, RemotePartitionDeleteState, RlmmCacheDump,
     TopicIdPartition,
 };
+use tracing::instrument;
 
-use crate::error::{CodecError, SnapshotError};
-use crate::serde::{MetadataEvent, Reader, read_uvarint, write_uvarint};
+use crate::{
+    error::{CodecError, SnapshotError},
+    serde::{MetadataEvent, Reader, read_uvarint, write_uvarint},
+};
 
 /// Format version at the head of every snapshot file. Greenfield: bump
 /// freely, no backward-compat decoder arms.
@@ -255,15 +256,16 @@ fn read_u16(r: &mut Reader<'_>) -> Result<u16, CodecError> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::assert;
     use std::collections::BTreeMap;
-    use uuid::Uuid;
 
+    use assert2::assert;
     use crabka_remote_storage::{
         RemoteLogSegmentId, RemoteLogSegmentMetadata, RemoteLogSegmentState,
         RemotePartitionDeleteState, TopicIdPartition,
     };
+    use uuid::Uuid;
+
+    use super::*;
 
     fn tp() -> TopicIdPartition {
         TopicIdPartition::new(Uuid::from_u128(1), "orders", 0)

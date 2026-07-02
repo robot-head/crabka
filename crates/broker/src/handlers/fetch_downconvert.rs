@@ -5,8 +5,7 @@
 
 use bytes::{Bytes, BytesMut};
 use crabka_compression::CompressionType;
-use crabka_protocol::records::RecordBatch;
-use crabka_protocol::records::RecordsPayload;
+use crabka_protocol::records::{RecordBatch, RecordsPayload};
 use crabka_records_legacy::{Magic, v2_to_legacy};
 
 use crate::codes;
@@ -116,10 +115,11 @@ pub(crate) fn down_convert_payload_for_fetch(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
     use bytes::Bytes;
     use crabka_protocol::records::{Attributes, Record, RecordBatch};
+
+    use super::*;
 
     fn make_batch(codec: CompressionType, records: Vec<Record>) -> RecordBatch {
         RecordBatch {

@@ -1,16 +1,18 @@
 //! Querier role: Pyroscope `querier.v1` Connect API and legacy flamebearer endpoints.
 
-use std::collections::BTreeMap;
-use std::future::Future;
-use std::net::SocketAddr;
-use std::sync::Arc;
+use std::{collections::BTreeMap, future::Future, net::SocketAddr, sync::Arc};
 
-use arrow::array::{Array, AsArray};
-use arrow::datatypes::{Int64Type, UInt64Type};
-use axum::extract::{Query, RawQuery};
-use axum::http::{HeaderMap, StatusCode};
-use axum::response::{IntoResponse, Response};
-use axum::{Extension, Json, Router, routing::get};
+use arrow::{
+    array::{Array, AsArray},
+    datatypes::{Int64Type, UInt64Type},
+};
+use axum::{
+    Extension, Json, Router,
+    extract::{Query, RawQuery},
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
+    routing::get,
+};
 use connectrpc_axum::message::{Code, ConnectError, ConnectRequest, ConnectResponse};
 use crabka_blockstore::{LABEL_PROFILE_TYPE, LabelMatcher, MatchOp};
 use crabka_pprof::{
@@ -24,10 +26,12 @@ use serde::{Deserialize, Deserializer};
 use serde_json::json;
 use tokio::net::TcpListener;
 
-use crate::limits::{Limits, OverridesProvider};
-use crate::metrics::ServiceMetrics;
-use crate::query_frontend::{FrontendConfig, split_inclusive_range};
-use crate::wire::pb;
+use crate::{
+    limits::{Limits, OverridesProvider},
+    metrics::ServiceMetrics,
+    query_frontend::{FrontendConfig, split_inclusive_range},
+    wire::pb,
+};
 
 const DEFAULT_HEATMAP_VALUE_BUCKETS: usize = 32;
 const MAX_HEATMAP_TIME_BUCKETS: usize = 4096;

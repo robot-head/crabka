@@ -20,9 +20,13 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use tokio::sync::oneshot;
 
-use crate::error::RaftError;
-use crate::kraft::event::Event;
-use crate::kraft::types::{LeaderEpoch, LogOffsetMetadata, NodeId};
+use crate::{
+    error::RaftError,
+    kraft::{
+        event::Event,
+        types::{LeaderEpoch, LogOffsetMetadata, NodeId},
+    },
+};
 
 /// A decoded inbound KIP-595 RPC plus a oneshot to reply on. The event loop
 /// decodes the body into a core [`Event`], runs it, and encodes the produced
@@ -185,8 +189,9 @@ impl PeerSender for NullPeerSender {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[tokio::test]
     async fn null_peer_sender_reports_target_as_current_leader() {
@@ -228,27 +233,25 @@ pub mod api_key {
 /// byte-faithful `VoteResponse` and the core infers the round itself (KIP-996).
 pub mod wire {
     use bytes::{Buf, Bytes, BytesMut};
-
-    use crabka_protocol::owned::begin_quorum_epoch_request::{
-        self as bqe_req, BeginQuorumEpochRequest,
+    use crabka_protocol::{
+        Decode, Encode,
+        owned::{
+            begin_quorum_epoch_request::{self as bqe_req, BeginQuorumEpochRequest},
+            begin_quorum_epoch_response::BeginQuorumEpochResponse,
+            end_quorum_epoch_request::{self as eqe_req, EndQuorumEpochRequest},
+            end_quorum_epoch_response::EndQuorumEpochResponse,
+            fetch_request::{self as fetch_req, FetchRequest},
+            fetch_response::{self as fetch_resp, FetchResponse},
+            fetch_snapshot_request::{self as fs_req, FetchSnapshotRequest},
+            fetch_snapshot_response::{self as fs_resp, FetchSnapshotResponse},
+            vote_request::{self as vote_req, VoteRequest},
+            vote_response::{self as vote_resp, VoteResponse},
+        },
+        primitives::uuid::Uuid as MetaUuid,
+        records::RecordsPayload,
     };
-    use crabka_protocol::owned::begin_quorum_epoch_response::BeginQuorumEpochResponse;
-    use crabka_protocol::owned::end_quorum_epoch_request::{
-        self as eqe_req, EndQuorumEpochRequest,
-    };
-    use crabka_protocol::owned::end_quorum_epoch_response::EndQuorumEpochResponse;
-    use crabka_protocol::owned::fetch_request::{self as fetch_req, FetchRequest};
-    use crabka_protocol::owned::fetch_response::{self as fetch_resp, FetchResponse};
-    use crabka_protocol::owned::fetch_snapshot_request::{self as fs_req, FetchSnapshotRequest};
-    use crabka_protocol::owned::fetch_snapshot_response::{self as fs_resp, FetchSnapshotResponse};
-    use crabka_protocol::owned::vote_request::{self as vote_req, VoteRequest};
-    use crabka_protocol::owned::vote_response::{self as vote_resp, VoteResponse};
-    use crabka_protocol::records::RecordsPayload;
-    use crabka_protocol::{Decode, Encode};
 
     use super::{LeaderEpoch, LogOffsetMetadata, NodeId};
-
-    use crabka_protocol::primitives::uuid::Uuid as MetaUuid;
 
     /// `KRaft` metadata log topic name.
     const METADATA_TOPIC: &str = "__cluster_metadata";
@@ -822,8 +825,9 @@ pub mod wire {
 
     #[cfg(test)]
     mod tests {
-        use super::*;
         use assert2::{assert, check};
+
+        use super::*;
 
         #[test]
         fn vote_request_round_trips() {
@@ -931,8 +935,7 @@ pub mod wire {
 
         #[test]
         fn encoded_fetch_request_carries_replica_state_epoch_sentinel() {
-            use crabka_protocol::Decode;
-            use crabka_protocol::owned::fetch_request::FetchRequest;
+            use crabka_protocol::{Decode, owned::fetch_request::FetchRequest};
 
             let req = PeerRequest::Fetch {
                 from: 2,
@@ -1119,8 +1122,7 @@ pub mod wire {
 
         #[test]
         fn encoded_fetch_response_carries_partition_success_fields() {
-            use crabka_protocol::Decode;
-            use crabka_protocol::owned::fetch_response::FetchResponse;
+            use crabka_protocol::{Decode, owned::fetch_response::FetchResponse};
 
             let resp = PeerResponse::Fetch {
                 leader_id: 2,
@@ -1143,9 +1145,10 @@ pub mod wire {
 
         #[test]
         fn fetch_wire_carries_metadata_topic_id() {
-            use crabka_protocol::Decode;
-            use crabka_protocol::owned::fetch_request::FetchRequest;
-            use crabka_protocol::owned::fetch_response::FetchResponse;
+            use crabka_protocol::{
+                Decode,
+                owned::{fetch_request::FetchRequest, fetch_response::FetchResponse},
+            };
             let req = PeerRequest::Fetch {
                 from: 2,
                 fetch_epoch: 1,

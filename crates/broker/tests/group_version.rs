@@ -10,8 +10,10 @@
 use assert2::assert;
 mod support;
 
-use crabka_protocol::owned::consumer_group_heartbeat_request::ConsumerGroupHeartbeatRequest;
-use crabka_protocol::owned::update_features_request::{FeatureUpdateKey, UpdateFeaturesRequest};
+use crabka_protocol::owned::{
+    consumer_group_heartbeat_request::ConsumerGroupHeartbeatRequest,
+    update_features_request::{FeatureUpdateKey, UpdateFeaturesRequest},
+};
 
 const UNSUPPORTED_VERSION: i16 = 35;
 

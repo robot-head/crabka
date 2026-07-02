@@ -6,12 +6,15 @@
 //! per-partition fetch loops with externally-owned offsets.
 
 use bytes::Bytes;
+use crabka_protocol::{
+    owned::{
+        fetch_request::{FetchPartition, FetchRequest, FetchTopic},
+        fetch_response::FetchResponse,
+    },
+    primitives::uuid::Uuid as WireUuid,
+};
 
-use crate::connection::Connection;
-use crate::error::ClientError;
-use crabka_protocol::owned::fetch_request::{FetchPartition, FetchRequest, FetchTopic};
-use crabka_protocol::owned::fetch_response::FetchResponse;
-use crabka_protocol::primitives::uuid::Uuid as WireUuid;
+use crate::{connection::Connection, error::ClientError};
 
 /// The single live-IO dependency [`fetch_partition_with_isolation`] needs: send
 /// a typed [`FetchRequest`] and get the decoded [`FetchResponse`] back.
@@ -270,14 +273,17 @@ fn decode_fetch_response(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
-    use crabka_protocol::UnknownTaggedFields;
-    use crabka_protocol::owned::fetch_request::ReplicaState;
-    use crabka_protocol::owned::fetch_response::{
-        FetchResponse, FetchableTopicResponse, PartitionData,
+    use crabka_protocol::{
+        UnknownTaggedFields,
+        owned::{
+            fetch_request::ReplicaState,
+            fetch_response::{FetchResponse, FetchableTopicResponse, PartitionData},
+        },
+        records::{Record, RecordBatch, RecordsPayload},
     };
-    use crabka_protocol::records::{Record, RecordBatch, RecordsPayload};
+
+    use super::*;
 
     fn batch_with(base_offset: i64, values: &[&[u8]]) -> RecordBatch {
         let records = values

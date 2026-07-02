@@ -14,8 +14,10 @@ use crabka_client_streams::{
     I64Serde, IqError, KafkaStreams, NodeHandle, Processor, ProcessorContext, Record,
     StreamsClientError, StringSerde, Topology,
 };
-use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-use crabka_protocol::owned::update_features_request::{FeatureUpdateKey, UpdateFeaturesRequest};
+use crabka_protocol::owned::{
+    create_topics_request::{CreatableTopic, CreateTopicsRequest},
+    update_features_request::{FeatureUpdateKey, UpdateFeaturesRequest},
+};
 
 // ─── broker helpers ───────────────────────────────────────────────────────────
 

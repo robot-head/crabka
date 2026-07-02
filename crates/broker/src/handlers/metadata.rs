@@ -4,20 +4,26 @@
 //! quorum-replicated snapshot — rather than a local in-memory struct.
 
 use bytes::{Bytes, BytesMut};
-
 use crabka_metadata::{AclOperation, ResourceType};
-use crabka_protocol::owned::metadata_request::MetadataRequest;
-use crabka_protocol::owned::metadata_response::{
-    MetadataResponse, MetadataResponseBroker, MetadataResponsePartition, MetadataResponseTopic,
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        metadata_request::MetadataRequest,
+        metadata_response::{
+            MetadataResponse, MetadataResponseBroker, MetadataResponsePartition,
+            MetadataResponseTopic,
+        },
+    },
+    primitives::uuid::Uuid as WireUuid,
 };
-use crabka_protocol::primitives::uuid::Uuid as WireUuid;
-use crabka_protocol::{Decode, Encode};
 
-use crate::authorizer::{AuthorizationResult, authorize_topics};
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
-use crate::handlers::authorized_operations::authorized_operations_bits;
+use crate::{
+    authorizer::{AuthorizationResult, authorize_topics},
+    broker::Broker,
+    codes,
+    error::BrokerError,
+    handlers::authorized_operations::authorized_operations_bits,
+};
 
 #[allow(clippy::too_many_lines)] // ACL preamble + asymmetric loop
 #[allow(clippy::unused_async)]
@@ -366,8 +372,9 @@ fn parse_host_port(addr: &str) -> (String, i32) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn parse_host_port_ok() {

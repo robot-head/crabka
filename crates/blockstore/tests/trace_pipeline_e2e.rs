@@ -4,8 +4,10 @@
 //! across multiple traces, and that the nested-set columns survive the round-trip
 //! with ancestor-contains-descendant interval containment intact.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use arrow::array::{FixedSizeBinaryArray, Int32Array};
 use assert2::{assert, check};
@@ -14,8 +16,7 @@ use crabka_blockstore::{
     SummaryColumns, TraceBlockStats, TraceIndex, assign_nested_set, encode_span_rows, read_block,
     span_block_decl, span_block_schema,
 };
-use object_store::ObjectStore;
-use object_store::memory::InMemory;
+use object_store::{ObjectStore, memory::InMemory};
 
 fn sid(n: u8) -> [u8; 8] {
     [n, 0, 0, 0, 0, 0, 0, 0]

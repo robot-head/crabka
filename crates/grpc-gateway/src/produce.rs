@@ -8,11 +8,13 @@ use std::sync::Arc;
 use crabka_client_producer::{Acks, Header, Producer, ProducerRecord};
 use crabka_security::Principal;
 
-use crate::codec::RecordCodec;
-use crate::dedup::membership::MembershipStore;
-use crate::error::GatewayError;
-use crate::forward::Forwarder;
-use crate::types::{GatewayRecord, RecordOutcome};
+use crate::{
+    codec::RecordCodec,
+    dedup::membership::MembershipStore,
+    error::GatewayError,
+    forward::Forwarder,
+    types::{GatewayRecord, RecordOutcome},
+};
 
 pub struct ProduceCore {
     producer: Arc<Producer>,

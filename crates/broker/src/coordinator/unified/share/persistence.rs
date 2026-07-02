@@ -11,15 +11,15 @@
 //! Key versions 9–13 are free; the consumer next-gen keys use 3,5,6,7,8.
 
 use bytes::{BufMut, Bytes, BytesMut};
+use crabka_protocol::{ProtocolError, primitives::uuid::Uuid};
 
-use crabka_protocol::ProtocolError;
-use crabka_protocol::primitives::uuid::Uuid;
-
-use crate::coordinator::unified::persistence::{
-    get_bytes, get_i16, get_i32, get_nullable_string, get_string, put_bytes, put_nullable_string,
-    put_string,
+use crate::{
+    coordinator::unified::persistence::{
+        get_bytes, get_i16, get_i32, get_nullable_string, get_string, put_bytes,
+        put_nullable_string, put_string,
+    },
+    error::BrokerError,
 };
-use crate::error::BrokerError;
 
 pub const KEY_SHARE_GROUP_METADATA: i16 = 9;
 pub const KEY_SHARE_MEMBER_METADATA: i16 = 10;
@@ -360,8 +360,9 @@ fn decode_topic_partitions(buf: &mut &[u8]) -> Result<Vec<(Uuid, Vec<i32>)>, Bro
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     /// Split a freshly encoded key into its leading version and the remaining
     /// body, mirroring how `__consumer_offsets` keys are dispatched on the

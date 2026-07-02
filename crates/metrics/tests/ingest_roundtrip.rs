@@ -1,26 +1,30 @@
 //! End-to-end metrics ingest: `remote_write` v1 -> distributor -> broker WAL ->
 //! compactor -> object-store block.
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::{
+    collections::BTreeMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use assert2::{assert, check};
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::{
+    body::Body,
+    http::{Request, StatusCode},
+};
 use crabka_blockstore::read_block;
 use crabka_broker::{Broker, BrokerConfig};
 use crabka_client_admin::{AdminClient, CreateTopicSpec};
 use crabka_client_consumer::{AutoOffsetReset, Consumer};
 use crabka_client_producer::Producer;
-use crabka_metrics::distributor::{DistributorState, KafkaSink, router};
-use crabka_metrics::wire::pb;
 use crabka_metrics::{
     CompactionPartitionOffset, MetricBlockKind, MetricsCompactorConfig, SamplePayload, WAL_TOPIC,
-    WalRecord, compaction_partition_object_key, run_compactor_consumer_loop,
+    WalRecord, compaction_partition_object_key,
+    distributor::{DistributorState, KafkaSink, router},
+    run_compactor_consumer_loop,
+    wire::pb,
 };
-use object_store::ObjectStore;
-use object_store::memory::InMemory;
+use object_store::{ObjectStore, memory::InMemory};
 use prost::Message;
 use tower::ServiceExt as _;
 

@@ -1,9 +1,11 @@
 //! `PolarsIpcSerde`: Arrow-IPC encoding of a polars `DataFrame` at the `Serde<T>` boundary.
 
-use crate::processor::serde::{DefaultSerde, Serde, SerdeAssociate, SerdeError};
+use std::io::Cursor;
+
 use ::polars::prelude::*;
 use bytes::Bytes;
-use std::io::Cursor;
+
+use crate::processor::serde::{DefaultSerde, Serde, SerdeAssociate, SerdeError};
 
 /// `Serde<DataFrame>` using the Arrow IPC stream format (schema embedded per message).
 #[derive(Debug, Clone, Copy, Default)]
@@ -36,8 +38,9 @@ impl DefaultSerde for DataFrame {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::check;
+
+    use super::*;
 
     fn sample() -> DataFrame {
         df!("id" => ["a", "b"], "total" => [1.0_f64, 2.5]).unwrap()

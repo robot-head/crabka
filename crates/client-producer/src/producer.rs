@@ -1,33 +1,41 @@
 //! `Producer` — public type. Builder lives in `builder.rs`. Sender task
 //! lives in `sender.rs`.
 
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
-use std::time::Duration;
-
-use dashmap::DashMap;
-use tokio::sync::{Mutex, Notify, oneshot};
-use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
-
-use crabka_client_consumer::ConsumerGroupMetadata;
-use crabka_client_core::Client;
-use crabka_client_core::security::ClientSecurity;
-use crabka_protocol::owned::add_offsets_to_txn_request::AddOffsetsToTxnRequest;
-use crabka_protocol::owned::end_txn_request::EndTxnRequest;
-use crabka_protocol::owned::find_coordinator_request::FindCoordinatorRequest;
-use crabka_protocol::owned::init_producer_id_request::InitProducerIdRequest;
-use crabka_protocol::owned::txn_offset_commit_request::{
-    TxnOffsetCommitRequest, TxnOffsetCommitRequestPartition, TxnOffsetCommitRequestTopic,
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicU8, AtomicUsize, Ordering},
+    },
+    time::Duration,
 };
 
-use crate::accumulator::{Accumulator, AppendResult};
-use crate::compression::Compression;
-use crate::error::ProducerError;
-use crate::partitioner::UniformStickyPartitioner;
-use crate::record::{ProducerRecord, RecordMetadata};
-use crate::transactional::{OwnedTransaction, Transaction, TxnState};
+use crabka_client_consumer::ConsumerGroupMetadata;
+use crabka_client_core::{Client, security::ClientSecurity};
+use crabka_protocol::owned::{
+    add_offsets_to_txn_request::AddOffsetsToTxnRequest,
+    end_txn_request::EndTxnRequest,
+    find_coordinator_request::FindCoordinatorRequest,
+    init_producer_id_request::InitProducerIdRequest,
+    txn_offset_commit_request::{
+        TxnOffsetCommitRequest, TxnOffsetCommitRequestPartition, TxnOffsetCommitRequestTopic,
+    },
+};
+use dashmap::DashMap;
+use tokio::{
+    sync::{Mutex, Notify, oneshot},
+    task::JoinHandle,
+};
+use tokio_util::sync::CancellationToken;
+
+use crate::{
+    accumulator::{Accumulator, AppendResult},
+    compression::Compression,
+    error::ProducerError,
+    partitioner::UniformStickyPartitioner,
+    record::{ProducerRecord, RecordMetadata},
+    transactional::{OwnedTransaction, Transaction, TxnState},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Acks {

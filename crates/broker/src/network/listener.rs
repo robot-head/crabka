@@ -17,9 +17,10 @@ pub(crate) fn resolve_sasl_mechanisms_for_listener<'a>(
 
 #[cfg(test)]
 mod per_listener_config_tests {
-    use super::*;
     use assert2::assert;
     use crabka_security::ListenerProtocol;
+
+    use super::*;
 
     fn test_listener_spec(
         protocol: ListenerProtocol,

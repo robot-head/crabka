@@ -2,19 +2,19 @@
 //! requested `group_id`. Uses the actor's `Describe` view to render.
 
 use bytes::{Bytes, BytesMut};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        consumer_group_describe_request::ConsumerGroupDescribeRequest,
+        consumer_group_describe_response::{ConsumerGroupDescribeResponse, DescribedGroup},
+    },
+};
 use futures_util::future::BoxFuture;
 use tokio::sync::oneshot;
 
-use crabka_protocol::owned::consumer_group_describe_request::ConsumerGroupDescribeRequest;
-use crabka_protocol::owned::consumer_group_describe_response::{
-    ConsumerGroupDescribeResponse, DescribedGroup,
+use crate::{
+    broker::Broker, codes, coordinator::unified::actor::GroupActorMessage, error::BrokerError,
 };
-use crabka_protocol::{Decode, Encode};
-
-use crate::broker::Broker;
-use crate::codes;
-use crate::coordinator::unified::actor::GroupActorMessage;
-use crate::error::BrokerError;
 
 /// KIP-848/KIP-584: minimum finalized `group.version` feature level that
 /// enables the next-gen consumer-group RPCs.
@@ -132,9 +132,10 @@ fn response(groups: Vec<DescribedGroup>) -> ConsumerGroupDescribeResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
     use crabka_metadata::{FeatureLevelRecord, MetadataImage, MetadataRecord};
+
+    use super::*;
 
     const VERSION: i16 = crabka_protocol::owned::consumer_group_describe_request::MAX_VERSION;
 

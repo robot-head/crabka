@@ -3,9 +3,8 @@
 //! controller. These are the plain Crabka types the engine and reconfig
 //! coordinator use.
 
-use serde::{Deserialize, Serialize};
-
 use crabka_metadata::MetadataRecord;
+use serde::{Deserialize, Serialize};
 
 pub type NodeId = u64;
 
@@ -65,8 +64,9 @@ pub struct AppDataResponse {
 
 #[cfg(test)]
 mod node_tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
     #[test]
     fn node_controller_addr_prefers_controller_listener() {
         let n = Node {

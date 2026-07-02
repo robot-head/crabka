@@ -8,8 +8,10 @@ use std::path::Path;
 use crabka_log::{Log, LogConfig, RawRead};
 use crabka_protocol::records::RecordBatch;
 
-use crate::error::RaftError;
-use crate::kraft::types::{LeaderEpoch, LogView};
+use crate::{
+    error::RaftError,
+    kraft::types::{LeaderEpoch, LogView},
+};
 
 pub struct KraftLog {
     log: Log,
@@ -154,8 +156,9 @@ impl LogView for KraftLog {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
+
+    use super::*;
 
     fn open_tmp() -> (KraftLog, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("tempdir");

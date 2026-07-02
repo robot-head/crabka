@@ -2,13 +2,12 @@
 
 pub mod model;
 
-use reqwest::Client;
-
-use crate::error::SchemaSerdeError;
-use crate::subject::SchemaKind;
 use model::{
     RegisterResponse, SchemaByIdResponse, SchemaPayload, SchemaReference, SubjectVersionResponse,
 };
+use reqwest::Client;
+
+use crate::{error::SchemaSerdeError, subject::SchemaKind};
 
 const CONTENT_TYPE: &str = "application/vnd.schemaregistry.v1+json";
 
@@ -150,11 +149,13 @@ impl RegistryClient {
 
 #[cfg(test)]
 mod tests {
-    use super::model::SchemaPayload;
-    use super::*;
     use assert2::check;
-    use wiremock::matchers::{body_json, method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{body_json, method, path},
+    };
+
+    use super::{model::SchemaPayload, *};
 
     #[test]
     fn base_url_trims_trailing_slash() {

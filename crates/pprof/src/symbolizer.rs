@@ -1,13 +1,16 @@
 //! Lazy native symbolization wrapper.
 
-use std::collections::HashMap;
-use std::io::Read;
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::{
+    collections::HashMap,
+    io::Read,
+    path::PathBuf,
+    sync::{Arc, Mutex, MutexGuard},
+    time::Duration,
+};
+
+use object::{Object, ObjectSymbol};
 
 use crate::{Frame, RawLocation, SymbolDb, SymbolSource};
-use object::{Object, ObjectSymbol};
 
 /// Hard cap on debuginfo artifacts downloaded from a (potentially untrusted)
 /// debuginfod server. `build_id` is attacker-controlled, so a malicious or

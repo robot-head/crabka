@@ -11,11 +11,13 @@ use parking_lot::RwLock;
 use tokio::sync::{Mutex, watch};
 use tokio_util::sync::CancellationToken;
 
-use crate::config::RegistryConfig;
-use crate::error::SrError;
-use crate::format::{self, SchemaType};
-use crate::kafkastore::record::SchemaReference;
-use crate::store::{Registered, StoreState};
+use crate::{
+    config::RegistryConfig,
+    error::SrError,
+    format::{self, SchemaType},
+    kafkastore::record::SchemaReference,
+    store::{Registered, StoreState},
+};
 
 /// Valid `mode` strings for the global / per-subject mode endpoints.
 const VALID_MODES: &[&str] = &["READWRITE", "READONLY", "IMPORT"];

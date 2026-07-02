@@ -70,12 +70,11 @@ pub use client::{BrokerHandle, Client};
 pub use connection::{ClientDuplex, Connection, ConnectionOptions};
 pub use error::ClientError;
 pub use fetch::{FetchedRecord, fetch_partition, fetch_partition_with_isolation};
+#[cfg(any(test, feature = "mock"))]
+pub use mock::MockBroker;
 pub use offset_for_leader_epoch::{EpochEndOffset, offset_for_leader_epoch};
 pub use pool::{BrokerInfo, BrokerPool};
 pub use request::ProtocolRequest;
 pub use sasl::{OutboundSaslError, SaslCredentials, outbound_sasl};
 pub use security::{ClientSecurity, TlsConnectorConfig};
 pub use version::ApiVersionTable;
-
-#[cfg(any(test, feature = "mock"))]
-pub use mock::MockBroker;

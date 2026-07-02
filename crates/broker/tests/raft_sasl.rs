@@ -5,12 +5,13 @@
 //! outbound (`InterBrokerDialer` dials with SASL credentials) paths
 //! work together.
 
-use assert2::assert;
-use std::net::SocketAddr;
-use std::time::Duration;
+use std::{net::SocketAddr, time::Duration};
 
-use crabka_broker::config::{InterBrokerCredentials, ListenerSpec};
-use crabka_broker::{BootstrapMode, Broker, BrokerConfig, BrokerHandle};
+use assert2::assert;
+use crabka_broker::{
+    BootstrapMode, Broker, BrokerConfig, BrokerHandle,
+    config::{InterBrokerCredentials, ListenerSpec},
+};
 use crabka_security::{ListenerProtocol, SaslMechanism};
 use tempfile::TempDir;
 

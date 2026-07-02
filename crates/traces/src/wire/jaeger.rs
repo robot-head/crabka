@@ -1,7 +1,9 @@
 //! Jaeger push-door decoding.
 
-use crate::span::{AttrValue, KeyValue, LinkRecord, Span, SpanKind, StatusCode};
-use crate::wire::WireError;
+use crate::{
+    span::{AttrValue, KeyValue, LinkRecord, Span, SpanKind, StatusCode},
+    wire::WireError,
+};
 
 const T_STOP: u8 = 0;
 const T_BOOL_TRUE: u8 = 1;

@@ -6,20 +6,22 @@
 //! every reconcile (see `ReplicatorSupervisor::reconcile`).
 
 use bytes::{Bytes, BytesMut};
-
 use crabka_metadata::{AclOperation, MetadataRecord, ResourceType, TopicConfigRecord};
-use crabka_protocol::owned::alter_configs_request::AlterConfigsRequest;
-use crabka_protocol::owned::alter_configs_response::{
-    AlterConfigsResourceResponse, AlterConfigsResponse,
+use crabka_protocol::{
+    Decode, Encode, UnknownTaggedFields,
+    owned::{
+        alter_configs_request::AlterConfigsRequest,
+        alter_configs_response::{AlterConfigsResourceResponse, AlterConfigsResponse},
+    },
 };
-use crabka_protocol::{Decode, Encode, UnknownTaggedFields};
 use crabka_raft::RaftError;
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes;
-use crate::config_keys;
-use crate::error::BrokerError;
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes, config_keys,
+    error::BrokerError,
+};
 
 const RESOURCE_TYPE_TOPIC: i8 = 2;
 const RESOURCE_TYPE_BROKER: i8 = 4;
@@ -177,17 +179,16 @@ pub(crate) async fn handle(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::{net::SocketAddr, sync::Arc};
+
     use assert2::assert;
     use crabka_protocol::owned::alter_configs_request::{
         AlterConfigsRequest, AlterConfigsResource, AlterableConfig,
     };
     use crabka_security::{AuthMethod, Principal};
-    use std::net::SocketAddr;
-    use std::sync::Arc;
 
-    use crate::authorizer::Authorizer;
-    use crate::test_support::DenyAll;
+    use super::*;
+    use crate::{authorizer::Authorizer, test_support::DenyAll};
 
     crate::test_support::wire_helpers!(
         AlterConfigsRequest,

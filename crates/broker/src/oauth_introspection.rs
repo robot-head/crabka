@@ -2,9 +2,7 @@
 //! here (not in `crates/security`) so the security crate stays
 //! I/O-free, mirroring the JWKS-refresher pattern.
 
-use std::path::Path;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{path::Path, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use crabka_security::{
@@ -126,16 +124,15 @@ impl IntrospectionClient for ReqwestIntrospectionClient {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::assert;
-    use std::net::SocketAddr;
-    use std::sync::Mutex;
+    use std::{net::SocketAddr, sync::Mutex};
 
-    use rustls::pki_types::pem::PemObject;
-    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+    use assert2::assert;
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio_rustls::TlsAcceptor;
     use tokio_util::sync::CancellationToken;
+
+    use super::*;
 
     /// Records observed requests so tests can assert on the bytes.
     #[derive(Debug, Default)]

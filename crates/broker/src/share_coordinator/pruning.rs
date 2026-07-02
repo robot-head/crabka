@@ -20,8 +20,9 @@ pub fn redundant_offset(per_key_last_snapshot: &[i64]) -> Option<i64> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn empty_is_none() {

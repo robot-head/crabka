@@ -6,8 +6,10 @@
 
 use quote::{format_ident, quote};
 
-use crate::ir::{MessageSpec, MessageType};
-use crate::name_conv;
+use crate::{
+    ir::{MessageSpec, MessageType},
+    name_conv,
+};
 
 /// Emit the `impl crate::ProtocolRequest for <Type>` block for a request spec.
 ///

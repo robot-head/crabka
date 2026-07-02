@@ -5,8 +5,7 @@
 
 #![allow(dead_code)]
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use crabka_client_core::ConnectionOptions;
 use crabka_protocol::owned::broker_heartbeat_request::BrokerHeartbeatRequest;
@@ -211,9 +210,10 @@ pub(crate) async fn run(mut cfg: Config) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
     use tempfile::tempdir;
+
+    use super::*;
 
     #[test]
     fn offline_dir_uuids_maps_offline_paths() {

@@ -9,8 +9,10 @@
 use assert2::assert;
 mod support;
 
-use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
-use crabka_protocol::owned::update_features_request::{FeatureUpdateKey, UpdateFeaturesRequest};
+use crabka_protocol::owned::{
+    api_versions_request::ApiVersionsRequest,
+    update_features_request::{FeatureUpdateKey, UpdateFeaturesRequest},
+};
 
 fn metadata_version_update(level: i16) -> UpdateFeaturesRequest {
     UpdateFeaturesRequest {

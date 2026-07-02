@@ -1,4 +1,4 @@
-﻿//! Broker integration test: KIP-213 foreign-key KTable-KTable join over a live
+//! Broker integration test: KIP-213 foreign-key KTable-KTable join over a live
 //! in-process broker.
 //!
 //! Mirrors `dsl_integration.rs` (the DSL counting + restart-restore broker test):
@@ -30,8 +30,10 @@ use std::time::Duration;
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_core::{Client, Connection, ConnectionOptions, FetchedRecord, fetch_partition};
 use crabka_client_streams::{KafkaStreams, StreamsBuilder, StringSerde};
-use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-use crabka_protocol::owned::update_features_request::{FeatureUpdateKey, UpdateFeaturesRequest};
+use crabka_protocol::owned::{
+    create_topics_request::{CreatableTopic, CreateTopicsRequest},
+    update_features_request::{FeatureUpdateKey, UpdateFeaturesRequest},
+};
 
 // ─── broker helpers (mirrors dsl_integration.rs) ───────────────────────────────
 

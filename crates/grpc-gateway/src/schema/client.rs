@@ -372,13 +372,14 @@ mod tests {
     ///   GET  /schemas/ids/{id}             → `{"schema":"...","schemaType":"PROTOBUF"}`
     ///   GET  /subjects/{subject}/versions/latest → `{"id":2,"schema":"...","schemaType":"JSON"}`
     fn start_mock_server() -> (tokio::runtime::Runtime, u16, String) {
+        use std::net::SocketAddr;
+
         use axum::{
             Json, Router,
             extract::Path,
             routing::{get, post},
         };
         use serde_json::json;
-        use std::net::SocketAddr;
 
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()

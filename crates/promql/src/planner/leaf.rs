@@ -11,23 +11,28 @@
 //! the `SeriesDivide -> SeriesNormalize -> InstantManipulate` chain that selects
 //! one sample per series within the lookback window.
 
-use std::collections::BTreeSet;
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
-use arrow::array::{ArrayRef, Float64Array, Int64Array, StringArray};
-use arrow::datatypes::{DataType, Field, Schema};
-use arrow::record_batch::RecordBatch;
+use arrow::{
+    array::{ArrayRef, Float64Array, Int64Array, StringArray},
+    datatypes::{DataType, Field, Schema},
+    record_batch::RecordBatch,
+};
 use crabka_blockstore::{Labels, SeriesFingerprint};
-use datafusion::catalog::MemTable;
-use datafusion::logical_expr::{Extension, LogicalPlan};
-use datafusion::prelude::SessionContext;
+use datafusion::{
+    catalog::MemTable,
+    logical_expr::{Extension, LogicalPlan},
+    prelude::SessionContext,
+};
 
-use crate::PromqlError;
-use crate::error::Result;
-use crate::extension::instant_manipulate::InstantManipulate;
-use crate::extension::normalize::SeriesNormalize;
-use crate::extension::planner::prom_session_context;
-use crate::extension::series_divide::SeriesDivide;
+use crate::{
+    PromqlError,
+    error::Result,
+    extension::{
+        instant_manipulate::InstantManipulate, normalize::SeriesNormalize,
+        planner::prom_session_context, series_divide::SeriesDivide,
+    },
+};
 
 /// Leaf-batch column carrying the per-sample timestamp in epoch milliseconds.
 /// This is the operator chain's time index, so [`InstantManipulate`] rewrites

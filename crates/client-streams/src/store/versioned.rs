@@ -8,14 +8,12 @@
 //! - Changelog KEY  = raw key bytes.
 //! - Changelog VALUE = bare serialized value bytes (`Some`) or `None` (tombstone).
 //! - The version timestamp lives in the Kafka RECORD timestamp field.
-use std::any::Any;
-use std::collections::BTreeMap;
+use std::{any::Any, collections::BTreeMap};
 
 use async_trait::async_trait;
 use bytes::Bytes;
 
-use crate::processor::serde::Serde;
-use crate::store::api::StateStore;
+use crate::{processor::serde::Serde, store::api::StateStore};
 
 /// A single resolved version: its value, the timestamp it became valid, and the
 /// timestamp the next version superseded it (`None` = still the latest, ∞).

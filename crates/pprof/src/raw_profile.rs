@@ -2,8 +2,10 @@
 
 use std::collections::HashMap;
 
-use crate::proto::{Function, Line, Location, Profile, Sample, ValueType};
-use crate::{PprofProfile, ProfileType, Tree};
+use crate::{
+    PprofProfile, ProfileType, Tree,
+    proto::{Function, Line, Location, Profile, Sample, ValueType},
+};
 
 #[must_use]
 pub fn tree_to_pprof(tree: &Tree, profile_type: &ProfileType) -> PprofProfile {

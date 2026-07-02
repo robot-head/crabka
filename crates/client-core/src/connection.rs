@@ -1,22 +1,26 @@
 //! Single-broker `Connection`: TCP socket + reader/writer tasks +
 //! correlation-ID multiplexing.
 
-use std::net::SocketAddr;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicI32, Ordering};
-use std::time::Duration;
+use std::{
+    net::SocketAddr,
+    sync::{
+        Arc,
+        atomic::{AtomicI32, Ordering},
+    },
+    time::Duration,
+};
 
 use bytes::{BufMut, Bytes, BytesMut};
 use dashmap::DashMap;
-use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::TcpStream;
-use tokio::sync::{mpsc, oneshot};
-use tokio::task::JoinHandle;
+use tokio::{
+    io::{AsyncRead, AsyncWrite},
+    net::TcpStream,
+    sync::{mpsc, oneshot},
+    task::JoinHandle,
+};
 use tokio_util::sync::CancellationToken;
 
-use crate::error::ClientError;
-use crate::request::ProtocolRequest;
-use crate::version::ApiVersionTable;
+use crate::{error::ClientError, request::ProtocolRequest, version::ApiVersionTable};
 
 /// Trait alias for the duplex stream types `Connection::from_stream`
 /// accepts (`TcpStream`, `tokio_rustls::client::TlsStream`, etc.). Boxed
@@ -542,9 +546,12 @@ fn build_request_header(
 /// supported by every broker.
 #[tracing::instrument(level = "debug", skip_all, err)]
 async fn fetch_api_versions(conn: &Connection) -> Result<ApiVersionTable, ClientError> {
-    use crabka_protocol::Encode;
-    use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
-    use crabka_protocol::owned::api_versions_response::ApiVersionsResponse;
+    use crabka_protocol::{
+        Encode,
+        owned::{
+            api_versions_request::ApiVersionsRequest, api_versions_response::ApiVersionsResponse,
+        },
+    };
 
     let req = ApiVersionsRequest::default();
     let corr_id = conn.inner.next_corr_id.fetch_add(1, Ordering::Relaxed);
@@ -594,19 +601,24 @@ async fn fetch_api_versions(conn: &Connection) -> Result<ApiVersionTable, Client
 
 #[cfg(test)]
 mod secured_tests {
+    use crabka_security::ListenerProtocol;
+
     use super::*;
     use crate::security::{ClientSecurity, SaslCredentials};
-    use crabka_security::ListenerProtocol;
 
     // A SASL_PLAINTEXT connect drives the handshake then ApiVersions.
     // The fake broker answers SaslHandshake(0), SaslAuthenticate(0),
     // then a minimal ApiVersionsResponse v0 so from_stream succeeds.
     #[tokio::test]
     async fn connect_secured_runs_sasl_then_api_versions() {
-        use crabka_protocol::Encode;
-        use crabka_protocol::owned::api_versions_response::ApiVersionsResponse;
-        use crabka_protocol::owned::sasl_authenticate_response::SaslAuthenticateResponse;
-        use crabka_protocol::owned::sasl_handshake_response::SaslHandshakeResponse;
+        use crabka_protocol::{
+            Encode,
+            owned::{
+                api_versions_response::ApiVersionsResponse,
+                sasl_authenticate_response::SaslAuthenticateResponse,
+                sasl_handshake_response::SaslHandshakeResponse,
+            },
+        };
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -681,10 +693,11 @@ mod secured_tests {
 mod io_task_tests {
     use std::time::Instant;
 
-    use crabka_protocol::Encode;
-    use crabka_protocol::owned::api_versions_response::ApiVersionsResponse;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
+    use crabka_protocol::{Encode, owned::api_versions_response::ApiVersionsResponse};
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
 
     use super::*;
 

@@ -3,9 +3,7 @@
 //! returning a plain `Stream` (unit-testable); the public handler is a thin
 //! wrapper into `ConnectResponse::new(StreamBody::new(inner))`.
 
-use std::net::SocketAddr;
-use std::pin::Pin;
-use std::sync::Arc;
+use std::{net::SocketAddr, pin::Pin, sync::Arc};
 
 use axum::Extension;
 use connectrpc_axum::message::{
@@ -15,15 +13,16 @@ use crabka_authz::AuthorizationResult;
 use crabka_metadata::{AclOperation, ResourceType};
 use crabka_security::Principal;
 use futures_util::{Stream, StreamExt};
-use jsonpath_rust::parser::model::JpQuery;
-use jsonpath_rust::query::js_path_process;
+use jsonpath_rust::{parser::model::JpQuery, query::js_path_process};
 use serde_json::Value;
 
-use crate::codec::{SchemaFormat, SchemaMeta};
-use crate::consume::ConsumeSession;
-use crate::handlers::{anonymous_principal, authorize_resource, to_gateway_record, unknown_host};
-use crate::pb;
-use crate::state::AppState;
+use crate::{
+    codec::{SchemaFormat, SchemaMeta},
+    consume::ConsumeSession,
+    handlers::{anonymous_principal, authorize_resource, to_gateway_record, unknown_host},
+    pb,
+    state::AppState,
+};
 
 struct CompiledPredicates(Vec<CompiledPredicate>);
 

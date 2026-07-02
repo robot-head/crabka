@@ -7,14 +7,15 @@ pub mod basic;
 
 use std::sync::Arc;
 
-use axum::extract::{Request, State};
-use axum::http::{HeaderMap, StatusCode, header};
-use axum::middleware::Next;
-use axum::response::{IntoResponse, Response};
+use axum::{
+    extract::{Request, State},
+    http::{HeaderMap, StatusCode, header},
+    middleware::Next,
+    response::{IntoResponse, Response},
+};
 use base64::Engine as _;
-use crabka_security::{AuthMethod, OAuthBearerValidator, Principal};
-
 use basic::BasicAuthStore;
+use crabka_security::{AuthMethod, OAuthBearerValidator, Principal};
 
 /// An mTLS-authenticated principal inserted by the TLS accept loop;
 /// `auth_layer` consumes it as the highest-precedence source.
@@ -381,9 +382,7 @@ mod tests {
     /// which forwards no credential, only `FORWARD_HEADER`.
     #[tokio::test]
     async fn forwarded_request_bypasses_require_auth() {
-        use axum::Router;
-        use axum::body::Body;
-        use axum::routing::get;
+        use axum::{Router, body::Body, routing::get};
         use tower::ServiceExt as _; // for `oneshot`
 
         let st = AuthState {
@@ -434,9 +433,7 @@ mod tests {
     /// reproduces cp's wire bytes.
     #[tokio::test]
     async fn auth_layer_401_matches_cp_byte_exact() {
-        use axum::Router;
-        use axum::body::Body;
-        use axum::routing::get;
+        use axum::{Router, body::Body, routing::get};
         use tower::ServiceExt as _; // for `oneshot`
 
         // The realm cp emitted in the capture (its `authentication.realm` = the

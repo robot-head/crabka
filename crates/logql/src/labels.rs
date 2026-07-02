@@ -2,10 +2,12 @@ use std::collections::BTreeSet;
 
 use regex::Regex;
 
-use crate::stream::anchored_regex_pattern;
-use crate::template::{LineFormat, template_parse_error};
-use crate::util::{format_decimal_ratio, parse_bytes_literal, parse_prometheus_duration_literal};
-use crate::{Labels, ParseError, UNWRAP_SAMPLE_VALUE_LABEL};
+use crate::{
+    Labels, ParseError, UNWRAP_SAMPLE_VALUE_LABEL,
+    stream::anchored_regex_pattern,
+    template::{LineFormat, template_parse_error},
+    util::{format_decimal_ratio, parse_bytes_literal, parse_prometheus_duration_literal},
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LabelFormat {

@@ -6,18 +6,20 @@
 use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        write_share_group_state_request::WriteShareGroupStateRequest,
+        write_share_group_state_response::{
+            PartitionResult, WriteShareGroupStateResponse, WriteStateResult,
+        },
+    },
+};
 use futures_util::future::BoxFuture;
 
-use crabka_protocol::owned::write_share_group_state_request::WriteShareGroupStateRequest;
-use crabka_protocol::owned::write_share_group_state_response::{
-    PartitionResult, WriteShareGroupStateResponse, WriteStateResult,
+use crate::{
+    broker::Broker, codes, error::BrokerError, share_coordinator::persistence::StateBatch,
 };
-use crabka_protocol::{Decode, Encode};
-
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
-use crate::share_coordinator::persistence::StateBatch;
 
 pub(crate) fn handle(
     broker: &Broker,
@@ -95,14 +97,19 @@ pub(crate) fn handle(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
-    use crabka_protocol::UnknownTaggedFields;
-    use crabka_protocol::owned::write_share_group_state_request::{
-        PartitionData, StateBatch, WriteShareGroupStateRequest, WriteStateData,
+    use crabka_protocol::{
+        UnknownTaggedFields,
+        owned::{
+            write_share_group_state_request::{
+                PartitionData, StateBatch, WriteShareGroupStateRequest, WriteStateData,
+            },
+            write_share_group_state_response::WriteShareGroupStateResponse,
+        },
+        primitives::uuid::Uuid as ProtoUuid,
     };
-    use crabka_protocol::owned::write_share_group_state_response::WriteShareGroupStateResponse;
-    use crabka_protocol::primitives::uuid::Uuid as ProtoUuid;
+
+    use super::*;
 
     const VERSION: i16 = 1;
 

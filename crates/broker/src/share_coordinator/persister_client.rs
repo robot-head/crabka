@@ -22,29 +22,36 @@
 use std::sync::Arc;
 
 use crabka_metadata::NodeId;
-use crabka_protocol::owned::delete_share_group_state_request::{
-    DeleteShareGroupStateRequest, DeleteStateData, PartitionData as DeletePartitionData,
+use crabka_protocol::{
+    owned::{
+        delete_share_group_state_request::{
+            DeleteShareGroupStateRequest, DeleteStateData, PartitionData as DeletePartitionData,
+        },
+        initialize_share_group_state_request::{
+            InitializeShareGroupStateRequest, InitializeStateData,
+            PartitionData as InitPartitionData,
+        },
+        read_share_group_state_request::{
+            PartitionData as ReadPartitionData, ReadShareGroupStateRequest, ReadStateData,
+        },
+        write_share_group_state_request::{
+            PartitionData as WritePartitionData, StateBatch as ProtoStateBatch,
+            WriteShareGroupStateRequest, WriteStateData,
+        },
+    },
+    primitives::uuid::Uuid as ProtoUuid,
 };
-use crabka_protocol::owned::initialize_share_group_state_request::{
-    InitializeShareGroupStateRequest, InitializeStateData, PartitionData as InitPartitionData,
-};
-use crabka_protocol::owned::read_share_group_state_request::{
-    PartitionData as ReadPartitionData, ReadShareGroupStateRequest, ReadStateData,
-};
-use crabka_protocol::owned::write_share_group_state_request::{
-    PartitionData as WritePartitionData, StateBatch as ProtoStateBatch,
-    WriteShareGroupStateRequest, WriteStateData,
-};
-use crabka_protocol::primitives::uuid::Uuid as ProtoUuid;
 use crabka_security::ListenerProtocol;
 
-use crate::error::BrokerError;
-use crate::metadata_source::MetadataSource;
-use crate::network::client::InterBrokerClient;
-use crate::share_coordinator::bootstrap;
-use crate::share_coordinator::coordinator::ShareCoordinator;
-use crate::share_coordinator::persistence::StateBatch;
-use crate::share_coordinator::state::SharePartitionState;
+use crate::{
+    error::BrokerError,
+    metadata_source::MetadataSource,
+    network::client::InterBrokerClient,
+    share_coordinator::{
+        bootstrap, coordinator::ShareCoordinator, persistence::StateBatch,
+        state::SharePartitionState,
+    },
+};
 
 /// Group-coordinator-side client for the share-state persister. Constructed in
 /// `Broker::start` once both the [`ShareCoordinator`] and the `GroupCoordinator`

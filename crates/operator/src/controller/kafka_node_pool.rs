@@ -11,28 +11,39 @@
 //! Validation errors surface as a `Ready=False` condition without
 //! attempting any further reconcile.
 
-use std::collections::BTreeMap;
-use std::collections::HashSet;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{
+    collections::{BTreeMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
 
 use futures::StreamExt as _;
-use k8s_openapi::api::apps::v1::StatefulSet;
-use k8s_openapi::api::core::v1::{PersistentVolumeClaim, ResourceRequirements};
-use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
-use kube::api::Api;
-use kube::runtime::controller::{Action, Controller};
-use kube::runtime::watcher;
-use kube::{Resource, ResourceExt as _};
+use k8s_openapi::{
+    api::{
+        apps::v1::StatefulSet,
+        core::v1::{PersistentVolumeClaim, ResourceRequirements},
+    },
+    apimachinery::pkg::api::resource::Quantity,
+};
+use kube::{
+    Resource, ResourceExt as _,
+    api::Api,
+    runtime::{
+        controller::{Action, Controller},
+        watcher,
+    },
+};
 use serde_json::json;
 
-use crate::context::Context;
-use crate::controller::common::{
-    self, APP_LABEL, BROKER_PORT, DEFAULT_BROKER_IMAGE, ReconcileError, apply_object,
-    common_labels, condition, derive_status, owner_ref,
-};
-use crate::crd::{
-    JbodVolume, Kafka, KafkaCondition, KafkaNodePool, KafkaNodePoolStatus, NodeRole, Storage,
+use crate::{
+    context::Context,
+    controller::common::{
+        self, APP_LABEL, BROKER_PORT, DEFAULT_BROKER_IMAGE, ReconcileError, apply_object,
+        common_labels, condition, derive_status, owner_ref,
+    },
+    crd::{
+        JbodVolume, Kafka, KafkaCondition, KafkaNodePool, KafkaNodePoolStatus, NodeRole, Storage,
+    },
 };
 
 /// Container port the broker binds for Prometheus `/metrics`
@@ -1613,13 +1624,14 @@ pub fn error_policy(_obj: Arc<KafkaNodePool>, err: &ReconcileError, _ctx: Arc<Co
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
+    use assert2::{assert, check};
+
     use super::*;
     use crate::crd::{
         KafkaNodePoolSpec, KafkaSpec, MetadataTemplate, PersistentClaimSpec, PodTemplate, Storage,
     };
-    use assert2::assert;
-    use assert2::check;
-    use std::collections::BTreeMap;
 
     fn parent_fixture(name: &str) -> Kafka {
         let mut k = Kafka::new(
@@ -3668,8 +3680,10 @@ mod tests {
 
     #[test]
     fn tier_persistence_delete_claim_mismatch_fails_validation() {
-        use crate::crd::kafka::{TieredStorage, TieredStoragePersistence, TieredStorageType};
-        use crate::crd::kafka_node_pool::{PersistentClaimSpec, Storage};
+        use crate::crd::{
+            kafka::{TieredStorage, TieredStoragePersistence, TieredStorageType},
+            kafka_node_pool::{PersistentClaimSpec, Storage},
+        };
 
         let mut parent = parent_fixture("demo");
         parent.spec.tiered_storage = Some(TieredStorage {
@@ -3699,8 +3713,10 @@ mod tests {
 
     #[test]
     fn tier_persistence_delete_claim_matching_pool_passes() {
-        use crate::crd::kafka::{TieredStorage, TieredStoragePersistence, TieredStorageType};
-        use crate::crd::kafka_node_pool::{PersistentClaimSpec, Storage};
+        use crate::crd::{
+            kafka::{TieredStorage, TieredStoragePersistence, TieredStorageType},
+            kafka_node_pool::{PersistentClaimSpec, Storage},
+        };
 
         let mut parent = parent_fixture("demo");
         parent.spec.tiered_storage = Some(TieredStorage {

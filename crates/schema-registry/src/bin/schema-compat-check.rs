@@ -1,12 +1,16 @@
 //! Local protobuf `FileDescriptorSet` backward-compatibility checker.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+};
 
 use clap::Parser;
 use crabka_schema_registry::format::{self, ResolvedReference, SchemaType};
-use prost_reflect::prost::Message;
-use prost_reflect::prost_types::{FileDescriptorProto, FileDescriptorSet};
+use prost_reflect::{
+    prost::Message,
+    prost_types::{FileDescriptorProto, FileDescriptorSet},
+};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -146,11 +150,12 @@ fn collect_refs(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use prost_reflect::prost_types::field_descriptor_proto::{
-        Label as FieldLabel, Type as FieldType,
+    use prost_reflect::prost_types::{
+        DescriptorProto, FieldDescriptorProto,
+        field_descriptor_proto::{Label as FieldLabel, Type as FieldType},
     };
-    use prost_reflect::prost_types::{DescriptorProto, FieldDescriptorProto};
+
+    use super::*;
 
     fn set(file: FileDescriptorProto) -> DescriptorSet {
         let name = file.name.clone().unwrap();

@@ -1,8 +1,7 @@
-use assert2::{assert, check};
 use std::path::PathBuf;
 
-use crabka_protocol_codegen::emit::EmittedMessage;
-use crabka_protocol_codegen::{emit, fmt, ir, resolve};
+use assert2::{assert, check};
+use crabka_protocol_codegen::{emit, emit::EmittedMessage, fmt, ir, resolve};
 
 const CURATED: &[&str] = &[
     "ApiVersionsRequest",

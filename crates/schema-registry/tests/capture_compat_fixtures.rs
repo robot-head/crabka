@@ -17,10 +17,12 @@
 
 #![allow(clippy::pedantic)]
 
-use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::{Duration, Instant};
+use std::{
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    process::Command,
+    time::{Duration, Instant},
+};
 
 use crabka_broker::{Broker, BrokerConfig};
 

@@ -505,8 +505,9 @@ fn balance_assignment(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     fn tp(items: &[(&str, i32)]) -> Vec<(String, i32)> {
         items.iter().map(|(t, p)| ((*t).to_string(), *p)).collect()

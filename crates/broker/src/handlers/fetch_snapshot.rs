@@ -16,19 +16,20 @@
 //! match this cluster gets a top-level `INCONSISTENT_CLUSTER_ID` (104).
 
 use bytes::{Bytes, BytesMut};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        fetch_snapshot_request::FetchSnapshotRequest,
+        fetch_snapshot_response::{
+            FetchSnapshotResponse, LeaderIdAndEpoch, PartitionSnapshot, SnapshotId, TopicSnapshot,
+        },
+    },
+    records::RecordsPayload,
+};
+use crabka_raft::SnapshotRange;
 use futures_util::future::BoxFuture;
 
-use crabka_protocol::owned::fetch_snapshot_request::FetchSnapshotRequest;
-use crabka_protocol::owned::fetch_snapshot_response::{
-    FetchSnapshotResponse, LeaderIdAndEpoch, PartitionSnapshot, SnapshotId, TopicSnapshot,
-};
-use crabka_protocol::records::RecordsPayload;
-use crabka_protocol::{Decode, Encode};
-use crabka_raft::SnapshotRange;
-
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
+use crate::{broker::Broker, codes, error::BrokerError};
 
 /// The single Kafka-side topic name that represents the `KRaft` metadata
 /// log. Mirrors `org.apache.kafka.common.Topic.CLUSTER_METADATA_TOPIC_NAME`.
@@ -142,9 +143,10 @@ fn build_response(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
     use crabka_raft::SnapshotSlice;
+
+    use super::*;
 
     #[test]
     fn build_response_serves_requested_range() {

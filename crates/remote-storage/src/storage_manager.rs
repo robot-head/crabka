@@ -5,8 +5,10 @@ use std::path::PathBuf;
 
 use bytes::Bytes;
 
-use crate::error::RemoteStorageError;
-use crate::metadata::{CustomMetadata, RemoteLogSegmentMetadata};
+use crate::{
+    error::RemoteStorageError,
+    metadata::{CustomMetadata, RemoteLogSegmentMetadata},
+};
 
 /// The kinds of index a segment carries alongside its `.log` data.
 ///
@@ -138,8 +140,9 @@ pub trait RemoteStorageManager: Send + Sync {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::check;
+
+    use super::*;
 
     #[test]
     fn index_suffixes_match_kafka() {

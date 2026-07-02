@@ -1,9 +1,6 @@
 //! File-backed `TraceQL` conformance testkit.
 
-use std::fmt::Write as _;
-use std::fs;
-use std::path::Path;
-use std::sync::Arc;
+use std::{fmt::Write as _, fs, path::Path, sync::Arc};
 
 use crate::{AttrValue, EngineOpts, InMemorySpanStore, InputSpan, SearchResponse, TraceqlEngine};
 
@@ -448,9 +445,11 @@ fn span(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::assert;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    use assert2::assert;
+
+    use super::*;
 
     fn temp_dir(name: &str) -> std::path::PathBuf {
         let unique = SystemTime::now()

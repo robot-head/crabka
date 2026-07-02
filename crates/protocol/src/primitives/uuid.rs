@@ -27,9 +27,10 @@ pub fn get_uuid<B: Buf>(buf: &mut B) -> Result<Uuid, ProtocolError> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
     use bytes::BytesMut;
+
+    use super::*;
 
     #[test]
     fn uuid_roundtrip() {

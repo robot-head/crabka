@@ -52,10 +52,11 @@
 //! ## In-process manager for tests and local tools
 //!
 //! ```no_run
+//! use std::{path::PathBuf, time::Duration};
+//!
 //! use crabka_remote_storage_topic::{
 //!     InProcessMetadataEventLog, TopicBasedRemoteLogMetadataManager,
 //! };
-//! use std::{path::PathBuf, time::Duration};
 //!
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let event_log = InProcessMetadataEventLog::new(16);

@@ -369,8 +369,9 @@ pub(crate) fn put_bytes<B: BufMut>(buf: &mut B, b: &Bytes) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn offset_commit_round_trip() {

@@ -1,8 +1,12 @@
 use bytes::{Buf, BufMut, Bytes};
 
-use crate::ProtocolError;
-use crate::primitives::fixed::{get_i16, get_i32, put_i16, put_i32};
-use crate::primitives::varint::{get_uvarint, put_uvarint, uvarint_len};
+use crate::{
+    ProtocolError,
+    primitives::{
+        fixed::{get_i16, get_i32, put_i16, put_i32},
+        varint::{get_uvarint, put_uvarint, uvarint_len},
+    },
+};
 
 // ---- STRING (non-flexible) ----
 // Wire: INT16 length (>=0), then `length` bytes UTF-8. -1 = null.
@@ -221,9 +225,10 @@ pub fn get_compact_nullable_bytes_owned<B: Buf>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
     use bytes::BytesMut;
+
+    use super::*;
 
     #[test]
     fn string_roundtrip() {

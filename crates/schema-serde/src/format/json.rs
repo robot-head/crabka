@@ -1,19 +1,19 @@
 //! JSON Schema serde. The local type provides its schema via `schemars`;
 //! payloads are UTF-8 JSON, optionally validated against the writer schema.
 
-use std::marker::PhantomData;
-use std::sync::Arc;
+use std::{marker::PhantomData, sync::Arc};
 
 use bytes::Bytes;
 use schemars::JsonSchema;
-use serde::Serialize;
-use serde::de::DeserializeOwned;
+use serde::{Serialize, de::DeserializeOwned};
 
-use crate::cache::SchemaCache;
-use crate::error::SchemaSerdeError;
-use crate::format::{Binding, SchemaDeserializer, SchemaSerializer, SchemaSubject};
-use crate::subject::{Role, SchemaKind};
-use crate::wire;
+use crate::{
+    cache::SchemaCache,
+    error::SchemaSerdeError,
+    format::{Binding, SchemaDeserializer, SchemaSerializer, SchemaSubject},
+    subject::{Role, SchemaKind},
+    wire,
+};
 
 /// JSON serializer/deserializer for `T: JsonSchema`, bound to a key/value role;
 /// the subject is derived from the topic at call time.
@@ -119,12 +119,15 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::cache::{CacheConfig, SchemaCache};
-    use crate::registry::RegistryClient;
     use assert2::check;
     use schemars::JsonSchema;
     use serde::{Deserialize, Serialize};
+
+    use super::*;
+    use crate::{
+        cache::{CacheConfig, SchemaCache},
+        registry::RegistryClient,
+    };
 
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
     struct Order {

@@ -17,22 +17,24 @@
 //! kept (no NaN suppression): `f(NaN)` / `sqrt(-1)` render as `NaN`, exactly as
 //! the interpreter keeps every float sample.
 
-use std::collections::BTreeSet;
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
-use arrow::array::{ArrayRef, Float64Array, Int64Array, StringArray};
-use arrow::datatypes::{DataType, Field, Schema};
-use arrow::record_batch::RecordBatch;
+use arrow::{
+    array::{ArrayRef, Float64Array, Int64Array, StringArray},
+    datatypes::{DataType, Field, Schema},
+    record_batch::RecordBatch,
+};
 use crabka_blockstore::Labels;
-use datafusion::catalog::MemTable;
-use datafusion::execution::FunctionRegistry;
-use datafusion::logical_expr::{Expr, LogicalPlan, LogicalPlanBuilder, col, lit};
-use datafusion::prelude::SessionContext;
+use datafusion::{
+    catalog::MemTable,
+    execution::FunctionRegistry,
+    logical_expr::{Expr, LogicalPlan, LogicalPlanBuilder, col, lit},
+    prelude::SessionContext,
+};
 
-use crate::PromqlError;
-use crate::error::Result;
-use crate::extension::planner::prom_session_context;
-use crate::functions::ScalarMathOp;
+use crate::{
+    PromqlError, error::Result, extension::planner::prom_session_context, functions::ScalarMathOp,
+};
 
 /// Leaf-batch / projection column carrying the per-series float value.
 pub const VALUE_COLUMN: &str = "value";
@@ -180,8 +182,7 @@ fn build_leaf_batch(
 #[cfg(test)]
 mod tests {
     use arrow::array::Float64Array as Float64ArrayT;
-    use assert2::assert;
-    use assert2::check;
+    use assert2::{assert, check};
 
     use super::*;
 

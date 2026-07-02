@@ -147,8 +147,9 @@ impl SubscriptionResponseWrapper {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use bytes::Bytes;
+
+    use super::*;
 
     #[test]
     fn instruction_ordinals_match_capture() {

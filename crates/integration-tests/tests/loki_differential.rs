@@ -4,13 +4,17 @@
 //! ingest the same Loki push payload into both, and compare the stable query
 //! result shape that Grafana's built-in Loki datasource consumes.
 
-use std::collections::BTreeMap;
-use std::io::Write;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::{
+    collections::BTreeMap,
+    io::Write,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
 
 use assert2::{assert, check};
-use axum::body::{Body, to_bytes};
-use axum::http::{Request, StatusCode};
+use axum::{
+    body::{Body, to_bytes},
+    http::{Request, StatusCode},
+};
 use crabka_blockstore::{
     BlockKey, LabelIndex, LogBlockIndex as BlockIndex, LogRow, TimeRange, write_log_block,
 };
@@ -22,19 +26,21 @@ use crabka_observability::{
     run_compactor_until_idle,
 };
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-use flate2::Compression;
-use flate2::write::DeflateEncoder;
+use flate2::{Compression, write::DeflateEncoder};
 use prost::Message as _;
 use serde_json::{Value, json};
 use snap::raw::Encoder as SnappyEncoder;
 use tempfile::TempDir;
-use testcontainers::GenericImage;
-use testcontainers::core::{IntoContainerPort, WaitFor};
-use testcontainers::runners::AsyncRunner;
+use testcontainers::{
+    GenericImage,
+    core::{IntoContainerPort, WaitFor},
+    runners::AsyncRunner,
+};
 use tokio::net::TcpListener;
-use tokio_tungstenite::connect_async;
-use tokio_tungstenite::tungstenite::Error as TungsteniteError;
-use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::{Error as TungsteniteError, client::IntoClientRequest as _},
+};
 use tower::ServiceExt;
 
 const LOKI_PORT: u16 = 3100;

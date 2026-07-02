@@ -2,12 +2,18 @@
 
 use std::sync::Arc;
 
-use arrow::array::{Array, ArrayRef, Float64Array, Float64Builder, Int64Array, Int64Builder};
-use arrow::array::{UInt64Array, UInt64Builder};
-use arrow::record_batch::RecordBatch;
+use arrow::{
+    array::{
+        Array, ArrayRef, Float64Array, Float64Builder, Int64Array, Int64Builder, UInt64Array,
+        UInt64Builder,
+    },
+    record_batch::RecordBatch,
+};
 
-use crate::histogram::HistogramCodecError;
-use crate::schema::{COL_FINGERPRINT, COL_TIMESTAMP, float_sample_schema};
+use crate::{
+    histogram::HistogramCodecError,
+    schema::{COL_FINGERPRINT, COL_TIMESTAMP, float_sample_schema},
+};
 
 const COL_VALUE: &str = "value";
 

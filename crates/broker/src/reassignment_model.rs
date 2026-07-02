@@ -12,8 +12,10 @@
 //! each run is fenced with `within_boundary` + `target_state_count` + `timeout`
 //! and MUST be executed under the host memory watchdog while bounds are tuned.
 
-use std::collections::{BTreeSet, HashSet};
-use std::time::Duration;
+use std::{
+    collections::{BTreeSet, HashSet},
+    time::Duration,
+};
 
 use crabka_metadata::PartitionRecord;
 use crabka_raft::NodeId;

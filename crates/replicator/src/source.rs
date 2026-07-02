@@ -1,8 +1,10 @@
 //! Source side: a consumer on the source cluster that emits [`ReplicatedRecord`]s
 //! and snapshots all partition positions as a [`SourceOffset`].
 
-use std::collections::{BTreeMap, VecDeque};
-use std::time::Duration;
+use std::{
+    collections::{BTreeMap, VecDeque},
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use crabka_client_consumer::{AutoOffsetReset, Consumer};
@@ -233,11 +235,10 @@ impl Source<(), ReplicatedRecord> for SourceConsumer {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
-    use assert2::check;
+    use assert2::{assert, check};
+    use crabka_connect::Source;
 
     use super::*;
-    use crabka_connect::Source;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn source_polls_records_with_topic_and_offset() {

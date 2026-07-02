@@ -101,9 +101,11 @@ pub fn classify_outcome(order: &Order) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use crabka_client_streams::{
+        Consumed, I64Serde, StringSerde, TopologyTestDriver, dsl::StreamsBuilder,
+    };
+
     use super::*;
-    use crabka_client_streams::dsl::StreamsBuilder;
-    use crabka_client_streams::{Consumed, I64Serde, StringSerde, TopologyTestDriver};
 
     #[test]
     fn order_at_is_deterministic_and_cycles_categories() {

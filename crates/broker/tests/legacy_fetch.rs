@@ -13,19 +13,23 @@ mod support;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use crabka_compression::CompressionType;
-use crabka_protocol::kafka_3_6_2::owned::fetch_response::FetchResponse as LegacyFetchResponse;
-use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-use crabka_protocol::owned::metadata_request::{MetadataRequest, MetadataRequestTopic};
-use crabka_protocol::owned::produce_request::{
-    PartitionProduceData, ProduceRequest, TopicProduceData,
+use crabka_protocol::{
+    Decode, Encode,
+    kafka_3_6_2::owned::fetch_response::FetchResponse as LegacyFetchResponse,
+    owned::{
+        create_topics_request::{CreatableTopic, CreateTopicsRequest},
+        metadata_request::{MetadataRequest, MetadataRequestTopic},
+        produce_request::{PartitionProduceData, ProduceRequest, TopicProduceData},
+        produce_response::ProduceResponse,
+    },
+    primitives::uuid::Uuid as WireUuid,
+    records::{Attributes, Record, RecordBatch, RecordsPayload},
 };
-use crabka_protocol::owned::produce_response::ProduceResponse;
-use crabka_protocol::primitives::uuid::Uuid as WireUuid;
-use crabka_protocol::records::{Attributes, Record, RecordBatch, RecordsPayload};
-use crabka_protocol::{Decode, Encode};
 use crabka_records_legacy::decode_message_set;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+};
 
 // ── Wire helpers ──────────────────────────────────────────────────────────────
 

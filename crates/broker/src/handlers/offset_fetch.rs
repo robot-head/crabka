@@ -8,22 +8,27 @@
 //! boundary and echoed back on the response.
 
 use bytes::{Bytes, BytesMut};
+use crabka_metadata::{AclOperation, ResourceType};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        offset_fetch_request::OffsetFetchRequest,
+        offset_fetch_response::{
+            OffsetFetchResponse, OffsetFetchResponseGroup, OffsetFetchResponsePartition,
+            OffsetFetchResponsePartitions, OffsetFetchResponseTopic, OffsetFetchResponseTopics,
+        },
+    },
+    primitives::uuid::Uuid as WireUuid,
+};
 use tokio::sync::oneshot;
 
-use crabka_metadata::{AclOperation, ResourceType};
-use crabka_protocol::owned::offset_fetch_request::OffsetFetchRequest;
-use crabka_protocol::owned::offset_fetch_response::{
-    OffsetFetchResponse, OffsetFetchResponseGroup, OffsetFetchResponsePartition,
-    OffsetFetchResponsePartitions, OffsetFetchResponseTopic, OffsetFetchResponseTopics,
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult, authorize_topics},
+    broker::Broker,
+    codes,
+    coordinator::unified::actor::{GroupActorMessage, GroupKindTag},
+    error::BrokerError,
 };
-use crabka_protocol::primitives::uuid::Uuid as WireUuid;
-use crabka_protocol::{Decode, Encode};
-
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize_topics};
-use crate::broker::Broker;
-use crate::codes;
-use crate::coordinator::unified::actor::{GroupActorMessage, GroupKindTag};
-use crate::error::BrokerError;
 
 #[allow(clippy::too_many_lines)]
 // ACL preamble (group + per-topic) + fetch-all vs named-topic branches; splitting hurts readability

@@ -6,10 +6,14 @@ use std::any::Any;
 use async_trait::async_trait;
 use bytes::Bytes;
 
-use crate::processor::serde::Serde;
-use crate::store::api::StateStore;
-use crate::store::byte::{ByteKeyValueStore, InMemoryBytes};
-use crate::store::window_schema::{key_bytes_of, store_key, window_start_of};
+use crate::{
+    processor::serde::Serde,
+    store::{
+        api::StateStore,
+        byte::{ByteKeyValueStore, InMemoryBytes},
+        window_schema::{key_bytes_of, store_key, window_start_of},
+    },
+};
 
 /// Typed windowed store that retains duplicates: every `put` with the same
 /// `(key, timestamp)` generates a distinct composite key via an incrementing

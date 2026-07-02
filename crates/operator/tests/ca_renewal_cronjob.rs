@@ -10,13 +10,12 @@ use assert2::{assert, check};
 mod shared;
 
 use base64::Engine as _;
-use http::{Method, Response};
-use shared::{MockRule, MockState, json_response, mock_client, not_found_body};
-
 use crabka_operator::controller::cluster_ca::run_renewal_check;
 use crabka_security::ca::{
     SubjectAltName, generate_clients_ca, generate_cluster_ca, issue_broker_cert,
 };
+use http::{Method, Response};
+use shared::{MockRule, MockState, json_response, mock_client, not_found_body};
 
 // ---------------------------------------------------------------------------
 // Helper: build a Secret JSON body with arbitrary `data` fields (base64

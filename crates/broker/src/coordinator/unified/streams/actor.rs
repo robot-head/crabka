@@ -16,35 +16,40 @@
 //! members still mint a `member_id` and advance their epoch, but no tasks are
 //! assigned.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
-use std::time::Instant;
-
-use tokio::sync::{mpsc, oneshot};
-use tokio::task::JoinHandle;
-
-use crabka_protocol::owned::common::streams_group_heartbeat_response::status::Status;
-use crabka_protocol::owned::common::streams_group_heartbeat_response::task_ids::TaskIds as RespTaskIds;
-use crabka_protocol::owned::streams_group_heartbeat_request::StreamsGroupHeartbeatRequest;
-use crabka_protocol::owned::streams_group_heartbeat_response::StreamsGroupHeartbeatResponse;
-
-use crate::codes;
-use crate::coordinator::unified::offsets_log::OffsetsLog;
-use crate::metadata_source::MetadataSource;
-
-use super::assignor::{self, AssignorInput, AssignorMember};
-use super::config::StreamsGroupConfig;
-use super::persistence::{
-    PendingStreamsRecords, StreamsEndpoint, StreamsGroupCurrentMemberAssignmentValue,
-    StreamsGroupMemberMetadataValue, StreamsGroupMetadataValue, StreamsGroupPartitionMetadataValue,
-    StreamsGroupTargetAssignmentMemberValue, StreamsGroupTargetAssignmentMetadataValue,
-    StreamsGroupTopologyValue,
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+    time::Instant,
 };
-use super::state::{
-    StoredTopologyHandle, StreamsGroupState, StreamsGroupStatePhase, StreamsMemberAssignmentState,
-    StreamsMemberState, StreamsTargetAssignment,
+
+use crabka_protocol::owned::{
+    common::streams_group_heartbeat_response::{status::Status, task_ids::TaskIds as RespTaskIds},
+    streams_group_heartbeat_request::StreamsGroupHeartbeatRequest,
+    streams_group_heartbeat_response::StreamsGroupHeartbeatResponse,
 };
-use super::topology::{self, status as topo_status};
+use tokio::{
+    sync::{mpsc, oneshot},
+    task::JoinHandle,
+};
+
+use super::{
+    assignor::{self, AssignorInput, AssignorMember},
+    config::StreamsGroupConfig,
+    persistence::{
+        PendingStreamsRecords, StreamsEndpoint, StreamsGroupCurrentMemberAssignmentValue,
+        StreamsGroupMemberMetadataValue, StreamsGroupMetadataValue,
+        StreamsGroupPartitionMetadataValue, StreamsGroupTargetAssignmentMemberValue,
+        StreamsGroupTargetAssignmentMetadataValue, StreamsGroupTopologyValue,
+    },
+    state::{
+        StoredTopologyHandle, StreamsGroupState, StreamsGroupStatePhase,
+        StreamsMemberAssignmentState, StreamsMemberState, StreamsTargetAssignment,
+    },
+    topology::{self, status as topo_status},
+};
+use crate::{
+    codes, coordinator::unified::offsets_log::OffsetsLog, metadata_source::MetadataSource,
+};
 
 /// Messages accepted by a [`StreamsGroupActorHandle`].
 // The `Heartbeat` variant carries the full wire request (KIP-1071 heartbeats
@@ -1072,15 +1077,14 @@ fn chrono_now_ms() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
 
-    use crate::coordinator::unified::GroupCoordinator;
-    use crate::coordinator::unified::actor::MetadataProvider;
-    use crate::coordinator::unified::config::NextGenConfig;
-    use crate::coordinator::unified::offsets_log::fake::InMemoryOffsetsLog;
-    use crate::coordinator::unified::reconciler::ReconcileInput;
-    use crate::coordinator::unified::share::config::ShareGroupConfig;
+    use super::*;
+    use crate::coordinator::unified::{
+        GroupCoordinator, actor::MetadataProvider, config::NextGenConfig,
+        offsets_log::fake::InMemoryOffsetsLog, reconciler::ReconcileInput,
+        share::config::ShareGroupConfig,
+    };
 
     #[derive(Debug)]
     struct EmptyMetadata;

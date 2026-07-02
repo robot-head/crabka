@@ -310,9 +310,10 @@ pub fn from_broker_error(err: &crate::error::BrokerError) -> i16 {
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
+
     use super::*;
     use crate::error::BrokerError;
-    use assert2::assert;
 
     #[test]
     fn share_group_error_codes_match_kafka() {

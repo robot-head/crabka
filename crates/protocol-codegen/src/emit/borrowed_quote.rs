@@ -16,21 +16,26 @@ use std::str::FromStr;
 use proc_macro2::{Literal, TokenStream};
 use quote::{format_ident, quote};
 
-use crate::emit::borrowed::{
-    self, base_type, borrowed_default_expr, borrowed_populated_value, decode_borrow_call,
-    decode_owned_call, encode_call, encode_call_option_as_non_nullable, encoded_len_expr,
-    encoded_len_expr_option_as_non_nullable, field_forces_non_flex, flex_min, has_any_flex,
-    has_float64_recursive, is_nullable, is_tagged, needs_lifetime, nullable_split_cond,
-    owned_struct_path_for, spec_needs_lifetime, struct_path_for, tagged_field_needs_owned,
-    tagged_is_default_cond, to_owned_field_expr, version_cond,
+use crate::{
+    emit::{
+        EmittedMessage,
+        borrowed::{
+            self, base_type, borrowed_default_expr, borrowed_populated_value, decode_borrow_call,
+            decode_owned_call, encode_call, encode_call_option_as_non_nullable, encoded_len_expr,
+            encoded_len_expr_option_as_non_nullable, field_forces_non_flex, flex_min, has_any_flex,
+            has_float64_recursive, is_nullable, is_tagged, needs_lifetime, nullable_split_cond,
+            owned_struct_path_for, spec_needs_lifetime, struct_path_for, tagged_field_needs_owned,
+            tagged_is_default_cond, to_owned_field_expr, version_cond,
+        },
+        common,
+        common::banner,
+        owned::EmitError,
+    },
+    ir::{FieldSpec, MessageSpec, MessageType},
+    name_conv,
+    resolve::{self, Resolution, StructKind},
+    type_map,
 };
-use crate::emit::common::banner;
-use crate::emit::owned::EmitError;
-use crate::emit::{EmittedMessage, common};
-use crate::ir::{FieldSpec, MessageSpec, MessageType};
-use crate::name_conv;
-use crate::resolve::{self, Resolution, StructKind};
-use crate::type_map;
 
 type ResMap = std::collections::HashMap<String, Resolution>;
 

@@ -143,11 +143,15 @@ pub trait IqQueryable: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::processor::serde::{I64Serde, Serde, StringSerde};
-    use crate::store::api::{KeyValueStore, StateStore};
-    use crate::store::kv::KeyValueBytesStore;
-    use crate::store::session::{SessionBytesStore, SessionStore};
-    use crate::store::window::{WindowBytesStore, WindowStore};
+    use crate::{
+        processor::serde::{I64Serde, Serde, StringSerde},
+        store::{
+            api::{KeyValueStore, StateStore},
+            kv::KeyValueBytesStore,
+            session::{SessionBytesStore, SessionStore},
+            window::{WindowBytesStore, WindowStore},
+        },
+    };
 
     #[tokio::test]
     async fn kv_get_range_all_count_inclusive() {

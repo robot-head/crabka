@@ -1,5 +1,4 @@
-use std::fs;
-use std::path::Path;
+use std::{fs, path::Path};
 
 use crate::crd::{
     Kafka, KafkaGrpcGateway, KafkaNodePool, KafkaRebalance, KafkaTopic, KafkaUser, SchemaRegistry,
@@ -35,9 +34,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
     use tempfile::tempdir;
+
+    use super::*;
 
     #[test]
     fn writes_kafka_pool_topic_and_user_crd_files() {

@@ -42,11 +42,14 @@ use crabka_client_streams::{
     I64Serde, KafkaStreams, NodeHandle, ProcessingGuarantee, Processor, ProcessorContext, Record,
     StringSerde, Topology,
 };
-use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-use crabka_protocol::owned::offset_fetch_request::{
-    OffsetFetchRequest, OffsetFetchRequestGroup, OffsetFetchRequestTopic, OffsetFetchRequestTopics,
+use crabka_protocol::owned::{
+    create_topics_request::{CreatableTopic, CreateTopicsRequest},
+    offset_fetch_request::{
+        OffsetFetchRequest, OffsetFetchRequestGroup, OffsetFetchRequestTopic,
+        OffsetFetchRequestTopics,
+    },
+    update_features_request::{FeatureUpdateKey, UpdateFeaturesRequest},
 };
-use crabka_protocol::owned::update_features_request::{FeatureUpdateKey, UpdateFeaturesRequest};
 
 const IN_TOPIC: &str = "in";
 const OUT_TOPIC: &str = "out";

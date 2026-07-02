@@ -5,22 +5,27 @@
 //! (`member_epoch = -1`) on shutdown. Meaningful changes are emitted as
 //! [`StreamsEvent`]s.
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
+use crabka_client_core::{Client, ClientError};
+use crabka_protocol::owned::{
+    common::{
+        streams_group_heartbeat_request::{
+            task_ids::TaskIds as ReqTaskIds, task_offset::TaskOffset,
+        },
+        streams_group_heartbeat_response::task_ids::TaskIds as RespTaskIds,
+    },
+    streams_group_heartbeat_request::StreamsGroupHeartbeatRequest,
+    streams_group_heartbeat_response::StreamsGroupHeartbeatResponse,
+};
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
 
-use crabka_client_core::{Client, ClientError};
-use crabka_protocol::owned::common::streams_group_heartbeat_request::task_ids::TaskIds as ReqTaskIds;
-use crabka_protocol::owned::common::streams_group_heartbeat_request::task_offset::TaskOffset;
-use crabka_protocol::owned::common::streams_group_heartbeat_response::task_ids::TaskIds as RespTaskIds;
-use crabka_protocol::owned::streams_group_heartbeat_request::StreamsGroupHeartbeatRequest;
-use crabka_protocol::owned::streams_group_heartbeat_response::StreamsGroupHeartbeatResponse;
-
-use super::assignment::resolve;
-use super::status::map_status;
-use super::types::{StreamsAssignment, StreamsEvent, TaskOffsetTracker};
+use super::{
+    assignment::resolve,
+    status::map_status,
+    types::{StreamsAssignment, StreamsEvent, TaskOffsetTracker},
+};
 use crate::topology::BuiltTopology;
 
 const FENCED_MEMBER_EPOCH: i16 = 110;
@@ -306,8 +311,7 @@ fn resp_to_req(t: &RespTaskIds) -> ReqTaskIds {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::VecDeque;
-    use std::sync::Mutex as StdMutex;
+    use std::{collections::VecDeque, sync::Mutex as StdMutex};
 
     use assert2::check;
     use crabka_protocol::owned::common::streams_group_heartbeat_response::task_ids::TaskIds as RespTaskIds2;

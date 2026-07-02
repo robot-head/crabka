@@ -17,8 +17,10 @@ use crabka_remote_storage::{
     RemoteStorageError, RemoteStorageManager, TopicIdPartition,
 };
 use tracing::warn;
-use zerocopy::byteorder::{I64, U32};
-use zerocopy::{BigEndian, FromBytes, Immutable, KnownLayout, Unaligned};
+use zerocopy::{
+    BigEndian, FromBytes, Immutable, KnownLayout, Unaligned,
+    byteorder::{I64, U32},
+};
 
 /// Absolute (partition-level) log offset.
 pub(crate) type LogOffset = i64;
@@ -442,8 +444,9 @@ fn first_batch_at_or_after(data: &[u8], floor: LogOffset) -> Option<RecordBatch>
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn parse_offset_index_round_trips_known_entries() {
@@ -705,14 +708,14 @@ mod tests {
     // ── helpers), using the copy path's `copy_eligible` to populate the
     // ── tier from a real `Log`.
 
+    use std::{collections::BTreeMap, fmt::Write as _};
+
     use crabka_log::{Log, LogConfig};
     use crabka_protocol::records::Record;
     use crabka_remote_storage::{
         InmemoryRemoteLogMetadataManager, LocalTieredStorage, RemoteLogMetadataManager,
         RemoteStorageManager,
     };
-    use std::collections::BTreeMap;
-    use std::fmt::Write as _;
     use uuid::Uuid;
 
     fn tp() -> TopicIdPartition {

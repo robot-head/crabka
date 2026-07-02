@@ -1,7 +1,9 @@
 //! Smoke test: the differential-table emitter produces the new dispatch fns.
 use assert2::check;
-use crabka_protocol_codegen::emit::differential_table;
-use crabka_protocol_codegen::ir::{FlexibleVersions, MessageSpec, MessageType, VersionRange};
+use crabka_protocol_codegen::{
+    emit::differential_table,
+    ir::{FlexibleVersions, MessageSpec, MessageType, VersionRange},
+};
 
 fn req(name: &str, api_key: i16, min: i16, max: i16, flex_min: i16) -> MessageSpec {
     MessageSpec {

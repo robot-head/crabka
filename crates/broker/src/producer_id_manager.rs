@@ -53,8 +53,9 @@ impl ProducerIdManager {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn allocate_returns_monotonic_pids_starting_at_base() {

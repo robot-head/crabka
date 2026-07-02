@@ -10,9 +10,9 @@
 //! `FetchSnapshot` catch-up respectively — so the tests that exercised them are
 //! gone with openraft.
 
-use assert2::{assert, check};
 use std::time::Duration;
 
+use assert2::{assert, check};
 use crabka_metadata::{FeatureLevelRecord, MetadataRecord, TopicRecord};
 use crabka_raft::{BootstrapMode, Controller, ControllerConfig};
 use tempfile::TempDir;

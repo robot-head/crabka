@@ -5,9 +5,8 @@
     reason = "Prometheus remote_write histograms expose integer counts that the query model stores as f64, matching Prometheus' own histogram math domain."
 )]
 
-use crate::{BucketSpan, NativeHistogram, ResetHint};
-
 use super::{WireError, pb};
+use crate::{BucketSpan, NativeHistogram, ResetHint};
 
 pub fn v1_histogram_to_native(histogram: &pb::v1::Histogram) -> Result<NativeHistogram, WireError> {
     let schema = schema_i8(histogram.schema)?;

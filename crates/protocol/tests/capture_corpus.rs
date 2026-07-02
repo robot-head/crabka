@@ -4,15 +4,14 @@
 //! remainder via the JVM oracle. Run manually:
 //!   `cargo test -p crabka-protocol --test capture_corpus -- --ignored --nocapture`
 mod support;
-use support::driver;
-use support::oracle;
+use std::{
+    collections::BTreeMap,
+    process::Command,
+    sync::{Arc, Mutex},
+};
 
-use std::collections::BTreeMap;
-use std::process::Command;
-use std::sync::{Arc, Mutex};
-
-use crabka_kafka_tap::frame::CapturedFrame;
-use crabka_kafka_tap::{Recorder, spawn};
+use crabka_kafka_tap::{Recorder, frame::CapturedFrame, spawn};
+use support::{driver, oracle};
 
 include!(concat!(
     env!("CARGO_MANIFEST_DIR"),

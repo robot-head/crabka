@@ -1,8 +1,10 @@
 //! Recent trace hot tier for the traces backend.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
-use std::time::Duration;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+    time::Duration,
+};
 
 use arrow::record_batch::RecordBatch;
 use crabka_client_consumer::Consumer;
@@ -10,14 +12,16 @@ use datafusion::catalog::MemTable;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
-use crate::error::TracesError;
-use crate::querier::live::{LiveSource, Result as LiveResult};
-use crate::span::{
-    AttrValue, EventRecord, KeyValue, LinkRecord, Span,
-    batch::{span_batch, span_batch_for_window},
-    nested_set,
+use crate::{
+    error::TracesError,
+    querier::live::{LiveSource, Result as LiveResult},
+    span::{
+        AttrValue, EventRecord, KeyValue, LinkRecord, Span,
+        batch::{span_batch, span_batch_for_window},
+        nested_set,
+    },
+    wal::SpanRecord,
 };
-use crate::wal::SpanRecord;
 
 const INTRINSIC_TAGS: &[&str] = &[
     "span:childCount",

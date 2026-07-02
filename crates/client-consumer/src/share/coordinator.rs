@@ -11,17 +11,18 @@
 //! re-sends `subscribed_topic_names`; the broker hands back a fresh epoch and
 //! assignment on the next ok.
 
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Duration;
-
-use tokio::sync::Mutex;
-use tokio_util::sync::CancellationToken;
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use crabka_client_core::Client;
-use crabka_protocol::owned::share_group_heartbeat_request::ShareGroupHeartbeatRequest;
-use crabka_protocol::owned::share_group_heartbeat_response::Assignment;
-use crabka_protocol::primitives::uuid::Uuid as WireUuid;
+use crabka_protocol::{
+    owned::{
+        share_group_heartbeat_request::ShareGroupHeartbeatRequest,
+        share_group_heartbeat_response::Assignment,
+    },
+    primitives::uuid::Uuid as WireUuid,
+};
+use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 
 /// `FENCED_MEMBER_EPOCH` — our epoch is behind the broker's; rejoin.
 const FENCED_MEMBER_EPOCH: i16 = 110;
@@ -235,10 +236,13 @@ fn hex_topic_id(id: WireUuid) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
-    use crabka_protocol::owned::common::share_group_heartbeat_response::topic_partitions::TopicPartitions;
-    use crabka_protocol::tagged_fields::UnknownTaggedFields;
+    use crabka_protocol::{
+        owned::common::share_group_heartbeat_response::topic_partitions::TopicPartitions,
+        tagged_fields::UnknownTaggedFields,
+    };
+
+    use super::*;
 
     fn id(n: u8) -> WireUuid {
         let mut b = [0u8; 16];

@@ -9,18 +9,23 @@
 //! Outcome → error code mapping is shared with [`super::add_raft_voter`].
 
 use bytes::{Bytes, BytesMut};
-
 use crabka_metadata::{AclOperation, ResourceType};
-use crabka_protocol::owned::remove_raft_voter_request::RemoveRaftVoterRequest;
-use crabka_protocol::owned::remove_raft_voter_response::RemoveRaftVoterResponse;
-use crabka_protocol::{Decode, Encode};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        remove_raft_voter_request::RemoveRaftVoterRequest,
+        remove_raft_voter_response::RemoveRaftVoterResponse,
+    },
+};
 use crabka_raft::reconfig::RemoveVoter;
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
-use crate::handlers::add_raft_voter::outcome_to_code;
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes,
+    error::BrokerError,
+    handlers::add_raft_voter::outcome_to_code,
+};
 
 #[tracing::instrument(
     name = "handle_remove_raft_voter",
@@ -104,12 +109,11 @@ fn encode_resp(version: i16, resp: &RemoveRaftVoterResponse) -> Result<Bytes, Br
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::{net::SocketAddr, sync::Arc};
+
     use assert2::assert;
     use crabka_protocol::primitives::uuid::Uuid as ProtoUuid;
     use crabka_security::{AuthMethod, Principal};
-    use std::net::SocketAddr;
-    use std::sync::Arc;
 
     use crate::test_support::DenyAll;
 
@@ -128,6 +132,7 @@ mod tests {
         client_id = "admin-client"
     );
 
+    use super::*;
     use crate::test_support::start_broker_with_authorizer as start_broker;
 
     /// Decode→encode round-trip at min and max versions.

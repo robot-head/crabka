@@ -8,8 +8,10 @@
 // ticker spawn. Allow dead_code until those land.
 #![allow(dead_code)]
 
-use std::collections::{HashMap, HashSet};
-use std::time::{Duration, Instant};
+use std::{
+    collections::{HashMap, HashSet},
+    time::{Duration, Instant},
+};
 
 use tokio::sync::Mutex;
 
@@ -288,9 +290,11 @@ impl ControllerLivenessState {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::assert;
     use std::time::Duration;
+
+    use assert2::assert;
+
+    use super::*;
 
     #[tokio::test]
     async fn new_broker_starts_alive_after_first_heartbeat() {

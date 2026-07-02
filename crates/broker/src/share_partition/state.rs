@@ -541,8 +541,9 @@ impl AcquisitionState {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
+
+    use super::*;
 
     fn t0() -> Instant {
         Instant::now()

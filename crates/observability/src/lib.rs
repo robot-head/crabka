@@ -2,30 +2,37 @@
 
 pub mod metrics;
 
-use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet};
-use std::convert::Infallible;
-use std::future::{Future, IntoFuture, pending};
-use std::io::ErrorKind;
-use std::io::Read as _;
-use std::net::SocketAddr;
-use std::path::{Path as FsPath, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
-use std::sync::{Arc, Mutex};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, BTreeSet},
+    convert::Infallible,
+    future::{Future, IntoFuture, pending},
+    io::{ErrorKind, Read as _},
+    net::SocketAddr,
+    path::{Path as FsPath, PathBuf},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering as AtomicOrdering},
+    },
+    time::{Instant, SystemTime, UNIX_EPOCH},
+};
 
-use crate::metrics::ServiceMetrics;
 use async_trait::async_trait;
-use axum::Router;
-use axum::body::Bytes;
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, RawQuery, State};
-use axum::http::header::{ACCEPT, CONTENT_ENCODING, CONTENT_TYPE};
-use axum::http::{HeaderMap, StatusCode};
-use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
-use base64::Engine as _;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use axum::{
+    Router,
+    body::Bytes,
+    extract::{
+        Path, RawQuery, State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
+    },
+    http::{
+        HeaderMap, StatusCode,
+        header::{ACCEPT, CONTENT_ENCODING, CONTENT_TYPE},
+    },
+    response::{IntoResponse, Response},
+    routing::{get, post},
+};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use clap::{Parser, ValueEnum};
 use crabka_blockstore::{
     BlockDescriptor, BlockKey, LabelIndex, LogBlockIndex as BlockIndex,
@@ -63,29 +70,35 @@ use crabka_logql::{
     parse_metric_query, parse_metric_scalar_arithmetic_query, parse_metric_scalar_comparison_query,
     parse_query, plan_stream_query,
 };
-use datafusion::arrow::array::builder::{MapBuilder, StringBuilder};
-use datafusion::arrow::array::{
-    Array, ArrayRef, Float64Array, Int64Array, MapArray, StringArray, TimestampNanosecondArray,
-    UInt64Array,
+use datafusion::{
+    arrow::{
+        array::{
+            Array, ArrayRef, Float64Array, Int64Array, MapArray, StringArray,
+            TimestampNanosecondArray, UInt64Array,
+            builder::{MapBuilder, StringBuilder},
+        },
+        datatypes::{DataType, Field, Schema, TimeUnit},
+        record_batch::RecordBatch,
+    },
+    error::DataFusionError,
+    prelude::SessionContext,
 };
-use datafusion::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
-use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::error::DataFusionError;
-use datafusion::prelude::SessionContext;
 use flate2::read::{DeflateDecoder, GzDecoder};
 use futures_util::{StreamExt as _, TryStreamExt as _};
-use object_store::local::LocalFileSystem;
-use object_store::path::Path as ObjectPath;
-use object_store::{ObjectStore, ObjectStoreExt, parse_url_opts};
-use opentelemetry_proto::tonic::collector::logs::v1::{
-    ExportLogsServiceRequest as ProtoExportLogsServiceRequest,
-    ExportLogsServiceResponse as ProtoExportLogsServiceResponse,
-    logs_service_server::{LogsService, LogsServiceServer},
+use object_store::{
+    ObjectStore, ObjectStoreExt, local::LocalFileSystem, parse_url_opts, path::Path as ObjectPath,
 };
-use opentelemetry_proto::tonic::common::v1::{
-    AnyValue as ProtoAnyValue, KeyValue as ProtoKeyValue, any_value as proto_any_value,
+use opentelemetry_proto::tonic::{
+    collector::logs::v1::{
+        ExportLogsServiceRequest as ProtoExportLogsServiceRequest,
+        ExportLogsServiceResponse as ProtoExportLogsServiceResponse,
+        logs_service_server::{LogsService, LogsServiceServer},
+    },
+    common::v1::{
+        AnyValue as ProtoAnyValue, KeyValue as ProtoKeyValue, any_value as proto_any_value,
+    },
+    logs::v1::LogRecord as ProtoLogRecord,
 };
-use opentelemetry_proto::tonic::logs::v1::LogRecord as ProtoLogRecord;
 use parquet::arrow::arrow_writer::ArrowWriter;
 use prost::Message as _;
 use regex::Regex;
@@ -93,14 +106,17 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use snap::raw::Decoder as SnappyDecoder;
 use thiserror::Error;
-use time::OffsetDateTime;
-use time::format_description::well_known::Rfc3339;
-use tokio::net::TcpListener;
-use tokio::task::JoinHandle;
-use tokio::time::{Duration, sleep};
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use tokio::{
+    net::TcpListener,
+    task::JoinHandle,
+    time::{Duration, sleep},
+};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument as _;
 use url::Url;
+
+use crate::metrics::ServiceMetrics;
 
 const LOKI_REJECT_OLD_SAMPLES_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const LOKI_CREATION_GRACE_PERIOD: Duration = Duration::from_secs(10 * 60);
@@ -20415,9 +20431,12 @@ mod tests {
     /// every emitted log line silently fails to decode and no logs are ingested.
     #[test]
     fn normalize_otlp_http_logs_decodes_gzip_identically_to_identity() {
-        use opentelemetry_proto::tonic::logs::v1::{ResourceLogs, ScopeLogs};
-        use opentelemetry_proto::tonic::resource::v1::Resource;
         use std::io::Write as _;
+
+        use opentelemetry_proto::tonic::{
+            logs::v1::{ResourceLogs, ScopeLogs},
+            resource::v1::Resource,
+        };
 
         let request = ProtoExportLogsServiceRequest {
             resource_logs: vec![ResourceLogs {

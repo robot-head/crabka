@@ -17,16 +17,14 @@
 //!   as length-prefixed `serde_wincode<SerdeCompat<MetadataRecord>>`
 //!   payloads, so the broker can stream them without touching JSON.
 
-use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::{collections::BTreeMap, path::PathBuf};
 
 use clap::Args;
 use crabka_metadata::{
     AclEntry, KRaftVersionRange, KRaftVersionRecord, MetadataRecord, ScramCredentialRecord, Voter,
     VoterEndpoint, VoterSet, VotersRecord,
 };
-use crabka_security::SaslMechanism;
-use crabka_security::scram::hash_scram_password_with_salt;
+use crabka_security::{SaslMechanism, scram::hash_scram_password_with_salt};
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::Serialize;
 use serde_wincode::SerdeCompat;
@@ -652,8 +650,9 @@ fn base64_encode(input: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn release_version_maps_to_feature_level() {

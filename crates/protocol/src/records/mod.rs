@@ -22,9 +22,8 @@ pub use borrowed::{
 };
 pub use error::RecordsError;
 pub use file_region::FileRegion;
-pub use header::HEADER_LEN;
 pub use header::{
-    Attributes, CRC_COVERAGE_START, RecordBatchHeader, TimestampType,
+    Attributes, CRC_COVERAGE_START, HEADER_LEN, RecordBatchHeader, TimestampType,
     patch_base_offset_and_leader_epoch,
 };
 pub use owned::{Record, RecordBatch, RecordHeader};

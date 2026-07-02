@@ -8,8 +8,9 @@
 //! ## Quick start
 //!
 //! ```no_run
-//! use crabka_client_consumer::{AutoOffsetReset, Consumer};
 //! use std::time::Duration;
+//!
+//! use crabka_client_consumer::{AutoOffsetReset, Consumer};
 //!
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut consumer = Consumer::builder()
@@ -34,8 +35,9 @@
 //! ## Share-group consumption
 //!
 //! ```no_run
-//! use crabka_client_consumer::{ShareAckMode, ShareAckType, ShareConsumer};
 //! use std::time::Duration;
+//!
+//! use crabka_client_consumer::{ShareAckMode, ShareAckType, ShareConsumer};
 //!
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut consumer = ShareConsumer::builder()

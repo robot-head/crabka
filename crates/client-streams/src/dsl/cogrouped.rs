@@ -11,24 +11,24 @@
 //! then [`lower_cogroup`] records the per-input repartition+aggregate nodes and
 //! the merge node, registering the shared store exactly once in the merge thunk.
 
-use std::any::Any;
-use std::cell::RefCell;
-use std::marker::PhantomData;
-use std::rc::Rc;
-use std::sync::Arc;
+use std::{any::Any, cell::RefCell, marker::PhantomData, rc::Rc, sync::Arc};
 
-use crate::dsl::builder::InternalStreamsBuilder;
-use crate::dsl::config::Materialized;
-use crate::dsl::graph::{GraphNodeKind, LowerState, NodeId};
-use crate::dsl::kgrouped::{KGroupedStream, RepartitionLowerFn, mint_store_name};
-use crate::dsl::ktable::KTable;
-use crate::dsl::names;
-use crate::dsl::processors::aggregate::KStreamAggregateProcessor;
-use crate::dsl::processors::change::Change;
-use crate::dsl::processors::cogroup_merge::KStreamPassThrough;
-use crate::dsl::processors::tuple_forwarder::TupleForwarder;
-use crate::processor::serde::{DefaultSerde, Serde};
-use crate::topology::NodeHandle;
+use crate::{
+    dsl::{
+        builder::InternalStreamsBuilder,
+        config::Materialized,
+        graph::{GraphNodeKind, LowerState, NodeId},
+        kgrouped::{KGroupedStream, RepartitionLowerFn, mint_store_name},
+        ktable::KTable,
+        names,
+        processors::{
+            aggregate::KStreamAggregateProcessor, change::Change,
+            cogroup_merge::KStreamPassThrough, tuple_forwarder::TupleForwarder,
+        },
+    },
+    processor::serde::{DefaultSerde, Serde},
+    topology::NodeHandle,
+};
 
 /// Which window flavor the terminal aggregation uses. Carries the window spec;
 /// the shared init + (session) merger live alongside in [`CogroupSpec`]. Each
@@ -153,8 +153,10 @@ where
                         h.name().to_string()
                     }
                     CogroupKind::Time(w) => {
-                        use crate::dsl::processors::window_aggregate::KStreamWindowAggregateProcessor;
-                        use crate::dsl::windows::Windowed;
+                        use crate::dsl::{
+                            processors::window_aggregate::KStreamWindowAggregateProcessor,
+                            windows::Windowed,
+                        };
                         let agg = agg.clone();
                         let store = store_name.clone();
                         let h = state
@@ -184,8 +186,10 @@ where
                         h.name().to_string()
                     }
                     CogroupKind::Sliding(w) => {
-                        use crate::dsl::processors::sliding_window_aggregate::KStreamSlidingWindowAggregateProcessor;
-                        use crate::dsl::windows::Windowed;
+                        use crate::dsl::{
+                            processors::sliding_window_aggregate::KStreamSlidingWindowAggregateProcessor,
+                            windows::Windowed,
+                        };
                         let agg = agg.clone();
                         let store = store_name.clone();
                         let h = state
@@ -215,8 +219,10 @@ where
                         h.name().to_string()
                     }
                     CogroupKind::Session(w) => {
-                        use crate::dsl::processors::session_aggregate::KStreamSessionAggregateProcessor;
-                        use crate::dsl::windows::Windowed;
+                        use crate::dsl::{
+                            processors::session_aggregate::KStreamSessionAggregateProcessor,
+                            windows::Windowed,
+                        };
                         let agg = agg.clone();
                         let store = store_name.clone();
                         let merger = spec
@@ -534,9 +540,10 @@ mod tests {
 mod cogroup_caching_tests {
     use assert2::check;
 
-    use crate::dsl::StreamsBuilder;
-    use crate::store::backend::StoreBackend;
-    use crate::{I64Serde, Materialized, Produced, StringSerde};
+    use crate::{
+        I64Serde, Materialized, Produced, StringSerde, dsl::StreamsBuilder,
+        store::backend::StoreBackend,
+    };
 
     /// Two co-grouped inputs aggregating into one cached KV store. Within a
     /// single batch, in1 adds `len(value)` and in2 adds 1; the cached store is

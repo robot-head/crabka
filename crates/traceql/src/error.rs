@@ -26,8 +26,9 @@ impl From<datafusion::error::DataFusionError> for TraceqlError {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn datafusion_error_maps_to_exec() {

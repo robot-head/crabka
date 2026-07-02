@@ -30,13 +30,17 @@
 
 use std::sync::Arc;
 
-use arrow::array::{Array, ArrayRef, DictionaryArray, Float64Builder, Int64Array};
-use arrow::datatypes::{DataType, Int64Type};
-use datafusion::common::{DataFusionError, Result as DfResult};
-use datafusion::logical_expr::{
-    ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
+use arrow::{
+    array::{Array, ArrayRef, DictionaryArray, Float64Builder, Int64Array},
+    datatypes::{DataType, Int64Type},
 };
-use datafusion::prelude::SessionContext;
+use datafusion::{
+    common::{DataFusionError, Result as DfResult},
+    logical_expr::{
+        ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
+    },
+    prelude::SessionContext,
+};
 
 use super::extrapolate::{InstantKind, RangeKind, extrapolated_rate, instant_delta};
 use crate::range_array::RangeArray;
@@ -321,9 +325,11 @@ pub fn register_rate_udfs(ctx: &SessionContext) {
 
 #[cfg(test)]
 mod tests {
-    use arrow::array::Float64Array;
-    use arrow::datatypes::{Field, Schema};
-    use arrow::record_batch::RecordBatch;
+    use arrow::{
+        array::Float64Array,
+        datatypes::{Field, Schema},
+        record_batch::RecordBatch,
+    };
     use assert2::{assert, check};
     use datafusion::common::ScalarValue;
 

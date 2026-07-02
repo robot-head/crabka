@@ -1,17 +1,20 @@
 //! Span source and `remote_write` sink traits.
 
-use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::{
+    collections::VecDeque,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use crabka_client_consumer::{Consumer, ConsumerRecord};
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::metricsgen::contract::SpanRecord;
-use crate::metricsgen::series::SeriesPayload;
-use crate::span::{AttrValue, KeyValue};
-use crate::wal;
+use crate::{
+    metricsgen::{contract::SpanRecord, series::SeriesPayload},
+    span::{AttrValue, KeyValue},
+    wal,
+};
 
 /// Errors crossing the metrics-generator source/sink boundaries.
 #[derive(Debug, thiserror::Error)]
@@ -245,10 +248,14 @@ mod tests {
     use assert2::{assert, check};
 
     use super::*;
-    use crate::metricsgen::contract::{SpanKind, SpanRecord, StatusCode};
-    use crate::metricsgen::series::{Series, SeriesPayload, SeriesSample};
-    use crate::span::{AttrValue, KeyValue, Span};
-    use crate::wal;
+    use crate::{
+        metricsgen::{
+            contract::{SpanKind, SpanRecord, StatusCode},
+            series::{Series, SeriesPayload, SeriesSample},
+        },
+        span::{AttrValue, KeyValue, Span},
+        wal,
+    };
 
     fn payload() -> SeriesPayload {
         SeriesPayload {

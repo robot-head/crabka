@@ -3,9 +3,10 @@
 //! immediate downstream forward is suppressed (the cache flush forwards the
 //! deduped `Change`); otherwise the processor forwards immediately.
 
-use crate::dsl::processors::change::Change;
-use crate::processor::api::ProcessorContext;
-use crate::processor::record::Record;
+use crate::{
+    dsl::processors::change::Change,
+    processor::{api::ProcessorContext, record::Record},
+};
 
 #[derive(Default)]
 pub(crate) struct TupleForwarder {
@@ -66,9 +67,13 @@ mod tests {
     use assert2::check;
 
     use super::*;
-    use crate::processor::erased::{Dispatch, ErasedRecord};
-    use crate::processor::record::RecordContext;
-    use crate::store::registry::StoreRegistry;
+    use crate::{
+        processor::{
+            erased::{Dispatch, ErasedRecord},
+            record::RecordContext,
+        },
+        store::registry::StoreRegistry,
+    };
 
     fn rc() -> RecordContext {
         RecordContext {

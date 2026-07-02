@@ -534,9 +534,10 @@ fn wire_to_operation(b: i8) -> Result<AclOperation, AdminError> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
     use crabka_protocol::UnknownTaggedFields;
+
+    use super::*;
 
     fn sample_entry() -> AclEntry {
         AclEntry {

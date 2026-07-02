@@ -7,10 +7,13 @@
 
 use bytes::{Bytes, BytesMut};
 use crabka_compression::CompressionType;
-use crabka_protocol::DecodeBorrow;
-use crabka_protocol::records::RecordBatchBorrowed;
-use crabka_protocol::records::{Record, RecordBatch, RecordHeader};
-use crabka_protocol::records::{count_records_in_v2_batches, validate_one_v2_batch};
+use crabka_protocol::{
+    DecodeBorrow,
+    records::{
+        Record, RecordBatch, RecordBatchBorrowed, RecordHeader, count_records_in_v2_batches,
+        validate_one_v2_batch,
+    },
+};
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
 // ---------------------------------------------------------------------------

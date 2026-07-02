@@ -12,11 +12,13 @@
 //! this is a different topic with its own discriminator space.
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use crabka_protocol::ProtocolError;
 use uuid::Uuid;
 
-use crate::coordinator::unified::persistence::{get_i16, get_i32, get_i64, get_string, put_string};
-use crate::error::BrokerError;
-use crabka_protocol::ProtocolError;
+use crate::{
+    coordinator::unified::persistence::{get_i16, get_i32, get_i64, get_string, put_string},
+    error::BrokerError,
+};
 
 pub const KEY_SHARE_SNAPSHOT: i16 = 0;
 pub const KEY_SHARE_UPDATE: i16 = 1;
@@ -192,8 +194,9 @@ fn get_batches(buf: &mut &[u8]) -> Result<Vec<StateBatch>, BrokerError> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     fn peek_type(buf: &[u8]) -> i16 {
         let mut r = buf;

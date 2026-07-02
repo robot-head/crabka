@@ -6,17 +6,23 @@
 use std::collections::BTreeMap;
 
 use k8s_openapi::api::core::v1::Service;
-use kube::Resource as _;
-use kube::api::{Api, DeleteParams, DynamicObject, Patch, PatchParams};
-use kube::core::{ApiResource, GroupVersionKind};
+use kube::{
+    Resource as _,
+    api::{Api, DeleteParams, DynamicObject, Patch, PatchParams},
+    core::{ApiResource, GroupVersionKind},
+};
 use serde_json::json;
 
-use crate::context::Context;
-use crate::controller::common::{
-    APP_LABEL, FIELD_MANAGER, ReconcileError, apply_object, common_labels, owner_ref,
+use crate::{
+    context::Context,
+    controller::{
+        common::{
+            APP_LABEL, FIELD_MANAGER, ReconcileError, apply_object, common_labels, owner_ref,
+        },
+        kafka_node_pool::METRICS_PORT,
+    },
+    crd::{Kafka, PodMonitorSpec, ServiceMonitorSpec},
 };
-use crate::controller::kafka_node_pool::METRICS_PORT;
-use crate::crd::{Kafka, PodMonitorSpec, ServiceMonitorSpec};
 
 pub(crate) fn render_pod_monitor(
     owner: &Kafka,
@@ -265,9 +271,10 @@ pub(crate) async fn reconcile_metrics(
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
+
     use super::*;
     use crate::crd::KafkaSpec;
-    use assert2::assert;
 
     fn test_kafka() -> Kafka {
         let mut k = Kafka::new(

@@ -28,14 +28,20 @@ use std::marker::PhantomData;
 use async_trait::async_trait;
 use bytes::Bytes;
 
-use crate::dsl::processors::change::Change;
-use crate::dsl::processors::fk::murmur3::hash128;
-use crate::dsl::processors::fk::subscription::{
-    Instruction, SubscriptionResponseWrapper, SubscriptionWrapper,
+use crate::{
+    dsl::processors::{
+        change::Change,
+        fk::{
+            murmur3::hash128,
+            subscription::{Instruction, SubscriptionResponseWrapper, SubscriptionWrapper},
+        },
+    },
+    processor::{
+        api::{Processor, ProcessorContext},
+        record::Record,
+        serde::Serde,
+    },
 };
-use crate::processor::api::{Processor, ProcessorContext};
-use crate::processor::record::Record;
-use crate::processor::serde::Serde;
 
 /// Variance-neutral marker for multi-param processor structs.
 type Marker<T> = PhantomData<fn() -> T>;

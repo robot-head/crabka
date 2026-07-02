@@ -9,12 +9,13 @@
 //! name-sort for backwards-compatible smoke runs.
 
 use anyhow::{Context, Result, anyhow};
-use crabka_client_core::Client as KafkaClient;
-use crabka_client_core::security::ClientSecurity;
+use crabka_client_core::{Client as KafkaClient, security::ClientSecurity};
 use crabka_protocol::owned::metadata_response::MetadataResponse;
 use k8s_openapi::api::core::v1::Pod;
-use kube::Client as KubeClient;
-use kube::api::{Api, DeleteParams, ListParams};
+use kube::{
+    Client as KubeClient,
+    api::{Api, DeleteParams, ListParams},
+};
 
 use crate::scenario::Stack;
 
@@ -127,10 +128,11 @@ fn choose_target_pod(names: &[String], stack: Stack, leader_id: Option<i32>) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crabka_protocol::owned::metadata_response::{
         MetadataResponse, MetadataResponsePartition, MetadataResponseTopic,
     };
+
+    use super::*;
 
     #[test]
     fn partition0_leader_is_read_from_metadata() {

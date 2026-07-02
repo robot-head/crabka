@@ -14,14 +14,11 @@
 
 use std::sync::Arc;
 
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
-use jsonpath_rust::parser::model::JpQuery;
-use jsonpath_rust::query::js_path_process;
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64URL};
+use jsonpath_rust::{parser::model::JpQuery, query::js_path_process};
 use serde_json::Value;
 
-use crate::jwks::JwksHandle;
-use crate::{AuthError, AuthMethod, Principal};
+use crate::{AuthError, AuthMethod, Principal, jwks::JwksHandle};
 
 /// Outcome of an OAUTHBEARER validation: the authenticated principal plus the
 /// token's expiry. The expiry populates
@@ -885,9 +882,10 @@ fn merge_userinfo_over_introspection(introspection: &mut Value, userinfo: Value)
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
     use jsonpath_rust::parser::parse_json_path;
+
+    use super::*;
 
     fn jws(header: &str, claims: &str) -> String {
         format!(
@@ -1685,8 +1683,7 @@ mod tests {
         jwks_json: &str,
         last_successful_fetch_ms: i64,
     ) -> (SignedJwsValidator, tokio::sync::mpsc::Receiver<()>) {
-        use std::sync::Arc;
-        use std::sync::atomic::AtomicI64;
+        use std::sync::{Arc, atomic::AtomicI64};
         let (tx, rx) = tokio::sync::mpsc::channel::<()>(1);
         let ts = Arc::new(AtomicI64::new(last_successful_fetch_ms));
         let handle = JwksHandle::new_with_refresher_handles(
@@ -1833,13 +1830,14 @@ mod tests {
 
 #[cfg(test)]
 mod introspection_tests {
-    use super::*;
-    use crate::{AuthError, AuthMethod};
+    use std::{collections::HashMap, sync::Mutex};
+
     use assert2::assert;
     use jsonpath_rust::parser::parse_json_path;
     use serde_json::{Value, json};
-    use std::collections::HashMap;
-    use std::sync::Mutex;
+
+    use super::*;
+    use crate::{AuthError, AuthMethod};
 
     // --- pure temporal/claim helpers (no IdP/JWKS fixtures needed) ----------
 

@@ -1,7 +1,9 @@
 //! Checkpoint codecs for rebuildable metrics-generator state.
 
-use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 

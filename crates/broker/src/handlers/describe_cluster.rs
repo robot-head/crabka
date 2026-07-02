@@ -8,20 +8,24 @@
 //! left at `i32::MIN` (Kafka's "not present" sentinel).
 
 use bytes::{Bytes, BytesMut};
-
 use crabka_metadata::{AclOperation, ResourceType};
-use crabka_protocol::owned::describe_cluster_request::DescribeClusterRequest;
-use crabka_protocol::owned::describe_cluster_response::{
-    DescribeClusterBroker, DescribeClusterResponse,
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        describe_cluster_request::DescribeClusterRequest,
+        describe_cluster_response::{DescribeClusterBroker, DescribeClusterResponse},
+    },
 };
-use crabka_protocol::{Decode, Encode};
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
-use crate::handlers::acl_wire::CLUSTER_RESOURCE_NAME;
-use crate::handlers::authorized_operations::authorized_operations_bits;
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes,
+    error::BrokerError,
+    handlers::{
+        acl_wire::CLUSTER_RESOURCE_NAME, authorized_operations::authorized_operations_bits,
+    },
+};
 
 /// `DescribeCluster` `endpoint_type` (KIP-919): `1` = BROKERS (default),
 /// `2` = CONTROLLERS.
@@ -166,14 +170,17 @@ pub(crate) async fn handle(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::sync::Arc;
+
     use assert2::assert;
     use crabka_metadata::{BrokerEndpoint, BrokerRegistrationRecord, MetadataRecord};
     use crabka_security::ListenerProtocol;
-    use std::sync::Arc;
 
-    use crate::broker::BrokerHandle;
-    use crate::test_support::{DenyAll, peer, principal};
+    use super::*;
+    use crate::{
+        broker::BrokerHandle,
+        test_support::{DenyAll, peer, principal},
+    };
 
     const VERSION: i16 = 1;
 

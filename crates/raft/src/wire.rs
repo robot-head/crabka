@@ -10,7 +10,6 @@
 //! Api keys: `1003` `SubmitChange` (forward), `1004` `MetadataFetch` (observer).
 
 use bytes::{Buf, BufMut, Bytes};
-
 use crabka_protocol::ProtocolError;
 
 const I32_LEN: usize = 4;
@@ -166,8 +165,9 @@ impl CrabkaMetadataFetchResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     fn assert_unexpected_eof<T: std::fmt::Debug>(result: Result<T, ProtocolError>, want: usize) {
         match result {

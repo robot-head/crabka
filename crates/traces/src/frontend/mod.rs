@@ -17,6 +17,8 @@ pub mod queue;
 pub mod server;
 pub mod wire;
 
+use std::sync::Arc;
+
 pub use backend::{
     BackendError, MetricsJobRequest, MetricsPartial, MockQuerier, QuerierBackend, SearchJobRequest,
     SearchPartial, TagNamesJobRequest, TagNamesPartial, TagValuesJobRequest, TagValuesPartial,
@@ -43,8 +45,6 @@ pub use wire::{
     ScopeSpansJson, SearchResponseJson, SpanJson, SpanSetJson, TraceByIdResponseJson,
     TraceEnvelopeJson, TraceJson, hex8, hex16, parse_hex8, parse_hex16,
 };
-
-use std::sync::Arc;
 
 /// Map a block-catalog enumeration failure to a backend transport error so the
 /// endpoint surfaces a 5xx instead of silently returning only live-tier results.
@@ -347,9 +347,11 @@ mod orch_tests {
     use assert2::{assert, check};
 
     use super::*;
-    use crate::frontend::backend::{MockQuerier, SearchPartial};
-    use crate::frontend::job::{BlockMetaInfo, MockCatalog, RowGroupInfo};
-    use crate::frontend::wire::{Metrics, SpanJson, SpanSetJson, TraceJson};
+    use crate::frontend::{
+        backend::{MockQuerier, SearchPartial},
+        job::{BlockMetaInfo, MockCatalog, RowGroupInfo},
+        wire::{Metrics, SpanJson, SpanSetJson, TraceJson},
+    };
 
     fn block(id: &str, start: i64, end: i64, rgs: &[u64]) -> BlockMetaInfo {
         let row_groups = rgs

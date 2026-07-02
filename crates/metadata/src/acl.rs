@@ -99,10 +99,11 @@ impl AclEntryFilter {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
     use serde_wincode::SerdeCompat;
     use wincode::{Deserialize as _, Serialize as _};
+
+    use super::*;
 
     fn rt<T>(value: &T) -> T
     where

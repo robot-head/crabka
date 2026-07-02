@@ -11,22 +11,25 @@ use assert2::{assert, check};
 mod support;
 
 use bytes::BufMut;
-
-use crabka_protocol::Encode;
-use crabka_protocol::owned::consumer_protocol_subscription::ConsumerProtocolSubscription;
-use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-use crabka_protocol::owned::join_group_request::{JoinGroupRequest, JoinGroupRequestProtocol};
-use crabka_protocol::owned::metadata_request::{MetadataRequest, MetadataRequestTopic};
-use crabka_protocol::owned::offset_commit_request::{
-    OffsetCommitRequest, OffsetCommitRequestPartition, OffsetCommitRequestTopic,
+use crabka_protocol::{
+    Encode,
+    owned::{
+        consumer_protocol_subscription::ConsumerProtocolSubscription,
+        create_topics_request::{CreatableTopic, CreateTopicsRequest},
+        join_group_request::{JoinGroupRequest, JoinGroupRequestProtocol},
+        metadata_request::{MetadataRequest, MetadataRequestTopic},
+        offset_commit_request::{
+            OffsetCommitRequest, OffsetCommitRequestPartition, OffsetCommitRequestTopic,
+        },
+        offset_delete_request::{
+            OffsetDeleteRequest, OffsetDeleteRequestPartition, OffsetDeleteRequestTopic,
+        },
+        offset_fetch_request::{
+            OffsetFetchRequest, OffsetFetchRequestGroup, OffsetFetchRequestTopics,
+        },
+    },
+    primitives::uuid::Uuid as WireUuid,
 };
-use crabka_protocol::owned::offset_delete_request::{
-    OffsetDeleteRequest, OffsetDeleteRequestPartition, OffsetDeleteRequestTopic,
-};
-use crabka_protocol::owned::offset_fetch_request::{
-    OffsetFetchRequest, OffsetFetchRequestGroup, OffsetFetchRequestTopics,
-};
-use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 
 const OFFSET_ABSENT_SENTINEL: i64 = -1; // OffsetFetch returns -1 when no offset is committed.
 

@@ -14,17 +14,22 @@
 //! enough to be the debugging anchor when the TCP integration (Task 10)
 //! misbehaves.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use assert2::assert;
 use bytes::Bytes;
+use crabka_raft::{
+    RaftError,
+    kraft::{
+        KraftConfig, KraftController, KraftLog, NodeId, PeerSender, QuorumState,
+        transport::{Inbound, api_key},
+    },
+};
 use tokio::sync::oneshot;
-
-use crabka_raft::RaftError;
-use crabka_raft::kraft::transport::{Inbound, api_key};
-use crabka_raft::kraft::{KraftConfig, KraftController, KraftLog, NodeId, PeerSender, QuorumState};
 
 /// Shared registry of in-process engines, keyed by node id. Each engine holds a
 /// clone of one of these (via [`SimNet`]) so its outbound peer sends can reach

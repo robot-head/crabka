@@ -1,10 +1,11 @@
 //! Flamegraph merge engine.
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
-use arrow::array::AsArray;
-use arrow::datatypes::{Int64Type, UInt64Type};
+use arrow::{
+    array::AsArray,
+    datatypes::{Int64Type, UInt64Type},
+};
 use crabka_blockstore::{LabelMatcher, MatchOp};
 
 use crate::{

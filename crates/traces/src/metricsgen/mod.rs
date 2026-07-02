@@ -16,8 +16,10 @@ pub mod spanmetrics;
 
 /// Single point of truth for types consumed from sibling traces/metrics slices.
 pub mod contract {
-    pub use crate::span::{SpanKind, StatusCode};
-    pub use crate::wal::TRACES_WAL_TOPIC;
+    pub use crate::{
+        span::{SpanKind, StatusCode},
+        wal::TRACES_WAL_TOPIC,
+    };
 
     /// The flattened WAL projection read by metrics-generator processors.
     #[derive(Clone, Debug, PartialEq)]

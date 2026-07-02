@@ -64,10 +64,11 @@ fn apply_image(image: &MetadataImage, node_id: NodeId, throttle: &ThrottleState)
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
     use crabka_metadata::{BrokerConfigRecord, MetadataRecord};
     use uuid::Uuid;
+
+    use super::*;
 
     #[test]
     fn apply_image_sets_rates() {

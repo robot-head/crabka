@@ -8,19 +8,27 @@ use assert2::assert;
 mod support;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use crabka_protocol::kafka_3_6_2::owned::produce_request::{
-    PartitionProduceData as LegacyPartitionProduceData, ProduceRequest as LegacyProduceRequest,
-    TopicProduceData as LegacyTopicProduceData,
+use crabka_protocol::{
+    Decode, Encode,
+    kafka_3_6_2::owned::{
+        produce_request::{
+            PartitionProduceData as LegacyPartitionProduceData,
+            ProduceRequest as LegacyProduceRequest, TopicProduceData as LegacyTopicProduceData,
+        },
+        produce_response::ProduceResponse as LegacyProduceResponse,
+    },
+    owned::{
+        create_topics_request::{CreatableTopic, CreateTopicsRequest},
+        fetch_request::{FetchPartition, FetchRequest, FetchTopic},
+        metadata_request::{MetadataRequest, MetadataRequestTopic},
+    },
+    records::RecordsPayload,
 };
-use crabka_protocol::kafka_3_6_2::owned::produce_response::ProduceResponse as LegacyProduceResponse;
-use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-use crabka_protocol::owned::fetch_request::{FetchPartition, FetchRequest, FetchTopic};
-use crabka_protocol::owned::metadata_request::{MetadataRequest, MetadataRequestTopic};
-use crabka_protocol::records::RecordsPayload;
-use crabka_protocol::{Decode, Encode};
 use crabka_records_legacy::{Magic, ParsedRecord, encode_flat_message_set};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+};
 
 // ── Raw TCP wire helpers ──────────────────────────────────────────────────────
 

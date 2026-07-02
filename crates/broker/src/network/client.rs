@@ -5,13 +5,15 @@
 //! Used by the replicator's Fetch path, the raft transport's
 //! outbound dial, and the controller-heartbeat loop.
 
+use std::sync::Arc;
+
 use crabka_security::ListenerProtocol;
 use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::TcpStream;
+use tokio::{
+    io::{AsyncRead, AsyncWrite},
+    net::TcpStream,
+};
 use tokio_rustls::TlsConnector;
-
-use std::sync::Arc;
 
 use crate::config::InterBrokerCredentials;
 

@@ -1,22 +1,26 @@
 //! Top-level `Broker` lifecycle. Wires together the partition registry,
 //! metadata image, network listener, and handler table.
 
-use std::net::{IpAddr, SocketAddr};
-use std::sync::{Arc, Mutex};
+use std::{
+    net::{IpAddr, SocketAddr},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicI32, AtomicU64, AtomicUsize, Ordering},
+    },
+};
 
 use dashmap::DashMap;
-use tokio::net::TcpListener;
-use tokio::task::JoinHandle;
+use tokio::{net::TcpListener, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
-use std::sync::atomic::{AtomicI32, AtomicU64, AtomicUsize, Ordering};
-
-use crate::config::BrokerConfig;
-use crate::error::BrokerError;
-use crate::handlers::HandlerTable;
-use crate::log_dir;
-use crate::partition::{Partition, WriterMessage};
-use crate::partition_registry::PartitionRegistry;
+use crate::{
+    config::BrokerConfig,
+    error::BrokerError,
+    handlers::HandlerTable,
+    log_dir,
+    partition::{Partition, WriterMessage},
+    partition_registry::PartitionRegistry,
+};
 
 /// Startup deadline for the controller quorum to elect a leader before
 /// `Broker::start` fails with a `Startup` error.
@@ -4170,9 +4174,10 @@ fn tune_accepted_socket(stream: &tokio::net::TcpStream) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
     use tempfile::tempdir;
+
+    use super::*;
 
     struct MockMetadataSource {
         image: Arc<crabka_metadata::MetadataImage>,

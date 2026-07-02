@@ -1114,16 +1114,14 @@ fn stable_hash_parts(parts: &[&str]) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-    use std::collections::BTreeSet;
-    use std::sync::Arc;
-    use std::sync::Mutex;
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        sync::{Arc, Mutex},
+    };
 
-    use assert2::assert;
-    use assert2::check;
-    use crabka_metrics::{SamplePayload, WalRecord};
-
+    use assert2::{assert, check};
     use crabka_blockstore::Labels;
+    use crabka_metrics::{SamplePayload, WalRecord};
 
     use crate::{EngineOpts, InMemoryMetricStore, PromqlEngine};
 

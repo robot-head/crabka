@@ -1,7 +1,9 @@
 //! Recover the audit hash-chain position from this broker's audit partition.
 
-use crabka_audit::chain::{chain_hash, from_hex32};
-use crabka_audit::{EVENT_CLASS_CHECKPOINT, HEADER_PREV_HASH, HEADER_SEQ};
+use crabka_audit::{
+    EVENT_CLASS_CHECKPOINT, HEADER_PREV_HASH, HEADER_SEQ,
+    chain::{chain_hash, from_hex32},
+};
 
 use crate::partition::Partition;
 
@@ -69,15 +71,19 @@ fn tail_window_start(log_end_offset: i64) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicI32, AtomicU64},
+    };
+
     use assert2::assert;
     use bytes::Bytes;
     use crabka_audit::chain::{GENESIS_HEAD, to_hex};
     use crabka_log::{Log, LogConfig};
     use crabka_protocol::records::{Record, RecordBatch, RecordHeader};
-    use std::sync::atomic::{AtomicI32, AtomicU64};
-    use std::sync::{Arc, Mutex};
     use tokio::sync::{Notify, mpsc};
+
+    use super::*;
 
     fn test_partition() -> (Partition, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("tempdir");

@@ -36,17 +36,21 @@ use std::collections::HashSet;
 use crabka_metadata::{
     AclOperation, DeleteScramCredentialRecord, MetadataRecord, ScramCredentialRecord,
 };
-use crabka_protocol::owned::alter_user_scram_credentials_request::{
-    AlterUserScramCredentialsRequest, ScramCredentialDeletion, ScramCredentialUpsertion,
-};
-use crabka_protocol::owned::alter_user_scram_credentials_response::{
-    AlterUserScramCredentialsResponse, AlterUserScramCredentialsResult,
+use crabka_protocol::owned::{
+    alter_user_scram_credentials_request::{
+        AlterUserScramCredentialsRequest, ScramCredentialDeletion, ScramCredentialUpsertion,
+    },
+    alter_user_scram_credentials_response::{
+        AlterUserScramCredentialsResponse, AlterUserScramCredentialsResult,
+    },
 };
 use crabka_security::SaslMechanism;
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes;
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes,
+};
 
 /// Lowest PBKDF2 iteration count accepted for a SCRAM credential (KIP-554);
 /// upsertions below this get `UNACCEPTABLE_CREDENTIAL`.
@@ -277,18 +281,15 @@ fn apply_submit_error(results: &mut [AlterUserScramCredentialsResult], msg: &str
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::{net::SocketAddr, sync::Arc, time::Duration};
+
     use assert2::assert;
     use bytes::Bytes;
     use crabka_metadata::FeatureLevelRecord;
     use crabka_protocol::UnknownTaggedFields;
     use crabka_security::{AuthMethod, Principal};
-    use std::net::SocketAddr;
-    use std::sync::Arc;
-    use std::time::Duration;
 
-    use crate::authorizer::Authorizer;
-    use crate::test_support::DenyAll;
+    use crate::{authorizer::Authorizer, test_support::DenyAll};
 
     fn valid_upsertion(name: &str) -> ScramCredentialUpsertion {
         ScramCredentialUpsertion {
@@ -363,6 +364,8 @@ mod tests {
         }
     }
 
+    use super::*;
+
     #[test]
     fn wire_to_mech_maps_both_scram_variants() {
         let cases = [
@@ -414,8 +417,9 @@ mod tests {
 
     #[test]
     fn scram_gate_permits_unknown_and_at_or_above_level() {
-        use crabka_metadata::metadata_version::SCRAM_MIN_LEVEL;
-        use crabka_metadata::{FeatureLevelRecord, MetadataImage, MetadataRecord};
+        use crabka_metadata::{
+            FeatureLevelRecord, MetadataImage, MetadataRecord, metadata_version::SCRAM_MIN_LEVEL,
+        };
 
         let gate = |level: Option<i16>| {
             let mut image = MetadataImage::new(uuid::Uuid::nil());

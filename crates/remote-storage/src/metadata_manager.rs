@@ -1,10 +1,12 @@
 //! The [`RemoteLogMetadataManager`] SPI: persistence and querying of
 //! remote-segment metadata.
 
-use crate::error::RemoteStorageError;
-use crate::metadata::{
-    RemoteLogSegmentMetadata, RemoteLogSegmentMetadataUpdate, RemotePartitionDeleteMetadata,
-    TopicIdPartition,
+use crate::{
+    error::RemoteStorageError,
+    metadata::{
+        RemoteLogSegmentMetadata, RemoteLogSegmentMetadataUpdate, RemotePartitionDeleteMetadata,
+        TopicIdPartition,
+    },
 };
 
 /// SPI for the store that holds metadata about remote log segments.

@@ -1,9 +1,9 @@
 //! In-process single-voter Controller. Validates the openraft + `log_store`
 //! + `state_machine` + listener wiring without needing a 3-node cluster.
 
-use assert2::assert;
 use std::time::Duration;
 
+use assert2::assert;
 use crabka_metadata::{MetadataRecord, TopicRecord};
 use crabka_raft::{Controller, ControllerConfig};
 use tempfile::TempDir;

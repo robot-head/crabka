@@ -5,9 +5,11 @@
 //! generated password lives in a Kubernetes Secret owner-referenced to
 //! the `KafkaUser`, so cluster delete cascades automatically.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
-use std::time::Duration;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+    time::Duration,
+};
 
 use base64::Engine as _;
 use crabka_client_admin::{
@@ -15,25 +17,35 @@ use crabka_client_admin::{
     PermissionType, ResourceType, ScramDeletion, ScramUpsertion,
 };
 use futures::StreamExt as _;
-use k8s_openapi::ByteString;
-use k8s_openapi::api::core::v1::Secret;
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference};
-use kube::api::{Api, Patch, PatchParams};
-use kube::runtime::controller::{Action, Controller};
-use kube::runtime::reflector::ObjectRef;
-use kube::runtime::watcher;
-use kube::{Resource, ResourceExt as _};
+use k8s_openapi::{
+    ByteString,
+    api::core::v1::Secret,
+    apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference},
+};
+use kube::{
+    Resource, ResourceExt as _,
+    api::{Api, Patch, PatchParams},
+    runtime::{
+        controller::{Action, Controller},
+        reflector::ObjectRef,
+        watcher,
+    },
+};
 use ring::rand::{SecureRandom, SystemRandom};
 use serde_json::json;
 
-use crate::context::Context;
-use crate::controller::common::{FIELD_MANAGER, ReconcileError, condition};
-use crate::controller::topic::internal_listener_bootstrap;
-use crate::controller::user_delegation_token::{self, KubeKafkaUserStatusWriter, KubeSecretWriter};
-use crate::controller::user_tls;
-use crate::crd::{
-    AclOp, AclPatternType, AclPermission, AclResourceKind, Authentication, Kafka, KafkaUser,
-    KafkaUserAuthorization as Authorization,
+use crate::{
+    context::Context,
+    controller::{
+        common::{FIELD_MANAGER, ReconcileError, condition},
+        topic::internal_listener_bootstrap,
+        user_delegation_token::{self, KubeKafkaUserStatusWriter, KubeSecretWriter},
+        user_tls,
+    },
+    crd::{
+        AclOp, AclPatternType, AclPermission, AclResourceKind, Authentication, Kafka, KafkaUser,
+        KafkaUserAuthorization as Authorization,
+    },
 };
 
 const FINALIZER: &str = "crabka.io/user-finalizer";
@@ -1048,12 +1060,13 @@ async fn patch_status(
 
 #[cfg(test)]
 mod tests {
+    use assert2::{assert, check};
+
     use super::*;
     use crate::crd::{
         AclOp, AclPatternType, AclPermission, AclResource, AclResourceKind, AclRule,
         KafkaUserSimpleAuthorization as SimpleAuthorization,
     };
-    use assert2::{assert, check};
 
     fn rule(kind: AclResourceKind, name: &str, ops: &[AclOp]) -> AclRule {
         AclRule {

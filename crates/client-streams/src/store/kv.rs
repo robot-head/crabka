@@ -1,17 +1,21 @@
 //! `KeyValueBytesStore<K,V>`: the single typed store the registry holds and
 //! downcasts to. Serde + changelog-buffer logic over a pluggable `ByteKeyValueStore`.
-use std::any::Any;
-use std::sync::{Arc, Mutex};
+use std::{
+    any::Any,
+    sync::{Arc, Mutex},
+};
 
 use async_trait::async_trait;
 use bytes::Bytes;
 
-use crate::processor::record::RecordContext;
-use crate::processor::serde::Serde;
-use crate::store::api::{KeyValueStore, StateStore};
-use crate::store::byte::{ByteKeyValueStore, InMemoryBytes};
-use crate::store::cache::kv::CachingKeyValueStore;
-use crate::store::cache::named::NamedCache;
+use crate::{
+    processor::{record::RecordContext, serde::Serde},
+    store::{
+        api::{KeyValueStore, StateStore},
+        byte::{ByteKeyValueStore, InMemoryBytes},
+        cache::{kv::CachingKeyValueStore, named::NamedCache},
+    },
+};
 
 /// The store's backing: either a plain boxed byte store or a record-cache
 /// wrapper over it. `Cached` is opted into via [`KeyValueBytesStore::enable_cache`];
@@ -234,8 +238,7 @@ impl<K: Send + 'static, V: Send + 'static> StateStore for KeyValueBytesStore<K, 
         buffer: &mut std::collections::VecDeque<(usize, crate::processor::erased::ErasedRecord)>,
         children: &[usize],
     ) {
-        use crate::dsl::processors::change::Change;
-        use crate::processor::erased::ErasedRecord;
+        use crate::{dsl::processors::change::Change, processor::erased::ErasedRecord};
         let Backing::Cached(cache) = &self.backing else {
             return;
         };
@@ -434,9 +437,10 @@ impl<K: Send + Sync + 'static, V: Send + 'static> KeyValueStore<K, V> for KeyVal
 
 #[cfg(test)]
 mod tests {
+    use assert2::check;
+
     use super::*;
     use crate::processor::serde::{I64Serde, StringSerde};
-    use assert2::check;
 
     fn store() -> KeyValueBytesStore<String, i64> {
         KeyValueBytesStore::in_memory(
@@ -478,8 +482,9 @@ mod tests {
 
     #[tokio::test]
     async fn range_returns_ordered_half_open() {
-        use crate::processor::serde::BytesSerde;
         use bytes::Bytes;
+
+        use crate::processor::serde::BytesSerde;
         let mut s = KeyValueBytesStore::<Bytes, Bytes>::in_memory(
             "r".into(),
             Box::new(BytesSerde),

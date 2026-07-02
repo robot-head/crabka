@@ -1,6 +1,10 @@
-use crate::ProtocolError;
-use crate::primitives::fixed::{get_i16, get_i32};
-use crate::primitives::varint::get_uvarint;
+use crate::{
+    ProtocolError,
+    primitives::{
+        fixed::{get_i16, get_i32},
+        varint::get_uvarint,
+    },
+};
 
 /// Decode a `STRING` (non-flexible) borrowing from the input buffer.
 /// Wire: INT16 length (≥0), then `length` UTF-8 bytes. Length −1 = null (error here).
@@ -162,8 +166,9 @@ pub fn get_compact_nullable_bytes_borrowed<'de>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
+
+    use super::*;
 
     #[test]
     fn borrowed_decode_zero_copy() {

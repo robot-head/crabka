@@ -4,23 +4,25 @@
 //! `crabka-rebalancer` (the `FakeRebalancerClient`) and assert both the
 //! Connect-RPC sequence and the kube-side status / annotation patches.
 
-use assert2::{assert, check};
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
-use crabka_operator::controller::rebalance::reconcile;
-use crabka_operator::crd::{
-    KafkaCondition, KafkaRebalance, KafkaRebalanceSpec, KafkaRebalanceStatus,
+use assert2::{assert, check};
+use crabka_operator::{
+    controller::rebalance::reconcile,
+    crd::{KafkaCondition, KafkaRebalance, KafkaRebalanceSpec, KafkaRebalanceStatus},
+    rebalancer_client::ProposalStatus,
 };
-use crabka_operator::rebalancer_client::ProposalStatus;
 use http::{Method, Request};
 use hyper::body::Bytes;
 
 #[path = "shared/mod.rs"]
 mod shared;
 
-use shared::fake_rebalancer::{FakeRebalancerClient, FakeResp, RebalCall, fake_proposal};
-use shared::{MockRule, build_ctx, fake_rebalance_body, json_response};
+use shared::{
+    MockRule, build_ctx, fake_rebalance_body,
+    fake_rebalancer::{FakeRebalancerClient, FakeResp, RebalCall, fake_proposal},
+    json_response,
+};
 
 const NS: &str = "kafka";
 const ENDPOINT: &str = "http://r-rebalancer.kafka.svc.cluster.local:9300";

@@ -116,8 +116,9 @@ fn read_varint(bytes: &[u8]) -> Result<(i64, &[u8]), SchemaSerdeError> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::check;
+
+    use super::*;
 
     #[test]
     fn encode_prepends_magic_and_be_id() {

@@ -1,13 +1,20 @@
 #![allow(clippy::unreadable_literal)]
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io::Write as _,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 
 use assert2::{assert, check};
 use async_trait::async_trait;
-use axum::body::{Body, to_bytes};
-use axum::http::{Request, StatusCode};
+use axum::{
+    body::{Body, to_bytes},
+    http::{Request, StatusCode},
+};
 use crabka_blockstore::{
     BlockDescriptor, BlockKey, LabelIndex, LogBlockIndex as BlockIndex, LogRow, TimeRange, labels,
     series_fingerprint, write_log_block, write_log_block_to_object_store, write_log_index_manifest,
@@ -24,30 +31,35 @@ use crabka_observability::{
     otlp_grpc_logs_service, otlp_grpc_logs_service_with_limiter, serve_service_listener,
     write_compaction_frontier_to_object_store,
 };
-use datafusion::arrow::array::{Float64Array, MapArray, StringArray, TimestampNanosecondArray};
-use datafusion::arrow::datatypes::{DataType, TimeUnit};
-use flate2::Compression;
-use flate2::write::DeflateEncoder;
-use flate2::write::GzEncoder;
+use datafusion::arrow::{
+    array::{Float64Array, MapArray, StringArray, TimestampNanosecondArray},
+    datatypes::{DataType, TimeUnit},
+};
+use flate2::{
+    Compression,
+    write::{DeflateEncoder, GzEncoder},
+};
 use futures_util::StreamExt as _;
-use object_store::local::LocalFileSystem;
-use object_store::path::Path as ObjectPath;
-use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
-use opentelemetry_proto::tonic::collector::logs::v1::logs_service_client::LogsServiceClient;
-use opentelemetry_proto::tonic::collector::logs::v1::logs_service_server::LogsService;
-use opentelemetry_proto::tonic::common::v1::{AnyValue, InstrumentationScope, KeyValue, any_value};
-use opentelemetry_proto::tonic::logs::v1::{LogRecord, ResourceLogs, ScopeLogs};
-use opentelemetry_proto::tonic::resource::v1::Resource;
+use object_store::{local::LocalFileSystem, path::Path as ObjectPath};
+use opentelemetry_proto::tonic::{
+    collector::logs::v1::{
+        ExportLogsServiceRequest, logs_service_client::LogsServiceClient,
+        logs_service_server::LogsService,
+    },
+    common::v1::{AnyValue, InstrumentationScope, KeyValue, any_value},
+    logs::v1::{LogRecord, ResourceLogs, ScopeLogs},
+    resource::v1::Resource,
+};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReader;
 use prost::Message as _;
 use serde_json::{Value, json};
 use snap::raw::Encoder as SnappyEncoder;
-use std::io::Write as _;
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-use tokio::net::TcpListener;
-use tokio::time::{Duration, timeout};
-use tokio_tungstenite::connect_async;
-use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
+use tokio::{
+    io::{AsyncReadExt as _, AsyncWriteExt as _},
+    net::TcpListener,
+    time::{Duration, timeout},
+};
+use tokio_tungstenite::{connect_async, tungstenite::client::IntoClientRequest as _};
 use tower::ServiceExt as _;
 
 #[derive(Clone, PartialEq, ::prost::Message)]

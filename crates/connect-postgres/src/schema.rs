@@ -1,14 +1,18 @@
 use bytes::Bytes;
 use crabka_schema_serde::wire::encode_protobuf;
 use prost::Message as _;
-use prost_reflect::prost_types::field_descriptor_proto::{Label, Type};
-use prost_reflect::prost_types::{
-    DescriptorProto, FieldDescriptorProto, FileDescriptorProto, FileDescriptorSet,
+use prost_reflect::{
+    DescriptorPool, DynamicMessage, MessageDescriptor, Value,
+    prost_types::{
+        DescriptorProto, FieldDescriptorProto, FileDescriptorProto, FileDescriptorSet,
+        field_descriptor_proto::{Label, Type},
+    },
 };
-use prost_reflect::{DescriptorPool, DynamicMessage, MessageDescriptor, Value};
 
-use crate::PostgresConnectError;
-use crate::model::{ColumnValue, EntityDifference, EntityKey, Operation, ScalarValue};
+use crate::{
+    PostgresConnectError,
+    model::{ColumnValue, EntityDifference, EntityKey, Operation, ScalarValue},
+};
 
 // Local placeholder IDs until schema registry allocation is wired in.
 const KEY_SCHEMA_ID: u32 = 1;
@@ -288,17 +292,17 @@ fn convert_error(error: impl std::fmt::Display) -> PostgresConnectError {
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
-    use prost_reflect::{DescriptorPool, DynamicMessage, Value};
-
     use crabka_schema_serde::wire::decode_protobuf;
-
-    use crate::model::{ColumnSchema, ScalarValue};
-    use crate::pgoutput::{RelationCache, RelationEvent, RowEvent, RowEventKind};
-    use crate::{ColumnValue, EntityDifference, EntityKey, Operation, PgLsn, TableSchema};
+    use prost_reflect::{DescriptorPool, DynamicMessage, Value};
 
     use super::{
         COLUMN_VALUE, ENTITY_DIFFERENCE, ENTITY_KEY, KEY_SCHEMA_ID, PostgresProtoEncoder,
         VALUE_SCHEMA_ID, message_descriptor, schema_descriptor_set,
+    };
+    use crate::{
+        ColumnValue, EntityDifference, EntityKey, Operation, PgLsn, TableSchema,
+        model::{ColumnSchema, ScalarValue},
+        pgoutput::{RelationCache, RelationEvent, RowEvent, RowEventKind},
     };
 
     #[test]

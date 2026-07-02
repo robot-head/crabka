@@ -12,19 +12,20 @@
 //! `client_software_name` / `client_software_version` bytes the broker
 //! sees.
 
-use assert2::assert;
-use std::io;
-use std::net::SocketAddr;
+use std::{io, net::SocketAddr};
 
+use assert2::assert;
 use bytes::{Buf, BufMut, BytesMut};
-use crabka_broker::config::ListenerSpec;
-use crabka_broker::{Broker, BrokerConfig};
-use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
-use crabka_protocol::owned::api_versions_response::ApiVersionsResponse;
-use crabka_protocol::{Decode, Encode};
+use crabka_broker::{Broker, BrokerConfig, config::ListenerSpec};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{api_versions_request::ApiVersionsRequest, api_versions_response::ApiVersionsResponse},
+};
 use crabka_security::ListenerProtocol;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+};
 
 const INVALID_REQUEST: i16 = 42;
 

@@ -29,30 +29,35 @@
 //!   misses feed `Event::FetchTimeout` to start an election;
 //! - the leader re-broadcasts `BeginQuorumEpoch` to voters each heartbeat tick.
 
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use bytes::BufMut;
-use tokio::sync::{mpsc, oneshot, watch};
-use tokio::time::{Duration, Instant};
-use uuid::Uuid;
-
 use crabka_metadata::{
     MetadataImage, MetadataRecord, VotersRecord, from_kraft_value, to_kraft_values,
 };
 use crabka_protocol::records::{Record, RecordBatch};
-
-use crate::error::RaftError;
-use crate::kraft::action::{Action, TimerKind};
-use crate::kraft::core::QuorumStateMachine;
-use crate::kraft::event::{Event, LogEnd};
-use crate::kraft::log::KraftLog;
-use crate::kraft::role::Role;
-use crate::kraft::snapshot_fetch::{SnapshotFetchState, SnapshotFetchStep};
-use crate::kraft::transport::{
-    Command, Inbound, MetadataFetchSlice, PeerSender, QuorumStateSnapshot, TimerTick, api_key, wire,
+use tokio::{
+    sync::{mpsc, oneshot, watch},
+    time::{Duration, Instant},
 };
-use crate::kraft::types::{LeaderEpoch, LogView, NodeId, QuorumState, ReplicaKey, SimInstant};
+use uuid::Uuid;
+
+use crate::{
+    error::RaftError,
+    kraft::{
+        action::{Action, TimerKind},
+        core::QuorumStateMachine,
+        event::{Event, LogEnd},
+        log::KraftLog,
+        role::Role,
+        snapshot_fetch::{SnapshotFetchState, SnapshotFetchStep},
+        transport::{
+            Command, Inbound, MetadataFetchSlice, PeerSender, QuorumStateSnapshot, TimerTick,
+            api_key, wire,
+        },
+        types::{LeaderEpoch, LogView, NodeId, QuorumState, ReplicaKey, SimInstant},
+    },
+};
 
 /// Consecutive fetch-timer misses a follower tolerates before electing. A
 /// single miss re-polls (the leader may just be slow); a sustained loss of
@@ -2059,11 +2064,16 @@ fn initial_state_voters(core: &QuorumStateMachine) -> Vec<NodeId> {
 /// `is_control_batch()`; it occupies exactly one log offset
 /// (`last_offset_delta = 0`), unchanged from the prior empty batch.
 fn leader_change_batch(epoch: LeaderEpoch, leader_id: NodeId, voter_ids: &[NodeId]) -> RecordBatch {
-    use crabka_protocol::Encode;
-    use crabka_protocol::owned::common::leader_change_message::voter::Voter;
-    use crabka_protocol::owned::leader_change_message::LeaderChangeMessage;
-    use crabka_protocol::records::header::Attributes;
-    use crabka_protocol::records::metadata::control::{ControlRecordType, control_record_key};
+    use crabka_protocol::{
+        Encode,
+        owned::{
+            common::leader_change_message::voter::Voter, leader_change_message::LeaderChangeMessage,
+        },
+        records::{
+            header::Attributes,
+            metadata::control::{ControlRecordType, control_record_key},
+        },
+    };
 
     let voters: Vec<Voter> = voter_ids
         .iter()
@@ -2304,10 +2314,11 @@ fn load_checkpoint_by_id(dir: &std::path::Path, end_offset: i64, epoch: i32) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::{assert, check};
     use std::time::Duration as StdDuration;
 
+    use assert2::{assert, check};
+
+    use super::*;
     use crate::kraft::transport::NullPeerSender;
 
     fn voter_set(ids: &[NodeId]) -> crabka_metadata::voters::VoterSet {
@@ -2861,9 +2872,11 @@ mod tests {
 
     #[test]
     fn leader_change_batch_encodes_control_record_payload() {
-        use crabka_protocol::Decode;
-        use crabka_protocol::owned::leader_change_message::LeaderChangeMessage;
-        use crabka_protocol::records::metadata::control::{ControlRecordType, control_record_key};
+        use crabka_protocol::{
+            Decode,
+            owned::leader_change_message::LeaderChangeMessage,
+            records::metadata::control::{ControlRecordType, control_record_key},
+        };
 
         let batch = leader_change_batch(7, 2, &[1, 2, 3]);
 

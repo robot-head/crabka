@@ -1,10 +1,14 @@
 use std::time::Duration;
 
-use k8s_openapi::api::coordination::v1::{Lease, LeaseSpec};
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::{MicroTime, ObjectMeta};
-use k8s_openapi::jiff;
-use kube::Client;
-use kube::api::{Api, Patch, PatchParams, PostParams};
+use k8s_openapi::{
+    api::coordination::v1::{Lease, LeaseSpec},
+    apimachinery::pkg::apis::meta::v1::{MicroTime, ObjectMeta},
+    jiff,
+};
+use kube::{
+    Client,
+    api::{Api, Patch, PatchParams, PostParams},
+};
 
 const LEASE_DURATION_SECS: i32 = 15;
 const RETRY: Duration = Duration::from_secs(2);
@@ -114,8 +118,9 @@ fn is_expired(lease: &Lease) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     fn lease_with(holder: &str, renew: jiff::Timestamp) -> Lease {
         Lease {

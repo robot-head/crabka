@@ -18,21 +18,24 @@
 //! host-gateway` to the container (`with_host(.., Host::HostGateway)`), which is
 //! how Docker exposes the host from inside a container on Linux/macOS/Windows.
 
-use std::collections::BTreeMap;
-use std::net::SocketAddr;
-use std::sync::Arc;
+use std::{collections::BTreeMap, net::SocketAddr, sync::Arc};
 
 use bytes::Bytes;
-use crabka_metrics::distributor::{DistributorState, ProduceError, WalSink};
-use crabka_metrics::{WalRecord, wire::pb};
+use crabka_metrics::{
+    WalRecord,
+    distributor::{DistributorState, ProduceError, WalSink},
+    wire::pb,
+};
 use crabka_promql::WalHead;
 use diff_corpus::seed_dataset;
 use prost::Message;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
-use testcontainers::core::{Host, IntoContainerPort, WaitFor};
-use testcontainers::runners::AsyncRunner;
-use testcontainers::{GenericImage, ImageExt};
+use testcontainers::{
+    GenericImage, ImageExt,
+    core::{Host, IntoContainerPort, WaitFor},
+    runners::AsyncRunner,
+};
 use tokio::sync::oneshot;
 
 // The shared corpus/differ module is path-included exactly as `diff_prometheus.rs`

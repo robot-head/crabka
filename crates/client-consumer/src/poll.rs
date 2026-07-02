@@ -1,17 +1,18 @@
 //! `Consumer::poll` — issues one `Fetch` covering every assigned partition,
 //! advances next-offsets, and returns the decoded records.
 
-use std::collections::HashMap;
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 
-use crabka_protocol::owned::fetch_request::{FetchPartition, FetchRequest, FetchTopic};
-use crabka_protocol::owned::list_offsets_request::{
-    ListOffsetsPartition, ListOffsetsRequest, ListOffsetsTopic,
+use crabka_protocol::owned::{
+    fetch_request::{FetchPartition, FetchRequest, FetchTopic},
+    list_offsets_request::{ListOffsetsPartition, ListOffsetsRequest, ListOffsetsTopic},
 };
 
-use crate::builder::{AutoOffsetReset, IsolationLevel};
-use crate::consumer::{Consumer, ConsumerRecord, Header};
-use crate::error::ConsumerError;
+use crate::{
+    builder::{AutoOffsetReset, IsolationLevel},
+    consumer::{Consumer, ConsumerRecord, Header},
+    error::ConsumerError,
+};
 
 /// Synthetic leader id meaning "leader unknown → use the bootstrap connection".
 /// Matches `BrokerPool`'s bootstrap slot so a fallback Fetch is sent via
@@ -698,12 +699,15 @@ impl Consumer {
 mod offset_advance_tests {
     use std::collections::HashMap;
 
-    use super::*;
     use assert2::{assert, check};
-    use crabka_protocol::owned::fetch_request::ReplicaState;
-    use crabka_protocol::primitives::uuid::Uuid as WireUuid;
-    use crabka_protocol::records::{RecordBatch, RecordsPayload};
-    use crabka_protocol::tagged_fields::UnknownTaggedFields;
+    use crabka_protocol::{
+        owned::fetch_request::ReplicaState,
+        primitives::uuid::Uuid as WireUuid,
+        records::{RecordBatch, RecordsPayload},
+        tagged_fields::UnknownTaggedFields,
+    };
+
+    use super::*;
 
     fn id(n: u8) -> WireUuid {
         let mut b = [0u8; 16];
@@ -747,8 +751,7 @@ mod offset_advance_tests {
 
     #[test]
     fn transient_transport_error_classification_is_narrow() {
-        use std::io;
-        use std::time::Duration;
+        use std::{io, time::Duration};
 
         use crabka_client_core::ClientError;
 

@@ -21,8 +21,10 @@
 //!   segmentLeaderEpochs = {0->0, 1->50}
 //!   customMetadata (with-custom case) = [1,2,3,4]
 
-use std::collections::{BTreeMap, HashMap};
-use std::fmt::Write as _;
+use std::{
+    collections::{BTreeMap, HashMap},
+    fmt::Write as _,
+};
 
 use crabka_remote_storage::{
     CustomMetadata, RemoteLogSegmentId, RemoteLogSegmentMetadata, RemoteLogSegmentMetadataUpdate,

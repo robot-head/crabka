@@ -7,8 +7,7 @@ use crabka_client_producer::{Acks, Producer, ProducerRecord};
 use tokio::sync::watch;
 use tracing::warn;
 
-use crate::error::ReplicatorError;
-use crate::mm2::Heartbeat;
+use crate::{error::ReplicatorError, mm2::Heartbeat};
 
 /// Parameters for the [`HeartbeatTask`].
 pub struct HeartbeatParams {

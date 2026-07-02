@@ -1,5 +1,6 @@
-use assert2::assert;
 use std::path::PathBuf;
+
+use assert2::assert;
 
 #[test]
 fn every_vendored_schema_parses() {

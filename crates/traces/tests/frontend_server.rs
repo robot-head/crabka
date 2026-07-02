@@ -1,18 +1,19 @@
 //! The frontend axum router round-trips the Tempo endpoints over loopback,
 //! backed by `MockQuerier` + `MockCatalog`.
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use assert2::{assert, check};
-use crabka_traces::frontend::QueryFrontend;
-use crabka_traces::frontend::backend::{MockQuerier, SearchPartial, TracePartial};
-use crabka_traces::frontend::config::FrontendConfig;
-use crabka_traces::frontend::job::{BlockMetaInfo, MockCatalog, RowGroupInfo};
-use crabka_traces::frontend::server::router_with_backend;
-use crabka_traces::frontend::wire::{
-    Metrics, OtlpSpanJson, ResourceSpansJson, ScopeSpansJson, SpanSetJson, TraceByIdResponseJson,
-    TraceEnvelopeJson, TraceJson,
+use crabka_traces::frontend::{
+    QueryFrontend,
+    backend::{MockQuerier, SearchPartial, TracePartial},
+    config::FrontendConfig,
+    job::{BlockMetaInfo, MockCatalog, RowGroupInfo},
+    server::router_with_backend,
+    wire::{
+        Metrics, OtlpSpanJson, ResourceSpansJson, ScopeSpansJson, SpanSetJson,
+        TraceByIdResponseJson, TraceEnvelopeJson, TraceJson,
+    },
 };
 
 fn block(id: &str) -> BlockMetaInfo {

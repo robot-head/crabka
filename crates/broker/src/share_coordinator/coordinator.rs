@@ -16,28 +16,30 @@
 // The state-machine methods are consumed by the persister RPC handlers and
 // the group-lifecycle hook.
 
-use std::collections::HashSet;
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use bytes::Bytes;
+use crabka_metadata::MetadataImage;
+use crabka_protocol::records::{Record, RecordBatch};
 use dashmap::DashMap;
 use tokio::sync::{Mutex, RwLock};
 use tracing::{info, warn};
 
-use crabka_metadata::MetadataImage;
-use crabka_protocol::records::{Record, RecordBatch};
-
-use crate::error::BrokerError;
-use crate::partition_registry::PartitionRegistry;
-use crate::share_coordinator::bootstrap;
-use crate::share_coordinator::config::ShareCoordinatorConfig;
-use crate::share_coordinator::partitioner::partition_for_share_key;
-use crate::share_coordinator::persistence::{
-    KEY_SHARE_SNAPSHOT, KEY_SHARE_UPDATE, ShareSnapshotValue, ShareStateKey, ShareUpdateValue,
-    StateBatch, encode_state_key, parse_state_key,
+use crate::{
+    error::BrokerError,
+    partition_registry::PartitionRegistry,
+    share_coordinator::{
+        bootstrap,
+        config::ShareCoordinatorConfig,
+        partitioner::partition_for_share_key,
+        persistence::{
+            KEY_SHARE_SNAPSHOT, KEY_SHARE_UPDATE, ShareSnapshotValue, ShareStateKey,
+            ShareUpdateValue, StateBatch, encode_state_key, parse_state_key,
+        },
+        pruning::redundant_offset,
+        state::SharePartitionState,
+    },
 };
-use crate::share_coordinator::pruning::redundant_offset;
-use crate::share_coordinator::state::SharePartitionState;
 
 /// In-memory map key: `(group_id, topic_id, partition)`.
 type ShareStateKey3 = (String, uuid::Uuid, i32);
@@ -573,12 +575,13 @@ impl ShareCoordinator {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::{assert, check};
     use std::path::Path;
+
+    use assert2::{assert, check};
+    use crabka_log::{Log, LogConfig};
     use tempfile::tempdir;
 
-    use crabka_log::{Log, LogConfig};
+    use super::*;
 
     fn batch(first: i64, last: i64) -> StateBatch {
         StateBatch {

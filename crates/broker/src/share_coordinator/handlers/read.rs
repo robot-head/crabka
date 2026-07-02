@@ -7,18 +7,23 @@
 use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        read_share_group_state_request::ReadShareGroupStateRequest,
+        read_share_group_state_response::{
+            PartitionResult, ReadShareGroupStateResponse, ReadStateResult, StateBatch,
+        },
+    },
+};
 use futures_util::future::BoxFuture;
 
-use crabka_protocol::owned::read_share_group_state_request::ReadShareGroupStateRequest;
-use crabka_protocol::owned::read_share_group_state_response::{
-    PartitionResult, ReadShareGroupStateResponse, ReadStateResult, StateBatch,
+use crate::{
+    broker::Broker,
+    codes,
+    error::BrokerError,
+    share_coordinator::coordinator::{ShareCoordinator, UNINITIALIZED_START_OFFSET},
 };
-use crabka_protocol::{Decode, Encode};
-
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
-use crate::share_coordinator::coordinator::{ShareCoordinator, UNINITIALIZED_START_OFFSET};
 
 pub(crate) fn handle(
     broker: &Broker,
@@ -105,12 +110,17 @@ async fn handle_request(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
-    use crabka_protocol::UnknownTaggedFields;
-    use crabka_protocol::owned::read_share_group_state_request::{PartitionData, ReadStateData};
-    use crabka_protocol::owned::read_share_group_state_response::ReadShareGroupStateResponse;
-    use crabka_protocol::primitives::uuid::Uuid as ProtoUuid;
+    use crabka_protocol::{
+        UnknownTaggedFields,
+        owned::{
+            read_share_group_state_request::{PartitionData, ReadStateData},
+            read_share_group_state_response::ReadShareGroupStateResponse,
+        },
+        primitives::uuid::Uuid as ProtoUuid,
+    };
+
+    use super::*;
 
     fn decode(bytes: &Bytes) -> ReadShareGroupStateResponse {
         let mut cur: &[u8] = bytes.as_ref();

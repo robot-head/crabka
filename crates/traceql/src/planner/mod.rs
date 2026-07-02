@@ -5,17 +5,17 @@ mod selector;
 use std::sync::Arc;
 
 use arrow::record_batch::RecordBatch;
-use datafusion::catalog::MemTable;
-use datafusion::logical_expr::LogicalPlan;
-use datafusion::prelude::SessionContext;
+use datafusion::{catalog::MemTable, logical_expr::LogicalPlan, prelude::SessionContext};
 
-use crate::ast::{
-    Aggregate, ComparisonOp, Field, FieldExpr, Intrinsic, Pipeline, Query, Scope, SpansetExpr,
-    StructuralOp,
+use crate::{
+    ast::{
+        Aggregate, ComparisonOp, Field, FieldExpr, Intrinsic, Pipeline, Query, Scope, SpansetExpr,
+        StructuralOp,
+    },
+    error::{Result, TraceqlError},
+    span_columns::{COL_NS_LEFT, COL_NS_RIGHT, COL_PARENT_ID, COL_SPAN_ID, COL_TRACE_ID},
+    store::{MatchCmp, MatchScope, MatchValue, ScanOptions, SpanMatcher, SpanStore},
 };
-use crate::error::{Result, TraceqlError};
-use crate::span_columns::{COL_NS_LEFT, COL_NS_RIGHT, COL_PARENT_ID, COL_SPAN_ID, COL_TRACE_ID};
-use crate::store::{MatchCmp, MatchScope, MatchValue, ScanOptions, SpanMatcher, SpanStore};
 
 pub(crate) struct PlannerContext {
     pub tenant: String,
@@ -836,17 +836,18 @@ fn structural_is_union(op: StructuralOp) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use arrow::array::Array;
-    use arrow::record_batch::RecordBatch;
+    use arrow::{array::Array, record_batch::RecordBatch};
     use assert2::{assert, check};
     use datafusion::arrow::array::AsArray;
 
     use super::*;
-    use crate::InMemorySpanStore;
-    use crate::ast::Value;
-    use crate::parser::parse;
-    use crate::result::{AttrValue, EventRef};
-    use crate::span_columns::{COL_NAME, InputSpan};
+    use crate::{
+        InMemorySpanStore,
+        ast::Value,
+        parser::parse,
+        result::{AttrValue, EventRef},
+        span_columns::{COL_NAME, InputSpan},
+    };
 
     fn span_with_parent(
         id: u8,

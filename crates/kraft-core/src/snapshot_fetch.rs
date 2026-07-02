@@ -105,8 +105,9 @@ impl SnapshotFetchState {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn assembles_in_order_chunks_to_complete() {

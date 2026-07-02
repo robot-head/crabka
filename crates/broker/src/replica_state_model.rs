@@ -12,9 +12,11 @@
 //! each run is fenced with `within_boundary` + `target_state_count` + `timeout`
 //! and MUST be executed under the host memory watchdog while bounds are tuned.
 
-use std::collections::HashSet;
-use std::hash::{Hash, Hasher};
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashSet,
+    hash::{Hash, Hasher},
+    time::{Duration, Instant},
+};
 
 use crabka_raft::NodeId;
 use stateright::{Checker, Model, Property};

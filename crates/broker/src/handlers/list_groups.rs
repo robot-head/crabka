@@ -13,18 +13,22 @@
 use std::collections::HashSet;
 
 use bytes::{Bytes, BytesMut};
-
 use crabka_metadata::{AclOperation, ResourceType};
-use crabka_protocol::owned::list_groups_request::ListGroupsRequest;
-use crabka_protocol::owned::list_groups_response::{ListGroupsResponse, ListedGroup};
-use crabka_protocol::{Decode, Encode};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        list_groups_request::ListGroupsRequest,
+        list_groups_response::{ListGroupsResponse, ListedGroup},
+    },
+};
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes;
-use crate::coordinator::unified::GroupType;
-use crate::coordinator::unified::classic_state::GroupState;
-use crate::error::BrokerError;
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes,
+    coordinator::unified::{GroupType, classic_state::GroupState},
+    error::BrokerError,
+};
 
 /// Wire `group_type` string for classic (pre-KIP-848) groups.
 const GROUP_TYPE_CLASSIC: &str = "classic";
@@ -249,11 +253,11 @@ fn state_to_str(s: GroupState) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::assert;
-    use std::collections::HashSet;
-    use std::sync::Arc;
+    use std::{collections::HashSet, sync::Arc};
 
+    use assert2::assert;
+
+    use super::*;
     use crate::test_support::{peer, principal};
 
     const VERSION: i16 = crabka_protocol::owned::list_groups_response::MAX_VERSION;

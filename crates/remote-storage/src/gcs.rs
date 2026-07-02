@@ -31,11 +31,12 @@
 
 use std::sync::Arc;
 
-use object_store::ClientOptions;
-use object_store::gcp::GoogleCloudStorageBuilder;
+use object_store::{ClientOptions, gcp::GoogleCloudStorageBuilder};
 
-use crate::error::RemoteStorageError;
-use crate::s3::{DEFAULT_MULTIPART_CHUNK_SIZE, DEFAULT_MULTIPART_THRESHOLD, S3RemoteStorage};
+use crate::{
+    error::RemoteStorageError,
+    s3::{DEFAULT_MULTIPART_CHUNK_SIZE, DEFAULT_MULTIPART_THRESHOLD, S3RemoteStorage},
+};
 
 /// Connection / bucket parameters for [`S3RemoteStorage::from_gcs_config`].
 ///
@@ -161,22 +162,25 @@ impl S3RemoteStorage {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::assert;
-    use assert2::check;
-    use bytes::Bytes;
-    use std::collections::BTreeMap;
-    use std::io::Write;
-    use std::path::{Path, PathBuf};
+    use std::{
+        collections::BTreeMap,
+        io::Write,
+        path::{Path, PathBuf},
+    };
 
+    use assert2::{assert, check};
+    use bytes::Bytes;
     use object_store::memory::InMemory;
     use tempfile::TempDir;
     use uuid::Uuid;
 
-    use crate::metadata::{
-        RemoteLogSegmentId, RemoteLogSegmentMetadata, RemoteLogSegmentState, TopicIdPartition,
+    use super::*;
+    use crate::{
+        metadata::{
+            RemoteLogSegmentId, RemoteLogSegmentMetadata, RemoteLogSegmentState, TopicIdPartition,
+        },
+        storage_manager::{IndexType, LogSegmentData, RemoteStorageManager},
     };
-    use crate::storage_manager::{IndexType, LogSegmentData, RemoteStorageManager};
 
     // The GCS backend reuses the generic `S3RemoteStorage` engine, so the
     // copy / fetch / delete round-trip behaviour is already covered by the

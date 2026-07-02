@@ -17,9 +17,11 @@
 use assert2::{assert, check};
 mod support;
 
-use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-use crabka_protocol::owned::describe_topic_partitions_request::{
-    Cursor as RequestCursor, DescribeTopicPartitionsRequest, TopicRequest,
+use crabka_protocol::owned::{
+    create_topics_request::{CreatableTopic, CreateTopicsRequest},
+    describe_topic_partitions_request::{
+        Cursor as RequestCursor, DescribeTopicPartitionsRequest, TopicRequest,
+    },
 };
 
 // Bit positions (subset; cross-check'd with the KIP-430 unit tests).

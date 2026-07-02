@@ -202,9 +202,10 @@ pub fn to_ocsf(event: &AuditEvent, product: &ProductInfo) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
+    use assert2::check;
+
     use super::*;
     use crate::event::*;
-    use assert2::check;
 
     fn product() -> ProductInfo {
         ProductInfo {

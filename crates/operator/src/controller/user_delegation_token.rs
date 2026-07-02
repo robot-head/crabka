@@ -27,24 +27,32 @@
 //! trait pair. Unit tests substitute trivial in-memory mocks; production
 //! wires `kube::Api<Secret>` / `kube::Api<KafkaUser>` adapters.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::time::Duration;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use base64::Engine as _;
 use crabka_client_admin::AdminError;
 use crabka_metadata::DelegationToken;
 use crabka_security::KafkaPrincipal;
-use k8s_openapi::ByteString;
-use k8s_openapi::api::core::v1::Secret;
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference};
-use kube::Resource;
-use kube::api::{Api, Patch, PatchParams};
-use kube::runtime::controller::Action;
+use k8s_openapi::{
+    ByteString,
+    api::core::v1::Secret,
+    apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference},
+};
+use kube::{
+    Resource,
+    api::{Api, Patch, PatchParams},
+    runtime::controller::Action,
+};
 use serde_json::json;
 
-use crate::controller::common::{FIELD_MANAGER, ReconcileError, condition};
-use crate::crd::{DelegationTokenAuth, KafkaCondition, KafkaUser};
+use crate::{
+    controller::common::{FIELD_MANAGER, ReconcileError, condition},
+    crd::{DelegationTokenAuth, KafkaCondition, KafkaUser},
+};
 
 /// Default `renew_before_expiry_ms` when the spec omits it (24h).
 pub(crate) const DEFAULT_RENEW_BEFORE_EXPIRY_MS: i64 = 24 * 60 * 60 * 1_000;
@@ -628,11 +636,12 @@ impl DelegationTokenAdmin for crate::context::AdminClientHandle {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::{assert, check};
-    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use std::sync::Mutex as StdMutex;
 
+    use assert2::{assert, check};
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+
+    use super::*;
     use crate::crd::{Authentication, KafkaUserSpec};
 
     fn kp(t: &str, n: &str) -> KafkaPrincipal {

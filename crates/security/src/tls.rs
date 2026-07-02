@@ -1,5 +1,4 @@
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use thiserror::Error;
@@ -181,10 +180,11 @@ fn load_private_key(path: &PathBuf) -> Result<PrivateKeyDer<'static>, TlsError> 
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::{fs::File, io::Write};
+
     use assert2::assert;
-    use std::fs::File;
-    use std::io::Write;
+
+    use super::*;
 
     fn install_provider() {
         // rustls requires an explicit CryptoProvider when no default feature is

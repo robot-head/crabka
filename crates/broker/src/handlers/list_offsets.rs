@@ -12,18 +12,23 @@
 //! local log.
 
 use bytes::{Bytes, BytesMut};
-
 use crabka_metadata::{AclOperation, ResourceType};
-use crabka_protocol::owned::list_offsets_request::ListOffsetsRequest;
-use crabka_protocol::owned::list_offsets_response::{
-    ListOffsetsPartitionResponse, ListOffsetsResponse, ListOffsetsTopicResponse,
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        list_offsets_request::ListOffsetsRequest,
+        list_offsets_response::{
+            ListOffsetsPartitionResponse, ListOffsetsResponse, ListOffsetsTopicResponse,
+        },
+    },
 };
-use crabka_protocol::{Decode, Encode};
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes,
+    error::BrokerError,
+};
 
 /// Request timestamp sentinel (-2): resolve the earliest available offset.
 /// Kafka's `ListOffsetsRequest.EARLIEST_TIMESTAMP`.
@@ -254,10 +259,10 @@ fn topic_describe_denied(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::sync::Arc;
+
     use assert2::assert;
     use crabka_protocol::owned::list_offsets_request::{ListOffsetsPartition, ListOffsetsTopic};
-    use std::sync::Arc;
 
     use crate::test_support::{DenyAll, peer, principal};
 
@@ -281,6 +286,8 @@ mod tests {
             assert!(sentinel == want, "{name}");
         }
     }
+
+    use super::*;
 
     #[test]
     fn topic_describe_denied_yields_topic_authorization_failed_rows() {

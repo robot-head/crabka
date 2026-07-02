@@ -16,24 +16,27 @@
 //! Gated to non-Windows to match the multi-broker test convention from
 //! slices 10b/12b/14/15/15b/16.
 
-use assert2::assert;
-use std::io;
-use std::net::SocketAddr;
+use std::{io, net::SocketAddr};
 
+use assert2::assert;
 use bytes::{Buf, BufMut, BytesMut};
-use crabka_broker::config::ListenerSpec;
-use crabka_broker::{Broker, BrokerHandle};
-use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
-use crabka_protocol::owned::api_versions_response::ApiVersionsResponse;
-use crabka_protocol::owned::sasl_authenticate_request::SaslAuthenticateRequest;
-use crabka_protocol::owned::sasl_authenticate_response::SaslAuthenticateResponse;
-use crabka_protocol::owned::sasl_handshake_request::SaslHandshakeRequest;
-use crabka_protocol::owned::sasl_handshake_response::SaslHandshakeResponse;
-use crabka_protocol::{Decode, Encode};
+use crabka_broker::{Broker, BrokerHandle, config::ListenerSpec};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        api_versions_request::ApiVersionsRequest, api_versions_response::ApiVersionsResponse,
+        sasl_authenticate_request::SaslAuthenticateRequest,
+        sasl_authenticate_response::SaslAuthenticateResponse,
+        sasl_handshake_request::SaslHandshakeRequest,
+        sasl_handshake_response::SaslHandshakeResponse,
+    },
+};
 use crabka_security::{ListenerProtocol, SaslMechanism};
 use tempfile::TempDir;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Wire helpers — single length-prefixed request/response exchange.
@@ -201,10 +204,10 @@ async fn drive_describe_user_scram_credentials_sasl(
     pass: &str,
     users_filter: Option<Vec<String>>,
 ) -> (i16, Vec<(String, i16, Vec<(i8, i32)>)>) {
-    use crabka_protocol::owned::describe_user_scram_credentials_request::{
-        DescribeUserScramCredentialsRequest, UserName,
+    use crabka_protocol::owned::{
+        describe_user_scram_credentials_request::{DescribeUserScramCredentialsRequest, UserName},
+        describe_user_scram_credentials_response::DescribeUserScramCredentialsResponse,
     };
-    use crabka_protocol::owned::describe_user_scram_credentials_response::DescribeUserScramCredentialsResponse;
 
     let req = DescribeUserScramCredentialsRequest {
         users: users_filter.map(|v| {

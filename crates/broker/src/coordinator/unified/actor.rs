@@ -6,37 +6,47 @@
 //! registry and resolves it at the rebalance boundary (the rebalance-deadline
 //! timer, an all-members-joined early-complete, or the leader's `SyncGroup`).
 
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use bytes::Bytes;
-use tokio::sync::{mpsc, oneshot};
-use tokio::task::JoinHandle;
-
-use crabka_protocol::owned::consumer_group_heartbeat_request::ConsumerGroupHeartbeatRequest;
-use crabka_protocol::owned::consumer_group_heartbeat_response::{
-    Assignment as RespAssignment, ConsumerGroupHeartbeatResponse,
+use crabka_protocol::{
+    owned::{
+        consumer_group_heartbeat_request::ConsumerGroupHeartbeatRequest,
+        consumer_group_heartbeat_response::{
+            Assignment as RespAssignment, ConsumerGroupHeartbeatResponse,
+        },
+        heartbeat_request::HeartbeatRequest,
+        join_group_request::JoinGroupRequest,
+        leave_group_request::LeaveGroupRequest,
+        leave_group_response::MemberResponse,
+        sync_group_request::SyncGroupRequest,
+    },
+    primitives::uuid::Uuid,
 };
-use crabka_protocol::owned::heartbeat_request::HeartbeatRequest;
-use crabka_protocol::owned::join_group_request::JoinGroupRequest;
-use crabka_protocol::owned::leave_group_request::LeaveGroupRequest;
-use crabka_protocol::owned::leave_group_response::MemberResponse;
-use crabka_protocol::owned::sync_group_request::SyncGroupRequest;
-use crabka_protocol::primitives::uuid::Uuid;
+use tokio::{
+    sync::{mpsc, oneshot},
+    task::JoinHandle,
+};
 
-use crate::codes;
-use crate::coordinator::{GroupSnapshot, MemberSnapshot};
-
-use super::classic_ops;
-use super::classic_state::{Group as ClassicState, GroupState as ClassicGroupState, OffsetEntry};
-use super::config::NextGenConfig;
-use super::consumer_state::{GroupState, MemberState};
-use super::group::{Group, GroupKind};
-use super::migration;
-use super::offsets_log::OffsetsLog;
-use super::persistence_next_gen::MemberAssignmentState;
-use super::reconciler::{self, ReconcileInput};
+use super::{
+    classic_ops,
+    classic_state::{Group as ClassicState, GroupState as ClassicGroupState, OffsetEntry},
+    config::NextGenConfig,
+    consumer_state::{GroupState, MemberState},
+    group::{Group, GroupKind},
+    migration,
+    offsets_log::OffsetsLog,
+    persistence_next_gen::MemberAssignmentState,
+    reconciler::{self, ReconcileInput},
+};
+use crate::{
+    codes,
+    coordinator::{GroupSnapshot, MemberSnapshot},
+};
 
 /// A Kafka wire `error_code` value, as carried in response `error_code`
 /// fields. The values live in [`crate::codes`].
@@ -1946,14 +1956,15 @@ mod consumer_group_composition_model;
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::sync::Arc;
+
     use assert2::{assert, check};
 
-    use crate::coordinator::unified::GroupCoordinator;
-    use crate::coordinator::unified::config::NextGenConfig;
-    use crate::coordinator::unified::offsets_log::fake::InMemoryOffsetsLog;
-    use crate::coordinator::unified::reconciler::ReconcileInput;
-    use std::sync::Arc;
+    use super::*;
+    use crate::coordinator::unified::{
+        GroupCoordinator, config::NextGenConfig, offsets_log::fake::InMemoryOffsetsLog,
+        reconciler::ReconcileInput,
+    };
 
     /// Yield-poll until `cond` holds, with a bounded hang-guard so a genuine
     /// stall fails the test deterministically instead of spinning forever.
@@ -2543,10 +2554,11 @@ mod tests {
     // custom assignor registry
     // ---------------------------------------------------------------------
 
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use crate::coordinator::unified::assignor::{
         Assignment, Assignor, MemberSubscription, TopicMetadata,
     };
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[derive(Debug)]
     struct CountingAssignor {
@@ -2762,8 +2774,10 @@ mod tests {
     async fn classic_seed_hydrates_group_and_blocks_delete_when_nonempty() {
         use std::time::Duration;
 
-        use super::super::classic_state::{Group as ClassicState, Member, OffsetEntry};
-        use super::super::group::{Group, GroupKind};
+        use super::super::{
+            classic_state::{Group as ClassicState, Member, OffsetEntry},
+            group::{Group, GroupKind},
+        };
         let (coord, _log) = make_coordinator();
 
         let mut cs = ClassicState::new("g");
@@ -2832,8 +2846,7 @@ mod tests {
     /// sleep: deterministic and instant.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn actor_tick_does_not_panic_after_in_place_flip() {
-        use qubit_clock::MockWaiterKind;
-        use qubit_clock::sleep::MockSleeper;
+        use qubit_clock::{MockWaiterKind, sleep::MockSleeper};
 
         let sleeper = MockSleeper::new();
         let timeline = sleeper.timeline();
@@ -2899,8 +2912,10 @@ mod tests {
     /// classic k2 `GroupMetadata` and writing the full next-gen record set.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn consumer_heartbeat_upgrades_a_classic_group() {
-        use super::super::classic_state::{Group as ClassicState, Member};
-        use super::super::group::{Group, GroupKind};
+        use super::super::{
+            classic_state::{Group as ClassicState, Member},
+            group::{Group, GroupKind},
+        };
 
         let (coord, log) = make_coordinator_with_topic("t", 2);
 
@@ -2973,8 +2988,9 @@ mod tests {
     /// prefix.
     fn subscription_blob(topics: &[&str]) -> Bytes {
         use bytes::{BufMut, BytesMut};
-        use crabka_protocol::Encode;
-        use crabka_protocol::owned::consumer_protocol_subscription::ConsumerProtocolSubscription;
+        use crabka_protocol::{
+            Encode, owned::consumer_protocol_subscription::ConsumerProtocolSubscription,
+        };
         let sub = ConsumerProtocolSubscription {
             topics: topics.iter().map(|s| (*s).to_string()).collect(),
             ..Default::default()
@@ -2991,8 +3007,9 @@ mod tests {
         blob: &Bytes,
     ) -> crabka_protocol::owned::consumer_protocol_assignment::ConsumerProtocolAssignment {
         use bytes::Buf;
-        use crabka_protocol::Decode;
-        use crabka_protocol::owned::consumer_protocol_assignment::ConsumerProtocolAssignment;
+        use crabka_protocol::{
+            Decode, owned::consumer_protocol_assignment::ConsumerProtocolAssignment,
+        };
         let mut cur = &blob[..];
         let version = cur.get_i16();
         ConsumerProtocolAssignment::decode(&mut cur, version).expect("assignment decodes")
@@ -3002,8 +3019,10 @@ mod tests {
     /// `topic`, then upgrade it in place via a native consumer heartbeat. After
     /// this returns, the group is consumer-kind and `m-classic` has a target.
     async fn seed_and_upgrade(coord: &Arc<GroupCoordinator>, topic: &str) -> Arc<GroupActorHandle> {
-        use super::super::classic_state::{Group as ClassicState, Member};
-        use super::super::group::{Group, GroupKind};
+        use super::super::{
+            classic_state::{Group as ClassicState, Member},
+            group::{Group, GroupKind},
+        };
 
         let mut cs = ClassicState::new("g");
         cs.protocol_type = Some("consumer".into());
@@ -3263,8 +3282,10 @@ mod tests {
     /// hosted classic member as a classic member.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn last_consumer_member_leaving_downgrades_to_classic() {
-        use super::super::classic_state::{Group as ClassicState, Member};
-        use super::super::group::{Group, GroupKind};
+        use super::super::{
+            classic_state::{Group as ClassicState, Member},
+            group::{Group, GroupKind},
+        };
 
         // Default policy is Bidirectional → downgrade is allowed.
         let (coord, log) = make_coordinator_with_topic("t", 2);
@@ -3448,8 +3469,10 @@ mod tests {
         topic: &str,
         instance_id: Option<&str>,
     ) -> Arc<GroupActorHandle> {
-        use super::super::classic_state::{Group as ClassicState, Member};
-        use super::super::group::{Group, GroupKind};
+        use super::super::{
+            classic_state::{Group as ClassicState, Member},
+            group::{Group, GroupKind},
+        };
 
         let mut cs = ClassicState::new("g");
         cs.protocol_type = Some("consumer".into());

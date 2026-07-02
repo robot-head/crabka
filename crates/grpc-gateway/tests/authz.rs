@@ -14,10 +14,12 @@
 //! with a short interval, then poll until an authorized probe passes (the cache
 //! is eventually consistent — never assert before it converges).
 
-use std::collections::{BTreeMap, HashSet};
-use std::net::SocketAddr;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{
+    collections::{BTreeMap, HashSet},
+    net::SocketAddr,
+    sync::Arc,
+    time::Duration,
+};
 
 use axum::Extension;
 use bytes::Bytes;
@@ -28,19 +30,24 @@ use crabka_authz::{
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_admin::{AdminClient, CreateTopicSpec};
 use crabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
-use crabka_grpc_gateway::authz::GatewayAuthz;
-use crabka_grpc_gateway::codec::RawCodec;
-use crabka_grpc_gateway::config::GatewayConfig;
-use crabka_grpc_gateway::dedup::membership::{MembershipPublisher, MembershipStore};
-use crabka_grpc_gateway::dedup::store::DedupStore;
-use crabka_grpc_gateway::dedup::topic::{ensure_dedup_topic, ensure_membership_topic};
-use crabka_grpc_gateway::dedup::{DedupEngine, partition_for};
-use crabka_grpc_gateway::error::GatewayError;
-use crabka_grpc_gateway::forward::{self, Forwarder};
-use crabka_grpc_gateway::produce::ProduceCore;
-use crabka_grpc_gateway::state::AppState;
-use crabka_grpc_gateway::types::GatewayRecord;
-use crabka_grpc_gateway::{handlers, pb};
+use crabka_grpc_gateway::{
+    authz::GatewayAuthz,
+    codec::RawCodec,
+    config::GatewayConfig,
+    dedup::{
+        DedupEngine,
+        membership::{MembershipPublisher, MembershipStore},
+        partition_for,
+        store::DedupStore,
+        topic::{ensure_dedup_topic, ensure_membership_topic},
+    },
+    error::GatewayError,
+    forward::{self, Forwarder},
+    handlers, pb,
+    produce::ProduceCore,
+    state::AppState,
+    types::GatewayRecord,
+};
 use crabka_metadata::{AclOperation, ResourceType};
 use crabka_security::{AuthMethod, Principal};
 use tempfile::TempDir;
@@ -528,9 +535,7 @@ async fn audit_log_emitted() {
     use std::sync::{Mutex, OnceLock};
 
     use tracing::field::{Field, Visit};
-    use tracing_subscriber::Layer;
-    use tracing_subscriber::layer::Context;
-    use tracing_subscriber::prelude::*;
+    use tracing_subscriber::{Layer, layer::Context, prelude::*};
 
     // Process-global capture of `gateway::audit` events as (principal, allowed),
     // filled by a global subscriber so it is thread-agnostic and immune to

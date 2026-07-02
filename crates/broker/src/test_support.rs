@@ -15,9 +15,11 @@ use bytes::{Bytes, BytesMut};
 use crabka_protocol::{Decode, Encode};
 use crabka_security::{AuthMethod, Principal};
 
-use crate::broker::{Broker, BrokerHandle};
-use crate::config::BrokerConfig;
-use crate::handlers::RequestContext;
+use crate::{
+    broker::{Broker, BrokerHandle},
+    config::BrokerConfig,
+    handlers::RequestContext,
+};
 
 /// Authorizer that denies every request — drives the authorization-failure
 /// path in every handler that consults the cluster authorizer.

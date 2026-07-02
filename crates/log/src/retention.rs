@@ -1,15 +1,14 @@
 //! Retention applied by `Log::tick`. Free functions so the policy is
 //! testable in isolation from `Log`'s mutable state.
 
-use std::path::Path;
-use std::time::{Duration, SystemTime};
+use std::{
+    path::Path,
+    time::{Duration, SystemTime},
+};
 
 use tracing::instrument;
 
-use crate::config::LogConfig;
-use crate::error::LogError;
-use crate::name;
-use crate::segment::Segment;
+use crate::{config::LogConfig, error::LogError, name, segment::Segment};
 
 pub fn now_ms(now: SystemTime) -> i64 {
     let millis = now

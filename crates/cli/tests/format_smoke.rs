@@ -3,8 +3,9 @@
 //! surface + the bootstrap-write path survive end-to-end without booting
 //! a broker.
 
-use assert2::assert;
 use std::process::Command;
+
+use assert2::assert;
 
 #[test]
 fn format_with_add_scram_writes_credential_record() {

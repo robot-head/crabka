@@ -96,9 +96,10 @@ fn is_struct_type(t: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
     use crate::ir;
-    use std::path::PathBuf;
 
     #[test]
     fn vendored_schemas_validate() {

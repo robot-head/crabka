@@ -1,8 +1,10 @@
 //! Crate-wide error type and ingest-edge HTTP status mapping.
 
-use axum::Json;
-use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
+use axum::{
+    Json,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+};
 use serde_json::json;
 
 use crate::limits::LimitError;

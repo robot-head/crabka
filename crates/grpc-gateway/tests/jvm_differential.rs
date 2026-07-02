@@ -2,17 +2,17 @@
 //! host-advertised in-process broker, then read it back with the JVM
 //! `kafka-console-consumer` from a cp-kafka container. Requires Docker.
 
-use std::collections::BTreeMap;
-use std::process::{Command, Stdio};
-use std::sync::Arc;
-use std::time::Duration;
+use std::{
+    collections::BTreeMap,
+    process::{Command, Stdio},
+    sync::Arc,
+    time::Duration,
+};
 
 use bytes::Bytes;
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_admin::{AdminClient, CreateTopicSpec};
-use crabka_grpc_gateway::codec::RawCodec;
-use crabka_grpc_gateway::produce::ProduceCore;
-use crabka_grpc_gateway::types::GatewayRecord;
+use crabka_grpc_gateway::{codec::RawCodec, produce::ProduceCore, types::GatewayRecord};
 
 const BOOTSTRAP: &str = "host.docker.internal:9092";
 const IMAGE: &str = "mirror.gcr.io/confluentinc/cp-kafka:7.5.0";

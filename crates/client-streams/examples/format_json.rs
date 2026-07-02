@@ -1,10 +1,11 @@
 //! `JsonSerde` round-trip: a typed value <-> Confluent JSON-Schema wire bytes.
 //! Run: `cargo run -p crabka-client-streams --example format_json`
-use crabka_client_streams::SchemaSerde;
-use crabka_client_streams::processor::serde::Serde;
-use crabka_schema_serde::RegistryClient;
-use crabka_schema_serde::cache::{CacheConfig, SchemaCache};
-use crabka_schema_serde::format::json::JsonSerde;
+use crabka_client_streams::{SchemaSerde, processor::serde::Serde};
+use crabka_schema_serde::{
+    RegistryClient,
+    cache::{CacheConfig, SchemaCache},
+    format::json::JsonSerde,
+};
 use serde::{Deserialize, Serialize};
 
 // docs:begin json-type

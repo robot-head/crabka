@@ -14,27 +14,34 @@
 //! table) so the handler receives the per-connection principal + peer
 //! `SocketAddr` for the per-topic `Read` ACL gate.
 
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use bytes::{Bytes, BytesMut};
+use crabka_metadata::{AclOperation, ResourceType};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        share_fetch_request::{FetchPartition, ShareFetchRequest},
+        share_fetch_response::{
+            AcquiredRecords, LeaderIdAndEpoch, PartitionData, ShareFetchResponse,
+            ShareFetchableTopicResponse,
+        },
+    },
+    records::RecordsPayload,
+};
 use tokio::sync::Notify;
 
-use crabka_metadata::{AclOperation, ResourceType};
-use crabka_protocol::owned::share_fetch_request::{FetchPartition, ShareFetchRequest};
-use crabka_protocol::owned::share_fetch_response::{
-    AcquiredRecords, LeaderIdAndEpoch, PartitionData, ShareFetchResponse,
-    ShareFetchableTopicResponse,
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes,
+    coordinator::unified::share::actor::ShareGroupActorMessage,
+    error::BrokerError,
+    share_partition::state::AckType,
 };
-use crabka_protocol::records::RecordsPayload;
-use crabka_protocol::{Decode, Encode};
-
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes;
-use crate::coordinator::unified::share::actor::ShareGroupActorMessage;
-use crate::error::BrokerError;
-use crate::share_partition::state::AckType;
 
 type WaitFut = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
 
@@ -554,12 +561,14 @@ fn encode_error_response(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
-    use crabka_protocol::UnknownTaggedFields;
-    use crabka_protocol::owned::share_fetch_request::AcknowledgementBatch;
-    use crabka_protocol::owned::share_fetch_response;
-    use crabka_protocol::primitives::uuid::Uuid as ProtoUuid;
+    use crabka_protocol::{
+        UnknownTaggedFields,
+        owned::{share_fetch_request::AcknowledgementBatch, share_fetch_response},
+        primitives::uuid::Uuid as ProtoUuid,
+    };
+
+    use super::*;
 
     fn decode_response(bytes: &Bytes) -> ShareFetchResponse {
         crate::test_support::decode_response(bytes, share_fetch_response::MAX_VERSION)

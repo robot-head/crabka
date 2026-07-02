@@ -1,7 +1,6 @@
 //! `TraceQL` span column names and structural interval helpers.
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 
@@ -206,9 +205,10 @@ pub fn assign_nested_set(spans: &[InputSpan]) -> Vec<NestedSet> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use arrow::datatypes::DataType;
     use assert2::{assert, check};
+
+    use super::*;
 
     fn sid(n: u8) -> [u8; 8] {
         [n, 0, 0, 0, 0, 0, 0, 0]

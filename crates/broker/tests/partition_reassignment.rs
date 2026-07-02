@@ -18,29 +18,34 @@
 //! Gated to non-Windows to match the multi-broker test convention from
 //! slices 10b/12b/14.
 
-use assert2::{assert, check};
-use std::io;
-use std::net::SocketAddr;
-use std::time::{Duration, Instant};
+use std::{
+    io,
+    net::SocketAddr,
+    time::{Duration, Instant},
+};
 
+use assert2::{assert, check};
 use bytes::{Buf, BufMut, BytesMut};
-use crabka_broker::authorizer::SimpleAclAuthorizer;
-use crabka_broker::config::ListenerSpec;
-use crabka_broker::{Broker, BrokerHandle};
+use crabka_broker::{Broker, BrokerHandle, authorizer::SimpleAclAuthorizer, config::ListenerSpec};
 use crabka_metadata::{
     AclEntry, AclOperation, MetadataRecord, PatternType, PermissionType, ResourceType,
 };
-use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
-use crabka_protocol::owned::api_versions_response::ApiVersionsResponse;
-use crabka_protocol::owned::sasl_authenticate_request::SaslAuthenticateRequest;
-use crabka_protocol::owned::sasl_authenticate_response::SaslAuthenticateResponse;
-use crabka_protocol::owned::sasl_handshake_request::SaslHandshakeRequest;
-use crabka_protocol::owned::sasl_handshake_response::SaslHandshakeResponse;
-use crabka_protocol::{Decode, Encode};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        api_versions_request::ApiVersionsRequest, api_versions_response::ApiVersionsResponse,
+        sasl_authenticate_request::SaslAuthenticateRequest,
+        sasl_authenticate_response::SaslAuthenticateResponse,
+        sasl_handshake_request::SaslHandshakeRequest,
+        sasl_handshake_response::SaslHandshakeResponse,
+    },
+};
 use crabka_security::{ListenerProtocol, SaslMechanism};
 use tempfile::TempDir;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+};
 
 mod support;
 
@@ -102,8 +107,10 @@ async fn create_topic_plaintext(
     partitions: i32,
     replication_factor: i16,
 ) {
-    use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-    use crabka_protocol::owned::create_topics_response::CreateTopicsResponse;
+    use crabka_protocol::owned::{
+        create_topics_request::{CreatableTopic, CreateTopicsRequest},
+        create_topics_response::CreateTopicsResponse,
+    };
 
     let req = CreateTopicsRequest {
         topics: vec![CreatableTopic {
@@ -196,10 +203,12 @@ async fn drive_alter_reassignments(
     addr: SocketAddr,
     rows: Vec<(&str, i32, Option<Vec<i32>>)>,
 ) -> Vec<(String, Vec<(i32, i16)>)> {
-    use crabka_protocol::owned::alter_partition_reassignments_request::{
-        AlterPartitionReassignmentsRequest, ReassignablePartition, ReassignableTopic,
+    use crabka_protocol::owned::{
+        alter_partition_reassignments_request::{
+            AlterPartitionReassignmentsRequest, ReassignablePartition, ReassignableTopic,
+        },
+        alter_partition_reassignments_response::AlterPartitionReassignmentsResponse,
     };
-    use crabka_protocol::owned::alter_partition_reassignments_response::AlterPartitionReassignmentsResponse;
 
     // Group by topic.
     let mut by_topic: std::collections::BTreeMap<String, Vec<ReassignablePartition>> =
@@ -259,10 +268,12 @@ async fn drive_list_reassignments(
     addr: SocketAddr,
     filter: Option<Vec<(&str, Vec<i32>)>>,
 ) -> Vec<(String, Vec<(i32, Vec<i32>, Vec<i32>, Vec<i32>)>)> {
-    use crabka_protocol::owned::list_partition_reassignments_request::{
-        ListPartitionReassignmentsRequest, ListPartitionReassignmentsTopics,
+    use crabka_protocol::owned::{
+        list_partition_reassignments_request::{
+            ListPartitionReassignmentsRequest, ListPartitionReassignmentsTopics,
+        },
+        list_partition_reassignments_response::ListPartitionReassignmentsResponse,
     };
-    use crabka_protocol::owned::list_partition_reassignments_response::ListPartitionReassignmentsResponse;
 
     let topics_arg = filter.map(|list| {
         list.into_iter()
@@ -564,8 +575,10 @@ async fn create_topic_as_admin(
     partitions: i32,
     replication_factor: i16,
 ) {
-    use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-    use crabka_protocol::owned::create_topics_response::CreateTopicsResponse;
+    use crabka_protocol::owned::{
+        create_topics_request::{CreatableTopic, CreateTopicsRequest},
+        create_topics_response::CreateTopicsResponse,
+    };
 
     let req = CreateTopicsRequest {
         topics: vec![CreatableTopic {
@@ -603,10 +616,12 @@ async fn drive_alter_reassignments_sasl_plain(
     pass: &str,
     rows: Vec<(&str, i32, Option<Vec<i32>>)>,
 ) -> Vec<(String, Vec<(i32, i16)>)> {
-    use crabka_protocol::owned::alter_partition_reassignments_request::{
-        AlterPartitionReassignmentsRequest, ReassignablePartition, ReassignableTopic,
+    use crabka_protocol::owned::{
+        alter_partition_reassignments_request::{
+            AlterPartitionReassignmentsRequest, ReassignablePartition, ReassignableTopic,
+        },
+        alter_partition_reassignments_response::AlterPartitionReassignmentsResponse,
     };
-    use crabka_protocol::owned::alter_partition_reassignments_response::AlterPartitionReassignmentsResponse;
 
     // Group by topic.
     let mut by_topic: std::collections::BTreeMap<String, Vec<ReassignablePartition>> =

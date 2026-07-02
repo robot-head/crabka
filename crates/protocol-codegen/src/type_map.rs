@@ -76,8 +76,9 @@ fn inner_borrowed(t: &str, struct_path: Option<&str>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
+
+    use super::*;
 
     #[test]
     fn primitives_owned() {

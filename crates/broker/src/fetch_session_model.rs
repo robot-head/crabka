@@ -26,12 +26,16 @@
 //! sorted projection gives identical fingerprints for identical resulting
 //! content, so the explored graph is well-defined.
 
-use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
-use std::time::Duration;
+use std::{
+    collections::HashMap,
+    hash::{Hash, Hasher},
+    time::Duration,
+};
 
-use crabka_protocol::owned::fetch_request::{FetchPartition, FetchTopic, ForgottenTopic};
-use crabka_protocol::primitives::uuid::Uuid as WireUuid;
+use crabka_protocol::{
+    owned::fetch_request::{FetchPartition, FetchTopic, ForgottenTopic},
+    primitives::uuid::Uuid as WireUuid,
+};
 use stateright::{Checker, Model, Property};
 
 use super::{CachedPartitionState, FetchSessionKey, apply_incremental};

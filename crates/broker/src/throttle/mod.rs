@@ -3,9 +3,8 @@
 pub use crabka_throttle::{ThrottleState, TokenBucket};
 
 mod refresh;
-pub use refresh::{ImageWatcher, run};
-
 use crabka_metadata::{MetadataImage, NodeId};
+pub use refresh::{ImageWatcher, run};
 
 /// Topic-level `*.throttled.replicas` config value.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,8 +81,9 @@ pub const FOLLOWER_THROTTLED_RATE_KEY: &str = "follower.replication.throttled.ra
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn empty_string_parses_as_none() {

@@ -11,8 +11,7 @@ use crabka_blockstore::{
     write_tenant_log_index_manifest_to_object_store, write_tenant_log_index_shard_to_object_store,
     write_tenant_log_index_shards_to_object_store,
 };
-use object_store::local::LocalFileSystem;
-use object_store::path::Path as ObjectPath;
+use object_store::{local::LocalFileSystem, path::Path as ObjectPath};
 
 #[test]
 fn log_index_manifest_round_trips_label_and_block_indexes() {

@@ -11,19 +11,24 @@
 // + Fetch handlers landing in Tasks 15-16; keep this allow until then.
 #![allow(dead_code)]
 
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicI32, AtomicU64, Ordering},
+    },
+};
 
 use arc_swap::ArcSwap;
-
 use crabka_log::{AbortedTxn, Log, ReadOutput, VerbatimBatch};
 use crabka_protocol::records::RecordBatch;
-use tokio::sync::{Notify, mpsc, oneshot};
-use tokio::task::JoinHandle;
+use tokio::{
+    sync::{Notify, mpsc, oneshot},
+    task::JoinHandle,
+};
+
 // `std::sync::Mutex` is kept for `log` (sync hot-path callers);
 // `replica_state` uses `tokio::sync::Mutex` to avoid blocking worker threads.
-
 use crate::error::BrokerError;
 use crate::replica_state::ReplicaState;
 
@@ -617,12 +622,13 @@ impl std::fmt::Debug for Partition {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
     use std::sync::atomic::{AtomicI32, AtomicU64};
 
-    use super::*;
+    use assert2::{assert, check};
     use crabka_log::LogConfig;
     use tempfile::tempdir;
+
+    use super::*;
 
     fn test_partition(hw_advance_notify: Arc<Notify>) -> (Partition, tempfile::TempDir) {
         let dir = tempdir().expect("tempdir");

@@ -8,8 +8,7 @@ use bytes::Bytes;
 use crabka_audit::{AuditError, AuditRecord, AuditSink};
 use crabka_protocol::records::{Record, RecordBatch, RecordHeader};
 
-use crate::metrics::BrokerMetrics;
-use crate::partition_registry::PartitionRegistry;
+use crate::{metrics::BrokerMetrics, partition_registry::PartitionRegistry};
 
 /// Writes audit records to a single partition of the audit topic that this
 /// broker leads. Slice 1: the partition index is resolved once at construction.
@@ -93,10 +92,12 @@ impl AuditSink for KafkaTopicAuditSink {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::sync::Arc;
+
     use assert2::assert;
     use crabka_log::{Log, LogConfig};
-    use std::sync::Arc;
+
+    use super::*;
 
     fn fixture_partition(
         log_dir: &std::path::Path,

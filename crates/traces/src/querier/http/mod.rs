@@ -1,33 +1,38 @@
-use std::collections::BTreeSet;
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
-use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode, Uri, header};
-use axum::response::{IntoResponse, Response};
-use axum::routing::get;
-use axum::{Json, Router};
+use axum::{
+    Json, Router,
+    extract::{Path, State},
+    http::{HeaderMap, StatusCode, Uri, header},
+    response::{IntoResponse, Response},
+    routing::get,
+};
 use base64::Engine;
 use crabka_traceql::{
     AttrValue, ComparisonOp, Field, FieldExpr, Intrinsic, ScanJob, ScanOptions, Scope, ScopedTag,
     SearchOptions, SearchResponse, SpanRef, SpanStore, SpansetExpr, TagScope, TraceMetricsResponse,
     TraceSpans, TraceqlEngine, TraceqlError, TypedValue, Value as TraceqlValue,
 };
-use opentelemetry_proto::tonic::common::v1::{
-    AnyValue as OtlpAnyValue, ArrayValue as OtlpArrayValue, InstrumentationScope,
-    KeyValue as OtlpKeyValue, any_value::Value as OtlpValue,
-};
-use opentelemetry_proto::tonic::resource::v1::Resource as OtlpResource;
-use opentelemetry_proto::tonic::trace::v1::{
-    ResourceSpans as OtlpResourceSpans, ScopeSpans as OtlpScopeSpans, Span as OtlpSpan,
-    Status as OtlpStatus,
-    span::{Event as OtlpEvent, Link as OtlpLink},
+use opentelemetry_proto::tonic::{
+    common::v1::{
+        AnyValue as OtlpAnyValue, ArrayValue as OtlpArrayValue, InstrumentationScope,
+        KeyValue as OtlpKeyValue, any_value::Value as OtlpValue,
+    },
+    resource::v1::Resource as OtlpResource,
+    trace::v1::{
+        ResourceSpans as OtlpResourceSpans, ScopeSpans as OtlpScopeSpans, Span as OtlpSpan,
+        Status as OtlpStatus,
+        span::{Event as OtlpEvent, Link as OtlpLink},
+    },
 };
 use prost::Message as _;
 use serde_json::{Map, Value, json};
 
-use crate::error::tempo_limit_error_response;
-use crate::limits::{LimitError, Limits, OverridesProvider, QueryEnforcer};
-use crate::metrics::ServiceMetrics;
+use crate::{
+    error::tempo_limit_error_response,
+    limits::{LimitError, Limits, OverridesProvider, QueryEnforcer},
+    metrics::ServiceMetrics,
+};
 
 const TENANT_HEADER: &str = "x-scope-orgid";
 const INTRINSIC_TAGS: &[&str] = &[
@@ -2425,12 +2430,17 @@ fn base64<const N: usize>(bytes: [u8; N]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, BTreeSet};
-    use std::sync::Arc;
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        sync::Arc,
+    };
 
+    use arc_swap::ArcSwap;
     use assert2::{assert, check};
-    use axum::body::Body;
-    use axum::http::{Request, StatusCode};
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
     use crabka_blockstore::{
         AttrValue as BlockAttrValue, BlockStore, NestedSet as BlockNestedSet, ShardedTraceBloom,
         SpanAttr, SpanKind as BlockSpanKind, SpanRow, StatusCode as BlockStatusCode,
@@ -2440,18 +2450,16 @@ mod tests {
         AttrValue, EngineOpts, EventRef, InMemorySpanStore, InputSpan, LinkRef, TraceqlEngine,
     };
     use http_body_util::BodyExt;
-    use object_store::memory::InMemory;
-    use object_store::path::Path;
+    use object_store::{memory::InMemory, path::Path};
     use opentelemetry_proto::tonic::trace::v1::TracesData;
-    use parquet::arrow::AsyncArrowWriter;
-    use parquet::arrow::async_writer::ParquetObjectWriter;
-    use parquet::file::properties::WriterProperties;
+    use parquet::{
+        arrow::{AsyncArrowWriter, async_writer::ParquetObjectWriter},
+        file::properties::WriterProperties,
+    };
     use prost::Message as _;
     use serde_json::{Value, json};
     use tower::ServiceExt;
     use url::Url;
-
-    use arc_swap::ArcSwap;
 
     use super::*;
     use crate::querier::store::{CrabkaSpanStore, SharedTraceIndex};

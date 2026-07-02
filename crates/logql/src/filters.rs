@@ -1,11 +1,12 @@
-use std::cmp::Ordering;
-use std::net::IpAddr;
+use std::{cmp::Ordering, net::IpAddr};
 
 use regex::Regex;
 
-use crate::stream::{PipelineStage, insert_extracted_field};
-use crate::util::{parse_bytes_literal, parse_prometheus_duration_literal};
-use crate::{Labels, ParseError};
+use crate::{
+    Labels, ParseError,
+    stream::{PipelineStage, insert_extracted_field},
+    util::{parse_bytes_literal, parse_prometheus_duration_literal},
+};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct FieldFilter {

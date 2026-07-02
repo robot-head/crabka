@@ -2,17 +2,18 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use axum::body::Bytes;
-use axum::extract::State;
-use axum::response::Response;
-use prost_reflect::prost::Message;
-use prost_reflect::prost_types::{FileDescriptorProto, FileDescriptorSet};
+use axum::{body::Bytes, extract::State, response::Response};
+use prost_reflect::{
+    prost::Message,
+    prost_types::{FileDescriptorProto, FileDescriptorSet},
+};
 
-use crate::error::SrError;
-use crate::format::{self, SchemaType};
-use crate::kafkastore::RegisterSchema;
-use crate::kafkastore::record::SchemaReference;
-use crate::rest::{AppState, response::ok_json};
+use crate::{
+    error::SrError,
+    format::{self, SchemaType},
+    kafkastore::{RegisterSchema, record::SchemaReference},
+    rest::{AppState, response::ok_json},
+};
 
 /// POST /schemas/import
 ///

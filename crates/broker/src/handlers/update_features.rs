@@ -7,15 +7,17 @@
 //! authenticated principal + peer for the ACL check.
 
 use crabka_metadata::{AclOperation, FeatureLevelRecord, MetadataRecord};
-use crabka_protocol::owned::update_features_request::UpdateFeaturesRequest;
-use crabka_protocol::owned::update_features_response::{
-    UpdatableFeatureResult, UpdateFeaturesResponse,
+use crabka_protocol::owned::{
+    update_features_request::UpdateFeaturesRequest,
+    update_features_response::{UpdatableFeatureResult, UpdateFeaturesResponse},
 };
 use crabka_raft::RaftError;
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes;
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes,
+};
 
 /// True if every KIP-1022 dependency for a feature finalize is already met in
 /// the target image. `deps` is the feature's `dependencies(level)` slice:
@@ -286,16 +288,17 @@ fn finalize(results: Vec<UpdatableFeatureResult>, version: i16) -> UpdateFeature
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::{net::SocketAddr, sync::Arc};
+
     use assert2::assert;
     use crabka_protocol::owned::update_features_request::FeatureUpdateKey;
     use crabka_security::Principal;
-    use std::net::SocketAddr;
-    use std::sync::Arc;
 
-    use crate::authorizer::Authorizer;
-    use crate::broker::{Broker, BrokerHandle};
-    use crate::test_support::DenyAll;
+    use crate::{
+        authorizer::Authorizer,
+        broker::{Broker, BrokerHandle},
+        test_support::DenyAll,
+    };
 
     const VERSION: i16 = 1;
 
@@ -397,6 +400,8 @@ mod tests {
         .await
         .expect("feature level visible");
     }
+
+    use super::*;
 
     #[test]
     fn downgrade_flag_v0_uses_allow_downgrade() {

@@ -10,23 +10,26 @@
 //! the `i32::MIN` "not present" sentinel.
 
 use bytes::{Bytes, BytesMut};
+use crabka_metadata::{AclOperation, ResourceType};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        describe_groups_request::DescribeGroupsRequest,
+        describe_groups_response::{DescribeGroupsResponse, DescribedGroup, DescribedGroupMember},
+    },
+};
 use tokio::sync::oneshot;
 
-use crabka_metadata::{AclOperation, ResourceType};
-use crabka_protocol::owned::describe_groups_request::DescribeGroupsRequest;
-use crabka_protocol::owned::describe_groups_response::{
-    DescribeGroupsResponse, DescribedGroup, DescribedGroupMember,
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes,
+    coordinator::unified::{
+        GroupType, classic_state::GroupState, streams::actor::StreamsGroupActorMessage,
+    },
+    error::BrokerError,
+    handlers::authorized_operations::authorized_operations_bits,
 };
-use crabka_protocol::{Decode, Encode};
-
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes;
-use crate::coordinator::unified::GroupType;
-use crate::coordinator::unified::classic_state::GroupState;
-use crate::coordinator::unified::streams::actor::StreamsGroupActorMessage;
-use crate::error::BrokerError;
-use crate::handlers::authorized_operations::authorized_operations_bits;
 
 #[tracing::instrument(
     name = "handle_describe_groups",

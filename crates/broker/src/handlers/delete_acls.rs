@@ -2,10 +2,12 @@
 
 use bytes::Bytes;
 use crabka_metadata::{AclEntry, AclEntryFilter, MetadataRecord};
-use crabka_protocol::Encode;
-use crabka_protocol::owned::delete_acls_request::{DeleteAclsFilter, DeleteAclsRequest};
-use crabka_protocol::owned::delete_acls_response::{
-    DeleteAclsFilterResult, DeleteAclsMatchingAcl, DeleteAclsResponse,
+use crabka_protocol::{
+    Encode,
+    owned::{
+        delete_acls_request::{DeleteAclsFilter, DeleteAclsRequest},
+        delete_acls_response::{DeleteAclsFilterResult, DeleteAclsMatchingAcl, DeleteAclsResponse},
+    },
 };
 
 use super::acl_wire::{
@@ -13,9 +15,11 @@ use super::acl_wire::{
     pattern_type_to_wire, permission_filter, permission_to_wire, resource_type_filter,
     resource_type_to_wire,
 };
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes;
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes,
+};
 
 #[allow(clippy::too_many_lines)]
 #[tracing::instrument(
@@ -203,14 +207,17 @@ fn encode_response<R: Encode>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::sync::Arc;
+
     use assert2::assert;
     use crabka_metadata::{AclOperation, PatternType, PermissionType, ResourceType};
     use crabka_protocol::UnknownTaggedFields;
-    use std::sync::Arc;
 
-    use crate::broker::BrokerHandle;
-    use crate::test_support::{DenyAll, peer, principal};
+    use super::*;
+    use crate::{
+        broker::BrokerHandle,
+        test_support::{DenyAll, peer, principal},
+    };
 
     const VERSION: i16 = 3;
     const RESOURCE_TYPE_TOPIC: i8 = 2;

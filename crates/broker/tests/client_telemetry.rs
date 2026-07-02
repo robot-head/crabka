@@ -31,17 +31,20 @@
 use assert2::{assert, check};
 mod support;
 
-use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
-use crabka_protocol::owned::get_telemetry_subscriptions_request::GetTelemetrySubscriptionsRequest;
-use crabka_protocol::owned::get_telemetry_subscriptions_response::GetTelemetrySubscriptionsResponse;
-use crabka_protocol::owned::incremental_alter_configs_request::{
-    AlterConfigsResource, AlterableConfig, IncrementalAlterConfigsRequest,
+use crabka_protocol::{
+    owned::{
+        api_versions_request::ApiVersionsRequest,
+        get_telemetry_subscriptions_request::GetTelemetrySubscriptionsRequest,
+        get_telemetry_subscriptions_response::GetTelemetrySubscriptionsResponse,
+        incremental_alter_configs_request::{
+            AlterConfigsResource, AlterableConfig, IncrementalAlterConfigsRequest,
+        },
+        incremental_alter_configs_response::IncrementalAlterConfigsResponse,
+        push_telemetry_request::PushTelemetryRequest,
+        push_telemetry_response::PushTelemetryResponse,
+    },
+    primitives::uuid::Uuid as WireUuid,
 };
-use crabka_protocol::owned::incremental_alter_configs_response::IncrementalAlterConfigsResponse;
-use crabka_protocol::owned::push_telemetry_request::PushTelemetryRequest;
-use crabka_protocol::owned::push_telemetry_response::PushTelemetryResponse;
-use crabka_protocol::primitives::uuid::Uuid as WireUuid;
-
 use support::start_n_node;
 
 /// Kafka resource type id for CLIENT_METRICS (KIP-714).

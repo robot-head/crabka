@@ -5,20 +5,24 @@
 //!
 //! `cargo test -p crabka-metrics-service --test diff_prometheus -- --ignored --nocapture`
 
-use std::net::SocketAddr;
-use std::sync::Arc;
+use std::{net::SocketAddr, sync::Arc};
 
 use bytes::Bytes;
-use crabka_metrics::distributor::{DistributorState, ProduceError, WalSink};
-use crabka_metrics::{WalRecord, wire::pb};
+use crabka_metrics::{
+    WalRecord,
+    distributor::{DistributorState, ProduceError, WalSink},
+    wire::pb,
+};
 use crabka_promql::WalHead;
 use diff_corpus::{QueryKind, assert_query_equal, query_corpus, seed_dataset};
 use prost::Message;
 use reqwest::StatusCode;
 use serde_json::Value;
-use testcontainers::core::{IntoContainerPort, WaitFor};
-use testcontainers::runners::AsyncRunner;
-use testcontainers::{GenericImage, ImageExt};
+use testcontainers::{
+    GenericImage, ImageExt,
+    core::{IntoContainerPort, WaitFor},
+    runners::AsyncRunner,
+};
 use tokio::sync::oneshot;
 
 #[path = "../../metrics/tests/support/diff_corpus.rs"]

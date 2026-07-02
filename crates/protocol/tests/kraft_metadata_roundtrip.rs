@@ -3,11 +3,11 @@
 //! the `KraftMetadataRecord` envelope, re-encode, and assert the bytes are
 //! unchanged.
 
+use std::path::Path;
+
 use assert2::assert;
 use bytes::BytesMut;
-use crabka_protocol::records::RecordBatch;
-use crabka_protocol::records::metadata::record::KraftMetadataRecord;
-use std::path::Path;
+use crabka_protocol::records::{RecordBatch, metadata::record::KraftMetadataRecord};
 
 /// Walk every batch in `log`; assert each re-encodes byte-identically, and that
 /// every non-control record value round-trips through `KraftMetadataRecord`.

@@ -5,10 +5,9 @@ use std::collections::HashSet;
 use crabka_blockstore::Labels;
 use prost::Message;
 
-use super::histogram::v1_histogram_to_native;
 use super::{
-    DecodedExemplar, DecodedMetadata, DecodedSample, DecodedSeries, WireError, pb,
-    snappy_block_decode,
+    DecodedExemplar, DecodedMetadata, DecodedSample, DecodedSeries, WireError,
+    histogram::v1_histogram_to_native, pb, snappy_block_decode,
 };
 
 pub fn decode_v1(body: &[u8], max_decompressed: usize) -> Result<Vec<DecodedSeries>, WireError> {

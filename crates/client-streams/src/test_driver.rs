@@ -5,10 +5,14 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::processor::erased::{OutputRecord, ProcessorError};
-use crate::processor::graph::Graph;
-use crate::processor::serde::{Consumed, Produced, Serde, SerdeAssociate};
-use crate::topology::BuiltTopology;
+use crate::{
+    processor::{
+        erased::{OutputRecord, ProcessorError},
+        graph::Graph,
+        serde::{Consumed, Produced, Serde, SerdeAssociate},
+    },
+    topology::BuiltTopology,
+};
 
 /// A pending record entry in the repartition loop-back queue.
 type PendingRecord = (String, Option<Vec<u8>>, Vec<u8>, i64);
@@ -337,8 +341,10 @@ impl TopologyTestDriver {
     ) -> crate::runtime::iqv2::StateQueryResult<Q::Result> {
         use std::collections::BTreeMap;
 
-        use crate::runtime::iqv2::request::Position;
-        use crate::runtime::iqv2::result::{FailureReason, QueryResult, StateQueryResult};
+        use crate::runtime::iqv2::{
+            request::Position,
+            result::{FailureReason, QueryResult, StateQueryResult},
+        };
 
         let store_name = req.store.clone();
         let kind = req.query.store_kind();
@@ -449,13 +455,18 @@ impl TopologyTestDriver {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::processor::api::{Processor, ProcessorContext};
-    use crate::processor::record::Record;
-    use crate::processor::serde::StringSerde;
-    use crate::topology::{NodeHandle, Topology};
     use assert2::check;
     use async_trait::async_trait;
+
+    use super::*;
+    use crate::{
+        processor::{
+            api::{Processor, ProcessorContext},
+            record::Record,
+            serde::StringSerde,
+        },
+        topology::{NodeHandle, Topology},
+    };
 
     struct Upper;
     #[async_trait]
@@ -645,8 +656,10 @@ mod tests {
 
     #[tokio::test]
     async fn iqv2_query_kv_via_driver() {
-        use crate::processor::serde::{Consumed, StringSerde};
-        use crate::runtime::iqv2::{KeyQuery, StateQueryRequest};
+        use crate::{
+            processor::serde::{Consumed, StringSerde},
+            runtime::iqv2::{KeyQuery, StateQueryRequest},
+        };
 
         let b = crate::StreamsBuilder::new();
         b.stream::<String, String>(["in"])

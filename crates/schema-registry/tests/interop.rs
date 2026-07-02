@@ -19,19 +19,21 @@
 
 #![allow(clippy::pedantic)]
 
-use std::net::SocketAddr;
-use std::process::Command;
-use std::time::{Duration, Instant};
+use std::{
+    net::SocketAddr,
+    process::Command,
+    time::{Duration, Instant},
+};
 
-use axum::body::Body;
-use axum::http::Request;
-use tower::ServiceExt;
-
+use axum::{body::Body, http::Request};
 use crabka_broker::{Broker, BrokerConfig};
-use crabka_schema_registry::config::{RegistryConfig, SecurityConfig};
-use crabka_schema_registry::kafkastore::KafkaStore;
-use crabka_schema_registry::rest::{self, AppState};
+use crabka_schema_registry::{
+    config::{RegistryConfig, SecurityConfig},
+    kafkastore::KafkaStore,
+    rest::{self, AppState},
+};
 use tokio_util::sync::CancellationToken;
+use tower::ServiceExt;
 
 // ── network constants (mirrors capture_fixtures.rs) ──────────────────────────
 

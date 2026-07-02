@@ -18,20 +18,23 @@
 //! Repartition and changelog topic names follow the JVM naming rules so the
 //! built topology can be sent through `StreamsGroupHeartbeat`.
 
-use std::any::Any;
-use std::cell::RefCell;
-use std::marker::PhantomData;
-use std::rc::Rc;
+use std::{any::Any, cell::RefCell, marker::PhantomData, rc::Rc};
 
-use crate::dsl::builder::InternalStreamsBuilder;
-use crate::dsl::config::Materialized;
-use crate::dsl::graph::{GraphNodeKind, LowerState, NodeId};
-use crate::dsl::ktable::KTable;
-use crate::dsl::names;
-use crate::dsl::processors::aggregate::{KStreamAggregateProcessor, KStreamReduceProcessor};
-use crate::dsl::processors::tuple_forwarder::TupleForwarder;
-use crate::processor::serde::{DefaultSerde, I64Serde, Serde};
-use crate::topology::NodeHandle;
+use crate::{
+    dsl::{
+        builder::InternalStreamsBuilder,
+        config::Materialized,
+        graph::{GraphNodeKind, LowerState, NodeId},
+        ktable::KTable,
+        names,
+        processors::{
+            aggregate::{KStreamAggregateProcessor, KStreamReduceProcessor},
+            tuple_forwarder::TupleForwarder,
+        },
+    },
+    processor::serde::{DefaultSerde, I64Serde, Serde},
+    topology::NodeHandle,
+};
 
 /// A typed thunk that wires a repartition `sink → topic → source` triple into
 /// the Processor-API topology, returning the source node's name. Built from the

@@ -1,10 +1,12 @@
 //! A single segment: `.log` + `.index` + `.timeindex` files sharing a
 //! base offset.
 
-use std::fs::{File, OpenOptions};
-use std::io::{IoSlice, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::{
+    fs::{File, OpenOptions},
+    io::{IoSlice, Seek, SeekFrom, Write},
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use bytes::Bytes;
 use crabka_protocol::records::{
@@ -13,9 +15,11 @@ use crabka_protocol::records::{
 use tracing::instrument;
 use zerocopy::FromBytes;
 
-use crate::error::LogError;
-use crate::index::{OffsetIndex, TimeIndex};
-use crate::name;
+use crate::{
+    error::LogError,
+    index::{OffsetIndex, TimeIndex},
+    name,
+};
 
 /// Positioned read: fill `buf` from `offset` in `file` without moving the
 /// file's cursor, looping over short reads until `buf` is full or EOF.
@@ -980,12 +984,12 @@ impl Segment {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::assert;
-    use assert2::check;
+    use assert2::{assert, check};
     use bytes::Bytes;
     use crabka_protocol::records::{Record, RecordBatch};
     use tempfile::tempdir;
+
+    use super::*;
 
     fn sample_batch(base_offset: i64, n: i32, ts_base: i64) -> RecordBatch {
         let mut b = RecordBatch {

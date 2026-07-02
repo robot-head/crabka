@@ -122,10 +122,9 @@ impl PartitionRegistry {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
-    use std::path::Path;
-    use std::sync::Arc;
+    use std::{path::Path, sync::Arc};
 
+    use assert2::{assert, check};
     use crabka_log::{Log, LogConfig};
     use tempfile::tempdir;
 

@@ -16,10 +16,12 @@ use bytes::{Bytes, BytesMut};
 use crabka_compression::CompressionType;
 use crabka_protocol::records::{Attributes, Record, RecordBatch, RecordsError};
 
-use crate::error::LegacyRecordsError;
-use crate::message::Magic;
-use crate::set::{
-    ParsedRecord, decode_message_set, encode_compressed_message_set, encode_flat_message_set,
+use crate::{
+    error::LegacyRecordsError,
+    message::Magic,
+    set::{
+        ParsedRecord, decode_message_set, encode_compressed_message_set, encode_flat_message_set,
+    },
 };
 
 /// Iterate the v2 batch's records, dropping control batches entirely.
@@ -145,11 +147,11 @@ impl From<RecordsError> for LegacyRecordsError {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::assert;
-    use assert2::check;
+    use assert2::{assert, check};
     use bytes::Bytes;
     use crabka_protocol::records::{Record, RecordBatch};
+
+    use super::*;
 
     fn v2_batch(codec: CompressionType) -> RecordBatch {
         RecordBatch {

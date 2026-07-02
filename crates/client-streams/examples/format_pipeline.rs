@@ -10,38 +10,42 @@
     clippy::too_many_lines
 )]
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
+use ::arrow::{
+    array::{Int64Array, StringArray},
+    datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema},
+};
 use bytes::Bytes;
-use serde::{Deserialize, Serialize};
-
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_admin::{AdminClient, CreateTopicSpec};
 use crabka_client_consumer::{AutoOffsetReset, Consumer};
 use crabka_client_producer::{Acks, Producer, ProducerRecord};
-use crabka_client_streams::SchemaSerde;
-use crabka_client_streams::columnar::serde::arrow::ArrowIpcSerde;
-use crabka_client_streams::columnar::serde::polars::PolarsIpcSerde;
-use crabka_client_streams::columnar::topology::ColumnarTopology;
-use crabka_client_streams::columnar::topology::codec::{
-    BatchCodec, BatchError, BlobCodec, ConsumedRecord, ProduceRecord,
+use crabka_client_streams::{
+    SchemaSerde,
+    columnar::{
+        serde::{arrow::ArrowIpcSerde, polars::PolarsIpcSerde},
+        topology::{
+            ColumnarTopology,
+            codec::{BatchCodec, BatchError, BlobCodec, ConsumedRecord, ProduceRecord},
+            operator::BuiltinOp,
+        },
+    },
+    processor::serde::{Serde, SerdeRole},
 };
-use crabka_client_streams::columnar::topology::operator::BuiltinOp;
-use crabka_client_streams::processor::serde::{Serde, SerdeRole};
-use crabka_schema_registry::config::{RegistryConfig, SecurityConfig};
-use crabka_schema_registry::kafkastore::KafkaStore;
-use crabka_schema_registry::rest::{self, AppState};
-use crabka_schema_serde::RegistryClient;
-use crabka_schema_serde::cache::{CacheConfig, SchemaCache};
-use crabka_schema_serde::format::json::JsonSerde;
-use crabka_schema_serde::format::protobuf::ProtobufSerde;
+use crabka_schema_registry::{
+    config::{RegistryConfig, SecurityConfig},
+    kafkastore::KafkaStore,
+    rest::{self, AppState},
+};
+use crabka_schema_serde::{
+    RegistryClient,
+    cache::{CacheConfig, SchemaCache},
+    format::{json::JsonSerde, protobuf::ProtobufSerde},
+};
 use polars::prelude::*;
+use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
-
-use ::arrow::array::{Int64Array, StringArray};
-use ::arrow::datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema};
 
 // docs:begin types
 /// Raw order, ingested as JSON (JSON-Schema serde).

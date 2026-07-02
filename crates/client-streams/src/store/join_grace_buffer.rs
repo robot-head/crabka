@@ -11,14 +11,12 @@
 //! - Changelog KEY  = `(ts, seq)` encoded big-endian (8 bytes ts ‖ 4 bytes seq).
 //! - Changelog VALUE = `(key bytes, value bytes)` length-prefixed, or `None`
 //!   (a tombstone logged when an entry is drained).
-use std::any::Any;
-use std::collections::BTreeMap;
+use std::{any::Any, collections::BTreeMap};
 
 use async_trait::async_trait;
 use bytes::Bytes;
 
-use crate::processor::serde::Serde;
-use crate::store::api::StateStore;
+use crate::{processor::serde::Serde, store::api::StateStore};
 
 /// Encode a `(ts, seq)` buffer id as the changelog KEY: 8-byte big-endian `ts`
 /// followed by 4-byte big-endian `seq` (so byte order matches `(ts, seq)` order).
@@ -213,9 +211,10 @@ impl<K: 'static, V: 'static> StateStore for JoinGraceBufferStore<K, V> {
 
 #[cfg(test)]
 mod tests {
+    use assert2::check;
+
     use super::*;
     use crate::processor::serde::{I64Serde, StringSerde};
-    use assert2::check;
 
     #[tokio::test]
     async fn buffers_and_drains_in_ts_order() {

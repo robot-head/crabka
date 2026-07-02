@@ -8,22 +8,27 @@
 //! gate (principal + peer `SocketAddr`).
 
 use bytes::{Bytes, BytesMut};
+use crabka_metadata::{AclOperation, ResourceType};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        alter_share_group_offsets_request::AlterShareGroupOffsetsRequest,
+        alter_share_group_offsets_response::{
+            AlterShareGroupOffsetsResponse, AlterShareGroupOffsetsResponsePartition,
+            AlterShareGroupOffsetsResponseTopic,
+        },
+    },
+    primitives::uuid::Uuid,
+};
 use tokio::sync::oneshot;
 
-use crabka_metadata::{AclOperation, ResourceType};
-use crabka_protocol::owned::alter_share_group_offsets_request::AlterShareGroupOffsetsRequest;
-use crabka_protocol::owned::alter_share_group_offsets_response::{
-    AlterShareGroupOffsetsResponse, AlterShareGroupOffsetsResponsePartition,
-    AlterShareGroupOffsetsResponseTopic,
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes,
+    coordinator::unified::share::actor::ShareGroupActorMessage,
+    error::BrokerError,
 };
-use crabka_protocol::primitives::uuid::Uuid;
-use crabka_protocol::{Decode, Encode};
-
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes;
-use crate::coordinator::unified::share::actor::ShareGroupActorMessage;
-use crate::error::BrokerError;
 
 #[tracing::instrument(
     name = "handle_alter_share_group_offsets",
@@ -202,21 +207,26 @@ pub(crate) async fn group_is_empty(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::assert;
-    use crabka_protocol::UnknownTaggedFields;
-    use crabka_protocol::owned::alter_share_group_offsets_request::{
-        AlterShareGroupOffsetsRequestPartition, AlterShareGroupOffsetsRequestTopic,
-    };
-    use crabka_protocol::owned::alter_share_group_offsets_response;
-    use crabka_protocol::owned::share_group_heartbeat_request::ShareGroupHeartbeatRequest;
-    use crabka_security::Principal;
-    use std::net::SocketAddr;
-    use std::sync::Arc;
+    use std::{net::SocketAddr, sync::Arc};
 
-    use crate::authorizer::Authorizer;
-    use crate::coordinator::unified::share::actor::ShareGroupActorMessage;
-    use crate::test_support::DenyAll;
+    use assert2::assert;
+    use crabka_protocol::{
+        UnknownTaggedFields,
+        owned::{
+            alter_share_group_offsets_request::{
+                AlterShareGroupOffsetsRequestPartition, AlterShareGroupOffsetsRequestTopic,
+            },
+            alter_share_group_offsets_response,
+            share_group_heartbeat_request::ShareGroupHeartbeatRequest,
+        },
+    };
+    use crabka_security::Principal;
+
+    use super::*;
+    use crate::{
+        authorizer::Authorizer, coordinator::unified::share::actor::ShareGroupActorMessage,
+        test_support::DenyAll,
+    };
 
     fn request(
         group_id: &str,

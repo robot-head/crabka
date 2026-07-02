@@ -5,19 +5,24 @@
 //! connection blocks here exactly as long as the old `Notify`-based wait.
 
 use bytes::{Bytes, BytesMut};
+use crabka_metadata::{AclOperation, ResourceType};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        join_group_request::JoinGroupRequest,
+        join_group_response::{JoinGroupResponse, JoinGroupResponseMember},
+    },
+};
 use tokio::sync::oneshot;
 
-use crabka_metadata::{AclOperation, ResourceType};
-use crabka_protocol::owned::join_group_request::JoinGroupRequest;
-use crabka_protocol::owned::join_group_response::{JoinGroupResponse, JoinGroupResponseMember};
-use crabka_protocol::{Decode, Encode};
-
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes;
-use crate::coordinator::unified::actor::{GroupActorMessage, GroupKindTag};
-use crate::error::BrokerError;
-use crate::time_util::now_ms;
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes,
+    coordinator::unified::actor::{GroupActorMessage, GroupKindTag},
+    error::BrokerError,
+    time_util::now_ms,
+};
 
 #[tracing::instrument(
     name = "handle_join_group",

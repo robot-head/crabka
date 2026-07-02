@@ -3,16 +3,11 @@
 
 use std::sync::Arc;
 
-use axum::Router;
-use axum::extract::State;
-use axum::http::StatusCode;
-use axum::response::IntoResponse;
-use axum::routing::get;
+use axum::{Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
 use prometheus_client::registry::Registry;
 use tokio::sync::Mutex;
 
-use crate::ingest::SharedSnapshot;
-use crate::state_topic::StateBackend;
+use crate::{ingest::SharedSnapshot, state_topic::StateBackend};
 
 #[derive(Clone)]
 pub struct HealthState {
@@ -69,11 +64,11 @@ pub fn new_registry() -> Registry {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
-    use axum::body::Body;
-    use axum::http::Request;
+    use axum::{body::Body, http::Request};
     use tower::ServiceExt;
+
+    use super::*;
 
     fn fixture() -> HealthState {
         HealthState {

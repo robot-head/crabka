@@ -1,17 +1,14 @@
 //! Broker configuration. Built directly (library use) or from CLI flags
 //! (binary entry point in `bin/broker.rs`).
 
-use std::collections::HashMap;
-use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::{collections::HashMap, net::SocketAddr, path::PathBuf};
 
 use crabka_log::LogConfig;
+pub use crabka_raft::BootstrapMode;
 use crabka_raft::NodeId;
 use crabka_security::{ListenerProtocol, SaslMechanism, TlsConfig};
 
 use crate::BrokerError;
-
-pub use crabka_raft::BootstrapMode;
 
 /// `KRaft` `process.roles`. A node is a metadata-quorum `Controller`, a data
 /// `Broker`, or both. Default is the combined set `[Controller, Broker]`.
@@ -1098,9 +1095,10 @@ impl Default for BrokerConfig {
 
 #[cfg(test)]
 mod tests {
+    use assert2::{assert, check};
+
     use super::*;
     use crate::BrokerError as BrokerStartError;
-    use assert2::{assert, check};
 
     #[test]
     fn production_default_selects_topic_backed_rlmm() {

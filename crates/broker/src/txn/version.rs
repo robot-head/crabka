@@ -39,9 +39,10 @@ pub(crate) fn resolve_txn_version(image: &MetadataImage) -> TxnVersion {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
     use crabka_metadata::{FeatureLevelRecord, MetadataRecord};
+
+    use super::*;
 
     fn image_with_tv(level: Option<i16>) -> MetadataImage {
         let mut m = MetadataImage::new(uuid::Uuid::nil());

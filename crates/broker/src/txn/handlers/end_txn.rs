@@ -20,30 +20,34 @@
 use std::collections::HashMap;
 
 use bytes::{Bytes, BytesMut};
-
 use crabka_metadata::{AclOperation, MetadataImage, NodeId, ResourceType};
-use crabka_protocol::Decode;
-use crabka_protocol::Encode;
-use crabka_protocol::owned::end_txn_request::EndTxnRequest;
-use crabka_protocol::owned::end_txn_response::EndTxnResponse;
-use crabka_protocol::owned::write_txn_markers_request::{
-    WritableTxnMarker, WritableTxnMarkerTopic, WriteTxnMarkersRequest,
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        end_txn_request::EndTxnRequest,
+        end_txn_response::EndTxnResponse,
+        write_txn_markers_request::{
+            WritableTxnMarker, WritableTxnMarkerTopic, WriteTxnMarkersRequest,
+        },
+    },
 };
 use crabka_security::ListenerProtocol;
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes;
-use crate::coordinator::unified::actor::{GroupActorMessage, GroupKindTag};
-use crate::error::BrokerError;
-use crate::network::client::InterBrokerClient;
-use crate::txn::decision::{
-    CompletionDecision, decide_end_txn_completion, decide_phase1_transition,
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes,
+    coordinator::unified::actor::{GroupActorMessage, GroupKindTag},
+    error::BrokerError,
+    network::client::InterBrokerClient,
+    txn::{
+        decision::{CompletionDecision, decide_end_txn_completion, decide_phase1_transition},
+        marker::{MarkerType, build_marker_batch},
+        state::{TopicPartition, TxnEntry, TxnState},
+        util::now_millis,
+        version::TxnVersion,
+    },
 };
-use crate::txn::marker::{MarkerType, build_marker_batch};
-use crate::txn::state::{TopicPartition, TxnEntry, TxnState};
-use crate::txn::util::now_millis;
-use crate::txn::version::TxnVersion;
 
 /// A producer's identity pair as carried on the wire:
 /// (`producer_id`, `producer_epoch`).
@@ -651,15 +655,15 @@ fn encode_response(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
     use crabka_metadata::{BrokerEndpoint, BrokerRegistrationRecord, MetadataRecord};
-    use crabka_protocol::UnknownTaggedFields;
-    use crabka_protocol::owned::end_txn_response::EndTxnResponse;
+    use crabka_protocol::{UnknownTaggedFields, owned::end_txn_response::EndTxnResponse};
 
     fn decode_response(bytes: &Bytes, version: i16) -> EndTxnResponse {
         crate::test_support::decode_response(bytes, version)
     }
+
+    use super::*;
 
     // ── KIP-890 TV_2 completion identity: next_producer_identity ────────────
 

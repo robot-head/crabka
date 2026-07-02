@@ -5,7 +5,6 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-
 use crabka_bench_driver::report;
 
 #[derive(Debug, Parser)]

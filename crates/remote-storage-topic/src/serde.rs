@@ -15,21 +15,23 @@
 use std::collections::BTreeMap;
 
 use bytes::{BufMut, Bytes, BytesMut};
-
-use crabka_protocol::RemoteLogMetadataRecord;
-use crabka_protocol::owned::remote_log_segment_metadata_record::{
-    RemoteLogSegmentIdEntry as SegIdEntry, RemoteLogSegmentMetadataRecord, SegmentLeaderEpochEntry,
-    TopicIdPartitionEntry as TpEntry,
+use crabka_protocol::{
+    RemoteLogMetadataRecord,
+    owned::{
+        remote_log_segment_metadata_record::{
+            RemoteLogSegmentIdEntry as SegIdEntry, RemoteLogSegmentMetadataRecord,
+            SegmentLeaderEpochEntry, TopicIdPartitionEntry as TpEntry,
+        },
+        remote_log_segment_metadata_update_record::{
+            RemoteLogSegmentIdEntry as SegIdEntryUpd, RemoteLogSegmentMetadataUpdateRecord,
+            TopicIdPartitionEntry as TpEntryUpd,
+        },
+        remote_partition_delete_metadata_record::{
+            RemotePartitionDeleteMetadataRecord, TopicIdPartitionEntry as TpEntryDel,
+        },
+    },
+    primitives::uuid::Uuid as ProtoUuid,
 };
-use crabka_protocol::owned::remote_log_segment_metadata_update_record::{
-    RemoteLogSegmentIdEntry as SegIdEntryUpd, RemoteLogSegmentMetadataUpdateRecord,
-    TopicIdPartitionEntry as TpEntryUpd,
-};
-use crabka_protocol::owned::remote_partition_delete_metadata_record::{
-    RemotePartitionDeleteMetadataRecord, TopicIdPartitionEntry as TpEntryDel,
-};
-use crabka_protocol::primitives::uuid::Uuid as ProtoUuid;
-
 use crabka_remote_storage::{
     CustomMetadata, RemoteLogSegmentId, RemoteLogSegmentMetadata, RemoteLogSegmentMetadataUpdate,
     RemoteLogSegmentState, RemotePartitionDeleteMetadata, RemotePartitionDeleteState,
@@ -432,9 +434,10 @@ impl<'a> Reader<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
     use uuid::Uuid;
+
+    use super::*;
 
     fn tp() -> TopicIdPartition {
         TopicIdPartition::new(Uuid::from_u128(0xCAFE_BABE), "orders-📦", 7)

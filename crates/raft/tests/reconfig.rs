@@ -1,12 +1,12 @@
 // Tests the coordinator's safety guards against an in-memory mock (no real raft).
+use std::{collections::BTreeSet, sync::Mutex as StdMutex};
+
 use assert2::assert;
 use crabka_metadata::{KRaftVersionRange, Voter, VoterEndpoint, VoterSet};
-use crabka_raft::reconfig::{
-    AddVoter, Coordinator, ReconfigOps, ReconfigOutcome, RemoveVoter, UpdateVoter,
+use crabka_raft::{
+    Node, NodeId, RaftError,
+    reconfig::{AddVoter, Coordinator, ReconfigOps, ReconfigOutcome, RemoveVoter, UpdateVoter},
 };
-use crabka_raft::{Node, NodeId, RaftError};
-use std::collections::BTreeSet;
-use std::sync::Mutex as StdMutex;
 
 #[derive(Default)]
 struct MockState {

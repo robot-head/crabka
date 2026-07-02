@@ -17,21 +17,23 @@ use assert2::assert;
 pub mod fake_admin;
 pub mod fake_rebalancer;
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
-use std::sync::Mutex;
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+};
 
-use crabka_operator::config::OperatorConfig;
-use crabka_operator::context::Context;
-use crabka_operator::crd::{KafkaNodePool, KafkaNodePoolSpec, NodeRole};
-use crabka_operator::telemetry::new_registry_with_metrics;
+use crabka_operator::{
+    config::OperatorConfig,
+    context::Context,
+    crd::{KafkaNodePool, KafkaNodePoolSpec, NodeRole},
+    telemetry::new_registry_with_metrics,
+};
 use http::{Method, Request, Response};
 use http_body_util::BodyExt as _;
 use hyper::body::Bytes;
 use kube::Client;
 use tokio::sync::Mutex as AsyncMutex;
-use tower::ServiceBuilder;
-use tower::service_fn;
+use tower::{ServiceBuilder, service_fn};
 
 /// One preloaded mock response. Matched on `(method, path_substr)` against
 /// the incoming request URI. Substring match is sufficient because kube's

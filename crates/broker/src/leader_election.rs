@@ -19,11 +19,11 @@ use crabka_metadata::{MetadataImage, MetadataRecord, PartitionRecord};
 use crabka_raft::NodeId;
 use tracing::warn;
 
-use crate::config_keys::{
-    RecoveryStrategy, UNCLEAN_LEADER_ELECTION_ENABLE, resolve_recovery_strategy,
+use crate::{
+    config_keys::{RecoveryStrategy, UNCLEAN_LEADER_ELECTION_ENABLE, resolve_recovery_strategy},
+    error::BrokerError,
+    heartbeat::controller_state::ControllerLivenessState,
 };
-use crate::error::BrokerError;
-use crate::heartbeat::controller_state::ControllerLivenessState;
 
 /// Output of a failover scan: immediate metadata changes plus partitions
 /// that need asynchronous offset-aware recovery via the URM.
@@ -538,23 +538,20 @@ pub(crate) async fn select_new_leader_for_partition(
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
-    use std::collections::BTreeSet;
-    use std::net::SocketAddr;
-    use std::sync::Arc;
-    use std::time::Duration;
+    use std::{collections::BTreeSet, net::SocketAddr, sync::Arc, time::Duration};
 
+    use assert2::{assert, check};
     use crabka_metadata::{MetadataImage, MetadataRecord, PartitionRecord, TopicRecord};
+    use crabka_raft::{
+        AddVoter, Node, NodeId, QuorumState, RaftError, ReconfigOutcome, RemoveVoter,
+        SnapshotRange, UpdateVoter,
+    };
     use tokio::sync::{Mutex, watch};
     use uuid::Uuid;
 
     use super::{
         ControllerLivenessState, ElectError, ElectionType, on_broker_dead,
         select_new_leader_for_partition, select_replacement_leader_for_shutdown,
-    };
-    use crabka_raft::{
-        AddVoter, Node, NodeId, QuorumState, RaftError, ReconfigOutcome, RemoveVoter,
-        SnapshotRange, UpdateVoter,
     };
 
     fn img_with_partition(
@@ -868,12 +865,14 @@ mod tests {
 
     // ── KIP-841: automatic-failover + unclean.leader.election.enable ────────
 
+    use std::collections::BTreeMap;
+
+    use crabka_metadata::TopicConfigRecord;
+
     use super::compute_failover_changes;
     use crate::config_keys::{
         RecoveryStrategy, UNCLEAN_LEADER_ELECTION_ENABLE, UNCLEAN_RECOVERY_STRATEGY,
     };
-    use crabka_metadata::TopicConfigRecord;
-    use std::collections::BTreeMap;
 
     /// Apply a `V1TopicConfig` override on top of an existing image —
     /// matches the runtime path where `AlterConfigs` writes the record.

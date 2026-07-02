@@ -1,14 +1,15 @@
 //! Merge two metric stores, typically compacted cold blocks plus a hot WAL head.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use crabka_blockstore::{LabelMatcher, Labels, SeriesFingerprint};
 use crabka_metrics::{
     COL_FINGERPRINT, COL_TIMESTAMP, float_sample_schema, native_histogram_schema,
 };
-use datafusion::catalog::MemTable;
-use datafusion::prelude::SessionContext;
+use datafusion::{catalog::MemTable, prelude::SessionContext};
 
 use crate::{
     ExemplarRecord, LabelNameCardinality, LabelValueCardinality, MetadataRecord, MetricStore,

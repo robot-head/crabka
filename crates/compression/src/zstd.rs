@@ -32,8 +32,9 @@ pub fn decompress(data: &[u8], max_output: usize) -> Result<Bytes, CompressionEr
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     const HELLO: &[u8] = b"hello kafka, this is a moderately repetitive payload to compress";
     const BIG_CAP: usize = 256 * 1024 * 1024;

@@ -40,11 +40,12 @@ use std::time::Duration;
 
 use stateright::{Checker, Model, Property};
 
-use super::decision::{CompletionDecision, decide_end_txn_completion, decide_phase1_transition};
-use super::state::{TxnEntry, TxnState};
-use super::version::TxnVersion;
-use crate::handlers::fetch::compute_visibility_window;
-use crate::producer_id_manager::ProducerIdManager;
+use super::{
+    decision::{CompletionDecision, decide_end_txn_completion, decide_phase1_transition},
+    state::{TxnEntry, TxnState},
+    version::TxnVersion,
+};
+use crate::{handlers::fetch::compute_visibility_window, producer_id_manager::ProducerIdManager};
 
 const TARGET_STATE_COUNT: usize = 20_000_000;
 const MAX_UNIQUE_STATES: usize = 2_000_000;

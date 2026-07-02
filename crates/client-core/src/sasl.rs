@@ -15,11 +15,15 @@
 use std::path::PathBuf;
 
 use bytes::{Buf, BufMut, BytesMut};
-use crabka_protocol::owned::sasl_authenticate_request::SaslAuthenticateRequest;
-use crabka_protocol::owned::sasl_authenticate_response::SaslAuthenticateResponse;
-use crabka_protocol::owned::sasl_handshake_request::SaslHandshakeRequest;
-use crabka_protocol::owned::sasl_handshake_response::SaslHandshakeResponse;
-use crabka_protocol::{Decode, Encode};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        sasl_authenticate_request::SaslAuthenticateRequest,
+        sasl_authenticate_response::SaslAuthenticateResponse,
+        sasl_handshake_request::SaslHandshakeRequest,
+        sasl_handshake_response::SaslHandshakeResponse,
+    },
+};
 use crabka_security::{SaslMechanism, ScramClientExchange};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -278,8 +282,10 @@ async fn run_gssapi_client<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + ?Sized,
 {
-    use crabka_security::gssapi::client::{ClientStep, GssapiClientExchange};
-    use crabka_security::gssapi::provider::SspiInitiator;
+    use crabka_security::gssapi::{
+        client::{ClientStep, GssapiClientExchange},
+        provider::SspiInitiator,
+    };
 
     let target_spn = format!("{service_name}/{server_name}");
     let keytab = keytab_path.to_string_lossy();
@@ -417,13 +423,18 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::check;
-    use crabka_protocol::owned::sasl_authenticate_response::SaslAuthenticateResponse;
-    use crabka_protocol::owned::sasl_handshake_response::SaslHandshakeResponse;
+    use crabka_protocol::owned::{
+        sasl_authenticate_response::SaslAuthenticateResponse,
+        sasl_handshake_response::SaslHandshakeResponse,
+    };
     use crabka_security::{ScramServerExchange, StepResult, hash_scram_password};
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::time::{Duration, timeout};
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        time::{Duration, timeout},
+    };
+
+    use super::*;
 
     // Minimal server: read one request frame, reply with a response
     // header (corr_id, plus a 0x00 tagged-fields byte when `flex_header`)

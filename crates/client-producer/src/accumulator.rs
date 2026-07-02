@@ -2,14 +2,15 @@
 //! record + a oneshot tx; the sender drains in-flight batches and
 //! resolves the oneshots from the `ProduceResponse`.
 
-use std::collections::VecDeque;
-use std::time::Instant;
+use std::{collections::VecDeque, time::Instant};
 
 use bytes::Bytes;
 use tokio::sync::oneshot;
 
-use crate::error::ProducerError;
-use crate::record::{Header, RecordMetadata};
+use crate::{
+    error::ProducerError,
+    record::{Header, RecordMetadata},
+};
 
 /// A record waiting inside an in-progress batch.
 #[derive(Debug)]
@@ -156,8 +157,9 @@ fn approx_record_size(key: Option<&[u8]>, value: Option<&[u8]>, headers: &[Heade
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
+
+    use super::*;
 
     #[test]
     fn first_append_creates_batch() {

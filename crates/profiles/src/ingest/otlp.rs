@@ -6,9 +6,7 @@
 use crabka_blockstore::Labels;
 use crabka_pprof::PprofProfile;
 
-use crate::error::ProfilesError;
-use crate::ingest::RawProfile;
-use crate::wire::pb;
+use crate::{error::ProfilesError, ingest::RawProfile, wire::pb};
 
 pub fn decode_otlp(
     req: &pb::otlp_profiles::ExportProfilesServiceRequest,
@@ -332,10 +330,12 @@ mod tests {
 
     #[test]
     fn otlp_resolves_dictionary_into_rawprofile() {
-        use pb::opentelemetry::proto::common::v1::{AnyValue, any_value::Value};
-        use pb::otlp_profiles::{
-            Function, KeyValueAndUnit, Line, Link, Location, Profile, ProfilesDictionary,
-            ResourceProfiles, Sample, ScopeProfiles, Stack, ValueType,
+        use pb::{
+            opentelemetry::proto::common::v1::{AnyValue, any_value::Value},
+            otlp_profiles::{
+                Function, KeyValueAndUnit, Line, Link, Location, Profile, ProfilesDictionary,
+                ResourceProfiles, Sample, ScopeProfiles, Stack, ValueType,
+            },
         };
 
         let dict = ProfilesDictionary {

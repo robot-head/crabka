@@ -2,15 +2,19 @@
 use assert2::{assert, check};
 mod support;
 
-use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-use crabka_protocol::owned::metadata_request::{MetadataRequest, MetadataRequestTopic};
-use crabka_protocol::owned::offset_commit_request::{
-    OffsetCommitRequest, OffsetCommitRequestPartition, OffsetCommitRequestTopic,
+use crabka_protocol::{
+    owned::{
+        create_topics_request::{CreatableTopic, CreateTopicsRequest},
+        metadata_request::{MetadataRequest, MetadataRequestTopic},
+        offset_commit_request::{
+            OffsetCommitRequest, OffsetCommitRequestPartition, OffsetCommitRequestTopic,
+        },
+        offset_fetch_request::{
+            OffsetFetchRequest, OffsetFetchRequestGroup, OffsetFetchRequestTopics,
+        },
+    },
+    primitives::uuid::Uuid as WireUuid,
 };
-use crabka_protocol::owned::offset_fetch_request::{
-    OffsetFetchRequest, OffsetFetchRequestGroup, OffsetFetchRequestTopics,
-};
-use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 
 async fn topic_id_for(client: &crabka_client_core::Client, name: &str) -> WireUuid {
     let resp = client

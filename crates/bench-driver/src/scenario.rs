@@ -304,8 +304,9 @@ pub struct RunOutput {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
+
+    use super::*;
 
     #[test]
     fn stack_broker_pod_regex_distinguishes_stacks() {

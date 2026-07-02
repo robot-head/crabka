@@ -4,15 +4,22 @@
 
 use bytes::Bytes;
 use crabka_metadata::{PartitionRecord, ResourceType};
-use crabka_protocol::Encode;
-use crabka_protocol::owned::list_partition_reassignments_request::ListPartitionReassignmentsRequest;
-use crabka_protocol::owned::list_partition_reassignments_response::{
-    ListPartitionReassignmentsResponse, OngoingPartitionReassignment, OngoingTopicReassignment,
+use crabka_protocol::{
+    Encode,
+    owned::{
+        list_partition_reassignments_request::ListPartitionReassignmentsRequest,
+        list_partition_reassignments_response::{
+            ListPartitionReassignmentsResponse, OngoingPartitionReassignment,
+            OngoingTopicReassignment,
+        },
+    },
 };
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes::{CLUSTER_AUTHORIZATION_FAILED, NONE};
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes::{CLUSTER_AUTHORIZATION_FAILED, NONE},
+};
 
 #[tracing::instrument(
     name = "handle_list_partition_reassignments",
@@ -114,15 +121,18 @@ fn encode_response<R: Encode>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::sync::Arc;
+
     use assert2::assert;
     use crabka_metadata::{MetadataRecord, TopicRecord};
     use crabka_protocol::owned::list_partition_reassignments_request::ListPartitionReassignmentsTopics;
-    use std::sync::Arc;
     use uuid::Uuid;
 
-    use crate::broker::BrokerHandle;
-    use crate::test_support::{DenyAll, peer, principal};
+    use super::*;
+    use crate::{
+        broker::BrokerHandle,
+        test_support::{DenyAll, peer, principal},
+    };
 
     const VERSION: i16 = crabka_protocol::owned::list_partition_reassignments_response::MAX_VERSION;
 

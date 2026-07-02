@@ -10,20 +10,26 @@
 use std::collections::BTreeMap;
 
 use bytes::{Bytes, BytesMut};
-
 use crabka_metadata::{AclOperation, ResourceType};
-use crabka_protocol::owned::describe_log_dirs_request::DescribeLogDirsRequest;
-use crabka_protocol::owned::describe_log_dirs_response::{
-    DescribeLogDirsPartition, DescribeLogDirsResponse, DescribeLogDirsResult, DescribeLogDirsTopic,
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        describe_log_dirs_request::DescribeLogDirsRequest,
+        describe_log_dirs_response::{
+            DescribeLogDirsPartition, DescribeLogDirsResponse, DescribeLogDirsResult,
+            DescribeLogDirsTopic,
+        },
+    },
 };
-use crabka_protocol::{Decode, Encode};
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes;
-use crate::disk_scanner::scan::sum_partition_dir;
-use crate::error::BrokerError;
-use crate::log_dir;
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes,
+    disk_scanner::scan::sum_partition_dir,
+    error::BrokerError,
+    log_dir,
+};
 
 /// Filter derived from the request `topics` field:
 /// - `None`  → report every partition (admin-client default).
@@ -323,8 +329,9 @@ fn disk_stats(_dir: &std::path::Path) -> Option<(i64, i64)> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn filter_all_allows_everything() {

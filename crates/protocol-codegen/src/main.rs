@@ -1,9 +1,8 @@
 use std::path::{Path, PathBuf};
 
+use crabka_protocol_codegen::{emit, fmt, ir, name_conv, validate};
 use proc_macro2::Ident;
 use quote::{format_ident, quote};
-
-use crabka_protocol_codegen::{emit, fmt, ir, name_conv, validate};
 
 fn parse_args() -> (PathBuf, PathBuf, Option<String>) {
     let mut positional: Vec<String> = Vec::new();

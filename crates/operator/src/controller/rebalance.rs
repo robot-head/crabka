@@ -16,20 +16,25 @@
 //! `approve` (→ `ExecuteProposal`) does. This keeps a human (or `GitOps`
 //! approval) in the loop before any partition data moves.
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use futures::StreamExt as _;
-use kube::api::{Api, Patch, PatchParams};
-use kube::runtime::controller::{Action, Controller};
-use kube::runtime::watcher;
-use kube::{Resource, ResourceExt as _};
+use kube::{
+    Resource, ResourceExt as _,
+    api::{Api, Patch, PatchParams},
+    runtime::{
+        controller::{Action, Controller},
+        watcher,
+    },
+};
 use serde_json::json;
 
-use crate::context::Context;
-use crate::controller::common::{FIELD_MANAGER, ReconcileError, condition};
-use crate::crd::{KafkaRebalance, OptimizationResult};
-use crate::rebalancer_client::{ProposalStatus, RebalancerError, RebalancerProposal};
+use crate::{
+    context::Context,
+    controller::common::{FIELD_MANAGER, ReconcileError, condition},
+    crd::{KafkaRebalance, OptimizationResult},
+    rebalancer_client::{ProposalStatus, RebalancerError, RebalancerProposal},
+};
 
 /// Annotation that drives the rebalance state machine. Mirrors Strimzi's
 /// `strimzi.io/rebalance`.
@@ -662,10 +667,13 @@ async fn remove_command_annotation(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::crd::{KafkaCondition, KafkaRebalanceSpec, KafkaRebalanceStatus};
-    use crate::rebalancer_client::ProposalSummary;
     use assert2::assert;
+
+    use super::*;
+    use crate::{
+        crd::{KafkaCondition, KafkaRebalanceSpec, KafkaRebalanceStatus},
+        rebalancer_client::ProposalSummary,
+    };
 
     fn cr(name: &str) -> KafkaRebalance {
         let mut k = KafkaRebalance::new(name, KafkaRebalanceSpec::default());

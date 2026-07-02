@@ -19,11 +19,7 @@ use std::net::SocketAddr;
 #[cfg(unix)]
 use std::time::Duration;
 
-use axum::Router;
-use axum::extract::Query;
-use axum::http::StatusCode;
-use axum::response::IntoResponse;
-use axum::routing::get;
+use axum::{Router, extract::Query, http::StatusCode, response::IntoResponse, routing::get};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]

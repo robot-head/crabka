@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 use assert2::{assert, check};
 use crabka_blockstore::{
@@ -6,14 +6,12 @@ use crabka_blockstore::{
     register_log_blocks_from_object_store, series_fingerprint, write_log_block,
     write_log_block_to_object_store,
 };
-use datafusion::arrow::array::{Int64Array, StringArray};
-use datafusion::datasource::TableProvider;
-use datafusion::datasource::provider::TableProviderFilterPushDown;
-use datafusion::prelude::SessionContext;
-use datafusion::prelude::{col, lit};
-use object_store::local::LocalFileSystem;
-use object_store::path::Path as ObjectPath;
-use std::sync::Arc;
+use datafusion::{
+    arrow::array::{Int64Array, StringArray},
+    datasource::{TableProvider, provider::TableProviderFilterPushDown},
+    prelude::{SessionContext, col, lit},
+};
+use object_store::{local::LocalFileSystem, path::Path as ObjectPath};
 
 #[tokio::test]
 async fn datafusion_table_scans_only_planned_log_blocks() {

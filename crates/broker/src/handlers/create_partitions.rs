@@ -6,23 +6,24 @@
 //! --alter --partitions N --replica-assignment 0:1,1:2,...` flow.
 
 use bytes::{Bytes, BytesMut};
-
 use crabka_metadata::{AclOperation, MetadataRecord, PartitionRecord};
-use crabka_protocol::owned::create_partitions_request::{
-    CreatePartitionsAssignment, CreatePartitionsRequest,
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        create_partitions_request::{CreatePartitionsAssignment, CreatePartitionsRequest},
+        create_partitions_response::{CreatePartitionsResponse, CreatePartitionsTopicResult},
+    },
 };
-use crabka_protocol::owned::create_partitions_response::{
-    CreatePartitionsResponse, CreatePartitionsTopicResult,
-};
-use crabka_protocol::{Decode, Encode};
 use crabka_raft::{NodeId, RaftError};
 
-use crate::authorizer::{AuthorizationResult, authorize_topics};
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
-use crate::handlers::create_topics::round_robin_replicas;
-use crate::replicator_supervisor::materialize_partition;
+use crate::{
+    authorizer::{AuthorizationResult, authorize_topics},
+    broker::Broker,
+    codes,
+    error::BrokerError,
+    handlers::create_topics::round_robin_replicas,
+    replicator_supervisor::materialize_partition,
+};
 
 /// Resolve the replica list for each newly-added partition.
 ///
@@ -357,21 +358,23 @@ pub(crate) async fn handle(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::assert;
-    use assert2::check;
+    use std::{net::SocketAddr, sync::Arc};
+
+    use assert2::{assert, check};
     use crabka_metadata::TopicRecord;
     use crabka_protocol::owned::create_partitions_request::{
         CreatePartitionsAssignment, CreatePartitionsTopic,
     };
     use crabka_security::Principal;
-    use std::net::SocketAddr;
-    use std::sync::Arc;
 
-    use crate::broker::{Broker, BrokerHandle};
-    use crate::test_support::{DenyAll, peer, principal};
+    use crate::{
+        broker::{Broker, BrokerHandle},
+        test_support::{DenyAll, peer, principal},
+    };
 
     const VERSION: i16 = 3;
+
+    use super::*;
 
     fn assn(broker_ids: &[i32]) -> CreatePartitionsAssignment {
         CreatePartitionsAssignment {

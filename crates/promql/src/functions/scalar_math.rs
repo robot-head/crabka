@@ -26,13 +26,17 @@
 
 use std::sync::Arc;
 
-use arrow::array::{Array, ArrayRef, Float64Array, Float64Builder};
-use arrow::datatypes::DataType;
-use datafusion::common::{DataFusionError, Result as DfResult, ScalarValue};
-use datafusion::logical_expr::{
-    ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
+use arrow::{
+    array::{Array, ArrayRef, Float64Array, Float64Builder},
+    datatypes::DataType,
 };
-use datafusion::prelude::SessionContext;
+use datafusion::{
+    common::{DataFusionError, Result as DfResult, ScalarValue},
+    logical_expr::{
+        ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
+    },
+    prelude::SessionContext,
+};
 
 /// Which per-row scalar function a [`ScalarMathUdf`] evaluates.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -376,8 +380,7 @@ pub fn register_scalar_math_udfs(ctx: &SessionContext) {
 mod tests {
     use std::sync::Arc;
 
-    use arrow::array::Float64Array;
-    use arrow::datatypes::Field;
+    use arrow::{array::Float64Array, datatypes::Field};
     use assert2::assert;
 
     use super::*;

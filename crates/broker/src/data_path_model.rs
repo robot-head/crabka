@@ -21,19 +21,23 @@
     clippy::cast_sign_loss
 )]
 
-use std::collections::HashSet;
-use std::hash::{Hash, Hasher};
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashSet,
+    hash::{Hash, Hasher},
+    time::{Duration, Instant},
+};
 
 use crabka_log::{EpochEntry, epoch_and_offset_for_entries};
 use crabka_metadata::PartitionRecord;
 use stateright::{Checker, Model, Property};
 
-use crate::config_keys::RecoveryStrategy;
-use crate::handlers::fetch::compute_visibility_window;
-use crate::leader_election::{FailoverDecision, failover_one};
-use crate::replica_state::ReplicaState;
-use crate::unclean_recovery::{ReplicaLogInfo, select_best_replica};
+use crate::{
+    config_keys::RecoveryStrategy,
+    handlers::fetch::compute_visibility_window,
+    leader_election::{FailoverDecision, failover_one},
+    replica_state::ReplicaState,
+    unclean_recovery::{ReplicaLogInfo, select_best_replica},
+};
 
 const NB: usize = 3; // brokers 0,1,2
 const MAX_LEN: usize = 4; // max log length (offsets 0..4)

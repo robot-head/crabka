@@ -113,13 +113,15 @@ impl RemoteLogMetadataManager for NotReadyRlmm {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::collections::BTreeMap;
+
     use assert2::assert;
     use crabka_remote_storage::{
         RemoteLogSegmentId, RemoteLogSegmentState, RemotePartitionDeleteState,
     };
-    use std::collections::BTreeMap;
     use uuid::Uuid;
+
+    use super::*;
 
     fn tp() -> TopicIdPartition {
         TopicIdPartition::new(Uuid::from_u128(1), "orders", 3)

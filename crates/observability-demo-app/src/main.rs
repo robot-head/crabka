@@ -10,19 +10,24 @@
 //! the Kafka-Streams aggregation (`group_by` → count → order-counts) as the
 //! streams showcase.
 
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use bytes::Bytes;
 use clap::{Parser, ValueEnum};
 use crabka_client_consumer::{Consumer, ConsumerRecord};
 use crabka_client_producer::{Acks, Header, Producer, ProducerRecord};
-use crabka_client_streams::processor::serde::SerdeRole;
-use crabka_client_streams::{SchemaSerde, Serde};
-use crabka_schema_serde::format::protobuf::ProtobufSerde;
-use crabka_schema_serde::{CacheConfig, RegistryClient, SchemaCache, set_default_registry};
-use observability_demo_app::metrics::{DemoMetrics, metrics_router};
-use observability_demo_app::{Order, classify_outcome, is_anomalous, order_at};
+use crabka_client_streams::{SchemaSerde, Serde, processor::serde::SerdeRole};
+use crabka_schema_serde::{
+    CacheConfig, RegistryClient, SchemaCache, format::protobuf::ProtobufSerde, set_default_registry,
+};
+use observability_demo_app::{
+    Order, classify_outcome, is_anomalous,
+    metrics::{DemoMetrics, metrics_router},
+    order_at,
+};
 use tracing::Instrument as _;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;

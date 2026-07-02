@@ -13,12 +13,11 @@
 use std::sync::Arc;
 
 use axum::Router;
+use crabka_security::{AuthMethod, Principal, TlsConfig};
 use hyper_util::rt::TokioIo;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
-
-use crabka_security::{AuthMethod, Principal, TlsConfig};
 
 use crate::auth::MtlsPrincipal;
 

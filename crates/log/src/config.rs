@@ -105,8 +105,9 @@ impl Default for LogConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn defaults_match_kafka_4x() {

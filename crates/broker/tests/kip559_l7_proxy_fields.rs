@@ -12,8 +12,10 @@
 use assert2::{assert, check};
 mod support;
 
-use crabka_protocol::owned::join_group_request::{JoinGroupRequest, JoinGroupRequestProtocol};
-use crabka_protocol::owned::sync_group_request::{SyncGroupRequest, SyncGroupRequestAssignment};
+use crabka_protocol::owned::{
+    join_group_request::{JoinGroupRequest, JoinGroupRequestProtocol},
+    sync_group_request::{SyncGroupRequest, SyncGroupRequestAssignment},
+};
 
 const GROUP: &str = "kip559-grp";
 const PROTOCOL_TYPE: &str = "consumer";

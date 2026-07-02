@@ -6,9 +6,11 @@
 
 use std::collections::BTreeMap;
 
-use crate::error::SrError;
-use crate::format::{self, SchemaType};
-use crate::kafkastore::record::{SchemaKey, SchemaReference, SchemaValue};
+use crate::{
+    error::SrError,
+    format::{self, SchemaType},
+    kafkastore::record::{SchemaKey, SchemaReference, SchemaValue},
+};
 
 /// Result of a registration: the global id and the per-subject version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -528,8 +530,7 @@ impl StoreState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::format::SchemaType;
-    use crate::kafkastore::record::SchemaReference;
+    use crate::{format::SchemaType, kafkastore::record::SchemaReference};
 
     fn av(n: &str) -> String {
         format!("{{\"type\":\"record\",\"name\":\"{n}\",\"fields\":[]}}")

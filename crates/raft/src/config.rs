@@ -1,14 +1,10 @@
 //! Construction-time config for `Controller::start`.
 
-use std::net::SocketAddr;
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use uuid::Uuid;
 
-use crate::network::OutboundDialer;
-use crate::types::NodeId;
+use crate::{network::OutboundDialer, types::NodeId};
 
 /// Bootstrap orchestration for a freshly-formatted controller node.
 ///
@@ -157,8 +153,9 @@ impl ControllerConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
+
+    use super::*;
 
     #[test]
     fn for_tests_uses_expected_snapshot_defaults() {

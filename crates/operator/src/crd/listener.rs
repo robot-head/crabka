@@ -481,8 +481,9 @@ pub struct ListenerAddress {
 
 #[cfg(test)]
 mod auth_tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn listener_deserializes_tls_authentication() {
@@ -1417,8 +1418,9 @@ jwksIgnoreKeyUse: false
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn internal_listener_round_trips_through_json() {
@@ -1522,9 +1524,11 @@ mod tests {
 
     #[test]
     fn listener_with_named_peer_round_trips() {
-        use crate::crd::NetworkPolicyPeer;
-        use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;
         use std::collections::BTreeMap;
+
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;
+
+        use crate::crd::NetworkPolicyPeer;
 
         let mut match_labels = BTreeMap::new();
         match_labels.insert("role".to_string(), "client".to_string());

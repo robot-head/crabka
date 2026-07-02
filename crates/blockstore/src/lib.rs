@@ -37,10 +37,6 @@ pub use error::{BlockStoreError, Result};
 pub use index::{Index, MAX_INDEX_SNAPSHOT_BYTES};
 pub use index_snapshot::{DEFAULT_INDEX_SNAPSHOT_RETAIN, index_snapshot_prefix_for_key};
 pub use labels::{Labels, SeriesFingerprint};
-pub use matcher::{
-    LabelMatcher, MatchOp, QUERY_SHARD_LABEL, QueryShardSelector, parse_query_shard_selector,
-};
-pub use nested_set::{NestedSet, SpanNode, assign_nested_set};
 // Logs-path block store. Types that share a name with the canonical
 // (traces/shared) abstractions above are re-exported under `Log*` names.
 pub use log_blockstore::{
@@ -64,6 +60,10 @@ pub use log_blockstore::{
     write_tenant_log_index_shard_catalog_to_object_store,
     write_tenant_log_index_shard_to_object_store, write_tenant_log_index_shards_to_object_store,
 };
+pub use matcher::{
+    LabelMatcher, MatchOp, QUERY_SHARD_LABEL, QueryShardSelector, parse_query_shard_selector,
+};
+pub use nested_set::{NestedSet, SpanNode, assign_nested_set};
 pub use profile_block::{ProfileSampleRow, encode_profile_samples};
 pub use profile_index::{LABEL_PROFILE_TYPE, MAX_PROFILE_INDEX_SNAPSHOT_BYTES, ProfileIndex};
 pub use profile_schema::{

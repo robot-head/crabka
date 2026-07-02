@@ -13,14 +13,17 @@
 
 use std::collections::HashMap;
 
-use crabka_protocol::owned::offset_commit_request::{
-    OffsetCommitRequestPartition, OffsetCommitRequestTopic,
+use crabka_protocol::{
+    owned::{
+        offset_commit_request::{OffsetCommitRequestPartition, OffsetCommitRequestTopic},
+        offset_fetch_request::{
+            OffsetFetchRequest, OffsetFetchRequestGroup, OffsetFetchRequestTopic,
+            OffsetFetchRequestTopics,
+        },
+        offset_fetch_response::OffsetFetchResponse,
+    },
+    primitives::uuid::Uuid as WireUuid,
 };
-use crabka_protocol::owned::offset_fetch_request::{
-    OffsetFetchRequest, OffsetFetchRequestGroup, OffsetFetchRequestTopic, OffsetFetchRequestTopics,
-};
-use crabka_protocol::owned::offset_fetch_response::OffsetFetchResponse;
-use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 
 /// Build an `OffsetFetch` request covering `by_topic`, valid at any negotiated
 /// version. Legacy `group_id`/`topics` (v0-7) and the v8+ `groups[]` array
@@ -141,13 +144,16 @@ pub(crate) fn id_to_name(topic_ids: &HashMap<String, WireUuid>) -> HashMap<WireU
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
-    use crabka_protocol::UnknownTaggedFields;
-    use crabka_protocol::owned::offset_fetch_response::{
-        OffsetFetchResponse, OffsetFetchResponseGroup, OffsetFetchResponsePartition,
-        OffsetFetchResponsePartitions, OffsetFetchResponseTopic, OffsetFetchResponseTopics,
+    use crabka_protocol::{
+        UnknownTaggedFields,
+        owned::offset_fetch_response::{
+            OffsetFetchResponse, OffsetFetchResponseGroup, OffsetFetchResponsePartition,
+            OffsetFetchResponsePartitions, OffsetFetchResponseTopic, OffsetFetchResponseTopics,
+        },
     };
+
+    use super::*;
 
     fn id(n: u8) -> WireUuid {
         let mut b = [0u8; 16];

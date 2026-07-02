@@ -1,18 +1,14 @@
 //! Produce via `ProduceCore` against an in-process broker; read the record
 //! back with a native consumer to prove it landed.
 
-use std::time::Duration;
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use assert2::check;
 use bytes::Bytes;
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_admin::{AdminClient, CreateTopicSpec};
 use crabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
-use crabka_grpc_gateway::codec::RawCodec;
-use crabka_grpc_gateway::produce::ProduceCore;
-use crabka_grpc_gateway::types::GatewayRecord;
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use crabka_grpc_gateway::{codec::RawCodec, produce::ProduceCore, types::GatewayRecord};
 use tempfile::TempDir;
 
 async fn boot() -> (BrokerHandle, String, TempDir) {

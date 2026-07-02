@@ -12,25 +12,27 @@
 //!   `INVALID_CONFIG`.
 
 use bytes::{Bytes, BytesMut};
-
 use crabka_metadata::{
     AclOperation, BrokerConfigRecord, ClientMetricsConfigRecord, MetadataImage, MetadataRecord,
     NodeId, ResourceType, TopicConfigRecord,
 };
-use crabka_protocol::owned::incremental_alter_configs_request::{
-    AlterConfigsResource, IncrementalAlterConfigsRequest,
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        incremental_alter_configs_request::{AlterConfigsResource, IncrementalAlterConfigsRequest},
+        incremental_alter_configs_response::{
+            AlterConfigsResourceResponse, IncrementalAlterConfigsResponse,
+        },
+    },
 };
-use crabka_protocol::owned::incremental_alter_configs_response::{
-    AlterConfigsResourceResponse, IncrementalAlterConfigsResponse,
-};
-use crabka_protocol::{Decode, Encode};
 use crabka_raft::RaftError;
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes;
-use crate::config_keys;
-use crate::error::BrokerError;
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes, config_keys,
+    error::BrokerError,
+};
 
 const RESOURCE_TYPE_TOPIC: i8 = 2;
 const RESOURCE_TYPE_BROKER: i8 = 4;
@@ -386,8 +388,9 @@ fn handle_client_metrics_scoped(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn topic_throttle_config_value_validated() {

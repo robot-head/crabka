@@ -12,11 +12,13 @@ use crabka_connect::{ConnectError, ConnectRecord, Sink};
 use tokio::sync::oneshot::Receiver;
 use tracing::warn;
 
-use crate::config::{NamingPolicy, PolicyConfig};
-use crate::mm2::OffsetSync;
-use crate::naming::{PROVENANCE_HEADER, Renamer};
-use crate::record::ReplicatedRecord;
-use crate::residency::ResidencyGate;
+use crate::{
+    config::{NamingPolicy, PolicyConfig},
+    mm2::OffsetSync,
+    naming::{PROVENANCE_HEADER, Renamer},
+    record::ReplicatedRecord,
+    residency::ResidencyGate,
+};
 
 /// One in-flight produce awaiting its broker ack: the ack receiver plus the
 /// source-side `(topic, partition, upstream offset)` coordinates needed to build
@@ -301,9 +303,9 @@ impl Sink<(), ReplicatedRecord> for TargetSink {
 #[cfg(test)]
 mod tests {
     use assert2::assert;
+    use crabka_connect::Sink;
 
     use super::*;
-    use crabka_connect::Sink;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn produces_renamed_and_records_offset_sync_but_blocks_denied() {

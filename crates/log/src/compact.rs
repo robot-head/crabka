@@ -13,19 +13,23 @@
 //! as the most-recent entry for their key. `delete.retention.ms`
 //! ages them out.
 
-use std::collections::{HashMap, HashSet};
-use std::fs::OpenOptions;
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::{
+    collections::{HashMap, HashSet},
+    fs::OpenOptions,
+    io::Write,
+    path::{Path, PathBuf},
+};
 
 use bytes::{Bytes, BytesMut};
 use crabka_protocol::records::RecordBatch;
 use tracing::instrument;
 
-use crate::error::LogError;
-use crate::name;
-use crate::segment::Segment;
-use crate::txn_index::{AbortedTxn, TxnIndex};
+use crate::{
+    error::LogError,
+    name,
+    segment::Segment,
+    txn_index::{AbortedTxn, TxnIndex},
+};
 
 // ---------------------------------------------------------------------------
 // KIP-534 pure decision cores
@@ -165,9 +169,9 @@ pub(crate) fn retain_decision(
 #[cfg(test)]
 #[allow(clippy::similar_names)]
 mod core_tests {
+    use assert2::{assert, check};
+
     use super::*;
-    use assert2::assert;
-    use assert2::check;
 
     fn data(has_key: bool, has_value: bool) -> RecordMeta {
         RecordMeta { has_key, has_value }
@@ -462,11 +466,12 @@ impl CleanedTransactionMetadata {
     clippy::cast_possible_wrap
 )]
 mod build_map_tests {
-    use super::*;
     use assert2::assert;
     use bytes::Bytes;
     use crabka_protocol::records::{Attributes, Record};
     use tempfile::tempdir;
+
+    use super::*;
 
     pub(super) fn make_record(
         offset_delta: i32,
@@ -879,14 +884,15 @@ fn swap_path(dir: &Path, base_offset: i64, ext: &str) -> PathBuf {
 #[cfg(test)]
 #[allow(clippy::similar_names)]
 mod rewrite_tests {
-    use super::build_map_tests::{
-        control_batch, make_record, write_sealed_batches, write_sealed_segment,
-    };
-    use super::*;
-    use assert2::assert;
-    use assert2::check;
-    use crabka_protocol::records::Record;
     use std::fs;
+
+    use assert2::{assert, check};
+    use crabka_protocol::records::Record;
+
+    use super::{
+        build_map_tests::{control_batch, make_record, write_sealed_batches, write_sealed_segment},
+        *,
+    };
 
     /// A far-future `now` so nothing in the simple tests ages out, plus an
     /// empty active-producer set and no surviving transactions.
@@ -1268,9 +1274,12 @@ pub fn atomic_swap(
 #[cfg(test)]
 #[allow(clippy::similar_names)]
 mod swap_tests {
-    use super::build_map_tests::{make_record, write_sealed_segment};
-    use super::*;
     use assert2::check;
+
+    use super::{
+        build_map_tests::{make_record, write_sealed_segment},
+        *,
+    };
 
     #[test]
     fn atomic_swap_replaces_two_segments_with_one() {
@@ -1328,8 +1337,9 @@ mod compact_model;
 /// real `RecordBatch` delete-horizon wire round-trip.
 #[cfg(test)]
 mod retention_fuzz {
-    use super::*;
     use proptest::prelude::*;
+
+    use super::*;
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     enum EntryKind {

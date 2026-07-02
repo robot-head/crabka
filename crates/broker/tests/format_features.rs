@@ -7,9 +7,9 @@
 //! would otherwise re-seed every feature at the latest release — proving the
 //! `--feature` overrides survive boot rather than being clobbered.
 
-use assert2::{assert, check};
 use std::process::Command;
 
+use assert2::{assert, check};
 use crabka_broker::{Broker, BrokerConfig};
 use crabka_client_core::Client;
 use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;

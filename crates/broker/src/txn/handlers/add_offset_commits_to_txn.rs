@@ -7,19 +7,26 @@
 //! Response fields: `throttle_time_ms`, `error_code`.
 
 use bytes::{Bytes, BytesMut};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        add_offsets_to_txn_request::AddOffsetsToTxnRequest,
+        add_offsets_to_txn_response::AddOffsetsToTxnResponse,
+    },
+};
 use futures_util::future::BoxFuture;
 
-use crabka_protocol::owned::add_offsets_to_txn_request::AddOffsetsToTxnRequest;
-use crabka_protocol::owned::add_offsets_to_txn_response::AddOffsetsToTxnResponse;
-use crabka_protocol::{Decode, Encode};
-
-use crate::broker::Broker;
-use crate::codes;
-use crate::coordinator::bootstrap::{OFFSETS_NUM_PARTITIONS, OFFSETS_TOPIC};
-use crate::error::BrokerError;
-use crate::txn::partitioner::partition_for_tid;
-use crate::txn::state::{TopicPartition, TxnState};
-use crate::txn::util::now_millis;
+use crate::{
+    broker::Broker,
+    codes,
+    coordinator::bootstrap::{OFFSETS_NUM_PARTITIONS, OFFSETS_TOPIC},
+    error::BrokerError,
+    txn::{
+        partitioner::partition_for_tid,
+        state::{TopicPartition, TxnState},
+        util::now_millis,
+    },
+};
 
 pub(crate) fn handle(
     broker: &Broker,
@@ -122,8 +129,9 @@ fn encode_response(version: i16, error_code: i16) -> Result<Bytes, BrokerError> 
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     fn decode(bytes: &Bytes, version: i16) -> AddOffsetsToTxnResponse {
         let mut cur: &[u8] = bytes.as_ref();

@@ -6,11 +6,10 @@
 
 #![allow(clippy::manual_assert)]
 
-use assert2::assert;
 use std::collections::BTreeSet;
 
-use crabka_broker::config::NodeRole;
-use crabka_broker::{BootstrapMode, Broker};
+use assert2::assert;
+use crabka_broker::{BootstrapMode, Broker, config::NodeRole};
 use crabka_client_core::Client;
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
 use tempfile::TempDir;

@@ -1,7 +1,9 @@
 //! Aggregate per-run JSON outputs into a single Markdown summary.
 
-use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result};
 
@@ -945,12 +947,13 @@ pub fn render_web_fragment(input_dir: &Path, strict: bool) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+    use assert2::{assert, check};
+    use tempfile::tempdir;
+
     use super::*;
     use crate::scenario::{
         Acks, Compression, Disturbance, LoadMode, ModeTag, Sample, Scenario, Throughput, Topology,
     };
-    use assert2::{assert, check};
-    use tempfile::tempdir;
 
     fn fake_run(stack: Stack, msgs: u64) -> RunOutput {
         RunOutput {

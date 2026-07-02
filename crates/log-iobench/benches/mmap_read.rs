@@ -30,9 +30,11 @@
 //! serving recent data; a cold-cache comparison would need root to drop
 //! caches and isn't portable in CI.
 
-use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom};
-use std::path::PathBuf;
+use std::{
+    fs::{File, OpenOptions},
+    io::{Read, Seek, SeekFrom},
+    path::PathBuf,
+};
 
 use bytes::Bytes;
 use crabka_log::{Log, LogConfig};

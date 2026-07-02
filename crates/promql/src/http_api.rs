@@ -1,18 +1,24 @@
 //! Prometheus/Mimir-compatible HTTP query API adapter.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::fmt::Write as _;
-use std::sync::{Arc, RwLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt::Write as _,
+    sync::{Arc, RwLock},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
-use arrow::array::AsArray;
-use arrow::datatypes::{Float64Type, Int64Type, UInt64Type};
-use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, Path, RawQuery, State};
-use axum::http::{HeaderMap, StatusCode, header};
-use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
-use axum::{Json, Router};
+use arrow::{
+    array::AsArray,
+    datatypes::{Float64Type, Int64Type, UInt64Type},
+};
+use axum::{
+    Json, Router,
+    body::Bytes,
+    extract::{DefaultBodyLimit, Path, RawQuery, State},
+    http::{HeaderMap, StatusCode, header},
+    response::{IntoResponse, Response},
+    routing::{get, post},
+};
 use crabka_blockstore::{LabelMatcher, Labels, MatchOp, SeriesFingerprint};
 use crabka_metrics::{
     BucketSpan, LimitError, NativeHistogram, OverridesProvider, QueryEnforcer, ResetHint,
@@ -27,10 +33,10 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use url::form_urlencoded;
 
-use crate::metrics::ServiceMetrics;
 use crate::{
     EngineOpts, MetricStore, PromqlEngine, PromqlError, QueryResult, RangeSeries, SampleValue,
     engine::{MAX_RESOLUTION_POINTS, label_matcher_sets},
+    metrics::ServiceMetrics,
     parse_promql,
     query_frontend::{
         FrontendRangeRequest, QueryFrontendCache, QueryFrontendOptions, RangeQueryCache,
@@ -3581,14 +3587,18 @@ impl IntoResponse for ApiError {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
     };
-    use std::time::Duration;
 
-    use axum::body::{Body, to_bytes};
-    use axum::http::{Request, StatusCode};
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode},
+    };
     use crabka_metrics::{Limits, OverridesProvider};
     use tower::ServiceExt;
 

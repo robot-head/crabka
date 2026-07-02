@@ -1,14 +1,17 @@
 //! Hot/cold `ProfileStore` union.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
-use arrow::array::{ArrayRef, AsArray, UInt64Array};
-use arrow::datatypes::UInt64Type;
-use arrow::record_batch::RecordBatch;
+use arrow::{
+    array::{ArrayRef, AsArray, UInt64Array},
+    datatypes::UInt64Type,
+    record_batch::RecordBatch,
+};
 use crabka_blockstore::LabelMatcher;
-use datafusion::catalog::MemTable;
-use datafusion::prelude::SessionContext;
+use datafusion::{catalog::MemTable, prelude::SessionContext};
 
 use crate::{
     Frame, PCOL_STACKTRACE_PARTITION, ProfileError, ProfileScan, ProfileStats, ProfileStore,
@@ -252,8 +255,7 @@ mod tests {
     use std::sync::Arc;
 
     use assert2::{assert, check};
-    use datafusion::arrow::array::AsArray;
-    use datafusion::arrow::datatypes::UInt64Type;
+    use datafusion::arrow::{array::AsArray, datatypes::UInt64Type};
 
     use crate::{
         EngineOpts, FlameEngine, FunctionRec, InMemoryProfileStore, LocationRec, ProfileStats,

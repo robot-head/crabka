@@ -33,8 +33,7 @@
 //! This mirrors the JVM client's `seek`: a one-shot position set that takes
 //! effect on the next fetch and is not re-applied after a later rebalance.
 
-use crate::consumer::Consumer;
-use crate::error::ConsumerError;
+use crate::{consumer::Consumer, error::ConsumerError};
 
 impl Consumer {
     /// Set the next offset `poll` will fetch for `(topic, partition)`.

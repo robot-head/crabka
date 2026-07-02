@@ -15,16 +15,16 @@ mod support;
 
 use bytes::Bytes;
 use crabka_compression::CompressionType;
-use crabka_protocol::owned::create_topics_request::{
-    CreatableTopic, CreatableTopicConfig, CreateTopicsRequest,
+use crabka_protocol::{
+    owned::{
+        create_topics_request::{CreatableTopic, CreatableTopicConfig, CreateTopicsRequest},
+        fetch_request::{FetchPartition, FetchRequest, FetchTopic},
+        metadata_request::{MetadataRequest, MetadataRequestTopic},
+        produce_request::{PartitionProduceData, ProduceRequest, TopicProduceData},
+    },
+    primitives::uuid::Uuid as WireUuid,
+    records::{Attributes, HEADER_LEN, Record, RecordBatch, RecordsPayload},
 };
-use crabka_protocol::owned::fetch_request::{FetchPartition, FetchRequest, FetchTopic};
-use crabka_protocol::owned::metadata_request::{MetadataRequest, MetadataRequestTopic};
-use crabka_protocol::owned::produce_request::{
-    PartitionProduceData, ProduceRequest, TopicProduceData,
-};
-use crabka_protocol::primitives::uuid::Uuid as WireUuid;
-use crabka_protocol::records::{Attributes, HEADER_LEN, Record, RecordBatch, RecordsPayload};
 
 async fn topic_id_for(client: &crabka_client_core::Client, name: &str) -> WireUuid {
     let resp = client

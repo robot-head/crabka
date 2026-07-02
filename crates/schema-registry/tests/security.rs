@@ -19,30 +19,31 @@
 //! timer), so the authorized assertions poll to a deadline rather than asserting
 //! once.
 
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
-use std::time::Duration;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
 
 use axum::Router;
-use base64::Engine as _;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD as B64};
 use crabka_broker::{Broker, BrokerConfig};
 use crabka_client_admin::{
     AclEntry, AclOperation, AdminClient, PatternType, PermissionType, ResourceType,
 };
-use crabka_schema_registry::auth::AuthState;
-use crabka_schema_registry::auth::basic::BasicAuthStore;
-use crabka_schema_registry::authz::SchemaRegistryAuthz;
-use crabka_schema_registry::cli::{SecurityCliInput, build_security};
-use crabka_schema_registry::config::{
-    AuthzConfig, BasicAuthConfig, RegistryConfig, SecurityConfig,
+use crabka_schema_registry::{
+    auth::{AuthState, basic::BasicAuthStore},
+    authz::SchemaRegistryAuthz,
+    cli::{SecurityCliInput, build_security},
+    config::{AuthzConfig, BasicAuthConfig, RegistryConfig, SecurityConfig},
+    election::{Election, PrimaryState},
+    kafkastore::KafkaStore,
+    rest::{self, AppState, SecurityLayers, forward::ForwardState},
 };
-use crabka_schema_registry::election::{Election, PrimaryState};
-use crabka_schema_registry::kafkastore::KafkaStore;
-use crabka_schema_registry::rest::{self, AppState, SecurityLayers, forward::ForwardState};
-use crabka_security::Jwks;
-use crabka_security::TlsConfig;
-use crabka_security::ca::{SubjectAltName, generate_clients_ca, issue_broker_cert};
+use crabka_security::{
+    Jwks, TlsConfig,
+    ca::{SubjectAltName, generate_clients_ca, issue_broker_cert},
+};
 use tokio_util::sync::CancellationToken;
 
 const SR_CONTENT_TYPE: &str = "application/vnd.schemaregistry.v1+json";
@@ -512,8 +513,10 @@ fn rsa_pkcs8_der() -> Vec<u8> {
 /// `claims_json` is the full JWT payload as a JSON string. Set `exp` to a
 /// large Unix timestamp so tokens don't expire during tests.
 fn mint_rs256_for_test(kid: &str, claims_json: &str) -> (String, String) {
-    use ring::rand::SystemRandom;
-    use ring::signature::{RSA_PKCS1_SHA256, RsaKeyPair};
+    use ring::{
+        rand::SystemRandom,
+        signature::{RSA_PKCS1_SHA256, RsaKeyPair},
+    };
 
     let der = rsa_pkcs8_der();
     let kp = RsaKeyPair::from_pkcs8(&der).unwrap();

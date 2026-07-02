@@ -1,7 +1,8 @@
 //! A single record-cache entry: value bytes (None = tombstone), dirty flag, and
 //! the record context needed to forward the entry downstream on flush.
-use crate::processor::record::RecordContext;
 use bytes::Bytes;
+
+use crate::processor::record::RecordContext;
 
 #[derive(Clone, Debug)]
 pub(crate) struct LruCacheEntry {

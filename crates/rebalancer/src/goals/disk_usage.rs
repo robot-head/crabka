@@ -6,9 +6,11 @@
 
 use std::collections::HashMap;
 
-use crate::goals::{Goal, GoalContext, GoalPriority};
-use crate::model::{ClusterState, Movement, PartitionView};
-use crate::scraper::Window;
+use crate::{
+    goals::{Goal, GoalContext, GoalPriority},
+    model::{ClusterState, Movement, PartitionView},
+    scraper::Window,
+};
 
 pub struct DiskUsage;
 
@@ -147,13 +149,15 @@ impl Goal for DiskUsage {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::model::BrokerView;
-    use crate::scraper::parse::ParsedSample;
-    use crate::scraper::{MetricKind, UsageStore, WindowConfig};
+    use std::{sync::Arc, time::Duration};
+
     use assert2::assert;
-    use std::sync::Arc;
-    use std::time::Duration;
+
+    use super::*;
+    use crate::{
+        model::BrokerView,
+        scraper::{MetricKind, UsageStore, WindowConfig, parse::ParsedSample},
+    };
 
     fn ctx_with(store: Arc<UsageStore>) -> GoalContext {
         GoalContext {

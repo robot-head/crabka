@@ -1,14 +1,14 @@
-use crate::filters::field_filter_expression_to_pipeline_stage;
-use crate::util::{
-    QuotedChar, decode_quoted_escape, duration_unit, gcd_u64, is_ident_char, is_ident_start,
-    parse_bytes_literal, parse_prometheus_duration_literal,
-};
 use crate::{
     ComparisonOp, FieldFilter, FieldFilterExpression, FieldFilterLogicOp, FieldValue, IpMatcher,
     JsonExtraction, JsonParserConfig, LabelFormat, LabelFormatAssignment, LabelMatcher,
     LabelSelection, LabelSelectionSet, LineFilter, LineFilterOp, LineFormat, LogfmtExtraction,
     LogfmtParserConfig, MatchOp, ParseError, ParserStage, PatternParser, PipelineStage,
     RegexpParser, StreamQuery, UnwrapExpression,
+    filters::field_filter_expression_to_pipeline_stage,
+    util::{
+        QuotedChar, decode_quoted_escape, duration_unit, gcd_u64, is_ident_char, is_ident_start,
+        parse_bytes_literal, parse_prometheus_duration_literal,
+    },
 };
 
 #[tracing::instrument(level = "info", skip_all, fields(query = %input), err)]

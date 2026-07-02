@@ -2,10 +2,12 @@
 
 use prost_types::{Duration, Timestamp};
 
-use crate::span::{AttrValue, KeyValue, Span};
-use crate::wire::WireError;
-use crate::wire::jaeger::{
-    JaegerBatch, JaegerLog, JaegerProcess, JaegerRef, JaegerSpan, spans_from_batch,
+use crate::{
+    span::{AttrValue, KeyValue, Span},
+    wire::{
+        WireError,
+        jaeger::{JaegerBatch, JaegerLog, JaegerProcess, JaegerRef, JaegerSpan, spans_from_batch},
+    },
 };
 
 #[allow(clippy::all, clippy::pedantic, clippy::nursery)]

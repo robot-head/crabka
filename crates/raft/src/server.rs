@@ -16,18 +16,24 @@
 use std::sync::Arc;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::TcpListener;
-use tokio::sync::oneshot;
+use tokio::{
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    net::TcpListener,
+    sync::oneshot,
+};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
-use crate::error::RaftError;
-use crate::kraft::KraftController;
-use crate::kraft::transport::{Inbound, api_key};
-use crate::wire::{
-    API_KEY_METADATA_FETCH, API_KEY_SUBMIT_CHANGE, CrabkaMetadataFetchRequest,
-    CrabkaMetadataFetchResponse, CrabkaSubmitChangeRequest, CrabkaSubmitChangeResponse,
+use crate::{
+    error::RaftError,
+    kraft::{
+        KraftController,
+        transport::{Inbound, api_key},
+    },
+    wire::{
+        API_KEY_METADATA_FETCH, API_KEY_SUBMIT_CHANGE, CrabkaMetadataFetchRequest,
+        CrabkaMetadataFetchResponse, CrabkaSubmitChangeRequest, CrabkaSubmitChangeResponse,
+    },
 };
 
 /// Kafka request-header `api_key` (`RequestHeader` field 1).
@@ -287,9 +293,9 @@ where
 /// asymmetry, the *response header* stays v0 (no leading tagged-fields byte) —
 /// so this is written via [`write_response_no_tagged_fields`].
 fn api_versions_response_body(req_version: ApiVersion) -> Bytes {
-    use crabka_protocol::Encode;
-    use crabka_protocol::owned::api_versions_response::{
-        ApiVersion as ApiVersionEntry, ApiVersionsResponse,
+    use crabka_protocol::{
+        Encode,
+        owned::api_versions_response::{ApiVersion as ApiVersionEntry, ApiVersionsResponse},
     };
     // (api_key, max_version) — min_version/error_code/throttle_time_ms are all
     // protocol defaults of 0, so leave them implicit. Each max_version is the
@@ -467,8 +473,7 @@ async fn describe_cluster_response_body(
     body: &[u8],
     engine: &KraftController,
 ) -> Result<Bytes, RaftError> {
-    use crabka_protocol::Decode;
-    use crabka_protocol::owned::describe_cluster_request::DescribeClusterRequest;
+    use crabka_protocol::{Decode, owned::describe_cluster_request::DescribeClusterRequest};
 
     let mut cur = body;
     let req = DescribeClusterRequest::decode(&mut cur, version)?;
@@ -533,9 +538,9 @@ fn build_describe_cluster_body(
     cluster_id: &str,
     controller_id: i32,
 ) -> Result<Bytes, crabka_protocol::ProtocolError> {
-    use crabka_protocol::Encode;
-    use crabka_protocol::owned::describe_cluster_response::{
-        DescribeClusterBroker, DescribeClusterResponse,
+    use crabka_protocol::{
+        Encode,
+        owned::describe_cluster_response::{DescribeClusterBroker, DescribeClusterResponse},
     };
 
     const ENDPOINT_TYPE_CONTROLLERS: i8 = 2;
@@ -580,13 +585,14 @@ fn build_describe_cluster_body(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
     use bytes::{BufMut, Bytes};
     use crabka_metadata::{MetadataRecord, TopicRecord};
     use crabka_protocol::Decode;
     use tokio::io::AsyncWriteExt;
     use uuid::Uuid;
+
+    use super::*;
 
     fn length_prefixed(frame: &[u8]) -> Vec<u8> {
         let mut out = Vec::with_capacity(frame.len() + 4);
@@ -719,8 +725,7 @@ mod tests {
     }
 
     fn describe_cluster_body(version: i16, endpoint_type: i8) -> Bytes {
-        use crabka_protocol::Encode;
-        use crabka_protocol::owned::describe_cluster_request::DescribeClusterRequest;
+        use crabka_protocol::{Encode, owned::describe_cluster_request::DescribeClusterRequest};
 
         let req = DescribeClusterRequest {
             endpoint_type,
@@ -1041,8 +1046,7 @@ mod tests {
 
     #[test]
     fn api_versions_body_advertises_kip595_set_both_shapes() {
-        use crabka_protocol::Decode;
-        use crabka_protocol::owned::api_versions_response::ApiVersionsResponse;
+        use crabka_protocol::{Decode, owned::api_versions_response::ApiVersionsResponse};
         for req_v in [0i16, 4i16] {
             let body = super::api_versions_response_body(req_v);
             let v = req_v.clamp(0, 4);
@@ -1065,9 +1069,13 @@ mod tests {
 
     #[test]
     fn describe_cluster_body_projects_controllers_and_brokers() {
-        use crabka_protocol::Decode;
-        use crabka_protocol::owned::api_versions_response::ApiVersionsResponse;
-        use crabka_protocol::owned::describe_cluster_response::DescribeClusterResponse;
+        use crabka_protocol::{
+            Decode,
+            owned::{
+                api_versions_response::ApiVersionsResponse,
+                describe_cluster_response::DescribeClusterResponse,
+            },
+        };
 
         // DescribeCluster (60) is advertised so clients negotiate it (KIP-919).
         let av = super::api_versions_response_body(4);

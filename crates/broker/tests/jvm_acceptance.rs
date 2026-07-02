@@ -25,10 +25,12 @@
 // and its span computation ICEs in annotate-snippets on Rust 1.95.
 #![allow(clippy::unnecessary_unwrap)]
 
-use assert2::{assert, check};
-use std::io::Write;
-use std::process::{Command, Stdio};
+use std::{
+    io::Write,
+    process::{Command, Stdio},
+};
 
+use assert2::{assert, check};
 use crabka_broker::{Broker, BrokerConfig};
 use crabka_log::LogConfig;
 

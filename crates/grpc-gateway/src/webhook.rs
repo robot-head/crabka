@@ -13,30 +13,35 @@
 //! Both routes produce via [`crate::produce::ProduceCore::produce`] and return
 //! a [`WebhookResponse`] JSON body on success.
 
-use std::net::SocketAddr;
-use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    net::SocketAddr,
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
-use axum::Extension;
-use axum::body::Bytes;
-use axum::extract::Path;
-use axum::http::{HeaderMap, StatusCode};
-use axum::response::{IntoResponse, Response};
-use axum::routing::post;
-use axum::{Json, Router};
+use axum::{
+    Extension, Json, Router,
+    body::Bytes,
+    extract::Path,
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
+    routing::post,
+};
 use crabka_authz::AuthorizationResult;
 use crabka_metadata::{AclOperation, ResourceType};
 use crabka_security::{AuthMethod, Principal};
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::codec::{CodecError, SchemaSelector};
-use crate::error::GatewayError;
-use crate::handlers::anonymous_principal;
-use crate::metrics::metrics;
-use crate::state::AppState;
-use crate::types::GatewayRecord;
-use crate::webhook_config::{Source, extract_source, verify_signature};
+use crate::{
+    codec::{CodecError, SchemaSelector},
+    error::GatewayError,
+    handlers::anonymous_principal,
+    metrics::metrics,
+    state::AppState,
+    types::GatewayRecord,
+    webhook_config::{Source, extract_source, verify_signature},
+};
 
 // ---------------------------------------------------------------------------
 // Response type
@@ -339,18 +344,22 @@ fn now_unix_secs() -> i64 {
 mod tests {
     use std::collections::HashMap;
 
-    use axum::body::Body;
-    use axum::http::{Request, StatusCode};
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
     use hmac::{Hmac, KeyInit, Mac};
     use sha2::Sha256;
     use tower::ServiceExt as _;
 
     use super::*;
-    use crate::authz::GatewayAuthz;
-    use crate::codec::{Decoded, EncodeBody, RawCodec, RecordCodec, SchemaFormat};
-    use crate::config::GatewayConfig;
-    use crate::produce::ProduceCore;
-    use crate::webhook_config::{CompiledWebhook, SigEncoding};
+    use crate::{
+        authz::GatewayAuthz,
+        codec::{Decoded, EncodeBody, RawCodec, RecordCodec, SchemaFormat},
+        config::GatewayConfig,
+        produce::ProduceCore,
+        webhook_config::{CompiledWebhook, SigEncoding},
+    };
 
     /// A codec stub that rejects every `encode` with a fixed [`CodecError`],
     /// exercising the produce path's error→HTTP-status mapping without a
@@ -582,8 +591,9 @@ mod tests {
 
     #[tokio::test]
     async fn missing_idempotency_key_returns_400() {
-        use crate::webhook_config::Source;
         use jsonpath_rust::parser::parse_json_path;
+
+        use crate::webhook_config::Source;
 
         let mut cfg = unsigned_cfg("t");
         cfg.max_body_bytes = 1024; // allow larger body for this test
@@ -699,8 +709,9 @@ mod tests {
 
     #[test]
     fn needs_json_true_when_jsonpath_idempotency() {
-        use crate::webhook_config::Source;
         use jsonpath_rust::parser::parse_json_path;
+
+        use crate::webhook_config::Source;
 
         let mut cfg = unsigned_cfg("t");
         let q = parse_json_path("$.id").unwrap();
@@ -710,8 +721,9 @@ mod tests {
 
     #[test]
     fn needs_json_true_when_jsonpath_key() {
-        use crate::webhook_config::Source;
         use jsonpath_rust::parser::parse_json_path;
+
+        use crate::webhook_config::Source;
 
         let mut cfg = unsigned_cfg("t");
         let q = parse_json_path("$.key").unwrap();

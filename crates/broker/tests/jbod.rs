@@ -11,20 +11,25 @@
 //!   2. `DescribeLogDirs` reports one result per directory whose union
 //!      covers every partition, consistent with what's on disk.
 
-use assert2::assert;
-use std::io;
-use std::net::SocketAddr;
+use std::{io, net::SocketAddr};
 
+use assert2::assert;
 use bytes::{Buf, BufMut, BytesMut};
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
-use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-use crabka_protocol::owned::create_topics_response::CreateTopicsResponse;
-use crabka_protocol::owned::describe_log_dirs_request::DescribeLogDirsRequest;
-use crabka_protocol::owned::describe_log_dirs_response::DescribeLogDirsResponse;
-use crabka_protocol::{Decode, Encode};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        create_topics_request::{CreatableTopic, CreateTopicsRequest},
+        create_topics_response::CreateTopicsResponse,
+        describe_log_dirs_request::DescribeLogDirsRequest,
+        describe_log_dirs_response::DescribeLogDirsResponse,
+    },
+};
 use tempfile::TempDir;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+};
 
 const CLIENT_ID: &str = "crabka-jbod-test";
 

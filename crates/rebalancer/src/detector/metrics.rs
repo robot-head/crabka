@@ -11,9 +11,10 @@
 //! dispatch on `AnomalyKind` so callers don't need to know the field
 //! names.
 
-use prometheus_client::metrics::counter::Counter;
-use prometheus_client::metrics::gauge::Gauge;
-use prometheus_client::registry::Registry;
+use prometheus_client::{
+    metrics::{counter::Counter, gauge::Gauge},
+    registry::Registry,
+};
 
 use crate::detector::AnomalyKind;
 
@@ -233,9 +234,10 @@ impl DetectorMetrics {
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
+
     use super::*;
     use crate::health::new_registry;
-    use assert2::assert;
 
     #[test]
     fn register_emits_all_metric_names() {

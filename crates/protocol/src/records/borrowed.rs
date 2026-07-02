@@ -3,10 +3,14 @@
 use bytes::Bytes;
 use zerocopy::FromBytes as _;
 
-use crate::primitives::varint::{get_varint, get_varlong};
-use crate::records::RecordsError;
-use crate::records::crc::{crc32c, crc32c_append};
-use crate::records::header::{Attributes, HEADER_LEN, RecordBatchHeader};
+use crate::{
+    primitives::varint::{get_varint, get_varlong},
+    records::{
+        RecordsError,
+        crc::{crc32c, crc32c_append},
+        header::{Attributes, HEADER_LEN, RecordBatchHeader},
+    },
+};
 
 // batch_length field semantics: bytes after itself.
 // Header tail = partition_leader_epoch(4) + magic(1) + crc(4) +
@@ -504,11 +508,12 @@ impl crate::Encode for RecordBatch<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::DecodeBorrow;
     use assert2::{assert, check};
     use bytes::BytesMut;
     use crabka_compression::CompressionType;
+
+    use super::*;
+    use crate::DecodeBorrow;
 
     fn encode_owned_then_borrow(b: &super::super::owned::RecordBatch) -> Vec<u8> {
         let mut buf = BytesMut::new();

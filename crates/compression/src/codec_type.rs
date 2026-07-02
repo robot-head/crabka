@@ -37,8 +37,9 @@ impl CompressionType {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn attribute_bits_roundtrip() {

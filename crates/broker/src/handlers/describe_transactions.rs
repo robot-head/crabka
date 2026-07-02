@@ -15,19 +15,24 @@
 use std::collections::BTreeMap;
 
 use bytes::{Bytes, BytesMut};
-
 use crabka_metadata::{AclOperation, ResourceType};
-use crabka_protocol::owned::describe_transactions_request::DescribeTransactionsRequest;
-use crabka_protocol::owned::describe_transactions_response::{
-    DescribeTransactionsResponse, TopicData, TransactionState,
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        describe_transactions_request::DescribeTransactionsRequest,
+        describe_transactions_response::{
+            DescribeTransactionsResponse, TopicData, TransactionState,
+        },
+    },
 };
-use crabka_protocol::{Decode, Encode};
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
-use crate::txn::state::{TxnEntry, TxnState};
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes,
+    error::BrokerError,
+    txn::state::{TxnEntry, TxnState},
+};
 
 const TRANSACTIONAL_ID_NOT_FOUND: i16 = 75;
 
@@ -147,9 +152,10 @@ pub(crate) async fn handle(
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
+
     use super::*;
     use crate::txn::state::TopicPartition;
-    use assert2::assert;
 
     fn entry() -> TxnEntry {
         let mut e = TxnEntry::new_empty("tx".into(), 100, 0, 60_000, 1_000);

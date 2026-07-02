@@ -20,14 +20,16 @@
 //! coordinator or openraft membership directly. All the lockstep safety lives
 //! on the leader.
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use bytes::{Bytes, BytesMut};
-
-use crabka_protocol::owned::add_raft_voter_request::{self, AddRaftVoterRequest, Listener};
-use crabka_protocol::owned::add_raft_voter_response::AddRaftVoterResponse;
-use crabka_protocol::{Decode, Encode};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        add_raft_voter_request::{self, AddRaftVoterRequest, Listener},
+        add_raft_voter_response::AddRaftVoterResponse,
+    },
+};
 
 use crate::codes;
 
@@ -277,17 +279,23 @@ fn auto_join_connection_options() -> crabka_client_core::ConnectionOptions {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crabka_metadata::{KRaftVersionRange, MetadataImage, MetadataRecord};
-    use crabka_metadata::{Voter, VoterEndpoint, VoterSet, VotersRecord};
+    use std::{
+        collections::BTreeSet,
+        net::SocketAddr,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
+    use crabka_metadata::{
+        KRaftVersionRange, MetadataImage, MetadataRecord, Voter, VoterEndpoint, VoterSet,
+        VotersRecord,
+    };
     use crabka_raft::{
         AddVoter, Node, NodeId, QuorumState, RaftError, ReconfigOutcome, RemoveVoter,
         SnapshotRange, UpdateVoter,
     };
-    use std::collections::BTreeSet;
-    use std::net::SocketAddr;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::watch;
+
+    use super::*;
 
     struct MockSource {
         image: Arc<MetadataImage>,

@@ -51,8 +51,9 @@ impl Default for ShareGroupConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
+
+    use super::*;
     #[test]
     fn defaults_are_kafka_ga() {
         let c = ShareGroupConfig::default();

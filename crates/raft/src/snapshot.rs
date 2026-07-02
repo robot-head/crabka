@@ -7,15 +7,17 @@
 //! [`SnapshotReader::read_records`].
 
 use bytes::{BufMut, Bytes, BytesMut};
-
 use crabka_metadata::{MetadataImage, MetadataRecord, from_kraft_value, to_kraft_values};
-use crabka_protocol::Encode;
-use crabka_protocol::owned::snapshot_footer_record::SnapshotFooterRecord;
-use crabka_protocol::owned::snapshot_header_record::SnapshotHeaderRecord;
-use crabka_protocol::records::metadata::control::{
-    ControlRecordType, control_record_key, encode_control_batch,
+use crabka_protocol::{
+    Encode,
+    owned::{
+        snapshot_footer_record::SnapshotFooterRecord, snapshot_header_record::SnapshotHeaderRecord,
+    },
+    records::{
+        Record, RecordBatch,
+        metadata::control::{ControlRecordType, control_record_key, encode_control_batch},
+    },
 };
-use crabka_protocol::records::{Record, RecordBatch};
 use uuid::Uuid;
 
 use crate::error::RaftError;
@@ -179,14 +181,14 @@ impl SnapshotReader {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
-    use crabka_protocol::Decode;
-
     use crabka_metadata::{
         FeatureLevelRecord, MetadataImage, MetadataRecord, PartitionRecord, TopicRecord,
     };
+    use crabka_protocol::Decode;
     use uuid::Uuid;
+
+    use super::*;
 
     #[test]
     fn writer_reader_round_trips_image() {
@@ -399,9 +401,9 @@ mod tests {
     #[test]
     #[ignore = "requires Docker"]
     fn jvm_dump_log_parses_engine_snapshot() {
+        use std::{io::Write as _, process::Command};
+
         use crabka_metadata::{BrokerConfigRecord, BrokerRegistrationRecord, TopicConfigRecord};
-        use std::io::Write as _;
-        use std::process::Command;
 
         let cid = Uuid::new_v4();
         let mut image = MetadataImage::new(cid);

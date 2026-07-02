@@ -192,9 +192,10 @@ impl<KS, VS> Repartitioned<KS, VS> {
 
 #[cfg(test)]
 mod tests {
+    use assert2::check;
+
     use super::*;
     use crate::processor::serde::{I64Serde, StringSerde};
-    use assert2::check;
 
     #[test]
     fn grouped_materialized_repartitioned_carry_serdes_and_names() {

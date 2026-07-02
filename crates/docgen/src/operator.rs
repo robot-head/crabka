@@ -1,11 +1,12 @@
 //! Generate the operator CRD reference pages from `K::crd()`.
 
-use crate::schema_md::render_field_table;
 use crabka_operator::crd::{
     Kafka, KafkaNodePool, KafkaRebalance, KafkaTopic, KafkaUser, SchemaRegistry,
 };
 use kube::CustomResourceExt;
 use serde_json::Value;
+
+use crate::schema_md::render_field_table;
 
 /// One generated CRD page: front-matter title/weight metadata and body markdown.
 pub struct CrdPage {
@@ -70,8 +71,9 @@ fn page<K: CustomResourceExt>() -> CrdPage {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
+
+    use super::*;
     #[test]
     fn kafka_page_has_spec_fields() {
         let pages = crd_pages();

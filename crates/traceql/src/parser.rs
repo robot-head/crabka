@@ -1,11 +1,13 @@
 //! Recursive-descent `TraceQL` parser.
 
-use crate::ast::{
-    Aggregate, ComparisonOp, Field, FieldExpr, Intrinsic, Pipeline, Query, QueryHints, Scope,
-    SpansetExpr, StructuralOp, Value, WithBinding,
+use crate::{
+    ast::{
+        Aggregate, ComparisonOp, Field, FieldExpr, Intrinsic, Pipeline, Query, QueryHints, Scope,
+        SpansetExpr, StructuralOp, Value, WithBinding,
+    },
+    error::{Result, TraceqlError},
+    lexer::{Token, lex},
 };
-use crate::error::{Result, TraceqlError};
-use crate::lexer::{Token, lex};
 
 /// Default `topN` for `compare()` when the argument is omitted, matching Tempo.
 const DEFAULT_COMPARE_TOP_N: usize = 10;
@@ -958,9 +960,10 @@ fn parse_duration_component_nanos(number: &str, multiplier: i128, original: &str
 
 #[cfg(test)]
 mod tests {
+    use assert2::{assert, check};
+
     use super::*;
     use crate::ast::*;
-    use assert2::{assert, check};
 
     #[test]
     fn bare_dot_is_both_scope() {

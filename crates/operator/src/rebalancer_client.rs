@@ -296,8 +296,9 @@ impl RebalancerClientLike for ConnectRebalancerClient {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn status_parses_pbjson_enum_names() {

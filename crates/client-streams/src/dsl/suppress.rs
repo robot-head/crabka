@@ -194,8 +194,9 @@ impl<K> Suppressed<K> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::check;
+
+    use super::*;
 
     #[test]
     fn buffer_config_caps_and_overflow() {

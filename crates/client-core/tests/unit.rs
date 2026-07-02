@@ -10,19 +10,22 @@
 // Suppressing here keeps comments readable without cluttering them.
 #![allow(clippy::doc_markdown)]
 
-use assert2::{assert, check};
 use std::time::Duration;
 
+use assert2::{assert, check};
 use bytes::BytesMut;
 use crabka_client_core::{ClientError, Connection, ConnectionOptions, MockBroker};
-use crabka_protocol::Encode;
-use crabka_protocol::owned::api_versions_response::{ApiVersion, ApiVersionsResponse};
-use crabka_protocol::owned::metadata_request::MetadataRequest;
-use crabka_protocol::owned::metadata_response::MetadataResponse;
-
 // Use the raw constants so we don't need `ProtocolRequest` in scope.
 use crabka_protocol::owned::api_versions_request;
-use crabka_protocol::owned::metadata_request as metadata_request_mod;
+use crabka_protocol::{
+    Encode,
+    owned::{
+        api_versions_response::{ApiVersion, ApiVersionsResponse},
+        metadata_request as metadata_request_mod,
+        metadata_request::MetadataRequest,
+        metadata_response::MetadataResponse,
+    },
+};
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -186,8 +189,10 @@ async fn round_trip_metadata_request() {
 /// some order.
 #[tokio::test]
 async fn concurrent_sends_get_correct_responses() {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicI32, Ordering};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicI32, Ordering},
+    };
 
     let counter = Arc::new(AtomicI32::new(0));
     let counter_for_mock = Arc::clone(&counter);

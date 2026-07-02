@@ -1,20 +1,20 @@
 use assert2::{assert, check};
 mod support;
 
-use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
-use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-use crabka_protocol::owned::delete_topics_request::{DeleteTopicState, DeleteTopicsRequest};
-use crabka_protocol::owned::fetch_request::{FetchPartition, FetchRequest, FetchTopic};
-use crabka_protocol::owned::find_coordinator_request::FindCoordinatorRequest;
-use crabka_protocol::owned::init_producer_id_request::InitProducerIdRequest;
-use crabka_protocol::owned::list_offsets_request::{
-    ListOffsetsPartition, ListOffsetsRequest, ListOffsetsTopic,
+use crabka_protocol::{
+    owned::{
+        api_versions_request::ApiVersionsRequest,
+        create_topics_request::{CreatableTopic, CreateTopicsRequest},
+        delete_topics_request::{DeleteTopicState, DeleteTopicsRequest},
+        fetch_request::{FetchPartition, FetchRequest, FetchTopic},
+        find_coordinator_request::FindCoordinatorRequest,
+        init_producer_id_request::InitProducerIdRequest,
+        list_offsets_request::{ListOffsetsPartition, ListOffsetsRequest, ListOffsetsTopic},
+        metadata_request::MetadataRequest,
+        produce_request::{PartitionProduceData, ProduceRequest, TopicProduceData},
+    },
+    records::{Record, RecordBatch},
 };
-use crabka_protocol::owned::metadata_request::MetadataRequest;
-use crabka_protocol::owned::produce_request::{
-    PartitionProduceData, ProduceRequest, TopicProduceData,
-};
-use crabka_protocol::records::{Record, RecordBatch};
 
 /// Build a single `RecordBatch` carrying `n` empty records with sequential
 /// offset deltas.
@@ -451,17 +451,17 @@ async fn join_group_single_member_completes_after_deadline() {
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn full_group_flow_join_sync_heartbeat_commit_fetch_leave() {
-    use crabka_protocol::owned::heartbeat_request::HeartbeatRequest;
-    use crabka_protocol::owned::join_group_request::{JoinGroupRequest, JoinGroupRequestProtocol};
-    use crabka_protocol::owned::leave_group_request::LeaveGroupRequest;
-    use crabka_protocol::owned::offset_commit_request::{
-        OffsetCommitRequest, OffsetCommitRequestPartition, OffsetCommitRequestTopic,
-    };
-    use crabka_protocol::owned::offset_fetch_request::{
-        OffsetFetchRequest, OffsetFetchRequestGroup, OffsetFetchRequestTopics,
-    };
-    use crabka_protocol::owned::sync_group_request::{
-        SyncGroupRequest, SyncGroupRequestAssignment,
+    use crabka_protocol::owned::{
+        heartbeat_request::HeartbeatRequest,
+        join_group_request::{JoinGroupRequest, JoinGroupRequestProtocol},
+        leave_group_request::LeaveGroupRequest,
+        offset_commit_request::{
+            OffsetCommitRequest, OffsetCommitRequestPartition, OffsetCommitRequestTopic,
+        },
+        offset_fetch_request::{
+            OffsetFetchRequest, OffsetFetchRequestGroup, OffsetFetchRequestTopics,
+        },
+        sync_group_request::{SyncGroupRequest, SyncGroupRequestAssignment},
     };
 
     let p = support::start().await;

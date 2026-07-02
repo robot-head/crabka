@@ -111,10 +111,13 @@ pub fn verify_signature(public_key: &[u8], msg: &[u8], sig: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::check;
-    use ring::rand::SystemRandom;
-    use ring::signature::{Ed25519KeyPair, KeyPair};
+    use ring::{
+        rand::SystemRandom,
+        signature::{Ed25519KeyPair, KeyPair},
+    };
+
+    use super::*;
 
     fn fresh_signer(key_id: &str) -> (FileEd25519Signer, Vec<u8>) {
         let rng = SystemRandom::new();

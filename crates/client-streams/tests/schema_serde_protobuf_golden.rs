@@ -5,10 +5,11 @@
 //! the single `0x00` byte) via `tests/schema-serde-capture/run.sh`.
 
 use assert2::check;
-use crabka_schema_serde::RegistryClient;
-use crabka_schema_serde::cache::{CacheConfig, SchemaCache};
-use crabka_schema_serde::format::SchemaSerializer;
-use crabka_schema_serde::format::protobuf::ProtobufSerde;
+use crabka_schema_serde::{
+    RegistryClient,
+    cache::{CacheConfig, SchemaCache},
+    format::{SchemaSerializer, protobuf::ProtobufSerde},
+};
 
 /// Embedded descriptor set referenced by the generated `Order` (see ../examples/gen/regenerate.sh).
 pub const FILE_DESCRIPTOR_SET_BYTES: &[u8] =

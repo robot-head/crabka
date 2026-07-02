@@ -81,8 +81,9 @@ fn stringify(per_topic: &BTreeMap<String, BTreeSet<(i32, i32)>>) -> BTreeMap<Str
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     fn mv(topic: &str, p: i32, old: Vec<i32>, new: Vec<i32>) -> Movement {
         Movement {

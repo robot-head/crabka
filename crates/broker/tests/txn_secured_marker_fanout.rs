@@ -29,26 +29,31 @@
 //! Windows-gated like the other multi-node transactional tests (openraft +
 //! tokio scheduling races on the hosted Windows runner).
 
-use assert2::assert;
-use std::net::SocketAddr;
-use std::time::{Duration, Instant};
-
-use tempfile::TempDir;
-
-use crabka_broker::config::{InterBrokerCredentials, ListenerSpec};
-use crabka_broker::{BootstrapMode, Broker, BrokerConfig, BrokerError, BrokerHandle};
-use crabka_client_core::Client;
-use crabka_client_core::security::{ClientSecurity, SaslCredentials};
-use crabka_protocol::owned::add_partitions_to_txn_request::{
-    AddPartitionsToTxnRequest, AddPartitionsToTxnTransaction,
+use std::{
+    net::SocketAddr,
+    time::{Duration, Instant},
 };
-use crabka_protocol::owned::common::add_partitions_to_txn_request::add_partitions_to_txn_topic::AddPartitionsToTxnTopic;
-use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-use crabka_protocol::owned::end_txn_request::EndTxnRequest;
-use crabka_protocol::owned::find_coordinator_request::FindCoordinatorRequest;
-use crabka_protocol::owned::init_producer_id_request::InitProducerIdRequest;
-use crabka_protocol::owned::metadata_request::{MetadataRequest, MetadataRequestTopic};
+
+use assert2::assert;
+use crabka_broker::{
+    BootstrapMode, Broker, BrokerConfig, BrokerError, BrokerHandle,
+    config::{InterBrokerCredentials, ListenerSpec},
+};
+use crabka_client_core::{
+    Client,
+    security::{ClientSecurity, SaslCredentials},
+};
+use crabka_protocol::owned::{
+    add_partitions_to_txn_request::{AddPartitionsToTxnRequest, AddPartitionsToTxnTransaction},
+    common::add_partitions_to_txn_request::add_partitions_to_txn_topic::AddPartitionsToTxnTopic,
+    create_topics_request::{CreatableTopic, CreateTopicsRequest},
+    end_txn_request::EndTxnRequest,
+    find_coordinator_request::FindCoordinatorRequest,
+    init_producer_id_request::InitProducerIdRequest,
+    metadata_request::{MetadataRequest, MetadataRequestTopic},
+};
 use crabka_security::{ListenerProtocol, SaslMechanism};
+use tempfile::TempDir;
 
 mod support;
 

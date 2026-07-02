@@ -1,13 +1,12 @@
 use std::collections::BTreeSet;
 
-use tracing::field::Empty;
-
 use crabka_blockstore::{
     BlockDescriptor, LabelIndex, LabelPredicate, LogBlockIndex as BlockIndex,
     LogBlockStoreError as BlockStoreError, LogMatchOp as BlockMatchOp,
     LogSeriesFingerprint as SeriesFingerprint, TimeRange,
 };
 use thiserror::Error;
+use tracing::field::Empty;
 
 use crate::{LabelMatcher, MatchOp, StreamQuery};
 

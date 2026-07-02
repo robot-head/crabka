@@ -8,13 +8,17 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crabka_raft::kraft::QuorumStateMachine;
-use crabka_raft::kraft::action::{Action, TimerKind};
-use crabka_raft::kraft::event::{Event, LogEnd};
-use crabka_raft::kraft::role::Role;
-use crabka_raft::kraft::types::{LeaderEpoch, LogView, NodeId, QuorumState, SimInstant};
-use stateright::semantics::{ConsistencyTester, LinearizabilityTester, SequentialSpec};
-use stateright::{Model, Property};
+use crabka_raft::kraft::{
+    QuorumStateMachine,
+    action::{Action, TimerKind},
+    event::{Event, LogEnd},
+    role::Role,
+    types::{LeaderEpoch, LogView, NodeId, QuorumState, SimInstant},
+};
+use stateright::{
+    Model, Property,
+    semantics::{ConsistencyTester, LinearizabilityTester, SequentialSpec},
+};
 
 /// Constant logical time. Timeouts are modeled as nondeterministic actions, so
 /// the core never needs a varying clock; constant `now` keeps role deadlines

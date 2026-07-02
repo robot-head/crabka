@@ -9,21 +9,20 @@
 //! Locking discipline: the `DashMap` guard is NEVER held across an `.await`.
 //! Callers clone the cell `Arc` out of the map first, then lock and await.
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
+use crabka_metadata::NodeId;
 use dashmap::DashMap;
 use tokio::sync::Mutex;
 use tracing::warn;
 
-use crabka_metadata::NodeId;
-
-use crate::coordinator::unified::share::config::ShareGroupConfig;
-use crate::metadata_source::MetadataSource;
-use crate::partition_registry::PartitionRegistry;
-use crate::share_coordinator::persister_client::SharePersister;
-use crate::share_partition::session::ShareSessionCache;
-use crate::share_partition::state::AcquisitionState;
+use crate::{
+    coordinator::unified::share::config::ShareGroupConfig,
+    metadata_source::MetadataSource,
+    partition_registry::PartitionRegistry,
+    share_coordinator::persister_client::SharePersister,
+    share_partition::{session::ShareSessionCache, state::AcquisitionState},
+};
 
 /// Live acquisition-state machines keyed by `(group, topic_id, partition)`.
 type LeaderKey = (String, uuid::Uuid, i32);
@@ -299,26 +298,27 @@ impl SharePartitionLeaderManager {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::{collections::BTreeSet, net::SocketAddr};
+
     use assert2::assert;
-    use std::collections::BTreeSet;
-    use std::net::SocketAddr;
+
+    use super::*;
 
     const LOCK: Duration = Duration::from_secs(30);
 
     use async_trait::async_trait;
-    use tokio::sync::watch;
-
     use crabka_metadata::{MetadataImage, MetadataRecord};
     use crabka_raft::{
         AddVoter, Node, QuorumState, RaftError, ReconfigOutcome, RemoveVoter, SnapshotRange,
         UpdateVoter,
     };
     use crabka_security::ListenerProtocol;
+    use tokio::sync::watch;
 
-    use crate::network::client::InterBrokerClient;
-    use crate::share_coordinator::config::ShareCoordinatorConfig;
-    use crate::share_coordinator::coordinator::ShareCoordinator;
+    use crate::{
+        network::client::InterBrokerClient,
+        share_coordinator::{config::ShareCoordinatorConfig, coordinator::ShareCoordinator},
+    };
 
     /// Minimal `MetadataSource` over a fixed (empty-of-brokers) image. The
     /// share-state topic can't be bootstrapped against it (no brokers), so the

@@ -67,8 +67,9 @@ pub(crate) fn classify(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn classify_decides_validity_or_truncation() {

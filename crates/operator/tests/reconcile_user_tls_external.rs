@@ -3,18 +3,19 @@
 //! the bare-name principal `User:<metadata.name>` but for whom the
 //! operator creates no Secret and issues no cert.
 
-use assert2::{assert, check};
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
+use assert2::{assert, check};
 use crabka_client_admin::{
     AclEntry, AclOperation, PatternType, PermissionType, QuotaOp, ResourceType,
 };
-use crabka_operator::controller::user::reconcile;
-use crabka_operator::crd::{
-    AclOp, AclPatternType, AclPermission, AclResource, AclResourceKind, AclRule, Authentication,
-    KafkaUser, KafkaUserAuthorization as Authorization, KafkaUserQuotas,
-    KafkaUserSimpleAuthorization as SimpleAuthorization, KafkaUserSpec,
+use crabka_operator::{
+    controller::user::reconcile,
+    crd::{
+        AclOp, AclPatternType, AclPermission, AclResource, AclResourceKind, AclRule,
+        Authentication, KafkaUser, KafkaUserAuthorization as Authorization, KafkaUserQuotas,
+        KafkaUserSimpleAuthorization as SimpleAuthorization, KafkaUserSpec,
+    },
 };
 use http::Method;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
@@ -23,8 +24,11 @@ use serde_json::json;
 #[path = "shared/mod.rs"]
 mod shared;
 
-use shared::fake_admin::{FakeAdminClient, RecordedCall};
-use shared::{MockRule, MockState, fixture_ctx, json_response, mock_client};
+use shared::{
+    MockRule, MockState,
+    fake_admin::{FakeAdminClient, RecordedCall},
+    fixture_ctx, json_response, mock_client,
+};
 
 const CLUSTER: &str = "demo";
 const NS: &str = "y";

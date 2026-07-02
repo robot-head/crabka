@@ -3,10 +3,13 @@
 //! assigned dedup partitions, and keeps the claim map warm. P3 gates every
 //! produce on ownership + warmth so only the owning replica may write.
 
-use std::sync::Arc;
-use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::{
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use bytes::Bytes;
 use crabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};

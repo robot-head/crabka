@@ -16,34 +16,44 @@
 //! During a rejoin in flight we deliberately do *not* heartbeat —
 //! `JoinGroup` resets the broker-side session timer.
 
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicI32, Ordering};
-use std::time::Duration;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{
+        Arc,
+        atomic::{AtomicI32, Ordering},
+    },
+    time::Duration,
+};
 
 use bytes::Bytes;
+use crabka_client_core::Client;
+use crabka_protocol::{
+    owned::{
+        find_coordinator_request::FindCoordinatorRequest,
+        find_coordinator_response::FindCoordinatorResponse,
+        heartbeat_request::HeartbeatRequest,
+        join_group_request::{JoinGroupRequest, JoinGroupRequestProtocol},
+        join_group_response::JoinGroupResponse,
+        leave_group_request::{LeaveGroupRequest, MemberIdentity},
+        metadata_request::MetadataRequest,
+        offset_commit_request::OffsetCommitRequest,
+        sync_group_request::{SyncGroupRequest, SyncGroupRequestAssignment},
+        sync_group_response::SyncGroupResponse,
+    },
+    primitives::uuid::Uuid as WireUuid,
+};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
-use crabka_client_core::Client;
-use crabka_protocol::owned::find_coordinator_request::FindCoordinatorRequest;
-use crabka_protocol::owned::find_coordinator_response::FindCoordinatorResponse;
-use crabka_protocol::owned::heartbeat_request::HeartbeatRequest;
-use crabka_protocol::owned::join_group_request::{JoinGroupRequest, JoinGroupRequestProtocol};
-use crabka_protocol::owned::join_group_response::JoinGroupResponse;
-use crabka_protocol::owned::leave_group_request::{LeaveGroupRequest, MemberIdentity};
-use crabka_protocol::owned::metadata_request::MetadataRequest;
-use crabka_protocol::owned::offset_commit_request::OffsetCommitRequest;
-use crabka_protocol::owned::sync_group_request::{SyncGroupRequest, SyncGroupRequestAssignment};
-use crabka_protocol::owned::sync_group_response::SyncGroupResponse;
-use crabka_protocol::primitives::uuid::Uuid as WireUuid;
-
-use crate::assignor::{Assignor, RebalanceProtocol};
-use crate::builder::{
-    AutoOffsetReset, decode_assignment, decode_subscription, encode_assignment, encode_subscription,
+use crate::{
+    assignor::{Assignor, RebalanceProtocol},
+    builder::{
+        AutoOffsetReset, decode_assignment, decode_subscription, encode_assignment,
+        encode_subscription,
+    },
+    error::ConsumerError,
+    offset_wire::{build_commit_topics, build_offset_fetch, id_to_name, parse_offset_fetch},
 };
-use crate::error::ConsumerError;
-use crate::offset_wire::{build_commit_topics, build_offset_fetch, id_to_name, parse_offset_fetch};
 
 /// Retriable group-coordinator error codes. The coordinator is loading its
 /// state (`14`), not yet available (`15`), or has moved to another broker
@@ -1296,12 +1306,16 @@ fn should_prime_missing_partition(seen: bool) -> bool {
 
 #[cfg(test)]
 mod retry_tests {
-    use super::*;
+    use std::{
+        io,
+        net::SocketAddr,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
     use assert2::assert;
     use crabka_protocol::UnknownTaggedFields;
-    use std::io;
-    use std::net::SocketAddr;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
 
     struct Resp {
         error_code: i16,
@@ -1698,10 +1712,10 @@ mod retry_tests {
 
 #[cfg(test)]
 mod find_coordinator_parse_tests {
-    use super::*;
+    use assert2::assert;
     use crabka_protocol::owned::find_coordinator_response::Coordinator;
 
-    use assert2::assert;
+    use super::*;
 
     // v4+ shape: the broker fills the `coordinators` array; legacy top-level
     // fields are zeroed/unused. We must read the array.
@@ -1761,9 +1775,11 @@ mod find_coordinator_parse_tests {
 
 #[cfg(test)]
 mod refind_tests {
-    use super::*;
-    use assert2::{assert, check};
     use std::sync::atomic::AtomicUsize;
+
+    use assert2::{assert, check};
+
+    use super::*;
 
     struct Resp {
         error_code: i16,

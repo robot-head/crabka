@@ -127,9 +127,10 @@ pub fn varlong_len(v: i64) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
     use bytes::BytesMut;
+
+    use super::*;
 
     #[test]
     fn uvarint_known_vectors() {

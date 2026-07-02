@@ -1,8 +1,6 @@
 //! Gateway configuration, parsed from CLI flags / env in `bin/gateway.rs`.
 
-use std::collections::HashMap;
-use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::{collections::HashMap, net::SocketAddr, path::PathBuf};
 
 pub use crabka_security::ClientAuthMode;
 

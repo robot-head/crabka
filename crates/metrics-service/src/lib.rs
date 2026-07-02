@@ -5,11 +5,13 @@
 // awaits in the PromQL operator-path evaluation); the default limit is too low.
 #![recursion_limit = "256"]
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::net::SocketAddr;
-use std::path::Path as StdPath;
-use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    net::SocketAddr,
+    path::Path as StdPath,
+    sync::Arc,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
 
 use axum::Router;
 use bytes::Bytes;
@@ -26,10 +28,8 @@ use crabka_promql::{
     evaluate_and_persist_ruler_rule_set_for_shard_due_for_eval, prometheus_router,
 };
 use futures::TryStreamExt;
-use object_store::path::Path;
-use object_store::{ObjectStore, ObjectStoreExt};
-use tokio::net::TcpListener;
-use tokio::task::JoinHandle;
+use object_store::{ObjectStore, ObjectStoreExt, path::Path};
+use tokio::{net::TcpListener, task::JoinHandle};
 use url::Url;
 
 pub const RULER_STATE_TOPIC: &str = "__crabka_metrics_ruler_state";
@@ -1415,24 +1415,27 @@ impl From<MetricsServiceError> for crabka_promql::PromqlError {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
     use assert2::{assert, check};
-    use axum::body::{Body, to_bytes};
-    use axum::http::{Request, StatusCode};
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode},
+    };
     use bytes::Bytes;
     use crabka_client_consumer::ConsumerRecord;
     use crabka_promql::{AlertmanagerSink, MetricStore};
-    use futures::StreamExt;
-    use futures::stream::BoxStream;
-    use object_store::ObjectStore;
-    use object_store::memory::InMemory;
-    use object_store::path::Path;
+    use futures::{StreamExt, stream::BoxStream};
     use object_store::{
-        CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta,
-        PutMultipartOptions, PutOptions, PutPayload, PutResult,
+        CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
+        PutMultipartOptions, PutOptions, PutPayload, PutResult, memory::InMemory, path::Path,
     };
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
     use tower::ServiceExt;
 
     struct RecordingWalHeadConsumer {

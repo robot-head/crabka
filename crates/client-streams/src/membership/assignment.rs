@@ -39,10 +39,11 @@ pub(crate) fn resolve(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::topology::{NodeHandle, Topology};
     use assert2::check;
     use crabka_protocol::owned::common::streams_group_heartbeat_response::task_ids::TaskIds;
+
+    use super::*;
+    use crate::topology::{NodeHandle, Topology};
 
     fn built() -> crate::topology::BuiltTopology {
         let mut t = Topology::new();

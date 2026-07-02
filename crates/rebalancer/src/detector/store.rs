@@ -1,11 +1,12 @@
 //! Ring buffer of `Anomaly` records with atomic on-disk persistence at
 //! `{data_dir}/anomalies.json`. Mirrors `model::store::ProposalStore`.
 
-use std::collections::VecDeque;
-use std::fs;
-use std::io;
-use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::{
+    collections::VecDeque,
+    fs, io,
+    path::{Path, PathBuf},
+    sync::Mutex,
+};
 
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
@@ -219,8 +220,9 @@ fn write_atomic(path: &Path, on_disk: &OnDisk) -> Result<(), StoreError> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
+
+    use super::*;
 
     #[test]
     fn upsert_creates_new_when_absent() {

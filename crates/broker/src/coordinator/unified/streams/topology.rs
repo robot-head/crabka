@@ -19,25 +19,24 @@
 //! not-yet-satisfied conditions as a status list ([`validate_topology`] plus
 //! the still-missing internal topics).
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use crabka_metadata::{
     MetadataImage, MetadataRecord, PartitionRecord, TopicConfigRecord, TopicRecord,
 };
+// Alias the request wire module for readability.
+use crabka_protocol::owned::streams_group_heartbeat_request as wire;
 use crabka_raft::RaftError;
 use uuid::Uuid;
-
-use crate::error::BrokerError;
-use crate::metadata_source::MetadataSource;
 
 use super::persistence::{
     StoredCopartitionGroup, StoredSubtopology, StoredTopicInfo, StreamsGroupPartitionMetadataValue,
     StreamsGroupTopologyValue, StreamsTopicMeta,
 };
-
-// Alias the request wire module for readability.
-use crabka_protocol::owned::streams_group_heartbeat_request as wire;
+use crate::{error::BrokerError, metadata_source::MetadataSource};
 
 // ---------------------------------------------------------------------------
 // A. Request -> stored topology conversion
@@ -504,8 +503,9 @@ pub async fn ensure_internal_topics(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
+
+    use super::*;
 
     fn topic_record(name: &str, id: u8, partitions: i32) -> TopicRecord {
         TopicRecord {
@@ -554,8 +554,9 @@ mod tests {
 
     #[test]
     fn to_stored_topology_maps_all_fields() {
-        use crabka_protocol::owned::common::streams_group_heartbeat_request::key_value::KeyValue;
-        use crabka_protocol::owned::common::streams_group_heartbeat_request::topic_info::TopicInfo;
+        use crabka_protocol::owned::common::streams_group_heartbeat_request::{
+            key_value::KeyValue, topic_info::TopicInfo,
+        };
 
         let wire_topology = wire::Topology {
             epoch: 9,

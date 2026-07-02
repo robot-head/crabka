@@ -13,12 +13,13 @@ pub use disk_pressure::DiskPressure;
 pub use slow_broker::SlowBroker;
 pub use under_replicated::UnderReplicatedPartitions;
 
-use crate::capacity::BrokerCapacities;
-use crate::detector::{AnomalyKey, AnomalyKind, AnomalySeverity, SnapshotHistory};
-use crate::model::ClusterState;
-use crate::scraper::UsageStore;
-
 use super::DetectorConfig;
+use crate::{
+    capacity::BrokerCapacities,
+    detector::{AnomalyKey, AnomalyKind, AnomalySeverity, SnapshotHistory},
+    model::ClusterState,
+    scraper::UsageStore,
+};
 
 /// Rule input — passed to every rule on each tick. Borrowed because
 /// rules don't own state (the tick loop owns the history + stores).

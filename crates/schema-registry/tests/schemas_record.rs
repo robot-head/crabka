@@ -1,6 +1,6 @@
-use crabka_schema_registry::format::SchemaType;
-use crabka_schema_registry::kafkastore::record::{
-    SchemaKey, SchemaRecord, SchemaValue, encode_schema,
+use crabka_schema_registry::{
+    format::SchemaType,
+    kafkastore::record::{SchemaKey, SchemaRecord, SchemaValue, encode_schema},
 };
 
 fn fixture(name: &str) -> serde_json::Value {

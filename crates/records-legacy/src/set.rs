@@ -13,8 +13,10 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use crabka_compression::CompressionType;
 
-use crate::error::LegacyRecordsError;
-use crate::message::{Magic, Message, attrs_with_compression, compression_from_attrs};
+use crate::{
+    error::LegacyRecordsError,
+    message::{Magic, Message, attrs_with_compression, compression_from_attrs},
+};
 
 /// A single decoded MessageSet entry: the offset-tagged payload of one
 /// logical record after compression unwrapping.
@@ -238,8 +240,9 @@ pub fn encode_compressed_message_set<B: BufMut>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     fn sample_records_v1() -> Vec<ParsedRecord> {
         vec![

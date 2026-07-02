@@ -108,8 +108,8 @@ pub use log::{CompactionContext, Log, RawRead, ReadOutput, SegmentExport, Verbat
 sendfile_cfg! {
     pub use segment::RawSegmentDesc;
 }
-pub use segment::{RawSegmentRead, Segment};
-pub use txn_index::{AbortedTxn, TxnIndex};
 // Re-export the zero-copy fetch descriptor so broker code can name
 // `crabka_log::FileRegion` without depending on the protocol crate's path.
 pub use crabka_protocol::records::FileRegion;
+pub use segment::{RawSegmentRead, Segment};
+pub use txn_index::{AbortedTxn, TxnIndex};

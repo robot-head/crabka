@@ -14,10 +14,12 @@
 
 use assert2::{assert, check};
 use bytes::Bytes;
-use crabka_protocol::owned::heartbeat_request::HeartbeatRequest;
-use crabka_protocol::owned::join_group_request::{JoinGroupRequest, JoinGroupRequestProtocol};
-use crabka_protocol::owned::leave_group_request::{LeaveGroupRequest, MemberIdentity};
-use crabka_protocol::owned::sync_group_request::{SyncGroupRequest, SyncGroupRequestAssignment};
+use crabka_protocol::owned::{
+    heartbeat_request::HeartbeatRequest,
+    join_group_request::{JoinGroupRequest, JoinGroupRequestProtocol},
+    leave_group_request::{LeaveGroupRequest, MemberIdentity},
+    sync_group_request::{SyncGroupRequest, SyncGroupRequestAssignment},
+};
 
 mod support;
 

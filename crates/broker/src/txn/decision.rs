@@ -7,14 +7,12 @@
 //! drive. See `decision_model.rs` and the design:
 //! `docs/superpowers/specs/2026-06-14-crabka-txn-coordinator-model-design.md`.
 
-use crate::codes;
-use crate::producer_id_manager::ProducerIdManager;
-
-use super::handlers::end_txn::{
-    ReacquireDecision, next_producer_identity, validate_complete_reacquire,
+use super::{
+    handlers::end_txn::{ReacquireDecision, next_producer_identity, validate_complete_reacquire},
+    state::{TxnEntry, TxnState},
+    version::TxnVersion,
 };
-use super::state::{TxnEntry, TxnState};
-use super::version::TxnVersion;
+use crate::{codes, producer_id_manager::ProducerIdManager};
 
 /// Phase 1 of `EndTxn`: validate the `Ongoing → Prepare{Commit,Abort}` transition
 /// and apply it to `entry`. Returns `(prepare, complete)` states on success, or

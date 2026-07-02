@@ -18,8 +18,9 @@ pub enum MetadataError {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn display_topic_exists() {

@@ -9,15 +9,17 @@
 //! exercises the real wire path (version negotiation through `ApiVersions` —
 //! both share RPCs are MIN=MAX=1, so the client negotiates v1).
 
-use assert2::{assert, check};
 use std::sync::Arc;
 
+use assert2::{assert, check};
 use crabka_broker::{BootstrapMode, Broker, BrokerConfig};
 use crabka_client_core::Client;
-use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-use crabka_protocol::owned::list_groups_request::ListGroupsRequest;
-use crabka_protocol::owned::share_group_describe_request::ShareGroupDescribeRequest;
-use crabka_protocol::owned::share_group_heartbeat_request::ShareGroupHeartbeatRequest;
+use crabka_protocol::owned::{
+    create_topics_request::{CreatableTopic, CreateTopicsRequest},
+    list_groups_request::ListGroupsRequest,
+    share_group_describe_request::ShareGroupDescribeRequest,
+    share_group_heartbeat_request::ShareGroupHeartbeatRequest,
+};
 
 async fn boot() -> (crabka_broker::BrokerHandle, String, tempfile::TempDir) {
     let dir = tempfile::TempDir::new().unwrap();

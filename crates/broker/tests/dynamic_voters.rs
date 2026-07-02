@@ -10,7 +10,6 @@
 //! are gated off Windows like the other multi-node suites.
 
 use assert2::assert;
-
 use crabka_raft::reconfig::{ReconfigOutcome, RemoveVoter};
 
 mod support;

@@ -27,16 +27,17 @@ fn anon() -> crabka_security::Principal {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn duplicate_idempotency_key_produces_once() {
+    use std::collections::BTreeMap;
+
     use bytes::Bytes;
     use crabka_client_admin::{AdminClient, CreateTopicSpec};
     use crabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
-    use crabka_grpc_gateway::codec::RawCodec;
-    use crabka_grpc_gateway::dedup::DedupEngine;
-    use crabka_grpc_gateway::dedup::store::DedupStore;
-    use crabka_grpc_gateway::dedup::topic::ensure_dedup_topic;
-    use crabka_grpc_gateway::produce::ProduceCore;
-    use crabka_grpc_gateway::types::GatewayRecord;
-    use std::collections::BTreeMap;
+    use crabka_grpc_gateway::{
+        codec::RawCodec,
+        dedup::{DedupEngine, store::DedupStore, topic::ensure_dedup_topic},
+        produce::ProduceCore,
+        types::GatewayRecord,
+    };
     use tokio_util::sync::CancellationToken;
 
     let (broker, bootstrap, _dir) = boot().await;
@@ -137,8 +138,10 @@ async fn duplicate_idempotency_key_produces_once() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn run_ownership_rebuilds_map_and_owns_all_as_sole_member() {
-    use crabka_grpc_gateway::dedup::store::{ClaimValue, DedupStore};
-    use crabka_grpc_gateway::dedup::topic::ensure_dedup_topic;
+    use crabka_grpc_gateway::dedup::{
+        store::{ClaimValue, DedupStore},
+        topic::ensure_dedup_topic,
+    };
     use tokio_util::sync::CancellationToken;
 
     let (broker, bootstrap, _dir) = boot().await;
@@ -199,16 +202,17 @@ async fn run_ownership_rebuilds_map_and_owns_all_as_sole_member() {
 #[allow(clippy::too_many_lines)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_duplicates_produce_once() {
+    use std::collections::BTreeMap;
+
     use bytes::Bytes;
     use crabka_client_admin::{AdminClient, CreateTopicSpec};
     use crabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
-    use crabka_grpc_gateway::codec::RawCodec;
-    use crabka_grpc_gateway::dedup::DedupEngine;
-    use crabka_grpc_gateway::dedup::store::DedupStore;
-    use crabka_grpc_gateway::dedup::topic::ensure_dedup_topic;
-    use crabka_grpc_gateway::produce::ProduceCore;
-    use crabka_grpc_gateway::types::GatewayRecord;
-    use std::collections::BTreeMap;
+    use crabka_grpc_gateway::{
+        codec::RawCodec,
+        dedup::{DedupEngine, store::DedupStore, topic::ensure_dedup_topic},
+        produce::ProduceCore,
+        types::GatewayRecord,
+    };
     use tokio_util::sync::CancellationToken;
 
     let (broker, bootstrap, _dir) = boot().await;

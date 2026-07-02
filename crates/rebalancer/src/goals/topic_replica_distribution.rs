@@ -8,8 +8,10 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::goals::{Goal, GoalContext, GoalPriority};
-use crate::model::{ClusterState, Movement, PartitionView};
+use crate::{
+    goals::{Goal, GoalContext, GoalPriority},
+    model::{ClusterState, Movement, PartitionView},
+};
 
 pub struct TopicReplicaDistribution;
 
@@ -139,9 +141,10 @@ impl Goal for TopicReplicaDistribution {
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
+
     use super::*;
     use crate::model::BrokerView;
-    use assert2::assert;
 
     fn ctx_with(threshold: u32, cap: usize) -> GoalContext {
         GoalContext {

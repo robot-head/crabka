@@ -7,13 +7,13 @@
 //! by `serve_tls` is the _base_ identity; a valid bearer header **overrides**
 //! it for per-request authz.
 
-use std::net::SocketAddr;
-use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    net::SocketAddr,
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
-use axum::extract::Request;
-use axum::middleware::Next;
-use axum::response::Response;
+use axum::{extract::Request, middleware::Next, response::Response};
 use crabka_security::{AuthMethod, OAuthBearerValidator, Principal};
 
 /// Extension wrapper around [`OAuthBearerValidator`] placed on the
@@ -114,11 +114,13 @@ pub fn peer_or_default(req: &Request) -> SocketAddr {
 mod tests {
     use std::sync::Arc;
 
-    use axum::Router;
-    use axum::body::Body;
-    use axum::http::{Request, Response, StatusCode};
-    use axum::middleware::from_fn;
-    use axum::routing::get;
+    use axum::{
+        Router,
+        body::Body,
+        http::{Request, Response, StatusCode},
+        middleware::from_fn,
+        routing::get,
+    };
     use crabka_security::{OAuthBearerValidator, Principal, UnsecuredJwsValidator};
     use tower::ServiceExt;
 

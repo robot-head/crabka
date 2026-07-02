@@ -14,14 +14,14 @@ pub mod json;
 pub mod protobuf;
 
 use bytes::Bytes;
-
-use crate::error::SchemaSerdeError;
 #[cfg(any(feature = "avro", feature = "json", feature = "protobuf"))]
 use {
     crate::cache::SchemaCache,
     crate::subject::{Role, SchemaKind},
     std::sync::Arc,
 };
+
+use crate::error::SchemaSerdeError;
 
 /// Serialize `T` to a Confluent-framed payload for `topic` (subject derived
 /// from the topic + the serde's role).

@@ -8,22 +8,27 @@
 //! runtime can't drive the broker's accept loop concurrently with the registry's
 //! producer/reader tasks and the test body.
 
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
-use prost_reflect::prost::Message;
-use prost_reflect::prost_types::field_descriptor_proto::{Label as FieldLabel, Type as FieldType};
-use prost_reflect::prost_types::{
-    DescriptorProto, FieldDescriptorProto, FileDescriptorProto, FileDescriptorSet,
-    MethodDescriptorProto, ServiceDescriptorProto,
+use axum::{
+    body::Body,
+    http::{Request, StatusCode},
 };
-use tower::ServiceExt;
-
 use crabka_broker::{Broker, BrokerConfig};
-use crabka_schema_registry::config::{RegistryConfig, SecurityConfig};
-use crabka_schema_registry::format::SchemaType;
-use crabka_schema_registry::kafkastore::{KafkaStore, RegisterSchema};
-use crabka_schema_registry::rest::{self, AppState};
+use crabka_schema_registry::{
+    config::{RegistryConfig, SecurityConfig},
+    format::SchemaType,
+    kafkastore::{KafkaStore, RegisterSchema},
+    rest::{self, AppState},
+};
+use prost_reflect::{
+    prost::Message,
+    prost_types::{
+        DescriptorProto, FieldDescriptorProto, FileDescriptorProto, FileDescriptorSet,
+        MethodDescriptorProto, ServiceDescriptorProto,
+        field_descriptor_proto::{Label as FieldLabel, Type as FieldType},
+    },
+};
 use tokio_util::sync::CancellationToken;
+use tower::ServiceExt;
 
 async fn boot_registry(
     rf: i32,

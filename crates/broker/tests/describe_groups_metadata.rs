@@ -16,15 +16,17 @@
 //! `group_protocol_negotiation.rs` (the MEMBER_ID_REQUIRED two-step +
 //! INITIAL_REBALANCE_DELAY wait) and `unit.rs` (the SyncGroup shape).
 
-use assert2::{assert, check};
 use std::time::Duration;
 
+use assert2::{assert, check};
 use bytes::Bytes;
 use crabka_broker::{Broker, BrokerConfig};
 use crabka_client_core::Client;
-use crabka_protocol::owned::describe_groups_request::DescribeGroupsRequest;
-use crabka_protocol::owned::join_group_request::{JoinGroupRequest, JoinGroupRequestProtocol};
-use crabka_protocol::owned::sync_group_request::{SyncGroupRequest, SyncGroupRequestAssignment};
+use crabka_protocol::owned::{
+    describe_groups_request::DescribeGroupsRequest,
+    join_group_request::{JoinGroupRequest, JoinGroupRequestProtocol},
+    sync_group_request::{SyncGroupRequest, SyncGroupRequestAssignment},
+};
 
 // Kafka error code consumed by the JoinGroup two-step.
 const ERR_NONE: i16 = 0;

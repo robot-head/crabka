@@ -6,8 +6,7 @@
 //! NEVER observes the other tenant's label values / series identifiers, and that
 //! a request without `X-Scope-OrgID` is rejected as `bad_data`.
 
-use std::net::SocketAddr;
-use std::sync::Arc;
+use std::{net::SocketAddr, sync::Arc};
 
 use crabka_blockstore::Labels;
 use crabka_promql::{EngineOpts, InMemoryMetricStore, PrometheusApiState, prometheus_router};

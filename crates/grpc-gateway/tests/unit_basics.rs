@@ -43,11 +43,13 @@ fn claim_value_round_trips() {
 
 #[tokio::test]
 async fn dedup_produce_before_ownership_is_unavailable() {
-    use crabka_grpc_gateway::dedup::DedupEngine;
-    use crabka_grpc_gateway::dedup::store::DedupStore;
-    use crabka_grpc_gateway::error::GatewayError;
-    use crabka_grpc_gateway::types::GatewayRecord;
     use std::sync::Arc;
+
+    use crabka_grpc_gateway::{
+        dedup::{DedupEngine, store::DedupStore},
+        error::GatewayError,
+        types::GatewayRecord,
+    };
 
     // The store is constructed but run_ownership has never run, so owns()
     // returns false for every partition. The engine must refuse keyed produces

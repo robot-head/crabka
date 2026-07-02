@@ -3,18 +3,23 @@
 //! `GroupCoordinator`.
 
 use bytes::{Bytes, BytesMut};
+use crabka_metadata::{AclOperation, ResourceType};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        consumer_group_heartbeat_request::ConsumerGroupHeartbeatRequest,
+        consumer_group_heartbeat_response::ConsumerGroupHeartbeatResponse,
+    },
+};
 use tokio::sync::oneshot;
 
-use crabka_metadata::{AclOperation, ResourceType};
-use crabka_protocol::owned::consumer_group_heartbeat_request::ConsumerGroupHeartbeatRequest;
-use crabka_protocol::owned::consumer_group_heartbeat_response::ConsumerGroupHeartbeatResponse;
-use crabka_protocol::{Decode, Encode};
-
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes;
-use crate::coordinator::unified::actor::{GroupActorMessage, GroupKindTag};
-use crate::error::BrokerError;
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes,
+    coordinator::unified::actor::{GroupActorMessage, GroupKindTag},
+    error::BrokerError,
+};
 
 #[tracing::instrument(
     name = "handle_consumer_group_heartbeat",
@@ -133,10 +138,10 @@ fn encode(version: i16, resp: &ConsumerGroupHeartbeatResponse) -> Result<Bytes, 
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::sync::Arc;
+
     use assert2::assert;
     use crabka_metadata::{FeatureLevelRecord, MetadataImage, MetadataRecord};
-    use std::sync::Arc;
 
     const VERSION: i16 = crabka_protocol::owned::consumer_group_heartbeat_request::MAX_VERSION;
 
@@ -202,6 +207,8 @@ mod tests {
         let resp = error(codes::GROUP_AUTHORIZATION_FAILED);
         assert!(resp.error_code == codes::GROUP_AUTHORIZATION_FAILED);
     }
+
+    use super::*;
 
     #[test]
     fn group_read_denied_yields_group_authorization_failed() {

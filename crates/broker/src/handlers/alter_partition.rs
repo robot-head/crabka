@@ -6,18 +6,23 @@
 //! `PartitionRecord` via `controller.submit_change`.
 
 use bytes::{Bytes, BytesMut};
-
 use crabka_metadata::{AclOperation, MetadataRecord, PartitionRecord, ResourceType};
-use crabka_protocol::owned::alter_partition_request::AlterPartitionRequest;
-use crabka_protocol::owned::alter_partition_response::{
-    AlterPartitionResponse, PartitionData as RespPartitionData, TopicData as RespTopicData,
+use crabka_protocol::{
+    Decode, Encode, UnknownTaggedFields,
+    owned::{
+        alter_partition_request::AlterPartitionRequest,
+        alter_partition_response::{
+            AlterPartitionResponse, PartitionData as RespPartitionData, TopicData as RespTopicData,
+        },
+    },
 };
-use crabka_protocol::{Decode, Encode, UnknownTaggedFields};
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes,
+    error::BrokerError,
+};
 
 #[tracing::instrument(
     name = "handle_alter_partition",
@@ -314,21 +319,24 @@ fn encode_resp(version: i16, resp: &AlterPartitionResponse) -> Result<Bytes, Bro
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::{net::SocketAddr, sync::Arc, time::Duration};
+
     use assert2::assert;
     use crabka_metadata::{
         BrokerRegistrationRecord, MetadataImage, MetadataRecord, PartitionRecord, TopicRecord,
     };
-    use crabka_protocol::owned::alter_partition_request::{
-        BrokerState, PartitionData as ReqPartitionData, TopicData as ReqTopicData,
+    use crabka_protocol::{
+        owned::{
+            alter_partition_request::{
+                BrokerState, PartitionData as ReqPartitionData, TopicData as ReqTopicData,
+            },
+            alter_partition_response::{self, AlterPartitionResponse},
+        },
+        primitives::uuid::Uuid as ProtoUuid,
     };
-    use crabka_protocol::owned::alter_partition_response::{self, AlterPartitionResponse};
-    use crabka_protocol::primitives::uuid::Uuid as ProtoUuid;
     use crabka_security::{AuthMethod, Principal};
-    use std::net::SocketAddr;
-    use std::sync::Arc;
-    use std::time::Duration;
 
+    use super::*;
     use crate::test_support::DenyAll;
 
     const TOPIC_ID_BYTES: [u8; 16] = [7; 16];

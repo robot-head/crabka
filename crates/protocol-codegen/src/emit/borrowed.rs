@@ -10,10 +10,12 @@ use std::collections::HashMap;
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
-use crate::emit::common::format_int_literal;
-use crate::ir::{FieldSpec, FlexibleVersions, MessageSpec, MessageType, VersionRange};
-use crate::name_conv;
-use crate::resolve::{Resolution, StructKind};
+use crate::{
+    emit::common::format_int_literal,
+    ir::{FieldSpec, FlexibleVersions, MessageSpec, MessageType, VersionRange},
+    name_conv,
+    resolve::{Resolution, StructKind},
+};
 
 // ── helpers shared with owned ──────────────────────────────────────────────
 

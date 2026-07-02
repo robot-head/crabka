@@ -39,19 +39,23 @@
 //! Gated to non-Windows to match the multi-broker test convention (openraft
 //! `debug_assert!` races on the hosted Windows scheduler are unrelated).
 
-use assert2::assert;
-use std::io;
-use std::net::SocketAddr;
-use std::time::Duration;
+use std::{io, net::SocketAddr, time::Duration};
 
+use assert2::assert;
 use bytes::{Buf, BufMut, BytesMut};
 use crabka_broker::BrokerHandle;
 use crabka_metadata::{MetadataRecord, PartitionRecord, TopicConfigRecord};
-use crabka_protocol::owned::elect_leaders_request::{ElectLeadersRequest, TopicPartitions};
-use crabka_protocol::owned::elect_leaders_response::ElectLeadersResponse;
-use crabka_protocol::{Decode, Encode};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        elect_leaders_request::{ElectLeadersRequest, TopicPartitions},
+        elect_leaders_response::ElectLeadersResponse,
+    },
+};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+};
 
 mod support;
 
@@ -119,8 +123,10 @@ async fn create_topic_plaintext(
     partitions: i32,
     replication_factor: i16,
 ) {
-    use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-    use crabka_protocol::owned::create_topics_response::CreateTopicsResponse;
+    use crabka_protocol::owned::{
+        create_topics_request::{CreatableTopic, CreateTopicsRequest},
+        create_topics_response::CreateTopicsResponse,
+    };
 
     let req = CreateTopicsRequest {
         topics: vec![CreatableTopic {

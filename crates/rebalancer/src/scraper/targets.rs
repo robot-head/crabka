@@ -46,8 +46,9 @@ pub fn parse_targets(spec: &str) -> Result<Vec<ScrapeTarget>, TargetParseError> 
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn empty_input_returns_empty_vec() {
@@ -87,8 +88,7 @@ mod tests {
     }
 }
 
-use std::sync::Arc;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use arc_swap::ArcSwap;
 use tracing::warn;
@@ -163,9 +163,10 @@ fn should_warn_empty_host(broker_id: i32) -> bool {
 
 #[cfg(test)]
 mod target_source_tests {
+    use assert2::assert;
+
     use super::*;
     use crate::model::{BrokerView, ClusterState, InFlightReassignment, PartitionView};
-    use assert2::assert;
 
     fn cluster_state_with(brokers: Vec<BrokerView>) -> ClusterState {
         ClusterState {

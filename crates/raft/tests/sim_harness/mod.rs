@@ -26,11 +26,13 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use crabka_raft::kraft::QuorumStateMachine;
-use crabka_raft::kraft::action::{Action, TimerKind};
-use crabka_raft::kraft::event::{Event, LogEnd};
-use crabka_raft::kraft::role::Role;
-use crabka_raft::kraft::types::{LeaderEpoch, LogView, NodeId, QuorumState, SimInstant};
+use crabka_raft::kraft::{
+    QuorumStateMachine,
+    action::{Action, TimerKind},
+    event::{Event, LogEnd},
+    role::Role,
+    types::{LeaderEpoch, LogView, NodeId, QuorumState, SimInstant},
+};
 
 // --------------------------------------------------------------------------
 // Pluggable per-node log

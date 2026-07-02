@@ -28,23 +28,22 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use futures_util::StreamExt;
-use tokio::runtime::Handle;
-use tokio::sync::watch;
-use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
-use tracing::{instrument, warn};
-
 use crabka_remote_storage::{
     InmemoryRemoteLogMetadataManager, RemoteLogMetadataManager, RemoteLogSegmentMetadata,
     RemoteLogSegmentMetadataUpdate, RemoteLogSegmentState, RemotePartitionDeleteMetadata,
     RemoteStorageError, TopicIdPartition,
 };
+use futures_util::StreamExt;
+use tokio::{runtime::Handle, sync::watch, task::JoinHandle};
+use tokio_util::sync::CancellationToken;
+use tracing::{instrument, warn};
 
-use crate::error::MetadataLogError;
-use crate::log::{AssignmentHandle, MetadataEventLog, MetadataEventStream, PartitionStart};
-use crate::partitioning::metadata_partition_for;
-use crate::serde::MetadataEvent;
+use crate::{
+    error::MetadataLogError,
+    log::{AssignmentHandle, MetadataEventLog, MetadataEventStream, PartitionStart},
+    partitioning::metadata_partition_for,
+    serde::MetadataEvent,
+};
 
 /// Sentinel target HWM meaning "this partition is assigned but its real
 /// high-water mark is not yet known" (the `high_water_marks` RPC failed,
@@ -723,16 +722,17 @@ async fn pump_loop(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::assert;
-    use assert2::check;
     use std::collections::BTreeMap;
+
+    use assert2::{assert, check};
+    use crabka_remote_storage::{CustomMetadata, RemoteLogSegmentId, RemotePartitionDeleteState};
     use uuid::Uuid;
 
-    use crabka_remote_storage::{CustomMetadata, RemoteLogSegmentId, RemotePartitionDeleteState};
-
-    use crate::error::MetadataLogError;
-    use crate::log::{AssignmentHandle, InProcessMetadataEventLog, MetadataEventStream};
+    use super::*;
+    use crate::{
+        error::MetadataLogError,
+        log::{AssignmentHandle, InProcessMetadataEventLog, MetadataEventStream},
+    };
 
     /// Test double that delegates to an inner [`InProcessMetadataEventLog`]
     /// but can be told to fail `high_water_marks()` on demand. The

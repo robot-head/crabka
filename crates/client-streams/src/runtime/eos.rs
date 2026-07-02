@@ -55,9 +55,11 @@ pub fn transactional_id(application_id: &str, thread_idx: usize) -> String {
 
 #[cfg(test)]
 pub(crate) mod mock {
-    use super::*;
-    use bytes::Bytes;
     use std::sync::Mutex;
+
+    use bytes::Bytes;
+
+    use super::*;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum Step {
@@ -135,8 +137,9 @@ pub(crate) mod mock {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::check;
+
+    use super::*;
 
     #[test]
     fn transactional_id_is_stable_per_thread() {
@@ -146,8 +149,9 @@ mod tests {
 
     #[tokio::test]
     async fn mock_records_calls_and_can_fail() {
-        use crate::runtime::io::RecordProducer;
         use mock::{MockTransactionalProducer, Step};
+
+        use crate::runtime::io::RecordProducer;
         let p = MockTransactionalProducer {
             fail_at: std::sync::Mutex::new(Some(Step::Commit)),
             ..Default::default()

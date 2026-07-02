@@ -8,19 +8,17 @@
 //! The actual compaction runs on the partition's writer actor, so
 //! appends and compaction are serialized.
 
-use std::sync::Arc;
-use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::{
+    sync::{Arc, atomic::Ordering},
+    time::Duration,
+};
 
+use crabka_metadata::NodeId;
 use qubit_clock::sleep::{AsyncSleeper, SystemSleeper};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
-use crabka_metadata::NodeId;
-
-use crate::metrics::BrokerMetrics;
-use crate::partition::Partition;
-use crate::partition_registry::PartitionRegistry;
+use crate::{metrics::BrokerMetrics, partition::Partition, partition_registry::PartitionRegistry};
 
 /// Default cadence of the broker-wide compaction sweep.
 const DEFAULT_COMPACTION_INTERVAL: Duration = Duration::from_secs(30);
@@ -123,13 +121,15 @@ pub(crate) async fn tick_all(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::sync::atomic::Ordering;
+
     use assert2::assert;
     use bytes::Bytes;
     use crabka_protocol::records::{Record, RecordBatch};
-    use std::sync::atomic::Ordering;
     use tempfile::TempDir;
     use tokio_util::sync::CancellationToken;
+
+    use super::*;
 
     fn keyed_batch(base: i64, key: &[u8], value: &[u8]) -> RecordBatch {
         RecordBatch {
@@ -238,8 +238,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_ticks_until_shutdown() {
-        use qubit_clock::MockWaiterKind;
-        use qubit_clock::sleep::MockSleeper;
+        use qubit_clock::{MockWaiterKind, sleep::MockSleeper};
 
         let dir = tempfile::tempdir().expect("log root");
         let registry = Arc::new(PartitionRegistry::new());

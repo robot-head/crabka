@@ -4,16 +4,17 @@
 
 #![allow(dead_code)]
 
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use crabka_protocol::owned::alter_partition_request::AlterPartitionRequest;
 use crabka_raft::NodeId;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
-use crate::partition::Partition;
-use crate::partition_registry::PartitionRegistry;
+use crate::{partition::Partition, partition_registry::PartitionRegistry};
 
 /// Cadence of the ISR maintenance scan: every leader partition's follower
 /// lag is re-evaluated once per tick.
@@ -353,13 +354,13 @@ fn is_not_controller_response(global_err: i16, part_err: i16) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::path::Path;
-    use std::sync::atomic::Ordering;
+    use std::{path::Path, sync::atomic::Ordering};
 
     use crabka_metadata::{BrokerRegistrationRecord, MetadataImage, MetadataRecord, TopicRecord};
     use tempfile::tempdir;
     use tokio::sync::watch;
+
+    use super::*;
 
     fn reg(id: NodeId) -> MetadataRecord {
         MetadataRecord::V1BrokerRegistration(BrokerRegistrationRecord {
@@ -650,9 +651,9 @@ mod tests {
 
     #[test]
     fn build_request_preserves_topic_broker_epochs_and_isr_fields() {
-        use crabka_protocol::UnknownTaggedFields;
-        use crabka_protocol::owned::alter_partition_request::{
-            BrokerState, PartitionData, TopicData,
+        use crabka_protocol::{
+            UnknownTaggedFields,
+            owned::alter_partition_request::{BrokerState, PartitionData, TopicData},
         };
 
         let topic_id = uuid::Uuid::from_u128(0xA11CE);

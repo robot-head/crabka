@@ -14,9 +14,9 @@
 //! that brackets the JVM value, since `approximateNumEntries` is documented as
 //! approximate. Every other field is an exact match.
 
-use crabka_client_streams::dsl::StreamsBuilder;
 use crabka_client_streams::{
     Consumed, I64Serde, SessionWindows, StringSerde, TimeWindows, TopologyTestDriver,
+    dsl::StreamsBuilder,
 };
 use serde_json::Value;
 

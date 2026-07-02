@@ -16,13 +16,15 @@ mod produce;
 
 #[cfg(test)]
 mod tests {
-    use crate::UnknownTaggedFields;
-    use crate::kafka_3_6_2;
-    use crate::owned::{
-        fetch_request::FetchRequest, fetch_response::FetchResponse,
-        produce_request::ProduceRequest, produce_response::ProduceResponse,
-    };
     use assert2::assert;
+
+    use crate::{
+        UnknownTaggedFields, kafka_3_6_2,
+        owned::{
+            fetch_request::FetchRequest, fetch_response::FetchResponse,
+            produce_request::ProduceRequest, produce_response::ProduceResponse,
+        },
+    };
 
     #[test]
     fn produce_request_legacy_to_canonical_defaults_transactional_id_to_none() {

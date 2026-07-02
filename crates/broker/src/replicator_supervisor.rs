@@ -13,24 +13,20 @@
 //!    where this broker is in `replicas` but is NOT the leader, and
 //!    cancels tasks for partitions removed from the image.
 
-use std::collections::HashSet;
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::{collections::HashSet, path::PathBuf, sync::Arc};
 
+use crabka_log::{Log, LogConfig};
+use crabka_metadata::MetadataImage;
+use crabka_raft::NodeId;
 use dashmap::DashMap;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
-use crabka_log::{Log, LogConfig};
-use crabka_metadata::MetadataImage;
-use crabka_raft::NodeId;
-
-use crate::broker::spawn_partition;
-use crate::partition_registry::PartitionRegistry;
-use crate::replicator;
-use crate::throttle::ThrottleState;
-use crate::txn::coordinator::TxnCoordinator;
+use crate::{
+    broker::spawn_partition, partition_registry::PartitionRegistry, replicator,
+    throttle::ThrottleState, txn::coordinator::TxnCoordinator,
+};
 
 /// A `(topic, partition)` pair — the key the supervisor tracks follower
 /// tasks, local materialization, and dir-assignment reports by.
@@ -564,7 +560,12 @@ impl ReplicatorSupervisor {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::{
+        collections::BTreeSet,
+        net::SocketAddr,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
     use assert2::{assert, check};
     use crabka_metadata::{
         BrokerEndpoint, BrokerRegistrationRecord, MetadataImage, MetadataRecord, PartitionRecord,
@@ -574,11 +575,10 @@ mod tests {
         AddVoter, Node, QuorumState, RaftError, ReconfigOutcome, RemoveVoter, SnapshotRange,
         UpdateVoter,
     };
-    use std::collections::BTreeSet;
-    use std::net::SocketAddr;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::watch;
     use uuid::Uuid;
+
+    use super::*;
 
     /// Yield-poll until `cond` holds, with a bounded hang-guard so a genuine
     /// stall fails the test deterministically instead of spinning forever.
@@ -1086,11 +1086,12 @@ mod tests {
 
     #[tokio::test]
     async fn push_topic_configs_pushes_overrides_to_local_partition() {
+        use std::collections::BTreeMap;
+
         use crabka_log::LogConfig;
         use crabka_metadata::{
             MetadataImage, MetadataRecord, PartitionRecord, TopicConfigRecord, TopicRecord,
         };
-        use std::collections::BTreeMap;
         use tempfile::tempdir;
         use uuid::Uuid;
 

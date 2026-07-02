@@ -1,9 +1,12 @@
+use std::{
+    io::{BufRead, BufReader, Write},
+    path::PathBuf,
+    process::{Child, ChildStdin, ChildStdout, Command, Stdio},
+    sync::{LazyLock, Mutex, MutexGuard},
+};
+
 use assert2::assert;
 use serde_json::{Value, json};
-use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::{LazyLock, Mutex, MutexGuard};
 
 pub struct Oracle {
     child: Child,

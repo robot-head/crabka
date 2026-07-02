@@ -10,18 +10,21 @@
 //! equality matcher returns exactly the rows whose fingerprint matches within
 //! the time window.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
-use arrow::array::{Int64Array, StringArray, UInt64Array};
-use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
-use arrow::record_batch::RecordBatch;
+use arrow::{
+    array::{Int64Array, StringArray, UInt64Array},
+    datatypes::{DataType, Field, Schema, SchemaRef},
+    record_batch::RecordBatch,
+};
 use crabka_blockstore::{
     BlockKey, BlockStore, COL_FINGERPRINT, COL_TIMESTAMP, LabelMatcher, Labels, LogRow, MatchOp,
     TimeRange, read_log_block, write_log_block,
 };
-use object_store::ObjectStore;
-use object_store::memory::InMemory;
+use object_store::{ObjectStore, memory::InMemory};
 use proptest::prelude::*;
 
 /// A total ordering over a row's full contents, so the read-back (sorted by

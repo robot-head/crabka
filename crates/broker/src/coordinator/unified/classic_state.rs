@@ -3,8 +3,10 @@
 //! protocol-agnostic and live on the unified [`super::group::Group`]
 //! container, not here.
 
-use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 
 use bytes::Bytes;
 
@@ -469,8 +471,9 @@ mod classic_state_model;
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
+
+    use super::*;
 
     fn sample_member(id: &str) -> Member {
         Member::new(

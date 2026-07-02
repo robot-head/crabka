@@ -13,8 +13,10 @@ pub mod subjects;
 
 use std::sync::Arc;
 
-use axum::Router;
-use axum::routing::{get, post};
+use axum::{
+    Router,
+    routing::{get, post},
+};
 
 use crate::kafkastore::KafkaStore;
 

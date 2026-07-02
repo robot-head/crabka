@@ -4,8 +4,10 @@
 
 use std::collections::HashMap;
 
-use super::codec::{ConsumedRecord, ProduceRecord};
-use super::graph::{BuiltColumnarTopology, ColumnarTopology};
+use super::{
+    codec::{ConsumedRecord, ProduceRecord},
+    graph::{BuiltColumnarTopology, ColumnarTopology},
+};
 
 /// Drives a [`ColumnarTopology`] in-process: pipe a batch of input records for a
 /// source topic, then read the records produced to each sink topic.
@@ -57,13 +59,20 @@ impl<'t> ColumnarTestDriver<'t> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::columnar::serde::polars::PolarsIpcSerde;
-    use crate::columnar::topology::codec::{BlobCodec, ConsumedRecord};
-    use crate::columnar::topology::operator::BuiltinOp;
-    use crate::processor::serde::Serde;
     use ::polars::prelude::*;
     use assert2::check;
+
+    use super::*;
+    use crate::{
+        columnar::{
+            serde::polars::PolarsIpcSerde,
+            topology::{
+                codec::{BlobCodec, ConsumedRecord},
+                operator::BuiltinOp,
+            },
+        },
+        processor::serde::Serde,
+    };
 
     #[test]
     fn driver_pipes_batch_and_reads_output() {

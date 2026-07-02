@@ -18,14 +18,12 @@
 
 #![allow(dead_code)]
 
+use std::{net::SocketAddr, time::Duration};
+
 use assert2::assert;
-use std::net::SocketAddr;
-use std::time::Duration;
-
-use tempfile::TempDir;
-
 use crabka_broker::{BootstrapMode, Broker, BrokerConfig, BrokerError, BrokerHandle};
 use crabka_client_core::Client;
+use tempfile::TempDir;
 
 pub struct InProcess {
     pub broker: BrokerHandle,
@@ -170,8 +168,9 @@ pub async fn start_with_audit_key(
 /// `for_tests` defaults. The anonymous client will be denied every admin
 /// operation, triggering `AuthorizationDenied` audit events.
 pub async fn start_with_deny_all_authz() -> InProcess {
-    use crabka_broker::authorizer::SimpleAclAuthorizer;
     use std::collections::HashSet;
+
+    use crabka_broker::authorizer::SimpleAclAuthorizer;
 
     let tempdir = tempfile::tempdir().expect("tempdir");
     let mut config = BrokerConfig::for_tests(tempdir.path().to_path_buf());
