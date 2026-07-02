@@ -32,7 +32,7 @@
 //! and advertises `host.docker.internal:9092`; the container reaches it via
 //! `--add-host=host.docker.internal:host-gateway`.
 
-use assert2::assert;
+use assert2::{assert, check};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -354,14 +354,17 @@ async fn jvm_streams_groups_admin_round_trips_crabka() {
     // of the single subtopology over `streams-input` (native StreamsGroupHeartbeat
     // / api 88).
     let (member_id, resp) = join_and_converge(&client, group, topology(topic), 2, 12).await;
-    assert!(
-        (
-            resp.error_code,
-            member_id.is_empty(),
-            active_partition_count(&resp),
-        ) == (0, false, 2),
-        "lone member must join cleanly with a broker-minted member id and own both \
-         input partitions, got member_id={member_id:?}, {resp:?}"
+    check!(
+        resp.error_code == 0,
+        "lone member must join cleanly, got member_id={member_id:?}, {resp:?}"
+    );
+    check!(
+        !member_id.is_empty(),
+        "lone member must get a broker-minted member id, got member_id={member_id:?}, {resp:?}"
+    );
+    check!(
+        active_partition_count(&resp) == 2,
+        "lone member must own both input partitions, got member_id={member_id:?}, {resp:?}"
     );
     let epoch = resp.member_epoch;
     keepalive(&client, group, &member_id, epoch).await;

@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use assert2::assert;
+use assert2::{assert, check};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use crabka_traceql::{
@@ -128,17 +128,15 @@ fn differential_search_corpus_covers_selector_structural_and_pipeline_queries() 
     let has_child_span_expectation = corpus
         .iter()
         .any(|case| case.expected_span_id == Some(CHILD_SPAN_ID_HEX));
-    assert!(
-        (kinds, has_child_span_expectation)
-            == (
-                vec![
-                    QueryCaseKind::Selector,
-                    QueryCaseKind::Structural,
-                    QueryCaseKind::Pipeline,
-                ],
-                true,
-            )
+    check!(
+        kinds
+            == vec![
+                QueryCaseKind::Selector,
+                QueryCaseKind::Structural,
+                QueryCaseKind::Pipeline,
+            ]
     );
+    check!(has_child_span_expectation);
 }
 
 #[tokio::test]
@@ -686,13 +684,18 @@ async fn grafana_service_graph_prometheus_datasource_and_series() -> TestResult 
             .iter()
             .any(|(k, v)| k == key && v == value)
     };
-    assert!(
-        (
-            (count - 1.0).abs() < 1e-9,
-            has_edge_label("client", "checkout-frontend"),
-            has_edge_label("server", "cart-backend"),
-        ) == (true, true, true),
-        "expected one paired request for the seed edge with client=checkout-frontend and server=cart-backend labels, got count={count}, labels={:?}",
+    check!(
+        (count - 1.0).abs() < 1e-9,
+        "expected one paired request for the seed edge, got count={count}"
+    );
+    check!(
+        has_edge_label("client", "checkout-frontend"),
+        "expected the client=checkout-frontend label on the seed edge, got labels={:?}",
+        request_total.labels
+    );
+    check!(
+        has_edge_label("server", "cart-backend"),
+        "expected the server=cart-backend label on the seed edge, got labels={:?}",
         request_total.labels
     );
 
@@ -1107,16 +1110,20 @@ fn assert_trace_shape_matches(tempo: &JsonValue, crabka: &JsonValue) {
 }
 
 fn assert_search_shape_matches(tempo: &JsonValue, crabka: &JsonValue) {
-    assert!(
-        (
-            tempo["traces"]
-                .as_array()
-                .is_some_and(|traces| !traces.is_empty()),
-            crabka["traces"]
-                .as_array()
-                .is_some_and(|traces| !traces.is_empty()),
-            crabka["traces"][0]["traceID"].as_str(),
-        ) == (true, true, Some(TRACE_ID_HEX)),
+    check!(
+        tempo["traces"]
+            .as_array()
+            .is_some_and(|traces| !traces.is_empty()),
+        "search shape mismatch; Tempo search response: {tempo}; Crabka search response: {crabka}"
+    );
+    check!(
+        crabka["traces"]
+            .as_array()
+            .is_some_and(|traces| !traces.is_empty()),
+        "search shape mismatch; Tempo search response: {tempo}; Crabka search response: {crabka}"
+    );
+    check!(
+        crabka["traces"][0]["traceID"].as_str() == Some(TRACE_ID_HEX),
         "search shape mismatch; Tempo search response: {tempo}; Crabka search response: {crabka}"
     );
 }

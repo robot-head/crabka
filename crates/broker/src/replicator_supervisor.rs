@@ -561,7 +561,7 @@ impl ReplicatorSupervisor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use crabka_metadata::{
         BrokerEndpoint, BrokerRegistrationRecord, MetadataImage, MetadataRecord, PartitionRecord,
         TopicRecord,
@@ -970,13 +970,9 @@ mod tests {
 
         supervisor.reconcile(&img).await;
 
-        assert!(
-            (
-                token.is_cancelled(),
-                supervisor.tasks.len(),
-                supervisor.task_targets.len(),
-            ) == (true, 0, 0)
-        );
+        check!(token.is_cancelled());
+        check!(supervisor.tasks.len() == 0);
+        check!(supervisor.task_targets.len() == 0);
     }
 
     #[tokio::test]
@@ -992,13 +988,9 @@ mod tests {
 
         supervisor.reconcile(&img).await;
 
-        assert!(
-            (
-                token.is_cancelled(),
-                supervisor.tasks.len(),
-                supervisor.task_targets.len(),
-            ) == (true, 0, 0)
-        );
+        check!(token.is_cancelled());
+        check!(supervisor.tasks.len() == 0);
+        check!(supervisor.task_targets.len() == 0);
     }
 
     #[tokio::test]

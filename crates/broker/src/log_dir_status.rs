@@ -205,20 +205,16 @@ fn probe_one(dir: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use tempfile::tempdir;
 
     #[test]
     fn probe_writable_tempdir_is_online() {
         let tmp = tempdir().unwrap();
         let reg = LogDirRegistry::probe(&[tmp.path().to_path_buf()]);
-        assert!(
-            (
-                reg.is_offline(tmp.path()),
-                reg.offline(),
-                reg.online_subset(&[tmp.path().to_path_buf()]),
-            ) == (false, Vec::new(), vec![tmp.path().to_path_buf()])
-        );
+        check!(!reg.is_offline(tmp.path()));
+        check!(reg.offline().is_empty());
+        check!(reg.online_subset(&[tmp.path().to_path_buf()]) == vec![tmp.path().to_path_buf()]);
     }
 
     #[test]
@@ -276,13 +272,9 @@ mod tests {
         let blocker = tmp.path().join("bad");
         std::fs::write(&blocker, b"file blocking the path").unwrap();
         let reg = LogDirRegistry::probe(&[good.clone(), blocker.clone()]);
-        assert!(
-            (
-                reg.is_offline(&good),
-                reg.is_offline(&blocker),
-                reg.online_subset(&[good.clone(), blocker]),
-            ) == (false, true, vec![good])
-        );
+        check!(!reg.is_offline(&good));
+        check!(reg.is_offline(&blocker));
+        check!(reg.online_subset(&[good.clone(), blocker]) == vec![good]);
     }
 
     /// Unknown dirs (never probed) report `is_offline = false`. This
@@ -310,17 +302,9 @@ mod tests {
         let flipped = reg.mark_offline(&dir, "EIO from segment fsync");
         assert!(flipped, "first mark_offline must flip and return true");
 
-        assert!(
-            (
-                reg.is_offline(&dir),
-                reg.offline(),
-                reg.online_subset(std::slice::from_ref(&dir)),
-            ) == (
-                true,
-                vec![(dir.clone(), "EIO from segment fsync".to_string())],
-                Vec::new(),
-            )
-        );
+        check!(reg.is_offline(&dir));
+        check!(reg.offline() == vec![(dir.clone(), "EIO from segment fsync".to_string())]);
+        check!(reg.online_subset(std::slice::from_ref(&dir)).is_empty());
     }
 
     /// `mark_offline` is idempotent: a second call returns `false` and
@@ -334,10 +318,11 @@ mod tests {
         let reg = LogDirRegistry::probe(std::slice::from_ref(&dir));
         let first = reg.mark_offline(&dir, "first reason");
         let second = reg.mark_offline(&dir, "second reason");
-        assert!(
-            (first, second, reg.offline()[0].1.clone())
-                == (true, false, "first reason".to_string()),
-            "first call must flip; second must be a no-op with the original reason winning",
+        check!(first, "first call must flip");
+        check!(!second, "second call must be a no-op");
+        check!(
+            reg.offline()[0].1 == "first reason",
+            "the original reason must win",
         );
     }
 

@@ -685,7 +685,7 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
 
     use crabka_log::{Log, LogConfig};
     use crabka_metadata::{MetadataImage, MetadataRecord, TopicRecord};
@@ -1085,20 +1085,13 @@ mod tests {
         for md in &listed {
             // The data + offset/leader-epoch indexes are fetchable (non-empty)
             // from the remote store.
-            assert!(
-                (
-                    md.state(),
-                    rsm.fetch_log_segment(md, 0, None).unwrap().is_empty(),
-                    rsm.fetch_index(md, IndexType::Offset).unwrap().is_empty(),
-                    rsm.fetch_index(md, IndexType::LeaderEpoch)
-                        .unwrap()
-                        .is_empty(),
-                ) == (
-                    RemoteLogSegmentState::CopySegmentFinished,
-                    false,
-                    false,
-                    false
-                )
+            check!(md.state() == RemoteLogSegmentState::CopySegmentFinished);
+            check!(!rsm.fetch_log_segment(md, 0, None).unwrap().is_empty());
+            check!(!rsm.fetch_index(md, IndexType::Offset).unwrap().is_empty());
+            check!(
+                !rsm.fetch_index(md, IndexType::LeaderEpoch)
+                    .unwrap()
+                    .is_empty()
             );
         }
     }
@@ -1469,7 +1462,9 @@ mod tests {
         // now=10_000, retention=500ms → seg with max_ts < 9_500 is deletable.
         // seg0 (100) + seg1 (200) qualify; seg2 (9_500) stops the walk.
         let out = remote_retention_eviction_set(&segs, Some(500), None, 10_000);
-        assert!((out.len(), out[0].start_offset(), out[1].start_offset()) == (2, 0, 10));
+        assert!(out.len() == 2);
+        check!(out[0].start_offset() == 0);
+        check!(out[1].start_offset() == 10);
     }
 
     #[test]

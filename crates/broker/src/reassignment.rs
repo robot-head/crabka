@@ -168,7 +168,7 @@ pub(crate) async fn compute_reassignment_progress(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use crabka_metadata::{BrokerRegistrationRecord, MetadataImage, MetadataRecord, TopicRecord};
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -390,13 +390,9 @@ mod tests {
         assert!(updates.len() == 1);
         let pr = first_partition(&updates[0]);
         // Slot 0 → broker 1 → dA; slot 1 → broker 3 → dC (NOT dB).
-        assert!(
-            (
-                pr.replicas.clone(),
-                pr.directories.clone(),
-                pr.partition_epoch
-            ) == (vec![1, 3], vec![da, dc], 1)
-        );
+        check!(pr.replicas == vec![1, 3]);
+        check!(pr.directories == vec![da, dc]);
+        check!(pr.partition_epoch == 1);
     }
 
     #[tokio::test]
@@ -407,25 +403,13 @@ mod tests {
         assert!(updates.len() == 1);
         let pr = first_partition(&updates[0]);
         // leader and leader_epoch are unchanged (leader didn't change).
-        assert!(
-            (
-                pr.replicas.clone(),
-                pr.adding_replicas.clone(),
-                pr.removing_replicas.clone(),
-                pr.isr.clone(),
-                pr.leader,
-                pr.leader_epoch,
-                pr.partition_epoch,
-            ) == (
-                vec![1, 3],
-                Vec::<NodeId>::new(),
-                Vec::<NodeId>::new(),
-                vec![1, 3],
-                1,
-                5,
-                1,
-            )
-        );
+        check!(pr.replicas == vec![1, 3]);
+        check!(pr.adding_replicas == Vec::<NodeId>::new());
+        check!(pr.removing_replicas == Vec::<NodeId>::new());
+        check!(pr.isr == vec![1, 3]);
+        check!(pr.leader == 1);
+        check!(pr.leader_epoch == 5);
+        check!(pr.partition_epoch == 1);
     }
 
     #[tokio::test]
@@ -487,14 +471,10 @@ mod tests {
         assert!(pr.leader == 1 || pr.leader == 3, "leader was {}", pr.leader);
         // leader_epoch bumped; replica set unchanged — completion happens
         // next tick.
-        assert!(
-            (
-                pr.leader_epoch,
-                pr.partition_epoch,
-                pr.adding_replicas.clone(),
-                pr.removing_replicas.clone(),
-            ) == (6, 1, vec![3], vec![2])
-        );
+        check!(pr.leader_epoch == 6);
+        check!(pr.partition_epoch == 1);
+        check!(pr.adding_replicas == vec![3]);
+        check!(pr.removing_replicas == vec![2]);
     }
 
     #[tokio::test]

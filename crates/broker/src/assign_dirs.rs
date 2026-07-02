@@ -129,7 +129,7 @@ fn validate_assign_response(error_code: i16) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use crabka_metadata::MetadataImage;
     use crabka_protocol::{Decode, Encode};
     use crabka_raft::{
@@ -223,7 +223,9 @@ mod tests {
         let req = build_request(7, &assignments);
 
         // broker_id, epoch, and two directories.
-        assert!((req.broker_id, req.broker_epoch, req.directories.len()) == (7, -1, 2));
+        check!(req.broker_id == 7);
+        check!(req.broker_epoch == -1);
+        check!(req.directories.len() == 2);
 
         // Find dir dX and dY by their UUID bytes.
         let dir_x = req
@@ -266,7 +268,9 @@ mod tests {
     #[test]
     fn build_request_empty_assignments() {
         let req = build_request(1, &[]);
-        assert!((req.broker_id, req.broker_epoch, req.directories.len()) == (1, -1, 0));
+        check!(req.broker_id == 1);
+        check!(req.broker_epoch == -1);
+        check!(req.directories.is_empty());
     }
 
     #[test]

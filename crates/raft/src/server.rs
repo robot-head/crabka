@@ -550,7 +550,7 @@ fn build_describe_cluster_body(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use bytes::{BufMut, Bytes};
     use crabka_metadata::{MetadataRecord, TopicRecord};
     use crabka_protocol::Decode;
@@ -751,10 +751,10 @@ mod tests {
             let (api_key, api_version, correlation_id, body) =
                 super::read_one_request(&mut server).await.expect("decode");
 
-            assert!(
-                (api_key, api_version, correlation_id, body.as_ref()) == (52, 2, 123, want_body),
-                "case: {case}"
-            );
+            check!(api_key == 52, "case: {case}");
+            check!(api_version == 2, "case: {case}");
+            check!(correlation_id == 123, "case: {case}");
+            check!(body.as_ref() == want_body, "case: {case}");
             writer.await.unwrap();
         }
     }
@@ -959,14 +959,10 @@ mod tests {
             .expect("metadata fetch dispatch");
 
         let resp = decode_metadata_fetch_response(&body);
-        assert!(
-            (
-                resp.error_code,
-                resp.leader_hint,
-                resp.high_watermark,
-                resp.records.is_empty()
-            ) == (0, -1, 0, true)
-        );
+        check!(resp.error_code == 0);
+        check!(resp.leader_hint == -1);
+        check!(resp.high_watermark == 0);
+        check!(resp.records.is_empty());
     }
 
     #[tokio::test]
@@ -987,14 +983,10 @@ mod tests {
         .expect("metadata fetch dispatch");
 
         let resp = decode_metadata_fetch_response(&body);
-        assert!(
-            (
-                resp.error_code,
-                resp.leader_hint,
-                resp.high_watermark >= 1,
-                resp.records.is_empty()
-            ) == (0, 1, true, false)
-        );
+        check!(resp.error_code == 0);
+        check!(resp.leader_hint == 1);
+        check!(resp.high_watermark >= 1);
+        check!(!resp.records.is_empty());
     }
 
     #[tokio::test]
@@ -1008,16 +1000,12 @@ mod tests {
 
         let mut cur = &body[..];
         let resp = DescribeClusterResponse::decode(&mut cur, 1).expect("describe response");
-        assert!(
-            (
-                cur.is_empty(),
-                resp.controller_id,
-                resp.brokers.len(),
-                resp.brokers[0].broker_id,
-                resp.brokers[0].host.as_str(),
-                resp.brokers[0].port
-            ) == (true, -1, 1, -1, "", -1)
-        );
+        check!(cur.is_empty());
+        check!(resp.controller_id == -1);
+        check!(resp.brokers.len() == 1);
+        check!(resp.brokers[0].broker_id == -1);
+        check!(resp.brokers[0].host.as_str() == "");
+        check!(resp.brokers[0].port == -1);
     }
 
     #[test]
@@ -1075,17 +1063,13 @@ mod tests {
             let mut cur = &body[..];
             let resp = DescribeClusterResponse::decode(&mut cur, version).unwrap();
             assert!(cur.is_empty(), "no trailing bytes (v={version})");
-            assert!(
-                (
-                    resp.endpoint_type,
-                    resp.cluster_id.as_str(),
-                    resp.controller_id,
-                    resp.brokers.len(),
-                    resp.brokers[0].broker_id,
-                    resp.brokers[0].host.as_str(),
-                    resp.brokers[0].port
-                ) == (2, "clusterX", 1, 2, 1, "c1", 9093)
-            );
+            check!(resp.endpoint_type == 2);
+            check!(resp.cluster_id.as_str() == "clusterX");
+            check!(resp.controller_id == 1);
+            check!(resp.brokers.len() == 2);
+            check!(resp.brokers[0].broker_id == 1);
+            check!(resp.brokers[0].host.as_str() == "c1");
+            check!(resp.brokers[0].port == 9093);
 
             // endpoint_type = BROKERS (1) → broker projection (rack preserved).
             let body =
@@ -1093,16 +1077,12 @@ mod tests {
                     .unwrap();
             let mut cur = &body[..];
             let resp = DescribeClusterResponse::decode(&mut cur, version).unwrap();
-            assert!(
-                (
-                    resp.endpoint_type,
-                    resp.brokers.len(),
-                    resp.brokers[0].broker_id,
-                    resp.brokers[0].host.as_str(),
-                    resp.brokers[0].port,
-                    resp.brokers[0].rack.as_deref()
-                ) == (1, 1, 10, "b10", 9092, Some("rack-a"))
-            );
+            check!(resp.endpoint_type == 1);
+            check!(resp.brokers.len() == 1);
+            check!(resp.brokers[0].broker_id == 10);
+            check!(resp.brokers[0].host.as_str() == "b10");
+            check!(resp.brokers[0].port == 9092);
+            check!(resp.brokers[0].rack.as_deref() == Some("rack-a"));
         }
     }
 }

@@ -200,6 +200,7 @@ pub(crate) async fn handle(
 mod tests {
     use super::*;
     use assert2::assert;
+    use assert2::check;
     use crabka_protocol::Decode;
     use crabka_protocol::owned::delete_records_request::{
         DeleteRecordsPartition, DeleteRecordsTopic,
@@ -322,22 +323,14 @@ mod tests {
 
     #[test]
     fn offset_helpers_cover_delete_records_boundaries() {
-        assert!(
-            (
-                target_offset(-1, 42),
-                target_offset(-2, 42),
-                target_offset(7, 42)
-            ) == (42, -2, 7)
-        );
+        check!(target_offset(-1, 42) == 42);
+        check!(target_offset(-2, 42) == -2);
+        check!(target_offset(7, 42) == 7);
 
-        assert!(
-            (
-                offset_out_of_range(0, 10),
-                offset_out_of_range(10, 10),
-                offset_out_of_range(-1, 10),
-                offset_out_of_range(11, 10)
-            ) == (false, false, true, true)
-        );
+        check!(!offset_out_of_range(0, 10));
+        check!(!offset_out_of_range(10, 10));
+        check!(offset_out_of_range(-1, 10));
+        check!(offset_out_of_range(11, 10));
     }
 
     #[test]

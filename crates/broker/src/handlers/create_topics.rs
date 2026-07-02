@@ -488,6 +488,7 @@ mod replica_assignment_tests {
 mod handler_tests {
     use super::*;
     use assert2::assert;
+    use assert2::check;
     use crabka_protocol::Decode;
     use crabka_protocol::UnknownTaggedFields;
     use crabka_protocol::owned::create_topics_request::{
@@ -686,10 +687,9 @@ mod handler_tests {
         else {
             panic!("expected AdminOperation");
         };
-        assert!(
-            (outcome, principal.name.as_str(), operation.as_str())
-                == (crabka_audit::AuditOutcome::Success, "admin", "CreateTopics")
-        );
+        check!(outcome == crabka_audit::AuditOutcome::Success);
+        check!(principal.name.as_str() == "admin");
+        check!(operation.as_str() == "CreateTopics");
         let expected_resources = vec![crabka_audit::AuditResource {
             resource_type: "Topic".into(),
             name: "orders".into(),

@@ -130,6 +130,7 @@ fn encode_response<R: Encode>(
 mod tests {
     use super::*;
     use assert2::assert;
+    use assert2::check;
     use crabka_metadata::{ClientQuotaRecord, MetadataRecord, QuotaEntity};
     use crabka_protocol::Decode;
     use crabka_security::{AuthMethod, Principal};
@@ -342,14 +343,9 @@ mod tests {
         .expect("handle");
         let resp = decode_response(&bytes);
 
-        assert!(
-            (
-                resp.throttle_time_ms,
-                resp.error_code,
-                resp.error_message.clone()
-            ) == (0, 0, None),
-            "{resp:?}"
-        );
+        check!(resp.throttle_time_ms == 0, "{resp:?}");
+        check!(resp.error_code == 0, "{resp:?}");
+        check!(resp.error_message == None, "{resp:?}");
         let entries = resp.entries.expect("entries");
         assert!(entries.len() == 1, "{entries:?}");
         let entry = &entries[0];
@@ -359,20 +355,18 @@ mod tests {
             .iter()
             .map(|e| (e.entity_type.as_str(), e.entity_name.as_deref()))
             .collect();
-        assert!(
-            (
-                by_type.get("client-id"),
-                by_type.get("user"),
-                entry.values.len(),
-                entry.values[0].key.as_str(),
-                (entry.values[0].value - 2048.0).abs() < f64::EPSILON
-            ) == (
-                Some(&Some("app-1")),
-                Some(&Some("alice")),
-                1,
-                "producer_byte_rate",
-                true
-            ),
+        check!(
+            by_type.get("client-id") == Some(&Some("app-1")),
+            "{entry:?}"
+        );
+        check!(by_type.get("user") == Some(&Some("alice")), "{entry:?}");
+        check!(entry.values.len() == 1, "{entry:?}");
+        check!(
+            entry.values[0].key.as_str() == "producer_byte_rate",
+            "{entry:?}"
+        );
+        check!(
+            (entry.values[0].value - 2048.0).abs() < f64::EPSILON,
             "{entry:?}"
         );
         broker_handle.shutdown().await;

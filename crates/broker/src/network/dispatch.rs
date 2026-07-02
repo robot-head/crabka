@@ -4388,7 +4388,7 @@ fn patch_leading_throttle(resp: Bytes, api_key: i16, version: i16, delay_ms: i32
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use std::time::Duration;
 
     fn request_frame(
@@ -4427,7 +4427,10 @@ mod tests {
         buf.put_i16(2);
         buf.put_slice(b"hi");
         let (k, v, c, body) = parse_request_header(&buf).unwrap();
-        assert!((k, v, c, body.len()) == (3, 8, 42, 0));
+        check!(k == 3);
+        check!(v == 8);
+        check!(c == 42);
+        check!(body.is_empty());
     }
 
     #[test]
@@ -4435,7 +4438,10 @@ mod tests {
         // api_key=18 (ApiVersions), version=3 (flexible), corr_id=1, client_id="x"
         let buf = request_frame(18, 3, 1, Some(b"x"), Some(0), b"body");
         let (k, v, c, body) = parse_request_header(&buf).unwrap();
-        assert!((k, v, c, body) == (18, 3, 1, b"body".as_slice()));
+        check!(k == 18);
+        check!(v == 3);
+        check!(c == 1);
+        check!(body == b"body".as_slice());
     }
 
     #[test]

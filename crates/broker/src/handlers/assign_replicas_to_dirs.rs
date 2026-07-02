@@ -425,7 +425,13 @@ mod tests {
         let MetadataRecord::V1PartitionDirAssignment(r) = &changes[0] else {
             panic!("expected V1PartitionDirAssignment")
         };
-        assert!((r.topic.as_str(), r.partition, r.replica, r.directory) == ("t", 0, 2, dir));
+        let expected = PartitionDirAssignmentRecord {
+            topic: "t".into(),
+            partition: 0,
+            replica: 2,
+            directory: dir,
+        };
+        assert!(*r == expected);
     }
 
     #[test]
@@ -544,7 +550,13 @@ mod tests {
         };
         // The delta names broker 2's replica of (t, 0) on dir_uuid; on apply it
         // merges only slot 1, leaving slot 0 (broker 1) untouched.
-        assert!((r.topic.as_str(), r.partition, r.replica, r.directory) == ("t", 0, 2, dir_uuid));
+        let expected = PartitionDirAssignmentRecord {
+            topic: "t".into(),
+            partition: 0,
+            replica: 2,
+            directory: dir_uuid,
+        };
+        assert!(*r == expected);
     }
 
     #[test]

@@ -175,6 +175,7 @@ fn flatten_for_prometheus(
 mod tests {
     use super::*;
     use assert2::assert;
+    use assert2::check;
     use bytes::{Bytes, BytesMut};
     use crabka_compression::CompressionType;
     use crabka_protocol::owned::push_telemetry_response;
@@ -348,13 +349,11 @@ mod tests {
         let points = flatten_for_prometheus(&md, "instance-1", "client-a");
 
         assert!(points.len() == 4, "{points:?}");
-        assert!(
-            (
-                points[0].client_instance_id.as_str(),
-                points[0].client_id.as_str(),
-            ) == ("instance-1", "client-a"),
+        check!(
+            points[0].client_instance_id.as_str() == "instance-1",
             "{points:?}"
         );
+        check!(points[0].client_id.as_str() == "client-a", "{points:?}");
         let cases = [
             (0usize, "cpu.utilization", 0.75f64),
             (1, "requests.total", 42.0),

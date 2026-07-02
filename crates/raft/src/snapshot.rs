@@ -177,7 +177,7 @@ impl SnapshotReader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use crabka_protocol::Decode;
 
     use crabka_metadata::{
@@ -250,13 +250,9 @@ mod tests {
         let mut cur: &[u8] = &bytes;
 
         let header = RecordBatch::decode(&mut cur).expect("header batch");
-        assert!(
-            (
-                header.base_offset,
-                header.attributes.is_control_batch(),
-                header.records.len()
-            ) == (0, true, 1)
-        );
+        check!(header.base_offset == 0);
+        check!(header.attributes.is_control_batch());
+        check!(header.records.len() == 1);
         let header_value = header.records[0].value.as_ref().expect("header value");
         let mut header_cur = &header_value[..];
         let header_record =
@@ -270,18 +266,12 @@ mod tests {
         assert!(header_cur.is_empty());
 
         let data = RecordBatch::decode(&mut cur).expect("data batch");
-        assert!(
-            (
-                data.base_offset,
-                data.attributes.is_control_batch(),
-                data.records.len() >= 2,
-                data.last_offset_delta
-            ) == (
-                1,
-                false,
-                true,
-                i32::try_from(data.records.len() - 1).expect("record count fits")
-            )
+        check!(data.base_offset == 1);
+        check!(!data.attributes.is_control_batch());
+        check!(data.records.len() >= 2);
+        check!(
+            data.last_offset_delta
+                == i32::try_from(data.records.len() - 1).expect("record count fits")
         );
         for (i, record) in data.records.iter().enumerate() {
             assert!(record.offset_delta == i32::try_from(i).expect("index fits"));
@@ -289,17 +279,11 @@ mod tests {
         }
 
         let footer = RecordBatch::decode(&mut cur).expect("footer batch");
-        assert!(
-            (
-                footer.base_offset,
-                footer.attributes.is_control_batch(),
-                footer.records.len()
-            ) == (
-                1 + i64::try_from(data.records.len()).expect("record count fits"),
-                true,
-                1
-            )
+        check!(
+            footer.base_offset == 1 + i64::try_from(data.records.len()).expect("record count fits")
         );
+        check!(footer.attributes.is_control_batch());
+        check!(footer.records.len() == 1);
         let footer_value = footer.records[0].value.as_ref().expect("footer value");
         let mut footer_cur = &footer_value[..];
         let footer_record =
@@ -309,7 +293,8 @@ mod tests {
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
         };
         assert!(footer_record == expected_footer);
-        assert!((footer_cur.is_empty(), cur.is_empty()) == (true, true));
+        check!(footer_cur.is_empty());
+        check!(cur.is_empty());
     }
 
     /// A snapshot of an image carrying finalized KIP-584 features must
@@ -342,13 +327,9 @@ mod tests {
         let records = SnapshotReader::read_records(&bytes).unwrap();
         let rebuilt = MetadataImage::from_records(cid, &records);
         assert!(rebuilt == image);
-        assert!(
-            (
-                rebuilt.finalized_features().get("metadata.version"),
-                rebuilt.finalized_features().get("group.version"),
-                rebuilt.finalized_features_epoch()
-            ) == (Some(&25), Some(&1), 3)
-        );
+        check!(rebuilt.finalized_features().get("metadata.version") == Some(&25));
+        check!(rebuilt.finalized_features().get("group.version") == Some(&1));
+        check!(rebuilt.finalized_features_epoch() == 3);
     }
 
     #[test]
@@ -370,13 +351,9 @@ mod tests {
         let mut cur: &[u8] = &bytes;
 
         let header = RecordBatch::decode(&mut cur).expect("header batch");
-        assert!(
-            (
-                header.base_offset,
-                header.attributes.is_control_batch(),
-                header.records.len()
-            ) == (0, true, 1)
-        );
+        check!(header.base_offset == 0);
+        check!(header.attributes.is_control_batch());
+        check!(header.records.len() == 1);
         let header_value = header.records[0].value.as_ref().expect("header value");
         let mut header_cur = &header_value[..];
         let header_record =
@@ -390,13 +367,9 @@ mod tests {
         assert!(header_cur.is_empty());
 
         let footer = RecordBatch::decode(&mut cur).expect("footer batch");
-        assert!(
-            (
-                footer.base_offset,
-                footer.attributes.is_control_batch(),
-                footer.records.len()
-            ) == (1, true, 1)
-        );
+        check!(footer.base_offset == 1);
+        check!(footer.attributes.is_control_batch());
+        check!(footer.records.len() == 1);
         let footer_value = footer.records[0].value.as_ref().expect("footer value");
         let mut footer_cur = &footer_value[..];
         let footer_record =
@@ -406,7 +379,8 @@ mod tests {
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
         };
         assert!(footer_record == expected_footer);
-        assert!((footer_cur.is_empty(), cur.is_empty()) == (true, true));
+        check!(footer_cur.is_empty());
+        check!(cur.is_empty());
     }
 
     /// Docker-gated: a Crabka engine-produced KIP-630 snapshot (built by
@@ -524,16 +498,19 @@ mod tests {
         //    nil UUID is all-zeros).
         // 3. All Partition records must have partitionEpoch >= 0 after Slice 6
         //    (not -1, the schema default).
-        assert!(
-            (
-                !text.contains("isvalid: false") && !text.to_lowercase().contains("could not"),
-                !text.contains("incarnationId=00000000-0000-0000-0000-000000000000"),
-                !text
-                    .lines()
-                    .any(|l| l.contains("PartitionRecord") && l.contains("partitionEpoch=-1"))
-            ) == (true, true, true),
-            "dump-log record-validity / incarnationId / partitionEpoch checks failed \
-             (in order): {text}"
+        check!(
+            !text.contains("isvalid: false") && !text.to_lowercase().contains("could not"),
+            "dump-log record-validity check failed: {text}"
+        );
+        check!(
+            !text.contains("incarnationId=00000000-0000-0000-0000-000000000000"),
+            "dump-log incarnationId check failed: {text}"
+        );
+        check!(
+            !text
+                .lines()
+                .any(|l| l.contains("PartitionRecord") && l.contains("partitionEpoch=-1")),
+            "dump-log partitionEpoch check failed: {text}"
         );
     }
 

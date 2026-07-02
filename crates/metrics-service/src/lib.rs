@@ -1410,7 +1410,7 @@ impl From<MetricsServiceError> for crabka_promql::PromqlError {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+    use assert2::{assert, check};
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
     use bytes::Bytes;
@@ -1772,10 +1772,8 @@ rules:
         assert!(records.len() == 1);
         assert!(records[0].tenant == "tenant-a");
         let record_labels = records[0].labels();
-        assert!(
-            (record_labels.get("__name__"), record_labels.get("job"))
-                == (Some("job:up:sum"), Some("api"))
-        );
+        check!(record_labels.get("__name__") == Some("job:up:sum"));
+        check!(record_labels.get("job") == Some("api"));
         assert!(matches!(
             records[0].payload,
             crabka_metrics::SamplePayload::Float { value, .. } if (value - 1.0).abs() < f64::EPSILON
@@ -2440,15 +2438,16 @@ rules:
             .await
             .unwrap();
 
-        assert!(
-            (
-                old.len(),
-                old[0].get("job").unwrap(),
-                new.len(),
-                new[0].get("job").unwrap(),
-                list_calls.load(Ordering::SeqCst),
-                get_calls.load(Ordering::SeqCst),
-            ) == (1, "old", 1, "new", 2, 2),
+        check!(old.len() == 1);
+        check!(old[0].get("job").unwrap() == "old");
+        check!(new.len() == 1);
+        check!(new[0].get("job").unwrap() == "new");
+        check!(
+            list_calls.load(Ordering::SeqCst) == 2,
+            "cold refresh should list for new manifest keys but not re-download known .index objects"
+        );
+        check!(
+            get_calls.load(Ordering::SeqCst) == 2,
             "cold refresh should list for new manifest keys but not re-download known .index objects"
         );
     }
@@ -2503,13 +2502,9 @@ rules:
             .series_count_by_label_value_pair
             .iter()
             .any(|stat| stat.name == "job=old");
-        assert!(
-            (
-                stats.head_stats.num_series,
-                has_recent_series,
-                has_stale_series
-            ) == (1, true, false)
-        );
+        check!(stats.head_stats.num_series == 1);
+        check!(has_recent_series);
+        check!(!has_stale_series);
     }
 
     #[tokio::test]

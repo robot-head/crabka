@@ -122,7 +122,7 @@ impl PartitionRegistry {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+    use assert2::{assert, check};
     use std::path::Path;
     use std::sync::Arc;
 
@@ -152,24 +152,16 @@ mod tests {
     async fn insert_get_contains_remove() {
         let dir = tempdir().unwrap();
         let reg = PartitionRegistry::new();
-        assert!(
-            (
-                reg.arcs().is_empty(),
-                reg.arcs().len(),
-                reg.get("t", 0).is_none(),
-                reg.contains("t", 0),
-            ) == (true, 0, true, false)
-        );
+        check!(reg.arcs().is_empty());
+        check!(reg.arcs().len() == 0);
+        check!(reg.get("t", 0).is_none());
+        check!(!reg.contains("t", 0));
 
         let p = fixture_partition(dir.path(), "t", 0);
-        assert!(
-            (
-                reg.insert("t".to_string(), 0, Arc::clone(&p)).is_none(),
-                reg.contains("t", 0),
-                reg.arcs().is_empty(),
-                reg.arcs().len(),
-            ) == (true, true, false, 1)
-        );
+        check!(reg.insert("t".to_string(), 0, Arc::clone(&p)).is_none());
+        check!(reg.contains("t", 0));
+        check!(!reg.arcs().is_empty());
+        check!(reg.arcs().len() == 1);
 
         let got = reg.get("t", 0).expect("present");
         assert!(Arc::ptr_eq(&got, &p));
@@ -183,14 +175,10 @@ mod tests {
         assert!(reg.arcs().len() == 1);
 
         let removed = reg.remove("t", 0).expect("removed");
-        assert!(
-            (
-                Arc::ptr_eq(&removed, &p2),
-                reg.remove("t", 0).is_none(),
-                reg.contains("t", 0),
-                reg.arcs().is_empty(),
-            ) == (true, true, false, true)
-        );
+        check!(Arc::ptr_eq(&removed, &p2));
+        check!(reg.remove("t", 0).is_none());
+        check!(!reg.contains("t", 0));
+        check!(reg.arcs().is_empty());
     }
 
     #[tokio::test]
@@ -206,18 +194,16 @@ mod tests {
 
         let mut a_parts = reg.partitions_of("a");
         a_parts.sort_unstable();
-        assert!((a_parts, reg.partitions_of("b"), reg.len()) == (vec![2, 4], vec![7], 3));
+        check!(a_parts == vec![2, 4]);
+        check!(reg.partitions_of("b") == vec![7]);
+        check!(reg.len() == 3);
 
         let removed = reg.remove("a", 2).expect("removed");
         drop(removed);
 
-        assert!(
-            (
-                reg.partitions_of("a"),
-                reg.partitions_of("missing"),
-                reg.len()
-            ) == (vec![4], vec![], 2)
-        );
+        check!(reg.partitions_of("a") == vec![4]);
+        check!(reg.partitions_of("missing") == Vec::<i32>::new());
+        check!(reg.len() == 2);
     }
 
     #[tokio::test]

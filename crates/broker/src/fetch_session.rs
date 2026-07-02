@@ -492,7 +492,7 @@ mod fetch_session_model;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use crabka_protocol::owned::fetch_request::{FetchPartition, FetchTopic, ForgottenTopic};
 
     fn req(
@@ -555,7 +555,9 @@ mod tests {
         let a = cache.try_allocate(false, "alice".into(), vec![]);
         let b = cache.try_allocate(false, "alice".into(), vec![]);
         // Id allocation starts at 1 and increments monotonically.
-        assert!((a, b, cache.len()) == (1, 2, 2));
+        check!(a == 1);
+        check!(b == 2);
+        check!(cache.len() == 2);
     }
 
     #[test]
@@ -693,7 +695,9 @@ mod tests {
                 new_epoch,
                 partitions,
             } => {
-                assert!((session_id, new_epoch, partitions.len()) == (id, 2, 2));
+                check!(session_id == id);
+                check!(new_epoch == 2);
+                check!(partitions.len() == 2);
             }
             other => panic!("expected Incremental, got {other:?}"),
         }
@@ -1003,7 +1007,9 @@ mod tests {
         assert!(p > 0);
         // Cache full, only session is privileged. Consumer alloc refused.
         let c = cache.try_allocate(false, "consumer".into(), vec![]);
-        assert!((c, cache.evictions_total(), cache.len()) == (INVALID_SESSION_ID, 0, 1));
+        check!(c == INVALID_SESSION_ID);
+        check!(cache.evictions_total() == 0);
+        check!(cache.len() == 1);
     }
 
     #[test]
@@ -1013,7 +1019,9 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(2));
         let p2 = cache.try_allocate(true, "f2".into(), vec![]);
         // p2 gets the next monotonic id (p1 + 1) after evicting p1.
-        assert!((p2, cache.len(), cache.evictions_total()) == (p1 + 1, 1, 1));
+        check!(p2 == p1 + 1);
+        check!(cache.len() == 1);
+        check!(cache.evictions_total() == 1);
         let g = cache.inner.lock().unwrap();
         assert!(!g.sessions.contains_key(&p1));
         assert!(g.sessions.contains_key(&p2));

@@ -612,7 +612,7 @@ impl std::fmt::Debug for Partition {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+    use assert2::{assert, check};
     use std::sync::atomic::{AtomicI32, AtomicU64};
 
     use super::*;
@@ -809,10 +809,8 @@ mod tests {
         };
         p.install_isr(&[1, 2, 3], &[1, 2, 3], 1).await;
         let st = p.replica_state.lock().await;
-        assert!(
-            (st.isr.clone(), st.per_follower.get(&2).map(|f| f.leo))
-                == ([1, 2, 3].into_iter().collect(), Some(0))
-        );
+        check!(st.isr == [1, 2, 3].into_iter().collect());
+        check!(st.per_follower.get(&2).map(|f| f.leo) == Some(0));
     }
 
     #[tokio::test]

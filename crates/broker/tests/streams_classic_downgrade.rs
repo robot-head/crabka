@@ -5,7 +5,7 @@
 //! JoinGroup (offsets preserved); a streams group with a live member rejects it;
 //! and the admin handlers (List/Describe/Delete) respect the type lock.
 
-use assert2::assert;
+use assert2::{assert, check};
 use bytes::Bytes;
 use std::sync::Arc;
 use std::time::Duration;
@@ -375,16 +375,18 @@ async fn drained_streams_group_downgrades_and_preserves_offsets() {
     )
     .await
     .is_err();
-    assert!(
-        (resp.error_code, group_type, empty_waiter_timed_out)
-            == (
-                ERR_NONE,
-                Some(crabka_broker::coordinator::unified::GroupType::Streams),
-                true,
-            ),
+    check!(
+        resp.error_code == ERR_NONE,
+        "streams member must converge without error (precondition for the downgrade): {resp:?}"
+    );
+    check!(
+        group_type == Some(crabka_broker::coordinator::unified::GroupType::Streams),
         "streams member must converge on a Streams-typed group (precondition for the \
-         downgrade) whose streams-group-empty waiter does not complete while a member \
-         is live: {resp:?}"
+         downgrade): {resp:?}"
+    );
+    check!(
+        empty_waiter_timed_out,
+        "the streams-group-empty waiter must not complete while a member is live: {resp:?}"
     );
 
     // Commit offset 42 via the simple-consumer path (empty member_id, epoch

@@ -42,7 +42,7 @@ pub struct ListenerSpec {
 
 /// Credentials the broker uses when connecting *to* other brokers, one
 /// variant per SASL mechanism the inter-broker client can speak.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InterBrokerCredentials {
     /// SASL/PLAIN: `\0username\0password`.
     Plain { username: String, password: String },
@@ -1026,7 +1026,7 @@ impl Default for BrokerConfig {
 mod tests {
     use super::*;
     use crate::BrokerError as BrokerStartError;
-    use assert2::assert;
+    use assert2::{assert, check};
 
     #[test]
     fn production_default_selects_topic_backed_rlmm() {
@@ -1043,23 +1043,12 @@ mod tests {
     #[test]
     fn kafka_rlmm_config_default_has_sane_topic_settings() {
         let c = KafkaRlmmConfig::default();
-        assert!(
-            (
-                c.num_partitions,
-                c.replication,
-                c.bootstrap,
-                c.snapshot_dir,
-                c.snapshot_interval,
-                c.security.is_none(),
-            ) == (
-                50,
-                3,
-                String::new(),
-                std::path::PathBuf::new(),
-                DEFAULT_RLMM_SNAPSHOT_INTERVAL,
-                true,
-            )
-        );
+        check!(c.num_partitions == 50);
+        check!(c.replication == 3);
+        check!(c.bootstrap.is_empty());
+        check!(c.snapshot_dir == std::path::PathBuf::new());
+        check!(c.snapshot_interval == DEFAULT_RLMM_SNAPSHOT_INTERVAL);
+        check!(c.security.is_none());
     }
 
     #[test]
@@ -1377,13 +1366,9 @@ mod tests {
     #[test]
     fn auto_leader_rebalance_defaults_to_true_in_default() {
         let c = BrokerConfig::default();
-        assert!(
-            (
-                c.auto_leader_rebalance_enable,
-                c.leader_imbalance_check_interval_secs,
-                c.leader_imbalance_per_broker_percentage,
-            ) == (true, 300, 10)
-        );
+        check!(c.auto_leader_rebalance_enable);
+        check!(c.leader_imbalance_check_interval_secs == 300);
+        check!(c.leader_imbalance_per_broker_percentage == 10);
     }
 
     #[test]

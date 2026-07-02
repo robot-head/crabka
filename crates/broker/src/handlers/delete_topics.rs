@@ -302,6 +302,7 @@ pub(crate) async fn handle(
 mod tests {
     use super::*;
     use assert2::assert;
+    use assert2::check;
     use crabka_protocol::Decode;
     use crabka_protocol::owned::delete_topics_request::{DeleteTopicState, DeleteTopicsRequest};
     use crabka_security::{AuthMethod, Principal};
@@ -417,14 +418,10 @@ mod tests {
         let empty = String::new();
         let named = String::from("orders");
 
-        assert!(
-            (
-                requested_by_topic_id(None, id),
-                requested_by_topic_id(Some(&empty), id),
-                requested_by_topic_id(Some(&named), id),
-                requested_by_topic_id(None, WireUuid::ZERO)
-            ) == (true, true, false, false)
-        );
+        check!(requested_by_topic_id(None, id));
+        check!(requested_by_topic_id(Some(&empty), id));
+        check!(!requested_by_topic_id(Some(&named), id));
+        check!(!requested_by_topic_id(None, WireUuid::ZERO));
     }
 
     #[test]
@@ -521,19 +518,10 @@ mod tests {
             resource_type: "Topic".into(),
             name: "orders".into(),
         }];
-        assert!(
-            (
-                outcome,
-                principal.name.as_str(),
-                operation.as_str(),
-                resources
-            ) == (
-                crabka_audit::AuditOutcome::Success,
-                "admin",
-                "DeleteTopics",
-                expected_resources
-            )
-        );
+        check!(outcome == crabka_audit::AuditOutcome::Success);
+        check!(principal.name.as_str() == "admin");
+        check!(operation.as_str() == "DeleteTopics");
+        check!(resources == expected_resources);
     }
 
     #[test]

@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::io::Write;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use assert2::assert;
+use assert2::{assert, check};
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use crabka_blockstore::{
@@ -3429,24 +3429,16 @@ async fn real_loki_and_crabka_return_same_parser_error_labels() {
     let crabka_result = crabka_query_range_result(querier.clone(), query, base_ns, end_ns).await;
 
     assert!(crabka_result == loki_result);
-    assert!(
-        (
-            json_contains_string(&loki_result, invalid_line),
-            json_contains_string(&loki_result, valid_line),
-        ) == (true, true)
-    );
+    check!(json_contains_string(&loki_result, invalid_line));
+    check!(json_contains_string(&loki_result, valid_line));
 
     let query = r#"{app="api",format="json"} | json | __error__ = """#;
     let loki_result = loki_query_range_result(&http, &loki_base, query, base_ns, end_ns).await;
     let crabka_result = crabka_query_range_result(querier, query, base_ns, end_ns).await;
 
     assert!(crabka_result == loki_result);
-    assert!(
-        (
-            json_contains_string(&loki_result, invalid_line),
-            json_contains_string(&loki_result, valid_line),
-        ) == (false, true)
-    );
+    check!(!json_contains_string(&loki_result, invalid_line));
+    check!(json_contains_string(&loki_result, valid_line));
     broker.shutdown().await;
 }
 
@@ -3571,12 +3563,8 @@ async fn real_loki_and_crabka_return_same_logfmt_malformed_field_results() {
     let crabka_strict_result =
         crabka_query_range_result(querier.clone(), strict_query, base_ns, end_ns).await;
     assert!(crabka_strict_result == loki_strict_result);
-    assert!(
-        (
-            json_contains_string(&loki_strict_result, invalid_line),
-            json_contains_string(&loki_strict_result, valid_line),
-        ) == (true, false)
-    );
+    check!(json_contains_string(&loki_strict_result, invalid_line));
+    check!(!json_contains_string(&loki_strict_result, valid_line));
 
     let strict_clean_query = r#"{app="api",format="logfmt"} | logfmt --strict | __error__ = """#;
     let loki_strict_clean_result =
@@ -3584,12 +3572,11 @@ async fn real_loki_and_crabka_return_same_logfmt_malformed_field_results() {
     let crabka_strict_clean_result =
         crabka_query_range_result(querier, strict_clean_query, base_ns, end_ns).await;
     assert!(crabka_strict_clean_result == loki_strict_clean_result);
-    assert!(
-        (
-            json_contains_string(&loki_strict_clean_result, invalid_line),
-            json_contains_string(&loki_strict_clean_result, valid_line),
-        ) == (false, true)
-    );
+    check!(!json_contains_string(
+        &loki_strict_clean_result,
+        invalid_line
+    ));
+    check!(json_contains_string(&loki_strict_clean_result, valid_line));
     broker.shutdown().await;
 }
 

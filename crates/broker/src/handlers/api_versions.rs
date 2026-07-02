@@ -158,7 +158,7 @@ pub(crate) fn handle(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use crabka_metadata::{FeatureLevelRecord, MetadataRecord};
     use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
 
@@ -366,30 +366,20 @@ mod tests {
             .expect("ApiVersions handler");
         let resp = decode_response(API_VERSIONS_V3, &bytes);
 
-        assert!(
-            (
-                resp.error_code,
-                &resp.api_keys,
-                resp.supported_features.is_empty()
-            ) == (codes::NONE, &crate::api_catalog::supported_apis(), false),
+        check!(resp.error_code == codes::NONE, "{resp:?}");
+        check!(
+            resp.api_keys == crate::api_catalog::supported_apis(),
             "{resp:?}"
         );
+        check!(!resp.supported_features.is_empty(), "{resp:?}");
         let mv = resp
             .supported_features
             .iter()
             .find(|f| f.name == "metadata.version")
             .expect("metadata.version supported");
-        assert!(
-            (
-                mv.min_version,
-                mv.max_version,
-                resp.finalized_features_epoch
-            ) == (
-                crate::features::METADATA_VERSION_MIN,
-                crate::features::METADATA_VERSION_MAX,
-                image.finalized_features_epoch()
-            )
-        );
+        check!(mv.min_version == crate::features::METADATA_VERSION_MIN);
+        check!(mv.max_version == crate::features::METADATA_VERSION_MAX);
+        check!(resp.finalized_features_epoch == image.finalized_features_epoch());
         let finalized_mv = resp
             .finalized_features
             .iter()

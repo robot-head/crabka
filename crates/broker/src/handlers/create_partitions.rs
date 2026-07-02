@@ -359,6 +359,7 @@ pub(crate) async fn handle(
 mod tests {
     use super::*;
     use assert2::assert;
+    use assert2::check;
     use crabka_metadata::TopicRecord;
     use crabka_protocol::Decode;
     use crabka_protocol::owned::create_partitions_request::{
@@ -669,15 +670,11 @@ mod tests {
 
     #[test]
     fn local_materialization_predicates_track_replica_membership_and_leader() {
-        assert!(
-            (
-                should_materialize_locally(&[1, 2], 1),
-                should_materialize_locally(&[1, 2], 2),
-                should_materialize_locally(&[1, 2], 3),
-                is_local_leader(1, 1),
-                is_local_leader(2, 1)
-            ) == (true, true, false, true, false)
-        );
+        check!(should_materialize_locally(&[1, 2], 1));
+        check!(should_materialize_locally(&[1, 2], 2));
+        check!(!should_materialize_locally(&[1, 2], 3));
+        check!(is_local_leader(1, 1));
+        check!(!is_local_leader(2, 1));
     }
 
     #[tokio::test]
@@ -856,15 +853,16 @@ mod tests {
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
         };
         assert!(resp == expected);
-        assert!(
-            (
-                elapsed >= std::time::Duration::from_millis(450),
-                broker_handle
-                    .controller_image_for_test()
-                    .partitions_of("metered")
-                    .count(),
-            ) == (true, 5),
+        check!(
+            elapsed >= std::time::Duration::from_millis(450),
             "handler must wait for the advertised throttle, elapsed={elapsed:?}"
+        );
+        check!(
+            broker_handle
+                .controller_image_for_test()
+                .partitions_of("metered")
+                .count()
+                == 5
         );
         broker_handle.shutdown().await;
     }

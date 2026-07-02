@@ -332,7 +332,7 @@ mod producer_state_model;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
 
     #[tokio::test]
     async fn first_batch_appends() {
@@ -574,13 +574,9 @@ mod tests {
         let evicted = s.expire_older_than(1_000_000, 1).await;
         // The empty partition and topic maps are pruned (the empty topic slot
         // must be removed), and a subsequent produce still works after pruning.
-        assert!(
-            (
-                evicted,
-                s.by_topic.get("t").is_none(),
-                s.check("t", 0, 1, 0, 0, 0).await,
-            ) == (1, true, Decision::Append)
-        );
+        check!(evicted == 1);
+        check!(s.by_topic.get("t").is_none());
+        check!(s.check("t", 0, 1, 0, 0, 0).await == Decision::Append);
     }
 }
 

@@ -185,7 +185,7 @@ pub fn permission_to_wire(pt: PermissionType) -> i8 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
 
     #[test]
     fn resource_type_concrete_rejects_any() {
@@ -232,17 +232,9 @@ mod tests {
     /// `DescribeAcls` can carry the 2PC grant on a `TransactionalId`.
     #[test]
     fn two_phase_commit_operation_is_byte_15() {
-        assert!(
-            (
-                operation_to_wire(AclOperation::TwoPhaseCommit),
-                operation_concrete(15),
-                operation_filter(15),
-            ) == (
-                15,
-                Ok(AclOperation::TwoPhaseCommit),
-                Ok(Some(AclOperation::TwoPhaseCommit)),
-            )
-        );
+        check!(operation_to_wire(AclOperation::TwoPhaseCommit) == 15);
+        check!(operation_concrete(15) == Ok(AclOperation::TwoPhaseCommit));
+        check!(operation_filter(15) == Ok(Some(AclOperation::TwoPhaseCommit)));
     }
 
     /// The KIP-48 `TOKEN` (a.k.a. `DELEGATION_TOKEN`)
@@ -253,18 +245,12 @@ mod tests {
     fn delegation_token_resource_type_now_accepted() {
         use crabka_metadata::AclEntry;
 
-        // Concrete (CreateAcls), filter (Delete/DescribeAcls), encoder.
-        assert!(
-            (
-                resource_type_concrete(6),
-                resource_type_filter(6),
-                resource_type_to_wire(ResourceType::DelegationToken),
-            ) == (
-                Ok(ResourceType::DelegationToken),
-                Ok(Some(ResourceType::DelegationToken)),
-                6,
-            )
-        );
+        // Concrete (CreateAcls) codec.
+        check!(resource_type_concrete(6) == Ok(ResourceType::DelegationToken));
+        // Filter (Delete/DescribeAcls) codec.
+        check!(resource_type_filter(6) == Ok(Some(ResourceType::DelegationToken)));
+        // Encoder.
+        check!(resource_type_to_wire(ResourceType::DelegationToken) == 6);
 
         // Build a concrete AclEntry at the canonical (Describe, Allow)
         // shape KIP-48 token ACLs use; verify the wire bytes line up.

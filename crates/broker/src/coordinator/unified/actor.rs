@@ -1896,7 +1896,7 @@ mod consumer_group_composition_model;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
 
     use crate::coordinator::unified::GroupCoordinator;
     use crate::coordinator::unified::config::NextGenConfig;
@@ -1983,19 +1983,10 @@ mod tests {
 
         drain_removed_classic_waiters(&["m1".to_string()], &mut joiners, &mut followers);
 
-        assert!(
-            (
-                joiners.is_empty(),
-                followers.is_empty(),
-                join_rx.await.unwrap().error_code,
-                sync_rx.await.unwrap().error_code,
-            ) == (
-                true,
-                true,
-                codes::UNKNOWN_MEMBER_ID,
-                codes::UNKNOWN_MEMBER_ID
-            )
-        );
+        check!(joiners.is_empty());
+        check!(followers.is_empty());
+        check!(join_rx.await.unwrap().error_code == codes::UNKNOWN_MEMBER_ID);
+        check!(sync_rx.await.unwrap().error_code == codes::UNKNOWN_MEMBER_ID);
     }
 
     /// A coordinator whose metadata image holds one topic `t` with `partitions`
@@ -2100,14 +2091,10 @@ mod tests {
         // The join must succeed, echo the client-supplied member id, and
         // advance the epoch off 0. The client-id first-join takes the same
         // flush path as the empty-id case and persists exactly one batch.
-        assert!(
-            (
-                resp.error_code,
-                resp.member_id.as_deref(),
-                resp.member_epoch >= 1,
-                log.batches().await.len(),
-            ) == (0, Some("client-uuid-1"), true, 1)
-        );
+        check!(resp.error_code == 0);
+        check!(resp.member_id.as_deref() == Some("client-uuid-1"));
+        check!(resp.member_epoch >= 1);
+        check!(log.batches().await.len() == 1);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2523,14 +2510,10 @@ mod tests {
 
         // Admin surface lists/describes the classic group, then deletes it (empty).
         let listed = coord.list_groups().await;
-        assert!(
-            (
-                listed.iter().any(|s| s.group_id == "g"),
-                coord.describe_group("g").await.is_some(),
-                coord.delete_group("g").await == Ok(()),
-                coord.describe_group("g").await.is_none(),
-            ) == (true, true, true, true)
-        );
+        check!(listed.iter().any(|s| s.group_id == "g"));
+        check!(coord.describe_group("g").await.is_some());
+        check!(coord.delete_group("g").await == Ok(()));
+        check!(coord.describe_group("g").await.is_none());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2769,14 +2752,10 @@ mod tests {
         // The hosted classic member must survive the upgrade, the new native
         // consumer member must be present, and the upgrade batch tombstoned
         // the classic k2 GroupMetadata record.
-        assert!(
-            (
-                describe.members.len(),
-                describe.members.iter().any(|m| m.is_classic),
-                describe.members.iter().any(|m| !m.is_classic),
-                log.has_classic_group_metadata_tombstone("g").await,
-            ) == (2, true, true, true)
-        );
+        check!(describe.members.len() == 2);
+        check!(describe.members.iter().any(|m| m.is_classic));
+        check!(describe.members.iter().any(|m| !m.is_classic));
+        check!(log.has_classic_group_metadata_tombstone("g").await);
     }
 
     // ── KIP-848: serving hosted classic members off the reconciler ─────
@@ -2972,13 +2951,9 @@ mod tests {
         // 2. JoinGroup (rejoin of the existing member, unchanged subscription):
         //    success, server-assigned single-member view at group_epoch, self leader.
         let join = classic_join(&handle, "m-classic", "t").await;
-        assert!(
-            (
-                join.error_code,
-                join.leader.as_str(),
-                join.member_id.as_str()
-            ) == (codes::NONE, "m-classic", "m-classic")
-        );
+        check!(join.error_code == codes::NONE);
+        check!(join.leader.as_str() == "m-classic");
+        check!(join.member_id.as_str() == "m-classic");
         // Generation equals the group epoch (read it back from Describe).
         let (tx, rx) = tokio::sync::oneshot::channel();
         handle
@@ -3161,15 +3136,11 @@ mod tests {
         // record (which would otherwise survive log compaction and resurrect
         // the group as next-gen), and wrote a classic k2 GroupMetadata
         // (non-tombstone) for "g".
-        assert!(
-            (
-                snap.members.len(),
-                snap.members.iter().any(|m| m.member_id == "m-classic"),
-                log.has_next_gen_group_metadata_tombstone("g").await,
-                log.has_next_gen_target_metadata_tombstone("g").await,
-                log_has_classic_group_metadata_write(&log, "g").await,
-            ) == (1, true, true, true, true)
-        );
+        check!(snap.members.len() == 1);
+        check!(snap.members.iter().any(|m| m.member_id == "m-classic"));
+        check!(log.has_next_gen_group_metadata_tombstone("g").await);
+        check!(log.has_next_gen_target_metadata_tombstone("g").await);
+        check!(log_has_classic_group_metadata_write(&log, "g").await);
     }
 
     /// KIP-848 admin coherence: after an in-place UPGRADE the group is
@@ -3202,18 +3173,16 @@ mod tests {
         // an assigned hosted-classic member has non-empty assignment bytes.
         // generation_id mirrors the group epoch (the next-gen analogue of a
         // classic group's generation) and must have advanced off 0.
-        assert!(
-            (
-                snap.group_id.as_str(),
-                snap.members.is_empty(),
-                snap.members.iter().any(|m| m.member_id == "m-classic"),
-                snap.protocol_type.as_deref(),
-                snap.members
-                    .iter()
-                    .any(|m| m.member_id == "m-classic" && !m.assignment.is_empty()),
-                snap.generation_id >= 1,
-            ) == ("g", false, true, Some("consumer"), true, true)
+        check!(snap.group_id.as_str() == "g");
+        check!(!snap.members.is_empty());
+        check!(snap.members.iter().any(|m| m.member_id == "m-classic"));
+        check!(snap.protocol_type.as_deref() == Some("consumer"));
+        check!(
+            snap.members
+                .iter()
+                .any(|m| m.member_id == "m-classic" && !m.assignment.is_empty())
         );
+        check!(snap.generation_id >= 1);
 
         // `list_groups` produces the wire `group_type="classic"` rows; an
         // upgraded (consumer-kind) group is NOT a classic row, so it does not
@@ -3801,13 +3770,9 @@ mod tests {
         let step = step_heartbeat(&mut group, &config, &metadata, &req, "", Instant::now());
         // First join succeeds, advances to group epoch 1, targets all
         // partitions of "t", and must persist records.
-        assert!(
-            (
-                step.response.error_code,
-                step.response.member_epoch,
-                group.target.per_member["m1"][&topic_id].clone(),
-                step.pending.is_empty(),
-            ) == (0, 1, vec![0, 1], false)
-        );
+        check!(step.response.error_code == 0);
+        check!(step.response.member_epoch == 1);
+        check!(group.target.per_member["m1"][&topic_id].clone() == vec![0, 1]);
+        check!(!step.pending.is_empty());
     }
 }

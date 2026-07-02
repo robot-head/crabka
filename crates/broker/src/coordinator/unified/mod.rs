@@ -1223,15 +1223,15 @@ pub struct StreamsGroupSeed {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
 
     #[test]
     fn group_type_has_share_variant() {
         // KIP-932: a third locked group type alongside Classic and NextGen.
         let t = GroupType::Share;
-        assert!(
-            (t, t != GroupType::Classic, t != GroupType::NextGen) == (GroupType::Share, true, true)
-        );
+        check!(t == GroupType::Share);
+        check!(t != GroupType::Classic);
+        check!(t != GroupType::NextGen);
     }
 
     fn make_coord() -> Arc<GroupCoordinator> {
@@ -1569,13 +1569,9 @@ mod tests {
     #[test]
     fn cache_updates_and_forced_type_transitions_are_observable() {
         let coord = make_coord();
-        assert!(
-            (
-                coord.cached_seed("g"),
-                coord.cached_share_seed("sg"),
-                coord.cached_streams_seed("st"),
-            ) == (None, None, None)
-        );
+        check!(coord.cached_seed("g") == None);
+        check!(coord.cached_share_seed("sg") == None);
+        check!(coord.cached_streams_seed("st") == None);
 
         coord.update_cache(
             "g",
@@ -1599,13 +1595,9 @@ mod tests {
         coord.mark_next_gen("g");
         assert!(coord.group_type("g") == Some(GroupType::NextGen));
         coord.mark_classic_after_downgrade("g");
-        assert!(
-            (
-                coord.group_type("g"),
-                coord.seeds.get("g").is_none(),
-                coord.cached_seed("g"),
-            ) == (Some(GroupType::Classic), true, None)
-        );
+        check!(coord.group_type("g") == Some(GroupType::Classic));
+        check!(coord.seeds.get("g").is_none());
+        check!(coord.cached_seed("g") == None);
 
         coord.update_share_cache(
             "sg",
@@ -1637,13 +1629,9 @@ mod tests {
         let coord = make_coord();
         let share_a = coord.get_or_create_share("share-a");
         let share_b = coord.get_or_create_share("share-b");
-        assert!(
-            (
-                Arc::ptr_eq(&share_a, &coord.get_or_create_share("share-a")),
-                coord.find_share("share-b").is_some(),
-                Arc::ptr_eq(&share_a, &share_b),
-            ) == (true, true, false)
-        );
+        check!(Arc::ptr_eq(&share_a, &coord.get_or_create_share("share-a")));
+        check!(coord.find_share("share-b").is_some());
+        check!(!Arc::ptr_eq(&share_a, &share_b));
 
         let streams_a = coord.get_or_create_streams("streams-a");
         assert!(Arc::ptr_eq(
@@ -1678,40 +1666,32 @@ mod tests {
         );
 
         coord.mark_classic("g");
-        assert!(
-            (
-                coord
-                    .try_convert_classic_to_streams("g", 101)
-                    .await
-                    .unwrap(),
-                coord.group_type("g"),
-                offsets_log.appended.lock().await.len(),
-            ) == (
-                streams::migration::ConvertOutcome::Converted,
-                Some(GroupType::Streams),
-                1
-            )
+        check!(
+            coord
+                .try_convert_classic_to_streams("g", 101)
+                .await
+                .unwrap()
+                == streams::migration::ConvertOutcome::Converted
         );
+        check!(coord.group_type("g") == Some(GroupType::Streams));
+        check!(offsets_log.appended.lock().await.len() == 1);
 
-        assert!(
-            (
-                coord
-                    .try_convert_streams_to_classic("fresh", 102)
-                    .await
-                    .unwrap(),
-                coord
-                    .try_convert_streams_to_classic("g", 103)
-                    .await
-                    .unwrap(),
-                coord.group_type("g"),
-                offsets_log.appended.lock().await.len(),
-            ) == (
-                streams::migration::DowngradeOutcome::NotStreams,
-                streams::migration::DowngradeOutcome::Converted,
-                Some(GroupType::Classic),
-                2
-            )
+        check!(
+            coord
+                .try_convert_streams_to_classic("fresh", 102)
+                .await
+                .unwrap()
+                == streams::migration::DowngradeOutcome::NotStreams
         );
+        check!(
+            coord
+                .try_convert_streams_to_classic("g", 103)
+                .await
+                .unwrap()
+                == streams::migration::DowngradeOutcome::Converted
+        );
+        check!(coord.group_type("g") == Some(GroupType::Classic));
+        check!(offsets_log.appended.lock().await.len() == 2);
 
         coord.mark_streams("missing-streams-actor");
         assert!(
@@ -1942,18 +1922,12 @@ mod tests {
         let snapshot = provider.snapshot();
         let proto_topic_id = crabka_protocol::primitives::uuid::Uuid(*topic_id.as_bytes());
 
-        assert!(
-            (
-                snapshot.topic_id_by_name.get("input"),
-                snapshot.partitions_per_topic.get(&proto_topic_id),
-                snapshot.partition_racks.get(&(proto_topic_id, 0)),
-                snapshot.partition_racks.get(&(proto_topic_id, 1)),
-            ) == (
-                Some(&proto_topic_id),
-                Some(&2),
-                Some(&vec!["rack-a".to_string(), "rack-b".to_string()]),
-                None
-            )
+        check!(snapshot.topic_id_by_name.get("input") == Some(&proto_topic_id));
+        check!(snapshot.partitions_per_topic.get(&proto_topic_id) == Some(&2));
+        check!(
+            snapshot.partition_racks.get(&(proto_topic_id, 0))
+                == Some(&vec!["rack-a".to_string(), "rack-b".to_string()])
         );
+        check!(snapshot.partition_racks.get(&(proto_topic_id, 1)) == None);
     }
 }

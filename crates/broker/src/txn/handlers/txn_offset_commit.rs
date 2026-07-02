@@ -337,7 +337,7 @@ mod tests {
     use std::path::Path;
     use std::sync::Arc;
 
-    use assert2::assert;
+    use assert2::{assert, check};
     use crabka_log::{Log, LogConfig};
     use crabka_protocol::owned::txn_offset_commit_request::{
         TxnOffsetCommitRequestPartition, TxnOffsetCommitRequestTopic,
@@ -505,15 +505,11 @@ mod tests {
         let read = log.read(0, 1024 * 1024).expect("read offsets log");
         assert!(read.batches.len() == 1);
         let batch = &read.batches[0];
-        assert!(
-            (
-                batch.attributes.is_transactional(),
-                batch.max_timestamp,
-                batch.producer_id,
-                batch.producer_epoch,
-                batch.last_offset_delta
-            ) == (true, 12_345, 47, 5, 1)
-        );
+        check!(batch.attributes.is_transactional());
+        check!(batch.max_timestamp == 12_345);
+        check!(batch.producer_id == 47);
+        check!(batch.producer_epoch == 5);
+        check!(batch.last_offset_delta == 1);
         let record_rows: Vec<_> = batch
             .records
             .iter()

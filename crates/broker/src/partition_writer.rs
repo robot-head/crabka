@@ -542,7 +542,7 @@ fn swap_future_log(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use crabka_compression::CompressionType;
     use crabka_log::LogConfig;
     use crabka_protocol::records::{Record, RecordBatch};
@@ -598,13 +598,9 @@ mod tests {
             version: 0,
         };
 
-        assert!(
-            (
-                flag_storage_failure(&err, &log_dir, &status),
-                status.is_offline(dir.path()),
-                status.offline(),
-            ) == (false, false, vec![])
-        );
+        check!(!flag_storage_failure(&err, &log_dir, &status));
+        check!(!status.is_offline(dir.path()));
+        check!(status.offline().is_empty());
     }
 
     #[tokio::test]
@@ -839,13 +835,9 @@ mod tests {
         assert!(leo == 2);
 
         let read = log.lock().unwrap().read(0, 10 * 1024 * 1024).unwrap();
-        assert!(
-            (
-                read.batches.len(),
-                read.batches[0].attributes.compression(),
-                read.batches[0].records.len(),
-            ) == (1, CompressionType::Lz4, 2)
-        );
+        assert!(read.batches.len() == 1);
+        check!(read.batches[0].attributes.compression() == CompressionType::Lz4);
+        check!(read.batches[0].records.len() == 2);
     }
 
     #[tokio::test]
@@ -1286,23 +1278,12 @@ mod tests {
             let guard = log.lock().unwrap();
             (guard.log_end_offset(), guard.dir().to_path_buf())
         };
-        assert!(
-            (
-                result,
-                leo,
-                log_dir_now,
-                log_dir.load().as_ref().clone(),
-                source_partition.exists(),
-                target_partition_path.exists(),
-            ) == (
-                SwapOutcome::Swapped,
-                2,
-                target_partition_path.clone(),
-                target_dir,
-                false,
-                true,
-            )
-        );
+        check!(result == SwapOutcome::Swapped);
+        check!(leo == 2);
+        check!(log_dir_now == target_partition_path.clone());
+        check!(log_dir.load().as_ref().clone() == target_dir);
+        check!(!source_partition.exists());
+        check!(target_partition_path.exists());
     }
 
     #[test]
@@ -1334,24 +1315,12 @@ mod tests {
             let guard = log.lock().unwrap();
             (guard.log_end_offset(), guard.dir().to_path_buf())
         };
-        assert!(
-            (
-                result,
-                leo,
-                log_dir_now,
-                log_dir.load().as_ref().clone(),
-                source_partition.exists(),
-                future_path.exists(),
-                target_partition_path.exists(),
-            ) == (
-                SwapOutcome::NotCaughtUp,
-                2,
-                source_partition.clone(),
-                source_dir,
-                true,
-                true,
-                false,
-            )
-        );
+        check!(result == SwapOutcome::NotCaughtUp);
+        check!(leo == 2);
+        check!(log_dir_now == source_partition.clone());
+        check!(log_dir.load().as_ref().clone() == source_dir);
+        check!(source_partition.exists());
+        check!(future_path.exists());
+        check!(!target_partition_path.exists());
     }
 }

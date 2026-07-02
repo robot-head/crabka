@@ -30,7 +30,7 @@ pub fn frame(stream: TcpStream) -> Framed<TcpStream, LengthDelimitedCodec> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use bytes::{BufMut, Bytes, BytesMut};
     use futures_util::{SinkExt, StreamExt};
     use tokio::io::AsyncWriteExt;
@@ -76,7 +76,9 @@ mod tests {
         bytes.resize(4 + payload_len, 0xA5);
 
         let decoded = codec().decode(&mut bytes).expect("decode").expect("frame");
-        assert!((decoded.len(), decoded[0], decoded[payload_len - 1]) == (payload_len, 0xA5, 0xA5));
+        check!(decoded.len() == payload_len);
+        check!(decoded[0] == 0xA5);
+        check!(decoded[payload_len - 1] == 0xA5);
     }
 
     #[test]

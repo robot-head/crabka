@@ -16,7 +16,7 @@
 //! `group_protocol_negotiation.rs` (the MEMBER_ID_REQUIRED two-step +
 //! INITIAL_REBALANCE_DELAY wait) and `unit.rs` (the SyncGroup shape).
 
-use assert2::assert;
+use assert2::{assert, check};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -122,13 +122,17 @@ async fn describe_groups_reports_member_metadata_and_protocol_name() {
     .await
     .expect("second JoinGroup timed out")
     .expect("second JoinGroup must round-trip");
-    assert!(
-        (
-            r2.error_code,
-            r2.protocol_name.as_deref(),
-            r2.leader.as_str(),
-        ) == (ERR_NONE, Some("range"), member_id.as_str()),
-        "second JoinGroup must succeed with protocol 'range' and the lone member as leader, got {r2:?}"
+    check!(
+        r2.error_code == ERR_NONE,
+        "second JoinGroup must succeed, got {r2:?}"
+    );
+    check!(
+        r2.protocol_name.as_deref() == Some("range"),
+        "second JoinGroup must select protocol 'range', got {r2:?}"
+    );
+    check!(
+        r2.leader.as_str() == member_id.as_str(),
+        "second JoinGroup must elect the lone member as leader, got {r2:?}"
     );
     let generation_id = r2.generation_id;
 
@@ -173,15 +177,21 @@ async fn describe_groups_reports_member_metadata_and_protocol_name() {
         "exactly one described group, got {resp:?}"
     );
     let g = &resp.groups[0];
-    assert!(
-        (
-            g.error_code,
-            g.protocol_type.as_str(),
-            g.protocol_data.as_str(),
-            g.members.len(),
-        ) == (ERR_NONE, "consumer", "range", 1),
-        "described group must be error-free with protocol_type 'consumer', \
-         protocol_data 'range' (the selected protocol name), and exactly one member: {g:?}"
+    check!(
+        g.error_code == ERR_NONE,
+        "described group must be error-free: {g:?}"
+    );
+    check!(
+        g.protocol_type.as_str() == "consumer",
+        "described group must have protocol_type 'consumer': {g:?}"
+    );
+    check!(
+        g.protocol_data.as_str() == "range",
+        "described group must have protocol_data 'range' (the selected protocol name): {g:?}"
+    );
+    check!(
+        g.members.len() == 1,
+        "described group must have exactly one member: {g:?}"
     );
     let m = &g.members[0];
     assert!(
@@ -276,14 +286,17 @@ async fn describe_groups_matches_real_kafka_range_subscription() {
 
     let g = &resp.groups[0];
     // Real-Kafka authority (from real_kafka_classic.json).
-    assert!(
-        (
-            g.error_code,
-            g.protocol_type.as_str(),
-            g.protocol_data.as_str()
-        ) == (ERR_NONE, "consumer", "range"),
-        "DescribeGroups must match real Kafka's authority (protocol_type 'consumer', \
-         selected assignor 'range'), got {g:?}"
+    check!(
+        g.error_code == ERR_NONE,
+        "DescribeGroups must match real Kafka's authority (error-free), got {g:?}"
+    );
+    check!(
+        g.protocol_type.as_str() == "consumer",
+        "DescribeGroups must match real Kafka's authority (protocol_type 'consumer'), got {g:?}"
+    );
+    check!(
+        g.protocol_data.as_str() == "range",
+        "DescribeGroups must match real Kafka's authority (selected assignor 'range'), got {g:?}"
     );
     let m = &g.members[0];
     assert!(

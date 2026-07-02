@@ -545,7 +545,7 @@ impl ShareCoordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use std::path::Path;
     use tempfile::tempdir;
 
@@ -638,15 +638,11 @@ mod tests {
             .unwrap();
 
         let st = coord.read("g", tid, 0).await.expect("present");
-        assert!(
-            (
-                st.state_epoch,
-                st.leader_epoch,
-                st.start_offset,
-                st.delivery_complete_count,
-                st.state_batches.clone(),
-            ) == (1, 2, 50, 7, vec![batch(50, 59)])
-        );
+        check!(st.state_epoch == 1);
+        check!(st.leader_epoch == 2);
+        check!(st.start_offset == 50);
+        check!(st.delivery_complete_count == 7);
+        check!(st.state_batches == vec![batch(50, 59)]);
 
         let summary = coord.read_summary("g", tid, 0).await.expect("present");
         assert!(summary == (1, 2, 50, 7));
@@ -755,14 +751,10 @@ mod tests {
         recovered.replay_led_partitions().await;
 
         let st = recovered.read("g", tid, 0).await.expect("recovered");
-        assert!(
-            (
-                st.state_epoch,
-                st.leader_epoch,
-                st.start_offset,
-                st.delivery_complete_count,
-                st.state_batches.clone(),
-            ) == (2, 3, 20, 4, vec![batch(20, 29)])
-        );
+        check!(st.state_epoch == 2);
+        check!(st.leader_epoch == 3);
+        check!(st.start_offset == 20);
+        check!(st.delivery_complete_count == 4);
+        check!(st.state_batches == vec![batch(20, 29)]);
     }
 }
