@@ -4825,4 +4825,112 @@ mod tests {
             );
         }
     }
+
+    /// The three KIP-853 controller-plane RPCs (`AddRaftVoter` 80,
+    /// `RemoveRaftVoter` 81, `UpdateRaftVoter` 82) are dispatched by inline
+    /// `serve_connection_stream` match arms, not by the `HandlerTable`. If an
+    /// arm is deleted the frame falls through to `dispatch_one`, which — with
+    /// no table entry — synthesizes an `UNSUPPORTED_VERSION` (35) response
+    /// instead of running the real handler. Drive each RPC over a real socket
+    /// through the whole serve loop and assert it reaches its handler: a
+    /// `DenyAll` authorizer makes every handler short-circuit at the ACL gate
+    /// with `CLUSTER_AUTHORIZATION_FAILED` (31), which is observably different
+    /// from the fall-through's 35 and so pins the routing.
+    #[tokio::test]
+    async fn raft_voter_dispatch_arms_route_to_real_handlers() {
+        use crabka_protocol::owned::{
+            add_raft_voter_request as add_req, add_raft_voter_response as add_resp,
+            remove_raft_voter_request as rem_req, remove_raft_voter_response as rem_resp,
+            update_raft_voter_request as upd_req, update_raft_voter_response as upd_resp,
+        };
+        use crabka_protocol::{Decode, Encode};
+
+        #[derive(Debug)]
+        struct DenyAll;
+        impl crate::authorizer::Authorizer for DenyAll {
+            fn authorize(
+                &self,
+                _source: &dyn crabka_authz::AclSource,
+                _req: &crate::authorizer::AuthorizationRequest<'_>,
+            ) -> crate::authorizer::AuthorizationResult {
+                crate::authorizer::AuthorizationResult::Deny
+            }
+        }
+
+        // Send a flexible (v2-header) request frame carrying `body` for
+        // `api_key`/`version` and return the response body with its 5-byte
+        // flexible header (corr_id + empty tagged-fields byte) stripped.
+        async fn round_trip(
+            framed: &mut Framed<TcpStream, tokio_util::codec::LengthDelimitedCodec>,
+            api_key: i16,
+            version: i16,
+            body: &[u8],
+        ) -> Vec<u8> {
+            let frame = request_frame(api_key, version, 7, None, Some(0), body);
+            framed.send(frame.freeze()).await.expect("send request");
+            let resp = framed
+                .next()
+                .await
+                .expect("a response frame")
+                .expect("response decode");
+            resp[5..].to_vec()
+        }
+
+        fn encode_default<T: Encode + Default>(version: i16) -> BytesMut {
+            let mut body = BytesMut::new();
+            T::default().encode(&mut body, version).expect("encode");
+            body
+        }
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let mut cfg = crate::config::BrokerConfig::for_tests(dir.path().to_path_buf());
+        cfg.authorizer = std::sync::Arc::new(DenyAll);
+        let handle = Broker::start(cfg).await.expect("start broker");
+        let broker = handle.broker_arc_for_test();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = tokio::spawn(async move {
+            let (stream, peer) = listener.accept().await.expect("accept");
+            let spec = crate::config::ListenerSpec {
+                name: "PLAINTEXT".to_string(),
+                bind_addr: addr,
+                advertised: "127.0.0.1:9092".to_string(),
+                protocol: crabka_security::ListenerProtocol::Plaintext,
+                tls_config: None,
+                sasl_mechanisms: None,
+            };
+            serve_connection_stream(broker, stream, spec, peer, None).await;
+        });
+
+        let client = TcpStream::connect(addr).await.expect("connect");
+        let mut framed = codec::frame(client);
+
+        let add_body = encode_default::<add_req::AddRaftVoterRequest>(add_req::MAX_VERSION);
+        let raw = round_trip(&mut framed, 80, add_req::MAX_VERSION, &add_body).await;
+        let add = add_resp::AddRaftVoterResponse::decode(&mut &raw[..], add_resp::MAX_VERSION)
+            .expect("decode AddRaftVoterResponse");
+
+        let rem_body = encode_default::<rem_req::RemoveRaftVoterRequest>(rem_req::MAX_VERSION);
+        let raw = round_trip(&mut framed, 81, rem_req::MAX_VERSION, &rem_body).await;
+        let rem = rem_resp::RemoveRaftVoterResponse::decode(&mut &raw[..], rem_resp::MAX_VERSION)
+            .expect("decode RemoveRaftVoterResponse");
+
+        let upd_body = encode_default::<upd_req::UpdateRaftVoterRequest>(upd_req::MAX_VERSION);
+        let raw = round_trip(&mut framed, 82, upd_req::MAX_VERSION, &upd_body).await;
+        let upd = upd_resp::UpdateRaftVoterResponse::decode(&mut &raw[..], upd_resp::MAX_VERSION)
+            .expect("decode UpdateRaftVoterResponse");
+
+        // Each real handler denies at the ACL gate; the fall-through path would
+        // instead yield UNSUPPORTED_VERSION (and not even decode as this type).
+        check!(add.error_code == codes::CLUSTER_AUTHORIZATION_FAILED);
+        check!(rem.error_code == codes::CLUSTER_AUTHORIZATION_FAILED);
+        check!(upd.error_code == codes::CLUSTER_AUTHORIZATION_FAILED);
+
+        drop(framed);
+        server.await.expect("serve loop joins on client EOF");
+        handle.shutdown().await;
+    }
 }
