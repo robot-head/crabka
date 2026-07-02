@@ -295,6 +295,19 @@ mod tests {
         }
     }
 
+    #[test]
+    fn permission_filter_maps_any_concrete_and_unknown() {
+        let cases = [
+            (WIRE_ANY, Ok(None)),
+            (2, Ok(Some(PermissionType::Deny))),
+            (3, Ok(Some(PermissionType::Allow))),
+            (4, Err(WireAclError::UnknownDiscriminant)),
+        ];
+        for (byte, want) in cases {
+            check!(permission_filter(byte) == want, "byte {byte}");
+        }
+    }
+
     /// KIP-939: the `TWO_PHASE_COMMIT` operation is wire byte 15 and must
     /// round-trip through the concrete + filter codecs so `CreateAcls` /
     /// `DescribeAcls` can carry the 2PC grant on a `TransactionalId`.
