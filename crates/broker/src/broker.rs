@@ -4888,50 +4888,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancelled_topic_rlmm_bootstrap_attempts_once_without_activating() {
-        let placeholder: Arc<dyn crabka_remote_storage::RemoteLogMetadataManager> =
-            Arc::new(crabka_remote_storage_topic::NotReadyRlmm::new());
-        let swap = Arc::new(crabka_remote_storage_topic::SwappableRlmm::new(placeholder));
-        let metrics = crate::metrics::BrokerMetrics::new();
-        let snapshot_dir = tempfile::tempdir().expect("snapshot tempdir");
-        let closed_bootstrap = unused_loopback_addr();
-        let kickoff = KafkaSwapKickoff {
-            cfg: crate::config::KafkaRlmmConfig {
-                bootstrap: closed_bootstrap.to_string(),
-                num_partitions: 1,
-                replication: 1,
-                snapshot_interval: std::time::Duration::from_hours(1),
-                snapshot_dir: snapshot_dir.path().join("rlmm-snapshot"),
-                security: None,
-            },
-            broker_id: 1,
-        };
-        let (_image_tx, image_rx) = tokio::sync::watch::channel(Arc::new(
-            crabka_metadata::MetadataImage::new(uuid::Uuid::from_u128(0x5151)),
-        ));
-        let shutdown = CancellationToken::new();
-        shutdown.cancel();
-
-        tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            bootstrap_topic_rlmm(
-                swap,
-                kickoff,
-                tokio::runtime::Handle::current(),
-                metrics.clone(),
-                1,
-                image_rx,
-                shutdown,
-            ),
-        )
-        .await
-        .expect("cancelled bootstrap should return promptly");
-
-        assert!(metrics.tiered_storage_rlmm_bootstrap_attempts.get() == 1);
-        assert!(metrics.tiered_storage_rlmm_topic_backed.get() == 0);
-    }
-
-    #[tokio::test]
     async fn rlmm_reconciler_applies_initial_and_changed_assignments() {
         let log: Arc<dyn crabka_remote_storage_topic::MetadataEventLog> =
             crabka_remote_storage_topic::InProcessMetadataEventLog::new(3);

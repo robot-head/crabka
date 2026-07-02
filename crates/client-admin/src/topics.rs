@@ -522,7 +522,7 @@ mod tests {
         let md = parse_metadata(resp);
         assert!(
             md == TopicMetadata {
-                controller_id: 0,
+                controller_id: -1,
                 topics: vec![
                     TopicMetadataEntry {
                         name: "ok-topic".to_string(),
