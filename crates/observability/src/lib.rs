@@ -21486,9 +21486,9 @@ mod tests {
         assert_eq!(ingest_quota_bytes(&[record]), expected_bytes);
 
         let mut bucket = IngestQuotaBucket::new(10.0);
-        assert!((bucket.capacity() - 10.0).abs() < f64::EPSILON);
-        assert!(bucket.consume(10.0));
-        assert!(!bucket.consume(0.1));
+        check!((bucket.capacity() - 10.0).abs() < f64::EPSILON);
+        check!(bucket.consume(10.0));
+        check!(!bucket.consume(0.1));
         bucket.update_rate(5.0);
         assert!(bucket.available <= 5.0);
         bucket.available = 4.0;
@@ -21509,27 +21509,19 @@ mod tests {
 
     #[test]
     fn native_header_detection_requires_native_log_shape() {
-        let record_type_log_line = KafkaWalHeader {
-            key: "crabka-wal-record-type".to_string(),
-            value: Some(b"log-line".to_vec()),
-        };
-        assert!(has_native_kafka_log_headers(&[record_type_log_line]));
-        assert!(has_native_kafka_log_headers(&[KafkaWalHeader {
-            key: "crabka-log-timestamp-ns".to_string(),
-            value: Some(b"1".to_vec()),
-        }]));
-        assert!(has_native_kafka_log_headers(&[KafkaWalHeader {
-            key: "crabka-log-label-app".to_string(),
-            value: Some(b"api".to_vec()),
-        }]));
-        assert!(!has_native_kafka_log_headers(&[KafkaWalHeader {
-            key: "crabka-wal-record-type".to_string(),
-            value: Some(b"log".to_vec()),
-        }]));
-        assert!(!has_native_kafka_log_headers(&[KafkaWalHeader {
-            key: "other".to_string(),
-            value: None,
-        }]));
+        for (key, value, want) in [
+            ("crabka-wal-record-type", Some(&b"log-line"[..]), true),
+            ("crabka-log-timestamp-ns", Some(&b"1"[..]), true),
+            ("crabka-log-label-app", Some(&b"api"[..]), true),
+            ("crabka-wal-record-type", Some(&b"log"[..]), false),
+            ("other", None, false),
+        ] {
+            let header = KafkaWalHeader {
+                key: key.to_string(),
+                value: value.map(<[u8]>::to_vec),
+            };
+            assert!(has_native_kafka_log_headers(&[header]) == want);
+        }
     }
 
     #[test]
@@ -21577,18 +21569,15 @@ mod tests {
             headers
         }
 
-        assert!(is_loki_json_content_type(&loki_content_type("application/json")).unwrap());
-        assert!(
-            is_loki_json_content_type(&loki_content_type("Application/JSON; charset=utf-8"))
-                .unwrap()
-        );
-        assert!(!is_loki_json_content_type(&loki_content_type("application/x-protobuf")).unwrap());
-        assert!(
-            is_loki_json_content_type(&loki_content_type("application/json; charset")).is_err()
-        );
-        assert!(
-            is_loki_json_content_type(&loki_content_type("application/json; charset=")).is_err()
-        );
+        for (value, want) in [
+            ("application/json", Some(true)),
+            ("Application/JSON; charset=utf-8", Some(true)),
+            ("application/x-protobuf", Some(false)),
+            ("application/json; charset", None),
+            ("application/json; charset=", None),
+        ] {
+            assert!(is_loki_json_content_type(&loki_content_type(value)).ok() == want);
+        }
     }
 
     #[test]
@@ -21619,13 +21608,13 @@ mod tests {
             loki_label_set(&rendered_labels),
             r#"{app="api",env="prod"}"#
         );
-        assert!(loki_push_label_parse_error(&rendered_labels, "bad-name").contains("1:5"));
-        assert!(
+        check!(loki_push_label_parse_error(&rendered_labels, "bad-name").contains("1:5"));
+        check!(
             loki_proto_label_parse_error(r#"{9bad="x"}"#)
                 .unwrap()
                 .contains("1:2")
         );
-        assert!(
+        check!(
             loki_proto_label_parse_error(r#"{app="api",9bad="x"}"#)
                 .unwrap()
                 .contains("1:12")
@@ -21640,14 +21629,17 @@ mod tests {
         let mut explicit = BTreeMap::from([("level".to_string(), "custom".to_string())]);
         discover_detected_level_label(&mut explicit, "api error happened");
         assert!(!explicit.contains_key("detected_level"));
-        assert!(contains_log_level_token("error happened", "error"));
-        assert!(contains_log_level_token("happened error", "error"));
-        assert!(!contains_log_level_token("terror", "error"));
-        assert!(!contains_log_level_token("error_code", "error"));
-        assert!(is_log_level_word_byte(b'a'));
-        assert!(is_log_level_word_byte(b'1'));
-        assert!(is_log_level_word_byte(b'_'));
-        assert!(!is_log_level_word_byte(b'-'));
+        for (line, want) in [
+            ("error happened", true),
+            ("happened error", true),
+            ("terror", false),
+            ("error_code", false),
+        ] {
+            assert!(contains_log_level_token(line, "error") == want);
+        }
+        for (byte, want) in [(b'a', true), (b'1', true), (b'_', true), (b'-', false)] {
+            assert!(is_log_level_word_byte(byte) == want);
+        }
     }
 
     #[test]
@@ -21732,29 +21724,31 @@ mod tests {
             status: "received".to_string(),
             created_at: 1,
         };
-        assert!(delete_request_overlaps_filter(&request, &list));
-        assert!(delete_request_overlaps_filter(
-            &request,
-            &ListDeleteRequestsParams {
-                start_time: Some(20),
-                end_time: Some(30),
-            }
-        ));
-        assert!(!delete_request_overlaps_filter(
-            &request,
-            &ListDeleteRequestsParams {
-                start_time: Some(21),
-                end_time: Some(30),
-            }
-        ));
-        assert!(ranges_overlap(
-            TimeRange::new(10, 20).unwrap(),
-            TimeRange::new(20, 30).unwrap()
-        ));
-        assert!(!ranges_overlap(
-            TimeRange::new(10, 20).unwrap(),
-            TimeRange::new(21, 30).unwrap()
-        ));
+        for (filter, want) in [
+            (list, true),
+            (
+                ListDeleteRequestsParams {
+                    start_time: Some(20),
+                    end_time: Some(30),
+                },
+                true,
+            ),
+            (
+                ListDeleteRequestsParams {
+                    start_time: Some(21),
+                    end_time: Some(30),
+                },
+                false,
+            ),
+        ] {
+            assert!(delete_request_overlaps_filter(&request, &filter) == want);
+        }
+        for (right, want) in [
+            (TimeRange::new(20, 30).unwrap(), true),
+            (TimeRange::new(21, 30).unwrap(), false),
+        ] {
+            assert!(ranges_overlap(TimeRange::new(10, 20).unwrap(), right) == want);
+        }
     }
 
     #[test]
@@ -21764,11 +21758,11 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(filters.rule_kind, Some("alerting"));
-        assert!(filters.exclude_alerts);
-        assert!(filters.evaluation_time.is_some());
-        assert!(filters.rule_names.contains("HighError"));
-        assert!(filters.rule_groups.contains("api"));
-        assert!(filters.files.contains("rules.yaml"));
+        check!(filters.exclude_alerts);
+        check!(filters.evaluation_time.is_some());
+        check!(filters.rule_names.contains("HighError"));
+        check!(filters.rule_groups.contains("api"));
+        check!(filters.files.contains("rules.yaml"));
         assert_eq!(filters.group_limit, Some(2));
         assert_eq!(filters.group_next_token.as_deref(), Some("next"));
         assert_eq!(filters.label_selectors.len(), 1);

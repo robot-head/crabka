@@ -133,16 +133,23 @@ pub fn metadata_schema() -> SchemaRef {
 #[cfg(test)]
 mod tests {
     use arrow::datatypes::DataType;
-    use assert2::assert;
+    use assert2::{assert, check};
 
     use super::*;
 
     #[test]
     fn float_schema_has_mandatory_and_value() {
         let s = float_sample_schema();
-        assert!(s.column_with_name(COL_FINGERPRINT).unwrap().1.data_type() == &DataType::UInt64);
-        assert!(s.column_with_name(COL_TIMESTAMP).unwrap().1.data_type() == &DataType::Int64);
-        assert!(s.column_with_name("value").unwrap().1.data_type() == &DataType::Float64);
+        for (column, data_type) in [
+            (COL_FINGERPRINT, DataType::UInt64),
+            (COL_TIMESTAMP, DataType::Int64),
+            ("value", DataType::Float64),
+        ] {
+            check!(
+                s.column_with_name(column).unwrap().1.data_type() == &data_type,
+                "column {column}",
+            );
+        }
     }
 
     #[test]
@@ -154,8 +161,8 @@ mod tests {
             DataType::List(inner) => match inner.data_type() {
                 DataType::Struct(fields) => {
                     assert!(fields.len() == 2);
-                    assert!(fields[0].name() == "offset");
-                    assert!(fields[1].name() == "length");
+                    check!(fields[0].name() == "offset");
+                    check!(fields[1].name() == "length");
                 }
                 other => panic!("expected Struct, got {other:?}"),
             },
@@ -173,17 +180,18 @@ mod tests {
     #[test]
     fn metadata_schema_has_metric_metadata_columns() {
         let s = metadata_schema();
-        assert!(s.column_with_name(COL_FINGERPRINT).unwrap().1.data_type() == &DataType::UInt64);
-        assert!(s.column_with_name(COL_TIMESTAMP).unwrap().1.data_type() == &DataType::Int64);
-        assert!(
-            s.column_with_name("metric_family_name")
-                .unwrap()
-                .1
-                .data_type()
-                == &DataType::Utf8
-        );
-        assert!(s.column_with_name("metric_type").unwrap().1.data_type() == &DataType::Utf8);
-        assert!(s.column_with_name("help").unwrap().1.data_type() == &DataType::Utf8);
-        assert!(s.column_with_name("unit").unwrap().1.data_type() == &DataType::Utf8);
+        for (column, data_type) in [
+            (COL_FINGERPRINT, DataType::UInt64),
+            (COL_TIMESTAMP, DataType::Int64),
+            ("metric_family_name", DataType::Utf8),
+            ("metric_type", DataType::Utf8),
+            ("help", DataType::Utf8),
+            ("unit", DataType::Utf8),
+        ] {
+            check!(
+                s.column_with_name(column).unwrap().1.data_type() == &data_type,
+                "column {column}",
+            );
+        }
     }
 }

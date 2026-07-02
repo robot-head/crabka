@@ -257,7 +257,7 @@ mod tests {
     use crate::goals::tests::FixedGoal;
     use crate::model::{BrokerView, PartitionView};
     use crate::scraper::UsageStore;
-    use assert2::assert;
+    use assert2::{assert, check};
     use std::sync::Arc;
 
     fn ctx() -> GoalContext {
@@ -486,7 +486,7 @@ mod tests {
         let goals: Vec<&dyn Goal> = vec![&hard, &soft];
         let out = optimize(&s, &goals, &ctx).unwrap();
 
-        assert!(out.proposal.movements.len() == 3);
+        check!(out.proposal.movements.len() == 3);
         let z_count = out
             .proposal
             .movements
@@ -500,9 +500,9 @@ mod tests {
             .filter(|m| m.topic == "a")
             .count();
         // Both hard movements must survive.
-        assert!(z_count == 2, "both hard ('z', _) movements must be kept");
+        check!(z_count == 2, "both hard ('z', _) movements must be kept");
         // Exactly one soft movement fits in the remaining slot.
-        assert!(
+        check!(
             a_count == 1,
             "exactly one soft ('a', _) movement should fit"
         );
@@ -818,10 +818,16 @@ mod tests {
 
         apply_movement(&mut s, &m);
 
-        let p = &s.partitions[0];
-        assert!(p.replicas == vec![1, 3]);
-        assert!(p.leader == 3);
-        assert!(p.isr == vec![3]);
+        assert!(
+            s.partitions[0]
+                == PartitionView {
+                    topic: "t".into(),
+                    partition: 0,
+                    replicas: vec![1, 3],
+                    leader: 3,
+                    isr: vec![3],
+                }
+        );
     }
 
     #[test]
@@ -892,11 +898,16 @@ mod tests {
 
         let summary = compute_summary(&before, &after, &movements);
 
-        assert!(summary.replica_movements == 1);
-        assert!(summary.leader_movements == 1);
-        assert!(summary.max_replicas_before == 2);
-        assert!(summary.max_replicas_after == 2);
-        assert!(summary.max_leaders_before == 2);
-        assert!(summary.max_leaders_after == 1);
+        assert!(
+            summary
+                == ProposalSummary {
+                    replica_movements: 1,
+                    leader_movements: 1,
+                    max_replicas_before: 2,
+                    max_replicas_after: 2,
+                    max_leaders_before: 2,
+                    max_leaders_after: 1,
+                }
+        );
     }
 }

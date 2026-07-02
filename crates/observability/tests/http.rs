@@ -2353,9 +2353,9 @@ async fn loki_push_endpoint_rejects_invalid_snappy_protobuf_without_wal_append()
         .await
         .unwrap();
 
-    assert!(response.status() == StatusCode::BAD_REQUEST);
-    assert!(text_body(response).await == "snappy: corrupt input\n");
-    assert!(sink.records().is_empty());
+    check!(response.status() == StatusCode::BAD_REQUEST);
+    check!(text_body(response).await == "snappy: corrupt input\n");
+    check!(sink.records().is_empty());
 }
 
 #[tokio::test]
@@ -2446,12 +2446,12 @@ async fn loki_push_endpoint_rejects_invalid_protobuf_labels_like_loki_without_wa
         .await
         .unwrap();
 
-    assert!(response.status() == StatusCode::BAD_REQUEST);
-    assert!(
+    check!(response.status() == StatusCode::BAD_REQUEST);
+    check!(
         text_body(response).await
             == "couldn't parse labels: 1:5: parse error: unexpected character inside braces: '-'\n"
     );
-    assert!(sink.records().is_empty());
+    check!(sink.records().is_empty());
 }
 
 #[tokio::test]
@@ -2490,12 +2490,12 @@ async fn loki_push_endpoint_rejects_duplicate_protobuf_labels_without_wal_append
         .await
         .unwrap();
 
-    assert!(response.status() == StatusCode::BAD_REQUEST);
-    assert!(
+    check!(response.status() == StatusCode::BAD_REQUEST);
+    check!(
         text_body(response).await
             == "stream '{app=\"api\", app=\"worker\", service_name=\"api\"}' has duplicate label name: 'app'\n"
     );
-    assert!(sink.records().is_empty());
+    check!(sink.records().is_empty());
 }
 
 #[tokio::test]
@@ -2746,12 +2746,12 @@ async fn loki_push_endpoint_rejects_invalid_json_timestamp_like_loki_without_wal
         .await
         .unwrap();
 
-    assert!(response.status() == StatusCode::BAD_REQUEST);
-    assert!(
+    check!(response.status() == StatusCode::BAD_REQUEST);
+    check!(
         text_body(response).await
             == "loghttp.PushRequest.Streams: []loghttp.LogProtoStream: unmarshalerDecoder: Value looks like Number/Boolean/None, but can't find its end: ',' or '}' symbol, error found in #10 byte of ...|estamp\"]]}]}|..., bigger context ...|s\":[[\"not-a-timestamp\",\"invalid push timestamp\"]]}]}|...\n"
     );
-    assert!(sink.records().is_empty());
+    check!(sink.records().is_empty());
 }
 
 #[tokio::test]
@@ -2786,12 +2786,12 @@ async fn loki_push_endpoint_rejects_non_string_json_timestamp_like_loki_without_
         .await
         .unwrap();
 
-    assert!(response.status() == StatusCode::BAD_REQUEST);
-    assert!(
+    check!(response.status() == StatusCode::BAD_REQUEST);
+    check!(
         text_body(response).await
             == "loghttp.PushRequest.Streams: []loghttp.LogProtoStream: unmarshalerDecoder: Value looks like Number/Boolean/None, but can't find its end: ',' or '}' symbol, error found in #10 byte of ...|estamp\"]]}]}|..., bigger context ...|alues\":[[1000000000,\"non-string push timestamp\"]]}]}|...\n"
     );
-    assert!(sink.records().is_empty());
+    check!(sink.records().is_empty());
 }
 
 #[tokio::test]
@@ -2826,12 +2826,12 @@ async fn loki_push_endpoint_rejects_object_json_timestamp_like_loki_without_wal_
         .await
         .unwrap();
 
-    assert!(response.status() == StatusCode::BAD_REQUEST);
-    assert!(
+    check!(response.status() == StatusCode::BAD_REQUEST);
+    check!(
         text_body(response).await
             == "loghttp.PushRequest.Streams: []loghttp.LogProtoStream: unmarshalerDecoder: Value looks like Number/Boolean/None, but can't find its end: ',' or '}' symbol, error found in #10 byte of ...|estamp\"]]}]}|..., bigger context ...|\":[[{\"ts\":\"1000000000\"},\"object push timestamp\"]]}]}|...\n"
     );
-    assert!(sink.records().is_empty());
+    check!(sink.records().is_empty());
 }
 
 #[tokio::test]
@@ -2866,12 +2866,12 @@ async fn loki_push_endpoint_rejects_array_json_timestamp_like_loki_without_wal_a
         .await
         .unwrap();
 
-    assert!(response.status() == StatusCode::BAD_REQUEST);
-    assert!(
+    check!(response.status() == StatusCode::BAD_REQUEST);
+    check!(
         text_body(response).await
             == "loghttp.PushRequest.Streams: []loghttp.LogProtoStream: unmarshalerDecoder: Value looks like Number/Boolean/None, but can't find its end: ',' or '}' symbol, error found in #10 byte of ...|estamp\"]]}]}|..., bigger context ...|values\":[[[\"1000000000\"],\"array push timestamp\"]]}]}|...\n"
     );
-    assert!(sink.records().is_empty());
+    check!(sink.records().is_empty());
 }
 
 #[tokio::test]
@@ -2906,12 +2906,12 @@ async fn loki_push_endpoint_rejects_invalid_json_line_like_loki_without_wal_appe
         .await
         .unwrap();
 
-    assert!(response.status() == StatusCode::BAD_REQUEST);
-    assert!(
+    check!(response.status() == StatusCode::BAD_REQUEST);
+    check!(
         text_body(response).await
             == "loghttp.PushRequest.Streams: []loghttp.LogProtoStream: unmarshalerDecoder: Value is string, but can't find closing '\"' symbol, error found in #10 byte of ...|00\",500]]}]}|..., bigger context ...|ream\":{\"app\":\"api\"},\"values\":[[\"1000000000\",500]]}]}|...\n"
     );
-    assert!(sink.records().is_empty());
+    check!(sink.records().is_empty());
 }
 
 #[tokio::test]
@@ -3015,10 +3015,10 @@ async fn loki_push_endpoint_rejects_negative_protobuf_timestamp_like_loki_withou
 
     assert!(response.status() == StatusCode::BAD_REQUEST);
     let body = text_body(response).await;
-    assert!(body.contains("timestamp too old"));
-    assert!(body.contains("1969-12-31T23:59:59Z"));
-    assert!(body.contains(r#"{app="api", service_name="api"}"#));
-    assert!(sink.records().is_empty());
+    check!(body.contains("timestamp too old"));
+    check!(body.contains("1969-12-31T23:59:59Z"));
+    check!(body.contains(r#"{app="api", service_name="api"}"#));
+    check!(sink.records().is_empty());
 }
 
 #[tokio::test]
@@ -3094,12 +3094,12 @@ async fn loki_push_endpoint_rejects_invalid_json_labels_without_wal_append() {
         .await
         .unwrap();
 
-    assert!(response.status() == StatusCode::BAD_REQUEST);
-    assert!(
+    check!(response.status() == StatusCode::BAD_REQUEST);
+    check!(
         text_body(response).await
             == "couldn't parse labels: 1:5: parse error: unexpected character inside braces: '-'\n"
     );
-    assert!(sink.records().is_empty());
+    check!(sink.records().is_empty());
 }
 
 #[tokio::test]
@@ -3374,11 +3374,11 @@ async fn loki_push_endpoint_rejects_non_object_json_structured_metadata_like_lok
 
     assert!(response.status() == StatusCode::BAD_REQUEST);
     let body = text_body(response).await;
-    assert!(body.contains(
+    check!(body.contains(
         "loghttp.PushRequest.Streams: []loghttp.LogProtoStream: unmarshalerDecoder: Value looks like object"
     ));
-    assert!(body.contains("api error\",null"));
-    assert!(sink.records().is_empty());
+    check!(body.contains("api error\",null"));
+    check!(sink.records().is_empty());
 }
 
 #[tokio::test]
@@ -4159,9 +4159,9 @@ async fn otlp_grpc_logs_service_rejects_ingest_quota_without_wal_append() {
 
     let error = service.export(request).await.unwrap_err();
 
-    assert!(error.code() == tonic::Code::ResourceExhausted);
-    assert!(error.message().contains("tenant write quota exceeded"));
-    assert!(sink.records().is_empty());
+    check!(error.code() == tonic::Code::ResourceExhausted);
+    check!(error.message().contains("tenant write quota exceeded"));
+    check!(sink.records().is_empty());
 }
 
 #[tokio::test]
@@ -4568,10 +4568,14 @@ async fn status_services_endpoint_returns_loki_service_states() {
 
     assert!(response.status() == StatusCode::OK);
     let body = text_body(response).await;
-    assert!(body.contains("server => Running\n"));
-    assert!(body.contains("querier => Running\n"));
-    assert!(body.contains("distributor => Running\n"));
-    assert!(body.contains("compactor => Running\n"));
+    for needle in [
+        "server => Running\n",
+        "querier => Running\n",
+        "distributor => Running\n",
+        "compactor => Running\n",
+    ] {
+        check!(body.contains(needle));
+    }
 }
 
 #[tokio::test]
@@ -4635,9 +4639,9 @@ async fn status_ring_aliases_return_loki_ring_pages() {
             .unwrap_or_default()
             .to_string();
         let body = text_body(response).await;
-        assert!(content_type.starts_with("text/html"));
-        assert!(body.contains("Ring Status"));
-        assert!(body.contains("ACTIVE"));
+        check!(content_type.starts_with("text/html"));
+        check!(body.contains("Ring Status"));
+        check!(body.contains("ACTIVE"));
     }
 }
 
@@ -4659,10 +4663,14 @@ async fn status_metrics_endpoint_returns_prometheus_text_for_loki_router() {
     assert!(response.status() == StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let body = std::str::from_utf8(&body).unwrap();
-    assert!(body.contains("loki_build_info"));
-    assert!(body.contains("loki_boltdb_shipper_compactor_running"));
-    assert!(body.contains("crabka_observability_service_up"));
-    assert!(body.contains(r#"component="querier""#));
+    for needle in [
+        "loki_build_info",
+        "loki_boltdb_shipper_compactor_running",
+        "crabka_observability_service_up",
+        r#"component="querier""#,
+    ] {
+        check!(body.contains(needle));
+    }
 }
 
 #[tokio::test]
@@ -4683,10 +4691,14 @@ async fn status_metrics_endpoint_returns_prometheus_text_for_distributor_router(
     assert!(response.status() == StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let body = std::str::from_utf8(&body).unwrap();
-    assert!(body.contains("loki_build_info"));
-    assert!(body.contains("loki_boltdb_shipper_compactor_running"));
-    assert!(body.contains("crabka_observability_service_up"));
-    assert!(body.contains(r#"component="distributor""#));
+    for needle in [
+        "loki_build_info",
+        "loki_boltdb_shipper_compactor_running",
+        "crabka_observability_service_up",
+        r#"component="distributor""#,
+    ] {
+        check!(body.contains(needle));
+    }
 }
 
 #[tokio::test]
@@ -4790,9 +4802,9 @@ async fn compactor_router_exposes_loki_status_and_ring_endpoints() {
         .unwrap_or_default()
         .to_string();
     let ring_body = text_body(ring_response).await;
-    assert!(content_type.starts_with("text/html"));
-    assert!(ring_body.contains("Ring Status"));
-    assert!(ring_body.contains("ACTIVE"));
+    check!(content_type.starts_with("text/html"));
+    check!(ring_body.contains("Ring Status"));
+    check!(ring_body.contains("ACTIVE"));
 }
 
 #[tokio::test]
@@ -4849,13 +4861,13 @@ async fn compactor_delete_endpoint_tracks_and_cancels_delete_requests() {
         .unwrap();
     assert!(list_response.status() == StatusCode::OK);
     let body = json_body(list_response).await;
-    assert!(body.as_array().unwrap().len() == 1);
-    assert!(body[0]["request_id"] == "delete-1");
-    assert!(body[0]["query"] == "{app=\"api\"} |= \"secret\"");
-    assert!(body[0]["start_time"] == 1_591_616_227_i64);
-    assert!(body[0]["end_time"] == 1_591_619_692_i64);
-    assert!(body[0]["status"] == "received");
-    assert!(body[0]["created_at"].as_i64().is_some());
+    check!(body.as_array().unwrap().len() == 1);
+    check!(body[0]["request_id"] == "delete-1");
+    check!(body[0]["query"] == "{app=\"api\"} |= \"secret\"");
+    check!(body[0]["start_time"] == 1_591_616_227_i64);
+    check!(body[0]["end_time"] == 1_591_619_692_i64);
+    check!(body[0]["status"] == "received");
+    check!(body[0]["created_at"].as_i64().is_some());
 
     let other_tenant_response = app
         .clone()
@@ -4953,10 +4965,10 @@ async fn compactor_delete_endpoint_accepts_form_post_query_with_raw_ampersand() 
         .unwrap();
     assert!(list_response.status() == StatusCode::OK);
     let body = json_body(list_response).await;
-    assert!(body.as_array().unwrap().len() == 1);
-    assert!(body[0]["query"] == r#"{app="api&edge"} |= "secret""#);
-    assert!(body[0]["start_time"] == 1_591_616_227_i64);
-    assert!(body[0]["end_time"] == 1_591_619_692_i64);
+    check!(body.as_array().unwrap().len() == 1);
+    check!(body[0]["query"] == r#"{app="api&edge"} |= "secret""#);
+    check!(body[0]["start_time"] == 1_591_616_227_i64);
+    check!(body[0]["end_time"] == 1_591_619_692_i64);
 }
 
 #[tokio::test]
@@ -5509,9 +5521,9 @@ async fn distributor_ring_endpoint_returns_loki_status_page() {
         .unwrap_or_default()
         .to_string();
     let body = text_body(response).await;
-    assert!(content_type.starts_with("text/html"));
-    assert!(body.contains("Ring Status"));
-    assert!(body.contains("ACTIVE"));
+    check!(content_type.starts_with("text/html"));
+    check!(body.contains("Ring Status"));
+    check!(body.contains("ACTIVE"));
 }
 
 #[tokio::test]
@@ -5725,9 +5737,13 @@ rules:
 
     assert!(group_response.status() == StatusCode::OK);
     let group_body = text_body(group_response).await;
-    assert!(group_body.contains("name: api-errors\n"));
-    assert!(group_body.contains("alert: ApiErrors\n"));
-    assert!(group_body.contains("severity: page\n"));
+    for needle in [
+        "name: api-errors\n",
+        "alert: ApiErrors\n",
+        "severity: page\n",
+    ] {
+        check!(group_body.contains(needle));
+    }
 
     let namespace_response = app
         .clone()
@@ -5759,9 +5775,9 @@ rules:
 
     assert!(all_rules_response.status() == StatusCode::OK);
     let all_rules_body = text_body(all_rules_response).await;
-    assert!(all_rules_body.contains("default:\n"));
-    assert!(all_rules_body.contains("- name: api-errors\n"));
-    assert!(all_rules_body.contains("alert: ApiErrors\n"));
+    for needle in ["default:\n", "- name: api-errors\n", "alert: ApiErrors\n"] {
+        check!(all_rules_body.contains(needle));
+    }
 }
 
 #[tokio::test]
@@ -5958,9 +5974,9 @@ rules:
 
     assert!(response.status() == StatusCode::OK);
     let body = text_body(response).await;
-    assert!(body.contains("default:"));
-    assert!(body.contains("- name: api-errors\n"));
-    assert!(body.contains("alert: ApiErrors\n"));
+    for needle in ["default:", "- name: api-errors\n", "alert: ApiErrors\n"] {
+        check!(body.contains(needle));
+    }
 }
 
 async fn post_loki_rule_group_for_test(app: &axum::Router, namespace: &str, rule_group: &str) {
@@ -6028,41 +6044,41 @@ rules:
 
     let record_body =
         prometheus_rules_body_for_test(&app, "/prometheus/api/v1/rules?type=record").await;
-    assert!(record_body["data"]["groups"].as_array().unwrap().len() == 1);
-    assert!(record_body["data"]["groups"][0]["name"] == "api-errors");
-    assert!(
+    check!(record_body["data"]["groups"].as_array().unwrap().len() == 1);
+    check!(record_body["data"]["groups"][0]["name"] == "api-errors");
+    check!(
         record_body["data"]["groups"][0]["rules"]
             .as_array()
             .unwrap()
             .len()
             == 1
     );
-    assert!(record_body["data"]["groups"][0]["rules"][0]["type"] == "recording");
-    assert!(record_body["data"]["groups"][0]["rules"][0]["name"] == "job:api_errors:rate5m");
+    check!(record_body["data"]["groups"][0]["rules"][0]["type"] == "recording");
+    check!(record_body["data"]["groups"][0]["rules"][0]["name"] == "job:api_errors:rate5m");
 
     let alert_name_body =
         prometheus_rules_body_for_test(&app, "/prometheus/api/v1/rules?rule_name[]=WorkerErrors")
             .await;
-    assert!(alert_name_body["data"]["groups"].as_array().unwrap().len() == 1);
-    assert!(alert_name_body["data"]["groups"][0]["file"] == "jobs");
-    assert!(
+    check!(alert_name_body["data"]["groups"].as_array().unwrap().len() == 1);
+    check!(alert_name_body["data"]["groups"][0]["file"] == "jobs");
+    check!(
         alert_name_body["data"]["groups"][0]["rules"]
             .as_array()
             .unwrap()
             .len()
             == 1
     );
-    assert!(alert_name_body["data"]["groups"][0]["rules"][0]["name"] == "WorkerErrors");
+    check!(alert_name_body["data"]["groups"][0]["rules"][0]["name"] == "WorkerErrors");
 
     let group_file_body = prometheus_rules_body_for_test(
         &app,
         "/prometheus/api/v1/rules?rule_group[]=api-errors&file[]=default",
     )
     .await;
-    assert!(group_file_body["data"]["groups"].as_array().unwrap().len() == 1);
-    assert!(group_file_body["data"]["groups"][0]["name"] == "api-errors");
-    assert!(group_file_body["data"]["groups"][0]["file"] == "default");
-    assert!(
+    check!(group_file_body["data"]["groups"].as_array().unwrap().len() == 1);
+    check!(group_file_body["data"]["groups"][0]["name"] == "api-errors");
+    check!(group_file_body["data"]["groups"][0]["file"] == "default");
+    check!(
         group_file_body["data"]["groups"][0]["rules"]
             .as_array()
             .unwrap()
@@ -6175,9 +6191,9 @@ rules:
 
     assert!(alerts_response.status() == StatusCode::OK);
     let body = json_body(alerts_response).await;
-    assert!(body["data"]["alerts"].as_array().unwrap().len() == 1);
-    assert!(body["data"]["alerts"][0]["labels"]["route"] == "api-prod");
-    assert!(body["data"]["alerts"][0]["annotations"]["summary"] == "service=api value=1");
+    check!(body["data"]["alerts"].as_array().unwrap().len() == 1);
+    check!(body["data"]["alerts"][0]["labels"]["route"] == "api-prod");
+    check!(body["data"]["alerts"][0]["annotations"]["summary"] == "service=api value=1");
 }
 
 #[tokio::test]
@@ -6214,9 +6230,9 @@ rules:
 
     assert!(alerts_response.status() == StatusCode::OK);
     let body = json_body(alerts_response).await;
-    assert!(body["data"]["alerts"].as_array().unwrap().len() == 1);
-    assert!(body["data"]["alerts"][0]["labels"]["route"] == "api-prod");
-    assert!(body["data"]["alerts"][0]["annotations"]["summary"] == "service=api value=1");
+    check!(body["data"]["alerts"].as_array().unwrap().len() == 1);
+    check!(body["data"]["alerts"][0]["labels"]["route"] == "api-prod");
+    check!(body["data"]["alerts"][0]["annotations"]["summary"] == "service=api value=1");
 }
 
 #[tokio::test]
@@ -6251,9 +6267,9 @@ rules:
         .unwrap();
     assert!(pending_response.status() == StatusCode::OK);
     let pending_body = json_body(pending_response).await;
-    assert!(pending_body["data"]["alerts"].as_array().unwrap().len() == 1);
-    assert!(pending_body["data"]["alerts"][0]["state"] == "pending");
-    assert!(pending_body["data"]["alerts"][0]["activeAt"] == "1970-01-01T00:00:00.000000019Z");
+    check!(pending_body["data"]["alerts"].as_array().unwrap().len() == 1);
+    check!(pending_body["data"]["alerts"][0]["state"] == "pending");
+    check!(pending_body["data"]["alerts"][0]["activeAt"] == "1970-01-01T00:00:00.000000019Z");
 
     let firing_body =
         prometheus_rules_body_for_test(&app, "/prometheus/api/v1/rules?time=40&type=alert").await;
@@ -6298,9 +6314,9 @@ rules:
         .unwrap();
     assert!(retained_response.status() == StatusCode::OK);
     let retained_body = json_body(retained_response).await;
-    assert!(retained_body["data"]["alerts"].as_array().unwrap().len() == 1);
-    assert!(retained_body["data"]["alerts"][0]["state"] == "firing");
-    assert!(retained_body["data"]["alerts"][0]["activeAt"] == "1970-01-01T00:00:00.00000004Z");
+    check!(retained_body["data"]["alerts"].as_array().unwrap().len() == 1);
+    check!(retained_body["data"]["alerts"][0]["state"] == "firing");
+    check!(retained_body["data"]["alerts"][0]["activeAt"] == "1970-01-01T00:00:00.00000004Z");
 
     let resolved_response = app
         .clone()
@@ -6381,9 +6397,9 @@ rules:
     )
     .await;
 
-    assert!(body["data"]["groups"].as_array().unwrap().len() == 1);
-    assert!(body["data"]["groups"][0]["rules"][0]["name"] == "ApiErrors");
-    assert!(body["data"]["groups"][0]["rules"][0]["alerts"] == json!([]));
+    check!(body["data"]["groups"].as_array().unwrap().len() == 1);
+    check!(body["data"]["groups"][0]["rules"][0]["name"] == "ApiErrors");
+    check!(body["data"]["groups"][0]["rules"][0]["alerts"] == json!([]));
 }
 
 #[tokio::test]
@@ -6415,10 +6431,10 @@ rules:
     )
     .await;
 
-    assert!(body["data"]["groups"].as_array().unwrap().len() == 1);
-    assert!(body["data"]["groups"][0]["rules"].as_array().unwrap().len() == 1);
-    assert!(body["data"]["groups"][0]["rules"][0]["name"] == "ApiErrors");
-    assert!(body["data"]["groups"][0]["rules"][0]["labels"]["severity"] == "page");
+    check!(body["data"]["groups"].as_array().unwrap().len() == 1);
+    check!(body["data"]["groups"][0]["rules"].as_array().unwrap().len() == 1);
+    check!(body["data"]["groups"][0]["rules"][0]["name"] == "ApiErrors");
+    check!(body["data"]["groups"][0]["rules"][0]["labels"]["severity"] == "page");
 }
 
 #[tokio::test]
@@ -6463,9 +6479,9 @@ rules:
         "/prometheus/api/v1/rules?exclude_alerts=true&group_limit=2",
     )
     .await;
-    assert!(first_page["data"]["groups"].as_array().unwrap().len() == 2);
-    assert!(first_page["data"]["groups"][0]["name"] == "api-rules");
-    assert!(first_page["data"]["groups"][1]["name"] == "worker-rules");
+    check!(first_page["data"]["groups"].as_array().unwrap().len() == 2);
+    check!(first_page["data"]["groups"][0]["name"] == "api-rules");
+    check!(first_page["data"]["groups"][1]["name"] == "worker-rules");
     let token = first_page["data"]["groupNextToken"]
         .as_str()
         .expect("expected next page token");
@@ -6477,9 +6493,9 @@ rules:
         ),
     )
     .await;
-    assert!(second_page["data"]["groups"].as_array().unwrap().len() == 1);
-    assert!(second_page["data"]["groups"][0]["name"] == "search-rules");
-    assert!(second_page["data"].get("groupNextToken").is_none());
+    check!(second_page["data"]["groups"].as_array().unwrap().len() == 1);
+    check!(second_page["data"]["groups"][0]["name"] == "search-rules");
+    check!(second_page["data"].get("groupNextToken").is_none());
 }
 
 #[tokio::test]
@@ -6649,9 +6665,9 @@ rules:
 
     assert!(namespace_response.status() == StatusCode::OK);
     let namespace_body = text_body(namespace_response).await;
-    assert!(!namespace_body.contains("api-errors"));
-    assert!(namespace_body.contains("worker-errors"));
-    assert!(namespace_body.contains("WorkerErrors"));
+    check!(!namespace_body.contains("api-errors"));
+    check!(namespace_body.contains("worker-errors"));
+    check!(namespace_body.contains("WorkerErrors"));
 }
 
 #[tokio::test]
@@ -9058,9 +9074,9 @@ async fn query_endpoint_returns_vector_metrics_as_parquet_when_requested() {
     assert!(reader.next().is_none());
 
     assert!(batch.num_rows() == 1);
-    assert!(batch.schema().field(0).name() == "timestamp");
-    assert!(batch.schema().field(1).name() == "labels");
-    assert!(batch.schema().field(2).name() == "value");
+    for (index, name) in [(0, "timestamp"), (1, "labels"), (2, "value")] {
+        check!(batch.schema().field(index).name() == name);
+    }
     let timestamps = batch
         .column(0)
         .as_any()
@@ -10703,13 +10719,13 @@ async fn query_endpoint_populates_loki_stats_from_planned_cold_blocks() {
 
     assert!(response.status() == StatusCode::OK);
     let body = json_body(response).await;
-    assert!(body["data"]["stats"]["store"]["compressedBytes"] == expected_block_bytes);
-    assert!(body["data"]["stats"]["store"]["decompressedBytes"] == expected_block_bytes);
-    assert!(body["data"]["stats"]["store"]["decompressedLines"] == 1);
-    assert!(body["data"]["stats"]["store"]["totalChunksRef"] == 1);
-    assert!(body["data"]["stats"]["store"]["totalChunksDownloaded"] == 1);
-    assert!(body["data"]["stats"]["summary"]["totalBytesProcessed"] == expected_block_bytes);
-    assert!(body["data"]["stats"]["summary"]["totalLinesProcessed"] == 1);
+    check!(body["data"]["stats"]["store"]["compressedBytes"] == expected_block_bytes);
+    check!(body["data"]["stats"]["store"]["decompressedBytes"] == expected_block_bytes);
+    check!(body["data"]["stats"]["store"]["decompressedLines"] == 1);
+    check!(body["data"]["stats"]["store"]["totalChunksRef"] == 1);
+    check!(body["data"]["stats"]["store"]["totalChunksDownloaded"] == 1);
+    check!(body["data"]["stats"]["summary"]["totalBytesProcessed"] == expected_block_bytes);
+    check!(body["data"]["stats"]["summary"]["totalLinesProcessed"] == 1);
 }
 
 #[tokio::test]
@@ -10744,15 +10760,15 @@ async fn metric_query_endpoint_populates_loki_stats_from_planned_cold_blocks() {
 
     assert!(response.status() == StatusCode::OK);
     let body = json_body(response).await;
-    assert!(body["data"]["resultType"] == "vector");
-    assert!(body["data"]["result"][0]["value"][1] == "1");
-    assert!(body["data"]["stats"]["store"]["compressedBytes"] == expected_block_bytes);
-    assert!(body["data"]["stats"]["store"]["decompressedBytes"] == expected_block_bytes);
-    assert!(body["data"]["stats"]["store"]["decompressedLines"] == 1);
-    assert!(body["data"]["stats"]["store"]["totalChunksRef"] == 1);
-    assert!(body["data"]["stats"]["store"]["totalChunksDownloaded"] == 1);
-    assert!(body["data"]["stats"]["summary"]["totalBytesProcessed"] == expected_block_bytes);
-    assert!(body["data"]["stats"]["summary"]["totalLinesProcessed"] == 1);
+    check!(body["data"]["resultType"] == "vector");
+    check!(body["data"]["result"][0]["value"][1] == "1");
+    check!(body["data"]["stats"]["store"]["compressedBytes"] == expected_block_bytes);
+    check!(body["data"]["stats"]["store"]["decompressedBytes"] == expected_block_bytes);
+    check!(body["data"]["stats"]["store"]["decompressedLines"] == 1);
+    check!(body["data"]["stats"]["store"]["totalChunksRef"] == 1);
+    check!(body["data"]["stats"]["store"]["totalChunksDownloaded"] == 1);
+    check!(body["data"]["stats"]["summary"]["totalBytesProcessed"] == expected_block_bytes);
+    check!(body["data"]["stats"]["summary"]["totalLinesProcessed"] == 1);
 }
 
 #[tokio::test]
@@ -11319,9 +11335,9 @@ async fn tail_endpoint_defaults_limit_to_one_hundred_entries() {
         .and_then(Value::as_array)
         .unwrap();
 
-    assert!(values.len() == 100);
-    assert!(values.first() == Some(&json!(["20", "api error 0"])));
-    assert!(values.last() == Some(&json!(["119", "api error 99"])));
+    check!(values.len() == 100);
+    check!(values.first() == Some(&json!(["20", "api error 0"])));
+    check!(values.last() == Some(&json!(["119", "api error 99"])));
 }
 
 #[tokio::test]
@@ -11623,14 +11639,14 @@ async fn query_range_endpoint_returns_streams_as_parquet_when_requested() {
     assert!(reader.next().is_none());
 
     assert!(batch.num_rows() == 1);
-    assert!(batch.schema().field(0).name() == "timestamp");
-    assert!(
+    check!(batch.schema().field(0).name() == "timestamp");
+    check!(
         batch.schema().field(0).data_type()
             == &DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into()))
     );
-    assert!(batch.schema().field(1).name() == "labels");
-    assert!(batch.schema().field(2).name() == "line");
-    assert!(batch.schema().field(2).data_type() == &DataType::Utf8);
+    check!(batch.schema().field(1).name() == "labels");
+    check!(batch.schema().field(2).name() == "line");
+    check!(batch.schema().field(2).data_type() == &DataType::Utf8);
 
     let timestamps = batch
         .column(0)
@@ -11650,12 +11666,14 @@ async fn query_range_endpoint_returns_streams_as_parquet_when_requested() {
         .as_any()
         .downcast_ref::<StringArray>()
         .unwrap();
-    assert!(keys.value(0) == "app");
-    assert!(values.value(0) == "api");
-    assert!(keys.value(1) == "detected_level");
-    assert!(values.value(1) == "unknown");
-    assert!(keys.value(2) == "env");
-    assert!(values.value(2) == "prod");
+    for (index, expected_key, expected_value) in [
+        (0, "app", "api"),
+        (1, "detected_level", "unknown"),
+        (2, "env", "prod"),
+    ] {
+        check!(keys.value(index) == expected_key);
+        check!(values.value(index) == expected_value);
+    }
     let lines = batch
         .column(2)
         .as_any()
@@ -11684,15 +11702,15 @@ async fn query_range_endpoint_ignores_zero_quality_parquet_accept() {
         .await
         .unwrap();
 
-    assert!(response.status() == StatusCode::OK);
-    assert!(
+    check!(response.status() == StatusCode::OK);
+    check!(
         response
             .headers()
             .get("content-type")
             .and_then(|value| value.to_str().ok())
             == Some("application/json")
     );
-    assert!(json_body(response).await == expected_api_error());
+    check!(json_body(response).await == expected_api_error());
 }
 
 #[tokio::test]
@@ -11783,23 +11801,23 @@ async fn query_range_endpoint_returns_metrics_as_parquet_when_requested() {
     assert!(reader.next().is_none());
 
     assert!(batch.num_rows() == 3);
-    assert!(batch.schema().field(0).name() == "timestamp");
-    assert!(
+    check!(batch.schema().field(0).name() == "timestamp");
+    check!(
         batch.schema().field(0).data_type()
             == &DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into()))
     );
-    assert!(batch.schema().field(1).name() == "labels");
-    assert!(batch.schema().field(2).name() == "value");
-    assert!(batch.schema().field(2).data_type() == &DataType::Float64);
+    check!(batch.schema().field(1).name() == "labels");
+    check!(batch.schema().field(2).name() == "value");
+    check!(batch.schema().field(2).data_type() == &DataType::Float64);
 
     let timestamps = batch
         .column(0)
         .as_any()
         .downcast_ref::<TimestampNanosecondArray>()
         .unwrap();
-    assert!(timestamps.value(0) == 0);
-    assert!(timestamps.value(1) == 10);
-    assert!(timestamps.value(2) == 20);
+    for (index, want) in [(0, 0), (1, 10), (2, 20)] {
+        check!(timestamps.value(index) == want);
+    }
     let labels = batch.column(1).as_any().downcast_ref::<MapArray>().unwrap();
     assert!(labels.value_offsets() == &[0, 0, 0, 0]);
     let values = batch
@@ -11807,9 +11825,9 @@ async fn query_range_endpoint_returns_metrics_as_parquet_when_requested() {
         .as_any()
         .downcast_ref::<Float64Array>()
         .unwrap();
-    assert!((values.value(0) - 6.0).abs() < f64::EPSILON);
-    assert!((values.value(1) - 6.0).abs() < f64::EPSILON);
-    assert!((values.value(2) - 6.0).abs() < f64::EPSILON);
+    for index in [0, 1, 2] {
+        check!((values.value(index) - 6.0).abs() < f64::EPSILON);
+    }
 }
 
 #[tokio::test]

@@ -2961,9 +2961,9 @@ mod tests {
         )
         .await;
 
-        assert!(status == StatusCode::OK);
-        assert!(body["series"][0]["samples"] == json!([{"timestampMs": "1000", "value": 2.0}]));
-        assert!(body["series"][0]["exemplars"] == json!([]));
+        check!(status == StatusCode::OK);
+        check!(body["series"][0]["samples"] == json!([{"timestampMs": "1000", "value": 2.0}]));
+        check!(body["series"][0]["exemplars"] == json!([]));
     }
 
     #[tokio::test]
@@ -3073,18 +3073,18 @@ mod tests {
     #[tokio::test]
     async fn search_accepts_legacy_tags_parameter() {
         let (status, body) = get_json("/api/search?tags=svc%3Db&start=0&end=10").await;
-        assert!(status == StatusCode::OK);
-        assert!(body["traces"][0]["traceID"] == "09090909090909090909090909090909");
-        assert!(body["traces"][0]["spanSets"][0]["matched"] == 1);
+        check!(status == StatusCode::OK);
+        check!(body["traces"][0]["traceID"] == "09090909090909090909090909090909");
+        check!(body["traces"][0]["spanSets"][0]["matched"] == 1);
     }
 
     #[tokio::test]
     async fn search_accepts_quoted_legacy_tags_parameter() {
         let (status, body) = get_json("/api/search?tags=svc%3D%22b%22&start=0&end=10").await;
 
-        assert!(status == StatusCode::OK);
-        assert!(body["traces"][0]["traceID"] == "09090909090909090909090909090909");
-        assert!(body["traces"][0]["spanSets"][0]["matched"] == 1);
+        check!(status == StatusCode::OK);
+        check!(body["traces"][0]["traceID"] == "09090909090909090909090909090909");
+        check!(body["traces"][0]["spanSets"][0]["matched"] == 1);
     }
 
     #[tokio::test]
@@ -3104,17 +3104,21 @@ mod tests {
         let malicious = "a%22%7D%20%7C%7C%20true%20%7B.b=c";
         let (status, body) =
             get_text(&format!("/api/search?tags={malicious}&start=0&end=10")).await;
-        assert!(status == StatusCode::BAD_REQUEST);
-        assert!(body == "invalid query parameter tags");
+        check!(status == StatusCode::BAD_REQUEST);
+        check!(body == "invalid query parameter tags");
 
-        // The unit-level converter rejects a key with a metacharacter (no
-        // structure leaks); only the key is unquoted, so the value side is safe.
-        assert!(tags_to_traceql("a}=c").is_none());
-        assert!(tags_to_traceql("a\"b=c").is_none());
-        // A benign key is still converted to a properly-quoted attribute match,
-        // and a value containing metacharacters stays safely quoted.
-        assert!(tags_to_traceql("svc=b") == Some("{ .svc = \"b\" }".to_string()));
-        assert!(tags_to_traceql("svc=a\"}||x") == Some("{ .svc = \"a\\\"}||x\" }".to_string()));
+        for (tags, want) in [
+            // The unit-level converter rejects a key with a metacharacter (no
+            // structure leaks); only the key is unquoted, so the value side is safe.
+            ("a}=c", None),
+            ("a\"b=c", None),
+            // A benign key is still converted to a properly-quoted attribute match,
+            // and a value containing metacharacters stays safely quoted.
+            ("svc=b", Some("{ .svc = \"b\" }")),
+            ("svc=a\"}||x", Some("{ .svc = \"a\\\"}||x\" }")),
+        ] {
+            check!(tags_to_traceql(tags).as_deref() == want, "tags={tags:?}");
+        }
     }
 
     #[tokio::test]
@@ -3136,8 +3140,8 @@ mod tests {
         assert!(status == StatusCode::OK);
         let traces = body["traces"].as_array().unwrap();
         assert!(traces.len() == 1);
-        assert!(traces[0]["traceID"] == "02020202020202020202020202020202");
-        assert!(traces[0]["rootTraceName"] == "second-rg");
+        check!(traces[0]["traceID"] == "02020202020202020202020202020202");
+        check!(traces[0]["rootTraceName"] == "second-rg");
     }
 
     #[tokio::test]
@@ -3196,9 +3200,9 @@ mod tests {
         )
         .await;
 
-        assert!(status == StatusCode::BAD_REQUEST);
-        assert!(body["status"] == "error");
-        assert!(
+        check!(status == StatusCode::BAD_REQUEST);
+        check!(body["status"] == "error");
+        check!(
             body["error"]
                 .as_str()
                 .is_some_and(|message| message.contains("max traces per search"))
@@ -3270,9 +3274,9 @@ overrides:
         )
         .await;
 
-        assert!(status == StatusCode::BAD_REQUEST);
-        assert!(body["status"] == "error");
-        assert!(
+        check!(status == StatusCode::BAD_REQUEST);
+        check!(body["status"] == "error");
+        check!(
             body["error"]
                 .as_str()
                 .is_some_and(|message| message.contains("max search duration"))
@@ -3356,9 +3360,9 @@ overrides:
             .as_array()
             .unwrap();
 
-        assert!(status == StatusCode::OK);
-        assert!(body["traces"][0]["spanSets"][0]["matched"] == 2);
-        assert!(spans.len() == 1);
+        check!(status == StatusCode::OK);
+        check!(body["traces"][0]["spanSets"][0]["matched"] == 2);
+        check!(spans.len() == 1);
     }
 
     #[tokio::test]
@@ -3395,9 +3399,9 @@ overrides:
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
 
-        assert!(status == StatusCode::OK);
-        assert!(body["traces"].as_array().unwrap().len() == 1);
-        assert!(body["traces"][0]["rootTraceName"] == "long");
+        check!(status == StatusCode::OK);
+        check!(body["traces"].as_array().unwrap().len() == 1);
+        check!(body["traces"][0]["rootTraceName"] == "long");
     }
 
     #[tokio::test]
@@ -3426,10 +3430,10 @@ overrides:
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
 
-        assert!(status == StatusCode::OK);
-        assert!(body["traces"].as_array().unwrap().len() == 1);
-        assert!(body["traces"][0]["rootTraceName"] == "long");
-        assert!(body["traces"][0]["durationMs"] == 1);
+        check!(status == StatusCode::OK);
+        check!(body["traces"].as_array().unwrap().len() == 1);
+        check!(body["traces"][0]["rootTraceName"] == "long");
+        check!(body["traces"][0]["durationMs"] == 1);
     }
 
     #[tokio::test]
@@ -3466,9 +3470,9 @@ overrides:
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
 
-        assert!(status == StatusCode::OK);
-        assert!(body["traces"].as_array().unwrap().len() == 1);
-        assert!(body["traces"][0]["rootTraceName"] == "short");
+        check!(status == StatusCode::OK);
+        check!(body["traces"].as_array().unwrap().len() == 1);
+        check!(body["traces"][0]["rootTraceName"] == "short");
     }
 
     #[tokio::test]
@@ -3505,9 +3509,9 @@ overrides:
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
 
-        assert!(status == StatusCode::OK);
-        assert!(body["traces"].as_array().unwrap().len() == 1);
-        assert!(body["traces"][0]["rootTraceName"] == "long");
+        check!(status == StatusCode::OK);
+        check!(body["traces"].as_array().unwrap().len() == 1);
+        check!(body["traces"][0]["rootTraceName"] == "long");
     }
 
     #[tokio::test]
@@ -3541,9 +3545,9 @@ overrides:
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
 
-        assert!(status == StatusCode::OK);
-        assert!(body["traces"].as_array().unwrap().len() == 1);
-        assert!(body["metrics"]["inspectedTraces"] == 2);
+        check!(status == StatusCode::OK);
+        check!(body["traces"].as_array().unwrap().len() == 1);
+        check!(body["metrics"]["inspectedTraces"] == 2);
     }
 
     #[tokio::test]
@@ -3571,13 +3575,13 @@ overrides:
                 }])
         );
         let metrics = &body["metrics"];
-        assert!(metrics["completedJobs"] == 1);
-        assert!(metrics["totalBlocks"] == 0);
-        assert!(metrics["inspectedTraces"] == 1);
-        assert!(metrics["inspectedSpans"] == 1);
+        check!(metrics["completedJobs"] == 1);
+        check!(metrics["totalBlocks"] == 0);
+        check!(metrics["inspectedTraces"] == 1);
+        check!(metrics["inspectedSpans"] == 1);
         // inspectedBytes = decoded size of the scanned data: non-zero, but not
         // pinned to a brittle exact byte count.
-        assert!(metrics["inspectedBytes"].as_u64().unwrap() > 0);
+        check!(metrics["inspectedBytes"].as_u64().unwrap() > 0);
     }
 
     #[tokio::test]
@@ -3590,10 +3594,14 @@ overrides:
             get_json("/api/search?q=%7B%20.svc%20%3D%20%22b%22%20%7D&start=0&end=10").await;
         assert!(status == StatusCode::OK);
         let metrics = &body["metrics"];
-        assert!(metrics["completedJobs"].as_u64().unwrap() >= 1);
-        assert!(metrics["inspectedTraces"].as_u64().unwrap() >= 1);
-        assert!(metrics["inspectedSpans"].as_u64().unwrap() >= 1);
-        assert!(metrics["inspectedBytes"].as_u64().unwrap() >= 1);
+        for key in [
+            "completedJobs",
+            "inspectedTraces",
+            "inspectedSpans",
+            "inspectedBytes",
+        ] {
+            check!(metrics[key].as_u64().unwrap() >= 1, "{key}");
+        }
     }
 
     #[tokio::test]
@@ -3654,14 +3662,20 @@ overrides:
             );
         }
         let unset = otlp_status(0, "");
-        assert!(unset.code == 0 && unset.message.is_empty());
+        check!(unset.code == 0 && unset.message.is_empty());
         // JSON mirrors the protojson shape: UNSET is present-but-empty, OK/ERROR
         // carry the explicit code.
-        assert!(span_status_json(0, "") == json!({}));
-        assert!(span_status_json(1, "") == json!({"code": "STATUS_CODE_OK"}));
-        assert!(
-            span_status_json(2, "boom") == json!({"code": "STATUS_CODE_ERROR", "message": "boom"})
-        );
+        for (code, message, want) in [
+            (0, "", json!({})),
+            (1, "", json!({"code": "STATUS_CODE_OK"})),
+            (
+                2,
+                "boom",
+                json!({"code": "STATUS_CODE_ERROR", "message": "boom"}),
+            ),
+        ] {
+            check!(span_status_json(code, message) == want, "code {code}");
+        }
     }
 
     #[test]
@@ -3819,7 +3833,7 @@ overrides:
         let resource_spans = body["trace"]["resourceSpans"].as_array().unwrap();
 
         assert!(resource_spans.len() == 2);
-        assert!(
+        check!(
             resource_spans[0]["resource"]["attributes"]
                 .as_array()
                 .unwrap()
@@ -3828,7 +3842,7 @@ overrides:
                     "value": {"stringValue": "api"}
                 }))
         );
-        assert!(
+        check!(
             resource_spans[1]["resource"]["attributes"]
                 .as_array()
                 .unwrap()
@@ -3951,11 +3965,11 @@ overrides:
         // v2 returns a Tempo TraceByIDResponse wrapping the OTLP trace.
         let data = TraceByIdResponse::decode(bytes).unwrap().trace.unwrap();
 
-        assert!(status == StatusCode::OK);
-        assert!(content_type.as_deref() == Some("application/protobuf"));
+        check!(status == StatusCode::OK);
+        check!(content_type.as_deref() == Some("application/protobuf"));
         assert!(data.resource_spans.len() == 1);
         assert!(data.resource_spans[0].scope_spans[0].spans.len() == 2);
-        assert!(data.resource_spans[0].scope_spans[0].spans[0].trace_id == vec![9; 16]);
+        check!(data.resource_spans[0].scope_spans[0].spans[0].trace_id == vec![9; 16]);
     }
 
     #[tokio::test]
@@ -3979,18 +3993,18 @@ overrides:
             .map(str::to_string);
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
 
-        assert!(status == StatusCode::OK);
-        assert!(content_type.as_deref() == Some("application/protobuf"));
-        assert!(TraceByIdResponse::decode(bytes).unwrap().trace.is_some());
+        check!(status == StatusCode::OK);
+        check!(content_type.as_deref() == Some("application/protobuf"));
+        check!(TraceByIdResponse::decode(bytes).unwrap().trace.is_some());
     }
 
     #[tokio::test]
     async fn buildinfo_reports_tempo_version() {
         // Grafana's Tempo datasource probes this to detect backend capabilities.
         let (status, body) = get_json("/api/status/buildinfo").await;
-        assert!(status == StatusCode::OK);
-        assert!(body["status"] == "success");
-        assert!(body["data"]["version"].as_str() == Some("2.6.0"));
+        check!(status == StatusCode::OK);
+        check!(body["status"] == "success");
+        check!(body["data"]["version"].as_str() == Some("2.6.0"));
     }
 
     #[tokio::test]
@@ -4017,10 +4031,10 @@ overrides:
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let data = TracesData::decode(bytes).unwrap();
 
-        assert!(status == StatusCode::OK);
-        assert!(content_type.as_deref() == Some("application/protobuf"));
+        check!(status == StatusCode::OK);
+        check!(content_type.as_deref() == Some("application/protobuf"));
         assert!(data.resource_spans[0].scope_spans[0].spans.len() == 2);
-        assert!(data.resource_spans[0].scope_spans[0].spans[0].trace_id == vec![9; 16]);
+        check!(data.resource_spans[0].scope_spans[0].spans[0].trace_id == vec![9; 16]);
     }
 
     #[tokio::test]
@@ -4064,9 +4078,9 @@ overrides:
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
 
-        assert!(status == StatusCode::OK);
-        assert!(body["status"] == "COMPLETE");
-        assert!(body["trace"]["resourceSpans"].as_array().is_some());
+        check!(status == StatusCode::OK);
+        check!(body["status"] == "COMPLETE");
+        check!(body["trace"]["resourceSpans"].as_array().is_some());
     }
 
     #[tokio::test]
@@ -4127,9 +4141,9 @@ overrides:
         let body: Value = serde_json::from_slice(&bytes).unwrap();
         let span = &body["trace"]["resourceSpans"][0]["scopeSpans"][0]["spans"][0];
 
-        assert!(status == StatusCode::OK);
-        assert!(span["kind"] == "SPAN_KIND_SERVER");
-        assert!(
+        check!(status == StatusCode::OK);
+        check!(span["kind"] == "SPAN_KIND_SERVER");
+        check!(
             span["status"]
                 == json!({
                     "code": "STATUS_CODE_ERROR",
@@ -4170,8 +4184,8 @@ overrides:
         let body: Value = serde_json::from_slice(&bytes).unwrap();
         let span = &body["trace"]["resourceSpans"][0]["scopeSpans"][0]["spans"][0];
 
-        assert!(status == StatusCode::OK);
-        assert!(
+        check!(status == StatusCode::OK);
+        check!(
             span["events"]
                 == json!([{
                     "timeUnixNano": "1050",
@@ -4182,7 +4196,7 @@ overrides:
                     }]
                 }])
         );
-        assert!(
+        check!(
             span["links"]
                 == json!([{
                     "traceId": "BwcHBwcHBwcHBwcHBwcHBw==",
@@ -4262,9 +4276,9 @@ overrides:
             .as_array()
             .unwrap();
 
-        assert!(status == StatusCode::OK);
-        assert!(spans.len() == 2);
-        assert!(body["status"] == "COMPLETE");
+        check!(status == StatusCode::OK);
+        check!(spans.len() == 2);
+        check!(body["status"] == "COMPLETE");
     }
 
     #[tokio::test]
@@ -4320,10 +4334,10 @@ overrides:
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
 
-        assert!(status == StatusCode::OK);
-        assert!(body["status"] == "PARTIAL");
-        assert!(body["message"] == "trace truncated after 1 spans");
-        assert!(
+        check!(status == StatusCode::OK);
+        check!(body["status"] == "PARTIAL");
+        check!(body["message"] == "trace truncated after 1 spans");
+        check!(
             body["trace"]["resourceSpans"][0]["scopeSpans"][0]["spans"]
                 .as_array()
                 .unwrap()

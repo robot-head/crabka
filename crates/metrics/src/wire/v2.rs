@@ -126,7 +126,7 @@ fn metadata_type(value: i32) -> String {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+    use assert2::{assert, check};
     use prost::Message;
 
     use super::*;
@@ -164,10 +164,10 @@ mod tests {
         let (decoded, counts) = decode_v2(&snappy(&req.encode_to_vec()), 1 << 20).unwrap();
 
         assert!(decoded.len() == 1);
-        assert!(decoded[0].labels.get("__name__") == Some("up"));
-        assert!(decoded[0].samples == vec![DecodedSample::new(1000, 1.0)]);
-        assert!(decoded[0].exemplars[0].labels.get("trace_id") == Some("abc"));
-        assert!(
+        check!(decoded[0].labels.get("__name__") == Some("up"));
+        check!(decoded[0].samples == vec![DecodedSample::new(1000, 1.0)]);
+        check!(decoded[0].exemplars[0].labels.get("trace_id") == Some("abc"));
+        check!(
             counts
                 == WrittenCounts {
                     samples: 1,

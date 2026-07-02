@@ -585,23 +585,27 @@ fn scope_name(scope: crabka_traceql::TagScope) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+    use assert2::{assert, check};
 
     use super::*;
 
     #[test]
     fn step_accepts_seconds_and_go_durations() {
-        // Bare epoch-seconds (what the frontend already accepted).
-        assert!(parse_step_to_ns("30") == Some(30_000_000_000));
-        // Go-duration forms Grafana's Tempo datasource actually sends.
-        assert!(parse_step_to_ns("30s") == Some(30_000_000_000));
-        assert!(parse_step_to_ns("5m") == Some(300_000_000_000));
-        assert!(parse_step_to_ns("1h") == Some(3_600_000_000_000));
-        assert!(parse_step_to_ns("100ms") == Some(100_000_000));
-        assert!(parse_step_to_ns("1m30s") == Some(90_000_000_000));
-        // Garbage is still rejected.
-        assert!(parse_step_to_ns("nonsense").is_none());
-        assert!(parse_step_to_ns("30q").is_none());
+        for (input, want) in [
+            // Bare epoch-seconds (what the frontend already accepted).
+            ("30", Some(30_000_000_000)),
+            // Go-duration forms Grafana's Tempo datasource actually sends.
+            ("30s", Some(30_000_000_000)),
+            ("5m", Some(300_000_000_000)),
+            ("1h", Some(3_600_000_000_000)),
+            ("100ms", Some(100_000_000)),
+            ("1m30s", Some(90_000_000_000)),
+            // Garbage is still rejected.
+            ("nonsense", None),
+            ("30q", None),
+        ] {
+            check!(parse_step_to_ns(input) == want);
+        }
     }
 
     #[test]

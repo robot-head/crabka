@@ -79,7 +79,7 @@ pub struct MetricsJobRequest {
 
 /// The partial result of one search job: matched traces (typed Tempo JSON) +
 /// the job's accounting.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct SearchPartial {
     pub traces: Vec<TraceJson>,
     pub metrics: Metrics,
@@ -319,7 +319,7 @@ impl QuerierBackend for MockQuerier {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+    use assert2::{assert, check};
 
     use super::*;
     use crate::frontend::job::JobShard;
@@ -358,10 +358,21 @@ mod tests {
             shard: JobShard::Live,
         };
         let out = mock.search_job(&req).await.unwrap();
-        assert!(out.traces.len() == 1);
-        assert!(out.metrics.inspected_bytes == 10);
+        assert!(
+            out == SearchPartial {
+                traces: vec![trace("checkout")],
+                metrics: Metrics {
+                    total_jobs: 1,
+                    completed_jobs: 1,
+                    total_blocks: 0,
+                    inspected_traces: 0,
+                    inspected_bytes: 10,
+                    inspected_spans: 0,
+                },
+            }
+        );
         assert!(mock.search_calls().len() == 1);
-        assert!(mock.search_calls()[0].tenant == "t1");
+        check!(mock.search_calls()[0].tenant == "t1");
         assert!(matches!(mock.search_calls()[0].shard, JobShard::Live));
     }
 

@@ -238,6 +238,7 @@ mod tests {
     use super::*;
     use assert2::assert;
     use crabka_protocol::owned::common::share_group_heartbeat_response::topic_partitions::TopicPartitions;
+    use crabka_protocol::tagged_fields::UnknownTaggedFields;
 
     fn id(n: u8) -> WireUuid {
         let mut b = [0u8; 16];
@@ -268,9 +269,17 @@ mod tests {
     #[test]
     fn heartbeat_requests_preserve_group_member_epoch_and_subscription() {
         let leave = build_leave_heartbeat_request("group-a".into(), "member-a".into());
-        assert!(leave.group_id == "group-a");
-        assert!(leave.member_id == "member-a");
-        assert!(leave.member_epoch == -1);
+        assert!(
+            leave
+                == ShareGroupHeartbeatRequest {
+                    group_id: "group-a".into(),
+                    member_id: "member-a".into(),
+                    member_epoch: -1,
+                    rack_id: None,
+                    subscribed_topic_names: None,
+                    unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                }
+        );
 
         let heartbeat = build_heartbeat_request(
             "group-a".into(),
@@ -278,10 +287,17 @@ mod tests {
             4,
             Some(vec!["topic-a".into()]),
         );
-        assert!(heartbeat.group_id == "group-a");
-        assert!(heartbeat.member_id == "member-a");
-        assert!(heartbeat.member_epoch == 4);
-        assert!(heartbeat.subscribed_topic_names == Some(vec!["topic-a".into()]));
+        assert!(
+            heartbeat
+                == ShareGroupHeartbeatRequest {
+                    group_id: "group-a".into(),
+                    member_id: "member-a".into(),
+                    member_epoch: 4,
+                    rack_id: None,
+                    subscribed_topic_names: Some(vec!["topic-a".into()]),
+                    unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                }
+        );
     }
 
     #[test]

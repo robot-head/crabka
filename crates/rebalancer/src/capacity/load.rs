@@ -58,6 +58,7 @@ pub fn load_from_path(path: &Path) -> Result<BrokerCapacities, CapacityError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::capacity::BrokerCapacity;
     use assert2::assert;
     use std::io::Write;
 
@@ -85,15 +86,25 @@ brokers:
         );
         let c = load_from_path(f.path()).expect("load");
         let b1 = c.for_broker(1).expect("broker 1");
-        assert!(b1.max_replicas == Some(4096));
-        assert!(b1.disk_bytes == Some(1_099_511_627_776));
-        assert!(b1.network_in_bytes_per_sec == Some(125_000_000));
-        assert!(b1.network_out_bytes_per_sec == Some(125_000_000));
-        assert!(b1.cpu_cores == Some(8.0));
+        assert!(
+            *b1 == BrokerCapacity {
+                max_replicas: Some(4096),
+                disk_bytes: Some(1_099_511_627_776),
+                network_in_bytes_per_sec: Some(125_000_000),
+                network_out_bytes_per_sec: Some(125_000_000),
+                cpu_cores: Some(8.0),
+            }
+        );
         let b2 = c.for_broker(2).expect("broker 2");
-        assert!(b2.max_replicas == Some(2048));
-        assert!(b2.disk_bytes == None);
-        assert!(b2.cpu_cores == None);
+        assert!(
+            *b2 == BrokerCapacity {
+                max_replicas: Some(2048),
+                disk_bytes: None,
+                network_in_bytes_per_sec: None,
+                network_out_bytes_per_sec: None,
+                cpu_cores: None,
+            }
+        );
         assert!(c.for_broker(3).is_none(), "broker 3 unconstrained");
     }
 
@@ -117,11 +128,15 @@ brokers:
         );
         let c = load_from_path(f.path()).expect("load");
         let b1 = c.for_broker(1).expect("broker 1");
-        assert!(b1.max_replicas == Some(100));
-        assert!(b1.disk_bytes == None);
-        assert!(b1.network_in_bytes_per_sec == None);
-        assert!(b1.network_out_bytes_per_sec == None);
-        assert!(b1.cpu_cores == None);
+        assert!(
+            *b1 == BrokerCapacity {
+                max_replicas: Some(100),
+                disk_bytes: None,
+                network_in_bytes_per_sec: None,
+                network_out_bytes_per_sec: None,
+                cpu_cores: None,
+            }
+        );
     }
 
     #[test]

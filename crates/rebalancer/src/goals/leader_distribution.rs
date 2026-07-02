@@ -96,7 +96,7 @@ impl Goal for LeaderDistribution {
 mod tests {
     use super::*;
     use crate::model::BrokerView;
-    use assert2::assert;
+    use assert2::{assert, check};
 
     fn ctx() -> GoalContext {
         GoalContext {
@@ -175,9 +175,9 @@ mod tests {
         let mvs = LeaderDistribution.propose(&s, &ctx());
         assert!(!mvs.is_empty());
         for m in &mvs {
-            assert!(m.old_replicas == m.new_replicas, "leader-only move");
-            assert!(m.old_leader == 1);
-            assert!(m.new_leader == 2);
+            check!(m.old_replicas == m.new_replicas, "leader-only move");
+            check!(m.old_leader == 1);
+            check!(m.new_leader == 2);
         }
     }
 
@@ -213,10 +213,7 @@ mod tests {
 
         let counts = LeaderDistribution::leader_counts(&s);
 
-        assert!(counts.get(&1) == Some(&2));
-        assert!(counts.get(&2) == Some(&0));
-        assert!(counts.get(&3) == Some(&1));
-        assert!(counts.get(&99) == Some(&1));
+        assert!(counts == HashMap::from([(1, 2), (2, 0), (3, 1), (99, 1)]));
     }
 
     #[test]

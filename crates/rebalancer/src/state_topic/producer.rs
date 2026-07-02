@@ -186,6 +186,7 @@ fn classify_send_result(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::{assert, check};
     use crabka_protocol::owned::metadata_response::{MetadataResponse, MetadataResponseTopic};
     use crabka_protocol::owned::produce_response::{
         PartitionProduceResponse, ProduceResponse, TopicProduceResponse,
@@ -238,14 +239,14 @@ mod tests {
 
         let req = produce_request("state-topic", topic_id, &key, value.clone());
 
-        assert!(req.transactional_id.is_none());
-        assert!(req.acks == -1);
-        assert!(req.timeout_ms == 10_000);
+        check!(req.transactional_id.is_none());
+        check!(req.acks == -1);
+        check!(req.timeout_ms == 10_000);
         assert!(req.topic_data.len() == 1);
-        assert!(req.topic_data[0].name == "state-topic");
-        assert!(req.topic_data[0].topic_id == topic_id);
+        check!(req.topic_data[0].name == "state-topic");
+        check!(req.topic_data[0].topic_id == topic_id);
         assert!(req.topic_data[0].partition_data.len() == 1);
-        assert!(req.topic_data[0].partition_data[0].index == 0);
+        check!(req.topic_data[0].partition_data[0].index == 0);
         let records = req.topic_data[0].partition_data[0]
             .records
             .as_ref()
@@ -255,8 +256,8 @@ mod tests {
         };
         assert!(batches.len() == 1);
         assert!(batches[0].records.len() == 1);
-        assert!(batches[0].records[0].key.as_ref() == Some(&key));
-        assert!(batches[0].records[0].value == value);
+        check!(batches[0].records[0].key.as_ref() == Some(&key));
+        check!(batches[0].records[0].value == value);
     }
 
     #[test]
@@ -287,9 +288,13 @@ mod tests {
             ..Default::default()
         };
 
-        assert!(topic_id_from_metadata(&resp, "state-topic") == Some(wanted));
-        assert!(topic_id_from_metadata(&resp, "other-topic") == Some(Uuid([9; 16])));
-        assert!(topic_id_from_metadata(&resp, "missing").is_none());
+        for (topic, want) in [
+            ("state-topic", Some(wanted)),
+            ("other-topic", Some(Uuid([9; 16]))),
+            ("missing", None),
+        ] {
+            assert!(topic_id_from_metadata(&resp, topic) == want);
+        }
     }
 
     #[test]
@@ -308,8 +313,8 @@ mod tests {
 
     #[test]
     fn produce_response_errors_are_classified_for_retry() {
-        assert!(classify_send_result(Ok(())).unwrap().is_none());
-        assert!(
+        check!(classify_send_result(Ok(())).unwrap().is_none());
+        check!(
             classify_send_result(Err(StateTopicError::ProduceErrorCode { code: 5 })).unwrap()
                 == Some(5)
         );

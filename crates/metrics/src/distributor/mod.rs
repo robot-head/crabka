@@ -1866,9 +1866,9 @@ mod tests {
         else {
             panic!("expected float payload");
         };
-        assert!(timestamp_ms == 7);
-        assert!((value - 3.0).abs() < f64::EPSILON);
-        assert!(start_timestamp_ms == Some(5));
+        check!(timestamp_ms == 7);
+        check!((value - 3.0).abs() < f64::EPSILON);
+        check!(start_timestamp_ms == Some(5));
     }
 
     #[tokio::test]
@@ -1893,22 +1893,17 @@ mod tests {
         assert!(records.len() == 2);
         let metadata = records
             .iter()
-            .find_map(|record| match &record.payload {
-                SamplePayload::Metadata {
-                    metric_family_name,
-                    metric_type,
-                    help,
-                    unit,
-                } => Some((metric_family_name, metric_type, help, unit)),
-                SamplePayload::Float { .. }
-                | SamplePayload::Hist { .. }
-                | SamplePayload::Exemplars => None,
-            })
+            .find(|record| matches!(record.payload, SamplePayload::Metadata { .. }))
             .expect("metadata wal record");
-        assert!(metadata.0 == "http_requests_total");
-        assert!(metadata.1 == "counter");
-        assert!(metadata.2 == "Total HTTP requests.");
-        assert!(metadata.3 == "requests");
+        assert!(
+            metadata.payload
+                == SamplePayload::Metadata {
+                    metric_family_name: "http_requests_total".to_string(),
+                    metric_type: "counter".to_string(),
+                    help: "Total HTTP requests.".to_string(),
+                    unit: "requests".to_string(),
+                }
+        );
     }
 
     #[tokio::test]
@@ -1936,22 +1931,17 @@ mod tests {
         assert!(records.len() == 2);
         let metadata = records
             .iter()
-            .find_map(|record| match &record.payload {
-                SamplePayload::Metadata {
-                    metric_family_name,
-                    metric_type,
-                    help,
-                    unit,
-                } => Some((metric_family_name, metric_type, help, unit)),
-                SamplePayload::Float { .. }
-                | SamplePayload::Hist { .. }
-                | SamplePayload::Exemplars => None,
-            })
+            .find(|record| matches!(record.payload, SamplePayload::Metadata { .. }))
             .expect("metadata wal record");
-        assert!(metadata.0 == "http_requests_total");
-        assert!(metadata.1 == "counter");
-        assert!(metadata.2 == "Total HTTP requests.");
-        assert!(metadata.3 == "requests");
+        assert!(
+            metadata.payload
+                == SamplePayload::Metadata {
+                    metric_family_name: "http_requests_total".to_string(),
+                    metric_type: "counter".to_string(),
+                    help: "Total HTTP requests.".to_string(),
+                    unit: "requests".to_string(),
+                }
+        );
     }
 
     #[tokio::test]
@@ -2055,9 +2045,9 @@ overrides:
             .await
             .unwrap();
 
-        assert!(tight_response.status() == StatusCode::BAD_REQUEST);
-        assert!(loose_response.status() == StatusCode::NO_CONTENT);
-        assert!(sink.records().len() == 1);
+        check!(tight_response.status() == StatusCode::BAD_REQUEST);
+        check!(loose_response.status() == StatusCode::NO_CONTENT);
+        check!(sink.records().len() == 1);
     }
 
     #[tokio::test]
@@ -2212,9 +2202,9 @@ overrides:
             .await
             .unwrap();
 
-        assert!(first_response.status() == StatusCode::NO_CONTENT);
-        assert!(second_response.status() == StatusCode::TOO_MANY_REQUESTS);
-        assert!(sink.records().len() == 1);
+        check!(first_response.status() == StatusCode::NO_CONTENT);
+        check!(second_response.status() == StatusCode::TOO_MANY_REQUESTS);
+        check!(sink.records().len() == 1);
     }
 
     #[tokio::test]
@@ -2259,9 +2249,9 @@ defaults:
             .iter()
             .filter(|status| **status == StatusCode::BAD_REQUEST)
             .count();
-        assert!(admitted == 1);
-        assert!(rejected == 1);
-        assert!(sink.records().len() == 1);
+        check!(admitted == 1);
+        check!(rejected == 1);
+        check!(sink.records().len() == 1);
     }
 
     #[tokio::test]
@@ -2304,9 +2294,9 @@ defaults:
             .await
             .unwrap();
 
-        assert!(exemplar_response.status() == StatusCode::NO_CONTENT);
-        assert!(sample_response.status() == StatusCode::TOO_MANY_REQUESTS);
-        assert!(sink.records().len() == 1);
+        check!(exemplar_response.status() == StatusCode::NO_CONTENT);
+        check!(sample_response.status() == StatusCode::TOO_MANY_REQUESTS);
+        check!(sink.records().len() == 1);
     }
 
     #[tokio::test]
@@ -2362,10 +2352,10 @@ defaults:
             .await
             .unwrap();
 
-        assert!(newest_response.status() == StatusCode::NO_CONTENT);
-        assert!(within_window_response.status() == StatusCode::NO_CONTENT);
-        assert!(too_old_response.status() == StatusCode::BAD_REQUEST);
-        assert!(sink.records().len() == 2);
+        check!(newest_response.status() == StatusCode::NO_CONTENT);
+        check!(within_window_response.status() == StatusCode::NO_CONTENT);
+        check!(too_old_response.status() == StatusCode::BAD_REQUEST);
+        check!(sink.records().len() == 2);
     }
 
     #[tokio::test]
@@ -2415,9 +2405,9 @@ overrides:
             .await
             .unwrap();
 
-        assert!(newest_response.status() == StatusCode::NO_CONTENT);
-        assert!(overridden_window_response.status() == StatusCode::NO_CONTENT);
-        assert!(sink.records().len() == 2);
+        check!(newest_response.status() == StatusCode::NO_CONTENT);
+        check!(overridden_window_response.status() == StatusCode::NO_CONTENT);
+        check!(sink.records().len() == 2);
     }
 
     #[tokio::test]
@@ -2459,9 +2449,9 @@ overrides:
             .await
             .unwrap();
 
-        assert!(newest_response.status() == StatusCode::NO_CONTENT);
-        assert!(too_old_response.status() == StatusCode::BAD_REQUEST);
-        assert!(sink.records().len() == 1);
+        check!(newest_response.status() == StatusCode::NO_CONTENT);
+        check!(too_old_response.status() == StatusCode::BAD_REQUEST);
+        check!(sink.records().len() == 1);
     }
 
     #[tokio::test]
@@ -2587,22 +2577,17 @@ overrides:
         ));
         let metadata = records
             .iter()
-            .find_map(|record| match &record.payload {
-                SamplePayload::Metadata {
-                    metric_family_name,
-                    metric_type,
-                    help,
-                    unit,
-                } => Some((metric_family_name, metric_type, help, unit)),
-                SamplePayload::Float { .. }
-                | SamplePayload::Hist { .. }
-                | SamplePayload::Exemplars => None,
-            })
+            .find(|record| matches!(record.payload, SamplePayload::Metadata { .. }))
             .expect("metadata wal record");
-        assert!(metadata.0 == "system_cpu_utilization");
-        assert!(metadata.1 == "gauge");
-        assert!(metadata.2 == "CPU utilization ratio.");
-        assert!(metadata.3 == "1");
+        assert!(
+            metadata.payload
+                == SamplePayload::Metadata {
+                    metric_family_name: "system_cpu_utilization".to_string(),
+                    metric_type: "gauge".to_string(),
+                    help: "CPU utilization ratio.".to_string(),
+                    unit: "1".to_string(),
+                }
+        );
     }
 
     #[tokio::test]
@@ -2660,9 +2645,9 @@ overrides:
         let _ = shutdown_tx.send(());
 
         let records = sink.records();
-        assert!(response.into_inner().partial_success.is_none());
-        assert!(records.len() == 2);
-        assert!(records.iter().any(|record| record.tenant == "tenant-a"));
+        check!(response.into_inner().partial_success.is_none());
+        check!(records.len() == 2);
+        check!(records.iter().any(|record| record.tenant == "tenant-a"));
     }
 
     #[tokio::test]
@@ -2849,29 +2834,22 @@ overrides:
             .await
             .unwrap();
 
-        assert!(response.status() == StatusCode::ACCEPTED);
-        assert!(
-            response
-                .headers()
-                .get("X-Prometheus-Remote-Write-Samples-Written")
-                .and_then(|value| value.to_str().ok())
-                == Some("0")
-        );
-        assert!(
-            response
-                .headers()
-                .get("X-Prometheus-Remote-Write-Histograms-Written")
-                .and_then(|value| value.to_str().ok())
-                == Some("0")
-        );
-        assert!(
-            response
-                .headers()
-                .get("X-Prometheus-Remote-Write-Exemplars-Written")
-                .and_then(|value| value.to_str().ok())
-                == Some("0")
-        );
-        assert!(sink.records().is_empty());
+        check!(response.status() == StatusCode::ACCEPTED);
+        for header in [
+            "X-Prometheus-Remote-Write-Samples-Written",
+            "X-Prometheus-Remote-Write-Histograms-Written",
+            "X-Prometheus-Remote-Write-Exemplars-Written",
+        ] {
+            check!(
+                response
+                    .headers()
+                    .get(header)
+                    .and_then(|value| value.to_str().ok())
+                    == Some("0"),
+                "header {header}",
+            );
+        }
+        check!(sink.records().is_empty());
     }
 
     #[tokio::test]
@@ -2904,10 +2882,10 @@ overrides:
         assert!(sink.records().len() == 1);
         let elections = election_sink.elections();
         assert!(elections.len() == 1);
-        assert!(elections[0].tenant == "tenant-a");
-        assert!(elections[0].cluster == "c1");
-        assert!(elections[0].replica == "r1");
-        assert!(elections[0].lease_timestamp_ms > 0);
+        check!(elections[0].tenant == "tenant-a");
+        check!(elections[0].cluster == "c1");
+        check!(elections[0].replica == "r1");
+        check!(elections[0].lease_timestamp_ms > 0);
     }
 
     #[tokio::test]
@@ -2981,14 +2959,16 @@ overrides:
 
         let result = replay_ha_election_records(&tracker, HA_TRACKER_TOPIC, &records).unwrap();
 
-        assert!(result.polled_records == 2);
-        assert!(result.replayed_records == 1);
         assert!(
-            result.committed_offsets
-                == vec![HaElectionPartitionOffset {
-                    partition: 2,
-                    offset: 21,
-                }]
+            result
+                == HaElectionReplayResult {
+                    polled_records: 2,
+                    replayed_records: 1,
+                    committed_offsets: vec![HaElectionPartitionOffset {
+                        partition: 2,
+                        offset: 21,
+                    }],
+                }
         );
         assert!(tracker.elected_replica("tenant-a", "c1") == Some("r1".to_string()));
     }
@@ -3021,16 +3001,19 @@ overrides:
         .await
         .unwrap();
 
-        assert!(result.replayed_records == 1);
         assert!(
-            result.committed_offsets
-                == vec![HaElectionPartitionOffset {
-                    partition: 1,
-                    offset: 8,
-                }]
+            result
+                == HaElectionReplayResult {
+                    polled_records: 1,
+                    replayed_records: 1,
+                    committed_offsets: vec![HaElectionPartitionOffset {
+                        partition: 1,
+                        offset: 8,
+                    }],
+                }
         );
-        assert!(consumer.commit_calls == 1);
-        assert!(tracker.elected_replica("tenant-a", "c1") == Some("r1".to_string()));
+        check!(consumer.commit_calls == 1);
+        check!(tracker.elected_replica("tenant-a", "c1") == Some("r1".to_string()));
     }
 
     #[test]
@@ -3049,8 +3032,8 @@ overrides:
         let records = wal_records_from_series("tenant-a", &series);
 
         assert!(records.len() == 2);
-        assert!(records[0].tenant == "tenant-a");
-        assert!(records[0].labels == records[1].labels);
+        check!(records[0].tenant == "tenant-a");
+        check!(records[0].labels == records[1].labels);
         assert!(matches!(
             records[0].payload,
             SamplePayload::Float {

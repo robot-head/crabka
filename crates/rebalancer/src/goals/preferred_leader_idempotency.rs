@@ -157,10 +157,16 @@ mod tests {
             vec![1, 2, 3],
         );
         let mvs = PreferredLeaderIdempotency.propose(&s, &ctx());
-        assert!(mvs.len() == 1);
-        assert!(mvs[0].new_leader == 1);
-        assert!(mvs[0].old_leader == 2);
-        assert!(mvs[0].old_replicas == mvs[0].new_replicas);
+        assert!(
+            mvs == vec![Movement {
+                topic: "foo".into(),
+                partition: 0,
+                old_replicas: vec![1, 2, 3],
+                new_replicas: vec![1, 2, 3],
+                old_leader: 2,
+                new_leader: 1,
+            }]
+        );
     }
 
     #[test]

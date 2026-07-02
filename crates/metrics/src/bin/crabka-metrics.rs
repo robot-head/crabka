@@ -406,7 +406,7 @@ fn unix_time_ms() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+    use assert2::{assert, check};
     use axum::body::Body;
     use axum::http::Request;
     use clap::Parser;
@@ -438,10 +438,10 @@ mod tests {
         ])
         .unwrap();
 
-        assert!(cli.ha_tracker_topic == "__tenant_a_ha");
-        assert!(cli.ha_tracker_group_id == "metrics-ha");
-        assert!(cli.ha_tracker_client_id == "metrics-ha-1");
-        assert!(cli.ha_tracker_poll_timeout_ms == 250);
+        check!(cli.ha_tracker_topic == "__tenant_a_ha");
+        check!(cli.ha_tracker_group_id == "metrics-ha");
+        check!(cli.ha_tracker_client_id == "metrics-ha-1");
+        check!(cli.ha_tracker_poll_timeout_ms == 250);
     }
 
     #[test]
@@ -570,11 +570,11 @@ mod tests {
         .unwrap();
 
         assert!(matches!(cli.target, Target::Compactor));
-        assert!(cli.bootstrap == "broker:9092");
-        assert!(cli.compactor_group_id == "metrics-c");
-        assert!(cli.compactor_poll_timeout_ms == 250);
-        assert!(cli.compactor_retention_ms == 3_600_000);
-        assert!(cli.compactor_retention_sweep_ms == 30_000);
+        check!(cli.bootstrap == "broker:9092");
+        check!(cli.compactor_group_id == "metrics-c");
+        check!(cli.compactor_poll_timeout_ms == 250);
+        check!(cli.compactor_retention_ms == 3_600_000);
+        check!(cli.compactor_retention_sweep_ms == 30_000);
     }
 
     #[test]

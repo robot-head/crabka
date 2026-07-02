@@ -191,7 +191,7 @@ mod tests {
     use crate::model::BrokerView;
     use crate::scraper::parse::ParsedSample;
     use crate::scraper::{MetricKind, UsageStore, WindowConfig};
-    use assert2::assert;
+    use assert2::{assert, check};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -385,9 +385,9 @@ mod tests {
         let ctx = ctx_with(caps(1, 1.0), store);
         let mvs = CpuCapacity.propose(&s, &ctx);
         assert!(!mvs.is_empty());
-        assert!(mvs[0].old_leader == 1);
-        assert!(mvs[0].new_leader != 1);
-        assert!(mvs[0].new_replicas.contains(&mvs[0].new_leader));
+        check!(mvs[0].old_leader == 1);
+        check!(mvs[0].new_leader != 1);
+        check!(mvs[0].new_replicas.contains(&mvs[0].new_leader));
     }
 
     #[test]

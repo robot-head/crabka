@@ -2872,18 +2872,18 @@ mod tests {
         .await
         .expect("poll compactor once");
 
-        assert!(result.polled_records == 1);
-        assert!(result.compacted_records == 1);
-        assert!(result.batch.writes.len() == 1);
-        assert!(
+        check!(result.polled_records == 1);
+        check!(result.compacted_records == 1);
+        check!(result.batch.writes.len() == 1);
+        check!(
             result.batch.committed_offsets
                 == vec![super::CompactionPartitionOffset {
                     partition: 4,
                     offset: 22,
                 }]
         );
-        assert!(*commit.calls.lock().expect("commit calls lock") == 1);
-        assert!(sink.manifests.lock().expect("manifest lock").len() == 1);
+        check!(*commit.calls.lock().expect("commit calls lock") == 1);
+        check!(sink.manifests.lock().expect("manifest lock").len() == 1);
     }
 
     struct QueuePoller {
@@ -2952,26 +2952,28 @@ mod tests {
         .await
         .expect("run compactor loop");
 
-        assert!(result.polls == 3);
-        assert!(result.polled_records == 2);
-        assert!(result.compacted_records == 2);
-        // ONE block written for the whole buffer, not one per poll.
-        assert!(result.writes == 1);
-        // Single commit at flush: through the last buffered record (offset 11 -> commit 12).
+        // ONE block written for the whole buffer, not one per poll; a single
+        // commit at flush through the last buffered record (offset 11 -> commit 12).
         assert!(
-            result.committed_offsets
-                == vec![super::CompactionPartitionOffset {
-                    partition: 0,
-                    offset: 12,
-                }]
+            result
+                == super::CompactionLoopResult {
+                    polls: 3,
+                    polled_records: 2,
+                    compacted_records: 2,
+                    writes: 1,
+                    committed_offsets: vec![super::CompactionPartitionOffset {
+                        partition: 0,
+                        offset: 12,
+                    }],
+                }
         );
-        assert!(*commit.calls.lock().expect("commit calls lock") == 1);
+        check!(*commit.calls.lock().expect("commit calls lock") == 1);
         assert!(sink.manifests.lock().expect("manifest lock").len() == 1);
         // The single block spans the full buffered offset range [10, 11].
         let manifests = sink.manifests.lock().expect("manifest lock");
-        assert!(manifests[0].first_offset == 10);
-        assert!(manifests[0].last_offset == 11);
-        assert!(manifests[0].row_count == 2);
+        check!(manifests[0].first_offset == 10);
+        check!(manifests[0].last_offset == 11);
+        check!(manifests[0].row_count == 2);
     }
 
     #[tokio::test]
@@ -3022,16 +3024,16 @@ mod tests {
 
         // One block flushed by the row threshold on the first poll; the empty
         // second poll triggers stop with an already-empty buffer (no extra write).
-        assert!(result.writes == 1);
-        assert!(
+        check!(result.writes == 1);
+        check!(
             result.committed_offsets
                 == vec![super::CompactionPartitionOffset {
                     partition: 0,
                     offset: 12,
                 }]
         );
-        assert!(*commit.calls.lock().expect("commit calls lock") == 1);
-        assert!(sink.manifests.lock().expect("manifest lock").len() == 1);
+        check!(*commit.calls.lock().expect("commit calls lock") == 1);
+        check!(sink.manifests.lock().expect("manifest lock").len() == 1);
     }
 
     struct FixedClock {
@@ -3113,19 +3115,19 @@ mod tests {
         .expect("run compactor loop with clock");
 
         // Both records land in one age-triggered block; commit through offset 11 -> 12.
-        assert!(result.writes == 1);
-        assert!(
+        check!(result.writes == 1);
+        check!(
             result.committed_offsets
                 == vec![super::CompactionPartitionOffset {
                     partition: 0,
                     offset: 12,
                 }]
         );
-        assert!(*commit.calls.lock().expect("commit calls lock") == 1);
+        check!(*commit.calls.lock().expect("commit calls lock") == 1);
         let manifests = sink.manifests.lock().expect("manifest lock");
         assert!(manifests.len() == 1);
-        assert!(manifests[0].first_offset == 10);
-        assert!(manifests[0].last_offset == 11);
+        check!(manifests[0].first_offset == 10);
+        check!(manifests[0].last_offset == 11);
     }
 
     #[tokio::test]
@@ -3167,11 +3169,11 @@ mod tests {
         .await
         .expect("run compactor consumer loop");
 
-        assert!(result.polls == 2);
-        assert!(result.polled_records == 1);
+        check!(result.polls == 2);
+        check!(result.polled_records == 1);
         // Buffered for one poll, then flushed once on the empty-poll shutdown.
-        assert!(result.writes == 1);
-        assert!(consumer.commit_calls == 1);
+        check!(result.writes == 1);
+        check!(consumer.commit_calls == 1);
     }
 
     #[tokio::test]
@@ -3214,16 +3216,16 @@ mod tests {
         .await
         .expect("run compactor consumer loop");
 
-        assert!(result.polls == 3);
-        assert!(result.polled_records == 2);
+        check!(result.polls == 3);
+        check!(result.polled_records == 2);
         // Single block + single commit for the whole two-poll buffer.
-        assert!(result.writes == 1);
-        assert!(consumer.commit_calls == 1);
+        check!(result.writes == 1);
+        check!(consumer.commit_calls == 1);
         let manifests = sink.manifests.lock().expect("manifest lock");
         assert!(manifests.len() == 1);
-        assert!(manifests[0].first_offset == 10);
-        assert!(manifests[0].last_offset == 11);
-        assert!(manifests[0].row_count == 2);
+        check!(manifests[0].first_offset == 10);
+        check!(manifests[0].last_offset == 11);
+        check!(manifests[0].row_count == 2);
     }
 
     /// Index sink that appends an ordered event marker shared with a committer,
@@ -3412,12 +3414,12 @@ mod tests {
 
         assert!(compacted.len() == 1);
         assert!(compacted[0].histogram_rows.len() == 1);
-        assert!(compacted[0].histogram_rows[0].timestamp_ms == 21);
+        check!(compacted[0].histogram_rows[0].timestamp_ms == 21);
         assert!(compacted[0].exemplar_rows.len() == 1);
-        assert!(compacted[0].exemplar_rows[0].fingerprint == record.series_fingerprint());
-        assert!(compacted[0].exemplar_rows[0].trace_id.as_deref() == Some("abc"));
-        assert!(compacted[0].exemplar_rows[0].span_id.as_deref() == Some("def"));
-        assert!(compacted[0].exemplar_rows[0].labels == vec![("kind".into(), "slow".into())]);
+        check!(compacted[0].exemplar_rows[0].fingerprint == record.series_fingerprint());
+        check!(compacted[0].exemplar_rows[0].trace_id.as_deref() == Some("abc"));
+        check!(compacted[0].exemplar_rows[0].span_id.as_deref() == Some("def"));
+        check!(compacted[0].exemplar_rows[0].labels == vec![("kind".into(), "slow".into())]);
     }
 
     #[test]
@@ -3446,10 +3448,10 @@ mod tests {
         let compacted = compact_wal_records(&records);
 
         assert!(compacted.len() == 1);
-        assert!(compacted[0].float_rows.len() == 2);
+        check!(compacted[0].float_rows.len() == 2);
         assert!(compacted[0].exemplar_rows.len() == 1);
-        assert!(compacted[0].exemplar_rows[0].fingerprint == labels.fingerprint());
-        assert!(compacted[0].exemplar_rows[0].trace_id.as_deref() == Some("abc"));
+        check!(compacted[0].exemplar_rows[0].fingerprint == labels.fingerprint());
+        check!(compacted[0].exemplar_rows[0].trace_id.as_deref() == Some("abc"));
     }
 
     #[test]
@@ -3469,12 +3471,16 @@ mod tests {
         let compacted = compact_wal_records(std::slice::from_ref(&record));
 
         assert!(compacted.len() == 1);
-        assert!(compacted[0].metadata_rows.len() == 1);
-        assert!(compacted[0].metadata_rows[0].fingerprint == record.series_fingerprint());
-        assert!(compacted[0].metadata_rows[0].metric_family_name == "http_requests_total");
-        assert!(compacted[0].metadata_rows[0].metric_type == "counter");
-        assert!(compacted[0].metadata_rows[0].help == "Total HTTP requests.");
-        assert!(compacted[0].metadata_rows[0].unit == "requests");
+        assert!(
+            compacted[0].metadata_rows
+                == vec![super::MetadataRow {
+                    fingerprint: record.series_fingerprint(),
+                    metric_family_name: "http_requests_total".to_string(),
+                    metric_type: "counter".to_string(),
+                    help: "Total HTTP requests.".to_string(),
+                    unit: "requests".to_string(),
+                }]
+        );
     }
 
     #[test]
@@ -3531,12 +3537,12 @@ mod tests {
         let tenant_a_http = index.metadata("tenant-a", Some("http_requests_total"));
 
         assert!(tenant_a_all.len() == 2);
-        assert!(tenant_a_all[0].metric_family_name == "http_requests_total");
-        assert!(tenant_a_all[1].metric_family_name == "up");
+        check!(tenant_a_all[0].metric_family_name == "http_requests_total");
+        check!(tenant_a_all[1].metric_family_name == "up");
         assert!(tenant_a_http.len() == 1);
-        assert!(tenant_a_http[0].metric_type == "counter");
-        assert!(tenant_a_http[0].help == "Total HTTP requests.");
-        assert!(index.metadata("tenant-b", Some("http_requests_total"))[0].metric_type == "gauge");
+        check!(tenant_a_http[0].metric_type == "counter");
+        check!(tenant_a_http[0].help == "Total HTTP requests.");
+        check!(index.metadata("tenant-b", Some("http_requests_total"))[0].metric_type == "gauge");
     }
 
     #[test]
@@ -3600,10 +3606,10 @@ mod tests {
             .unwrap();
         let label_entries = labels.value(0);
 
-        assert!(trace_ids.value(0) == "abc");
-        assert!(span_ids.value(0) == "def");
+        check!(trace_ids.value(0) == "abc");
+        check!(span_ids.value(0) == "def");
         assert!(label_entries.column(0).len() == 1);
-        assert!(
+        check!(
             label_entries
                 .column(0)
                 .as_any()
@@ -3612,7 +3618,7 @@ mod tests {
                 .value(0)
                 == "kind"
         );
-        assert!(
+        check!(
             label_entries
                 .column(1)
                 .as_any()

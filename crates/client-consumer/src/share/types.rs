@@ -66,9 +66,13 @@ mod tests {
 
     #[test]
     fn ack_wire_codes() {
-        assert!(ShareAckType::Accept.wire() == 1);
-        assert!(ShareAckType::Release.wire() == 2);
-        assert!(ShareAckType::Reject.wire() == 3);
+        for (ack, expected) in [
+            (ShareAckType::Accept, 1),
+            (ShareAckType::Release, 2),
+            (ShareAckType::Reject, 3),
+        ] {
+            assert!(ack.wire() == expected, "ack: {ack:?}");
+        }
     }
 
     #[test]

@@ -308,7 +308,8 @@ impl ShareConsumer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
+    use crabka_protocol::tagged_fields::UnknownTaggedFields;
 
     fn id(n: u8) -> WireUuid {
         let mut b = [0u8; 16];
@@ -342,27 +343,33 @@ mod tests {
     fn join_heartbeat_request_preserves_group_member_epoch_and_subscription() {
         let req = build_join_heartbeat_request("group-a".into(), vec!["topic-a".into()]);
 
-        assert!(req.group_id == "group-a");
-        assert!(req.member_id.is_empty());
-        assert!(req.member_epoch == 0);
-        assert!(req.subscribed_topic_names == Some(vec!["topic-a".into()]));
+        assert!(
+            req == ShareGroupHeartbeatRequest {
+                group_id: "group-a".into(),
+                member_id: String::new(),
+                member_epoch: 0,
+                rack_id: None,
+                subscribed_topic_names: Some(vec!["topic-a".into()]),
+                unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+            }
+        );
     }
 
     #[test]
     fn join_response_helpers_preserve_error_interval_and_assignment_boundaries() {
-        assert!(!response_has_error(0));
-        assert!(response_has_error(17));
-        assert!(
+        check!(!response_has_error(0));
+        check!(response_has_error(17));
+        check!(
             heartbeat_interval_from_response(2500, Duration::from_secs(3))
                 == Duration::from_millis(2500)
         );
-        assert!(
+        check!(
             heartbeat_interval_from_response(0, Duration::from_secs(3)) == Duration::from_secs(3)
         );
-        assert!(!has_assignment_partitions(0));
-        assert!(has_assignment_partitions(1));
-        assert!(should_stage_implicit_accepts(ShareAckMode::Implicit));
-        assert!(!should_stage_implicit_accepts(ShareAckMode::Explicit));
+        check!(!has_assignment_partitions(0));
+        check!(has_assignment_partitions(1));
+        check!(should_stage_implicit_accepts(ShareAckMode::Implicit));
+        check!(!should_stage_implicit_accepts(ShareAckMode::Explicit));
     }
 
     #[test]
@@ -389,9 +396,9 @@ mod tests {
     async fn accessors_return_share_identity_and_assignment() {
         let consumer = test_consumer().await;
 
-        assert!(consumer.group_id() == "group-a");
-        assert!(consumer.member_id() == "member-a");
-        assert!(consumer.assignment().await == vec![("topic-a".into(), 2)]);
+        check!(consumer.group_id() == "group-a");
+        check!(consumer.member_id() == "member-a");
+        check!(consumer.assignment().await == vec![("topic-a".into(), 2)]);
     }
 
     #[tokio::test]

@@ -83,7 +83,7 @@ fn parse_line(line: &str) -> Option<ParsedSample> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
 
     #[test]
     fn empty_input_returns_empty() {
@@ -99,21 +99,30 @@ crabka_broker_partition_bytes_in_total{topic="kept",partition="1"} 7
 "#;
         let out = parse(txt);
         assert!(out.len() == 1);
-        assert!(out[0].topic == "kept");
-        assert!(out[0].partition == 1);
-        assert!((out[0].value - 7.0).abs() < 1e-9);
+        check!(out[0].topic == "kept");
+        check!(out[0].partition == 1);
+        check!((out[0].value - 7.0).abs() < 1e-9);
     }
 
     #[test]
-    fn parses_a_well_formed_counter() {
-        let txt = r#"crabka_broker_partition_bytes_in_total{topic="t",partition="0"} 1024
-"#;
-        let out = parse(txt);
-        assert!(out.len() == 1);
-        assert!(out[0].metric == MetricKind::BytesIn);
-        assert!(out[0].topic == "t");
-        assert!(out[0].partition == 0);
-        assert!((out[0].value - 1024.0).abs() < 1e-9);
+    fn parses_well_formed_counters() {
+        for (txt, want_metric) in [
+            (
+                "crabka_broker_partition_bytes_in_total{topic=\"t\",partition=\"0\"} 1024\n",
+                MetricKind::BytesIn,
+            ),
+            (
+                "crabka_broker_partition_cpu_micros_total{topic=\"t\",partition=\"0\"} 1024\n",
+                MetricKind::CpuMicros,
+            ),
+        ] {
+            let out = parse(txt);
+            assert!(out.len() == 1);
+            check!(out[0].metric == want_metric);
+            check!(out[0].topic == "t");
+            check!(out[0].partition == 0);
+            check!((out[0].value - 1024.0).abs() < 1e-9);
+        }
     }
 
     #[test]
@@ -122,9 +131,9 @@ crabka_broker_partition_bytes_in_total{topic="kept",partition="1"} 7
 "#;
         let out = parse(txt);
         assert!(out.len() == 1);
-        assert!(out[0].metric == MetricKind::DiskBytes);
-        assert!(out[0].partition == 5);
-        assert!((out[0].value - 1_234_567.0).abs() < 1e-3);
+        check!(out[0].metric == MetricKind::DiskBytes);
+        check!(out[0].partition == 5);
+        check!((out[0].value - 1_234_567.0).abs() < 1e-3);
     }
 
     #[test]
@@ -139,21 +148,9 @@ crabka_broker_partition_cpu_micros_total{topic="t",partition="0"} 42
 "#;
         let out = parse(txt);
         assert!(out.len() == 3);
-        assert!(out[0].metric == MetricKind::BytesIn);
-        assert!(out[1].metric == MetricKind::BytesOut);
-        assert!(out[2].metric == MetricKind::CpuMicros);
-    }
-
-    #[test]
-    fn parses_a_cpu_micros_counter() {
-        let txt = r#"crabka_broker_partition_cpu_micros_total{topic="t",partition="0"} 1024
-"#;
-        let out = parse(txt);
-        assert!(out.len() == 1);
-        assert!(out[0].metric == MetricKind::CpuMicros);
-        assert!(out[0].topic == "t");
-        assert!(out[0].partition == 0);
-        assert!((out[0].value - 1024.0).abs() < 1e-9);
+        check!(out[0].metric == MetricKind::BytesIn);
+        check!(out[1].metric == MetricKind::BytesOut);
+        check!(out[2].metric == MetricKind::CpuMicros);
     }
 
     #[test]

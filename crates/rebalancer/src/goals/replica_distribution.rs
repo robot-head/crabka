@@ -143,7 +143,7 @@ impl Goal for ReplicaDistribution {
 mod tests {
     use super::*;
     use crate::model::BrokerView;
-    use assert2::assert;
+    use assert2::{assert, check};
 
     fn ctx() -> GoalContext {
         GoalContext {
@@ -224,11 +224,7 @@ mod tests {
 
         let counts = ReplicaDistribution::counts(&s);
 
-        assert!(counts.get(&1) == Some(&2));
-        assert!(counts.get(&2) == Some(&1));
-        assert!(counts.get(&3) == Some(&1));
-        assert!(counts.get(&4) == Some(&0));
-        assert!(counts.get(&99) == Some(&1));
+        assert!(counts == HashMap::from([(1, 2), (2, 1), (3, 1), (4, 0), (99, 1)]));
     }
 
     #[test]
@@ -279,10 +275,16 @@ mod tests {
 
         let mvs = ReplicaDistribution.propose(&s, &ctx_with_cap(1));
 
-        assert!(mvs.len() == 1);
-        assert!(mvs[0].partition == 1);
-        assert!(mvs[0].old_replicas == vec![1]);
-        assert!(mvs[0].new_replicas == vec![2]);
+        assert!(
+            mvs == vec![Movement {
+                topic: "t".into(),
+                partition: 1,
+                old_replicas: vec![1],
+                new_replicas: vec![2],
+                old_leader: 1,
+                new_leader: 2,
+            }]
+        );
     }
 
     #[test]
@@ -296,9 +298,16 @@ mod tests {
 
         let mvs = ReplicaDistribution.propose(&s, &ctx_with_cap(1));
 
-        assert!(mvs.len() == 1);
-        assert!(mvs[0].old_leader == 1);
-        assert!(mvs[0].new_leader == 3);
+        assert!(
+            mvs == vec![Movement {
+                topic: "t".into(),
+                partition: 0,
+                old_replicas: vec![1],
+                new_replicas: vec![3],
+                old_leader: 1,
+                new_leader: 3,
+            }]
+        );
     }
 
     #[test]
@@ -338,12 +347,12 @@ mod tests {
                 .iter()
                 .find(|p| p.topic == m.topic && p.partition == m.partition)
                 .expect("movement references a partition in the input");
-            assert!(
+            check!(
                 m.old_replicas == original.replicas,
                 "movement old_replicas must reflect the original cluster state, \
                  not an intermediate working-state snapshot"
             );
-            assert!(
+            check!(
                 m.old_leader == original.leader,
                 "movement old_leader must reflect the original cluster state, \
                  not an intermediate working-state snapshot"

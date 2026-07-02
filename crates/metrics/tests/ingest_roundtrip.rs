@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use assert2::assert;
+use assert2::{assert, check};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use crabka_blockstore::read_block;
@@ -16,8 +16,8 @@ use crabka_client_producer::Producer;
 use crabka_metrics::distributor::{DistributorState, KafkaSink, router};
 use crabka_metrics::wire::pb;
 use crabka_metrics::{
-    MetricBlockKind, MetricsCompactorConfig, SamplePayload, WAL_TOPIC, WalRecord,
-    compaction_partition_object_key, run_compactor_consumer_loop,
+    CompactionPartitionOffset, MetricBlockKind, MetricsCompactorConfig, SamplePayload, WAL_TOPIC,
+    WalRecord, compaction_partition_object_key, run_compactor_consumer_loop,
 };
 use object_store::ObjectStore;
 use object_store::memory::InMemory;
@@ -94,11 +94,15 @@ async fn remote_write_v1_lands_as_block() {
     .await
     .expect("run compactor");
 
-    assert!(result.compacted_records == 1);
-    assert!(result.writes == 1);
-    assert!(result.committed_offsets.len() == 1);
-    assert!(result.committed_offsets[0].partition == 0);
-    assert!(result.committed_offsets[0].offset == 1);
+    check!(result.compacted_records == 1);
+    check!(result.writes == 1);
+    check!(
+        result.committed_offsets
+            == vec![CompactionPartitionOffset {
+                partition: 0,
+                offset: 1,
+            }]
+    );
 
     let block_key = compaction_partition_object_key("tenant-a", MetricBlockKind::Float, 0, 0, 0);
     let batches = read_block(object_store, &block_key)
@@ -116,10 +120,10 @@ async fn remote_write_v1_lands_as_block() {
         .read_manifest(&expected_manifest_key)
         .await
         .expect("read compaction manifest");
-    assert!(manifest.tenant == "tenant-a");
-    assert!(manifest.block_key == block_key);
-    assert!(manifest.row_count == 1);
-    assert!(fingerprint != 0);
+    check!(manifest.tenant == "tenant-a");
+    check!(manifest.block_key == block_key);
+    check!(manifest.row_count == 1);
+    check!(fingerprint != 0);
 }
 
 async fn create_metrics_wal_topic(bootstrap: &str) {

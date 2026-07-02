@@ -344,7 +344,7 @@ impl<B: QuerierBackend + 'static, C: BlockCatalog + 'static> QueryFrontend<B, C>
 mod orch_tests {
     use std::sync::Arc;
 
-    use assert2::assert;
+    use assert2::{assert, check};
 
     use super::*;
     use crate::frontend::backend::{MockQuerier, SearchPartial};
@@ -421,17 +421,21 @@ mod orch_tests {
         for c in qf.backend_ref().search_calls() {
             assert!(c.tenant == "t1");
         }
-        assert!(resp.traces.len() == 3);
-        assert!(resp.metrics.total_jobs == 3);
-        assert!(resp.metrics.completed_jobs == 3);
-        assert!(resp.metrics.total_blocks == 2);
-        assert!(resp.metrics.inspected_bytes == 300);
+        check!(resp.traces.len() == 3);
         // A successful multi-job search folds real per-job accounting:
         // completedJobs == totalJobs, and non-zero inspected traces/spans (not
         // the all-zero block that the querier used to emit).
-        assert!(resp.metrics.completed_jobs == resp.metrics.total_jobs);
-        assert!(resp.metrics.inspected_traces == 3);
-        assert!(resp.metrics.inspected_spans == 3);
+        check!(
+            resp.metrics
+                == Metrics {
+                    total_jobs: 3,
+                    completed_jobs: 3,
+                    total_blocks: 2,
+                    inspected_traces: 3,
+                    inspected_bytes: 300,
+                    inspected_spans: 3,
+                }
+        );
     }
 
     #[tokio::test]
@@ -470,8 +474,8 @@ mod orch_tests {
         let qf = QueryFrontend::new(Arc::new(backend), Arc::new(catalog), cfg);
         let (_t, metrics, status) = qf.trace_by_id("t1", [9; 16], 0, 300).await.unwrap();
         // One job per querier (3), none returned the trace => Complete + None.
-        assert!(qf.backend_ref().trace_calls().len() == 3);
-        assert!(metrics.total_jobs == 3);
+        check!(qf.backend_ref().trace_calls().len() == 3);
+        check!(metrics.total_jobs == 3);
         assert!(matches!(status, TraceStatus::Complete));
     }
 

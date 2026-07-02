@@ -149,7 +149,7 @@ mod tests {
     use crate::model::BrokerView;
     use crate::scraper::parse::ParsedSample;
     use crate::scraper::{MetricKind, UsageStore, WindowConfig};
-    use assert2::assert;
+    use assert2::{assert, check};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -252,8 +252,8 @@ mod tests {
         let mvs = LeaderBytesIn.propose(&s, &ctx);
         assert!(!mvs.is_empty(), "expected leader-only swaps");
         for m in &mvs {
-            assert!(m.old_replicas == m.new_replicas, "leader-only");
-            assert!(m.new_leader == 2, "cold broker becomes new leader");
+            check!(m.old_replicas == m.new_replicas, "leader-only");
+            check!(m.new_leader == 2, "cold broker becomes new leader");
         }
     }
 
@@ -305,10 +305,16 @@ mod tests {
 
         let mvs = LeaderBytesIn.propose(&s, &ctx);
 
-        assert!(mvs.len() == 1);
-        assert!(mvs[0].old_replicas == mvs[0].new_replicas);
-        assert!(mvs[0].old_leader == 1);
-        assert!(mvs[0].new_leader == 2);
+        assert!(
+            mvs == vec![Movement {
+                topic: "hot".into(),
+                partition: 0,
+                old_replicas: vec![1, 2],
+                new_replicas: vec![1, 2],
+                old_leader: 1,
+                new_leader: 2,
+            }]
+        );
     }
 
     #[test]

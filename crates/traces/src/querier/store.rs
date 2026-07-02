@@ -3275,22 +3275,22 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(
+        check!(
             event_values
                 == vec![TypedValue {
                     type_: "string".into(),
                     value: "timeout".into(),
                 }]
         );
-        assert!(scoped_event_values == event_values);
-        assert!(
+        check!(scoped_event_values == event_values);
+        check!(
             link_values
                 == vec![TypedValue {
                     type_: "string".into(),
                     value: "retry".into(),
                 }]
         );
-        assert!(scoped_link_values == link_values);
+        check!(scoped_link_values == link_values);
     }
 
     #[tokio::test]
@@ -3339,25 +3339,27 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(event_tags.len() == 1);
-        assert!(event_tags[0].scope == TagScope::Event);
-        assert!(
-            event_tags[0].tags
-                == vec![
-                    "event:name".to_string(),
-                    "event:timeSinceStart".to_string(),
-                    "exception.type".to_string(),
-                ]
+        check!(
+            event_tags
+                == vec![ScopedTag {
+                    scope: TagScope::Event,
+                    tags: vec![
+                        "event:name".to_string(),
+                        "event:timeSinceStart".to_string(),
+                        "exception.type".to_string(),
+                    ],
+                }]
         );
-        assert!(link_tags.len() == 1);
-        assert!(link_tags[0].scope == TagScope::Link);
-        assert!(
-            link_tags[0].tags
-                == vec![
-                    "link.kind".to_string(),
-                    "link:spanID".to_string(),
-                    "link:traceID".to_string(),
-                ]
+        check!(
+            link_tags
+                == vec![ScopedTag {
+                    scope: TagScope::Link,
+                    tags: vec![
+                        "link.kind".to_string(),
+                        "link:spanID".to_string(),
+                        "link:traceID".to_string(),
+                    ],
+                }]
         );
     }
 
@@ -3387,9 +3389,9 @@ mod tests {
             .await
             .unwrap();
         assert!(intrinsic.len() == 1);
-        assert!(intrinsic[0].scope == TagScope::Intrinsic);
-        assert!(intrinsic[0].tags.contains(&"span:duration".to_string()));
-        assert!(intrinsic[0].tags.contains(&"trace:id".to_string()));
+        check!(intrinsic[0].scope == TagScope::Intrinsic);
+        check!(intrinsic[0].tags.contains(&"span:duration".to_string()));
+        check!(intrinsic[0].tags.contains(&"trace:id".to_string()));
 
         let event = store
             .tag_names("tenant", Some(TagScope::Event), 0, 10)
@@ -3442,9 +3444,12 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(tags.len() == 1);
-        assert!(tags[0].scope == TagScope::Span);
-        assert!(tags[0].tags == vec!["http.method"]);
+        assert!(
+            tags == vec![ScopedTag {
+                scope: TagScope::Span,
+                tags: vec!["http.method".to_string()],
+            }]
+        );
     }
 
     #[tokio::test]
@@ -3787,14 +3792,14 @@ mod tests {
             .unwrap();
 
         assert!(trace.spans.len() == 1);
-        assert!(
+        check!(
             trace.spans[0].attributes
                 == vec![
                     ("http.status_code".into(), AttrValue::Int(504)),
                     ("retryable".into(), AttrValue::Bool(true)),
                 ]
         );
-        assert!(
+        check!(
             trace.spans[0].events
                 == vec![EventRef {
                     time_since_start_nano: 50,
@@ -3802,7 +3807,7 @@ mod tests {
                     attributes: vec![("exception.type".into(), AttrValue::Str("timeout".into()))],
                 }]
         );
-        assert!(
+        check!(
             trace.spans[0].links
                 == vec![LinkRef {
                     trace_id: [9; 16],
@@ -4008,9 +4013,9 @@ mod tests {
             .find(|span| span.span_id == child.span_id)
             .unwrap();
 
-        assert!(child.nested_set_parent == root.nested_set_left);
-        assert!(child.nested_set_left > root.nested_set_left);
-        assert!(child.nested_set_right < root.nested_set_right);
+        check!(child.nested_set_parent == root.nested_set_left);
+        check!(child.nested_set_left > root.nested_set_left);
+        check!(child.nested_set_right < root.nested_set_right);
     }
 
     #[tokio::test]
@@ -4070,9 +4075,9 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert!(trace.spans.len() == 2);
-        assert!(trace.spans.iter().any(|s| s.span_id == root.span_id));
-        assert!(trace.spans.iter().any(|s| s.span_id == child.span_id));
+        check!(trace.spans.len() == 2);
+        check!(trace.spans.iter().any(|s| s.span_id == root.span_id));
+        check!(trace.spans.iter().any(|s| s.span_id == child.span_id));
     }
 
     #[tokio::test]
@@ -4137,9 +4142,9 @@ mod tests {
             .unwrap();
 
         assert!(resp.traces.len() == 1);
-        assert!(resp.traces[0].trace_id == root.trace_id);
+        check!(resp.traces[0].trace_id == root.trace_id);
         assert!(resp.traces[0].span_sets[0].spans.len() == 1);
-        assert!(resp.traces[0].span_sets[0].spans[0].span_id == child.span_id);
+        check!(resp.traces[0].span_sets[0].spans[0].span_id == child.span_id);
     }
 
     #[tokio::test]
@@ -4229,13 +4234,13 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(resp.traces.len() == 2);
-        assert!(
+        check!(resp.traces.len() == 2);
+        check!(
             resp.traces
                 .iter()
                 .any(|trace| trace.trace_id == matching.trace_id)
         );
-        assert!(
+        check!(
             resp.traces
                 .iter()
                 .any(|trace| trace.trace_id == split_events.trace_id)
@@ -4252,18 +4257,18 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(resp.traces.len() == 3);
-        assert!(
+        check!(resp.traces.len() == 3);
+        check!(
             resp.traces
                 .iter()
                 .any(|trace| trace.trace_id == matching.trace_id)
         );
-        assert!(
+        check!(
             resp.traces
                 .iter()
                 .any(|trace| trace.trace_id == other.trace_id)
         );
-        assert!(
+        check!(
             resp.traces
                 .iter()
                 .any(|trace| trace.trace_id == split_events.trace_id)
@@ -4280,18 +4285,18 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(resp.traces.len() == 3);
-        assert!(
+        check!(resp.traces.len() == 3);
+        check!(
             resp.traces
                 .iter()
                 .any(|trace| trace.trace_id == matching.trace_id)
         );
-        assert!(
+        check!(
             resp.traces
                 .iter()
                 .any(|trace| trace.trace_id == other.trace_id)
         );
-        assert!(
+        check!(
             resp.traces
                 .iter()
                 .any(|trace| trace.trace_id == split_events.trace_id)
@@ -4316,23 +4321,23 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(resp.traces.len() == 3);
-        assert!(
+        check!(resp.traces.len() == 3);
+        check!(
             resp.traces
                 .iter()
                 .any(|trace| trace.trace_id == matching.trace_id)
         );
-        assert!(
+        check!(
             resp.traces
                 .iter()
                 .any(|trace| trace.trace_id == other.trace_id)
         );
-        assert!(
+        check!(
             resp.traces
                 .iter()
                 .any(|trace| trace.trace_id == split_events.trace_id)
         );
-        assert!(
+        check!(
             !resp
                 .traces
                 .iter()
@@ -4631,10 +4636,16 @@ mod tests {
 
         series.sort_by(|a, b| a.labels.cmp(&b.labels));
         assert!(series.len() == 2);
-        assert!(series[0].labels == vec![("resource.service.name".into(), "billing".into())]);
-        assert!(series[0].points == vec![(0, 1.0), (10_000, 0.0)]);
-        assert!(series[1].labels == vec![("resource.service.name".into(), "checkout".into())]);
-        assert!(series[1].points == vec![(0, 1.0), (10_000, 0.0)]);
+        for (i, service) in ["billing", "checkout"].into_iter().enumerate() {
+            check!(
+                series[i].labels == vec![("resource.service.name".into(), service.into())],
+                "series {i}"
+            );
+            check!(
+                series[i].points == vec![(0, 1.0), (10_000, 0.0)],
+                "series {i}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -4696,8 +4707,8 @@ mod tests {
             .await
             .unwrap();
         assert!(resp.traces.len() == 1);
-        assert!(resp.traces[0].trace_id == [1; 16]);
-        assert!(
+        check!(resp.traces[0].trace_id == [1; 16]);
+        check!(
             resp.traces[0].span_sets[0].spans[0].attributes
                 == vec![
                     ("http.method".into(), AttrValue::Str("GET".into())),

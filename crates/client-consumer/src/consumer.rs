@@ -1275,45 +1275,52 @@ mod security_arg_tests {
             "Server(42) should NOT be retriable"
         );
 
-        // A connection dropped mid-join is transient — retry a fresh attempt.
-        assert!(is_retriable_consumer_start_error(&ConsumerError::Client(
-            ClientError::Disconnected
-        )));
-        // Connect/Timeout are NOT retried: an unreachable or non-responding
-        // broker is a genuine fault that must surface promptly (the lost-wakeup
-        // hang the retry loop survives never returns Timeout — it is caught by
-        // the per-attempt timeout, not classified here).
-        assert!(!is_retriable_consumer_start_error(&ConsumerError::Client(
-            ClientError::Timeout(Duration::from_secs(1))
-        )));
-        assert!(is_retriable_consumer_start_error(
-            &ConsumerError::StartupAfterJoin(Box::new(ConsumerError::Client(
-                ClientError::Timeout(Duration::from_secs(1))
-            )))
-        ));
-        assert!(!is_retriable_consumer_start_error(&ConsumerError::Client(
-            ClientError::Connect {
-                addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9092),
-                source: std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "refused"),
-            }
-        )));
-
-        // Permanent misconfig errors — must NOT be retriable.
-        assert!(!is_retriable_consumer_start_error(
-            &ConsumerError::NotSubscribed
-        ));
-        assert!(!is_retriable_consumer_start_error(
-            &ConsumerError::RebalanceFailed("group_id required".into())
-        ));
-        assert!(!is_retriable_consumer_start_error(&ConsumerError::Client(
-            ClientError::IncompatibleVersion {
-                api_key: 0,
-                broker_min: 0,
-                broker_max: 5,
-                client_min: 7,
-                client_max: 10,
-            }
-        )));
+        for (error, expected) in [
+            // A connection dropped mid-join is transient — retry a fresh attempt.
+            (ConsumerError::Client(ClientError::Disconnected), true),
+            // Connect/Timeout are NOT retried: an unreachable or non-responding
+            // broker is a genuine fault that must surface promptly (the lost-wakeup
+            // hang the retry loop survives never returns Timeout — it is caught by
+            // the per-attempt timeout, not classified here).
+            (
+                ConsumerError::Client(ClientError::Timeout(Duration::from_secs(1))),
+                false,
+            ),
+            (
+                ConsumerError::StartupAfterJoin(Box::new(ConsumerError::Client(
+                    ClientError::Timeout(Duration::from_secs(1)),
+                ))),
+                true,
+            ),
+            (
+                ConsumerError::Client(ClientError::Connect {
+                    addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9092),
+                    source: std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "refused"),
+                }),
+                false,
+            ),
+            // Permanent misconfig errors — must NOT be retriable.
+            (ConsumerError::NotSubscribed, false),
+            (
+                ConsumerError::RebalanceFailed("group_id required".into()),
+                false,
+            ),
+            (
+                ConsumerError::Client(ClientError::IncompatibleVersion {
+                    api_key: 0,
+                    broker_min: 0,
+                    broker_max: 5,
+                    client_min: 7,
+                    client_max: 10,
+                }),
+                false,
+            ),
+        ] {
+            assert!(
+                is_retriable_consumer_start_error(&error) == expected,
+                "error: {error:?}"
+            );
+        }
     }
 
     #[tokio::test]

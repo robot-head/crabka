@@ -338,7 +338,7 @@ pub use crate::frontend::metrics_merge::{
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+    use assert2::{assert, check};
 
     use super::*;
     use crate::frontend::wire::{
@@ -590,19 +590,19 @@ mod tests {
         let p1 = by_id_partial(by_id_body(&["02", "03"], "COMPLETE"), 100);
         let (trace, metrics, status) = assemble_trace(vec![p0, p1], 1_000_000);
         let trace = trace.unwrap();
-        assert_eq!(assembled_span_count(&trace), 3);
-        assert_eq!(
-            metrics,
-            Metrics {
-                total_jobs: 0,
-                completed_jobs: 2,
-                total_blocks: 0,
-                inspected_traces: 0,
-                inspected_bytes: 200,
-                inspected_spans: 0,
-            }
+        check!(assembled_span_count(&trace) == 3);
+        check!(
+            metrics
+                == Metrics {
+                    total_jobs: 0,
+                    completed_jobs: 2,
+                    total_blocks: 0,
+                    inspected_traces: 0,
+                    inspected_bytes: 200,
+                    inspected_spans: 0,
+                }
         );
-        assert_eq!(status, TraceStatus::Complete);
+        check!(status == TraceStatus::Complete);
     }
 
     #[test]

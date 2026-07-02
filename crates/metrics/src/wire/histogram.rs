@@ -258,7 +258,7 @@ fn counts(float_counts: &[f64], deltas: &[i64]) -> Vec<f64> {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+    use assert2::{assert, check};
 
     use super::*;
 
@@ -286,12 +286,12 @@ mod tests {
 
         let native = v1_histogram_to_native(&histogram).unwrap();
 
-        assert!(!native.is_float);
-        assert!((native.count - 9.0).abs() < f64::EPSILON);
-        assert!((native.zero_count - 1.0).abs() < f64::EPSILON);
-        assert!(native.positive_counts == vec![4.0, 3.0, 6.0]);
-        assert!(native.negative_counts == vec![2.0, 3.0]);
-        assert!(native.reset_hint == ResetHint::Yes);
+        check!(!native.is_float);
+        check!((native.count - 9.0).abs() < f64::EPSILON);
+        check!((native.zero_count - 1.0).abs() < f64::EPSILON);
+        check!(native.positive_counts == vec![4.0, 3.0, 6.0]);
+        check!(native.negative_counts == vec![2.0, 3.0]);
+        check!(native.reset_hint == ResetHint::Yes);
     }
 
     #[test]
@@ -313,12 +313,12 @@ mod tests {
 
         let native = v2_histogram_to_native(&histogram).unwrap();
 
-        assert!(native.is_float);
-        assert!(native.is_nhcb());
-        assert!(native.positive_counts == vec![1.5, 2.5]);
-        assert!(native.custom_values == Some(vec![0.1, 0.2, 0.3]));
-        assert!(native.start_timestamp_ms == Some(7));
-        assert!(native.reset_hint == ResetHint::Gauge);
+        check!(native.is_float);
+        check!(native.is_nhcb());
+        check!(native.positive_counts == vec![1.5, 2.5]);
+        check!(native.custom_values == Some(vec![0.1, 0.2, 0.3]));
+        check!(native.start_timestamp_ms == Some(7));
+        check!(native.reset_hint == ResetHint::Gauge);
     }
 
     #[test]

@@ -127,7 +127,7 @@ fn merge_limits(base: &Limits, partial: &PartialLimits) -> Limits {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+    use assert2::{assert, check};
 
     use super::*;
 
@@ -146,9 +146,9 @@ overrides:
     fn tenant_override_merges_over_defaults() {
         let p = OverridesProvider::from_yaml(YAML).unwrap();
         let a = p.for_tenant("tenant-a");
-        assert!((a.ingestion_rate - 500.0).abs() < f64::EPSILON);
-        assert!(a.max_global_series_per_user == 1000);
-        assert!(a.max_label_name_length == Limits::default().max_label_name_length);
+        check!((a.ingestion_rate - 500.0).abs() < f64::EPSILON);
+        check!(a.max_global_series_per_user == 1000);
+        check!(a.max_label_name_length == Limits::default().max_label_name_length);
     }
 
     #[test]

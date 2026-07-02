@@ -1982,10 +1982,21 @@ for: 5m
         )
         .await
         .expect("firing alert evaluation");
-        let alerts = sink.alerts();
         assert!(firing == 1);
-        assert!(alerts.len() == 1);
-        assert!(alerts[0].starts_at_ms == 60_000);
+        assert!(
+            sink.alerts()
+                == vec![super::AlertmanagerAlert {
+                    labels: BTreeMap::from([
+                        ("__name__".to_string(), "up".to_string()),
+                        ("alertname".to_string(), "InstanceUp".to_string()),
+                        ("job".to_string(), "api".to_string()),
+                    ]),
+                    annotations: BTreeMap::new(),
+                    starts_at_ms: 60_000,
+                    ends_at_ms: None,
+                    generator_url: String::new(),
+                }]
+        );
     }
 
     #[tokio::test]
@@ -2031,11 +2042,21 @@ expr: up > 0
         )
         .await
         .expect("resolved evaluation");
-        let alerts = resolved_sink.alerts();
         assert!(resolved == 1);
-        assert!(alerts.len() == 1);
-        assert!(alerts[0].labels.get("alertname").map(String::as_str) == Some("InstanceUp"));
-        assert!(alerts[0].ends_at_ms == Some(120_000));
+        assert!(
+            resolved_sink.alerts()
+                == vec![super::AlertmanagerAlert {
+                    labels: BTreeMap::from([
+                        ("__name__".to_string(), "up".to_string()),
+                        ("alertname".to_string(), "InstanceUp".to_string()),
+                        ("job".to_string(), "api".to_string()),
+                    ]),
+                    annotations: BTreeMap::new(),
+                    starts_at_ms: 60_000,
+                    ends_at_ms: Some(120_000),
+                    generator_url: String::new(),
+                }]
+        );
     }
 
     #[tokio::test]
@@ -2125,11 +2146,21 @@ rules:
         )
         .await
         .expect("firing group alert evaluation");
-        let alerts = sink.alerts();
         assert!(firing == 1);
-        assert!(alerts.len() == 1);
-        assert!(alerts[0].labels.get("alertname").map(String::as_str) == Some("InstanceUp"));
-        assert!(alerts[0].starts_at_ms == 60_000);
+        assert!(
+            sink.alerts()
+                == vec![super::AlertmanagerAlert {
+                    labels: BTreeMap::from([
+                        ("__name__".to_string(), "up".to_string()),
+                        ("alertname".to_string(), "InstanceUp".to_string()),
+                        ("job".to_string(), "api".to_string()),
+                    ]),
+                    annotations: BTreeMap::new(),
+                    starts_at_ms: 60_000,
+                    ends_at_ms: None,
+                    generator_url: String::new(),
+                }]
+        );
     }
 
     #[tokio::test]
@@ -2167,9 +2198,14 @@ rules:
         )
         .await
         .expect("pending group evaluation");
-        assert!(pending.recording_records == 1);
-        assert!(pending.alerts_dispatched == 0);
-        assert!(pending.last_eval_ms == 60_000);
+        assert!(
+            pending
+                == super::RulerGroupEvaluation {
+                    recording_records: 1,
+                    alerts_dispatched: 0,
+                    last_eval_ms: 60_000,
+                }
+        );
 
         let firing = super::evaluate_ruler_rule_group(
             &engine,
@@ -2183,11 +2219,59 @@ rules:
         .await
         .expect("firing group evaluation");
 
-        assert!(firing.recording_records == 1);
-        assert!(firing.alerts_dispatched == 1);
-        assert!(firing.last_eval_ms == 360_000);
-        assert!(wal_sink.records().len() == 2);
-        assert!(alert_sink.alerts().len() == 1);
+        assert!(
+            firing
+                == super::RulerGroupEvaluation {
+                    recording_records: 1,
+                    alerts_dispatched: 1,
+                    last_eval_ms: 360_000,
+                }
+        );
+        assert!(
+            wal_sink.records()
+                == vec![
+                    WalRecord {
+                        tenant: "tenant-a".to_string(),
+                        labels: vec![
+                            ("__name__".to_string(), "job:up:current".to_string()),
+                            ("job".to_string(), "api".to_string()),
+                        ],
+                        payload: SamplePayload::Float {
+                            timestamp_ms: 60_000,
+                            value: 1.0,
+                            start_timestamp_ms: None,
+                        },
+                        exemplars: Vec::new(),
+                    },
+                    WalRecord {
+                        tenant: "tenant-a".to_string(),
+                        labels: vec![
+                            ("__name__".to_string(), "job:up:current".to_string()),
+                            ("job".to_string(), "api".to_string()),
+                        ],
+                        payload: SamplePayload::Float {
+                            timestamp_ms: 360_000,
+                            value: 1.0,
+                            start_timestamp_ms: None,
+                        },
+                        exemplars: Vec::new(),
+                    },
+                ]
+        );
+        assert!(
+            alert_sink.alerts()
+                == vec![super::AlertmanagerAlert {
+                    labels: BTreeMap::from([
+                        ("__name__".to_string(), "up".to_string()),
+                        ("alertname".to_string(), "InstanceUp".to_string()),
+                        ("job".to_string(), "api".to_string()),
+                    ]),
+                    annotations: BTreeMap::new(),
+                    starts_at_ms: 60_000,
+                    ends_at_ms: None,
+                    generator_url: String::new(),
+                }]
+        );
     }
 
     #[tokio::test]
@@ -2242,9 +2326,14 @@ rules:
         .await
         .expect("rule-set evaluation with state persistence");
 
-        assert!(evaluation.recording_records == 1);
-        assert!(evaluation.alerts_dispatched == 1);
-        assert!(evaluation.last_eval_ms == 120_000);
+        assert!(
+            evaluation
+                == super::RulerGroupEvaluation {
+                    recording_records: 1,
+                    alerts_dispatched: 1,
+                    last_eval_ms: 120_000,
+                }
+        );
         assert!(
             state_sink.group_records()
                 == vec![
@@ -2428,9 +2517,14 @@ rules:
         )
         .await
         .expect("pending rule-set evaluation");
-        assert!(pending.recording_records == 1);
-        assert!(pending.alerts_dispatched == 0);
-        assert!(pending.last_eval_ms == 60_000);
+        assert!(
+            pending
+                == super::RulerGroupEvaluation {
+                    recording_records: 1,
+                    alerts_dispatched: 0,
+                    last_eval_ms: 60_000,
+                }
+        );
 
         let firing = super::evaluate_ruler_rule_set(
             &engine,
@@ -2443,10 +2537,58 @@ rules:
         )
         .await
         .expect("firing rule-set evaluation");
-        assert!(firing.recording_records == 1);
-        assert!(firing.alerts_dispatched == 1);
-        assert!(firing.last_eval_ms == 360_000);
-        assert!(wal_sink.records().len() == 2);
-        assert!(alert_sink.alerts().len() == 1);
+        assert!(
+            firing
+                == super::RulerGroupEvaluation {
+                    recording_records: 1,
+                    alerts_dispatched: 1,
+                    last_eval_ms: 360_000,
+                }
+        );
+        assert!(
+            wal_sink.records()
+                == vec![
+                    WalRecord {
+                        tenant: "tenant-a".to_string(),
+                        labels: vec![
+                            ("__name__".to_string(), "job:up:current".to_string()),
+                            ("job".to_string(), "api".to_string()),
+                        ],
+                        payload: SamplePayload::Float {
+                            timestamp_ms: 60_000,
+                            value: 1.0,
+                            start_timestamp_ms: None,
+                        },
+                        exemplars: Vec::new(),
+                    },
+                    WalRecord {
+                        tenant: "tenant-a".to_string(),
+                        labels: vec![
+                            ("__name__".to_string(), "job:up:current".to_string()),
+                            ("job".to_string(), "api".to_string()),
+                        ],
+                        payload: SamplePayload::Float {
+                            timestamp_ms: 360_000,
+                            value: 1.0,
+                            start_timestamp_ms: None,
+                        },
+                        exemplars: Vec::new(),
+                    },
+                ]
+        );
+        assert!(
+            alert_sink.alerts()
+                == vec![super::AlertmanagerAlert {
+                    labels: BTreeMap::from([
+                        ("__name__".to_string(), "up".to_string()),
+                        ("alertname".to_string(), "InstanceUp".to_string()),
+                        ("job".to_string(), "api".to_string()),
+                    ]),
+                    annotations: BTreeMap::new(),
+                    starts_at_ms: 60_000,
+                    ends_at_ms: None,
+                    generator_url: String::new(),
+                }]
+        );
     }
 }

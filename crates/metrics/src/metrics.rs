@@ -272,19 +272,13 @@ mod tests {
             "crabka_metrics_blocks_compacted_total",
             "crabka_metrics_query_requests_total",
             "crabka_metrics_query_duration_seconds",
+            "status=\"ok\"",
+            "status=\"error\"",
+            "route=\"query\"",
+            "tenant=\"tenant-a\"",
         ] {
             assert!(buf.contains(needle), "missing {needle} in:\n{buf}");
         }
-        assert!(buf.contains("status=\"ok\""), "ok status label missing");
-        assert!(
-            buf.contains("status=\"error\""),
-            "error status label missing"
-        );
-        assert!(buf.contains("route=\"query\""), "query route label missing");
-        assert!(
-            buf.contains("tenant=\"tenant-a\""),
-            "ingest_series tenant label missing"
-        );
     }
 
     #[test]

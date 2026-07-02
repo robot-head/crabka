@@ -342,9 +342,16 @@ mod tests {
 
         let mvs = NetworkOutCapacity.propose(&s, &ctx);
 
-        assert!(mvs.len() == 1);
-        assert!(mvs[0].old_replicas == vec![2]);
-        assert!(mvs[0].new_replicas == vec![3]);
+        assert!(
+            mvs == vec![Movement {
+                topic: "large_limit".into(),
+                partition: 0,
+                old_replicas: vec![2],
+                new_replicas: vec![3],
+                old_leader: 2,
+                new_leader: 3,
+            }]
+        );
     }
 
     #[test]
@@ -363,9 +370,16 @@ mod tests {
 
         let mvs = NetworkOutCapacity.propose(&s, &ctx);
 
-        assert!(mvs.len() == 1);
-        assert!(mvs[0].old_replicas == vec![2]);
-        assert!(mvs[0].new_replicas == vec![3]);
+        assert!(
+            mvs == vec![Movement {
+                topic: "high_excess".into(),
+                partition: 0,
+                old_replicas: vec![2],
+                new_replicas: vec![3],
+                old_leader: 2,
+                new_leader: 3,
+            }]
+        );
     }
 
     #[test]
@@ -400,9 +414,16 @@ mod tests {
 
         let mvs = NetworkOutCapacity.propose(&s, &ctx);
 
-        assert!(mvs.len() == 1);
-        assert!(mvs[0].old_leader == 1);
-        assert!(mvs[0].new_leader == 2);
+        assert!(
+            mvs == vec![Movement {
+                topic: "hot".into(),
+                partition: 0,
+                old_replicas: vec![1],
+                new_replicas: vec![2],
+                old_leader: 1,
+                new_leader: 2,
+            }]
+        );
     }
 
     #[test]

@@ -791,9 +791,13 @@ mod tests {
             .await
             .insert(id(8), "topic-b".into());
 
-        assert!(consumer.topic_id_for("topic-a") == id(7));
-        assert!(consumer.topic_id_for("topic-b") == id(8));
-        assert!(consumer.topic_id_for("missing") == WireUuid::default());
+        for (name, expected) in [
+            ("topic-a", id(7)),
+            ("topic-b", id(8)),
+            ("missing", WireUuid::default()),
+        ] {
+            assert!(consumer.topic_id_for(name) == expected, "name: {name}");
+        }
     }
 
     #[test]
@@ -812,14 +816,26 @@ mod tests {
             .find(|part| part.partition_index == 2)
             .unwrap();
         let batch = only(&part.acknowledgement_batches);
-        assert!(batch.first_offset == 10);
-        assert!(batch.last_offset == 12);
-        assert!(batch.acknowledge_types == vec![ShareAckType::Accept.wire(); 3]);
+        assert!(
+            *batch
+                == AckAckBatch {
+                    first_offset: 10,
+                    last_offset: 12,
+                    acknowledge_types: vec![1, 1, 1],
+                    unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                }
+        );
 
         let renew = build_ack_topics(vec![(id(7), 2, 10, 10, 0)]);
         let renew_batch = only(&only(&only(&renew).partitions).acknowledgement_batches);
-        assert!(renew_batch.first_offset == 10);
-        assert!(renew_batch.last_offset == 10);
-        assert!(renew_batch.acknowledge_types.is_empty());
+        assert!(
+            *renew_batch
+                == AckAckBatch {
+                    first_offset: 10,
+                    last_offset: 10,
+                    acknowledge_types: Vec::new(),
+                    unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                }
+        );
     }
 }

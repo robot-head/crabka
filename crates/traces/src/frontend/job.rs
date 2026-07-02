@@ -359,9 +359,13 @@ mod tests {
     fn empty_blocks_with_hot_window_is_just_live() {
         let blocks: Vec<BlockMetaInfo> = vec![];
         let plan = plan_search_jobs(&blocks, i64::MAX, 0, 10_000);
-        assert!(plan.jobs.len() == 1);
-        assert!(matches!(plan.jobs[0], JobShard::Live));
-        assert!(plan.total_blocks == 0);
+        assert_eq!(
+            plan,
+            JobPlan {
+                jobs: vec![JobShard::Live],
+                total_blocks: 0,
+            }
+        );
     }
 
     #[test]

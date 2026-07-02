@@ -220,7 +220,7 @@ fn write_atomic(path: &Path, on_disk: &OnDisk) -> Result<(), StoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
 
     #[test]
     fn upsert_creates_new_when_absent() {
@@ -232,9 +232,9 @@ mod tests {
             "down".into(),
             100,
         );
-        assert!(is_new);
-        assert!(!id.is_empty());
-        assert!(s.list(0, false).len() == 1);
+        check!(is_new);
+        check!(!id.is_empty());
+        check!(s.list(0, false).len() == 1);
     }
 
     #[test]
@@ -254,14 +254,24 @@ mod tests {
             "still down".into(),
             250,
         );
-        assert!(new1);
-        assert!(!new2);
-        assert!(id1 == id2);
+        check!(new1);
+        check!(!new2);
+        check!(id1 == id2);
         let all = s.list(0, false);
-        assert!(all.len() == 1);
-        assert!(all[0].last_seen_at_ms == 250);
-        assert!(all[0].severity == AnomalySeverity::Critical);
-        assert!(all[0].details == "still down");
+        assert!(
+            all == vec![Anomaly {
+                id: id1,
+                kind: AnomalyKind::BrokerDeath,
+                key: AnomalyKey::Broker(1),
+                severity: AnomalySeverity::Critical,
+                detected_at_ms: 100,
+                last_seen_at_ms: 250,
+                resolved_at_ms: None,
+                triggered_proposal_id: None,
+                mute_until_ms: None,
+                details: "still down".into(),
+            }]
+        );
     }
 
     #[test]
@@ -274,10 +284,10 @@ mod tests {
             "85%".into(),
             10,
         );
-        assert!(s.mark_resolved(AnomalyKind::DiskPressure, &AnomalyKey::Broker(3), 20));
+        check!(s.mark_resolved(AnomalyKind::DiskPressure, &AnomalyKey::Broker(3), 20));
         let all = s.list(0, true);
-        assert!(all[0].resolved_at_ms == Some(20));
-        assert!(!s.mark_resolved(AnomalyKind::DiskPressure, &AnomalyKey::Broker(3), 30));
+        check!(all[0].resolved_at_ms == Some(20));
+        check!(!s.mark_resolved(AnomalyKind::DiskPressure, &AnomalyKey::Broker(3), 30));
     }
 
     #[test]
@@ -334,10 +344,36 @@ mod tests {
         let s2 = AnomalyStore::open(dir.path(), 4).unwrap();
         let got_a = s2.get(&id_a).expect("a persisted");
         let got_b = s2.get(&id_b).expect("b persisted");
-        assert!(got_a.details == "a");
-        assert!(got_a.kind == AnomalyKind::BrokerDeath);
-        assert!(got_b.details == "b");
-        assert!(got_b.kind == AnomalyKind::SlowBroker);
+        assert!(
+            got_a
+                == Anomaly {
+                    id: id_a,
+                    kind: AnomalyKind::BrokerDeath,
+                    key: AnomalyKey::Broker(1),
+                    severity: AnomalySeverity::Critical,
+                    detected_at_ms: 10,
+                    last_seen_at_ms: 10,
+                    resolved_at_ms: None,
+                    triggered_proposal_id: None,
+                    mute_until_ms: None,
+                    details: "a".into(),
+                }
+        );
+        assert!(
+            got_b
+                == Anomaly {
+                    id: id_b,
+                    kind: AnomalyKind::SlowBroker,
+                    key: AnomalyKey::Broker(2),
+                    severity: AnomalySeverity::Warning,
+                    detected_at_ms: 20,
+                    last_seen_at_ms: 20,
+                    resolved_at_ms: None,
+                    triggered_proposal_id: None,
+                    mute_until_ms: None,
+                    details: "b".into(),
+                }
+        );
     }
 
     #[test]
@@ -386,10 +422,34 @@ mod tests {
 
         let a1 = s.get(&id1).expect("updated anomaly");
         let a2 = s.get(&id2).expect("other anomaly");
-        assert!(a1.triggered_proposal_id.as_deref() == Some("proposal-a"));
-        assert!(a1.mute_until_ms == Some(1234));
-        assert!(a2.triggered_proposal_id.is_none());
-        assert!(a2.mute_until_ms.is_none());
+        assert!(
+            a1 == Anomaly {
+                id: id1,
+                kind: AnomalyKind::BrokerDeath,
+                key: AnomalyKey::Broker(1),
+                severity: AnomalySeverity::Critical,
+                detected_at_ms: 1,
+                last_seen_at_ms: 1,
+                resolved_at_ms: None,
+                triggered_proposal_id: Some("proposal-a".into()),
+                mute_until_ms: Some(1234),
+                details: "down".into(),
+            }
+        );
+        assert!(
+            a2 == Anomaly {
+                id: id2,
+                kind: AnomalyKind::DiskPressure,
+                key: AnomalyKey::Broker(2),
+                severity: AnomalySeverity::Warning,
+                detected_at_ms: 2,
+                last_seen_at_ms: 2,
+                resolved_at_ms: None,
+                triggered_proposal_id: None,
+                mute_until_ms: None,
+                details: "hot".into(),
+            }
+        );
     }
 
     #[test]
@@ -412,7 +472,7 @@ mod tests {
     #[test]
     fn find_open_requires_matching_kind_and_key() {
         let s = AnomalyStore::new(4);
-        s.upsert_open(
+        let (death_id, _) = s.upsert_open(
             AnomalyKind::BrokerDeath,
             AnomalyKey::Broker(5),
             AnomalySeverity::Critical,
@@ -430,16 +490,29 @@ mod tests {
         let found = s
             .find_open(AnomalyKind::BrokerDeath, &AnomalyKey::Broker(5))
             .expect("broker-death anomaly");
-        assert!(found.kind == AnomalyKind::BrokerDeath);
-        assert!(found.details == "down");
         assert!(
+            found
+                == Anomaly {
+                    id: death_id,
+                    kind: AnomalyKind::BrokerDeath,
+                    key: AnomalyKey::Broker(5),
+                    severity: AnomalySeverity::Critical,
+                    detected_at_ms: 1,
+                    last_seen_at_ms: 1,
+                    resolved_at_ms: None,
+                    triggered_proposal_id: None,
+                    mute_until_ms: None,
+                    details: "down".into(),
+                }
+        );
+        check!(
             s.find_open(
                 AnomalyKind::UnderReplicatedPartitions,
                 &AnomalyKey::Broker(5)
             )
             .is_none()
         );
-        assert!(
+        check!(
             s.find_open(AnomalyKind::BrokerDeath, &AnomalyKey::Broker(6))
                 .is_none()
         );

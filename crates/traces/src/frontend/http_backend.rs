@@ -423,16 +423,20 @@ pub async fn run_query_frontend(
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+    use assert2::{assert, check};
 
     use super::*;
 
     #[test]
     fn ns_to_seconds_round_trips_whole_and_fractional() {
-        assert!(ns_to_seconds(0) == "0");
-        assert!(ns_to_seconds(1_000_000_000) == "1");
-        assert!(ns_to_seconds(1_400_000_000) == "1.4");
-        assert!(ns_to_seconds(-500_000_000) == "-0.5");
+        for (ns, want) in [
+            (0, "0"),
+            (1_000_000_000, "1"),
+            (1_400_000_000, "1.4"),
+            (-500_000_000, "-0.5"),
+        ] {
+            check!(ns_to_seconds(ns) == want);
+        }
     }
 
     #[test]

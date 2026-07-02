@@ -369,10 +369,16 @@ mod tests {
 
         let mvs = ReplicaCapacity.propose(&s, &ctx);
 
-        assert!(mvs.len() == 1);
-        assert!(mvs[0].partition == 1);
-        assert!(mvs[0].old_replicas == vec![1, 2]);
-        assert!(mvs[0].new_replicas == vec![3, 2]);
+        assert!(
+            mvs == vec![Movement {
+                topic: "t".into(),
+                partition: 1,
+                old_replicas: vec![1, 2],
+                new_replicas: vec![3, 2],
+                old_leader: 1,
+                new_leader: 2,
+            }]
+        );
     }
 
     #[test]
@@ -383,9 +389,16 @@ mod tests {
 
         let mvs = ReplicaCapacity.propose(&s, &ctx);
 
-        assert!(mvs.len() == 1);
-        assert!(mvs[0].old_leader == 1);
-        assert!(mvs[0].new_leader == 2);
+        assert!(
+            mvs == vec![Movement {
+                topic: "hot".into(),
+                partition: 0,
+                old_replicas: vec![1],
+                new_replicas: vec![2],
+                old_leader: 1,
+                new_leader: 2,
+            }]
+        );
     }
 
     #[test]
