@@ -1710,6 +1710,14 @@ mod tests {
 
         coord.shutdown_all().await;
 
+        // The ack can arrive a scheduler tick before the actor task exits
+        // and drops its receiver — poll briefly instead of racing it.
+        for _ in 0..200 {
+            if group.tx.is_closed() && share.tx.is_closed() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
         assert!(group.tx.is_closed());
         assert!(share.tx.is_closed());
     }
