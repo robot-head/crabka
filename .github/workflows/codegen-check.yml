@@ -26,6 +26,9 @@ concurrency:
   group: codegen-check-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   drift:
     runs-on: ubuntu-latest
