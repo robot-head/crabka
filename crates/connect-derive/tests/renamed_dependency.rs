@@ -27,7 +27,13 @@ edition = "2024"
 [dependencies]
 renamed-connect = {{ package = "crabka-connect", path = "{}" }}
 "#,
-            workspace_root.join("crates/connect").display()
+            // Backslashes in Windows paths are parsed as escape sequences in
+            // basic TOML strings; forward slashes work on every platform.
+            workspace_root
+                .join("crates/connect")
+                .display()
+                .to_string()
+                .replace('\\', "/")
         ),
     )
     .expect("write renamed dependency manifest");
