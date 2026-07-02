@@ -1,4 +1,4 @@
-use assert2::assert;
+use assert2::{assert, check};
 use std::path::PathBuf;
 
 use crabka_protocol_codegen::emit::EmittedMessage;
@@ -94,18 +94,18 @@ fn common_structs_are_message_scoped() {
     let share_path = &share_map.get("Assignment").unwrap().rust_path;
     let streams_path = &streams_map.get("Assignment").unwrap().rust_path;
 
-    assert!(
+    check!(
         share_path != streams_path,
         "ShareGroupDescribeResponse and StreamsGroupDescribeResponse both \
          resolve Assignment to the same path `{share_path}` — common structs \
          are not message-scoped"
     );
-    assert!(
+    check!(
         share_path.contains("share_group_describe_response"),
         "ShareGroupDescribeResponse Assignment path `{share_path}` lacks its \
          message segment"
     );
-    assert!(
+    check!(
         streams_path.contains("streams_group_describe_response"),
         "StreamsGroupDescribeResponse Assignment path `{streams_path}` lacks \
          its message segment"

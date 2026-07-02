@@ -960,7 +960,7 @@ fn parse_duration_component_nanos(number: &str, multiplier: i128, original: &str
 mod tests {
     use super::*;
     use crate::ast::*;
-    use assert2::assert;
+    use assert2::{assert, check};
 
     #[test]
     fn bare_dot_is_both_scope() {
@@ -1415,7 +1415,7 @@ mod tests {
             panic!("with pipeline")
         };
         assert!(bindings.len() == 1);
-        assert!(bindings[0].name == "error");
+        check!(bindings[0].name == "error");
         assert!(matches!(
             bindings[0].expr,
             FieldExpr::Comparison {

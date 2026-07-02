@@ -192,6 +192,8 @@ enum Outcome {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
     use assert2::assert;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -315,9 +317,7 @@ mod tests {
 
         // First tick: scrape both brokers (they'll fail; we don't care).
         scraper.tick_once().await;
-        assert!(scraper.last_ok.len() == 2);
-        assert!(scraper.last_ok.contains_key(&1));
-        assert!(scraper.last_ok.contains_key(&2));
+        assert!(scraper.last_ok.keys().copied().collect::<BTreeSet<_>>() == BTreeSet::from([1, 2]));
 
         // Snapshot loses broker 2.
         snapshot.store(Arc::new(Some(ClusterState {
@@ -335,9 +335,7 @@ mod tests {
 
         scraper.tick_once().await;
         // last_ok should now only contain broker 1.
-        assert!(scraper.last_ok.len() == 1);
-        assert!(scraper.last_ok.contains_key(&1));
-        assert!(!scraper.last_ok.contains_key(&2));
+        assert!(scraper.last_ok.keys().copied().collect::<BTreeSet<_>>() == BTreeSet::from([1]));
     }
 
     #[tokio::test]

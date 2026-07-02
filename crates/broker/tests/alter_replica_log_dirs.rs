@@ -13,7 +13,7 @@
 //!   3. invalid target / missing replica return the right Kafka
 //!      error codes.
 
-use assert2::assert;
+use assert2::{assert, check};
 use std::io;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -535,9 +535,9 @@ async fn startup_resumes_move_for_existing_partition() {
     // Wait for the resumed move to converge: partition lives in
     // target dir with no remaining future entries.
     wait_for_move_complete(addr, target_dir, "t", &[0]).await;
-    assert!(count_topic_dirs(target_dir, "t") == 1);
-    assert!(count_topic_dirs(current_dir, "t") == 0);
-    assert!(!future_path.exists(), "future dir must be renamed away");
+    check!(count_topic_dirs(target_dir, "t") == 1);
+    check!(count_topic_dirs(current_dir, "t") == 0);
+    check!(!future_path.exists(), "future dir must be renamed away");
 
     handle.shutdown().await;
 }

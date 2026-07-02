@@ -337,7 +337,7 @@ mod tests {
     use crate::model::ProposalStore;
     use crate::model::{BrokerView, PartitionView};
     use crate::scraper::UsageStore;
-    use assert2::assert;
+    use assert2::{assert, check};
     use std::sync::Arc;
     use tokio_util::sync::CancellationToken;
 
@@ -531,9 +531,9 @@ mod tests {
         let open = anomaly_store
             .find_open(AnomalyKind::UnderReplicatedPartitions, &key)
             .expect("under-replicated anomaly should be open");
-        assert!(open.severity == AnomalySeverity::Critical);
-        assert!(metrics.anomalies_detected_under_replicated.get() == 1);
-        assert!(metrics.anomalies_open_under_replicated.get() == 1);
+        check!(open.severity == AnomalySeverity::Critical);
+        check!(metrics.anomalies_detected_under_replicated.get() == 1);
+        check!(metrics.anomalies_open_under_replicated.get() == 1);
 
         snapshot.store(Arc::new(Some(make_under_replicated_state(210_000, false))));
         detector.tick_once(210_000).await;
@@ -548,8 +548,8 @@ mod tests {
             .into_iter()
             .find(|a| a.id == open.id)
             .expect("resolved anomaly remains in history");
-        assert!(resolved.resolved_at_ms == Some(210_000));
-        assert!(metrics.anomalies_resolved_under_replicated.get() == 1);
-        assert!(metrics.anomalies_open_under_replicated.get() == 0);
+        check!(resolved.resolved_at_ms == Some(210_000));
+        check!(metrics.anomalies_resolved_under_replicated.get() == 1);
+        check!(metrics.anomalies_open_under_replicated.get() == 0);
     }
 }

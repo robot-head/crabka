@@ -276,21 +276,16 @@ mod tests {
     #[test]
     fn identity_columns_are_fixed_size_binary() {
         let s = span_block_schema();
-        assert!(
-            s.column_with_name(SCOL_TRACE_ID).unwrap().1.data_type()
-                == &DataType::FixedSizeBinary(16)
-        );
-        assert!(
-            s.column_with_name(SCOL_SPAN_ID).unwrap().1.data_type()
-                == &DataType::FixedSizeBinary(8)
-        );
-        assert!(
-            s.column_with_name(SCOL_PARENT_SPAN_ID)
-                .unwrap()
-                .1
-                .data_type()
-                == &DataType::FixedSizeBinary(8)
-        );
+        for (name, want) in [
+            (SCOL_TRACE_ID, DataType::FixedSizeBinary(16)),
+            (SCOL_SPAN_ID, DataType::FixedSizeBinary(8)),
+            (SCOL_PARENT_SPAN_ID, DataType::FixedSizeBinary(8)),
+        ] {
+            assert!(
+                s.column_with_name(name).unwrap().1.data_type() == &want,
+                "data type for {name}"
+            );
+        }
     }
 
     #[test]

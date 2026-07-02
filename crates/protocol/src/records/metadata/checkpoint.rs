@@ -87,7 +87,7 @@ mod tests {
     use super::*;
     use crate::Decode;
     use crate::records::RecordBatch;
-    use assert2::assert;
+    use assert2::{assert, check};
 
     #[test]
     fn bootstrap_checkpoint_has_header_features_footer() {
@@ -100,21 +100,25 @@ mod tests {
         // control footer.
         let mut cur: &[u8] = &bytes;
         let header = RecordBatch::decode(&mut cur).expect("header batch");
-        assert!(header.base_offset == 0);
-        assert!(header.attributes.is_control_batch());
+        check!(header.base_offset == 0);
+        check!(header.attributes.is_control_batch());
         assert!(header.records.len() == 1);
         let header_value = header.records[0].value.as_ref().expect("header value");
         let mut header_cur = &header_value[..];
         let header_record =
             SnapshotHeaderRecord::decode(&mut header_cur, 0).expect("snapshot header");
-        assert!(header_record.version == 0);
-        assert!(header_record.last_contained_log_timestamp == 0);
+        let expected_header = SnapshotHeaderRecord {
+            version: 0,
+            last_contained_log_timestamp: 0,
+            unknown_tagged_fields: crate::UnknownTaggedFields(vec![]),
+        };
+        assert!(header_record == expected_header);
         assert!(header_cur.is_empty());
 
         let data = RecordBatch::decode(&mut cur).expect("data batch");
-        assert!(data.base_offset == 1);
-        assert!(data.last_offset_delta == 2);
-        assert!(!data.attributes.is_control_batch());
+        check!(data.base_offset == 1);
+        check!(data.last_offset_delta == 2);
+        check!(!data.attributes.is_control_batch());
         assert!(data.records.len() == 3);
         let expected = [
             ("metadata.version", 25),
@@ -135,15 +139,19 @@ mod tests {
         }
 
         let footer = RecordBatch::decode(&mut cur).expect("footer batch");
-        assert!(footer.base_offset == 4);
-        assert!(footer.attributes.is_control_batch());
+        check!(footer.base_offset == 4);
+        check!(footer.attributes.is_control_batch());
         assert!(footer.records.len() == 1);
         let footer_value = footer.records[0].value.as_ref().expect("footer value");
         let mut footer_cur = &footer_value[..];
         let footer_record =
             SnapshotFooterRecord::decode(&mut footer_cur, 0).expect("snapshot footer");
-        assert!(footer_record.version == 0);
-        assert!(footer_cur.is_empty());
-        assert!(cur.is_empty());
+        let expected_footer = SnapshotFooterRecord {
+            version: 0,
+            unknown_tagged_fields: crate::UnknownTaggedFields(vec![]),
+        };
+        assert!(footer_record == expected_footer);
+        check!(footer_cur.is_empty());
+        check!(cur.is_empty());
     }
 }

@@ -212,6 +212,7 @@ mod tests {
     use super::*;
     use crate::metadata::{CustomMetadata, RemoteLogSegmentId, TopicIdPartition};
     use assert2::assert;
+    use assert2::check;
 
     fn tp() -> TopicIdPartition {
         TopicIdPartition::new(Uuid::from_u128(1), "t", 0)
@@ -269,11 +270,21 @@ mod tests {
         c.add(seg(11, &[(0, 100)], 100, 199)).unwrap();
         c.update(&finish(10)).unwrap();
         c.update(&finish(11)).unwrap();
-        assert!(c.segment_for(0, 0).unwrap().remote_log_segment_id().id == Uuid::from_u128(10));
-        assert!(c.segment_for(0, 99).unwrap().remote_log_segment_id().id == Uuid::from_u128(10));
-        assert!(c.segment_for(0, 100).unwrap().remote_log_segment_id().id == Uuid::from_u128(11));
-        assert!(c.segment_for(0, 199).unwrap().remote_log_segment_id().id == Uuid::from_u128(11));
-        assert!(c.segment_for(0, 200).is_none(), "past the end");
+        for (offset, want) in [
+            (0, Some(Uuid::from_u128(10))),
+            (99, Some(Uuid::from_u128(10))),
+            (100, Some(Uuid::from_u128(11))),
+            (199, Some(Uuid::from_u128(11))),
+            // past the end
+            (200, None),
+        ] {
+            check!(
+                c.segment_for(0, offset)
+                    .map(|s| s.remote_log_segment_id().id)
+                    == want,
+                "offset={offset}"
+            );
+        }
     }
 
     #[test]
@@ -281,9 +292,12 @@ mod tests {
         let mut c = RemoteLogMetadataCache::default();
         c.add(seg(10, &[(0, 0)], 0, 99)).unwrap();
         c.update(&finish(10)).unwrap();
-        let listed = c.list_by_epoch(0);
-        assert!(listed.len() == 1);
-        assert!(listed[0].remote_log_segment_id().id == Uuid::from_u128(10));
+        let listed_ids: Vec<Uuid> = c
+            .list_by_epoch(0)
+            .iter()
+            .map(|s| s.remote_log_segment_id().id)
+            .collect();
+        assert!(listed_ids == [Uuid::from_u128(10)]);
         assert!(c.list_by_epoch(7).is_empty(), "unknown epoch -> empty");
     }
 
@@ -311,15 +325,22 @@ mod tests {
         c.add(seg(11, &[(1, 100)], 100, 199)).unwrap();
         c.update(&finish(11)).unwrap();
 
-        // Epoch 0 lookups only see the first segment.
-        assert!(c.segment_for(0, 10).unwrap().remote_log_segment_id().id == Uuid::from_u128(10));
-        assert!(
-            c.segment_for(0, 150).is_none(),
-            "epoch 0 has no segment at 150"
-        );
-        // Epoch 1 floor lookup picks the right segment.
-        assert!(c.segment_for(1, 60).unwrap().remote_log_segment_id().id == Uuid::from_u128(10));
-        assert!(c.segment_for(1, 150).unwrap().remote_log_segment_id().id == Uuid::from_u128(11));
+        for (epoch, offset, want) in [
+            // Epoch 0 lookups only see the first segment.
+            (0, 10, Some(Uuid::from_u128(10))),
+            // Epoch 0 has no segment at 150.
+            (0, 150, None),
+            // Epoch 1 floor lookup picks the right segment.
+            (1, 60, Some(Uuid::from_u128(10))),
+            (1, 150, Some(Uuid::from_u128(11))),
+        ] {
+            check!(
+                c.segment_for(epoch, offset)
+                    .map(|s| s.remote_log_segment_id().id)
+                    == want,
+                "epoch={epoch} offset={offset}"
+            );
+        }
     }
 
     #[test]
@@ -401,7 +422,7 @@ mod tests {
 
         // Finished seg 10 is queryable; delete-started seg 11 is hidden
         // but still listed; delete_state survives.
-        assert!(
+        check!(
             seeded
                 .segment_for(0, 50)
                 .unwrap()
@@ -409,9 +430,9 @@ mod tests {
                 .id
                 == Uuid::from_u128(10)
         );
-        assert!(seeded.segment_for(0, 150).is_none());
-        assert!(seeded.list().len() == 2);
-        assert!(seeded.delete_state() == Some(RemotePartitionDeleteState::DeletePartitionMarked));
+        check!(seeded.segment_for(0, 150).is_none());
+        check!(seeded.list().len() == 2);
+        check!(seeded.delete_state() == Some(RemotePartitionDeleteState::DeletePartitionMarked));
     }
 
     #[test]

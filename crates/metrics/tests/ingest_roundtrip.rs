@@ -59,8 +59,8 @@ async fn remote_write_v1_lands_as_block() {
 
     let wal_record = inspect_wal_record(&bootstrap).await;
     let fingerprint = wal_record.series_fingerprint();
-    assert!(wal_record.tenant == "tenant-a");
-    assert!(
+    check!(wal_record.tenant == "tenant-a");
+    check!(
         wal_record
             .labels
             .iter()

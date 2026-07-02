@@ -629,7 +629,7 @@ impl DelegationTokenAdmin for crate::context::AdminClientHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use std::sync::Mutex as StdMutex;
 
@@ -1018,8 +1018,8 @@ mod tests {
         );
 
         // Secret + status both patched.
-        assert!(secrets.applied.lock().unwrap().len() == 1);
-        assert!(users.patches.lock().unwrap().len() == 1);
+        check!(secrets.applied.lock().unwrap().len() == 1);
+        check!(users.patches.lock().unwrap().len() == 1);
     }
 
     // --- failure-path coverage (§2.5) ------------------------------------

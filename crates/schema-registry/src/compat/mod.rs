@@ -219,6 +219,7 @@ mod tests {
     use super::*;
     use crate::format::SchemaType;
     use crate::store::StoreState;
+    use assert2::check;
 
     fn av(fields: &str) -> String {
         format!("{{\"type\":\"record\",\"name\":\"U\",\"fields\":[{fields}]}}")
@@ -235,9 +236,9 @@ mod tests {
             CompatibilityLevel::parse("FULL_TRANSITIVE"),
             CompatibilityLevel::FullTransitive
         );
-        assert!(CompatibilityLevel::FullTransitive.is_transitive());
-        assert!(!CompatibilityLevel::Backward.is_transitive());
-        assert!(CompatibilityLevel::None.directions().is_empty());
+        check!(CompatibilityLevel::FullTransitive.is_transitive());
+        check!(!CompatibilityLevel::Backward.is_transitive());
+        check!(CompatibilityLevel::None.directions().is_empty());
     }
 
     #[test]

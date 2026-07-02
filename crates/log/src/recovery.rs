@@ -107,7 +107,7 @@ fn swap_triple(dir: &Path, base: i64, ext: &str) -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::check;
     use tempfile::tempdir;
 
     fn touch(path: &std::path::Path) {
@@ -126,12 +126,12 @@ mod tests {
         touch(&p.join("00000000000000000000.timeindex.swap"));
         touch(&p.join("00000000000000000000.txnindex.swap"));
         swap_orphan_recover(p).unwrap();
-        assert!(name::log_path(p, 0).exists());
-        assert!(!p.join("00000000000000000000.log.swap").exists());
-        assert!(!p.join("00000000000000000000.index.swap").exists());
-        assert!(!p.join("00000000000000000000.timeindex.swap").exists());
+        check!(name::log_path(p, 0).exists());
+        check!(!p.join("00000000000000000000.log.swap").exists());
+        check!(!p.join("00000000000000000000.index.swap").exists());
+        check!(!p.join("00000000000000000000.timeindex.swap").exists());
         // The orphaned survivor `.txnindex.swap` is discarded too.
-        assert!(!p.join("00000000000000000000.txnindex.swap").exists());
+        check!(!p.join("00000000000000000000.txnindex.swap").exists());
     }
 
     #[test]
@@ -143,10 +143,10 @@ mod tests {
         touch(&p.join("00000000000000000000.index.swap"));
         touch(&p.join("00000000000000000000.timeindex.swap"));
         swap_orphan_recover(p).unwrap();
-        assert!(name::log_path(p, 0).exists());
-        assert!(name::index_path(p, 0).exists());
-        assert!(name::timeindex_path(p, 0).exists());
-        assert!(!p.join("00000000000000000000.log.swap").exists());
+        check!(name::log_path(p, 0).exists());
+        check!(name::index_path(p, 0).exists());
+        check!(name::timeindex_path(p, 0).exists());
+        check!(!p.join("00000000000000000000.log.swap").exists());
     }
 
     #[test]
@@ -160,9 +160,9 @@ mod tests {
         touch(&p.join("00000000000000000000.timeindex.swap"));
         touch(&p.join("00000000000000000000.txnindex.swap"));
         swap_orphan_recover(p).unwrap();
-        assert!(name::log_path(p, 0).exists());
-        assert!(name::txnindex_path(p, 0).exists());
-        assert!(!p.join("00000000000000000000.txnindex.swap").exists());
+        check!(name::log_path(p, 0).exists());
+        check!(name::txnindex_path(p, 0).exists());
+        check!(!p.join("00000000000000000000.txnindex.swap").exists());
     }
 
     #[test]
@@ -179,9 +179,9 @@ mod tests {
         touch(&p.join("00000000000000000000.index.swap"));
         touch(&p.join("00000000000000000000.timeindex.swap"));
         swap_orphan_recover(p).unwrap();
-        assert!(name::log_path(p, 0).exists());
+        check!(name::log_path(p, 0).exists());
         // No `.txnindex` is synthesized when the survivor had none.
-        assert!(!name::txnindex_path(p, 0).exists());
-        assert!(!p.join("00000000000000000000.txnindex.swap").exists());
+        check!(!name::txnindex_path(p, 0).exists());
+        check!(!p.join("00000000000000000000.txnindex.swap").exists());
     }
 }

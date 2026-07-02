@@ -18,9 +18,7 @@ fn owned_produce_request_min_version_empty_topics() {
     let mut cur = &buf[..];
     let decoded = ProduceRequest::decode(&mut cur, MIN_VERSION).unwrap();
     assert!(cur.is_empty(), "decoder left trailing bytes");
-    assert!(decoded.acks == req.acks);
-    assert!(decoded.timeout_ms == req.timeout_ms);
-    assert!(decoded.topic_data.len() == 0);
+    assert!(decoded == req);
 }
 
 #[test]

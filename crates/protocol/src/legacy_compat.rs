@@ -16,6 +16,7 @@ mod produce;
 
 #[cfg(test)]
 mod tests {
+    use crate::UnknownTaggedFields;
     use crate::kafka_3_6_2;
     use crate::owned::{
         fetch_request::FetchRequest, fetch_response::FetchResponse,
@@ -32,9 +33,14 @@ mod tests {
             ..Default::default()
         };
         let canonical: ProduceRequest = legacy.into();
-        assert!(canonical.acks == 1);
-        assert!(canonical.timeout_ms == 30_000);
-        assert!(canonical.transactional_id.is_none());
+        let expected = ProduceRequest {
+            transactional_id: None,
+            acks: 1,
+            timeout_ms: 30_000,
+            topic_data: vec![],
+            unknown_tagged_fields: UnknownTaggedFields(vec![]),
+        };
+        assert!(canonical == expected);
     }
 
     #[test]
@@ -56,9 +62,26 @@ mod tests {
             ..Default::default()
         };
         let canonical: FetchRequest = legacy.into();
-        assert!(canonical.max_wait_ms == 500);
-        assert!(canonical.min_bytes == 1);
-        assert!(canonical.cluster_id.is_none());
+        let expected = FetchRequest {
+            replica_id: -1,
+            max_wait_ms: 500,
+            min_bytes: 1,
+            max_bytes: 2_147_483_647,
+            isolation_level: 0,
+            session_id: 0,
+            session_epoch: -1,
+            topics: vec![],
+            forgotten_topics_data: vec![],
+            rack_id: String::new(),
+            cluster_id: None,
+            replica_state: crate::owned::fetch_request::ReplicaState {
+                replica_id: -1,
+                replica_epoch: -1,
+                unknown_tagged_fields: UnknownTaggedFields(vec![]),
+            },
+            unknown_tagged_fields: UnknownTaggedFields(vec![]),
+        };
+        assert!(canonical == expected);
     }
 
     #[test]

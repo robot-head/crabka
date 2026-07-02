@@ -167,7 +167,7 @@ impl PartialLimits {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+    use assert2::{assert, check};
 
     use super::*;
 
@@ -185,9 +185,21 @@ overrides:
         let provider = OverridesProvider::from_yaml(YAML).unwrap();
         let tenant_a = provider.for_tenant("tenant-a");
 
-        assert!(tenant_a.ingestion_rate_profiles_per_sec == 500.0);
-        assert!(tenant_a.max_series == 1000);
-        assert!(tenant_a.max_label_value_length == Limits::default().max_label_value_length);
+        assert!(
+            *tenant_a
+                == Limits {
+                    ingestion_rate_profiles_per_sec: 500.0,
+                    ingestion_burst_profiles: 10_000,
+                    max_series: 1000,
+                    max_label_name_length: 1024,
+                    max_label_value_length: 2048,
+                    max_label_names_per_series: 40,
+                    max_flamegraph_nodes_default: 2048,
+                    max_flamegraph_nodes_max: 0,
+                    max_query_length_secs: 2_595_600,
+                    max_session_id_cardinality: 0,
+                }
+        );
     }
 
     #[test]
@@ -206,9 +218,9 @@ overrides:
     fn unlisted_tenant_gets_defaults() {
         let provider = OverridesProvider::from_yaml(YAML).unwrap();
 
-        assert!(*provider.for_tenant("tenant-z") == Limits::default());
-        assert!(!provider.has_tenant_override("tenant-z"));
-        assert!(provider.has_tenant_override("tenant-a"));
+        check!(*provider.for_tenant("tenant-z") == Limits::default());
+        check!(!provider.has_tenant_override("tenant-z"));
+        check!(provider.has_tenant_override("tenant-a"));
     }
 
     #[test]
@@ -299,8 +311,20 @@ overrides:
         .unwrap();
         let tenant_a = provider.for_tenant("tenant-a");
 
-        assert!(tenant_a.ingestion_rate_profiles_per_sec == 0.0);
-        assert!(tenant_a.max_flamegraph_nodes_default == 0);
-        assert!(tenant_a.max_flamegraph_nodes_max == 4096);
+        assert!(
+            *tenant_a
+                == Limits {
+                    ingestion_rate_profiles_per_sec: 0.0,
+                    ingestion_burst_profiles: 10_000,
+                    max_series: 0,
+                    max_label_name_length: 1024,
+                    max_label_value_length: 2048,
+                    max_label_names_per_series: 40,
+                    max_flamegraph_nodes_default: 0,
+                    max_flamegraph_nodes_max: 4096,
+                    max_query_length_secs: 2_595_600,
+                    max_session_id_cardinality: 0,
+                }
+        );
     }
 }

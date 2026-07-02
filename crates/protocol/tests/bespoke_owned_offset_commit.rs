@@ -20,8 +20,7 @@ fn owned_offset_commit_request_min_version_group_id_preserved() {
     let mut cur = &buf[..];
     let decoded = OffsetCommitRequest::decode(&mut cur, MIN_VERSION).unwrap();
     assert!(cur.is_empty(), "decoder left trailing bytes");
-    assert!(decoded.group_id == req.group_id);
-    assert!(decoded.topics.len() == 0);
+    assert!(decoded == req);
 }
 
 #[test]

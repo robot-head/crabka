@@ -489,6 +489,7 @@ impl RemoteStorageManager for S3RemoteStorage {
 mod tests {
     use super::*;
     use assert2::assert;
+    use assert2::check;
     use std::collections::BTreeMap;
     use std::io::Write;
     use std::path::PathBuf;
@@ -515,12 +516,12 @@ mod tests {
             ..Default::default()
         };
         let dbg = format!("{cfg:?}");
-        assert!(!dbg.contains("super-secret-key-value"));
-        assert!(!dbg.contains("AKIAEXAMPLEKEYID"));
-        assert!(dbg.contains("***"));
+        check!(!dbg.contains("super-secret-key-value"));
+        check!(!dbg.contains("AKIAEXAMPLEKEYID"));
+        check!(dbg.contains("***"));
         // Non-secret fields are still printed.
-        assert!(dbg.contains("logs"));
-        assert!(dbg.contains("us-east-1"));
+        check!(dbg.contains("logs"));
+        check!(dbg.contains("us-east-1"));
     }
 
     #[test]
@@ -636,11 +637,18 @@ mod tests {
             store
                 .copy_log_segment_data(&md, &sample_data(src.path(), true))
                 .unwrap();
-            assert!(store.fetch_index(&md, IndexType::Offset).unwrap() == b"OFFSET-IDX");
-            assert!(store.fetch_index(&md, IndexType::Timestamp).unwrap() == b"TIME-IDX");
-            assert!(store.fetch_index(&md, IndexType::ProducerSnapshot).unwrap() == b"SNAP");
-            assert!(store.fetch_index(&md, IndexType::LeaderEpoch).unwrap() == b"EPOCH-BYTES");
-            assert!(store.fetch_index(&md, IndexType::Transaction).unwrap() == b"TXN-IDX");
+            for (index_type, want) in [
+                (IndexType::Offset, b"OFFSET-IDX".as_ref()),
+                (IndexType::Timestamp, b"TIME-IDX".as_ref()),
+                (IndexType::ProducerSnapshot, b"SNAP".as_ref()),
+                (IndexType::LeaderEpoch, b"EPOCH-BYTES".as_ref()),
+                (IndexType::Transaction, b"TXN-IDX".as_ref()),
+            ] {
+                check!(
+                    store.fetch_index(&md, index_type).unwrap() == want,
+                    "{index_type:?}"
+                );
+            }
         })
         .await
         .unwrap();

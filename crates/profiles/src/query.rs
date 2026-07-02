@@ -2791,7 +2791,7 @@ fn heatmap_y_mins(min_value: i64, max_value: i64, value_buckets: usize) -> Vec<f
 mod tests {
     use std::sync::Arc;
 
-    use assert2::assert;
+    use assert2::{assert, check};
     use base64::Engine;
     use crabka_pprof::{FunctionRec, LineRec, LocationRec};
 
@@ -3187,9 +3187,14 @@ mod tests {
         // The handler path queries globally and reports the sample.
         let state = QuerierState::new(Arc::clone(&store));
         let stats = state.global_profile_stats("tenant-a").await.unwrap();
-        assert!(stats.data_ingested);
-        assert!(stats.oldest_profile_time == Some(5_000));
-        assert!(stats.newest_profile_time == Some(5_000));
+        assert!(
+            stats
+                == ProfileStats {
+                    data_ingested: true,
+                    oldest_profile_time: Some(5_000),
+                    newest_profile_time: Some(5_000),
+                }
+        );
     }
 
     #[tokio::test]
@@ -3290,9 +3295,9 @@ overrides:
             .await
             .unwrap();
 
-        assert!(flamegraph.names.iter().any(|name| name == "other"));
-        assert!(!flamegraph.names.iter().any(|name| name == "warm.path"));
-        assert!(!flamegraph.names.iter().any(|name| name == "cold.path"));
+        for (name, want) in [("other", true), ("warm.path", false), ("cold.path", false)] {
+            check!(flamegraph.names.iter().any(|frame| frame == name) == want);
+        }
     }
 
     #[tokio::test]
@@ -3419,15 +3424,13 @@ overrides:
             .and_then(serde_json::Value::as_array)
             .unwrap();
 
-        assert!(
-            names.iter().any(|name| name.as_str() == Some("api")),
-            "{body}"
-        );
-        assert!(
-            names.iter().any(|name| name.as_str() == Some("worker")),
-            "{body}"
-        );
-        assert!(
+        for service in ["api", "worker"] {
+            check!(
+                names.iter().any(|name| name.as_str() == Some(service)),
+                "{body}"
+            );
+        }
+        check!(
             body.pointer("/flamebearer/numTicks")
                 .and_then(serde_json::Value::as_i64)
                 == Some(12),
@@ -3462,19 +3465,19 @@ overrides:
             .await
             .unwrap();
 
-        assert!(
+        check!(
             body.pointer("/metadata/format")
                 .and_then(serde_json::Value::as_str)
                 == Some("double"),
             "{body}"
         );
-        assert!(
+        check!(
             body.pointer("/flamebearer/numTicks")
                 .and_then(serde_json::Value::as_i64)
                 == Some(14),
             "{body}"
         );
-        assert!(
+        check!(
             body.pointer("/flamebearer/maxSelf")
                 .and_then(serde_json::Value::as_i64)
                 == Some(7),
@@ -3558,8 +3561,8 @@ overrides:
             .await
             .unwrap();
 
-        assert!(response.get("flamegraph").is_none(), "{response}");
-        assert!(
+        check!(response.get("flamegraph").is_none(), "{response}");
+        check!(
             response
                 .get("dot")
                 .and_then(serde_json::Value::as_str)
@@ -3568,7 +3571,7 @@ overrides:
                 ),
             "{response}"
         );
-        assert!(
+        check!(
             response
                 .get("tree")
                 .and_then(serde_json::Value::as_str)
@@ -3867,9 +3870,9 @@ overrides:
             .and_then(serde_json::Value::as_array)
             .unwrap();
 
-        assert!(samples.len() <= 4, "{response}");
-        assert!(total == 10, "{response}");
-        assert!(
+        check!(samples.len() <= 4, "{response}");
+        check!(total == 10, "{response}");
+        check!(
             strings.iter().any(|value| value.as_str() == Some("other")),
             "{response}"
         );
@@ -4210,9 +4213,9 @@ overrides:
             .and_then(serde_json::Value::as_object)
             .unwrap_or_else(|| panic!("missing span exemplar: {response}"));
 
-        assert!(exemplar.get("spanId").and_then(serde_json::Value::as_str) == Some("2a"));
-        assert!(exemplar.get("timestamp").and_then(json_i64) == Some(10));
-        assert!(exemplar.get("value").and_then(json_i64) == Some(7));
+        check!(exemplar.get("spanId").and_then(serde_json::Value::as_str) == Some("2a"));
+        check!(exemplar.get("timestamp").and_then(json_i64) == Some(10));
+        check!(exemplar.get("value").and_then(json_i64) == Some(7));
     }
 
     #[tokio::test]
@@ -4426,31 +4429,21 @@ overrides:
             .get("series")
             .and_then(serde_json::Value::as_array)
             .unwrap();
-        assert!(series.len() == 2, "{response}");
-        assert!(
-            series.iter().any(|item| {
-                item.pointer("/labels/0/name")
-                    .and_then(serde_json::Value::as_str)
-                    == Some("service_name")
-                    && item
-                        .pointer("/labels/0/value")
+        check!(series.len() == 2, "{response}");
+        for service in ["api", "worker"] {
+            check!(
+                series.iter().any(|item| {
+                    item.pointer("/labels/0/name")
                         .and_then(serde_json::Value::as_str)
-                        == Some("api")
-            }),
-            "{response}"
-        );
-        assert!(
-            series.iter().any(|item| {
-                item.pointer("/labels/0/name")
-                    .and_then(serde_json::Value::as_str)
-                    == Some("service_name")
-                    && item
-                        .pointer("/labels/0/value")
-                        .and_then(serde_json::Value::as_str)
-                        == Some("worker")
-            }),
-            "{response}"
-        );
+                        == Some("service_name")
+                        && item
+                            .pointer("/labels/0/value")
+                            .and_then(serde_json::Value::as_str)
+                            == Some(service)
+                }),
+                "{response}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -4494,9 +4487,9 @@ overrides:
             .and_then(serde_json::Value::as_object)
             .unwrap_or_else(|| panic!("missing heatmap span exemplar: {response}"));
 
-        assert!(exemplar.get("spanId").and_then(serde_json::Value::as_str) == Some("2a"));
-        assert!(exemplar.get("timestamp").and_then(json_i64) == Some(10));
-        assert!(exemplar.get("value").and_then(json_i64) == Some(7));
+        check!(exemplar.get("spanId").and_then(serde_json::Value::as_str) == Some("2a"));
+        check!(exemplar.get("timestamp").and_then(json_i64) == Some(10));
+        check!(exemplar.get("value").and_then(json_i64) == Some(7));
     }
 
     #[tokio::test]
@@ -4641,22 +4634,22 @@ overrides:
             .await
             .unwrap();
 
-        assert!(response.get("valid").is_none(), "{response}");
-        assert!(
+        check!(response.get("valid").is_none(), "{response}");
+        check!(
             response
                 .pointer("/queryImpact/totalQueriedSeries")
                 .and_then(json_i64)
                 == Some(1),
             "{response}"
         );
-        assert!(
+        check!(
             response
                 .pointer("/queryScopes/0/componentType")
                 .and_then(serde_json::Value::as_str)
                 == Some("Long term storage"),
             "{response}"
         );
-        assert!(
+        check!(
             response
                 .pointer("/queryScopes/0/seriesCount")
                 .and_then(json_i64)
@@ -4735,18 +4728,15 @@ overrides:
         );
 
         let metadata = response.get("metadata").unwrap();
-        assert!(metadata.get("format").and_then(serde_json::Value::as_str) == Some("single"));
-        assert!(metadata.get("spyName").and_then(serde_json::Value::as_str) == Some("process_cpu"));
         assert!(
             metadata
-                .get("sampleRate")
-                .and_then(serde_json::Value::as_u64)
-                == Some(100)
-        );
-        assert!(metadata.get("units").and_then(serde_json::Value::as_str) == Some("nanoseconds"));
-        assert!(
-            metadata.get("name").and_then(serde_json::Value::as_str)
-                == Some("process_cpu:cpu:nanoseconds:cpu:nanoseconds")
+                == &json!({
+                    "format": "single",
+                    "spyName": "process_cpu",
+                    "sampleRate": 100,
+                    "units": "nanoseconds",
+                    "name": "process_cpu:cpu:nanoseconds:cpu:nanoseconds",
+                })
         );
     }
 
@@ -4773,10 +4763,10 @@ overrides:
             max_self: 7,
         });
 
-        assert!(dot.starts_with("digraph flamegraph"));
-        assert!(dot.contains("main.work"));
-        assert!(dot.contains("n0 -> n1"));
-        assert!(dot.contains("n1 -> n2"));
+        check!(dot.starts_with("digraph flamegraph"), "{dot}");
+        for needle in ["main.work", "n0 -> n1", "n1 -> n2"] {
+            check!(dot.contains(needle), "{dot}");
+        }
     }
 
     #[test]
@@ -4789,39 +4779,41 @@ overrides:
     fn render_time_params_accept_now_offsets() {
         let now_ms = 1_700_000_000_000;
 
-        assert!(parse_render_time_param(None, now_ms, 0).unwrap() == 0);
-        assert!(parse_render_time_param(Some("now"), now_ms, 0).unwrap() == now_ms);
-        assert!(parse_render_time_param(Some("now-1h"), now_ms, 0).unwrap() == now_ms - 3_600_000);
-        assert!(
-            parse_render_time_param(Some("now-15m"), now_ms, 0).unwrap() == now_ms - 15 * 60_000
-        );
+        for (input, want) in [
+            (None, 0),
+            (Some("now"), now_ms),
+            (Some("now-1h"), now_ms - 3_600_000),
+            (Some("now-15m"), now_ms - 15 * 60_000),
+        ] {
+            check!(parse_render_time_param(input, now_ms, 0).unwrap() == want);
+        }
     }
 
     #[test]
     fn render_time_params_accept_unix_seconds_and_millis() {
         let now_ms = 1_700_000_000_000;
 
-        assert!(parse_render_time_param(Some("123"), now_ms, 0).unwrap() == 123_000);
-        assert!(
-            parse_render_time_param(Some("1700000000"), now_ms, 0).unwrap() == 1_700_000_000_000
-        );
-        assert!(
-            parse_render_time_param(Some("1700000000000"), now_ms, 0).unwrap() == 1_700_000_000_000
-        );
+        for (input, want) in [
+            ("123", 123_000),
+            ("1700000000", 1_700_000_000_000),
+            ("1700000000000", 1_700_000_000_000),
+        ] {
+            check!(parse_render_time_param(Some(input), now_ms, 0).unwrap() == want);
+        }
     }
 
     #[test]
     fn render_time_params_reject_negative_resolved_bounds() {
         let now_ms = 1_000;
 
-        // A `now-<offset>` larger than `now` underflows past the epoch.
-        assert!(parse_render_time_param(Some("now-1h"), now_ms, 0).is_err());
-        // A literal negative timestamp (seconds or millis heuristic) is rejected.
-        assert!(parse_render_time_param(Some("-5"), now_ms, 0).is_err());
-        assert!(parse_render_time_param(Some("-1700000000000"), now_ms, 0).is_err());
+        // A `now-<offset>` larger than `now` underflows past the epoch, and a
+        // literal negative timestamp (seconds or millis heuristic) is rejected.
+        for input in ["now-1h", "-5", "-1700000000000"] {
+            check!(parse_render_time_param(Some(input), now_ms, 0).is_err());
+        }
         // A valid millisecond timestamp at/above the seconds-vs-millis cutoff is
         // left untouched (not mangled by the heuristic) and accepted.
-        assert!(
+        check!(
             parse_render_time_param(Some("1700000000000"), now_ms, 0).unwrap() == 1_700_000_000_000
         );
     }
@@ -4939,9 +4931,9 @@ overrides:
             .await
             .unwrap();
         let body = String::from_utf8(body.to_vec()).unwrap();
-        assert!(body == "internal error", "{body}");
-        assert!(!body.contains("datafusion"), "{body}");
-        assert!(!body.contains("secret"), "{body}");
+        check!(body == "internal error", "{body}");
+        check!(!body.contains("datafusion"), "{body}");
+        check!(!body.contains("secret"), "{body}");
     }
 
     #[tokio::test]
@@ -4973,17 +4965,17 @@ overrides:
 
     #[test]
     fn heatmap_time_buckets_ceil_from_step_seconds() {
-        assert!(heatmap_time_buckets(0, 21_000, 10.0).unwrap() == 3);
-        assert!(heatmap_time_buckets(0, 1, 0.0).is_err());
-        assert!(heatmap_time_buckets(1, 1, 1.0).is_err());
+        check!(heatmap_time_buckets(0, 21_000, 10.0).unwrap() == 3);
+        check!(heatmap_time_buckets(0, 1, 0.0).is_err());
+        check!(heatmap_time_buckets(1, 1, 1.0).is_err());
     }
 
     #[test]
     fn heatmap_time_buckets_rejects_sub_millisecond_steps() {
-        assert!(heatmap_time_buckets(0, 1, 0.0001).is_err());
-        assert!(heatmap_time_buckets(0, 1, 0.0005).is_err());
-        assert!(heatmap_time_buckets(0, 1, 0.0009999).is_err());
-        assert!(heatmap_time_buckets(0, 1, 0.001).unwrap() == 1);
+        for step in [0.0001, 0.0005, 0.0009999] {
+            check!(heatmap_time_buckets(0, 1, step).is_err());
+        }
+        check!(heatmap_time_buckets(0, 1, 0.001).unwrap() == 1);
     }
 
     #[test]
@@ -5003,10 +4995,25 @@ overrides:
             counts: vec![vec![1, 0], vec![0, 2]],
         });
 
-        assert!(series.labels.is_empty());
-        assert!(series.slots[0].timestamp == 10);
-        assert!(series.slots[1].timestamp == 20);
-        assert!(series.slots[0].y_min == vec![10.0, 20.0]);
-        assert!(series.slots[1].counts == vec![0, 2]);
+        assert!(
+            series
+                == pb::querier::v1::HeatmapSeries {
+                    labels: Vec::new(),
+                    slots: vec![
+                        pb::querier::v1::HeatmapSlot {
+                            timestamp: 10,
+                            y_min: vec![10.0, 20.0],
+                            counts: vec![1, 0],
+                            exemplars: Vec::new(),
+                        },
+                        pb::querier::v1::HeatmapSlot {
+                            timestamp: 20,
+                            y_min: vec![10.0, 20.0],
+                            counts: vec![0, 2],
+                            exemplars: Vec::new(),
+                        },
+                    ],
+                }
+        );
     }
 }

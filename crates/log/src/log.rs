@@ -1461,6 +1461,7 @@ mod tests {
     use super::*;
     use crate::leader_epoch_checkpoint::EpochEntry;
     use assert2::assert;
+    use assert2::check;
     use bytes::Bytes;
     use crabka_protocol::records::{Attributes, Record};
     use tempfile::tempdir;
@@ -1518,9 +1519,9 @@ mod tests {
         let wire = wire.freeze();
         let log_end = log.log_end_offset();
         let r = log.read_raw(0, log_end, 10 * 1024 * 1024).unwrap();
-        assert!(r.start_offset == 0);
-        assert!(r.total == wire.len());
-        assert!(&r.bytes[..] == &wire[..]);
+        check!(r.start_offset == 0);
+        check!(r.total == wire.len());
+        check!(&r.bytes[..] == &wire[..]);
         drop(dir);
     }
 
@@ -1559,9 +1560,9 @@ mod tests {
 
         let log_end = log.log_end_offset();
         let r = log.read_raw(0, log_end, 10 * 1024 * 1024).unwrap();
-        assert!(r.start_offset == 0);
-        assert!(r.total == wire.len());
-        assert!(
+        check!(r.start_offset == 0);
+        check!(r.total == wire.len());
+        check!(
             &r.bytes[..] == &wire[..],
             "raw bytes must be byte-exact across the segment seam"
         );
@@ -1603,10 +1604,10 @@ mod tests {
         let raw = log.read_raw(0, log_end, 10 * 1024 * 1024).unwrap();
         let desc = log.read_raw_desc(0, log_end, 10 * 1024 * 1024).unwrap();
 
-        assert!(desc.start_offset == raw.start_offset);
-        assert!(desc.total == raw.total);
+        check!(desc.start_offset == raw.start_offset);
+        check!(desc.total == raw.total);
         // Multi-segment ⇒ more than one region (no coalescing copy).
-        assert!(
+        check!(
             desc.regions.len() >= 2,
             "expected >=2 regions across the seam, got {}",
             desc.regions.len()
@@ -1777,9 +1778,9 @@ mod tests {
         let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
         let mut b1 = sample_batch(3);
         let mut b2 = sample_batch(2);
-        assert!(log.append(&mut b1).unwrap() == 0);
-        assert!(log.append(&mut b2).unwrap() == 3);
-        assert!(log.log_end_offset() == 5);
+        check!(log.append(&mut b1).unwrap() == 0);
+        check!(log.append(&mut b2).unwrap() == 3);
+        check!(log.log_end_offset() == 5);
     }
 
     #[test]
@@ -2065,13 +2066,17 @@ mod tests {
 
         let idx = TxnIndex::open(dir.path().join("00000000000000000000.txnindex")).unwrap();
         let entries = idx.entries();
-        assert!(entries.len() == 1);
-        assert!(entries[0].producer_id == 1000);
         // Txn batch was the first append: start_offset = 0.
-        assert!(entries[0].start_offset == 0);
         // last_offset = abort marker's base_offset + last_offset_delta = 3 + 0 = 3.
         // (The 3-record txn batch occupies offsets 0-2; the marker lands at offset 3.)
-        assert!(entries[0].last_offset == 3);
+        assert!(
+            entries
+                == [AbortedTxn {
+                    start_offset: 0,
+                    last_offset: 3,
+                    producer_id: 1000,
+                }]
+        );
     }
 
     #[test]
@@ -2273,11 +2278,11 @@ mod tests {
         // Trim clamps to next segment boundary <= target; new_start may
         // be less than 15 if 15 falls inside a sealed segment that we
         // can't drop without losing in-range records. LEO is unaffected.
-        assert!(new_start <= 15);
-        assert!(log.log_end_offset() == leo);
+        check!(new_start <= 15);
+        check!(log.log_end_offset() == leo);
         // If target landed inside the active segment, log_start advanced
         // exactly to target. Otherwise it advanced to a sealed boundary.
-        assert!(log.log_start_offset() >= 0);
+        check!(log.log_start_offset() >= 0);
     }
 
     #[test]
@@ -2432,11 +2437,11 @@ mod tests {
         let active_base = log.log_end_offset(); // not literally, but exports must be below it
         let mut prev_last = -1;
         for ex in &exports {
-            assert!(ex.log_path.exists(), "log file present: {:?}", ex.log_path);
-            assert!(ex.offset_index_path.exists());
-            assert!(ex.time_index_path.exists());
-            assert!(ex.last_offset >= ex.base_offset);
-            assert!(ex.base_offset > prev_last, "segments are offset-ordered");
+            check!(ex.log_path.exists(), "log file present: {:?}", ex.log_path);
+            check!(ex.offset_index_path.exists());
+            check!(ex.time_index_path.exists());
+            check!(ex.last_offset >= ex.base_offset);
+            check!(ex.base_offset > prev_last, "segments are offset-ordered");
             prev_last = ex.last_offset;
             assert!(
                 ex.last_offset < active_base,
@@ -2522,12 +2527,19 @@ mod tests {
                 start_offset: 100,
             },
         ];
-        // Segment [60, 90] sits entirely in epoch 1.
-        assert!(epochs_for_range(&entries, 60, 90) == vec![(1, 60)]);
-        // Segment [40, 60] straddles epoch 0 (->clamped to 40) and epoch 1.
-        assert!(epochs_for_range(&entries, 40, 60) == vec![(0, 40), (1, 50)]);
-        // Segment [0, 200] covers all three.
-        assert!(epochs_for_range(&entries, 0, 200) == vec![(0, 0), (1, 50), (2, 100)]);
+        for (start, end, want) in [
+            // Segment [60, 90] sits entirely in epoch 1.
+            (60, 90, vec![(1, 60)]),
+            // Segment [40, 60] straddles epoch 0 (->clamped to 40) and epoch 1.
+            (40, 60, vec![(0, 40), (1, 50)]),
+            // Segment [0, 200] covers all three.
+            (0, 200, vec![(0, 0), (1, 50), (2, 100)]),
+        ] {
+            check!(
+                epochs_for_range(&entries, start, end) == want,
+                "range [{start}, {end}]"
+            );
+        }
         // No entries -> empty.
         assert!(epochs_for_range(&[], 0, 100).is_empty());
     }
@@ -2627,9 +2639,9 @@ mod tests {
 
         // (b) on-disk files for deleted segments are gone.
         for base in &expected_deleted {
-            assert!(!name::log_path(dir.path(), *base).exists());
-            assert!(!name::index_path(dir.path(), *base).exists());
-            assert!(!name::timeindex_path(dir.path(), *base).exists());
+            check!(!name::log_path(dir.path(), *base).exists());
+            check!(!name::index_path(dir.path(), *base).exists());
+            check!(!name::timeindex_path(dir.path(), *base).exists());
         }
 
         // (c) the active segment is untouched.
@@ -2652,13 +2664,13 @@ mod tests {
         // active.base_offset. The active segment must not be removed.
         let huge_target = leo_before + 1_000_000;
         let _ = log.delete_local_segments_through(huge_target).unwrap();
-        assert!(active_log.exists(), "active segment must survive");
-        assert!(
+        check!(active_log.exists(), "active segment must survive");
+        check!(
             log.log_end_offset() == leo_before,
             "active segment untouched (LEO unchanged)"
         );
         // Sealed-segment pointer should have advanced past everything.
-        assert!(log.tierable_segments().is_empty());
+        check!(log.tierable_segments().is_empty());
     }
 
     #[test]
@@ -2684,9 +2696,9 @@ mod tests {
         let removed_below = log
             .delete_local_segments_through((start_before - 1).max(0))
             .unwrap();
-        assert!(removed_below == 0);
-        assert!(log.log_start_offset() == start_before);
-        assert!(log.tierable_segments().len() == sealed_before);
+        check!(removed_below == 0);
+        check!(log.log_start_offset() == start_before);
+        check!(log.tierable_segments().len() == sealed_before);
     }
 
     #[test]
@@ -2770,16 +2782,20 @@ mod tests {
             let mut b = ts_batch(ts);
             assert!(log.append(&mut b).unwrap() == i64::try_from(i).unwrap());
         }
-        // before-first → offset 0.
-        assert!(log.offset_for_timestamp(50) == Some((0, 100)));
-        // exact match on a sealed segment.
-        assert!(log.offset_for_timestamp(300) == Some((2, 300)));
-        // between records → next record up.
-        assert!(log.offset_for_timestamp(350) == Some((3, 400)));
-        // landing on the active segment's record.
-        assert!(log.offset_for_timestamp(500) == Some((4, 500)));
-        // after-last → None.
-        assert!(log.offset_for_timestamp(600) == None);
+        for (ts, want) in [
+            // before-first → offset 0.
+            (50, Some((0, 100))),
+            // exact match on a sealed segment.
+            (300, Some((2, 300))),
+            // between records → next record up.
+            (350, Some((3, 400))),
+            // landing on the active segment's record.
+            (500, Some((4, 500))),
+            // after-last → None.
+            (600, None),
+        ] {
+            check!(log.offset_for_timestamp(ts) == want, "ts={ts}");
+        }
         log.close();
         drop(dir);
     }

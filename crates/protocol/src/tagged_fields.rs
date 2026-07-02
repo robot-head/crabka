@@ -175,12 +175,17 @@ mod tests {
         let buf = [0x02, 0x05, 0x03, 10, 20, 30, 0x08, 0x01, 40];
         let mut cur = &buf[..];
         let unknown = read_tagged_fields(&mut cur, |_, _| Ok(false)).unwrap();
-        assert!(!unknown.is_empty());
-        assert!(unknown.len() == 2);
-        assert!(unknown.0[0].tag == 5);
-        assert!(unknown.0[0].bytes.as_ref() == &[10, 20, 30]);
-        assert!(unknown.0[1].tag == 8);
-        assert!(unknown.0[1].bytes.as_ref() == &[40]);
+        let expected = UnknownTaggedFields(vec![
+            UnknownTaggedField {
+                tag: 5,
+                bytes: Bytes::from_static(&[10, 20, 30]),
+            },
+            UnknownTaggedField {
+                tag: 8,
+                bytes: Bytes::from_static(&[40]),
+            },
+        ]);
+        assert!(unknown == expected);
     }
 
     #[test]

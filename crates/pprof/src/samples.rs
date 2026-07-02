@@ -15,23 +15,16 @@ mod tests {
     #[test]
     fn samples_schema_has_fold_keys_and_value() {
         let schema = profile_samples_schema();
-        assert!(
-            schema
-                .column_with_name(PCOL_STACKTRACE_PARTITION)
-                .unwrap()
-                .1
-                .data_type()
-                == &DataType::UInt64
-        );
-        assert!(
-            schema
-                .column_with_name(PCOL_STACKTRACE_ID)
-                .unwrap()
-                .1
-                .data_type()
-                == &DataType::UInt64
-        );
-        assert!(schema.column_with_name(PCOL_VALUE).unwrap().1.data_type() == &DataType::Int64);
+        for (column, want) in [
+            (PCOL_STACKTRACE_PARTITION, DataType::UInt64),
+            (PCOL_STACKTRACE_ID, DataType::UInt64),
+            (PCOL_VALUE, DataType::Int64),
+        ] {
+            assert!(
+                schema.column_with_name(column).unwrap().1.data_type() == &want,
+                "{column}"
+            );
+        }
         let (_, field) = schema.column_with_name(PCOL_TRACE_ID).unwrap();
         assert!(field.is_nullable() && field.data_type() == &DataType::Binary);
     }

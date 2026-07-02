@@ -725,6 +725,7 @@ async fn pump_loop(
 mod tests {
     use super::*;
     use assert2::assert;
+    use assert2::check;
     use std::collections::BTreeMap;
     use uuid::Uuid;
 
@@ -900,9 +901,9 @@ mod tests {
             .remote_log_segment_metadata(&tp(), 0, 42)
             .unwrap()
             .expect("segment found");
-        assert!(got.remote_log_segment_id().id == Uuid::from_u128(10));
-        assert!(got.custom_metadata() == Some(&CustomMetadata(vec![7])));
-        assert!(m.highest_offset_for_epoch(&tp(), 0).unwrap() == Some(99));
+        check!(got.remote_log_segment_id().id == Uuid::from_u128(10));
+        check!(got.custom_metadata() == Some(&CustomMetadata(vec![7])));
+        check!(m.highest_offset_for_epoch(&tp(), 0).unwrap() == Some(99));
         m.shutdown();
     }
 
@@ -979,9 +980,11 @@ mod tests {
         // replays the full history before the read below.
         let fresh = start_manager_all(log).await;
         let listed = fresh.list_remote_log_segments(&tp()).unwrap();
-        assert!(listed.len() == 3);
-        assert!(listed[0].start_offset() == 0);
-        assert!(listed[2].end_offset() == 299);
+        let ranges: Vec<(i64, i64)> = listed
+            .iter()
+            .map(|s| (s.start_offset(), s.end_offset()))
+            .collect();
+        assert!(ranges == [(0, 99), (100, 199), (200, 299)]);
         assert!(fresh.highest_offset_for_epoch(&tp(), 0).unwrap() == Some(299));
         fresh.shutdown();
     }
@@ -1042,13 +1045,13 @@ mod tests {
         // The orders partition's committed offset covers both events.
         let p = crate::partitioning::metadata_partition_for(&tp(), 4);
         let idx = usize::try_from(p).unwrap();
-        assert!(
+        check!(
             snap.committed_offsets[idx] >= 1,
             "committed >= last applied offset"
         );
         // The dump contains the finished segment.
         assert!(snap.dump.partitions.len() == 1);
-        assert!(snap.dump.partitions[0].segments.len() == 1);
+        check!(snap.dump.partitions[0].segments.len() == 1);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1215,9 +1218,9 @@ mod tests {
         let log: Arc<dyn MetadataEventLog> = InProcessMetadataEventLog::new(2);
         let m = start_manager(log).await;
         let other = TopicIdPartition::new(Uuid::from_u128(999), "nope", 0);
-        assert!(m.remote_log_segment_metadata(&other, 0, 0).unwrap() == None);
-        assert!(m.highest_offset_for_epoch(&other, 0).unwrap() == None);
-        assert!(m.list_remote_log_segments(&other).unwrap().is_empty());
+        check!(m.remote_log_segment_metadata(&other, 0, 0).unwrap() == None);
+        check!(m.highest_offset_for_epoch(&other, 0).unwrap() == None);
+        check!(m.list_remote_log_segments(&other).unwrap().is_empty());
         m.shutdown();
     }
 
@@ -1276,10 +1279,10 @@ mod tests {
         a.reconcile_assignment(&[mp_a]).await;
         b.reconcile_assignment(&[mp_b]).await;
 
-        assert!(a.assigned_metadata_partitions() == vec![mp_a]);
-        assert!(b.assigned_metadata_partitions() == vec![mp_b]);
+        check!(a.assigned_metadata_partitions() == vec![mp_a]);
+        check!(b.assigned_metadata_partitions() == vec![mp_b]);
         // Disjoint shares.
-        assert!(
+        check!(
             a.assigned_metadata_partitions()
                 .iter()
                 .all(|p| !b.assigned_metadata_partitions().contains(p)),
@@ -1366,9 +1369,9 @@ mod tests {
             listed.len() == 1,
             "remove + re-add must not duplicate the segment, got {listed:?}"
         );
-        assert!(listed[0].remote_log_segment_id().id == Uuid::from_u128(10));
+        check!(listed[0].remote_log_segment_id().id == Uuid::from_u128(10));
         // The finished state survived (no half-applied duplicate update).
-        assert!(m.highest_offset_for_epoch(&tp(), 0).unwrap() == Some(99));
+        check!(m.highest_offset_for_epoch(&tp(), 0).unwrap() == Some(99));
 
         m.shutdown();
     }

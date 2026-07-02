@@ -30,6 +30,7 @@ use std::net::SocketAddr;
 use std::process::Command;
 use std::time::Duration;
 
+use assert2::check;
 use base64::Engine as _;
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -276,7 +277,7 @@ async fn static_mixed_jvm_crabka_quorum() {
     c2.shutdown().await;
 
     // The two Crabka voters MUST elect among themselves regardless of the JVM.
-    assert!(
+    check!(
         elected,
         "Crabka 2/3 majority failed to elect a stable shared leader \
          (n1={last_l1:?} n2={last_l2:?})"
@@ -286,15 +287,15 @@ async fn static_mixed_jvm_crabka_quorum() {
     // static quorum as a follower, never fatal-faults, and replicates the
     // leader's committed metadata (HWM catch-up + a FeaturesImage carrying
     // metadata.version=25).
-    assert!(
+    check!(
         jvm_joined && !jvm_unsupported_version,
         "JVM did not join cross-impl: joined={jvm_joined}, unsupported={jvm_unsupported_version}"
     );
-    assert!(
+    check!(
         !jvm_fatal_fault,
         "JVM raft thread fatal-faulted (a wire/record inconsistency); see logs"
     );
-    assert!(
+    check!(
         jvm_replicated,
         "JVM did not replicate the Crabka leader's committed metadata (no HWM catch-up / \
          metadata.version not loaded); see JVM logs"

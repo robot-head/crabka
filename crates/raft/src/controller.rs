@@ -58,6 +58,7 @@ pub struct QuorumState {
 /// A contiguous byte window of the latest metadata `.checkpoint`, returned by
 /// [`ControllerHandle::read_snapshot_range`] to back the broker's
 /// `FetchSnapshot` handler.
+#[derive(Debug, PartialEq)]
 pub struct SnapshotSlice {
     pub end_offset: i64,
     pub epoch: i32,
@@ -773,7 +774,7 @@ pub fn metadata_log_nonempty(dir: &std::path::Path) -> bool {
 #[cfg(test)]
 mod bootstrap_mode_tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use tempfile::TempDir;
 
     const TEST_OP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
@@ -954,10 +955,15 @@ mod bootstrap_mode_tests {
 
         match ctrl.read_snapshot_range(3, 10) {
             SnapshotRange::Slice(slice) => {
-                assert!(slice.end_offset == 10);
-                assert!(slice.epoch == 4);
-                assert!(slice.total_size == 3);
-                assert!(slice.bytes.is_empty());
+                assert!(
+                    slice
+                        == SnapshotSlice {
+                            end_offset: 10,
+                            epoch: 4,
+                            total_size: 3,
+                            bytes: bytes::Bytes::new(),
+                        }
+                );
             }
             other => panic!(
                 "position exactly at snapshot end should yield an empty slice, got {:?}",
@@ -1010,9 +1016,9 @@ mod bootstrap_mode_tests {
         wait_for_leader(&ctrl).await;
 
         let voters = <ControllerHandle as crate::reconfig::ReconfigOps>::current_voters(&ctrl);
-        assert!(voters.contains(1));
-        assert!(<ControllerHandle as crate::reconfig::ReconfigOps>::leader(&ctrl) == Some(1));
-        assert!(<ControllerHandle as crate::reconfig::ReconfigOps>::is_leader(&ctrl));
+        check!(voters.contains(1));
+        check!(<ControllerHandle as crate::reconfig::ReconfigOps>::leader(&ctrl) == Some(1));
+        check!(<ControllerHandle as crate::reconfig::ReconfigOps>::is_leader(&ctrl));
 
         tokio::time::timeout(
             TEST_OP_TIMEOUT,

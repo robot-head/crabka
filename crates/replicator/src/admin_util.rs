@@ -235,20 +235,23 @@ fn is_unknown_topic_error(msg: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use assert2::assert;
+    use assert2::check;
 
     #[test]
     fn unknown_topic_error_matches_each_substring() {
         // Each positive exercises exactly one of the OR'd substrings, so the
         // single-substring match must hold on its own (kills `||`→`&&`, which
         // would require all four, and the `-> true`/`-> false` constants).
-        assert!(super::is_unknown_topic_error(
-            "x UNKNOWN_TOPIC_OR_PARTITION y"
-        ));
-        assert!(super::is_unknown_topic_error("unknown topic foo"));
-        assert!(super::is_unknown_topic_error("UnknownTopicOrPartition"));
-        assert!(super::is_unknown_topic_error("err: NotSubscribed"));
-        // A message with none of the substrings must not match (kills `-> true`).
-        assert!(!super::is_unknown_topic_error("connection refused"));
+        for (msg, want) in [
+            ("x UNKNOWN_TOPIC_OR_PARTITION y", true),
+            ("unknown topic foo", true),
+            ("UnknownTopicOrPartition", true),
+            ("err: NotSubscribed", true),
+            // A message with none of the substrings must not match (kills `-> true`).
+            ("connection refused", false),
+        ] {
+            check!(super::is_unknown_topic_error(msg) == want, "msg={msg:?}");
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -524,15 +524,12 @@ mod tests {
         let mut to_submit = Vec::new();
         handle_broker_scoped(&resource, &img, &mut out, &mut to_submit);
         assert!(out.error_code == codes::NONE);
-        assert!(to_submit.len() == 1);
-        match &to_submit[0] {
-            MetadataRecord::V1BrokerConfig(rec) => {
-                assert!(rec.node_id == 1);
-                assert!(rec.config_name == crate::throttle::LEADER_THROTTLED_RATE_KEY);
-                assert!(rec.config_value == Some("2048".into()));
-            }
-            other => panic!("expected V1BrokerConfig, got {other:?}"),
-        }
+        let expected = vec![MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
+            node_id: 1,
+            config_name: crate::throttle::LEADER_THROTTLED_RATE_KEY.to_string(),
+            config_value: Some("2048".to_string()),
+        })];
+        assert!(to_submit == expected);
     }
 
     #[test]
@@ -546,15 +543,12 @@ mod tests {
         let mut to_submit = Vec::new();
         handle_broker_scoped(&resource, &img, &mut out, &mut to_submit);
         assert!(out.error_code == codes::NONE);
-        assert!(to_submit.len() == 1);
-        match &to_submit[0] {
-            MetadataRecord::V1BrokerConfig(rec) => {
-                assert!(rec.node_id == 1);
-                assert!(rec.config_name == crate::throttle::FOLLOWER_THROTTLED_RATE_KEY);
-                assert!(rec.config_value == None);
-            }
-            other => panic!("expected V1BrokerConfig, got {other:?}"),
-        }
+        let expected = vec![MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
+            node_id: 1,
+            config_name: crate::throttle::FOLLOWER_THROTTLED_RATE_KEY.to_string(),
+            config_value: None,
+        })];
+        assert!(to_submit == expected);
     }
 
     #[test]

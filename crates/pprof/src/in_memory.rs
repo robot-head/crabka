@@ -573,8 +573,14 @@ mod tests {
         let stats = store.stats("t", 1500, 2500).await.unwrap();
 
         assert!(values == vec!["inside".to_string()]);
-        assert!(stats.oldest_profile_time == Some(2000));
-        assert!(stats.newest_profile_time == Some(2000));
+        assert!(
+            stats
+                == crate::ProfileStats {
+                    data_ingested: true,
+                    oldest_profile_time: Some(2000),
+                    newest_profile_time: Some(2000),
+                }
+        );
     }
 
     #[tokio::test]

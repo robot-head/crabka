@@ -185,6 +185,7 @@ impl From<crate::owned::fetch_response::SnapshotId>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::UnknownTaggedFields;
     use crate::primitives::uuid::Uuid;
     use crate::records::RecordsPayload;
     use assert2::assert;
@@ -213,40 +214,48 @@ mod tests {
         legacy.topics[0].partitions[0].partition_max_bytes = 8;
         legacy.forgotten_topics_data[0].topic = "forgotten-topic".into();
         legacy.forgotten_topics_data[0].partitions = vec![9, 10];
-        let converted = FetchRequest::from(legacy.clone());
+        let converted = FetchRequest::from(legacy);
 
-        assert!(converted.replica_id == legacy.replica_id);
-        assert!(converted.max_wait_ms == legacy.max_wait_ms);
-        assert!(converted.min_bytes == legacy.min_bytes);
-        assert!(converted.max_bytes == legacy.max_bytes);
-        assert!(converted.isolation_level == legacy.isolation_level);
-        assert!(converted.session_id == legacy.session_id);
-        assert!(converted.session_epoch == legacy.session_epoch);
-        assert!(converted.rack_id == legacy.rack_id);
-        assert!(converted.cluster_id == legacy.cluster_id);
-        assert!(converted.topics.len() == legacy.topics.len());
-        assert!(converted.forgotten_topics_data.len() == legacy.forgotten_topics_data.len());
-        assert!(converted.replica_state.replica_id == legacy.replica_state.replica_id);
-        assert!(converted.replica_state.replica_epoch == legacy.replica_state.replica_epoch);
-
-        let topic = &converted.topics[0];
-        let legacy_topic = &legacy.topics[0];
-        assert!(topic.topic == legacy_topic.topic);
-        assert!(topic.partitions.len() == legacy_topic.partitions.len());
-
-        let partition = &topic.partitions[0];
-        let legacy_partition = &legacy_topic.partitions[0];
-        assert!(partition.partition == legacy_partition.partition);
-        assert!(partition.current_leader_epoch == legacy_partition.current_leader_epoch);
-        assert!(partition.fetch_offset == legacy_partition.fetch_offset);
-        assert!(partition.last_fetched_epoch == legacy_partition.last_fetched_epoch);
-        assert!(partition.log_start_offset == legacy_partition.log_start_offset);
-        assert!(partition.partition_max_bytes == legacy_partition.partition_max_bytes);
-
-        let forgotten = &converted.forgotten_topics_data[0];
-        let legacy_forgotten = &legacy.forgotten_topics_data[0];
-        assert!(forgotten.topic == legacy_forgotten.topic);
-        assert!(forgotten.partitions == legacy_forgotten.partitions);
+        let expected = FetchRequest {
+            replica_id: 42,
+            max_wait_ms: 43,
+            min_bytes: 44,
+            max_bytes: 45,
+            isolation_level: 1,
+            session_id: 46,
+            session_epoch: 47,
+            topics: vec![crate::owned::fetch_request::FetchTopic {
+                topic: "fetch-topic".to_string(),
+                topic_id: Uuid::ZERO,
+                partitions: vec![crate::owned::fetch_request::FetchPartition {
+                    partition: 3,
+                    current_leader_epoch: 4,
+                    fetch_offset: 5,
+                    last_fetched_epoch: 6,
+                    log_start_offset: 7,
+                    partition_max_bytes: 8,
+                    replica_directory_id: Uuid::ZERO,
+                    high_watermark: 9_223_372_036_854_775_807,
+                    unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                }],
+                unknown_tagged_fields: UnknownTaggedFields(vec![]),
+            }],
+            forgotten_topics_data: vec![crate::owned::fetch_request::ForgottenTopic {
+                topic: "forgotten-topic".to_string(),
+                topic_id: Uuid::ZERO,
+                partitions: vec![9, 10],
+                unknown_tagged_fields: UnknownTaggedFields(vec![]),
+            }],
+            rack_id: "rack-a".to_string(),
+            cluster_id: Some("cluster-a".to_string()),
+            replica_state: crate::owned::fetch_request::ReplicaState {
+                replica_id: 48,
+                replica_epoch: 49,
+                unknown_tagged_fields: UnknownTaggedFields(vec![]),
+            },
+            unknown_tagged_fields: UnknownTaggedFields(vec![]),
+        };
+        assert!(converted == expected);
     }
 
     #[test]
@@ -287,51 +296,51 @@ mod tests {
             .as_mut()
             .expect("aborted transactions")[0]
             .first_offset = 67;
-        let converted = kafka_3_6_2::owned::fetch_response::FetchResponse::from(canonical.clone());
+        let converted = kafka_3_6_2::owned::fetch_response::FetchResponse::from(canonical);
 
-        assert!(converted.throttle_time_ms == canonical.throttle_time_ms);
-        assert!(converted.error_code == canonical.error_code);
-        assert!(converted.session_id == canonical.session_id);
-        assert!(converted.responses.len() == canonical.responses.len());
-
-        let topic = &converted.responses[0];
-        let canonical_topic = &canonical.responses[0];
-        assert!(topic.topic == canonical_topic.topic);
-        assert!(topic.topic_id == canonical_topic.topic_id);
-        assert!(topic.partitions.len() == canonical_topic.partitions.len());
-
-        let partition = &topic.partitions[0];
-        let canonical_partition = &canonical_topic.partitions[0];
-        assert!(partition.partition_index == canonical_partition.partition_index);
-        assert!(partition.error_code == canonical_partition.error_code);
-        assert!(partition.high_watermark == canonical_partition.high_watermark);
-        assert!(partition.last_stable_offset == canonical_partition.last_stable_offset);
-        assert!(partition.log_start_offset == canonical_partition.log_start_offset);
-        assert!(partition.preferred_read_replica == canonical_partition.preferred_read_replica);
-        assert!(partition.records == canonical_partition.records);
-        assert!(partition.diverging_epoch.epoch == canonical_partition.diverging_epoch.epoch);
-        assert!(
-            partition.diverging_epoch.end_offset == canonical_partition.diverging_epoch.end_offset
-        );
-        assert!(partition.current_leader.leader_id == canonical_partition.current_leader.leader_id);
-        assert!(
-            partition.current_leader.leader_epoch
-                == canonical_partition.current_leader.leader_epoch
-        );
-        assert!(partition.snapshot_id.end_offset == canonical_partition.snapshot_id.end_offset);
-        assert!(partition.snapshot_id.epoch == canonical_partition.snapshot_id.epoch);
-
-        let aborted = partition
-            .aborted_transactions
-            .as_ref()
-            .expect("aborted transactions")[0]
-            .clone();
-        let canonical_aborted = canonical_partition
-            .aborted_transactions
-            .as_ref()
-            .expect("canonical aborted transactions")[0]
-            .clone();
-        assert!(aborted.producer_id == canonical_aborted.producer_id);
-        assert!(aborted.first_offset == canonical_aborted.first_offset);
+        let expected = kafka_3_6_2::owned::fetch_response::FetchResponse {
+            throttle_time_ms: 51,
+            error_code: 52,
+            session_id: 53,
+            responses: vec![kafka_3_6_2::owned::fetch_response::FetchableTopicResponse {
+                topic: "fetch-response-topic".to_string(),
+                topic_id: Uuid([0x12; 16]),
+                partitions: vec![kafka_3_6_2::owned::fetch_response::PartitionData {
+                    partition_index: 54,
+                    error_code: 55,
+                    high_watermark: 56,
+                    last_stable_offset: 57,
+                    log_start_offset: 58,
+                    aborted_transactions: Some(vec![
+                        kafka_3_6_2::owned::fetch_response::AbortedTransaction {
+                            producer_id: 66,
+                            first_offset: 67,
+                            unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                        },
+                    ]),
+                    preferred_read_replica: 59,
+                    records: Some(RecordsPayload::Legacy(Bytes::from_static(&[1, 2, 3]))),
+                    diverging_epoch: kafka_3_6_2::owned::fetch_response::EpochEndOffset {
+                        epoch: 60,
+                        end_offset: 61,
+                        unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                    },
+                    current_leader: kafka_3_6_2::owned::fetch_response::LeaderIdAndEpoch {
+                        leader_id: 62,
+                        leader_epoch: 63,
+                        unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                    },
+                    snapshot_id: kafka_3_6_2::owned::fetch_response::SnapshotId {
+                        end_offset: 64,
+                        epoch: 65,
+                        unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                    },
+                    unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                }],
+                unknown_tagged_fields: UnknownTaggedFields(vec![]),
+            }],
+            unknown_tagged_fields: UnknownTaggedFields(vec![]),
+        };
+        assert!(converted == expected);
     }
 }

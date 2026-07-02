@@ -424,7 +424,7 @@ fn compute_active_revoke_split(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
 
     fn task_map(entries: &[(&str, &[i32])]) -> BTreeMap<String, Vec<i32>> {
         entries
@@ -502,17 +502,17 @@ mod tests {
         // Within the timeout: nothing evicted, stays clean.
         let recent = Instant::now() + Duration::from_millis(50);
         let kept = g.evict_expired(recent, Duration::from_secs(45));
-        assert!(kept.is_empty());
-        assert!(g.members.len() == 2);
-        assert!(!g.dirty);
+        check!(kept.is_empty());
+        check!(g.members.len() == 2);
+        check!(!g.dirty);
 
         // Timeout shrinks below the silence: both overdue, dirty flips.
         let later = Instant::now() + Duration::from_millis(50);
         let mut evicted = g.evict_expired(later, Duration::from_millis(1));
         evicted.sort();
-        assert!(evicted == vec!["m1".to_string(), "m2".to_string()]);
-        assert!(g.members.is_empty());
-        assert!(g.dirty);
+        check!(evicted == vec!["m1".to_string(), "m2".to_string()]);
+        check!(g.members.is_empty());
+        check!(g.dirty);
     }
 
     #[test]
@@ -531,11 +531,11 @@ mod tests {
         g.install_target(target);
 
         let m = &g.members["m1"];
-        assert!(g.assignment_epoch == 7);
-        assert!(g.target.epoch == 7);
-        assert!(m.active == task_map(&[("sub0", &[0, 1])]));
-        assert!(m.active_pending_revocation == task_map(&[("sub0", &[2])]));
-        assert!(m.assignment_state == StreamsMemberAssignmentState::UnrevokedActiveTasks);
+        check!(g.assignment_epoch == 7);
+        check!(g.target.epoch == 7);
+        check!(m.active == task_map(&[("sub0", &[0, 1])]));
+        check!(m.active_pending_revocation == task_map(&[("sub0", &[2])]));
+        check!(m.assignment_state == StreamsMemberAssignmentState::UnrevokedActiveTasks);
     }
 
     #[test]
@@ -556,9 +556,9 @@ mod tests {
         let m = &g.members["m1"];
         // Kept = intersection of current and target = {0,1}; the new {2} is not
         // installed until the member advances its epoch.
-        assert!(m.active == task_map(&[("sub0", &[0, 1])]));
-        assert!(m.active_pending_revocation.is_empty());
-        assert!(m.assignment_state == StreamsMemberAssignmentState::Stable);
+        check!(m.active == task_map(&[("sub0", &[0, 1])]));
+        check!(m.active_pending_revocation.is_empty());
+        check!(m.assignment_state == StreamsMemberAssignmentState::Stable);
     }
 
     #[test]
@@ -588,22 +588,26 @@ mod tests {
 
         g.advance_member_epoch("m1");
         let m = &g.members["m1"];
-        assert!(m.member_epoch == 9);
-        assert!(m.previous_member_epoch == 0);
-        assert!(m.active == task_map(&[("sub0", &[0, 1])]));
-        assert!(m.standby == task_map(&[("sub1", &[3])]));
-        assert!(m.warmup == task_map(&[("sub2", &[4, 5])]));
-        assert!(m.active_pending_revocation.is_empty());
-        assert!(m.assignment_state == StreamsMemberAssignmentState::Stable);
+        check!(m.member_epoch == 9);
+        check!(m.previous_member_epoch == 0);
+        check!(m.active == task_map(&[("sub0", &[0, 1])]));
+        check!(m.standby == task_map(&[("sub1", &[3])]));
+        check!(m.warmup == task_map(&[("sub2", &[4, 5])]));
+        check!(m.active_pending_revocation.is_empty());
+        check!(m.assignment_state == StreamsMemberAssignmentState::Stable);
     }
 
     #[test]
     fn group_state_phase_as_str_strings() {
-        assert!(StreamsGroupStatePhase::Empty.as_str() == "Empty");
-        assert!(StreamsGroupStatePhase::NotReady.as_str() == "NotReady");
-        assert!(StreamsGroupStatePhase::Assigning.as_str() == "Assigning");
-        assert!(StreamsGroupStatePhase::Reconciling.as_str() == "Reconciling");
-        assert!(StreamsGroupStatePhase::Stable.as_str() == "Stable");
+        for (phase, want) in [
+            (StreamsGroupStatePhase::Empty, "Empty"),
+            (StreamsGroupStatePhase::NotReady, "NotReady"),
+            (StreamsGroupStatePhase::Assigning, "Assigning"),
+            (StreamsGroupStatePhase::Reconciling, "Reconciling"),
+            (StreamsGroupStatePhase::Stable, "Stable"),
+        ] {
+            assert!(phase.as_str() == want);
+        }
         assert!(StreamsGroupStatePhase::default() == StreamsGroupStatePhase::Empty);
     }
 

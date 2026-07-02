@@ -220,7 +220,7 @@ impl KraftMetadataRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
 
     #[test]
     fn feature_level_record_value_roundtrips_through_dispatch() {
@@ -231,10 +231,10 @@ mod tests {
         });
         let value = rec.encode_value(0).expect("encode");
         let (decoded, ver) = KraftMetadataRecord::decode_value(&value).expect("decode");
-        assert!(decoded == rec);
-        assert!(ver == 0);
+        check!(decoded == rec);
+        check!(ver == 0);
         // Re-encode at the decoded version is byte-identical.
-        assert!(decoded.encode_value(ver).expect("re-encode") == value);
+        check!(decoded.encode_value(ver).expect("re-encode") == value);
     }
 
     #[test]
@@ -244,18 +244,12 @@ mod tests {
         let value = encode_value(99, 0, &[0xAB, 0xCD]);
         let (decoded, ver) = KraftMetadataRecord::decode_value(&value).expect("decode");
         assert!(ver == 0);
-        match &decoded {
-            KraftMetadataRecord::Unknown {
-                api_key,
-                api_version,
-                body,
-            } => {
-                assert!(*api_key == 99);
-                assert!(*api_version == 0);
-                assert!(body.as_ref() == &[0xAB, 0xCD]);
-            }
-            other => panic!("expected Unknown, got {other:?}"),
-        }
+        let expected = KraftMetadataRecord::Unknown {
+            api_key: 99,
+            api_version: 0,
+            body: Bytes::from_static(&[0xAB, 0xCD]),
+        };
+        assert!(decoded == expected);
         // Unknown re-encodes byte-identically too.
         assert!(decoded.encode_value(ver).expect("re-encode") == value);
     }
@@ -282,38 +276,47 @@ mod tests {
             unregister_broker_record::UnregisterBrokerRecord,
             user_scram_credential_record::UserScramCredentialRecord,
         };
-        assert!(
-            KraftMetadataRecord::UnregisterBroker(UnregisterBrokerRecord::default()).api_key() == 1
-        );
-        assert!(KraftMetadataRecord::Config(ConfigRecord::default()).api_key() == 4);
-        assert!(
-            KraftMetadataRecord::DelegationToken(DelegationTokenRecord::default()).api_key() == 10
-        );
-        assert!(
-            KraftMetadataRecord::UserScramCredential(UserScramCredentialRecord::default())
-                .api_key()
-                == 11
-        );
-        assert!(KraftMetadataRecord::ClientQuota(ClientQuotaRecord::default()).api_key() == 14);
-        assert!(
-            KraftMetadataRecord::AccessControlEntry(AccessControlEntryRecord::default()).api_key()
-                == 18
-        );
-        assert!(
-            KraftMetadataRecord::RemoveAccessControlEntry(RemoveAccessControlEntryRecord::default())
-                .api_key() == 19
-        );
-        assert!(
-            KraftMetadataRecord::RemoveUserScramCredential(
-                RemoveUserScramCredentialRecord::default()
-            )
-            .api_key()
-                == 22
-        );
-        assert!(
-            KraftMetadataRecord::RemoveDelegationToken(RemoveDelegationTokenRecord::default())
-                .api_key()
-                == 26
-        );
+        let cases = [
+            (
+                KraftMetadataRecord::UnregisterBroker(UnregisterBrokerRecord::default()),
+                1,
+            ),
+            (KraftMetadataRecord::Config(ConfigRecord::default()), 4),
+            (
+                KraftMetadataRecord::DelegationToken(DelegationTokenRecord::default()),
+                10,
+            ),
+            (
+                KraftMetadataRecord::UserScramCredential(UserScramCredentialRecord::default()),
+                11,
+            ),
+            (
+                KraftMetadataRecord::ClientQuota(ClientQuotaRecord::default()),
+                14,
+            ),
+            (
+                KraftMetadataRecord::AccessControlEntry(AccessControlEntryRecord::default()),
+                18,
+            ),
+            (
+                KraftMetadataRecord::RemoveAccessControlEntry(
+                    RemoveAccessControlEntryRecord::default(),
+                ),
+                19,
+            ),
+            (
+                KraftMetadataRecord::RemoveUserScramCredential(
+                    RemoveUserScramCredentialRecord::default(),
+                ),
+                22,
+            ),
+            (
+                KraftMetadataRecord::RemoveDelegationToken(RemoveDelegationTokenRecord::default()),
+                26,
+            ),
+        ];
+        for (rec, want) in cases {
+            assert!(rec.api_key() == want);
+        }
     }
 }

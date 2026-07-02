@@ -330,6 +330,8 @@ fn path_ends_with_ident(ty: &Type, expected: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use assert2::check;
+
     use super::*;
 
     fn expanded_config_def(input: &str) -> String {
@@ -360,9 +362,16 @@ mod tests {
             ",
         );
 
-        assert!(expanded.contains("def=def.secret(\"password\");"));
-        assert!(expanded.contains("def=def.optional(\"maybe_password\","));
-        assert!(expanded.contains("def=def.secret(\"required_maybe_password\");"));
+        for needle in [
+            "def=def.secret(\"password\");",
+            "def=def.optional(\"maybe_password\",",
+            "def=def.secret(\"required_maybe_password\");",
+        ] {
+            assert!(
+                expanded.contains(needle),
+                "missing {needle:?} in {expanded}"
+            );
+        }
     }
 
     #[test]
@@ -378,9 +387,16 @@ mod tests {
             ",
         );
 
-        assert!(expanded.contains("def=def.required(\"database_url\","));
-        assert!(expanded.contains("def=def.optional(\"note\","));
-        assert!(expanded.contains("def=def.required(\"required_note\","));
+        for needle in [
+            "def=def.required(\"database_url\",",
+            "def=def.optional(\"note\",",
+            "def=def.required(\"required_note\",",
+        ] {
+            assert!(
+                expanded.contains(needle),
+                "missing {needle:?} in {expanded}"
+            );
+        }
     }
 
     #[test]
@@ -390,9 +406,9 @@ mod tests {
         assert!(optional_secret.is_secret);
 
         let string_vec = analyze_type(&parse_type("Vec<String>")).unwrap();
-        assert!(!string_vec.is_option);
-        assert!(!string_vec.is_secret);
-        assert!(analyze_type(&parse_type("Vec<u8>")).is_err());
+        check!(!string_vec.is_option);
+        check!(!string_vec.is_secret);
+        check!(analyze_type(&parse_type("Vec<u8>")).is_err());
 
         for scalar in [
             "String", "bool", "i8", "i16", "i32", "i64", "isize", "u8", "u16", "u32", "u64",

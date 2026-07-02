@@ -1096,7 +1096,7 @@ fn fail_batch(records: Vec<PendingRecord>, err: ProducerError) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use tokio::sync::oneshot;
 
     /// Build a `PreparedBatch` for `(topic, partition)` with `base_sequence` and
@@ -1146,28 +1146,40 @@ mod tests {
 
     #[test]
     fn classify_verdict_maps_codes() {
-        assert!(
-            classify_verdict(codes::NONE, 42)
-                == Classification::Verdict(BatchVerdict::Acked { base_offset: 42 })
-        );
-        // DUPLICATE is acked like a success (broker already wrote it).
-        assert!(
-            classify_verdict(codes::DUPLICATE_SEQUENCE_NUMBER, 7)
-                == Classification::Verdict(BatchVerdict::Acked { base_offset: 7 })
-        );
-        assert!(
-            classify_verdict(codes::OUT_OF_ORDER_SEQUENCE_NUMBER, 0)
-                == Classification::Verdict(BatchVerdict::Retry)
-        );
-        assert!(
-            classify_verdict(codes::INVALID_PRODUCER_EPOCH, 0)
-                == Classification::Verdict(BatchVerdict::Fence)
-        );
-        assert!(classify_verdict(codes::NOT_LEADER_OR_FOLLOWER, 0) == Classification::Routing);
-        assert!(classify_verdict(codes::UNKNOWN_TOPIC_OR_PARTITION, 0) == Classification::Routing);
-        // An arbitrary server error (MESSAGE_TOO_LARGE = 10) is terminal-but-not-
-        // fatal: fail the records with Server(10), never fence.
-        assert!(classify_verdict(10, 0) == Classification::Verdict(BatchVerdict::Terminal(10)));
+        for (code, base_offset, want) in [
+            (
+                codes::NONE,
+                42,
+                Classification::Verdict(BatchVerdict::Acked { base_offset: 42 }),
+            ),
+            // DUPLICATE is acked like a success (broker already wrote it).
+            (
+                codes::DUPLICATE_SEQUENCE_NUMBER,
+                7,
+                Classification::Verdict(BatchVerdict::Acked { base_offset: 7 }),
+            ),
+            (
+                codes::OUT_OF_ORDER_SEQUENCE_NUMBER,
+                0,
+                Classification::Verdict(BatchVerdict::Retry),
+            ),
+            (
+                codes::INVALID_PRODUCER_EPOCH,
+                0,
+                Classification::Verdict(BatchVerdict::Fence),
+            ),
+            (codes::NOT_LEADER_OR_FOLLOWER, 0, Classification::Routing),
+            (
+                codes::UNKNOWN_TOPIC_OR_PARTITION,
+                0,
+                Classification::Routing,
+            ),
+            // An arbitrary server error (MESSAGE_TOO_LARGE = 10) is terminal-but-
+            // not-fatal: fail the records with Server(10), never fence.
+            (10, 0, Classification::Verdict(BatchVerdict::Terminal(10))),
+        ] {
+            assert!(classify_verdict(code, base_offset) == want);
+        }
     }
 
     #[test]
@@ -1187,10 +1199,10 @@ mod tests {
         let (to_send, expired) = collect_retries(&mut retry, Instant::now());
 
         assert!(expired.len() == 1);
-        assert!(expired[0].base_sequence == 0);
+        check!(expired[0].base_sequence == 0);
         assert!(to_send.len() == 1);
-        assert!(to_send[0].base_sequence == 16);
-        assert!(retry.is_empty());
+        check!(to_send[0].base_sequence == 16);
+        check!(retry.is_empty());
     }
 
     #[test]
@@ -1202,9 +1214,9 @@ mod tests {
         let now = Instant::now();
         let (to_send, expired) = collect_retries(&mut retry, now);
 
-        assert!(expired.is_empty());
+        check!(expired.is_empty());
         assert!(to_send.len() == 1);
-        assert!(to_send[0].first_sent == Some(now));
+        check!(to_send[0].first_sent == Some(now));
     }
 
     #[test]
@@ -1229,13 +1241,17 @@ mod tests {
             (to_send.len(), retry.len())
         };
 
-        // Before the backoff instant: parked in its slot, nothing sent.
-        assert!(collect_after(Duration::from_millis(40)) == (0, 1));
-        // Exactly at the backoff instant: eligible — `now < t` is false here, so
-        // `<` resends while `<=` would keep it parked.
-        assert!(collect_after(backoff) == (1, 0));
-        // After the backoff instant: eligible and drained out to send.
-        assert!(collect_after(Duration::from_millis(160)) == (1, 0));
+        for (elapsed, want) in [
+            // Before the backoff instant: parked in its slot, nothing sent.
+            (Duration::from_millis(40), (0, 1)),
+            // Exactly at the backoff instant: eligible — `now < t` is false
+            // here, so `<` resends while `<=` would keep it parked.
+            (backoff, (1, 0)),
+            // After the backoff instant: eligible and drained out to send.
+            (Duration::from_millis(160), (1, 0)),
+        ] {
+            assert!(collect_after(elapsed) == want);
+        }
     }
 
     #[test]
@@ -1251,10 +1267,9 @@ mod tests {
 
     #[test]
     fn positive_partition_count_filters_boundary_values() {
-        assert!(positive_partition_count(-1).is_none());
-        assert!(positive_partition_count(0).is_none());
-        assert!(positive_partition_count(1) == Some(1));
-        assert!(positive_partition_count(2) == Some(2));
+        for (input, want) in [(-1, None), (0, None), (1, Some(1)), (2, Some(2))] {
+            assert!(positive_partition_count(input) == want);
+        }
     }
 }
 
@@ -1267,7 +1282,7 @@ mod tests {
 #[cfg(test)]
 mod harness {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use std::sync::Mutex as StdMutex;
     use std::sync::atomic::AtomicI64;
     use tokio::sync::oneshot;
@@ -2010,21 +2025,21 @@ mod harness {
             .expect("oneshot sender should stay alive")
             .expect("record should ack after reroute");
 
-        assert!(md.partition == 0);
-        assert!(md.offset == 0);
-        assert!(
+        check!(md.partition == 0);
+        check!(md.offset == 0);
+        check!(
             h.transport.refresh_count() >= 1,
             "first transport failure must force a metadata refresh"
         );
-        assert!(
+        check!(
             h.transport.refresh_count() <= 2,
             "failover should not spin through repeated refreshes"
         );
-        assert!(
+        check!(
             h.transport.sent_leaders() == vec![Some(0), Some(1)],
             "sender should try stale leader once, then reroute to fresh leader"
         );
-        assert!(h.transport.evicted() == vec![0]);
+        check!(h.transport.evicted() == vec![0]);
 
         shutdown(h).await;
     }
@@ -2257,15 +2272,15 @@ mod harness {
         }
 
         let leaders = h.transport.sent_leaders();
-        assert!(
+        check!(
             leaders.contains(&Some(5)),
             "known leader 5 must be routed to explicitly, got {leaders:?}"
         );
-        assert!(
+        check!(
             leaders.contains(&None),
             "unknown leader must fall back to bootstrap (None), got {leaders:?}"
         );
-        assert!(
+        check!(
             !leaders.contains(&Some(7)),
             "unknown-address leader 7 must never be dialed, got {leaders:?}"
         );
@@ -2416,22 +2431,22 @@ mod harness {
             .expect("acked Ok after re-route");
 
         let leaders = h.transport.sent_leaders();
-        assert!(
+        check!(
             leaders.contains(&Some(5)),
             "first send routes to current leader 5, got {leaders:?}"
         );
-        assert!(
+        check!(
             leaders.contains(&Some(8)),
             "the resend must adopt the inline hint 8, got {leaders:?}"
         );
-        assert!(
+        check!(
             h.partition_leaders
                 .get(&("t".to_string(), 0))
                 .map(|e| *e.value())
                 == Some(8),
             "the leader cache must be updated to the hinted leader 8"
         );
-        assert!(
+        check!(
             h.transport.refresh_count() == 0,
             "a known inline hint must not trigger a metadata refresh"
         );

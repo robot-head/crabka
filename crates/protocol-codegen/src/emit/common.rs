@@ -93,10 +93,14 @@ mod tests {
 
     #[test]
     fn decimal_literals() {
-        assert!(format_int_literal("0", "i32") == "0i32");
-        assert!(format_int_literal("-1", "i32") == "-1i32");
-        assert!(format_int_literal("2147483647", "i32") == "2_147_483_647i32");
-        assert!(format_int_literal("-2147483648", "i32") == "-2_147_483_648i32");
+        for (input, want) in [
+            ("0", "0i32"),
+            ("-1", "-1i32"),
+            ("2147483647", "2_147_483_647i32"),
+            ("-2147483648", "-2_147_483_648i32"),
+        ] {
+            assert!(format_int_literal(input, "i32") == want);
+        }
     }
 
     #[test]
@@ -108,9 +112,13 @@ mod tests {
     #[test]
     fn hex_high_bit_is_sign_extended_to_target_width() {
         // 0xffffffff as i32 is -1, not 4_294_967_295 (which would overflow i32).
-        assert!(format_int_literal("0xffffffff", "i32") == "-1i32");
-        assert!(format_int_literal("0x80000000", "i32") == "-2_147_483_648i32");
-        // Same 32-bit pattern widened to i64 is a large positive value.
-        assert!(format_int_literal("0xffffffff", "i64") == "4_294_967_295i64");
+        // The same 32-bit pattern widened to i64 is a large positive value.
+        for (input, suffix, want) in [
+            ("0xffffffff", "i32", "-1i32"),
+            ("0x80000000", "i32", "-2_147_483_648i32"),
+            ("0xffffffff", "i64", "4_294_967_295i64"),
+        ] {
+            assert!(format_int_literal(input, suffix) == want);
+        }
     }
 }

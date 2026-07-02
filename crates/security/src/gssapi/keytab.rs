@@ -332,13 +332,16 @@ mod tests {
         let kt = keytab(&[body]);
 
         let entries = parse_keytab(&kt).expect("parse");
-        assert!(entries.len() == 1);
-        let e = &entries[0];
-        assert!(e.components == vec!["kafka", "localhost"]);
-        assert!(e.realm == "CRABKA.TEST");
-        assert!(e.enctype == ENCTYPE_AES256_CTS_HMAC_SHA1_96);
-        assert!(e.kvno == 1);
-        assert!(e.key == key);
+        assert!(
+            entries
+                == vec![KeytabKey {
+                    components: vec!["kafka".to_string(), "localhost".to_string()],
+                    realm: "CRABKA.TEST".to_string(),
+                    enctype: ENCTYPE_AES256_CTS_HMAC_SHA1_96,
+                    kvno: 1,
+                    key: key.clone(),
+                }]
+        );
 
         let found = load_service_key(&kt, "kafka", ENCTYPE_AES256_CTS_HMAC_SHA1_96).expect("found");
         assert!(found.key == key);
@@ -440,14 +443,26 @@ mod tests {
         ]);
 
         let keys = load_service_keys(&kt, "kafka", ENCTYPE_AES256_CTS_HMAC_SHA1_96).expect("load");
-        // One key per distinct SPN, ordered by component list.
-        assert!(keys.len() == 2);
-        assert!(keys[0].components == vec!["kafka", "host.docker.internal"]);
-        assert!(keys[0].key == dock);
-        assert!(keys[1].components == vec!["kafka", "localhost"]);
-        // Highest kvno wins for the duplicated SPN; aes128 decoy excluded.
-        assert!(keys[1].kvno == 3);
-        assert!(keys[1].key == loc_v3);
+        // One key per distinct SPN, ordered by component list. Highest kvno
+        // wins for the duplicated SPN; aes128 decoy excluded.
+        assert!(
+            keys == vec![
+                KeytabKey {
+                    components: vec!["kafka".to_string(), "host.docker.internal".to_string()],
+                    realm: "R".to_string(),
+                    enctype: ENCTYPE_AES256_CTS_HMAC_SHA1_96,
+                    kvno: 1,
+                    key: dock.clone(),
+                },
+                KeytabKey {
+                    components: vec!["kafka".to_string(), "localhost".to_string()],
+                    realm: "R".to_string(),
+                    enctype: ENCTYPE_AES256_CTS_HMAC_SHA1_96,
+                    kvno: 3,
+                    key: loc_v3.clone(),
+                },
+            ]
+        );
     }
 
     #[test]
@@ -474,9 +489,15 @@ mod tests {
         ]);
 
         let keys = load_service_keys(&kt, "kafka", ENCTYPE_AES256_CTS_HMAC_SHA1_96).expect("load");
-        assert!(keys.len() == 1);
-        assert!(keys[0].kvno == 7);
-        assert!(keys[0].key == first);
+        assert!(
+            keys == vec![KeytabKey {
+                components: vec!["kafka".to_string(), "localhost".to_string()],
+                realm: "R".to_string(),
+                enctype: ENCTYPE_AES256_CTS_HMAC_SHA1_96,
+                kvno: 7,
+                key: first.clone(),
+            }]
+        );
     }
 
     #[test]

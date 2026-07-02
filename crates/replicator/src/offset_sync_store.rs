@@ -39,7 +39,7 @@ impl OffsetSyncStore {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+    use assert2::check;
 
     use super::*;
     use crate::mm2::OffsetSync;
@@ -59,9 +59,16 @@ mod tests {
             upstream: 200,
             downstream: 165,
         });
-        assert!(s.translate("orders", 0, 250) == Some(215)); // 165 + (250-200)
-        assert!(s.translate("orders", 0, 150) == Some(120)); // 70 + (150-100)
-        assert!(s.translate("orders", 0, 50) == None); // below first sync
-        assert!(s.translate("orders", 9, 100) == None); // unknown partition
+        for (partition, upstream, want) in [
+            (0, 250, Some(215)), // 165 + (250-200)
+            (0, 150, Some(120)), // 70 + (150-100)
+            (0, 50, None),       // below first sync
+            (9, 100, None),      // unknown partition
+        ] {
+            check!(
+                s.translate("orders", partition, upstream) == want,
+                "partition={partition} upstream={upstream}"
+            );
+        }
     }
 }

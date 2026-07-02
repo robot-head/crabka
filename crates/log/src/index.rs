@@ -151,6 +151,7 @@ impl OffsetIndex {
 mod tests {
     use super::*;
     use assert2::assert;
+    use assert2::check;
     use tempfile::tempdir;
 
     #[test]
@@ -161,11 +162,9 @@ mod tests {
         idx.append(0, 0).unwrap();
         idx.append(100, 4096).unwrap();
         idx.append(200, 8192).unwrap();
-        assert!(idx.lookup(50) == 0);
-        assert!(idx.lookup(100) == 4096);
-        assert!(idx.lookup(150) == 4096);
-        assert!(idx.lookup(200) == 8192);
-        assert!(idx.lookup(9999) == 8192);
+        for (offset, want) in [(50, 0), (100, 4096), (150, 4096), (200, 8192), (9999, 8192)] {
+            check!(idx.lookup(offset) == want, "offset={offset}");
+        }
     }
 
     #[test]
@@ -214,9 +213,9 @@ mod tests {
         drop(f);
 
         let idx = OffsetIndex::open(&path).unwrap();
-        assert!(idx.entry_count() == 2);
-        assert!(idx.last_entry() == Some((100, 4096)));
-        assert!(idx.lookup(150) == 4096);
+        check!(idx.entry_count() == 2);
+        check!(idx.last_entry() == Some((100, 4096)));
+        check!(idx.lookup(150) == 4096);
     }
 
     #[test]
@@ -227,10 +226,14 @@ mod tests {
         idx.append(0, 0).unwrap();
         idx.append(100, 4096).unwrap();
         idx.append(200, 8192).unwrap();
-        assert!(idx.position_at_or_after(100) == Some(4096)); // exact
-        assert!(idx.position_at_or_after(150) == Some(8192)); // ceiling
-        assert!(idx.position_at_or_after(0) == Some(0));
-        assert!(idx.position_at_or_after(201) == None); // past last
+        for (offset, want) in [
+            (100, Some(4096)), // exact
+            (150, Some(8192)), // ceiling
+            (0, Some(0)),
+            (201, None), // past last
+        ] {
+            check!(idx.position_at_or_after(offset) == want, "offset={offset}");
+        }
     }
 
     #[test]
@@ -367,6 +370,7 @@ impl TimeIndex {
 mod time_tests {
     use super::*;
     use assert2::assert;
+    use assert2::check;
     use tempfile::tempdir;
 
     #[test]
@@ -377,11 +381,15 @@ mod time_tests {
         idx.append(1_000_000, 0).unwrap();
         idx.append(2_000_000, 100).unwrap();
         idx.append(3_000_000, 200).unwrap();
-        assert!(idx.lookup(0) == 0);
-        assert!(idx.lookup(1_500_000) == 0);
-        assert!(idx.lookup(2_000_000) == 100);
-        assert!(idx.lookup(2_500_000) == 100);
-        assert!(idx.lookup(5_000_000) == 200);
+        for (ts, want) in [
+            (0, 0),
+            (1_500_000, 0),
+            (2_000_000, 100),
+            (2_500_000, 100),
+            (5_000_000, 200),
+        ] {
+            check!(idx.lookup(ts) == want, "ts={ts}");
+        }
     }
 
     #[test]
@@ -415,8 +423,8 @@ mod time_tests {
         drop(f);
 
         let idx = TimeIndex::open(&path).unwrap();
-        assert!(idx.entry_count() == 2);
-        assert!(idx.last_entry() == Some((2_000, 100)));
-        assert!(idx.lookup(2_500) == 100);
+        check!(idx.entry_count() == 2);
+        check!(idx.last_entry() == Some((2_000, 100)));
+        check!(idx.lookup(2_500) == 100);
     }
 }

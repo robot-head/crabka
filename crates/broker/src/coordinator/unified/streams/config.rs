@@ -18,7 +18,7 @@ pub enum StreamsAssignorKind {
 /// static broker defaults; per-group `IncrementalAlterConfigs` overrides
 /// (`group.streams.*`) are not yet implemented (deferred — no GROUP-resource
 /// config store exists).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamsGroupConfig {
     /// Config-level kill switch. The real gate is the `streams.version`
     /// feature (KIP-1071 early access, default-disabled); this lets an operator
@@ -78,13 +78,24 @@ mod tests {
 
     #[test]
     fn defaults_are_kafka_ga() {
-        let c = StreamsGroupConfig::default();
-        assert!(c.enable);
-        assert!(c.heartbeat_interval == Duration::from_secs(5));
-        assert!(c.session_timeout == Duration::from_secs(45));
-        assert!(c.num_standby_replicas == 0);
-        assert!(c.num_warmup_replicas == 2);
-        assert!(c.acceptable_recovery_lag == 10_000);
-        assert!(c.assignor == StreamsAssignorKind::Auto);
+        assert!(
+            StreamsGroupConfig::default()
+                == StreamsGroupConfig {
+                    enable: true,
+                    session_timeout: Duration::from_secs(45),
+                    heartbeat_interval: Duration::from_secs(5),
+                    min_session_timeout: Duration::from_secs(45),
+                    max_session_timeout: Duration::from_mins(1),
+                    min_heartbeat_interval: Duration::from_secs(5),
+                    max_heartbeat_interval: Duration::from_secs(15),
+                    max_groups: 0,
+                    max_size: 200,
+                    num_standby_replicas: 0,
+                    num_warmup_replicas: 2,
+                    acceptable_recovery_lag: 10_000,
+                    task_offset_interval: Duration::from_secs(30),
+                    assignor: StreamsAssignorKind::Auto,
+                }
+        );
     }
 }

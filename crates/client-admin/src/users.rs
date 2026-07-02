@@ -535,7 +535,8 @@ fn wire_to_operation(b: i8) -> Result<AclOperation, AdminError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
+    use crabka_protocol::UnknownTaggedFields;
 
     fn sample_entry() -> AclEntry {
         AclEntry {
@@ -616,26 +617,37 @@ mod tests {
     fn acl_to_creation_matches_discriminants() {
         let e = sample_entry();
         let c = acl_to_creation(&e);
-        assert!(c.resource_type == 2);
-        assert!(c.resource_name == "orders");
-        assert!(c.resource_pattern_type == 3);
-        assert!(c.principal == "User:alice");
-        assert!(c.host == "*");
-        assert!(c.operation == 3);
-        assert!(c.permission_type == 3);
+        assert!(
+            c == AclCreation {
+                resource_type: 2,
+                resource_name: "orders".to_string(),
+                resource_pattern_type: 3,
+                principal: "User:alice".to_string(),
+                host: "*".to_string(),
+                operation: 3,
+                permission_type: 3,
+                unknown_tagged_fields: UnknownTaggedFields(vec![]),
+            }
+        );
     }
 
     #[test]
     fn acl_filter_to_wire_uses_any_for_none_axes() {
         let f = AclEntryFilter::default();
         let w = acl_filter_to_wire(&f);
-        assert!(w.resource_type_filter == WIRE_ANY);
-        assert!(w.pattern_type_filter == WIRE_ANY);
-        assert!(w.operation == WIRE_ANY);
-        assert!(w.permission_type == WIRE_ANY);
-        assert!(w.resource_name_filter.is_none());
-        assert!(w.principal_filter.is_none());
-        assert!(w.host_filter.is_none());
+        // 1 == Kafka's `AclBindingFilter.ANY` discriminant (`WIRE_ANY`).
+        assert!(
+            w == DeleteAclsFilter {
+                resource_type_filter: 1,
+                resource_name_filter: None,
+                pattern_type_filter: 1,
+                principal_filter: None,
+                host_filter: None,
+                operation: 1,
+                permission_type: 1,
+                unknown_tagged_fields: UnknownTaggedFields(vec![]),
+            }
+        );
     }
 
     #[test]
@@ -650,13 +662,18 @@ mod tests {
             permission_type: Some(PermissionType::Allow),
         };
         let w = acl_filter_to_wire(&f);
-        assert!(w.resource_type_filter == 2);
-        assert!(w.resource_name_filter.as_deref() == Some("orders"));
-        assert!(w.pattern_type_filter == 3);
-        assert!(w.principal_filter.as_deref() == Some("User:alice"));
-        assert!(w.host_filter.as_deref() == Some("10.0.0.0"));
-        assert!(w.operation == 3);
-        assert!(w.permission_type == 3);
+        assert!(
+            w == DeleteAclsFilter {
+                resource_type_filter: 2,
+                resource_name_filter: Some("orders".to_string()),
+                pattern_type_filter: 3,
+                principal_filter: Some("User:alice".to_string()),
+                host_filter: Some("10.0.0.0".to_string()),
+                operation: 3,
+                permission_type: 3,
+                unknown_tagged_fields: UnknownTaggedFields(vec![]),
+            }
+        );
     }
 
     #[test]
@@ -670,14 +687,14 @@ mod tests {
         let req = build_alter_scram_request_sha512(&upserts, &[], &rng).unwrap();
         assert!(req.upsertions.len() == 1);
         let u = &req.upsertions[0];
-        assert!(u.name == "alice");
-        assert!(u.mechanism == SCRAM_SHA_512_WIRE);
-        assert!(u.iterations == 4096);
-        assert!(u.salt.len() == 16);
+        check!(u.name == "alice");
+        check!(u.mechanism == 2); // SCRAM_SHA_512_WIRE, KIP-554
+        check!(u.iterations == 4096);
+        check!(u.salt.len() == 16);
         // SHA-512 output is 64 bytes — KIP-554 mandates the wire field
         // carries the PBKDF2 intermediate, not the raw password.
-        assert!(u.salted_password.len() == 64);
-        assert!(u.salted_password.as_ref() != b"hunter2");
+        check!(u.salted_password.len() == 64);
+        check!(u.salted_password.as_ref() != b"hunter2");
     }
 
     #[test]
@@ -687,9 +704,17 @@ mod tests {
             username: "alice".into(),
         }];
         let req = build_alter_scram_request_sha512(&[], &dels, &rng).unwrap();
-        assert!(req.deletions.len() == 1);
-        assert!(req.deletions[0].name == "alice");
-        assert!(req.deletions[0].mechanism == SCRAM_SHA_512_WIRE);
+        assert!(
+            req == AlterUserScramCredentialsRequest {
+                deletions: vec![ScramCredentialDeletion {
+                    name: "alice".to_string(),
+                    mechanism: 2, // SCRAM_SHA_512_WIRE, KIP-554
+                    unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                }],
+                upsertions: vec![],
+                unknown_tagged_fields: UnknownTaggedFields(vec![]),
+            }
+        );
     }
 
     #[test]
@@ -718,10 +743,18 @@ mod tests {
             ..Default::default()
         };
         let r = filter_to_describe_request(&f);
-        assert!(r.principal_filter.as_deref() == Some("User:alice"));
-        assert!(r.resource_type_filter == WIRE_ANY);
-        assert!(r.pattern_type_filter == WIRE_ANY);
-        assert!(r.operation == WIRE_ANY);
-        assert!(r.permission_type == WIRE_ANY);
+        // 1 == Kafka's `AclBindingFilter.ANY` discriminant (`WIRE_ANY`).
+        assert!(
+            r == DescribeAclsRequest {
+                resource_type_filter: 1,
+                resource_name_filter: None,
+                pattern_type_filter: 1,
+                principal_filter: Some("User:alice".to_string()),
+                host_filter: None,
+                operation: 1,
+                permission_type: 1,
+                unknown_tagged_fields: UnknownTaggedFields(vec![]),
+            }
+        );
     }
 }

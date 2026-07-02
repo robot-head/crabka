@@ -8,7 +8,7 @@
 
 #![allow(clippy::too_many_lines)]
 
-use assert2::assert;
+use assert2::{assert, check};
 mod support;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -295,22 +295,19 @@ async fn fetch_v3_downconverts_v2_batch_to_v0_messageset() {
         "expected 2 records in MessageSet; got {}",
         recs.len()
     );
-    assert!(
-        recs[0].key.as_deref() == Some(b"key0".as_ref()),
-        "record 0 key mismatch"
-    );
-    assert!(
-        recs[0].value.as_deref() == Some(b"val0".as_ref()),
-        "record 0 value mismatch"
-    );
-    assert!(
-        recs[1].key.as_deref() == Some(b"key1".as_ref()),
-        "record 1 key mismatch"
-    );
-    assert!(
-        recs[1].value.as_deref() == Some(b"val1".as_ref()),
-        "record 1 value mismatch"
-    );
+    for (i, key, value) in [
+        (0usize, b"key0" as &[u8], b"val0" as &[u8]),
+        (1, b"key1", b"val1"),
+    ] {
+        check!(
+            recs[i].key.as_deref() == Some(key),
+            "record {i} key mismatch"
+        );
+        check!(
+            recs[i].value.as_deref() == Some(value),
+            "record {i} value mismatch"
+        );
+    }
 
     p.broker.shutdown().await;
 }
@@ -407,11 +404,11 @@ async fn fetch_v3_recompresses_zstd_as_snappy() {
         recs.len() == 50,
         "expected 50 records after snappy decompression"
     );
-    assert!(
+    check!(
         recs[0].key.as_deref() == Some(b"key-0000".as_ref()),
         "first record key mismatch"
     );
-    assert!(
+    check!(
         recs[49].key.as_deref() == Some(b"key-0049".as_ref()),
         "last record key mismatch"
     );
@@ -473,9 +470,9 @@ async fn fetch_v0_downconverts_to_magic_v0_without_timestamps() {
     let mut ms_cur: &[u8] = &legacy_bytes;
     let recs = decode_message_set(&mut ms_cur, legacy_bytes.len()).expect("decode_message_set");
     assert!(recs.len() == 1, "expected 1 record");
-    assert!(recs[0].key.as_deref() == Some(b"k".as_ref()));
-    assert!(recs[0].value.as_deref() == Some(b"v".as_ref()));
-    assert!(
+    check!(recs[0].key.as_deref() == Some(b"k".as_ref()));
+    check!(recs[0].value.as_deref() == Some(b"v".as_ref()));
+    check!(
         recs[0].timestamp == None,
         "v0 MessageSet must carry no timestamp"
     );

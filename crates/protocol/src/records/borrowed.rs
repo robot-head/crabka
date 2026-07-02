@@ -506,7 +506,7 @@ impl crate::Encode for RecordBatch<'_> {
 mod tests {
     use super::*;
     use crate::DecodeBorrow;
-    use assert2::assert;
+    use assert2::{assert, check};
     use bytes::BytesMut;
     use crabka_compression::CompressionType;
 
@@ -535,9 +535,15 @@ mod tests {
                 assert!(borrowed.attributes() == owned.attributes);
 
                 let records: Vec<_> = borrowed.iter().collect::<Result<_, _>>().unwrap();
-                assert!(records.len() == 1);
-                assert!(records[0].key == Some(b"key".as_slice()));
-                assert!(records[0].value == Some(b"value".as_slice()));
+                let expected_records = vec![Record {
+                    attributes: 0,
+                    timestamp_delta: 0,
+                    offset_delta: 0,
+                    key: Some(b"key".as_slice()),
+                    value: Some(b"value".as_slice()),
+                    headers: vec![],
+                }];
+                assert!(records == expected_records);
 
                 let back_owned = borrowed.to_owned().unwrap();
                 assert!(back_owned == owned);
@@ -596,14 +602,14 @@ mod tests {
         let encoded = encode_owned_then_borrow(&owned);
 
         let v = validate_one_v2_batch(&encoded).unwrap();
-        assert!(v.total_len == encoded.len());
-        assert!(v.header.base_offset.get() == 7);
-        assert!(v.header.partition_leader_epoch.get() == 3);
-        assert!(v.header.producer_id.get() == 99);
-        assert!(v.header.producer_epoch.get() == 1);
-        assert!(v.header.base_sequence.get() == 5);
-        assert!(v.header.max_timestamp.get() == 1_234);
-        assert!(v.header.magic == 2);
+        check!(v.total_len == encoded.len());
+        check!(v.header.base_offset.get() == 7);
+        check!(v.header.partition_leader_epoch.get() == 3);
+        check!(v.header.producer_id.get() == 99);
+        check!(v.header.producer_epoch.get() == 1);
+        check!(v.header.base_sequence.get() == 5);
+        check!(v.header.max_timestamp.get() == 1_234);
+        check!(v.header.magic == 2);
     }
 
     #[test]

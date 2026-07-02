@@ -64,6 +64,7 @@ impl Selector {
 #[cfg(test)]
 mod tests {
     use assert2::assert;
+    use assert2::check;
 
     use super::*;
 
@@ -74,10 +75,14 @@ mod tests {
             &["*.internal".into()],
         )
         .unwrap();
-        assert!(s.matches("orders"));
-        assert!(s.matches("telemetry.cpu"));
-        assert!(!s.matches("payments"));
-        assert!(!s.matches("telemetry.internal")); // excluded wins
+        for (name, want) in [
+            ("orders", true),
+            ("telemetry.cpu", true),
+            ("payments", false),
+            ("telemetry.internal", false), // excluded wins
+        ] {
+            check!(s.matches(name) == want, "name={name:?}");
+        }
     }
 
     #[test]

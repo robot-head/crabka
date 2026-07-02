@@ -1,4 +1,4 @@
-use assert2::assert;
+use assert2::{assert, check};
 mod support;
 
 use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
@@ -110,8 +110,8 @@ async fn create_then_delete_topic_round_trip() {
     };
     let resp = p.client.send(create).await.expect("CreateTopics");
     assert!(resp.topics.len() == 1);
-    assert!(resp.topics[0].error_code == 0);
-    assert!(resp.topics[0].num_partitions == 2);
+    check!(resp.topics[0].error_code == 0);
+    check!(resp.topics[0].num_partitions == 2);
 
     let delete = DeleteTopicsRequest {
         topics: vec![DeleteTopicState {
@@ -196,9 +196,9 @@ async fn metadata_returns_this_broker_and_listed_topics() {
         .unwrap();
     assert!(topic.partitions.len() == 3);
     for (i, part) in topic.partitions.iter().enumerate() {
-        assert!(part.error_code == 0);
-        assert!(part.partition_index == i32::try_from(i).unwrap());
-        assert!(part.leader_id == 1);
+        check!(part.error_code == 0);
+        check!(part.partition_index == i32::try_from(i).unwrap());
+        check!(part.leader_id == 1);
     }
     p.broker.shutdown().await;
 }
@@ -228,8 +228,8 @@ async fn produce_assigns_base_offsets() {
     let resp = p.client.send(req).await.expect("Produce 1");
     assert!(resp.responses.len() == 1);
     assert!(resp.responses[0].partition_responses.len() == 1);
-    assert!(resp.responses[0].partition_responses[0].error_code == 0);
-    assert!(resp.responses[0].partition_responses[0].base_offset == 0);
+    check!(resp.responses[0].partition_responses[0].error_code == 0);
+    check!(resp.responses[0].partition_responses[0].base_offset == 0);
 
     // Second produce: 2 records → base 3.
     let req2 = ProduceRequest {
@@ -352,10 +352,10 @@ async fn list_offsets_earliest_and_latest() {
 
     let earliest = p.client.send(mk(-2)).await.expect("ListOffsets earliest");
     let latest = p.client.send(mk(-1)).await.expect("ListOffsets latest");
-    assert!(earliest.topics[0].partitions[0].error_code == 0);
-    assert!(latest.topics[0].partitions[0].error_code == 0);
-    assert!(earliest.topics[0].partitions[0].offset == 0);
-    assert!(latest.topics[0].partitions[0].offset == 0);
+    for (label, resp) in [("earliest", &earliest), ("latest", &latest)] {
+        check!(resp.topics[0].partitions[0].error_code == 0, "{label}");
+        check!(resp.topics[0].partitions[0].offset == 0, "{label}");
+    }
 
     p.broker.shutdown().await;
 }
@@ -369,10 +369,10 @@ async fn find_coordinator_returns_self() {
     };
     let r = p.client.send(req).await.expect("FindCoordinator");
     for c in &r.coordinators {
-        assert!(c.error_code == 0);
-        assert!(c.node_id == 1);
-        assert!(!c.host.is_empty());
-        assert!(c.port > 0);
+        check!(c.error_code == 0);
+        check!(c.node_id == 1);
+        check!(!c.host.is_empty());
+        check!(c.port > 0);
     }
     p.broker.shutdown().await;
 }
@@ -441,10 +441,10 @@ async fn join_group_single_member_completes_after_deadline() {
         })
         .await
         .expect("JoinGroup2");
-    assert!(r2.error_code == 0);
-    assert!(r2.leader == r1.member_id);
-    assert!(r2.member_id == r1.member_id);
-    assert!(!r2.members.is_empty(), "leader sees member list");
+    check!(r2.error_code == 0);
+    check!(r2.leader == r1.member_id);
+    check!(r2.member_id == r1.member_id);
+    check!(!r2.members.is_empty(), "leader sees member list");
     p.broker.shutdown().await;
 }
 
@@ -618,9 +618,9 @@ async fn init_producer_id_returns_fresh_pid() {
         .send(InitProducerIdRequest::default())
         .await
         .expect("InitProducerId");
-    assert!(r.error_code == 0);
-    assert!(r.producer_id >= 1000);
-    assert!(r.producer_epoch == 0);
+    check!(r.error_code == 0);
+    check!(r.producer_id >= 1000);
+    check!(r.producer_epoch == 0);
     p.broker.shutdown().await;
 }
 
@@ -788,10 +788,10 @@ async fn find_coordinator_txn_creates_topic_and_returns_local_broker() {
     assert!(r.error_code == 0, "top-level error_code");
     assert!(r.coordinators.len() == 1, "one coordinator entry");
     let c = &r.coordinators[0];
-    assert!(c.error_code == 0, "coordinator error_code");
-    assert!(c.node_id == 1, "node_id should be this single broker");
-    assert!(!c.host.is_empty(), "host should be non-empty");
-    assert!(c.port > 0, "port should be positive");
+    check!(c.error_code == 0, "coordinator error_code");
+    check!(c.node_id == 1, "node_id should be this single broker");
+    check!(!c.host.is_empty(), "host should be non-empty");
+    check!(c.port > 0, "port should be positive");
     p.broker.shutdown().await;
 }
 
@@ -820,12 +820,12 @@ async fn init_producer_id_with_transactional_id_returns_real_pid() {
         })
         .await
         .expect("InitProducerId");
-    assert!(r.error_code == 0, "error_code should be NONE");
-    assert!(
+    check!(r.error_code == 0, "error_code should be NONE");
+    check!(
         r.producer_id >= 1_000,
         "producer_id should come from txn coordinator's pool"
     );
-    assert!(r.producer_epoch == 0, "first allocation → epoch 0");
+    check!(r.producer_epoch == 0, "first allocation → epoch 0");
     p.broker.shutdown().await;
 }
 
@@ -863,9 +863,9 @@ async fn init_producer_id_with_same_tid_bumps_epoch() {
         })
         .await
         .expect("InitProducerId 2");
-    assert!(r2.error_code == 0, "r2 error_code");
-    assert!(r1.producer_id == r2.producer_id, "same pid for same tid");
-    assert!(
+    check!(r2.error_code == 0, "r2 error_code");
+    check!(r1.producer_id == r2.producer_id, "same pid for same tid");
+    check!(
         r2.producer_epoch == r1.producer_epoch + 1,
         "second call bumps epoch by 1"
     );

@@ -28,11 +28,7 @@ mod tests {
         let f = InFlightFile::new("p-abc".into(), Phase::Wait, 1234, 50_000_000);
         let bytes = encode(&f).unwrap();
         let back = decode(&bytes).unwrap();
-        assert!(back.proposal_id == f.proposal_id);
-        assert!(back.phase == f.phase);
-        assert!(back.started_at_ms == f.started_at_ms);
-        assert!(back.throttle_bytes_per_sec == f.throttle_bytes_per_sec);
-        assert!(back.version == f.version);
+        assert!(back == f);
     }
 
     #[test]

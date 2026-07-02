@@ -2559,8 +2559,8 @@ overrides:
             .iter()
             .find(|record| matches!(record.payload, SamplePayload::Float { .. }))
             .expect("float wal record");
-        assert!(sample.tenant == "tenant-a");
-        assert!(
+        check!(sample.tenant == "tenant-a");
+        check!(
             sample.labels
                 == vec![
                     ("__name__".to_string(), "system_cpu_utilization".to_string()),

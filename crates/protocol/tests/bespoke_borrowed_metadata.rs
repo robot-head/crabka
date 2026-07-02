@@ -74,6 +74,5 @@ fn borrowed_metadata_response_max_version_empty_collections() {
     let mut cur = &frozen[..];
     let decoded = MetadataResponse::decode_borrow(&mut cur, RESP_MAX).unwrap();
     assert!(cur.is_empty());
-    assert!(decoded.brokers.len() == resp.brokers.len());
-    assert!(decoded.topics.len() == resp.topics.len());
+    assert!(decoded == resp);
 }

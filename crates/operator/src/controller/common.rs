@@ -797,7 +797,7 @@ pub(crate) fn parse_quantity(s: &str) -> Result<i128, &'static str> {
 #[cfg(test)]
 mod config_hash_tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
 
     #[test]
     fn config_hash_is_truncated_sha256_hex() {
@@ -1048,8 +1048,8 @@ mod config_hash_tests {
         // broker.properties keys are dropped.
         let keys: Vec<&str> = data.keys().map(String::as_str).collect();
         assert!(keys == ["broker-0.toml", "broker-1.toml"]);
-        assert!(data["broker-0.toml"].contains("demo-0.svc"));
-        assert!(data["broker-1.toml"].contains("demo-1.svc"));
+        check!(data["broker-0.toml"].contains("demo-0.svc"));
+        check!(data["broker-1.toml"].contains("demo-1.svc"));
     }
 
     #[test]

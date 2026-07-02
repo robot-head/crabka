@@ -118,12 +118,11 @@ mod tests {
     #[test]
     fn open_then_incremental_advances() {
         let cache = ShareSessionCache::new(8);
-        // epoch 0 opens → stored epoch becomes 1.
-        assert!(cache.validate("g", "m", 0) == Ok(()));
-        // The next request must carry the stored epoch (1).
-        assert!(cache.validate("g", "m", 1) == Ok(()));
-        // Stored epoch is now 2; carrying 2 succeeds.
-        assert!(cache.validate("g", "m", 2) == Ok(()));
+        // epoch 0 opens → stored epoch becomes 1; each subsequent request
+        // must carry the stored epoch, which advances by 1 on success.
+        for epoch in [0, 1, 2] {
+            assert!(cache.validate("g", "m", epoch) == Ok(()), "epoch {epoch}");
+        }
     }
 
     #[test]
@@ -143,11 +142,14 @@ mod tests {
     #[test]
     fn close_removes_session() {
         let cache = ShareSessionCache::new(8);
-        assert!(cache.validate("g", "m", 0) == Ok(()));
-        // Close (epoch -1).
-        assert!(cache.validate("g", "m", -1) == Ok(()));
-        // After closing, an incremental epoch finds nothing.
-        assert!(cache.validate("g", "m", 1) == Err(codes::SHARE_SESSION_NOT_FOUND));
+        // Open, close (epoch -1), then an incremental epoch finds nothing.
+        for (epoch, want) in [
+            (0, Ok(())),
+            (-1, Ok(())),
+            (1, Err(codes::SHARE_SESSION_NOT_FOUND)),
+        ] {
+            assert!(cache.validate("g", "m", epoch) == want, "epoch {epoch}");
+        }
     }
 
     #[test]
@@ -159,10 +161,14 @@ mod tests {
     #[test]
     fn over_capacity_is_limit_reached() {
         let cache = ShareSessionCache::new(1);
-        assert!(cache.validate("g", "m1", 0) == Ok(()));
-        // The single slot is taken; a second new session is rejected.
-        assert!(cache.validate("g", "m2", 0) == Err(codes::SHARE_SESSION_LIMIT_REACHED));
-        // Re-opening the existing session is still fine.
-        assert!(cache.validate("g", "m1", 0) == Ok(()));
+        // m1 takes the single slot; a second new session is rejected;
+        // re-opening the existing session is still fine.
+        for (member, want) in [
+            ("m1", Ok(())),
+            ("m2", Err(codes::SHARE_SESSION_LIMIT_REACHED)),
+            ("m1", Ok(())),
+        ] {
+            assert!(cache.validate("g", member, 0) == want, "member {member}");
+        }
     }
 }

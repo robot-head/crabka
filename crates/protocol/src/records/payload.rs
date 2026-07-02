@@ -424,9 +424,7 @@ mod tests {
         b1.encode(&mut buf).unwrap();
         let p = RecordsPayload::from_bytes(buf.freeze()).unwrap();
         let batches = p.as_v2().expect("v2");
-        assert!(batches.len() == 2);
-        assert!(batches[0].base_offset == 0);
-        assert!(batches[1].base_offset == 1);
+        assert!(batches == &[b0, b1][..]);
     }
 
     #[test]
@@ -513,9 +511,8 @@ mod tests {
     fn legacy_payload_len_and_encode_owned() {
         let bytes = legacy_bytes();
         let p = RecordsPayload::from_bytes(bytes.clone()).unwrap();
+        assert!(p == RecordsPayload::Legacy(bytes.clone()));
         assert!(p.payload_len() == bytes.len());
-        assert!(p.as_v2().is_none());
-        assert!(p.as_legacy() == Some(&bytes));
 
         let mut out = BytesMut::new();
         p.encode_to(&mut out).unwrap();
@@ -621,9 +618,7 @@ mod tests {
         buf.extend_from_slice(&[0u8; 7]); // partial trailing batch header
         let p = RecordsPayload::from_fetch_bytes(buf.freeze()).unwrap();
         let batches = p.as_v2().expect("v2");
-        assert!(batches.len() == 2);
-        assert!(batches[0].base_offset == 0);
-        assert!(batches[1].base_offset == 1);
+        assert!(batches == &[b0, b1][..]);
     }
 
     #[test]

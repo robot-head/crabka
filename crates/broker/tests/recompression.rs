@@ -14,7 +14,7 @@
 //! Gated to non-Windows to match the multi-broker test convention used
 //! by the other replication and compaction tests.
 
-use assert2::assert;
+use assert2::{assert, check};
 use std::io;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -257,12 +257,12 @@ async fn topic_compression_lz4_recompresses_producer_gzip_batch() {
     produce_gzip(addr, TOPIC, topic_id, payload).await;
 
     let served = fetch_first_batch(addr, TOPIC, topic_id).await;
-    assert!(
+    check!(
         served.attributes.compression() == CompressionType::Lz4,
         "broker must re-encode the gzip batch to lz4 before write"
     );
     assert!(served.records.len() == 1);
-    assert!(
+    check!(
         served.records[0].value.as_deref() == Some(payload.as_slice()),
         "record payload must survive the recompress round-trip"
     );

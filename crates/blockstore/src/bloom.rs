@@ -166,7 +166,7 @@ impl ShardedTraceBloom {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+    use assert2::{assert, check};
 
     use super::*;
 
@@ -254,9 +254,9 @@ mod tests {
         let h0 = 2_166_136_261_u32;
         let h1 = (h0 ^ 0x01).wrapping_mul(PRIME);
         let expected = (h1 ^ 0xFF).wrapping_mul(PRIME);
-        assert!(fnv1a_32(&[0x01, 0xFF]) == expected);
-        assert!(fnv1a_32(&[0x01, 0xFF]) != 0);
-        assert!(fnv1a_32(&[0x01, 0xFF]) != 1);
+        check!(fnv1a_32(&[0x01, 0xFF]) == expected);
+        check!(fnv1a_32(&[0x01, 0xFF]) != 0);
+        check!(fnv1a_32(&[0x01, 0xFF]) != 1);
         // `&=` and `|=` produce different hashes for the same input.
         let and_variant = ((h0 & 0x01).wrapping_mul(PRIME) & 0xFF).wrapping_mul(PRIME);
         let or_variant = ((h0 | 0x01).wrapping_mul(PRIME) | 0xFF).wrapping_mul(PRIME);

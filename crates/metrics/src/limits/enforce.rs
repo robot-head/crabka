@@ -295,7 +295,7 @@ mod tests {
         let ok = labels(&[("ab", "cd")]);
         let bad_name = labels(&[("toolong", "x")]);
         let bad_val = labels(&[("a", "toolong")]);
-        assert!(IngestEnforcer::check_labels(&l, &ok).is_ok());
+        check!(IngestEnforcer::check_labels(&l, &ok).is_ok());
         assert!(matches!(
             IngestEnforcer::check_labels(&l, &bad_name),
             Err(LimitError::LabelNameTooLong { .. })

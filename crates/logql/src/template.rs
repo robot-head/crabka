@@ -2727,29 +2727,51 @@ mod tests {
 
     #[test]
     fn template_helpers_classify_invalid_variable_boundaries() {
-        assert!(is_template_control_assignment_variable_char('|'));
-        assert!(is_template_control_assignment_variable_char(' '));
-        assert!(is_template_control_assignment_variable_char('\n'));
-        assert!(!is_template_control_assignment_variable_char('_'));
+        for (ch, expected) in [('|', true), (' ', true), ('\n', true), ('_', false)] {
+            assert_eq!(
+                is_template_control_assignment_variable_char(ch),
+                expected,
+                "control-assignment boundary: {ch:?}"
+            );
+        }
 
-        assert!(is_template_variable_name_char_invalid('.'));
-        assert!(is_template_variable_name_char_invalid(' '));
-        assert!(is_template_variable_name_char_invalid('\t'));
-        assert!(!is_template_variable_name_char_invalid('_'));
+        for (ch, expected) in [('.', true), (' ', true), ('\t', true), ('_', false)] {
+            assert_eq!(
+                is_template_variable_name_char_invalid(ch),
+                expected,
+                "variable-name boundary: {ch:?}"
+            );
+        }
     }
 
     #[test]
     fn template_token_guards_reject_non_advancing_or_unwrapped_results() {
-        assert!(ensure_template_quoted_token("`ok`", 0, "`ok`", 4, '`').is_ok());
-        assert!(ensure_template_quoted_token("`ok`", 0, "`ok`", 0, '`').is_err());
-        assert!(ensure_template_quoted_token("`ok`", 0, "`ok`", 5, '`').is_err());
-        assert!(ensure_template_quoted_token("`ok`", 0, "`ok", 3, '`').is_err());
+        for (token, end, expected_ok) in [
+            ("`ok`", 4, true),
+            ("`ok`", 0, false),
+            ("`ok`", 5, false),
+            ("`ok", 3, false),
+        ] {
+            assert_eq!(
+                ensure_template_quoted_token("`ok`", 0, token, end, '`').is_ok(),
+                expected_ok,
+                "quoted token {token:?} ending at {end}"
+            );
+        }
 
-        assert!(ensure_template_parenthesized_token("(ok)", 0, "(ok)", 4).is_ok());
-        assert!(ensure_template_parenthesized_token("(ok)", 0, "(ok)", 0).is_err());
-        assert!(ensure_template_parenthesized_token("(ok)", 0, "(ok)", 5).is_err());
-        assert!(ensure_template_parenthesized_token("(ok)", 0, "ok)", 3).is_err());
-        assert!(ensure_template_parenthesized_token("(ok)", 0, "(ok", 3).is_err());
+        for (token, end, expected_ok) in [
+            ("(ok)", 4, true),
+            ("(ok)", 0, false),
+            ("(ok)", 5, false),
+            ("ok)", 3, false),
+            ("(ok", 3, false),
+        ] {
+            assert_eq!(
+                ensure_template_parenthesized_token("(ok)", 0, token, end).is_ok(),
+                expected_ok,
+                "parenthesized token {token:?} ending at {end}"
+            );
+        }
     }
 
     #[test]
@@ -2876,9 +2898,13 @@ mod tests {
         let json_string = TemplateRuntimeValue::Json(serde_json::Value::String("xyz".to_string()));
         let scalar = TemplateRuntimeValue::Integer(7);
 
-        assert!(template_value_is_collection(&plain));
-        assert!(template_value_is_collection(&json_string));
-        assert!(!template_value_is_collection(&scalar));
+        for (value, expected) in [(&plain, true), (&json_string, true), (&scalar, false)] {
+            assert_eq!(
+                template_value_is_collection(value),
+                expected,
+                "collection check: {value:?}"
+            );
+        }
 
         assert_eq!(
             template_index_value(&plain, "1"),

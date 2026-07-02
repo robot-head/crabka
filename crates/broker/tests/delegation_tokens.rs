@@ -49,7 +49,7 @@
 //! tuple). No public test-support surface was added — the helpers are
 //! inline so they don't leak into other tests.
 
-use assert2::assert;
+use assert2::{assert, check};
 use std::io;
 use std::net::SocketAddr;
 
@@ -518,14 +518,14 @@ async fn delegation_token_lifecycle_end_to_end() {
                 create_resp.token_requester_principal_name,
             ));
         }
-        assert!(create_resp.principal_type == "User");
-        assert!(create_resp.principal_name == "alice");
-        assert!(create_resp.token_requester_principal_type == "User");
-        assert!(create_resp.token_requester_principal_name == "alice");
-        assert!(!create_resp.token_id.is_empty(), "token_id must be set");
+        check!(create_resp.principal_type == "User");
+        check!(create_resp.principal_name == "alice");
+        check!(create_resp.token_requester_principal_type == "User");
+        check!(create_resp.token_requester_principal_name == "alice");
+        check!(!create_resp.token_id.is_empty(), "token_id must be set");
         // HMAC-SHA-256 → 32 raw bytes.
-        assert!(create_resp.hmac.len() == 32, "HMAC length must be 32 bytes");
-        assert!(create_resp.expiry_timestamp_ms > create_resp.issue_timestamp_ms);
+        check!(create_resp.hmac.len() == 32, "HMAC length must be 32 bytes");
+        check!(create_resp.expiry_timestamp_ms > create_resp.issue_timestamp_ms);
 
         let token_id = create_resp.token_id.clone();
         let hmac_bytes = create_resp.hmac.clone();
@@ -544,14 +544,14 @@ async fn delegation_token_lifecycle_end_to_end() {
         // node's image — every subsequent step reads it back via the same
         // controller, so the visibility window is tiny but non-zero.
         let img_token = wait_for_token(&handle, &token_id).await;
-        assert!(img_token.owner.principal_type == "User");
-        assert!(img_token.owner.name == "alice");
+        check!(img_token.owner.principal_type == "User");
+        check!(img_token.owner.name == "alice");
         assert!(
             img_token.renewers.len() == 1,
             "renewers must carry exactly the requested entry"
         );
-        assert!(img_token.renewers[0].principal_type == "User");
-        assert!(img_token.renewers[0].name == "bob");
+        check!(img_token.renewers[0].principal_type == "User");
+        check!(img_token.renewers[0].name == "bob");
 
         // ── (c) Open a second connection and SASL/SCRAM-SHA-256 authenticate
         //         with username=token_id, password=base64(hmac). KIP-48
@@ -613,21 +613,21 @@ async fn delegation_token_lifecycle_end_to_end() {
         )
         .await
         .map_err(|e| format!("RenewDelegationToken(bob): {e}"))?;
-        assert!(
+        check!(
             renew_resp.error_code == 0,
             "Renew by listed renewer must succeed; got {}",
             renew_resp.error_code
         );
         // KIP-48: with the fix, Renew strictly extends the expiry past
         // its initial value, capped at `max_timestamp_ms`.
-        assert!(
+        check!(
             renew_resp.expiry_timestamp_ms > initial_expiry_ms,
             "Renew must strictly extend expiry past initial value: \
              renewed={} initial={}",
             renew_resp.expiry_timestamp_ms,
             initial_expiry_ms,
         );
-        assert!(
+        check!(
             renew_resp.expiry_timestamp_ms <= max_timestamp_ms,
             "Renew must never push expiry past max_timestamp_ms: \
              renewed={} max={}",
@@ -651,7 +651,7 @@ async fn delegation_token_lifecycle_end_to_end() {
         )
         .await
         .map_err(|e| format!("DescribeDelegationToken(alice): {e}"))?;
-        assert!(
+        check!(
             describe_resp.error_code == 0,
             "Describe must succeed; got {}",
             describe_resp.error_code
@@ -661,9 +661,9 @@ async fn delegation_token_lifecycle_end_to_end() {
             "alice must see exactly her one token; got {} entries",
             describe_resp.tokens.len()
         );
-        assert!(describe_resp.tokens[0].token_id == token_id);
-        assert!(describe_resp.tokens[0].principal_type == "User");
-        assert!(describe_resp.tokens[0].principal_name == "alice");
+        check!(describe_resp.tokens[0].token_id == token_id);
+        check!(describe_resp.tokens[0].principal_type == "User");
+        check!(describe_resp.tokens[0].principal_name == "alice");
 
         // ── (g) alice expires the token (negative period = immediate delete).
         let expire_resp = send_expire_delegation_token(
@@ -803,12 +803,12 @@ async fn act_as_super_user_mints_token_owned_by_target() {
                 create_resp.token_requester_principal_name,
             ));
         }
-        assert!(create_resp.principal_type == "User");
-        assert!(create_resp.principal_name == "alice");
-        assert!(create_resp.token_requester_principal_type == "User");
-        assert!(create_resp.token_requester_principal_name == "admin");
-        assert!(!create_resp.token_id.is_empty(), "token_id must be set");
-        assert!(create_resp.hmac.len() == 32, "HMAC length must be 32 bytes");
+        check!(create_resp.principal_type == "User");
+        check!(create_resp.principal_name == "alice");
+        check!(create_resp.token_requester_principal_type == "User");
+        check!(create_resp.token_requester_principal_name == "admin");
+        check!(!create_resp.token_id.is_empty(), "token_id must be set");
+        check!(create_resp.hmac.len() == 32, "HMAC length must be 32 bytes");
 
         let token_id = create_resp.token_id.clone();
         let hmac_bytes = create_resp.hmac.clone();
@@ -993,19 +993,19 @@ async fn super_user_can_renew_other_owners_token() {
         )
         .await
         .map_err(|e| format!("RenewDelegationToken(admin super-user): {e}"))?;
-        assert!(
+        check!(
             renew_resp.error_code == 0,
             "super-user Renew of another owner's token must succeed; got {} \
              (super-user bypass regressed)",
             renew_resp.error_code
         );
-        assert!(
+        check!(
             renew_resp.expiry_timestamp_ms > initial_expiry_ms,
             "Renew must strictly extend expiry: renewed={} initial={}",
             renew_resp.expiry_timestamp_ms,
             initial_expiry_ms,
         );
-        assert!(
+        check!(
             renew_resp.expiry_timestamp_ms <= max_timestamp_ms,
             "Renew must never push expiry past max_timestamp_ms",
         );

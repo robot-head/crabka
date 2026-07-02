@@ -1497,13 +1497,14 @@ mod tests {
         let offline: std::collections::HashSet<uuid::Uuid> = [bad].into_iter().collect();
         let metrics = crate::metrics::BrokerMetrics::new();
         let plan = compute_offline_dir_failover_changes(&img, 1, &offline, &l, &metrics).await;
-        assert!(
+        use assert2::check;
+        check!(
             plan.changes.is_empty(),
             "no alive replica → no election; got {:?}",
             plan.changes
         );
-        assert!(plan.recoveries.is_empty());
-        assert!(
+        check!(plan.recoveries.is_empty());
+        check!(
             metrics.unclean_leader_elections_total.get() == 0,
             "no election means no counter bump"
         );

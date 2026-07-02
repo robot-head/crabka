@@ -52,22 +52,22 @@ impl Default for ShareGroupConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     #[test]
     fn defaults_are_kafka_ga() {
         let c = ShareGroupConfig::default();
-        assert!(c.enable);
-        assert!(c.heartbeat_interval == Duration::from_secs(5));
-        assert!(c.session_timeout == Duration::from_secs(45));
-        assert!(c.max_size == 200);
+        check!(c.enable);
+        check!(c.heartbeat_interval == Duration::from_secs(5));
+        check!(c.session_timeout == Duration::from_secs(45));
+        check!(c.max_size == 200);
     }
 
     #[test]
     fn slice_c_defaults() {
         let c = ShareGroupConfig::default();
-        assert!(c.record_lock_duration == std::time::Duration::from_secs(30));
-        assert!(c.max_delivery_attempts == 5);
-        assert!(c.max_inflight_records == 200);
+        check!(c.record_lock_duration == std::time::Duration::from_secs(30));
+        check!(c.max_delivery_attempts == 5);
+        check!(c.max_inflight_records == 200);
     }
 
     #[test]

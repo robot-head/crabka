@@ -81,7 +81,7 @@ impl Rule for SlowBroker {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+    use assert2::{assert, check};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -238,8 +238,8 @@ mod tests {
         };
         let hits = SlowBroker.evaluate(&ctx);
         assert!(hits.len() == 1);
-        assert!(hits[0].key == AnomalyKey::Broker(1));
-        assert!(matches!(hits[0].severity, AnomalySeverity::Warning));
+        check!(hits[0].key == AnomalyKey::Broker(1));
+        check!(hits[0].severity == AnomalySeverity::Warning);
     }
 
     #[test]
@@ -267,9 +267,9 @@ mod tests {
         let hits = SlowBroker.evaluate(&ctx);
 
         assert!(hits.len() == 1);
-        assert!(hits[0].key == AnomalyKey::Broker(4));
-        assert!(hits[0].details.contains("median 4.00"));
-        assert!(hits[0].details.contains("threshold 6.00"));
+        check!(hits[0].key == AnomalyKey::Broker(4));
+        check!(hits[0].details.contains("median 4.00"));
+        check!(hits[0].details.contains("threshold 6.00"));
     }
 
     #[test]

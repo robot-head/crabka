@@ -111,7 +111,7 @@ pub fn partition_key(tenant: &str, fingerprint: u64) -> Bytes {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+    use assert2::{assert, check};
 
     use super::*;
 
@@ -187,8 +187,8 @@ mod tests {
         let k2 = partition_key("t", 42);
         let k3 = partition_key("t", 43);
         let k4 = partition_key("u", 42);
-        assert!(k1 == k2);
-        assert!(k1 != k3);
-        assert!(k1 != k4);
+        check!(k1 == k2);
+        check!(k1 != k3);
+        check!(k1 != k4);
     }
 }

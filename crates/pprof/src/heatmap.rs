@@ -97,10 +97,18 @@ mod tests {
 
         let heatmap = bin_heatmap(&points, 0, 100, 2, 2);
 
-        assert!(heatmap.counts.len() == 2 && heatmap.counts[0].len() == 2);
-        assert!(heatmap.counts[0][0] == 2);
-        assert!(heatmap.counts[1][1] == 2);
-        assert!(heatmap.min_value == 0 && heatmap.max_value == 35);
+        assert!(
+            heatmap
+                == Heatmap {
+                    start_ms: 0,
+                    end_ms: 100,
+                    time_buckets: 2,
+                    value_buckets: 2,
+                    min_value: 0,
+                    max_value: 35,
+                    counts: vec![vec![2, 0], vec![0, 2]],
+                }
+        );
     }
 
     #[test]

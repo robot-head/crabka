@@ -476,14 +476,15 @@ fn filtered_broadcast(
 mod tests {
     use super::*;
     use assert2::assert;
+    use assert2::check;
     use futures_util::StreamExt;
 
     #[tokio::test]
     async fn publish_assigns_monotonic_offsets() {
         let log = InProcessMetadataEventLog::new(2);
-        assert!(log.publish(0, Bytes::from_static(b"a")).await.unwrap() == 0);
-        assert!(log.publish(0, Bytes::from_static(b"b")).await.unwrap() == 1);
-        assert!(log.publish(1, Bytes::from_static(b"c")).await.unwrap() == 0);
+        check!(log.publish(0, Bytes::from_static(b"a")).await.unwrap() == 0);
+        check!(log.publish(0, Bytes::from_static(b"b")).await.unwrap() == 1);
+        check!(log.publish(1, Bytes::from_static(b"c")).await.unwrap() == 0);
         let hwms = log.high_water_marks().await.unwrap();
         assert!(hwms == vec![2, 1]);
     }
@@ -503,8 +504,9 @@ mod tests {
         assert!(b.payload.as_ref() == b"b");
         log.publish(0, Bytes::from_static(b"c")).await.unwrap();
         let c = stream.next().await.unwrap();
-        assert!(c.payload.as_ref() == b"c");
-        assert!((c.partition, c.offset) == (0, 2));
+        check!(c.payload.as_ref() == b"c");
+        check!(c.partition == 0);
+        check!(c.offset == 2);
     }
 
     #[tokio::test]
@@ -590,7 +592,9 @@ mod tests {
         );
         // partition 1 offset 1 ("y") is the only remaining assigned record.
         let r = stream.next().await.unwrap();
-        assert!((r.partition, r.offset, r.payload.as_ref()) == (1, 1, b"y".as_ref()));
+        check!(r.partition == 1);
+        check!(r.offset == 1);
+        check!(r.payload.as_ref() == b"y");
     }
 
     #[tokio::test]
@@ -604,7 +608,8 @@ mod tests {
         log.publish(1, Bytes::from_static(b"skip")).await.unwrap();
         log.publish(0, Bytes::from_static(b"keep")).await.unwrap();
         let r = stream.next().await.unwrap();
-        assert!((r.partition, r.payload.as_ref()) == (0, b"keep".as_ref()));
+        check!(r.partition == 0);
+        check!(r.payload.as_ref() == b"keep");
     }
 
     #[tokio::test]
@@ -687,6 +692,7 @@ mod tests {
         log.publish(1, Bytes::from_static(b"gone")).await.unwrap();
         log.publish(0, Bytes::from_static(b"here")).await.unwrap();
         let r = stream.next().await.unwrap();
-        assert!((r.partition, r.payload.as_ref()) == (0, b"here".as_ref()));
+        check!(r.partition == 0);
+        check!(r.payload.as_ref() == b"here");
     }
 }

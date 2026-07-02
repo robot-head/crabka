@@ -90,9 +90,10 @@ mod tests {
         let b1 = buckets.get_or_create("producer_byte_rate", &key("alice"), 1024);
         let b2 = buckets.get_or_create("producer_byte_rate", &key("alice"), 4096);
         // Same Arc — initial_rate on second call is ignored.
-        assert!(Arc::ptr_eq(&b1, &b2));
-        assert!(b1.rate() == 1024);
-        assert!(buckets.len() == 1);
+        use assert2::check;
+        check!(Arc::ptr_eq(&b1, &b2));
+        check!(b1.rate() == 1024);
+        check!(buckets.len() == 1);
     }
 
     #[test]

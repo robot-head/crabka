@@ -31,12 +31,16 @@ mod tests {
             .map(|key| (key.name.as_str(), key.kind, key.required))
             .collect::<Vec<_>>();
 
-        assert!(keys.contains(&("database_url", ConfigKind::Secret, true)));
-        assert!(keys.contains(&("slot_name", ConfigKind::String, true)));
-        assert!(keys.contains(&("publication_name", ConfigKind::String, false)));
-        assert!(keys.contains(&("schema", ConfigKind::String, false)));
-        assert!(keys.contains(&("tables", ConfigKind::StringList, true)));
-        assert!(keys.contains(&("max_messages_per_poll", ConfigKind::UnsignedInteger, false,)));
+        for expected in [
+            ("database_url", ConfigKind::Secret, true),
+            ("slot_name", ConfigKind::String, true),
+            ("publication_name", ConfigKind::String, false),
+            ("schema", ConfigKind::String, false),
+            ("tables", ConfigKind::StringList, true),
+            ("max_messages_per_poll", ConfigKind::UnsignedInteger, false),
+        ] {
+            assert!(keys.contains(&expected), "missing key {expected:?}");
+        }
 
         let raw = serde_json::Map::from_iter([
             (

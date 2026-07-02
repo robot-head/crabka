@@ -26,7 +26,7 @@ pub fn encode_offer(layers: SecurityLayer, max_recv_size: u32) -> Vec<u8> {
 }
 
 /// Client choice parsed from the unwrapped response.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct LayerChoice {
     pub selected: SecurityLayer,
     pub max_size: u32,
@@ -87,9 +87,14 @@ mod tests {
         // selected 0x01, max size 0x1000, no authzid
         let bytes = [0x01u8, 0x00, 0x10, 0x00];
         let choice = decode_choice(&bytes).unwrap();
-        assert!(choice.selected == SecurityLayer::AUTH);
-        assert!(choice.max_size == 0x1000);
-        assert!(choice.authzid == None);
+        assert!(
+            choice
+                == LayerChoice {
+                    selected: SecurityLayer::AUTH,
+                    max_size: 0x1000,
+                    authzid: None,
+                }
+        );
     }
 
     #[test]

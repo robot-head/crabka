@@ -93,7 +93,7 @@ pub struct FormatArgs {
     controller_listener: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScramSpec {
     mechanism: SaslMechanism,
     name: String,
@@ -657,10 +657,14 @@ mod tests {
 
     #[test]
     fn release_version_maps_to_feature_level() {
-        assert!(resolve_release_level("4.0").unwrap() == 25);
-        assert!(resolve_release_level("3.7-IV4").unwrap() == 19);
-        assert!(resolve_release_level("2.8").is_err()); // below MIN / unknown
-        assert!(resolve_release_level("9.9-IV0").is_err()); // unknown
+        for (input, want) in [
+            ("4.0", Some(25)),
+            ("3.7-IV4", Some(19)),
+            ("2.8", None),     // below MIN / unknown
+            ("9.9-IV0", None), // unknown
+        ] {
+            assert!(resolve_release_level(input).ok() == want);
+        }
     }
 
     #[test]
@@ -782,11 +786,16 @@ mod tests {
 
     #[test]
     fn resolve_features_rejects_out_of_range_level() {
-        // group.version supports 0..=1.
-        assert!(resolve_format_features(None, &[("group.version".into(), 5)]).is_err());
-        // metadata.version supports 7..=25.
-        assert!(resolve_format_features(None, &[("metadata.version".into(), 99)]).is_err());
-        assert!(resolve_format_features(None, &[("metadata.version".into(), 1)]).is_err());
+        for (name, level) in [
+            ("group.version", 5),     // group.version supports 0..=1
+            ("metadata.version", 99), // metadata.version supports 7..=25
+            ("metadata.version", 1),
+        ] {
+            assert!(
+                resolve_format_features(None, &[(name.into(), level)]).is_err(),
+                "expected error for {name}={level}"
+            );
+        }
     }
 
     #[test]
@@ -798,10 +807,14 @@ mod tests {
     fn parse_scram_spec_happy_path() {
         let spec = parse_scram_spec("SCRAM-SHA-512=[name=alice,password=hunter2,iterations=8192]")
             .unwrap();
-        assert!(spec.name == "alice");
-        assert!(spec.password == "hunter2");
-        assert!(spec.iterations == 8192);
-        assert!(spec.mechanism == SaslMechanism::ScramSha512);
+        assert!(
+            spec == ScramSpec {
+                mechanism: SaslMechanism::ScramSha512,
+                name: "alice".to_string(),
+                password: "hunter2".to_string(),
+                iterations: 8192,
+            }
+        );
     }
 
     #[test]
@@ -837,12 +850,18 @@ mod tests {
     fn parse_acl_spec_minimal() {
         let s = "principal=User:admin,host=*,operation=All,permission=Allow,resource=Cluster:kafka-cluster";
         let entry = parse_acl_spec(s).unwrap();
-        assert!(entry.resource_type == crabka_metadata::ResourceType::Cluster);
-        assert!(entry.resource_name == "kafka-cluster");
-        assert!(entry.pattern_type == crabka_metadata::PatternType::Literal);
-        assert!(entry.principal == "User:admin");
-        assert!(entry.operation == crabka_metadata::AclOperation::All);
-        assert!(entry.permission_type == crabka_metadata::PermissionType::Allow);
+        assert!(
+            entry
+                == AclEntry {
+                    resource_type: crabka_metadata::ResourceType::Cluster,
+                    resource_name: "kafka-cluster".to_string(),
+                    pattern_type: crabka_metadata::PatternType::Literal,
+                    principal: "User:admin".to_string(),
+                    host: "*".to_string(),
+                    operation: crabka_metadata::AclOperation::All,
+                    permission_type: crabka_metadata::PermissionType::Allow,
+                }
+        );
     }
 
     #[test]
@@ -863,11 +882,18 @@ mod tests {
     fn parses_initial_controller_spec() {
         let v =
             parse_initial_controller("3@host:9093:00000000-0000-0000-0000-000000000003").unwrap();
-        assert!(v.id == 3);
-        assert!(v.endpoints[0].name == "CONTROLLER");
-        assert!(v.endpoints[0].host == "host");
-        assert!(v.endpoints[0].port == 9093);
-        assert!(v.directory_id == Uuid::from_u128(3));
+        assert!(
+            v == Voter {
+                id: 3,
+                directory_id: Uuid::from_u128(3),
+                endpoints: vec![VoterEndpoint {
+                    name: "CONTROLLER".to_string(),
+                    host: "host".to_string(),
+                    port: 9093,
+                }],
+                kraft_version: KRaftVersionRange { min: 0, max: 1 },
+            }
+        );
     }
 
     #[test]
@@ -969,12 +995,16 @@ mod tests {
     #[test]
     fn base64_encode_known_vectors() {
         // RFC 4648 §10
-        assert!(base64_encode(b"") == "");
-        assert!(base64_encode(b"f") == "Zg==");
-        assert!(base64_encode(b"fo") == "Zm8=");
-        assert!(base64_encode(b"foo") == "Zm9v");
-        assert!(base64_encode(b"foob") == "Zm9vYg==");
-        assert!(base64_encode(b"fooba") == "Zm9vYmE=");
-        assert!(base64_encode(b"foobar") == "Zm9vYmFy");
+        for (input, want) in [
+            (b"".as_slice(), ""),
+            (b"f".as_slice(), "Zg=="),
+            (b"fo".as_slice(), "Zm8="),
+            (b"foo".as_slice(), "Zm9v"),
+            (b"foob".as_slice(), "Zm9vYg=="),
+            (b"fooba".as_slice(), "Zm9vYmE="),
+            (b"foobar".as_slice(), "Zm9vYmFy"),
+        ] {
+            assert!(base64_encode(input) == want);
+        }
     }
 }

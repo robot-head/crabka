@@ -575,9 +575,13 @@ mod tests {
             )],
         };
 
-        assert!(expression.matches(&labels(&[("status", "500"), ("level", "info")])));
-        assert!(expression.matches(&labels(&[("status", "200"), ("level", "warn")])));
-        assert!(!expression.matches(&labels(&[("status", "200"), ("level", "info")])));
+        for (pairs, expected) in [
+            ([("status", "500"), ("level", "info")], true),
+            ([("status", "200"), ("level", "warn")], true),
+            ([("status", "200"), ("level", "info")], false),
+        ] {
+            assert_eq!(expression.matches(&labels(&pairs)), expected, "{pairs:?}");
+        }
     }
 
     #[test]
@@ -595,26 +599,24 @@ mod tests {
 
     #[test]
     fn field_filter_validation_rejects_invalid_combinations() {
-        assert!(
-            FieldFilter::try_new(
+        for (name, op, value) in [
+            (
                 "path",
                 ComparisonOp::RegexEqual,
-                FieldValue::String("[".to_string())
-            )
-            .is_err()
-        );
-        assert!(
-            FieldFilter::try_new("path", ComparisonOp::RegexEqual, FieldValue::Number(1.0))
-                .is_err()
-        );
-        assert!(
-            FieldFilter::try_new(
+                FieldValue::String("[".to_string()),
+            ),
+            ("path", ComparisonOp::RegexEqual, FieldValue::Number(1.0)),
+            (
                 "remote_addr",
                 ComparisonOp::Greater,
-                FieldValue::Ip(IpMatcher::parse("192.168.1.1").unwrap())
-            )
-            .is_err()
-        );
+                FieldValue::Ip(IpMatcher::parse("192.168.1.1").unwrap()),
+            ),
+        ] {
+            assert!(
+                FieldFilter::try_new(name, op, value.clone()).is_err(),
+                "{name} {op:?} {value:?}"
+            );
+        }
     }
 
     #[test]
@@ -695,9 +697,13 @@ mod tests {
 
     #[test]
     fn ip_matcher_rejects_invalid_ranges_and_prefixes() {
-        assert!(IpMatcher::parse("192.168.1.10-192.168.1.1").is_err());
-        assert!(IpMatcher::parse("192.168.1.1-2001:db8::1").is_err());
-        assert!(IpMatcher::parse("192.168.1.1/33").is_err());
+        for pattern in [
+            "192.168.1.10-192.168.1.1",
+            "192.168.1.1-2001:db8::1",
+            "192.168.1.1/33",
+        ] {
+            assert!(IpMatcher::parse(pattern).is_err(), "{pattern}");
+        }
     }
 
     #[test]

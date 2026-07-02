@@ -25,7 +25,7 @@
 // and its span computation ICEs in annotate-snippets on Rust 1.95.
 #![allow(clippy::unnecessary_unwrap)]
 
-use assert2::assert;
+use assert2::{assert, check};
 use std::io::Write;
 use std::process::{Command, Stdio};
 
@@ -4495,15 +4495,15 @@ async fn jvm_kafka_acls_provision_via_cli() {
         ],
     );
     let listed = String::from_utf8_lossy(&list_out.stdout);
-    assert!(
+    check!(
         listed.contains("User:alice"),
         "expected alice in --list output; got: {listed}"
     );
-    assert!(
+    check!(
         listed.to_ascii_uppercase().contains("READ"),
         "expected READ in --list output; got: {listed}"
     );
-    assert!(
+    check!(
         listed.to_ascii_uppercase().contains("ALLOW"),
         "expected ALLOW in --list output; got: {listed}"
     );
@@ -7137,17 +7137,17 @@ async fn jvm_kafka_log_dirs_describe_reports_jbod_spread() {
     let extra_path =
         std::fs::canonicalize(extra.path()).unwrap_or_else(|_| extra.path().to_path_buf());
 
-    assert!(
+    check!(
         stdout.contains(&primary_path.display().to_string()),
         "kafka-log-dirs output missing primary dir {}; got: {stdout}",
         primary_path.display()
     );
-    assert!(
+    check!(
         stdout.contains(&extra_path.display().to_string()),
         "kafka-log-dirs output missing extra dir {}; got: {stdout}",
         extra_path.display()
     );
-    assert!(
+    check!(
         stdout.contains("jbodtopic"),
         "kafka-log-dirs output missing topic partitions; got: {stdout}"
     );

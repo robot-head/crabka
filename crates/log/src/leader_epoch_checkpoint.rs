@@ -280,6 +280,7 @@ mod leader_epoch_model;
 mod tests {
     use super::*;
     use assert2::assert;
+    use assert2::check;
     use tempfile::TempDir;
 
     fn fresh() -> (TempDir, PathBuf) {
@@ -362,11 +363,11 @@ mod tests {
         c.append(1, 0).unwrap();
         c.append(7, 4).unwrap();
         c.truncate_from_end(4).unwrap();
-        assert!(c.latest_epoch() == Some(1));
+        check!(c.latest_epoch() == Some(1));
         // Epoch 7 began at offset 4 (>= end_offset), so it is gone.
-        assert!(c.end_offset_for_epoch(7, 4) == -1);
+        check!(c.end_offset_for_epoch(7, 4) == -1);
         // Epoch 1 survives; its end is now the log end (4).
-        assert!(c.end_offset_for_epoch(1, 4) == 4);
+        check!(c.end_offset_for_epoch(1, 4) == 4);
     }
 
     #[test]
@@ -453,20 +454,21 @@ mod tests {
         c.append(0, 0).unwrap();
         c.append(1, 50).unwrap();
         c.append(2, 100).unwrap();
-        // Offsets 0–49 belong to epoch 0.
-        assert!(c.epoch_for_offset(0) == Some(0), "start of epoch 0");
-        assert!(c.epoch_for_offset(25) == Some(0), "middle of epoch 0");
-        assert!(
-            c.epoch_for_offset(49) == Some(0),
-            "last offset before epoch 1"
-        );
-        // Offsets 50–99 belong to epoch 1.
-        assert!(c.epoch_for_offset(50) == Some(1), "start of epoch 1");
-        assert!(c.epoch_for_offset(75) == Some(1), "middle of epoch 1");
-        assert!(
-            c.epoch_for_offset(99) == Some(1),
-            "last offset before epoch 2"
-        );
+        for (offset, want, why) in [
+            // Offsets 0–49 belong to epoch 0.
+            (0, Some(0), "start of epoch 0"),
+            (25, Some(0), "middle of epoch 0"),
+            (49, Some(0), "last offset before epoch 1"),
+            // Offsets 50–99 belong to epoch 1.
+            (50, Some(1), "start of epoch 1"),
+            (75, Some(1), "middle of epoch 1"),
+            (99, Some(1), "last offset before epoch 2"),
+        ] {
+            check!(
+                c.epoch_for_offset(offset) == want,
+                "{why} (offset={offset})"
+            );
+        }
     }
 
     #[test]

@@ -72,7 +72,7 @@ impl Renamer {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+    use assert2::check;
 
     use super::*;
     use crate::config::NamingPolicy;
@@ -80,18 +80,18 @@ mod tests {
     #[test]
     fn default_policy_prefixes_with_source_alias() {
         let n = Renamer::new(NamingPolicy::Default, "us-east");
-        assert!(n.target_name("orders") == "us-east.orders");
-        assert!(n.is_remote("eu-west.billing"));
-        assert!(!n.is_remote("orders"));
+        check!(n.target_name("orders") == "us-east.orders");
+        check!(n.is_remote("eu-west.billing"));
+        check!(!n.is_remote("orders"));
     }
 
     #[test]
     fn identity_policy_keeps_name_and_uses_provenance() {
         let n = Renamer::new(NamingPolicy::Identity, "us-east");
-        assert!(n.target_name("orders") == "orders");
-        assert!(!n.is_remote("orders"));
-        assert!(n.provenance_alias() == "us-east");
+        check!(n.target_name("orders") == "orders");
+        check!(!n.is_remote("orders"));
+        check!(n.provenance_alias() == "us-east");
         // `policy()` returns the configured policy verbatim, not the Default.
-        assert!(n.policy() == NamingPolicy::Identity);
+        check!(n.policy() == NamingPolicy::Identity);
     }
 }

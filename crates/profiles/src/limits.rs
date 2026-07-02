@@ -142,7 +142,7 @@ impl LimitError {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+    use assert2::{assert, check};
 
     use super::*;
 
@@ -150,17 +150,21 @@ mod tests {
     fn default_limits_are_generous_and_finite() {
         let limits = Limits::default();
 
-        assert!(limits.ingestion_rate_profiles_per_sec > 0.0);
-        assert!(limits.ingestion_burst_profiles == 10_000);
-        assert!(limits.max_series == 0);
-        assert!(limits.max_label_name_length == 1024);
-        assert!(limits.max_label_value_length == 2048);
-        assert!(limits.max_label_names_per_series == 40);
-        assert!(limits.max_flamegraph_nodes_default == 2048);
-        assert!(limits.max_flamegraph_nodes_max == 0);
-        assert!(limits.max_query_length_secs == DEFAULT_MAX_QUERY_LENGTH_SECS);
-        assert!(limits.max_query_length_secs == 2_595_600);
-        assert!(limits.max_session_id_cardinality == 0);
+        assert!(
+            limits
+                == Limits {
+                    ingestion_rate_profiles_per_sec: 10_000.0,
+                    ingestion_burst_profiles: 10_000,
+                    max_series: 0,
+                    max_label_name_length: 1024,
+                    max_label_value_length: 2048,
+                    max_label_names_per_series: 40,
+                    max_flamegraph_nodes_default: 2048,
+                    max_flamegraph_nodes_max: 0,
+                    max_query_length_secs: 2_595_600,
+                    max_session_id_cardinality: 0,
+                }
+        );
     }
 
     #[test]
@@ -213,10 +217,9 @@ mod tests {
             ..Limits::default()
         };
 
-        assert!(limits.effective_max_nodes(0) == 2048);
-        assert!(limits.effective_max_nodes(-1) == 2048);
-        assert!(limits.effective_max_nodes(1024) == 1024);
-        assert!(limits.effective_max_nodes(10_000) == 4096);
+        for (requested, want) in [(0, 2048), (-1, 2048), (1024, 1024), (10_000, 4096)] {
+            check!(limits.effective_max_nodes(requested) == want);
+        }
     }
 
     #[test]

@@ -167,6 +167,7 @@ pub(crate) fn retain_decision(
 mod core_tests {
     use super::*;
     use assert2::assert;
+    use assert2::check;
 
     fn data(has_key: bool, has_value: bool) -> RecordMeta {
         RecordMeta { has_key, has_value }
@@ -184,135 +185,104 @@ mod core_tests {
     fn control_batch_key_is_never_indexed() {
         // A control batch's key (commit/abort marker) must NOT enter the
         // dedup map, regardless of whether the key is present.
-        assert!(should_index_key(Some(b"\x00\x00\x00\x01".as_ref()), true) == false);
-        // Null-key data is also never indexed.
-        assert!(should_index_key(None, false) == false);
-        // Ordinary keyed data IS indexed.
-        assert!(should_index_key(Some(b"k".as_ref()), false) == true);
+        for (key, is_control, want) in [
+            (Some(b"\x00\x00\x00\x01".as_ref()), true, false),
+            // Null-key data is also never indexed.
+            (None, false, false),
+            // Ordinary keyed data IS indexed.
+            (Some(b"k".as_ref()), false, true),
+        ] {
+            check!(
+                should_index_key(key, is_control) == want,
+                "key={key:?} is_control={is_control}"
+            );
+        }
     }
 
     #[test]
     fn tombstone_sets_horizon_then_deletes_after_expiry() {
         let rec = data(true, false); // keyed, null value (tombstone)
-        // Newest tombstone, no existing horizon: stamp now+ret = 100+50 = 150.
-        assert!(
-            retain_decision(
-                rec,
-                batch(false, -1, None),
-                true,
-                TxnDataState::NotTransactional,
-                100,
-                50
-            ) == RetainDecision::SetHorizon(150)
-        );
-        // Now=149 < horizon 150: keep.
-        assert!(
-            retain_decision(
-                rec,
-                batch(false, -1, Some(150)),
-                true,
-                TxnDataState::NotTransactional,
-                149,
-                50
-            ) == RetainDecision::Keep
-        );
-        // Now=150 >= horizon 150: delete.
-        assert!(
-            retain_decision(
-                rec,
-                batch(false, -1, Some(150)),
-                true,
-                TxnDataState::NotTransactional,
-                150,
-                50
-            ) == RetainDecision::Delete
-        );
-        // Superseded tombstone (not newest-for-key): delete outright.
-        assert!(
-            retain_decision(
-                rec,
-                batch(false, -1, None),
-                false,
-                TxnDataState::NotTransactional,
-                100,
-                50
-            ) == RetainDecision::Delete
-        );
+        for (existing_horizon, is_newest, now_ms, want) in [
+            // Newest tombstone, no existing horizon: stamp now+ret = 100+50 = 150.
+            (None, true, 100, RetainDecision::SetHorizon(150)),
+            // Now=149 < horizon 150: keep.
+            (Some(150), true, 149, RetainDecision::Keep),
+            // Now=150 >= horizon 150: delete.
+            (Some(150), true, 150, RetainDecision::Delete),
+            // Superseded tombstone (not newest-for-key): delete outright.
+            (None, false, 100, RetainDecision::Delete),
+        ] {
+            check!(
+                retain_decision(
+                    rec,
+                    batch(false, -1, existing_horizon),
+                    is_newest,
+                    TxnDataState::NotTransactional,
+                    now_ms,
+                    50
+                ) == want,
+                "horizon={existing_horizon:?} newest={is_newest} now={now_ms}"
+            );
+        }
     }
 
     #[test]
     fn marker_retained_while_data_survives_then_ages() {
         let marker = data(true, false); // control records carry a key, no value
-        // Data still survives: keep the marker.
-        assert!(
-            retain_decision(
-                marker,
-                batch(true, 1000, None),
-                false,
-                TxnDataState::DataSurvives,
-                100,
-                50
-            ) == RetainDecision::Keep
-        );
-        // Data fully gone, no horizon yet: stamp now+ret = 100+50 = 150.
-        assert!(
-            retain_decision(
-                marker,
-                batch(true, 1000, None),
-                false,
+        for (existing_horizon, txn_state, now_ms, want) in [
+            // Data still survives: keep the marker.
+            (None, TxnDataState::DataSurvives, 100, RetainDecision::Keep),
+            // Data fully gone, no horizon yet: stamp now+ret = 100+50 = 150.
+            (
+                None,
                 TxnDataState::DataFullyGone,
                 100,
-                50
-            ) == RetainDecision::SetHorizon(150)
-        );
-        // Data fully gone, horizon 150, now 150: delete.
-        assert!(
-            retain_decision(
-                marker,
-                batch(true, 1000, Some(150)),
-                false,
+                RetainDecision::SetHorizon(150),
+            ),
+            // Data fully gone, horizon 150, now 150: delete.
+            (
+                Some(150),
                 TxnDataState::DataFullyGone,
                 150,
-                50
-            ) == RetainDecision::Delete
-        );
+                RetainDecision::Delete,
+            ),
+        ] {
+            check!(
+                retain_decision(
+                    marker,
+                    batch(true, 1000, existing_horizon),
+                    false,
+                    txn_state,
+                    now_ms,
+                    50
+                ) == want,
+                "horizon={existing_horizon:?} now={now_ms}"
+            );
+        }
     }
 
     #[test]
     fn live_data_kept_nullkey_dropped() {
-        // Newest-for-key data with a value: keep.
-        assert!(
-            retain_decision(
-                data(true, true),
-                batch(false, -1, None),
-                true,
-                TxnDataState::NotTransactional,
-                100,
-                50
-            ) == RetainDecision::Keep
-        );
-        // Null-key data: dropped regardless of newest-ness.
-        assert!(
-            retain_decision(
-                data(false, true),
-                batch(false, -1, None),
-                true,
-                TxnDataState::NotTransactional,
-                100,
-                50
-            ) == RetainDecision::Delete
-        );
-        // Keyed data with a value but not newest-for-key: dropped.
-        assert!(
-            retain_decision(
-                data(true, true),
-                batch(false, -1, None),
-                false,
-                TxnDataState::NotTransactional,
-                100,
-                50
-            ) == RetainDecision::Delete
-        );
+        for (has_key, is_newest, want) in [
+            // Newest-for-key data with a value: keep.
+            (true, true, RetainDecision::Keep),
+            // Null-key data: dropped regardless of newest-ness.
+            (false, true, RetainDecision::Delete),
+            // Keyed data with a value but not newest-for-key: dropped.
+            (true, false, RetainDecision::Delete),
+        ] {
+            check!(
+                retain_decision(
+                    data(has_key, true),
+                    batch(false, -1, None),
+                    is_newest,
+                    TxnDataState::NotTransactional,
+                    100,
+                    50
+                ) == want,
+                "has_key={has_key} newest={is_newest}"
+            );
+        }
     }
 
     #[test]
@@ -914,6 +884,7 @@ mod rewrite_tests {
     };
     use super::*;
     use assert2::assert;
+    use assert2::check;
     use crabka_protocol::records::Record;
     use std::fs;
 
@@ -997,8 +968,8 @@ mod rewrite_tests {
         let mut cursor = &bytes[..];
         let batch = RecordBatch::decode(&mut cursor).unwrap();
         assert!(batch.records.len() == 1);
-        assert!(batch.records[0].value.is_none());
-        assert!(batch.records[0].key.as_ref().unwrap().as_ref() == b"k1");
+        check!(batch.records[0].value.is_none());
+        check!(batch.records[0].key.as_ref().unwrap().as_ref() == b"k1");
     }
 
     #[test]
@@ -1113,9 +1084,9 @@ mod rewrite_tests {
         let bytes = fs::read(&out.log_swap).unwrap();
         let mut cursor = &bytes[..];
         let batch = RecordBatch::decode(&mut cursor).unwrap();
-        assert!(batch.attributes.has_delete_horizon());
-        assert!(batch.delete_horizon_ms() == Some(now + ret));
-        assert!(batch.base_timestamp == now + ret);
+        check!(batch.attributes.has_delete_horizon());
+        check!(batch.delete_horizon_ms() == Some(now + ret));
+        check!(batch.base_timestamp == now + ret);
     }
 
     /// (c) A commit marker whose transaction's data is fully gone and whose
@@ -1203,10 +1174,10 @@ mod rewrite_tests {
             .iter()
             .find(|b| b.producer_id == 1000)
             .expect("pid 1000 bare header retained");
-        assert!(bare.records.is_empty());
-        assert!(bare.producer_epoch == 7);
-        assert!(bare.base_sequence == 3);
-        assert!(bare.base_offset == 0);
+        check!(bare.records.is_empty());
+        check!(bare.producer_epoch == 7);
+        check!(bare.base_sequence == 3);
+        check!(bare.base_offset == 0);
     }
 }
 
@@ -1299,7 +1270,7 @@ pub fn atomic_swap(
 mod swap_tests {
     use super::build_map_tests::{make_record, write_sealed_segment};
     use super::*;
-    use assert2::assert;
+    use assert2::check;
 
     #[test]
     fn atomic_swap_replaces_two_segments_with_one() {
@@ -1337,10 +1308,10 @@ mod swap_tests {
         atomic_swap(dir.path(), &[0, 10], &rewrite).unwrap();
 
         // After swap: only one .log (base 0). The base 10 segment is gone.
-        assert!(name::log_path(dir.path(), 0).exists());
-        assert!(!name::log_path(dir.path(), 10).exists());
+        check!(name::log_path(dir.path(), 0).exists());
+        check!(!name::log_path(dir.path(), 10).exists());
         // No leftover .swap files.
-        assert!(!dir.path().join("00000000000000000000.log.swap").exists());
+        check!(!dir.path().join("00000000000000000000.log.swap").exists());
     }
 }
 

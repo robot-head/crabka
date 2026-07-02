@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use assert2::assert;
+use assert2::{assert, check};
 use crabka_blockstore::{
     BlockKey, LogBlockTableProvider, LogRow, TimeRange, labels, register_log_blocks,
     register_log_blocks_from_object_store, series_fingerprint, write_log_block,
@@ -67,8 +67,8 @@ async fn datafusion_table_scans_only_planned_log_blocks() {
         .unwrap();
 
     assert!(batch.num_rows() == 1);
-    assert!(timestamps.value(0) == 19);
-    assert!(lines.value(0) == "api error");
+    check!(timestamps.value(0) == 19);
+    check!(lines.value(0) == "api error");
 }
 
 #[tokio::test]
@@ -146,8 +146,8 @@ async fn log_block_table_provider_exposes_planned_filter_pushdown() {
         .unwrap();
 
     assert!(batch.num_rows() == 1);
-    assert!(timestamps.value(0) == 19);
-    assert!(lines.value(0) == "api error");
+    check!(timestamps.value(0) == 19);
+    check!(lines.value(0) == "api error");
 }
 
 #[tokio::test]
@@ -210,8 +210,8 @@ async fn log_block_table_provider_scans_planned_object_store_blocks() {
         .unwrap();
 
     assert!(batch.num_rows() == 1);
-    assert!(timestamps.value(0) == 19);
-    assert!(lines.value(0) == "api error");
+    check!(timestamps.value(0) == 19);
+    check!(lines.value(0) == "api error");
 }
 
 #[tokio::test]
@@ -262,8 +262,8 @@ async fn registers_planned_object_store_blocks_as_datafusion_table() {
         .unwrap();
 
     assert!(batch.num_rows() == 1);
-    assert!(timestamps.value(0) == 19);
-    assert!(lines.value(0) == "api error");
+    check!(timestamps.value(0) == 19);
+    check!(lines.value(0) == "api error");
 }
 
 #[tokio::test]

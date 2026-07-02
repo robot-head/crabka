@@ -24,7 +24,7 @@ pub enum CleanupPolicy {
 /// [`Default`](Self::default) impl is the recommended starting point;
 /// most production deployments will only override `retention_ms` and
 /// `retention_bytes`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LogConfig {
     /// Roll the active segment when it exceeds this many bytes. Kafka default: 1 GiB.
     pub segment_bytes: u64,
@@ -110,11 +110,24 @@ mod tests {
 
     #[test]
     fn defaults_match_kafka_4x() {
-        let c = LogConfig::default();
-        assert!(c.segment_bytes == 1 << 30);
-        assert!(c.index_interval_bytes == 4096);
-        assert!(!c.flush_on_append);
-        assert!(c.validate_on_open);
+        assert!(
+            LogConfig::default()
+                == LogConfig {
+                    segment_bytes: 1 << 30,
+                    segment_ms: Duration::from_hours(7 * 24),
+                    retention_ms: Some(Duration::from_hours(7 * 24)),
+                    retention_bytes: None,
+                    index_interval_bytes: 4096,
+                    flush_on_append: false,
+                    validate_on_open: true,
+                    cleanup_policy: CleanupPolicy::Delete,
+                    compression_type: None,
+                    remote_storage_enable: false,
+                    local_retention_ms: None,
+                    local_retention_bytes: None,
+                    delete_retention_ms: Duration::from_hours(24),
+                }
+        );
     }
 
     #[test]

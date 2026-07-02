@@ -34,8 +34,7 @@ fn borrowed_request_populated_roundtrip() {
         let mut cur = &frozen[..];
         let decoded = GetReplicaLogInfoRequest::decode_borrow(&mut cur, v).unwrap();
         assert!(cur.is_empty(), "decoder left trailing bytes");
-        assert!(decoded.broker_id == 7);
-        assert!(decoded.topic_partitions[0].partitions == vec![0, 3, 5]);
+        assert!(decoded == req);
     }
 }
 
@@ -77,9 +76,5 @@ fn borrowed_response_populated_roundtrip() {
     let mut cur = &frozen[..];
     let decoded = GetReplicaLogInfoResponse::decode_borrow(&mut cur, v).unwrap();
     assert!(cur.is_empty(), "decoder left trailing bytes");
-    assert!(decoded.broker_epoch == 42);
-    let plis = &decoded.topic_partition_log_info_list[0].partition_log_info;
-    assert!(plis.len() == 2);
-    assert!(plis[0].error_message == None);
-    assert!(plis[1].error_message == Some("not leader"));
+    assert!(decoded == resp);
 }

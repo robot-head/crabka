@@ -327,6 +327,7 @@ fn build_sasl(input: &SecurityCliInput) -> anyhow::Result<SaslCredentials> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::check;
 
     /// Convenience: the binary's clap defaults for the string-typed knobs, so a
     /// test sets only the fields it exercises. Mirrors the `Args` `default_value`
@@ -355,13 +356,13 @@ mod tests {
     #[test]
     fn default_input_is_fully_open() {
         let s = sec(&input());
-        assert!(!s.require_auth);
-        assert!(s.realm.is_empty());
-        assert!(s.basic.is_none());
-        assert!(s.bearer.is_none());
-        assert!(s.tls.is_none());
-        assert!(s.authz.is_none());
-        assert!(s.client.is_none(), "PLAINTEXT broker client ⇒ None");
+        check!(!s.require_auth);
+        check!(s.realm.is_empty());
+        check!(s.basic.is_none());
+        check!(s.bearer.is_none());
+        check!(s.tls.is_none());
+        check!(s.authz.is_none());
+        check!(s.client.is_none(), "PLAINTEXT broker client ⇒ None");
     }
 
     #[test]
@@ -529,10 +530,16 @@ mod tests {
             ..input()
         });
         let a = s.authz.expect("authz enabled");
-        assert!(a.enabled);
-        assert!(a.super_users.contains("admin"));
-        assert!(a.super_users.contains("root"));
-        assert_eq!(a.acl_refresh, std::time::Duration::from_secs(45));
+        assert_eq!(
+            a,
+            crate::config::AuthzConfig {
+                enabled: true,
+                super_users: ["admin".to_string(), "root".to_string()]
+                    .into_iter()
+                    .collect(),
+                acl_refresh: std::time::Duration::from_secs(45),
+            }
+        );
     }
 
     #[test]

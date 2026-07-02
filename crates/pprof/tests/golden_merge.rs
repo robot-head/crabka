@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
-use assert2::assert;
+use assert2::{assert, check};
 use crabka_pprof::{
-    EngineOpts, FlameEngine, FlameGraph, FunctionRec, InMemoryProfileStore, LineRec, LocationRec,
-    ProfileType,
+    EngineOpts, FlameEngine, FlameGraph, FunctionRec, InMemoryProfileStore, Level, LineRec,
+    LocationRec, ProfileType,
 };
 
 const TENANT: &str = "tenant-a";
@@ -95,38 +95,55 @@ async fn merge(label_selector: &str, max_nodes: i64) -> FlameGraph {
 async fn full_merge_pins_four_int_levels_and_fold_before_symbolize() {
     let fg = merge("{}", 2_048).await;
 
-    assert!(fg.names == vec!["total", "main", "work", "inline_helper", "alloc", "other"]);
-    assert!(fg.total == 21);
-    assert!(fg.max_self == 17);
-    assert!(fg.levels.len() == 5);
-    assert!(fg.levels[0].values == vec![0, 21, 0, 0]);
-    assert!(fg.levels[1].values == vec![0, 21, 0, 1]);
-    assert!(fg.levels[2].values == vec![0, 4, 4, 5, 0, 17, 0, 2]);
-    assert!(fg.levels[3].values == vec![4, 17, 0, 3]);
-    assert!(fg.levels[4].values == vec![4, 17, 17, 4]);
+    assert!(
+        fg == FlameGraph {
+            names: ["total", "main", "work", "inline_helper", "alloc", "other"]
+                .map(String::from)
+                .to_vec(),
+            levels: vec![
+                Level {
+                    values: vec![0, 21, 0, 0],
+                },
+                Level {
+                    values: vec![0, 21, 0, 1],
+                },
+                Level {
+                    values: vec![0, 4, 4, 5, 0, 17, 0, 2],
+                },
+                Level {
+                    values: vec![4, 17, 0, 3],
+                },
+                Level {
+                    values: vec![4, 17, 17, 4],
+                },
+            ],
+            total: 21,
+            max_self: 17,
+        }
+    );
 }
 
 #[tokio::test]
 async fn label_selector_filters_series_before_merge() {
     let fg = merge(r#"{service="api"}"#, 2_048).await;
 
-    assert!(fg.total == 17);
-    assert!(fg.names == vec!["total", "main", "work", "inline_helper", "alloc"]);
-    assert!(fg.levels[2].values == vec![0, 17, 0, 2]);
-    assert!(!fg.names.iter().any(|name| name == "other"));
+    check!(fg.total == 17);
+    check!(fg.names == vec!["total", "main", "work", "inline_helper", "alloc"]);
+    check!(fg.levels[2].values == vec![0, 17, 0, 2]);
+    check!(!fg.names.iter().any(|name| name == "other"));
 }
 
 #[tokio::test]
 async fn max_nodes_truncates_to_synthetic_other_and_conserves_total() {
     let fg = merge("{}", 3).await;
 
-    assert!(fg.names == vec!["total", "main", "other", "work"]);
-    assert!(fg.total == 21);
-    assert!(fg.max_self == 17);
-    assert!(fg.levels[0].values == vec![0, 21, 0, 0]);
-    assert!(fg.levels[1].values == vec![0, 21, 0, 1]);
-    assert!(fg.levels[2].values == vec![4, 17, 0, 3, -4, 4, 4, 2]);
-    assert!(fg.levels[3].values == vec![4, 17, 17, 2]);
+    check!(fg.names == vec!["total", "main", "other", "work"]);
+    check!(fg.total == 21);
+    check!(fg.max_self == 17);
+    check!(fg.levels[0].values == vec![0, 21, 0, 0]);
+    check!(fg.levels[1].values == vec![0, 21, 0, 1]);
+    check!(fg.levels[2].values == vec![4, 17, 0, 3, -4, 4, 4, 2]);
+    check!(fg.levels[3].values == vec![4, 17, 17, 2]);
 }
 
 #[test]

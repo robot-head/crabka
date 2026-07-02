@@ -6,7 +6,7 @@
 //! state — `(transactional_id, producer_id, state)` summary for List,
 //! full per-tid detail (timeout, start time, partitions) for Describe.
 
-use assert2::assert;
+use assert2::{assert, check};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -131,9 +131,9 @@ async fn list_transactions_returns_ongoing_txn() {
         .iter()
         .find(|r| r.transactional_id == "my-tid")
         .expect("my-tid not present");
-    assert!(row.transaction_state == "Ongoing");
-    assert!(row.producer_id > 0);
-    assert!(
+    check!(row.transaction_state == "Ongoing");
+    check!(row.producer_id > 0);
+    check!(
         resp.unknown_state_filters.is_empty(),
         "no filters sent → no unknowns: {:?}",
         resp.unknown_state_filters,
@@ -220,16 +220,16 @@ async fn describe_transactions_returns_full_state_for_known_tid() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
 
-    assert!(row.transactional_id == "describe-tid");
-    assert!(row.transaction_state == "Ongoing");
-    assert!(row.producer_id > 0);
-    assert!(row.transaction_timeout_ms == 60_000);
-    assert!(row.transaction_start_time_ms > 0);
+    check!(row.transactional_id == "describe-tid");
+    check!(row.transaction_state == "Ongoing");
+    check!(row.producer_id > 0);
+    check!(row.transaction_timeout_ms == 60_000);
+    check!(row.transaction_start_time_ms > 0);
     // Exactly one topic + partition, since we produced one record to
     // a 1-partition topic.
     assert!(row.topics.len() == 1);
-    assert!(row.topics[0].topic == "t-describe");
-    assert!(row.topics[0].partitions == vec![0]);
+    check!(row.topics[0].topic == "t-describe");
+    check!(row.topics[0].partitions == vec![0]);
 
     producer.close().await.unwrap();
     broker.shutdown().await;
@@ -248,12 +248,12 @@ async fn describe_transactions_returns_not_found_for_unknown_tid() {
         .await
         .expect("DescribeTransactions");
     assert!(r.transaction_states.len() == 1);
-    assert!(
+    check!(
         r.transaction_states[0].error_code == 75,
         "expected TRANSACTIONAL_ID_NOT_FOUND (75), got {:?}",
         r.transaction_states[0]
     );
-    assert!(r.transaction_states[0].transactional_id == "ghost-tid");
+    check!(r.transaction_states[0].transactional_id == "ghost-tid");
 
     broker.shutdown().await;
 }

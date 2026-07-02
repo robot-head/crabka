@@ -25,7 +25,7 @@ const DYNAMIC_TOPIC_CONFIG_SOURCE: i8 = 1;
 const RESOURCE_TYPE_TOPIC: i8 = 2;
 
 /// Per-topic dynamic config overrides (broker defaults are filtered out).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TopicConfigOverrides {
     pub topic: String,
     pub overrides: BTreeMap<String, String>,
@@ -44,7 +44,7 @@ pub enum IncrementalAlterOp {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterConfigsOutcome {
     pub topic: String,
     pub error: Option<KafkaError>,
@@ -193,7 +193,7 @@ impl AdminClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
 
     #[test]
     fn dynamic_topic_config_source_is_one() {
@@ -250,13 +250,15 @@ mod tests {
             },
         ];
         let r = filter_dynamic_overrides("foo".into(), entries);
-        assert!(r.topic == "foo");
-        assert!(r.overrides.len() == 2);
-        assert!(r.overrides.get("retention.ms").map(String::as_str) == Some("60000"));
-        assert!(r.overrides.get("cleanup.policy").map(String::as_str) == Some("compact"));
-        assert!(!r.overrides.contains_key("log.dirs"));
-        assert!(!r.overrides.contains_key("segment.bytes"));
-        assert!(!r.overrides.contains_key("max.message.bytes"));
+        assert!(
+            r == TopicConfigOverrides {
+                topic: "foo".to_string(),
+                overrides: BTreeMap::from([
+                    ("cleanup.policy".to_string(), "compact".to_string()),
+                    ("retention.ms".to_string(), "60000".to_string()),
+                ]),
+            }
+        );
     }
 
     // ── parse_describe_configs_resource ────────────────────────────────
@@ -284,8 +286,13 @@ mod tests {
             ..Default::default()
         };
         let parsed = parse_describe_configs_resource(r).expect("Ok branch");
-        assert!(parsed.topic == "foo");
-        assert!(parsed.overrides.get("retention.ms").map(String::as_str) == Some("60000"));
+        assert!(
+            parsed
+                == TopicConfigOverrides {
+                    topic: "foo".to_string(),
+                    overrides: BTreeMap::from([("retention.ms".to_string(), "60000".to_string())]),
+                }
+        );
     }
 
     #[test]
@@ -307,10 +314,10 @@ mod tests {
                 name,
                 message,
             } => {
-                assert!(api == "DescribeConfigs");
-                assert!(code == 3);
-                assert!(name == "UNKNOWN_TOPIC_OR_PARTITION");
-                assert!(message.as_deref() == Some("nope"));
+                check!(api == "DescribeConfigs");
+                check!(code == 3);
+                check!(name == "UNKNOWN_TOPIC_OR_PARTITION");
+                check!(message.as_deref() == Some("nope"));
             }
             other => panic!("expected Broker, got {other:?}"),
         }
@@ -334,9 +341,12 @@ mod tests {
             ..Default::default()
         };
         let outs = parse_incremental_alter_outcomes(resp);
-        assert!(outs.len() == 1);
-        assert!(outs[0].topic == "foo");
-        assert!(outs[0].error.is_none());
+        assert!(
+            outs == vec![AlterConfigsOutcome {
+                topic: "foo".to_string(),
+                error: None,
+            }]
+        );
     }
 
     #[test]
@@ -364,11 +374,21 @@ mod tests {
             ..Default::default()
         };
         let outs = parse_incremental_alter_outcomes(resp);
-        assert!(outs.len() == 2);
-        assert!(outs[0].error.is_none());
-        let err = outs[1].error.as_ref().expect("error expected");
-        assert!(err.code == 40);
-        assert!(err.name == "INVALID_CONFIG");
-        assert!(err.message.as_deref() == Some("bad value"));
+        assert!(
+            outs == vec![
+                AlterConfigsOutcome {
+                    topic: "ok".to_string(),
+                    error: None,
+                },
+                AlterConfigsOutcome {
+                    topic: "bad".to_string(),
+                    error: Some(KafkaError {
+                        code: 40,
+                        name: "INVALID_CONFIG",
+                        message: Some("bad value".to_string()),
+                    }),
+                },
+            ]
+        );
     }
 }

@@ -410,7 +410,7 @@ async fn render() -> impl axum::response::IntoResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
 
     /// A fresh `GatewayMetrics` (not the global) so each test is isolated.
     fn fresh() -> GatewayMetrics {
@@ -599,11 +599,11 @@ mod tests {
         let dl = ResultLabel {
             result: "dead_letter".into(),
         };
-        assert!(m.webhook_in_total.get_or_create(&ok).get() == 1);
-        assert!(m.webhook_in_total.get_or_create(&err).get() == 1);
-        assert!(m.webhook_out_total.get_or_create(&delivered).get() == 1);
-        assert!(m.webhook_out_total.get_or_create(&dl).get() == 1);
-        assert!(m.webhook_retries_total.get() == 2);
-        assert!(m.dead_letter_total.get() == 1);
+        check!(m.webhook_in_total.get_or_create(&ok).get() == 1);
+        check!(m.webhook_in_total.get_or_create(&err).get() == 1);
+        check!(m.webhook_out_total.get_or_create(&delivered).get() == 1);
+        check!(m.webhook_out_total.get_or_create(&dl).get() == 1);
+        check!(m.webhook_retries_total.get() == 2);
+        check!(m.dead_letter_total.get() == 1);
     }
 }

@@ -3,7 +3,7 @@
 
 use bytes::Bytes;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProducerRecord {
     pub topic: String,
     /// If `Some(p)`, the partitioner is bypassed and partition `p` is used.
@@ -16,7 +16,7 @@ pub struct ProducerRecord {
     pub timestamp_ms: Option<i64>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Header {
     pub key: String,
     pub value: Option<Bytes>,
@@ -38,8 +38,15 @@ mod tests {
     #[test]
     fn producer_record_default_is_empty() {
         let r = ProducerRecord::default();
-        assert!(r.topic.is_empty());
-        assert!(r.key.is_none());
-        assert!(r.headers.is_empty());
+        assert!(
+            r == ProducerRecord {
+                topic: String::new(),
+                partition: None,
+                key: None,
+                value: None,
+                headers: vec![],
+                timestamp_ms: None,
+            }
+        );
     }
 }

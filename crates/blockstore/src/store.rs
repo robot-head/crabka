@@ -226,7 +226,7 @@ mod tests {
     use arrow::array::{Int64Array, LargeStringArray, StringArray, StringViewArray, UInt64Array};
     use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
     use arrow::record_batch::RecordBatch;
-    use assert2::assert;
+    use assert2::{assert, check};
     use object_store::ObjectStore;
     use object_store::memory::InMemory;
 
@@ -338,14 +338,14 @@ mod tests {
         web.insert("app", "web");
         mutated.index_mut().add_series("t", web.fingerprint(), &web);
 
-        assert!(!Arc::ptr_eq(&bs.index, &mutated.index));
-        assert!(
+        check!(!Arc::ptr_eq(&bs.index, &mutated.index));
+        check!(
             bs.index()
                 .resolve("t", &[LabelMatcher::new("app", MatchOp::Eq, "web")])
                 .unwrap()
                 .is_empty()
         );
-        assert!(
+        check!(
             mutated
                 .index()
                 .resolve("t", &[LabelMatcher::new("app", MatchOp::Eq, "web")])

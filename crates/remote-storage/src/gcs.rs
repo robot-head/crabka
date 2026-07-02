@@ -44,7 +44,7 @@ use crate::s3::{DEFAULT_MULTIPART_CHUNK_SIZE, DEFAULT_MULTIPART_THRESHOLD, S3Rem
 /// of [`Self::service_account_path`], [`Self::service_account_key`], or
 /// [`Self::application_credentials_path`] to use an explicit credential;
 /// providing more than one is rejected by `object_store`'s builder.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct GcsConfig {
     /// GCS bucket name.
     pub bucket: String,
@@ -163,6 +163,7 @@ impl S3RemoteStorage {
 mod tests {
     use super::*;
     use assert2::assert;
+    use assert2::check;
     use bytes::Bytes;
     use std::collections::BTreeMap;
     use std::io::Write;
@@ -194,23 +195,31 @@ mod tests {
             ..Default::default()
         };
         let dbg = format!("{cfg:?}");
-        assert!(!dbg.contains("super-secret-pem"));
-        assert!(!dbg.contains("/etc/gcs/key.json"));
-        assert!(!dbg.contains("/etc/gcs/adc.json"));
-        assert!(dbg.contains("***"));
+        check!(!dbg.contains("super-secret-pem"));
+        check!(!dbg.contains("/etc/gcs/key.json"));
+        check!(!dbg.contains("/etc/gcs/adc.json"));
+        check!(dbg.contains("***"));
         // Non-secret fields are still printed.
-        assert!(dbg.contains("logs"));
+        check!(dbg.contains("logs"));
     }
 
     #[test]
     fn gcs_config_default_uses_multipart_constants() {
-        let cfg = GcsConfig::default();
-        assert!(cfg.multipart_threshold == DEFAULT_MULTIPART_THRESHOLD);
-        assert!(cfg.multipart_chunk_size == DEFAULT_MULTIPART_CHUNK_SIZE);
         // No credentials by default → Workload Identity / ADC path.
-        assert!(cfg.service_account_path.is_none());
-        assert!(cfg.service_account_key.is_none());
-        assert!(cfg.application_credentials_path.is_none());
+        assert!(
+            GcsConfig::default()
+                == GcsConfig {
+                    bucket: String::new(),
+                    prefix: None,
+                    service_account_path: None,
+                    service_account_key: None,
+                    application_credentials_path: None,
+                    endpoint: None,
+                    allow_http: false,
+                    multipart_threshold: DEFAULT_MULTIPART_THRESHOLD,
+                    multipart_chunk_size: DEFAULT_MULTIPART_CHUNK_SIZE,
+                }
+        );
     }
 
     #[test]

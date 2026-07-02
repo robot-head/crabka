@@ -59,11 +59,16 @@ mod tests {
     #[test]
     fn parses_go_cpu() {
         let pt = ProfileType::parse("process_cpu:cpu:nanoseconds:cpu:nanoseconds").unwrap();
-        assert!(pt.name == "process_cpu");
-        assert!(pt.sample_type == "cpu");
-        assert!(pt.sample_unit == "nanoseconds");
-        assert!(pt.period_type == "cpu");
-        assert!(pt.period_unit == "nanoseconds");
+        assert!(
+            pt == ProfileType {
+                name: "process_cpu".to_string(),
+                sample_type: "cpu".to_string(),
+                sample_unit: "nanoseconds".to_string(),
+                period_type: "cpu".to_string(),
+                period_unit: "nanoseconds".to_string(),
+                delta: false,
+            }
+        );
     }
 
     #[test]
@@ -83,16 +88,23 @@ mod tests {
         let input = "process_cpu:cpu:nanoseconds:cpu:nanoseconds:delta";
         let pt = ProfileType::parse(input).unwrap();
 
-        assert!(pt.name == "process_cpu");
-        assert!(pt.delta);
+        assert!(
+            pt == ProfileType {
+                name: "process_cpu".to_string(),
+                sample_type: "cpu".to_string(),
+                sample_unit: "nanoseconds".to_string(),
+                period_type: "cpu".to_string(),
+                period_unit: "nanoseconds".to_string(),
+                delta: true,
+            }
+        );
         assert!(format!("{pt}") == input);
     }
 
     #[test]
     fn rejects_wrong_part_count() {
-        assert!(ProfileType::parse("a:b:c:d").is_err());
-        assert!(ProfileType::parse("a:b:c:d:e:f").is_err());
-        assert!(ProfileType::parse("a:b::d:e").is_err());
-        assert!(ProfileType::parse("a:b:c:d:e:cumulative").is_err());
+        for input in ["a:b:c:d", "a:b:c:d:e:f", "a:b::d:e", "a:b:c:d:e:cumulative"] {
+            assert!(ProfileType::parse(input).is_err(), "{input}");
+        }
     }
 }

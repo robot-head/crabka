@@ -517,7 +517,7 @@ fn filter_and_remap_batch(
 mod tests {
     use std::sync::Arc;
 
-    use assert2::assert;
+    use assert2::{assert, check};
     use crabka_blockstore::{BlockIndex, Labels, MatchOp};
     use crabka_pprof::{EngineOpts, FlameEngine, SymbolizeRequest};
     use object_store::ObjectStore;
@@ -603,9 +603,14 @@ mod tests {
 
         let stats = cold.stats("t", 0, i64::MAX).await.unwrap();
 
-        assert!(stats.data_ingested);
-        assert!(stats.oldest_profile_time == Some(1000));
-        assert!(stats.newest_profile_time == Some(1000));
+        assert!(
+            stats
+                == ProfileStats {
+                    data_ingested: true,
+                    oldest_profile_time: Some(1000),
+                    newest_profile_time: Some(1000),
+                }
+        );
     }
 
     #[tokio::test]
@@ -628,9 +633,14 @@ mod tests {
 
         let stats = cold.stats("t", 1_000, 1_000).await.unwrap();
 
-        assert!(stats.data_ingested);
-        assert!(stats.oldest_profile_time == Some(1000), "{stats:?}");
-        assert!(stats.newest_profile_time == Some(1000), "{stats:?}");
+        assert!(
+            stats
+                == ProfileStats {
+                    data_ingested: true,
+                    oldest_profile_time: Some(1000),
+                    newest_profile_time: Some(1000),
+                }
+        );
     }
 
     #[tokio::test]
@@ -674,15 +684,25 @@ mod tests {
 
         let stats = cold.stats("t", 0, i64::MAX).await.unwrap();
 
-        assert!(stats.data_ingested);
-        assert!(stats.oldest_profile_time == Some(1000), "{stats:?}");
-        assert!(stats.newest_profile_time == Some(5000), "{stats:?}");
+        assert!(
+            stats
+                == ProfileStats {
+                    data_ingested: true,
+                    oldest_profile_time: Some(1000),
+                    newest_profile_time: Some(5000),
+                }
+        );
 
         // A tenant with no blocks reports no data without touching the store.
         let empty = stats_for_unknown_tenant(&cold).await;
-        assert!(!empty.data_ingested, "{empty:?}");
-        assert!(empty.oldest_profile_time.is_none(), "{empty:?}");
-        assert!(empty.newest_profile_time.is_none(), "{empty:?}");
+        assert!(
+            empty
+                == ProfileStats {
+                    data_ingested: false,
+                    oldest_profile_time: None,
+                    newest_profile_time: None,
+                }
+        );
     }
 
     async fn stats_for_unknown_tenant(cold: &ColdProfileStore) -> ProfileStats {
@@ -914,13 +934,13 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(types == vec![PT.to_string()], "{types:?}");
-        assert!(names.contains(&"service_name".to_string()), "{names:?}");
-        assert!(
+        check!(types == vec![PT.to_string()], "{types:?}");
+        check!(names.contains(&"service_name".to_string()), "{names:?}");
+        check!(
             values == vec!["api".to_string(), "worker".to_string()],
             "{values:?}"
         );
-        assert!(
+        check!(
             series
                 == vec![
                     vec![("service_name".to_string(), "api".to_string())],
@@ -1013,14 +1033,14 @@ mod tests {
         assert!(out.num_rows() == 2);
         let out_fps = out.column(0).as_primitive::<UInt64Type>();
         let out_partitions = out.column(5).as_primitive::<UInt64Type>();
-        assert!(out_fps.value(0) == fp_keep);
-        assert!(out_fps.value(1) == fp_keep);
+        check!(out_fps.value(0) == fp_keep);
+        check!(out_fps.value(1) == fp_keep);
         // Partitions remapped once over the whole batch: base|local preserved
         // per surviving row.
-        assert!(out_partitions.value(0) == partition_base);
-        assert!(out_partitions.value(1) == (partition_base | 1));
+        check!(out_partitions.value(0) == partition_base);
+        check!(out_partitions.value(1) == (partition_base | 1));
         // Schema matches the canonical samples schema (consumed by the MemTable).
-        assert!(out.schema() == profile_samples_schema());
+        check!(out.schema() == profile_samples_schema());
     }
 
     fn record(tenant: &str, service: &str, stack: Vec<u32>, value: i64) -> ProfileRecord {

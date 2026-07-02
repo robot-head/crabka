@@ -830,7 +830,7 @@ fn u32_from_i64(value: i64, field: &str) -> Result<u32, ProfilesError> {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use assert2::assert;
+    use assert2::{assert, check};
     use prost::Message;
 
     use super::*;
@@ -976,9 +976,9 @@ mod tests {
         process_raw(&state, "tenant-a", raws).await.unwrap();
 
         let recs = sink.0.lock().unwrap();
-        assert!(recs.len() == 2);
-        assert!(recs.iter().all(|rec| rec.tenant == "tenant-a"));
-        assert!(
+        check!(recs.len() == 2);
+        check!(recs.iter().all(|rec| rec.tenant == "tenant-a"));
+        check!(
             recs.iter()
                 .all(|rec| rec.labels.iter().any(|(name, _)| name == "service_name"))
         );
@@ -1357,8 +1357,8 @@ overrides:
         assert!(response.status() == StatusCode::OK, "{response:?}");
         let recs = sink.0.lock().unwrap();
         assert!(recs.len() == 1);
-        assert!(recs[0].tenant == "tenant-a");
-        assert!(recs[0].labels.iter().any(|(name, value)| {
+        check!(recs[0].tenant == "tenant-a");
+        check!(recs[0].labels.iter().any(|(name, value)| {
             name == "__profile_type__" && value == "samples:samples:count:samples:count"
         }));
     }
@@ -1388,19 +1388,21 @@ overrides:
         assert!(response.status() == StatusCode::OK, "{response:?}");
         let recs = sink.0.lock().unwrap();
         assert!(recs.len() == 1);
-        assert!(recs[0].tenant == "tenant-a");
-        assert!(recs[0].labels.iter().any(|(name, value)| {
-            name == "__profile_type__" && value == "myapp:samples:samples:samples:samples"
-        }));
-        assert!(
-            recs[0]
-                .labels
-                .iter()
-                .any(|(name, value)| name == "service_name" && value == "api")
-        );
+        check!(recs[0].tenant == "tenant-a");
+        for (name, value) in [
+            ("__profile_type__", "myapp:samples:samples:samples:samples"),
+            ("service_name", "api"),
+        ] {
+            check!(
+                recs[0]
+                    .labels
+                    .iter()
+                    .any(|(label_name, label_value)| label_name == name && label_value == value)
+            );
+        }
         assert!(recs[0].samples.len() == 1);
-        assert!(recs[0].samples[0].value == 3);
-        assert!(recs[0].samples[0].timestamp_ns == 1_700_000_000_000_000_000);
+        check!(recs[0].samples[0].value == 3);
+        check!(recs[0].samples[0].timestamp_ns == 1_700_000_000_000_000_000);
     }
 
     #[tokio::test]
@@ -1418,9 +1420,9 @@ overrides:
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
-        assert!(status == StatusCode::TOO_MANY_REQUESTS);
-        assert!(json.get("code").and_then(serde_json::Value::as_str) == Some("resource_exhausted"));
-        assert!(
+        check!(status == StatusCode::TOO_MANY_REQUESTS);
+        check!(json.get("code").and_then(serde_json::Value::as_str) == Some("resource_exhausted"));
+        check!(
             json.get("message")
                 .and_then(serde_json::Value::as_str)
                 .is_some_and(|message| message.contains("max series exceeded"))
@@ -1645,9 +1647,9 @@ overrides:
             .unwrap();
         let text = String::from_utf8_lossy(&body);
 
-        assert!(status == StatusCode::INTERNAL_SERVER_ERROR);
-        assert!(text == INTERNAL_ERROR_MESSAGE, "leaked detail: {text}");
-        assert!(!text.contains("kafka"), "leaked detail: {text}");
+        check!(status == StatusCode::INTERNAL_SERVER_ERROR);
+        check!(text == INTERNAL_ERROR_MESSAGE, "leaked detail: {text}");
+        check!(!text.contains("kafka"), "leaked detail: {text}");
     }
 
     // #7: a 4xx client-input error keeps its specific, useful message.
@@ -1748,9 +1750,9 @@ overrides:
 
         let recs = sink.0.lock().unwrap();
         let mapping = &recs[0].symbols.mappings[0];
-        assert!(mapping.has_functions);
-        assert!(!mapping.has_filenames);
-        assert!(mapping.has_line_numbers);
-        assert!(!mapping.has_inline_frames);
+        check!(mapping.has_functions);
+        check!(!mapping.has_filenames);
+        check!(mapping.has_line_numbers);
+        check!(!mapping.has_inline_frames);
     }
 }

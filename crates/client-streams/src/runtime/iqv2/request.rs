@@ -133,10 +133,14 @@ mod tests {
     #[test]
     fn dominates_requires_all_bound_partitions_met() {
         let cur = pos(&[("in", 0, 10), ("in", 1, 5)]);
-        assert!(cur.dominates(&pos(&[("in", 0, 10)])));
-        assert!(cur.dominates(&pos(&[("in", 0, 9), ("in", 1, 5)])));
-        assert!(!cur.dominates(&pos(&[("in", 0, 11)]))); // behind
-        assert!(!cur.dominates(&pos(&[("other", 0, 1)]))); // unknown tp
+        for (bound, want) in [
+            (pos(&[("in", 0, 10)]), true),
+            (pos(&[("in", 0, 9), ("in", 1, 5)]), true),
+            (pos(&[("in", 0, 11)]), false),   // behind
+            (pos(&[("other", 0, 1)]), false), // unknown tp
+        ] {
+            assert!(cur.dominates(&bound) == want);
+        }
     }
 
     #[test]

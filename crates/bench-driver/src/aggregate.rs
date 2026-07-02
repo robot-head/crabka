@@ -320,7 +320,7 @@ mod tests {
         Acks, Compression, LatencyPercentiles, LoadMode, ModeTag, Resource, Scenario, Throughput,
         Topology,
     };
-    use assert2::assert;
+    use assert2::{assert, check};
 
     fn run(
         stack: Stack,
@@ -388,10 +388,10 @@ mod tests {
     #[test]
     fn stat_computes_mean_and_sample_stddev() {
         let s = stat(&[2.0, 4.0, 6.0]);
-        assert!(s.n == 3);
-        assert!((s.mean - 4.0).abs() < 1e-9);
+        check!(s.n == 3);
+        check!((s.mean - 4.0).abs() < 1e-9);
         // sample variance = ((−2)²+0²+2²)/(3−1) = 8/2 = 4 → stddev 2.
-        assert!((s.stddev - 2.0).abs() < 1e-9);
+        check!((s.stddev - 2.0).abs() < 1e-9);
     }
 
     #[test]
@@ -478,22 +478,20 @@ mod tests {
             .iter()
             .find(|s| s.metric == "producer_msgs_per_sec" && s.stack == Stack::Crabka)
             .expect("producer series present");
-        assert!(prod.points.len() == 2);
         assert!(
-            prod.points[0]
-                == TsPoint {
-                    t_offset_ms: 0,
-                    mean: 2000.0,
-                    n: 2
-                }
-        );
-        assert!(
-            prod.points[1]
-                == TsPoint {
-                    t_offset_ms: 2000,
-                    mean: 3000.0,
-                    n: 2
-                }
+            prod.points
+                == vec![
+                    TsPoint {
+                        t_offset_ms: 0,
+                        mean: 2000.0,
+                        n: 2
+                    },
+                    TsPoint {
+                        t_offset_ms: 2000,
+                        mean: 3000.0,
+                        n: 2
+                    },
+                ]
         );
         let cpu = series
             .iter()

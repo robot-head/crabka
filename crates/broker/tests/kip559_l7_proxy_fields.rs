@@ -9,7 +9,7 @@
 //! JoinGroup and v5 for SyncGroup, so the KIP-559 fields are always
 //! exercised on these tests.
 
-use assert2::assert;
+use assert2::{assert, check};
 mod support;
 
 use crabka_protocol::owned::join_group_request::{JoinGroupRequest, JoinGroupRequestProtocol};
@@ -62,15 +62,15 @@ async fn bootstrap_member(p: &support::InProcess) -> (String, i32) {
         })
         .await
         .expect("JoinGroup");
-    assert!(r2.error_code == 0, "JoinGroup must succeed: {r2:?}");
+    check!(r2.error_code == 0, "JoinGroup must succeed: {r2:?}");
 
     // KIP-559: protocol_type and protocol_name must be set on the
     // success response.
-    assert!(
+    check!(
         r2.protocol_type.as_deref() == Some(PROTOCOL_TYPE),
         "JoinGroup must echo protocol_type: {r2:?}"
     );
-    assert!(
+    check!(
         r2.protocol_name.as_deref() == Some(PROTOCOL_NAME),
         "JoinGroup must echo protocol_name: {r2:?}"
     );
@@ -107,14 +107,14 @@ async fn sync_group_response_carries_protocol_type_and_name_on_success() {
         })
         .await
         .expect("SyncGroup");
-    assert!(r3.error_code == 0, "SyncGroup must succeed: {r3:?}");
+    check!(r3.error_code == 0, "SyncGroup must succeed: {r3:?}");
 
     // KIP-559: both fields must be echoed on the v5+ response.
-    assert!(
+    check!(
         r3.protocol_type.as_deref() == Some(PROTOCOL_TYPE),
         "SyncGroup must echo protocol_type: {r3:?}"
     );
-    assert!(
+    check!(
         r3.protocol_name.as_deref() == Some(PROTOCOL_NAME),
         "SyncGroup must echo protocol_name: {r3:?}"
     );
@@ -181,15 +181,15 @@ async fn sync_group_response_carries_protocol_type_on_unknown_member_error() {
         })
         .await
         .expect("SyncGroup");
-    assert!(
+    check!(
         r.error_code == 25,
         "expected UNKNOWN_MEMBER_ID (25), got {r:?}"
     );
-    assert!(
+    check!(
         r.protocol_type.as_deref() == Some(PROTOCOL_TYPE),
         "UNKNOWN_MEMBER_ID response must echo the recorded protocol_type: {r:?}"
     );
-    assert!(
+    check!(
         r.protocol_name.as_deref() == Some(PROTOCOL_NAME),
         "UNKNOWN_MEMBER_ID response must echo the recorded protocol_name: {r:?}"
     );

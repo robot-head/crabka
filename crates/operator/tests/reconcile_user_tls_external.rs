@@ -368,25 +368,25 @@ async fn tls_external_user_with_no_authorization_and_no_quotas_still_reaches_rea
     reconcile(Arc::new(ku), ctx).await.unwrap();
 
     let calls = fake_for_assert.lock().await.calls();
-    assert!(
+    check!(
         calls
             .iter()
             .any(|c| matches!(c, RecordedCall::DescribeAcls(_))),
         "DescribeAcls expected even when spec declares no ACLs: {calls:?}",
     );
-    assert!(
+    check!(
         !calls
             .iter()
             .any(|c| matches!(c, RecordedCall::CreateAcls(_))),
         "no CreateAcls expected when spec declares no ACLs: {calls:?}",
     );
-    assert!(
+    check!(
         !calls
             .iter()
             .any(|c| matches!(c, RecordedCall::DescribeUserQuotas(_))),
         "no DescribeUserQuotas expected when spec.quotas is None: {calls:?}",
     );
-    assert!(
+    check!(
         !calls
             .iter()
             .any(|c| matches!(c, RecordedCall::AlterUserQuotas { .. })),

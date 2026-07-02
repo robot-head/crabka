@@ -154,6 +154,7 @@ impl ReplicatorConfig {
 #[cfg(test)]
 mod tests {
     use assert2::assert;
+    use assert2::check;
 
     use super::*;
 
@@ -177,10 +178,10 @@ policies:
     #[test]
     fn parses_and_validates() {
         let cfg = ReplicatorConfig::from_yaml(YAML).unwrap();
-        assert!(cfg.clusters.len() == 2);
-        assert!(cfg.clusters["eu-west"].zones == vec!["eu".to_string(), "gdpr".to_string()]);
-        assert!(cfg.flows[0].naming == NamingPolicy::Default);
-        assert!(cfg.flows[0].delivery == Delivery::AtLeastOnce);
+        check!(cfg.clusters.len() == 2);
+        check!(cfg.clusters["eu-west"].zones == vec!["eu".to_string(), "gdpr".to_string()]);
+        check!(cfg.flows[0].naming == NamingPolicy::Default);
+        check!(cfg.flows[0].delivery == Delivery::AtLeastOnce);
         cfg.validate().unwrap();
     }
 

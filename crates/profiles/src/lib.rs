@@ -59,7 +59,7 @@ pub fn crate_smoke() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+    use assert2::{assert, check};
 
     use super::*;
 
@@ -70,15 +70,18 @@ mod tests {
 
     #[test]
     fn status_codes_map() {
-        assert!(ProfilesError::UnsupportedFormat("x".into()).status_code() == 415);
-        assert!(ProfilesError::Decode("x".into()).status_code() == 400);
-        assert!(
-            ProfilesError::from(LimitError::MaxSeries {
-                limit: 1,
-                observed: 2,
-            })
-            .status_code()
-                == 429
-        );
+        for (err, want) in [
+            (ProfilesError::UnsupportedFormat("x".into()), 415),
+            (ProfilesError::Decode("x".into()), 400),
+            (
+                ProfilesError::from(LimitError::MaxSeries {
+                    limit: 1,
+                    observed: 2,
+                }),
+                429,
+            ),
+        ] {
+            check!(err.status_code() == want);
+        }
     }
 }

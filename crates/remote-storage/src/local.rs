@@ -214,6 +214,7 @@ impl RemoteStorageManager for LocalTieredStorage {
 mod tests {
     use super::*;
     use assert2::assert;
+    use assert2::check;
     use std::collections::BTreeMap;
     use std::io::Write;
 
@@ -282,14 +283,21 @@ mod tests {
         let md = metadata(10);
         rsm.copy_log_segment_data(&md, &sample_data(src.path(), false))
             .unwrap();
-        // Inclusive [2, 5] -> "2345".
-        assert!(rsm.fetch_log_segment(&md, 2, Some(5)).unwrap() == b"2345");
-        // Open-ended from 7 -> "789".
-        assert!(rsm.fetch_log_segment(&md, 7, None).unwrap() == b"789");
-        // End past EOF clamps.
-        assert!(rsm.fetch_log_segment(&md, 8, Some(99)).unwrap() == b"89");
-        // Start at EOF -> empty.
-        assert!(rsm.fetch_log_segment(&md, 10, None).unwrap() == b"");
+        for (start, end, want) in [
+            // Inclusive [2, 5] -> "2345".
+            (2, Some(5), b"2345".as_ref()),
+            // Open-ended from 7 -> "789".
+            (7, None, b"789".as_ref()),
+            // End past EOF clamps.
+            (8, Some(99), b"89".as_ref()),
+            // Start at EOF -> empty.
+            (10, None, b"".as_ref()),
+        ] {
+            check!(
+                rsm.fetch_log_segment(&md, start, end).unwrap() == want,
+                "range [{start}, {end:?}]"
+            );
+        }
     }
 
     #[test]
@@ -313,11 +321,18 @@ mod tests {
         let md = metadata(10);
         rsm.copy_log_segment_data(&md, &sample_data(src.path(), true))
             .unwrap();
-        assert!(rsm.fetch_index(&md, IndexType::Offset).unwrap() == b"OFFSET-IDX");
-        assert!(rsm.fetch_index(&md, IndexType::Timestamp).unwrap() == b"TIME-IDX");
-        assert!(rsm.fetch_index(&md, IndexType::ProducerSnapshot).unwrap() == b"SNAP");
-        assert!(rsm.fetch_index(&md, IndexType::LeaderEpoch).unwrap() == b"EPOCH-BYTES");
-        assert!(rsm.fetch_index(&md, IndexType::Transaction).unwrap() == b"TXN-IDX");
+        for (index_type, want) in [
+            (IndexType::Offset, b"OFFSET-IDX".as_ref()),
+            (IndexType::Timestamp, b"TIME-IDX".as_ref()),
+            (IndexType::ProducerSnapshot, b"SNAP".as_ref()),
+            (IndexType::LeaderEpoch, b"EPOCH-BYTES".as_ref()),
+            (IndexType::Transaction, b"TXN-IDX".as_ref()),
+        ] {
+            check!(
+                rsm.fetch_index(&md, index_type).unwrap() == want,
+                "{index_type:?}"
+            );
+        }
     }
 
     #[test]

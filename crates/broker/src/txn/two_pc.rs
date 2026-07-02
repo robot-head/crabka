@@ -107,31 +107,37 @@ mod tests {
 
     #[test]
     fn resolve_timeout_2pc_is_sentinel_regardless_of_request() {
-        assert!(resolve_txn_timeout(true, 30_000) == NO_TIMEOUT_MS);
-        assert!(resolve_txn_timeout(true, 0) == NO_TIMEOUT_MS);
-        assert!(resolve_txn_timeout(true, i32::MAX) == NO_TIMEOUT_MS);
-        // Even an out-of-range request is ignored under 2PC.
-        assert!(resolve_txn_timeout(true, -5) == NO_TIMEOUT_MS);
+        // Even an out-of-range request (-5) is ignored under 2PC.
+        for requested in [30_000, 0, i32::MAX, -5] {
+            assert!(
+                resolve_txn_timeout(true, requested) == NO_TIMEOUT_MS,
+                "{requested}"
+            );
+        }
     }
 
     #[test]
     fn resolve_timeout_non_2pc_clamps_to_kafka_bounds() {
-        assert!(resolve_txn_timeout(false, 30_000) == 30_000);
-        // Below the floor clamps up.
-        assert!(resolve_txn_timeout(false, 0) == MIN_TXN_TIMEOUT_MS);
-        assert!(resolve_txn_timeout(false, -1) == MIN_TXN_TIMEOUT_MS);
-        // Above the ceiling clamps down.
-        assert!(resolve_txn_timeout(false, i32::MAX) == MAX_TXN_TIMEOUT_MS);
-        assert!(resolve_txn_timeout(false, MAX_TXN_TIMEOUT_MS + 1) == MAX_TXN_TIMEOUT_MS);
+        // Below the floor clamps up; above the ceiling clamps down.
+        for (requested, want) in [
+            (30_000, 30_000),
+            (0, MIN_TXN_TIMEOUT_MS),
+            (-1, MIN_TXN_TIMEOUT_MS),
+            (i32::MAX, MAX_TXN_TIMEOUT_MS),
+            (MAX_TXN_TIMEOUT_MS + 1, MAX_TXN_TIMEOUT_MS),
+        ] {
+            assert!(resolve_txn_timeout(false, requested) == want, "{requested}");
+        }
     }
 
     #[test]
     fn non_2pc_resolution_never_collides_with_the_sentinel() {
+        use assert2::check;
         // The clamp ceiling is far below i32::MAX, so a non-2PC transaction can
         // never accidentally look like a 2PC one.
-        assert!(resolve_txn_timeout(false, i32::MAX) != NO_TIMEOUT_MS);
-        assert!(!is_two_phase_commit(resolve_txn_timeout(false, i32::MAX)));
-        assert!(is_two_phase_commit(resolve_txn_timeout(true, 1)));
+        check!(resolve_txn_timeout(false, i32::MAX) != NO_TIMEOUT_MS);
+        check!(!is_two_phase_commit(resolve_txn_timeout(false, i32::MAX)));
+        check!(is_two_phase_commit(resolve_txn_timeout(true, 1)));
     }
 
     #[test]

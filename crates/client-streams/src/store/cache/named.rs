@@ -266,6 +266,7 @@ impl NamedCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::check;
 
     fn ctx() -> RecordContext {
         RecordContext {
@@ -328,9 +329,9 @@ mod tests {
 
         let mut noop = |_: &Bytes, _: &LruCacheEntry| {};
         c.evict(&mut noop);
-        assert!(c.get(&key(b"A")).is_none(), "A (LRU) evicted first");
-        assert!(c.get(&key(b"B")).is_some());
-        assert!(c.get(&key(b"C")).is_some());
+        check!(c.get(&key(b"A")).is_none(), "A (LRU) evicted first");
+        check!(c.get(&key(b"B")).is_some());
+        check!(c.get(&key(b"C")).is_some());
 
         c.evict(&mut noop);
         assert!(c.get(&key(b"C")).is_none(), "C evicted next");
@@ -352,9 +353,9 @@ mod tests {
         assert_eq!(seen, vec![key(b"A"), key(b"B"), key(b"C")]);
 
         // No entry remains dirty.
-        assert!(!c.get(&key(b"A")).unwrap().dirty);
-        assert!(!c.get(&key(b"B")).unwrap().dirty);
-        assert!(!c.get(&key(b"C")).unwrap().dirty);
+        check!(!c.get(&key(b"A")).unwrap().dirty);
+        check!(!c.get(&key(b"B")).unwrap().dirty);
+        check!(!c.get(&key(b"C")).unwrap().dirty);
     }
 
     #[test]

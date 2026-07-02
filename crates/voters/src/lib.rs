@@ -108,7 +108,7 @@ impl VoterSet {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
 
     fn sample(id: NodeId) -> Voter {
         Voter {
@@ -142,15 +142,15 @@ mod tests {
     #[test]
     fn accessors_reflect_contents() {
         let set = VoterSet::from_voters([sample(1), sample(2)]);
-        assert!(set.len() == 2);
-        assert!(!set.is_empty());
-        assert!(set.get(1) == Some(&sample(1)));
-        assert!(set.get(99).is_none());
-        assert!(set.iter().count() == 2);
+        check!(set.len() == 2);
+        check!(!set.is_empty());
+        check!(set.get(1) == Some(&sample(1)));
+        check!(set.get(99).is_none());
+        check!(set.iter().count() == 2);
 
         let empty = VoterSet::default();
-        assert!(empty.len() == 0);
-        assert!(empty.is_empty());
-        assert!(empty.iter().count() == 0);
+        check!(empty.len() == 0);
+        check!(empty.is_empty());
+        check!(empty.iter().count() == 0);
     }
 }

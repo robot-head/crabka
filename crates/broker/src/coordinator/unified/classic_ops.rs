@@ -471,7 +471,7 @@ pub(super) fn validate_commit(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use crabka_protocol::owned::join_group_request::JoinGroupRequestProtocol;
     use crabka_protocol::owned::leave_group_request::MemberIdentity;
     use crabka_protocol::owned::sync_group_request::SyncGroupRequestAssignment;
@@ -550,8 +550,8 @@ mod tests {
         let mut g = ClassicState::new("g");
         let action = handle_join(&mut g, &join_req("m1", None), "h");
         assert!(matches!(action, JoinAction::Park));
-        assert!(g.rebalance_deadline.is_some());
-        assert!(g.state == GroupState::PreparingRebalance);
+        check!(g.rebalance_deadline.is_some());
+        check!(g.state == GroupState::PreparingRebalance);
     }
 
     #[test]
@@ -609,15 +609,15 @@ mod tests {
         let _ = handle_join(&mut g, &join_req("warmup", None), "h");
         g.complete_rebalance("range"); // gen 1
         g.remove_member("warmup"); // group is now Empty, generation still 1
-        assert!(g.state == GroupState::Empty);
-        assert!(g.generation_id == 1);
+        check!(g.state == GroupState::Empty);
+        check!(g.generation_id == 1);
         // First real member rejoins the re-emptied group: Park (batch the
         // herd), NOT CompleteNow, even though the group has rebalanced before.
         assert!(matches!(
             handle_join(&mut g, &join_req("m1", None), "h"),
             JoinAction::Park
         ));
-        assert!(g.rebalance_from_empty);
+        check!(g.rebalance_from_empty);
     }
 
     #[test]
@@ -759,9 +759,13 @@ mod tests {
         // Not Stable yet → REBALANCE_IN_PROGRESS.
         assert!(handle_heartbeat(&mut g, &hb("m1", cur_gen)) == codes::REBALANCE_IN_PROGRESS);
         g.state = GroupState::Stable;
-        assert!(handle_heartbeat(&mut g, &hb("ghost", cur_gen)) == codes::UNKNOWN_MEMBER_ID);
-        assert!(handle_heartbeat(&mut g, &hb("m1", cur_gen + 9)) == codes::ILLEGAL_GENERATION);
-        assert!(handle_heartbeat(&mut g, &hb("m1", cur_gen)) == codes::NONE);
+        for (member, gen_id, want) in [
+            ("ghost", cur_gen, codes::UNKNOWN_MEMBER_ID),
+            ("m1", cur_gen + 9, codes::ILLEGAL_GENERATION),
+            ("m1", cur_gen, codes::NONE),
+        ] {
+            assert!(handle_heartbeat(&mut g, &hb(member, gen_id)) == want);
+        }
     }
 
     // ── handle_leave ──────────────────────────────────────────────────────────
@@ -776,10 +780,11 @@ mod tests {
             ..Default::default()
         };
         let out = handle_leave(&mut g, &req, 2);
-        assert!(out.len() == 1 && out[0].error_code == codes::NONE);
-        assert!(!g.members.contains_key("m1"));
+        assert!(out.len() == 1);
+        check!(out[0].error_code == codes::NONE);
+        check!(!g.members.contains_key("m1"));
         // Surviving member + was Stable → reopened a rebalance.
-        assert!(g.state == GroupState::PreparingRebalance);
+        check!(g.state == GroupState::PreparingRebalance);
     }
 
     #[test]
@@ -804,9 +809,9 @@ mod tests {
         };
         let out = handle_leave(&mut g, &req, 3);
         assert!(out.len() == 2);
-        assert!(out[0].error_code == codes::NONE); // resolved via instance index
-        assert!(out[1].error_code == codes::UNKNOWN_MEMBER_ID);
-        assert!(!g.members.contains_key("m1"));
+        check!(out[0].error_code == codes::NONE); // resolved via instance index
+        check!(out[1].error_code == codes::UNKNOWN_MEMBER_ID);
+        check!(!g.members.contains_key("m1"));
     }
 
     // ── validate_commit ───────────────────────────────────────────────────────
@@ -815,22 +820,34 @@ mod tests {
     fn validate_commit_branches() {
         let mut g = stable_two_member_group();
         g.state = GroupState::Stable;
-        // Simple consumer (no member, no instance) → allowed.
-        assert!(validate_commit(&g, "", None, -1).is_none());
-        // Unknown member → UNKNOWN_MEMBER_ID.
-        assert!(
-            validate_commit(&g, "ghost", None, g.generation_id) == Some(codes::UNKNOWN_MEMBER_ID)
-        );
-        // Wrong generation → ILLEGAL_GENERATION.
-        assert!(
-            validate_commit(&g, "m1", None, g.generation_id + 9) == Some(codes::ILLEGAL_GENERATION)
-        );
-        // Correct → allowed.
-        assert!(validate_commit(&g, "m1", None, g.generation_id).is_none());
-        // Instance set but unknown → UNKNOWN_MEMBER_ID.
-        assert!(
-            validate_commit(&g, "", Some("nope"), g.generation_id)
-                == Some(codes::UNKNOWN_MEMBER_ID)
-        );
+        for (member, instance, gen_id, want) in [
+            // Simple consumer (no member, no instance) → allowed.
+            ("", None, -1, None),
+            // Unknown member → UNKNOWN_MEMBER_ID.
+            (
+                "ghost",
+                None,
+                g.generation_id,
+                Some(codes::UNKNOWN_MEMBER_ID),
+            ),
+            // Wrong generation → ILLEGAL_GENERATION.
+            (
+                "m1",
+                None,
+                g.generation_id + 9,
+                Some(codes::ILLEGAL_GENERATION),
+            ),
+            // Correct → allowed.
+            ("m1", None, g.generation_id, None),
+            // Instance set but unknown → UNKNOWN_MEMBER_ID.
+            (
+                "",
+                Some("nope"),
+                g.generation_id,
+                Some(codes::UNKNOWN_MEMBER_ID),
+            ),
+        ] {
+            assert!(validate_commit(&g, member, instance, gen_id) == want);
+        }
     }
 }

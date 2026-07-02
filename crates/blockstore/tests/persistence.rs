@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use assert2::assert;
+use assert2::{assert, check};
 use crabka_blockstore::{
     BlockDescriptor, BlockKey, LabelIndex, LogBlockIndex as BlockIndex, TimeRange, labels,
     log_tenant_index_manifest_object_path, log_tenant_index_shard_catalog_object_path,
@@ -36,13 +36,13 @@ fn log_index_manifest_round_trips_label_and_block_indexes() {
     write_log_index_manifest(dir.path(), &labels_index, &blocks).unwrap();
     let (loaded_labels, loaded_blocks) = read_log_index_manifest(dir.path()).unwrap();
 
-    assert!(loaded_labels == labels_index);
-    assert!(loaded_blocks == blocks);
-    assert!(
+    check!(loaded_labels == labels_index);
+    check!(loaded_blocks == blocks);
+    check!(
         loaded_labels.label_values("tenant-a", "app")
             == BTreeSet::from(["api".into(), "worker".into()])
     );
-    assert!(
+    check!(
         loaded_blocks
             .match_blocks("tenant-a", TimeRange::new(150, 250).unwrap(), &[api])
             .len()
@@ -77,9 +77,9 @@ async fn log_index_manifest_round_trips_through_object_store() {
         .await
         .unwrap();
 
-    assert!(loaded_labels == labels_index);
-    assert!(loaded_blocks == blocks);
-    assert!(
+    check!(loaded_labels == labels_index);
+    check!(loaded_blocks == blocks);
+    check!(
         loaded_blocks
             .match_blocks("tenant-a", TimeRange::new(150, 250).unwrap(), &[worker])
             .len()
@@ -157,9 +157,9 @@ async fn tenant_log_index_manifest_round_trips_only_one_tenant() {
             .await
             .unwrap();
 
-    assert!(loaded_labels.label_values("tenant-a", "app") == BTreeSet::from(["api".into()]));
-    assert!(loaded_labels.label_values("tenant-b", "app").is_empty());
-    assert!(
+    check!(loaded_labels.label_values("tenant-a", "app") == BTreeSet::from(["api".into()]));
+    check!(loaded_labels.label_values("tenant-b", "app").is_empty());
+    check!(
         loaded_blocks
             .match_blocks(
                 "tenant-a",
@@ -169,7 +169,7 @@ async fn tenant_log_index_manifest_round_trips_only_one_tenant() {
             .len()
             == 1
     );
-    assert!(
+    check!(
         loaded_blocks
             .match_blocks(
                 "tenant-b",
@@ -227,12 +227,12 @@ async fn tenant_log_index_shard_round_trips_only_matching_time_and_series() {
             .await
             .unwrap();
 
-    assert!(
+    check!(
         loaded_labels.label_values("tenant-a", "app")
             == BTreeSet::from(["api".into(), "worker".into()])
     );
-    assert!(loaded_labels.label_values("tenant-b", "app").is_empty());
-    assert!(
+    check!(loaded_labels.label_values("tenant-b", "app").is_empty());
+    check!(
         loaded_blocks
             .match_blocks("tenant-a", TimeRange::new(0, 1_000).unwrap(), &[])
             .into_iter()
@@ -243,7 +243,7 @@ async fn tenant_log_index_shard_round_trips_only_matching_time_and_series() {
                 "tenant=tenant-a/partition=0/offsets=20-29/time=200-299.parquet",
             ]
     );
-    assert!(loaded_labels.labels_for("tenant-a", admin).is_none());
+    check!(loaded_labels.labels_for("tenant-a", admin).is_none());
 }
 
 #[tokio::test]
@@ -294,11 +294,11 @@ async fn tenant_log_index_shard_catalog_selects_overlapping_shards_and_merges_in
     .await
     .unwrap();
 
-    assert!(
+    check!(
         loaded_labels.label_values("tenant-a", "app")
             == BTreeSet::from(["api".into(), "worker".into()])
     );
-    assert!(
+    check!(
         loaded_blocks
             .match_blocks("tenant-a", TimeRange::new(0, 1_000).unwrap(), &[])
             .into_iter()
@@ -309,5 +309,5 @@ async fn tenant_log_index_shard_catalog_selects_overlapping_shards_and_merges_in
                 "tenant=tenant-a/partition=0/offsets=20-29/time=200-299.parquet",
             ]
     );
-    assert!(loaded_labels.labels_for("tenant-a", admin).is_none());
+    check!(loaded_labels.labels_for("tenant-a", admin).is_none());
 }

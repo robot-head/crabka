@@ -77,50 +77,58 @@ fn inner_borrowed(t: &str, struct_path: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
 
     #[test]
     fn primitives_owned() {
-        assert!(owned_type("int16", false, None) == "i16");
-        assert!(owned_type("int32", true, None) == "Option<i32>");
-        assert!(owned_type("string", false, None) == "String");
-        assert!(owned_type("string", true, None) == "Option<String>");
-        assert!(owned_type("bytes", false, None) == "::bytes::Bytes");
-        assert!(owned_type("uuid", false, None) == "crate::primitives::uuid::Uuid");
-        assert!(owned_type("records", false, None) == "crate::records::RecordsPayload");
+        for (t, nullable, want) in [
+            ("int16", false, "i16"),
+            ("int32", true, "Option<i32>"),
+            ("string", false, "String"),
+            ("string", true, "Option<String>"),
+            ("bytes", false, "::bytes::Bytes"),
+            ("uuid", false, "crate::primitives::uuid::Uuid"),
+            ("records", false, "crate::records::RecordsPayload"),
+        ] {
+            assert!(owned_type(t, nullable, None) == want);
+        }
     }
 
     #[test]
     fn primitives_borrowed() {
-        assert!(borrowed_type("string", false, None) == "&'a str");
-        assert!(borrowed_type("bytes", true, None) == "Option<&'a [u8]>");
-        assert!(
-            borrowed_type("records", false, None) == "crate::records::RecordsPayloadBorrowed<'a>"
-        );
+        for (t, nullable, want) in [
+            ("string", false, "&'a str"),
+            ("bytes", true, "Option<&'a [u8]>"),
+            (
+                "records",
+                false,
+                "crate::records::RecordsPayloadBorrowed<'a>",
+            ),
+        ] {
+            assert!(borrowed_type(t, nullable, None) == want);
+        }
     }
 
     #[test]
     fn arrays() {
-        assert!(owned_type("[]int32", false, None) == "Vec<i32>");
-        assert!(owned_type("[]string", true, None) == "Option<Vec<String>>");
-        assert!(borrowed_type("[]string", false, None) == "Vec<&'a str>");
+        check!(owned_type("[]int32", false, None) == "Vec<i32>");
+        check!(owned_type("[]string", true, None) == "Option<Vec<String>>");
+        check!(borrowed_type("[]string", false, None) == "Vec<&'a str>");
     }
 
     #[test]
     fn struct_refs() {
-        assert!(owned_type("ProduceTopic", false, Some("ProduceTopic")) == "ProduceTopic");
+        check!(owned_type("ProduceTopic", false, Some("ProduceTopic")) == "ProduceTopic");
         // Caller is responsible for including <'a> in struct_path when needed.
-        assert!(
+        check!(
             borrowed_type("ProduceTopic", false, Some("ProduceTopic<'a>")) == "ProduceTopic<'a>"
         );
-        assert!(borrowed_type("ProduceTopic", false, Some("ProduceTopic")) == "ProduceTopic");
-        assert!(owned_type("[]ProduceTopic", false, Some("ProduceTopic")) == "Vec<ProduceTopic>");
-        assert!(
+        check!(borrowed_type("ProduceTopic", false, Some("ProduceTopic")) == "ProduceTopic");
+        check!(owned_type("[]ProduceTopic", false, Some("ProduceTopic")) == "Vec<ProduceTopic>");
+        check!(
             borrowed_type("[]ProduceTopic", false, Some("ProduceTopic<'a>"))
                 == "Vec<ProduceTopic<'a>>"
         );
-        assert!(
-            borrowed_type("[]ProduceTopic", false, Some("ProduceTopic")) == "Vec<ProduceTopic>"
-        );
+        check!(borrowed_type("[]ProduceTopic", false, Some("ProduceTopic")) == "Vec<ProduceTopic>");
     }
 }

@@ -131,9 +131,13 @@ mod tests {
     fn writes_full_tree() {
         let dir = tempdir().unwrap();
         write_reference_tree(dir.path()).unwrap();
-        assert!(dir.path().join("operator/kafka.md").exists());
-        assert!(dir.path().join("broker/protocol-apis.md").exists());
-        assert!(dir.path().join("broker/server-config.md").exists());
+        for page in [
+            "operator/kafka.md",
+            "broker/protocol-apis.md",
+            "broker/server-config.md",
+        ] {
+            assert!(dir.path().join(page).exists(), "missing {page}");
+        }
         let kafka = std::fs::read_to_string(dir.path().join("operator/kafka.md")).unwrap();
         assert!(kafka.contains("template = \"docs/page.html\""));
         let idx = std::fs::read_to_string(dir.path().join("_index.md")).unwrap();

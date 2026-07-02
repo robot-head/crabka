@@ -1090,18 +1090,16 @@ mod tests {
 
     #[test]
     fn custom_claim_check_rejects_false_and_null_matches() {
-        assert!(!evaluate_custom_claim_check(
-            &parse_jp("$.enabled"),
-            &serde_json::json!({"enabled": false}),
-        ));
-        assert!(!evaluate_custom_claim_check(
-            &parse_jp("$.enabled"),
-            &serde_json::json!({"enabled": null}),
-        ));
-        assert!(evaluate_custom_claim_check(
-            &parse_jp("$.enabled"),
-            &serde_json::json!({"enabled": true}),
-        ));
+        for (claims, want) in [
+            (serde_json::json!({"enabled": false}), false),
+            (serde_json::json!({"enabled": null}), false),
+            (serde_json::json!({"enabled": true}), true),
+        ] {
+            assert!(
+                evaluate_custom_claim_check(&parse_jp("$.enabled"), &claims) == want,
+                "case {claims}"
+            );
+        }
     }
 
     #[test]

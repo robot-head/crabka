@@ -14,7 +14,7 @@
 //! `reconcile_listener_auth.rs`) and that the rendered TOML actually
 //! lands in the broker-config ConfigMap.
 
-use assert2::assert;
+use assert2::{assert, check};
 use std::sync::Arc;
 
 use crabka_operator::controller::kafka::reconcile;
@@ -160,11 +160,11 @@ fn assert_listeners_invalid_with_reason(
         .iter()
         .find(|c| c["type"] == "ListenersValid")
         .unwrap_or_else(|| panic!("ListenersValid present; body = {body}"));
-    assert!(valid["status"] == "False", "body = {body}");
-    assert!(valid["reason"] == expected_reason, "body = {body}");
+    check!(valid["status"] == "False", "body = {body}");
+    check!(valid["reason"] == expected_reason, "body = {body}");
 
     // The ConfigMap PATCH must be absent on the validation-fail path.
-    assert!(
+    check!(
         !observed.iter().any(|r| {
             r.method() == Method::PATCH
                 && r.uri()
@@ -226,37 +226,18 @@ async fn oauth_listener_renders_oauthbearer_toml_block() {
     let observed = state.take_observed();
     let toml = extract_broker0_toml(&observed, "c1");
 
-    assert!(toml.contains("[oauthbearer]"), "TOML: {toml}");
-    assert!(
-        toml.contains(
-            "jwks_endpoint_uri = \"https://kc.example.com/realms/kafka/protocol/openid-connect/certs\""
-        ),
-        "TOML: {toml}"
-    );
-    assert!(
-        toml.contains("valid_issuer_uri = \"https://kc.example.com/realms/kafka\""),
-        "TOML: {toml}"
-    );
-    assert!(
-        toml.contains("expected_audience = \"kafka\""),
-        "TOML: {toml}"
-    );
-    assert!(
-        toml.contains("principal_claim_name = \"preferred_username\""),
-        "TOML: {toml}"
-    );
-    assert!(
-        toml.contains("custom_claim_check = '''$.scope[?@ == 'kafka.write']'''"),
-        "TOML: {toml}"
-    );
-    assert!(
-        toml.contains("jwks_refresh_interval_ms = 300000"),
-        "TOML: {toml}"
-    );
-    assert!(
-        toml.contains("allowable_clock_skew_ms = 30000"),
-        "TOML: {toml}"
-    );
+    for needle in [
+        "[oauthbearer]",
+        "jwks_endpoint_uri = \"https://kc.example.com/realms/kafka/protocol/openid-connect/certs\"",
+        "valid_issuer_uri = \"https://kc.example.com/realms/kafka\"",
+        "expected_audience = \"kafka\"",
+        "principal_claim_name = \"preferred_username\"",
+        "custom_claim_check = '''$.scope[?@ == 'kafka.write']'''",
+        "jwks_refresh_interval_ms = 300000",
+        "allowable_clock_skew_ms = 30000",
+    ] {
+        assert!(toml.contains(needle), "missing {needle:?} in TOML: {toml}");
+    }
 }
 
 // ── test 2: OAUTHBEARER appears in the listener's sasl_mechanisms ───────────
@@ -1051,15 +1032,13 @@ async fn oauth_listener_with_fallback_user_name_claim_renders_broker_toml_key() 
     let observed = state.take_observed();
     let toml = extract_broker0_toml(&observed, "c21");
 
-    assert!(toml.contains("[oauthbearer]"), "TOML: {toml}");
-    assert!(
-        toml.contains("fallback_user_name_claim = \"client_id\""),
-        "expected fallback_user_name_claim render; got:\n{toml}"
-    );
-    assert!(
-        toml.contains("fallback_user_name_prefix = \"service-account-\""),
-        "expected fallback_user_name_prefix render; got:\n{toml}"
-    );
+    for needle in [
+        "[oauthbearer]",
+        "fallback_user_name_claim = \"client_id\"",
+        "fallback_user_name_prefix = \"service-account-\"",
+    ] {
+        assert!(toml.contains(needle), "missing {needle:?} in TOML:\n{toml}");
+    }
 }
 
 // ── groupsClaim JsonPath + delimiter render to broker TOML ────────────────
@@ -1092,15 +1071,13 @@ async fn oauth_listener_with_groups_claim_renders_broker_toml_key() {
     let observed = state.take_observed();
     let toml = extract_broker0_toml(&observed, "c22");
 
-    assert!(toml.contains("[oauthbearer]"), "TOML: {toml}");
-    assert!(
-        toml.contains("groups_claim = '''$.realm_access.roles[*]'''"),
-        "expected groups_claim render; got:\n{toml}"
-    );
-    assert!(
-        toml.contains("groups_claim_delimiter = \",\""),
-        "expected groups_claim_delimiter render; got:\n{toml}"
-    );
+    for needle in [
+        "[oauthbearer]",
+        "groups_claim = '''$.realm_access.roles[*]'''",
+        "groups_claim_delimiter = \",\"",
+    ] {
+        assert!(toml.contains(needle), "missing {needle:?} in TOML:\n{toml}");
+    }
 }
 
 // ── JWKS refresher policy fields render to broker TOML ────────────────────
@@ -1133,19 +1110,14 @@ async fn oauth_listener_with_jwks_policies_renders_broker_toml_keys() {
     let observed = state.take_observed();
     let toml = extract_broker0_toml(&observed, "c23");
 
-    assert!(toml.contains("[oauthbearer]"), "TOML: {toml}");
-    assert!(
-        toml.contains("jwks_min_refresh_pause_seconds = 2"),
-        "expected jwks_min_refresh_pause_seconds render; got:\n{toml}"
-    );
-    assert!(
-        toml.contains("jwks_expiry_seconds = 3600"),
-        "expected jwks_expiry_seconds render; got:\n{toml}"
-    );
-    assert!(
-        toml.contains("jwks_ignore_key_use = true"),
-        "expected jwks_ignore_key_use render; got:\n{toml}"
-    );
+    for needle in [
+        "[oauthbearer]",
+        "jwks_min_refresh_pause_seconds = 2",
+        "jwks_expiry_seconds = 3600",
+        "jwks_ignore_key_use = true",
+    ] {
+        assert!(toml.contains(needle), "missing {needle:?} in TOML:\n{toml}");
+    }
 }
 
 // ── JWKS policy fields rejected on introspection-mode ─────────────────────

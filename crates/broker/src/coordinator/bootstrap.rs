@@ -641,7 +641,7 @@ fn apply_group_metadata(g: &mut ClassicState, v: GroupMetadataValue, replay_time
 mod tests {
     use super::*;
     use crate::config::BrokerConfig;
-    use assert2::assert;
+    use assert2::{assert, check};
     use crabka_raft::ControllerHandle;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
@@ -737,9 +737,9 @@ mod tests {
         // Type locked + seed reconstructed.
         assert!(coord.group_type("sg") == Some(crate::coordinator::unified::GroupType::Share));
         let seed = coord.cached_share_seed("sg").expect("seed cached");
-        assert!(seed.group_epoch == 4);
-        assert!(seed.members.contains_key("m1"));
-        assert!(seed.current_per_member["m1"].member_epoch == 4);
+        check!(seed.group_epoch == 4);
+        check!(seed.members.contains_key("m1"));
+        check!(seed.current_per_member["m1"].member_epoch == 4);
 
         // A member tombstone scrubs the member from the seed.
         let tomb_key =
@@ -834,9 +834,9 @@ mod tests {
         // Type locked to Streams + seed reconstructed.
         assert!(coord.group_type("stg") == Some(crate::coordinator::unified::GroupType::Streams));
         let seed = coord.cached_streams_seed("stg").expect("seed cached");
-        assert!(seed.group_epoch == 7);
-        assert!(seed.members.contains_key("m1"));
-        assert!(seed.current_per_member["m1"].member_epoch == 7);
+        check!(seed.group_epoch == 7);
+        check!(seed.members.contains_key("m1"));
+        check!(seed.current_per_member["m1"].member_epoch == 7);
 
         // A member tombstone scrubs the member from the seed.
         let tomb_key = persistence::parse_key(&sp::encode_streams_key(
@@ -891,9 +891,9 @@ mod tests {
         .await
         .unwrap();
         let topic_dir = log_dir::partition_dir(&config.log_dir, OFFSETS_TOPIC, OFFSETS_PARTITION);
-        assert!(topic_dir.exists());
-        assert!(partitions.contains(OFFSETS_TOPIC, OFFSETS_PARTITION));
-        assert!(controller.current_image().topic(OFFSETS_TOPIC).is_some());
+        check!(topic_dir.exists());
+        check!(partitions.contains(OFFSETS_TOPIC, OFFSETS_PARTITION));
+        check!(controller.current_image().topic(OFFSETS_TOPIC).is_some());
     }
 
     /// Regression for the bootstrap TOCTOU: a SECOND bootstrap against a
@@ -983,13 +983,13 @@ mod tests {
             }],
         };
         apply_group_metadata(&mut g, v, 0);
-        assert!(g.generation_id == 5);
-        assert!(g.protocol_type.as_deref() == Some("consumer"));
-        assert!(g.leader_id.as_deref() == Some("m1"));
-        assert!(g.state == ClassicGroupState::Stable);
-        assert!(g.members.contains_key("m1"));
-        assert!(g.members["m1"].assignment.as_deref() == Some(b"asn" as &[u8]));
-        assert!(g.current_member_id_for_instance("inst") == Some("m1"));
+        check!(g.generation_id == 5);
+        check!(g.protocol_type.as_deref() == Some("consumer"));
+        check!(g.leader_id.as_deref() == Some("m1"));
+        check!(g.state == ClassicGroupState::Stable);
+        check!(g.members.contains_key("m1"));
+        check!(g.members["m1"].assignment.as_deref() == Some(b"asn" as &[u8]));
+        check!(g.current_member_id_for_instance("inst") == Some("m1"));
 
         // No members → Empty state.
         let mut empty = ClassicState::new("g2");

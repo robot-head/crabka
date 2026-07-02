@@ -1,6 +1,7 @@
 //! Byte-exact interop gate: the encoder's wire `Topology` for a canonical
 //! Processor-API topology must match the JVM 4.x fixture.
 
+use assert2::check;
 use crabka_client_streams::{NodeHandle, Topology};
 
 #[test]
@@ -17,9 +18,9 @@ fn single_source_sink_matches_jvm_fixture() {
     let s = &wire.subtopologies[0];
     assert_eq!(s.subtopology_id, "0");
     assert_eq!(s.source_topics, vec!["streams-input".to_string()]);
-    assert!(s.source_topic_regex.is_empty());
-    assert!(s.repartition_sink_topics.is_empty());
-    assert!(s.repartition_source_topics.is_empty());
-    assert!(s.state_changelog_topics.is_empty());
-    assert!(s.copartition_groups.is_empty());
+    check!(s.source_topic_regex.is_empty());
+    check!(s.repartition_sink_topics.is_empty());
+    check!(s.repartition_source_topics.is_empty());
+    check!(s.state_changelog_topics.is_empty());
+    check!(s.copartition_groups.is_empty());
 }

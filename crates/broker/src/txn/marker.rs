@@ -77,9 +77,8 @@ mod tests {
     fn abort_marker_key_starts_with_version_zero_then_type_zero() {
         let b = build_marker_batch(1000, 0, 0, MarkerType::Abort);
         let key = b.records[0].key.as_ref().unwrap();
-        assert!(key.len() == 4);
-        assert!(&key[..2] == &0i16.to_be_bytes());
-        assert!(&key[2..] == &0i16.to_be_bytes());
+        // i16 BE version 0, then i16 BE control type 0 (abort).
+        assert!(&key[..] == &[0u8, 0, 0, 0][..]);
     }
 
     #[test]

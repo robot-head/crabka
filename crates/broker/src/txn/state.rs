@@ -165,11 +165,16 @@ mod tests {
     #[test]
     fn kafka_status_values_match_kafka() {
         // Empirically pinned: cp-kafka 4.0 Ongoing record had TransactionStatus=1.
-        assert!(TxnState::Ongoing.to_kafka_status() == 1);
-        assert!(TxnState::Empty.to_kafka_status() == 0);
-        assert!(TxnState::Dead.to_kafka_status() == 6);
+        for (state, want) in [
+            (TxnState::Ongoing, 1),
+            (TxnState::Empty, 0),
+            (TxnState::Dead, 6),
+        ] {
+            assert!(state.to_kafka_status() == want, "{state:?}");
+        }
         // PrepareEpochFence (7) and out-of-range are not modeled.
-        assert!(TxnState::from_kafka_status(7).is_none());
-        assert!(TxnState::from_kafka_status(-1).is_none());
+        for status in [7, -1] {
+            assert!(TxnState::from_kafka_status(status).is_none(), "{status}");
+        }
     }
 }

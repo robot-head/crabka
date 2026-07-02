@@ -58,11 +58,15 @@ mod tests {
 
     #[test]
     fn attribute_bits_match_kafka_table() {
-        assert!(Compression::None.attribute_bits() == 0);
-        assert!(Compression::Gzip.attribute_bits() == 1);
-        assert!(Compression::Snappy.attribute_bits() == 2);
-        assert!(Compression::Lz4.attribute_bits() == 3);
-        assert!(Compression::Zstd.attribute_bits() == 4);
+        for (compression, want) in [
+            (Compression::None, 0),
+            (Compression::Gzip, 1),
+            (Compression::Snappy, 2),
+            (Compression::Lz4, 3),
+            (Compression::Zstd, 4),
+        ] {
+            assert!(compression.attribute_bits() == want);
+        }
     }
 
     #[test]

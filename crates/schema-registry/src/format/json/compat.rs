@@ -250,66 +250,60 @@ mod tests {
             let _ = is_backward_compatible(k);
         }
         // Spot-check a representative selection of known verdicts.
-        assert!(is_backward_compatible(&Kind::TypeExtended));
-        assert!(!is_backward_compatible(&Kind::TypeNarrowed));
-        assert!(!is_backward_compatible(&Kind::TypeChanged));
-        assert!(!is_backward_compatible(
-            &Kind::PropertyAddedToOpenContentModel
-        ));
-        assert!(is_backward_compatible(
-            &Kind::PropertyRemovedFromOpenContentModel
-        ));
-        assert!(is_backward_compatible(
-            &Kind::PropertyAddedToClosedContentModel
-        ));
-        assert!(!is_backward_compatible(
-            &Kind::PropertyRemovedFromClosedContentModel
-        ));
-        assert!(!is_backward_compatible(&Kind::RequiredAttributeAdded));
-        assert!(is_backward_compatible(&Kind::RequiredAttributeRemoved));
-        assert!(!is_backward_compatible(&Kind::AdditionalPropertiesRemoved));
-        assert!(is_backward_compatible(&Kind::AdditionalPropertiesAdded));
-        assert!(!is_backward_compatible(&Kind::EnumArrayNarrowed));
-        assert!(is_backward_compatible(&Kind::EnumArrayExtended));
-        assert!(!is_backward_compatible(&Kind::EnumArrayChanged));
-        assert!(!is_backward_compatible(&Kind::MaximumAdded));
-        assert!(is_backward_compatible(&Kind::MaximumRemoved));
-        assert!(!is_backward_compatible(&Kind::MaximumDecreased));
-        assert!(is_backward_compatible(&Kind::MaximumIncreased));
-        assert!(!is_backward_compatible(&Kind::MinimumAdded));
-        assert!(is_backward_compatible(&Kind::MinimumRemoved));
-        assert!(is_backward_compatible(&Kind::MinimumDecreased));
-        assert!(!is_backward_compatible(&Kind::MinimumIncreased));
-        assert!(!is_backward_compatible(&Kind::MultipleOfAdded));
-        assert!(is_backward_compatible(&Kind::MultipleOfRemoved));
-        assert!(!is_backward_compatible(&Kind::MultipleOfChanged));
-        assert!(!is_backward_compatible(&Kind::MaxLengthAdded));
-        assert!(is_backward_compatible(&Kind::MaxLengthRemoved));
-        assert!(!is_backward_compatible(&Kind::PatternAdded));
-        assert!(is_backward_compatible(&Kind::PatternRemoved));
-        assert!(!is_backward_compatible(&Kind::PatternChanged));
-        assert!(!is_backward_compatible(&Kind::MaxItemsAdded));
-        assert!(is_backward_compatible(&Kind::MaxItemsRemoved));
-        assert!(!is_backward_compatible(&Kind::MinItemsAdded));
-        assert!(is_backward_compatible(&Kind::MinItemsRemoved));
-        assert!(!is_backward_compatible(&Kind::AdditionalItemsRemoved));
-        assert!(is_backward_compatible(&Kind::AdditionalItemsAdded));
-        assert!(!is_backward_compatible(&Kind::MaxPropertiesAdded));
-        assert!(is_backward_compatible(&Kind::MaxPropertiesRemoved));
-        assert!(!is_backward_compatible(&Kind::MinPropertiesAdded));
-        assert!(is_backward_compatible(&Kind::MinPropertiesRemoved));
-        assert!(!is_backward_compatible(&Kind::CombinedTypeChanged));
-        assert!(is_backward_compatible(&Kind::ProductTypeExtended));
-        assert!(!is_backward_compatible(&Kind::ProductTypeNarrowed));
-        assert!(is_backward_compatible(&Kind::SumTypeExtended));
-        assert!(!is_backward_compatible(&Kind::SumTypeNarrowed));
-        assert!(is_backward_compatible(&Kind::NotTypeExtended));
-        assert!(!is_backward_compatible(&Kind::NotTypeNarrowed));
-        assert!(!is_backward_compatible(
-            &Kind::CombinedTypeSubschemasChanged
-        ));
-        assert!(is_backward_compatible(&Kind::DependencyAdded));
-        assert!(is_backward_compatible(&Kind::DependencyRemoved));
-        assert!(!is_backward_compatible(&Kind::ConditionalChanged));
+        for (kind, want) in [
+            (Kind::TypeExtended, true),
+            (Kind::TypeNarrowed, false),
+            (Kind::TypeChanged, false),
+            (Kind::PropertyAddedToOpenContentModel, false),
+            (Kind::PropertyRemovedFromOpenContentModel, true),
+            (Kind::PropertyAddedToClosedContentModel, true),
+            (Kind::PropertyRemovedFromClosedContentModel, false),
+            (Kind::RequiredAttributeAdded, false),
+            (Kind::RequiredAttributeRemoved, true),
+            (Kind::AdditionalPropertiesRemoved, false),
+            (Kind::AdditionalPropertiesAdded, true),
+            (Kind::EnumArrayNarrowed, false),
+            (Kind::EnumArrayExtended, true),
+            (Kind::EnumArrayChanged, false),
+            (Kind::MaximumAdded, false),
+            (Kind::MaximumRemoved, true),
+            (Kind::MaximumDecreased, false),
+            (Kind::MaximumIncreased, true),
+            (Kind::MinimumAdded, false),
+            (Kind::MinimumRemoved, true),
+            (Kind::MinimumDecreased, true),
+            (Kind::MinimumIncreased, false),
+            (Kind::MultipleOfAdded, false),
+            (Kind::MultipleOfRemoved, true),
+            (Kind::MultipleOfChanged, false),
+            (Kind::MaxLengthAdded, false),
+            (Kind::MaxLengthRemoved, true),
+            (Kind::PatternAdded, false),
+            (Kind::PatternRemoved, true),
+            (Kind::PatternChanged, false),
+            (Kind::MaxItemsAdded, false),
+            (Kind::MaxItemsRemoved, true),
+            (Kind::MinItemsAdded, false),
+            (Kind::MinItemsRemoved, true),
+            (Kind::AdditionalItemsRemoved, false),
+            (Kind::AdditionalItemsAdded, true),
+            (Kind::MaxPropertiesAdded, false),
+            (Kind::MaxPropertiesRemoved, true),
+            (Kind::MinPropertiesAdded, false),
+            (Kind::MinPropertiesRemoved, true),
+            (Kind::CombinedTypeChanged, false),
+            (Kind::ProductTypeExtended, true),
+            (Kind::ProductTypeNarrowed, false),
+            (Kind::SumTypeExtended, true),
+            (Kind::SumTypeNarrowed, false),
+            (Kind::NotTypeExtended, true),
+            (Kind::NotTypeNarrowed, false),
+            (Kind::CombinedTypeSubschemasChanged, false),
+            (Kind::DependencyAdded, true),
+            (Kind::DependencyRemoved, true),
+            (Kind::ConditionalChanged, false),
+        ] {
+            assert_eq!(is_backward_compatible(&kind), want, "case {kind:?}");
+        }
     }
 }

@@ -12,7 +12,7 @@
     clippy::too_many_lines
 )]
 
-use assert2::assert;
+use assert2::{assert, check};
 
 use bytes::Bytes;
 use tempfile::TempDir;
@@ -263,10 +263,10 @@ async fn epoch_checkpoint_byte_compat() {
     let path = dir.path().join("ckpt-0").join("leader-epoch-checkpoint");
     let s = std::fs::read_to_string(&path).expect("checkpoint file");
     // Format: header "0\n", count "2\n", rows "0 0\n1 1\n".
-    assert!(s.starts_with("0\n"), "header should be '0\\n', got: {s:?}");
-    assert!(s.contains("\n2\n"), "count should be 2, got: {s:?}");
-    assert!(s.contains("0 0\n"), "epoch 0 row missing: {s:?}");
-    assert!(s.contains("1 1\n"), "epoch 1 row missing: {s:?}");
+    check!(s.starts_with("0\n"), "header should be '0\\n', got: {s:?}");
+    check!(s.contains("\n2\n"), "count should be 2, got: {s:?}");
+    check!(s.contains("0 0\n"), "epoch 0 row missing: {s:?}");
+    check!(s.contains("1 1\n"), "epoch 1 row missing: {s:?}");
 
     broker.shutdown().await;
 }
@@ -373,23 +373,23 @@ async fn diverging_epoch_returned_on_stale_last_fetched_epoch() {
 
     let part = &resp.responses[0].partitions[0];
     // NONE error code: divergence is reported in-band, not as an error.
-    assert!(
+    check!(
         part.error_code == 0,
         "expected NONE, got {}",
         part.error_code
     );
-    assert!(
+    check!(
         part.diverging_epoch.end_offset == k,
         "diverging_epoch.end_offset should be the epoch-0 boundary {k}, got {}",
         part.diverging_epoch.end_offset
     );
-    assert!(
+    check!(
         part.diverging_epoch.epoch == e0,
         "diverging_epoch.epoch should be {e0}, got {}",
         part.diverging_epoch.epoch
     );
     // No records are served alongside a divergence signal.
-    assert!(
+    check!(
         part.records.is_none()
             || part
                 .records

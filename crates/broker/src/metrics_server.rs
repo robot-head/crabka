@@ -102,8 +102,8 @@ mod tests {
             .await
             .unwrap();
         let s = std::str::from_utf8(&body).unwrap();
-        assert!(s.contains("crabka_broker_topic_bytes_in_total"), "{s}");
-        assert!(s.contains("42"), "{s}");
-        assert!(s.contains("# EOF"), "{s}");
+        for needle in ["crabka_broker_topic_bytes_in_total", "42", "# EOF"] {
+            assert!(s.contains(needle), "missing {needle:?} in {s}");
+        }
     }
 }

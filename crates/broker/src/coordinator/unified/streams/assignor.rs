@@ -447,7 +447,7 @@ fn to_role_maps(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
 
     fn member(id: &str, process: &str) -> AssignorMember {
         AssignorMember {
@@ -488,9 +488,13 @@ mod tests {
     fn empty_members_empty_assignment() {
         let inp = input(&[("a", &[0, 1])], &[], StreamsAssignorKind::Sticky);
         let out = assign(&[], &inp);
-        assert!(out.active.is_empty());
-        assert!(out.standby.is_empty());
-        assert!(out.warmup.is_empty());
+        assert!(
+            out == StreamsAssignment {
+                active: HashMap::new(),
+                standby: HashMap::new(),
+                warmup: HashMap::new(),
+            }
+        );
     }
 
     #[test]
@@ -498,10 +502,16 @@ mod tests {
         let members = [member("A", "p1")];
         let inp = input(&[("sub-0", &[0, 1, 2])], &[], StreamsAssignorKind::Sticky);
         let out = assign(&members, &inp);
-        assert!(out.active.len() == 1);
-        assert!(out.active["A"]["sub-0"] == vec![0, 1, 2]);
-        assert!(out.standby.is_empty());
-        assert!(out.warmup.is_empty());
+        assert!(
+            out == StreamsAssignment {
+                active: HashMap::from([(
+                    "A".to_string(),
+                    BTreeMap::from([("sub-0".to_string(), vec![0, 1, 2])]),
+                )]),
+                standby: HashMap::new(),
+                warmup: HashMap::new(),
+            }
+        );
     }
 
     #[test]
@@ -513,13 +523,21 @@ mod tests {
             StreamsAssignorKind::Sticky,
         );
         let out = assign(&members, &inp);
-        // 2/2 balanced.
-        assert!(count(&out.active) == 4);
-        assert!(out.active["A"]["sub-0"].len() == 2);
-        assert!(out.active["B"]["sub-0"].len() == 2);
-        // Deterministic: least-loaded fills A first, then B, alternating.
-        assert!(out.active["A"]["sub-0"] == vec![0, 2]);
-        assert!(out.active["B"]["sub-0"] == vec![1, 3]);
+        // 2/2 balanced; deterministic: least-loaded fills A first, then B,
+        // alternating.
+        assert!(
+            out.active
+                == HashMap::from([
+                    (
+                        "A".to_string(),
+                        BTreeMap::from([("sub-0".to_string(), vec![0, 2])]),
+                    ),
+                    (
+                        "B".to_string(),
+                        BTreeMap::from([("sub-0".to_string(), vec![1, 3])]),
+                    ),
+                ])
+        );
         // Re-running yields identical output.
         let out2 = assign(&members, &inp);
         assert!(out.active == out2.active);
@@ -626,10 +644,10 @@ mod tests {
         inp.num_standby_replicas = 0;
         let out = assign(&members, &inp);
         // Active stays on A (move deferred); B holds a warmup.
-        assert!(count(&out.active) == 2);
-        assert!(out.active["A"]["sub-0"].len() == 2);
-        assert!(count(&out.warmup) == 1);
-        assert!(out.warmup.contains_key("B"));
+        check!(count(&out.active) == 2);
+        check!(out.active["A"]["sub-0"].len() == 2);
+        check!(count(&out.warmup) == 1);
+        check!(out.warmup.contains_key("B"));
     }
 
     #[test]
@@ -652,8 +670,19 @@ mod tests {
         inp.acceptable_recovery_lag = 10;
         let out = assign(&members, &inp);
         // Move applied: A keeps 0, B takes 1; no warmup.
-        assert!(out.active["A"]["sub-0"] == vec![0]);
-        assert!(out.active["B"]["sub-0"] == vec![1]);
+        assert!(
+            out.active
+                == HashMap::from([
+                    (
+                        "A".to_string(),
+                        BTreeMap::from([("sub-0".to_string(), vec![0])]),
+                    ),
+                    (
+                        "B".to_string(),
+                        BTreeMap::from([("sub-0".to_string(), vec![1])]),
+                    ),
+                ])
+        );
         assert!(out.warmup.is_empty());
     }
 
@@ -686,9 +715,9 @@ mod tests {
         inp.num_warmup_replicas = 2;
         let out = assign(&members, &inp);
         // Sticky: active-only, no standby/warmup even with non-zero knobs.
-        assert!(count(&out.active) == 2);
-        assert!(out.standby.is_empty());
-        assert!(out.warmup.is_empty());
+        check!(count(&out.active) == 2);
+        check!(out.standby.is_empty());
+        check!(out.warmup.is_empty());
     }
 
     #[test]

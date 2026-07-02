@@ -152,7 +152,7 @@ fn labels_key(labels: &Labels) -> Vec<(String, String)> {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+    use assert2::{assert, check};
     use crabka_blockstore::Labels;
     use crabka_pprof::PprofProfile;
 
@@ -233,16 +233,20 @@ mod tests {
             .find(|profile| profile.profile_type.contains("alloc_space"))
             .unwrap();
 
-        assert!(objects.samples[0].value == 3);
-        assert!(space.samples[0].value == 4096);
-        assert!(objects.samples[0].timestamp_ns == 123_000_000);
-        assert!(objects.samples[0].stacktrace_location_refs == vec![6]);
-        assert!(objects.labels.get("__profile_type__") == Some(objects.profile_type.as_str()));
-        assert!(objects.labels.get("__period_type__") == Some("space"));
-        assert!(objects.labels.get("__period_unit__") == Some("bytes"));
-        assert!(objects.labels.get("__type__") == Some("alloc_objects"));
-        assert!(objects.labels.get("__unit__") == Some("count"));
-        assert!(objects.labels.get("__service_name__") == Some("api"));
+        check!(objects.samples[0].value == 3);
+        check!(space.samples[0].value == 4096);
+        check!(objects.samples[0].timestamp_ns == 123_000_000);
+        check!(objects.samples[0].stacktrace_location_refs == vec![6]);
+        for (name, want) in [
+            ("__profile_type__", objects.profile_type.as_str()),
+            ("__period_type__", "space"),
+            ("__period_unit__", "bytes"),
+            ("__type__", "alloc_objects"),
+            ("__unit__", "count"),
+            ("__service_name__", "api"),
+        ] {
+            check!(objects.labels.get(name) == Some(want));
+        }
     }
 
     #[test]
@@ -346,14 +350,12 @@ mod tests {
         })
         .unwrap();
 
-        assert!(out.len() == 2);
-        assert!(
-            out.iter()
-                .any(|profile| profile.labels.get("target") == Some("all"))
-        );
-        assert!(
-            out.iter()
-                .any(|profile| profile.labels.get("target") == Some("self"))
-        );
+        check!(out.len() == 2);
+        for target in ["all", "self"] {
+            check!(
+                out.iter()
+                    .any(|profile| profile.labels.get("target") == Some(target))
+            );
+        }
     }
 }

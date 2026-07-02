@@ -396,7 +396,7 @@ mod tests {
     use crate::model::Movement;
     use crate::model::proposal::ProposalSummary;
     use crate::state_topic::{StateBackend, StateTopicError};
-    use assert2::assert;
+    use assert2::{assert, check};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     fn cfg(dir: &std::path::Path) -> ExecutorConfig {
@@ -539,17 +539,17 @@ mod tests {
 
         let calls = client.calls();
         let kinds: Vec<&str> = calls.iter().map(kind).collect();
-        assert!(kinds.first() == Some(&"set"));
-        assert!(kinds.last() == Some(&"del"));
-        assert!(kinds.contains(&"submit"));
+        check!(kinds.first() == Some(&"set"));
+        check!(kinds.last() == Some(&"del"));
+        check!(kinds.contains(&"submit"));
 
         let after = state.store.get("p1").unwrap();
-        assert!(after.status == ProposalStatus::Completed);
-        assert!(after.terminated_at_ms > 0);
-        assert!(after.terminated_at_ms >= before);
+        check!(after.status == ProposalStatus::Completed);
+        check!(after.terminated_at_ms > 0);
+        check!(after.terminated_at_ms >= before);
 
         // After a clean terminal the backend should have been tombstoned.
-        assert!(state.state_topic.loaded().is_none());
+        check!(state.state_topic.loaded().is_none());
     }
 
     #[tokio::test]

@@ -12,7 +12,7 @@
 //!   * unknown topic / out-of-range partition → per-partition
 //!     `UNKNOWN_TOPIC_OR_PARTITION (3)`
 
-use assert2::assert;
+use assert2::{assert, check};
 mod support;
 
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
@@ -114,15 +114,15 @@ async fn empty_partition_returns_no_active_producers() {
         .expect("DescribeProducers");
 
     assert!(resp.topics.len() == 1);
-    assert!(resp.topics[0].name == "fresh");
+    check!(resp.topics[0].name == "fresh");
     assert!(resp.topics[0].partitions.len() == 1);
     let part = &resp.topics[0].partitions[0];
-    assert!(
+    check!(
         part.error_code == 0,
         "fresh partition must succeed: {part:?}"
     );
-    assert!(part.partition_index == 0);
-    assert!(
+    check!(part.partition_index == 0);
+    check!(
         part.active_producers.is_empty(),
         "no produce has happened — list must be empty: {:?}",
         part.active_producers,
@@ -184,14 +184,14 @@ async fn after_idempotent_produce_describe_returns_the_producer() {
         part.active_producers
     );
     let producer = &part.active_producers[0];
-    assert!(producer.producer_id == pid);
-    assert!(producer.producer_epoch == i32::from(epoch));
+    check!(producer.producer_id == pid);
+    check!(producer.producer_epoch == i32::from(epoch));
     // base_seq=0, last_offset_delta=n-1=2 → last_sequence = 2.
-    assert!(producer.last_sequence == 2);
+    check!(producer.last_sequence == 2);
     // Crabka doesn't yet wire per-partition txn bookkeeping; sentinels
     // stay at -1.
-    assert!(producer.coordinator_epoch == -1);
-    assert!(producer.current_txn_start_offset == -1);
+    check!(producer.coordinator_epoch == -1);
+    check!(producer.current_txn_start_offset == -1);
 
     p.broker.shutdown().await;
 }

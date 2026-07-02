@@ -81,9 +81,10 @@ mod tests {
         let gold = consume_producer_quota(&img, &buckets, "alice", "app", "gold", 1024);
         let bulk = consume_producer_quota(&img, &buckets, "alice", "app", "bulk", 64);
 
-        assert!(gold > Duration::ZERO);
-        assert!(bulk == Duration::ZERO);
-        assert!(buckets.len() == 2);
+        use assert2::check;
+        check!(gold > Duration::ZERO);
+        check!(bulk == Duration::ZERO);
+        check!(buckets.len() == 2);
     }
 
     #[test]

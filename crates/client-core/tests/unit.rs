@@ -10,7 +10,7 @@
 // Suppressing here keeps comments readable without cluttering them.
 #![allow(clippy::doc_markdown)]
 
-use assert2::assert;
+use assert2::{assert, check};
 use std::time::Duration;
 
 use bytes::BytesMut;
@@ -105,11 +105,11 @@ async fn connect_negotiates_api_versions() {
         .await
         .unwrap();
 
-    assert!(!conn.versions().is_empty());
+    check!(!conn.versions().is_empty());
     // The mock advertised api_key 18 min=0 max=3.
-    assert!(conn.versions().broker_range(api_versions_request::API_KEY) == Some((0, 3)));
+    check!(conn.versions().broker_range(api_versions_request::API_KEY) == Some((0, 3)));
     // The mock advertised api_key 3 min=0 max=12.
-    assert!(conn.versions().broker_range(metadata_request_mod::API_KEY) == Some((0, 12)));
+    check!(conn.versions().broker_range(metadata_request_mod::API_KEY) == Some((0, 12)));
 
     conn.close();
     mock.stop();

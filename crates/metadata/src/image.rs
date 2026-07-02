@@ -962,7 +962,7 @@ mod tests {
         DeleteScramCredentialRecord, DeleteTopicRecord, FeatureLevelRecord, QuotaEntity,
         ScramCredentialRecord,
     };
-    use assert2::assert;
+    use assert2::{assert, check};
 
     fn img() -> MetadataImage {
         MetadataImage::new(Uuid::nil())
@@ -1334,9 +1334,9 @@ mod tests {
         assert!(rebuilt == image);
         // Belt-and-suspenders beyond derived PartialEq: the two fields the
         // snapshot path used to lose.
-        assert!(rebuilt.finalized_features().get("metadata.version") == Some(&25));
-        assert!(rebuilt.finalized_features().get("group.version") == Some(&1));
-        assert!(rebuilt.finalized_features_epoch() == 3);
+        check!(rebuilt.finalized_features().get("metadata.version") == Some(&25));
+        check!(rebuilt.finalized_features().get("group.version") == Some(&1));
+        check!(rebuilt.finalized_features_epoch() == 3);
     }
 
     /// KIP-853 voter set + finalized cluster `kraft.version` must survive
@@ -1434,12 +1434,22 @@ mod tests {
             },
         ));
         let pr = m.partition("t", 0).unwrap();
-        // Slot 1 (replica 2) set; slots 0 and 2 untouched.
-        assert!(pr.directories == vec![uuid::Uuid::nil(), dir, uuid::Uuid::nil()]);
-        // The delta did NOT clobber the in-flight reassignment.
-        assert!(pr.adding_replicas == vec![3]);
-        assert!(pr.replicas == vec![1, 2, 3]);
-        assert!(pr.isr == vec![1, 2]);
+        // Slot 1 (replica 2) set; slots 0 and 2 untouched. The delta did NOT
+        // clobber the in-flight reassignment.
+        assert!(
+            *pr == PartitionRecord {
+                topic: "t".to_string(),
+                partition: 0,
+                leader: 1,
+                replicas: vec![1, 2, 3],
+                isr: vec![1, 2],
+                leader_epoch: 0,
+                adding_replicas: vec![3],
+                removing_replicas: vec![],
+                directories: vec![uuid::Uuid::nil(), dir, uuid::Uuid::nil()],
+                partition_epoch: 0,
+            }
+        );
     }
 
     #[test]
@@ -1818,9 +1828,7 @@ mod tests {
         let hits: Vec<_> = m
             .matching_acls(ResourceType::Topic, "some-random-topic")
             .collect();
-        assert!(hits.len() == 1);
-        assert!(hits[0].resource_name == "*");
-        assert!(hits[0].permission_type == PermissionType::Allow);
+        assert!(hits == vec![&topic_wildcard_allow()]);
         // Requesting "*" itself must not double-count the wildcard entry.
         let star: Vec<_> = m.matching_acls(ResourceType::Topic, "*").collect();
         assert!(star.len() == 1);
@@ -1833,9 +1841,7 @@ mod tests {
         let hits: Vec<_> = m
             .matching_acls(ResourceType::Topic, "another-random-topic")
             .collect();
-        assert!(hits.len() == 1);
-        assert!(hits[0].resource_name == "*");
-        assert!(hits[0].permission_type == PermissionType::Deny);
+        assert!(hits == vec![&topic_wildcard_deny()]);
     }
 
     #[test]
@@ -2323,9 +2329,7 @@ mod tests {
             iterations: 8192,
         }));
         let pairs = img.scram_credentials_for_user("alice");
-        assert!(pairs.len() == 1);
-        assert!(pairs[0].0 == SaslMechanism::ScramSha512);
-        assert!(pairs[0].1 == 8192);
+        assert!(pairs == vec![(SaslMechanism::ScramSha512, 8192)]);
         assert!(img.scram_credentials_for_user("ghost").is_empty());
     }
 
@@ -2544,9 +2548,8 @@ mod tests {
             },
         ));
         let pr = image.partition("t", 0).expect("partition present");
-        assert!(pr.directories.len() == 2);
-        assert!(pr.directories[0] == dir); // replica 10 is slot 0
-        assert!(pr.directories[1] == Uuid::nil()); // replica 20 still unassigned
+        // Replica 10 is slot 0; replica 20 still unassigned.
+        assert!(pr.directories == vec![dir, Uuid::nil()]);
     }
 
     #[test]

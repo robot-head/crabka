@@ -436,7 +436,7 @@ pub(crate) fn build_hosted_classic_join_result(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use bytes::{Buf, BufMut, Bytes, BytesMut};
     use crabka_protocol::Encode;
     use crabka_protocol::primitives::uuid::Uuid;
@@ -512,10 +512,11 @@ mod tests {
 
     #[test]
     fn decode_rejects_short_and_bad_version() {
-        assert!(decode_consumer_subscription(&[]).is_none());
-        assert!(decode_consumer_subscription(&[0]).is_none());
-        // Version 99 is out of the supported 0..=3 range.
-        assert!(decode_consumer_subscription(&[0, 99]).is_none());
+        // Too short to hold a version, or (version 99) out of the supported
+        // 0..=3 range.
+        for input in [&[][..], &[0][..], &[0, 99][..]] {
+            assert!(decode_consumer_subscription(input).is_none());
+        }
     }
 
     #[test]
@@ -664,19 +665,19 @@ mod tests {
         let version = cur.get_i16();
         assert!(version == 0);
         let decoded = ConsumerProtocolAssignment::decode(&mut cur, 0).unwrap();
-        assert!(decoded.assigned_partitions[0].topic == "orders");
-        assert!(decoded.assigned_partitions[0].partitions == vec![0, 1]);
+        check!(decoded.assigned_partitions[0].topic == "orders");
+        check!(decoded.assigned_partitions[0].partitions == vec![0, 1]);
         // Group must land in Stable so the first Heartbeat/SyncGroup after
         // downgrade does not trigger a spurious full rebalance.
-        assert!(classic.state == ClassicGroupState::Stable);
+        check!(classic.state == ClassicGroupState::Stable);
         // Seed assignment is still intact after stabilization.
         let asn2 = member
             .assignment
             .clone()
             .expect("seed assignment still set after stabilize");
-        assert!(asn2 == asn);
+        check!(asn2 == asn);
         // complete_rebalance must have set the protocol metadata coherently.
-        assert!(classic.protocol_name.as_deref() == Some("range"));
-        assert!(classic.leader_id.as_deref() == Some("m1"));
+        check!(classic.protocol_name.as_deref() == Some("range"));
+        check!(classic.leader_id.as_deref() == Some("m1"));
     }
 }

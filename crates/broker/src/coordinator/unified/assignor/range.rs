@@ -93,9 +93,13 @@ mod tests {
             &[member("m1", &[t]), member("m2", &[t]), member("m3", &[t])],
             &topics,
         );
-        assert!(a["m1"][&t] == vec![0, 1, 2]);
-        assert!(a["m2"][&t] == vec![3, 4]);
-        assert!(a["m3"][&t] == vec![5, 6]);
+        for (m, want) in [
+            ("m1", vec![0, 1, 2]),
+            ("m2", vec![3, 4]),
+            ("m3", vec![5, 6]),
+        ] {
+            assert!(a[m][&t] == want);
+        }
     }
 
     #[test]
@@ -107,10 +111,14 @@ mod tests {
             ..Default::default()
         };
         let a = RangeAssignor.assign(&[member("m1", &[t1, t2]), member("m2", &[t1, t2])], &topics);
-        assert!(a["m1"][&t1] == vec![0, 1]);
-        assert!(a["m1"][&t2] == vec![0, 1]);
-        assert!(a["m2"][&t1] == vec![2, 3]);
-        assert!(a["m2"][&t2] == vec![2, 3]);
+        for (m, topic, want) in [
+            ("m1", t1, vec![0, 1]),
+            ("m1", t2, vec![0, 1]),
+            ("m2", t1, vec![2, 3]),
+            ("m2", t2, vec![2, 3]),
+        ] {
+            assert!(a[m][&topic] == want);
+        }
     }
 
     #[test]
@@ -124,8 +132,9 @@ mod tests {
             &[member("m1", &[t]), member("m2", &[t]), member("m3", &[t])],
             &topics,
         );
-        assert!(a["m1"][&t] == vec![0]);
-        assert!(a["m2"][&t] == vec![1]);
+        for (m, want) in [("m1", vec![0]), ("m2", vec![1])] {
+            assert!(a[m][&t] == want);
+        }
         assert!(!a["m3"].contains_key(&t) || a["m3"][&t].is_empty());
     }
 

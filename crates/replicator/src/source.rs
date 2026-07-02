@@ -234,6 +234,7 @@ impl Source<(), ReplicatedRecord> for SourceConsumer {
 #[cfg(test)]
 mod tests {
     use assert2::assert;
+    use assert2::check;
 
     use super::*;
     use crabka_connect::Source;
@@ -273,10 +274,10 @@ mod tests {
         let rec = rec.expect("source did not yield the produced record");
 
         let payload = rec.value.unwrap();
-        assert!(payload.topic == "orders");
-        assert!(payload.partition == 0);
-        assert!(payload.offset == 0);
-        assert!(payload.value.as_deref() == Some(b"v".as_slice()));
+        check!(payload.topic == "orders");
+        check!(payload.partition == 0);
+        check!(payload.offset == 0);
+        check!(payload.value.as_deref() == Some(b"v".as_slice()));
 
         // The checkpoint position is the NEXT offset to read: `last_offset + 1`.
         // Having consumed offset 0, the position for `orders-0` must be exactly

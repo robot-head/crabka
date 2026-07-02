@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use assert2::assert;
+use assert2::{assert, check};
 use crabka_blockstore::{
     BlockDescriptor, BlockKey, LabelIndex, LogBlockIndex as BlockIndex, TimeRange, labels,
 };
@@ -40,11 +40,13 @@ fn stream_planner_prunes_series_and_blocks_before_line_filters() {
     )
     .unwrap();
 
-    assert!(plan.fingerprints == BTreeSet::from([api_prod]));
-    assert!(plan.blocks.len() == 1);
-    assert!(
-        plan.blocks[0].key.object_key()
-            == "tenant=tenant-a/partition=0/offsets=10-19/time=100-199.parquet"
+    check!(plan.fingerprints == BTreeSet::from([api_prod]));
+    check!(
+        plan.blocks
+            .iter()
+            .map(|block| block.key.object_key())
+            .collect::<Vec<_>>()
+            == ["tenant=tenant-a/partition=0/offsets=10-19/time=100-199.parquet"]
     );
     assert!(matches!(
         &plan.query.pipeline[..],

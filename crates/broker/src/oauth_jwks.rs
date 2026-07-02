@@ -547,15 +547,16 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        assert!(
+        use assert2::check;
+        check!(
             last_on_demand.load(Ordering::Relaxed) > 0,
             "on-demand timestamp should have advanced past sentinel 0",
         );
-        assert!(
+        check!(
             count.load(Ordering::Relaxed) >= 1,
             "server should have served the on-demand request"
         );
-        assert!(
+        check!(
             handle.load().len() == 1,
             "refresher must store the fetched key set"
         );

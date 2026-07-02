@@ -4,7 +4,7 @@
 //! `tokio` scheduling on Windows runners cause flakes that have
 //! nothing to do with the protocol being tested.
 
-use assert2::assert;
+use assert2::{assert, check};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -399,12 +399,12 @@ async fn acks_all_completes_via_isr_shrink_when_follower_dead() {
         .await
         .expect("acks=-1 success after shrink");
     let elapsed = start.elapsed();
-    assert!(offset == 0);
-    assert!(
+    check!(offset == 0);
+    check!(
         elapsed >= Duration::from_millis(1_500),
         "expected to wait for ISR shrink (~2s); took {elapsed:?}"
     );
-    assert!(
+    check!(
         elapsed < Duration::from_secs(5),
         "shrink + completion should be well under 5s; took {elapsed:?}"
     );

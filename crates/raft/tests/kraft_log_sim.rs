@@ -192,7 +192,7 @@ fn committed_batches(sim: &Sim<KraftBackedLog>, node: u64, hwm: i64) -> Vec<Reco
         .collect()
 }
 
-use assert2::assert;
+use assert2::{assert, check};
 
 #[test]
 fn voters_logs_byte_identical_up_to_hwm_over_real_log() {
@@ -286,11 +286,11 @@ fn follower_truncates_real_log_on_divergence_then_reconverges() {
         "follower {f} log end should match the leader after truncation+reconverge"
     );
     let hwm = sim.leader_high_watermark(leader);
-    assert!(
+    check!(
         committed_batches(&sim, f, hwm) == committed_batches(&sim, leader, hwm),
         "follower {f} did not re-converge to the leader after truncation"
     );
-    assert!(
+    check!(
         committed_bytes(&sim, f) == committed_bytes(&sim, leader),
         "follower {f} committed bytes did not re-converge to the leader"
     );
@@ -300,7 +300,7 @@ fn follower_truncates_real_log_on_divergence_then_reconverges() {
     // longer report the stale higher epoch and must match the leader's. This is
     // guaranteed by `Log::truncate_to` now truncating the leader-epoch
     // checkpoint (mirrors Kafka's `LeaderEpochFileCache.truncateFromEnd`).
-    assert!(
+    check!(
         LogView::last_epoch(sim.node_log(f)) == LogView::last_epoch(sim.node_log(leader)),
         "follower {f} last_epoch should match the leader after truncation (no stale epoch 7)"
     );

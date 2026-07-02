@@ -117,7 +117,7 @@ pub(crate) fn down_convert_payload_for_fetch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use bytes::Bytes;
     use crabka_protocol::records::{Attributes, Record, RecordBatch};
 
@@ -221,8 +221,8 @@ mod tests {
         let mut cur: &[u8] = &bytes;
         let recs = decode_message_set(&mut cur, bytes.len()).unwrap();
         assert!(recs.len() == 1);
-        assert!(recs[0].key.as_deref() == Some(b"hello".as_ref()));
-        assert!(recs[0].value.as_deref() == Some(b"world".as_ref()));
+        check!(recs[0].key.as_deref() == Some(b"hello".as_ref()));
+        check!(recs[0].value.as_deref() == Some(b"world".as_ref()));
     }
 
     /// version 0 uses `Magic::V0` (no timestamps)

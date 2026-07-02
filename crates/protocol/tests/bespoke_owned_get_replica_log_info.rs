@@ -88,15 +88,5 @@ fn owned_response_populated_roundtrip() {
     let mut cur = &buf[..];
     let decoded = GetReplicaLogInfoResponse::decode(&mut cur, v).unwrap();
     assert!(decoded == resp);
-    assert!(
-        decoded.topic_partition_log_info_list[0]
-            .partition_log_info
-            .len()
-            == 2
-    );
-    assert!(
-        decoded.topic_partition_log_info_list[0].partition_log_info[1].error_message
-            == Some("not leader".to_string())
-    );
     assert!(cur.is_empty(), "decoder left trailing bytes");
 }

@@ -33,7 +33,7 @@ pub enum Phase {
     ClearThrottle,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InFlightFile {
     pub version: u32,
     pub proposal_id: String,
@@ -121,10 +121,18 @@ mod tests {
         let mut f = InFlightFile::new("p".into(), Phase::Submit, 42, 50_000_000);
         f.write(dir.path()).unwrap();
         let loaded = InFlightFile::load(dir.path()).unwrap().unwrap();
-        assert!(loaded.proposal_id == "p");
-        assert!(loaded.phase == Phase::Submit);
-        assert!(loaded.started_at_ms == 42);
-        assert!(loaded.target_terminal_status == None);
+        assert!(
+            loaded
+                == InFlightFile {
+                    version: 1,
+                    proposal_id: "p".to_string(),
+                    phase: Phase::Submit,
+                    started_at_ms: 42,
+                    throttle_bytes_per_sec: 50_000_000,
+                    target_terminal_status: None,
+                    failure_reason: None,
+                }
+        );
 
         f.phase = Phase::ClearThrottle;
         f.target_terminal_status = Some(ProposalStatus::Completed);

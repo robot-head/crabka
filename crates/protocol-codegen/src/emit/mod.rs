@@ -28,7 +28,7 @@ pub struct EmittedMessage {
 mod tests {
     use super::*;
     use crate::{ir, name_conv, validate};
-    use assert2::assert;
+    use assert2::{assert, check};
     use std::path::PathBuf;
 
     fn schemas_dir() -> PathBuf {
@@ -67,9 +67,9 @@ mod tests {
             if wrappers::should_emit_wrapper(s) {
                 let w_owned = wrappers::emit(s, wrappers::Flavor::Owned, sha, namespace);
                 let w_borrowed = wrappers::emit(s, wrappers::Flavor::Borrowed, sha, namespace);
-                assert!(w_owned.contains("mod tests"));
-                assert!(w_borrowed.contains("mod tests"));
-                assert!(!name_conv::module_name(&s.name).is_empty());
+                check!(w_owned.contains("mod tests"));
+                check!(w_borrowed.contains("mod tests"));
+                check!(!name_conv::module_name(&s.name).is_empty());
             }
         }
 

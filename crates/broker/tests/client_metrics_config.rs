@@ -11,7 +11,7 @@
 
 #![allow(clippy::default_trait_access)]
 
-use assert2::assert;
+use assert2::{assert, check};
 mod support;
 
 use crabka_protocol::owned::describe_configs_request::{
@@ -136,18 +136,18 @@ async fn client_metrics_config_alter_describe_list_round_trip() {
         describe_resp.results.len()
     );
     let result = &describe_resp.results[0];
-    assert!(
+    check!(
         result.error_code == 0,
         "DescribeConfigs for CLIENT_METRICS 'sub-a' must succeed; error_code={} message={:?}",
         result.error_code,
         result.error_message
     );
-    assert!(
+    check!(
         result.resource_type == RESOURCE_TYPE_CLIENT_METRICS,
         "resource_type must be 16 (CLIENT_METRICS), got {}",
         result.resource_type
     );
-    assert!(
+    check!(
         result.resource_name == "sub-a",
         "resource_name must be 'sub-a', got '{}'",
         result.resource_name

@@ -13,7 +13,7 @@
 //! Linux/macOS-only by convention (matches the other integration
 //! tests' ``).
 
-use assert2::assert;
+use assert2::{assert, check};
 use std::io;
 use std::time::Duration;
 
@@ -247,17 +247,17 @@ async fn metrics_endpoint_serves_openmetrics_and_counters_tick() {
     // `produce_one` writes a single v2 record into the
     // topic, so `messages_in_total{topic=TOPIC}` must read exactly 1.
     let messages_needle = format!("crabka_broker_messages_in_total{{topic=\"{TOPIC}\"}} 1");
-    assert!(
+    check!(
         body.contains(&messages_needle),
         "messages_in_total should be 1 for the lone produced record, body:\n{body}"
     );
-    assert!(
+    check!(
         body.contains(&format!(
             "crabka_broker_topic_produce_requests_total{{topic=\"{TOPIC}\"}}"
         )),
         "produce-requests counter missing topic label:\n{body}"
     );
-    assert!(
+    check!(
         body.contains(&format!(
             "crabka_broker_topic_fetch_requests_total{{topic=\"{TOPIC}\"}}"
         )),

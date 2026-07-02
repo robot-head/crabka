@@ -11931,11 +11931,9 @@ async fn query_range_endpoint_logfmt_sanitizes_ansi_prefixed_field_names() {
     assert!(response.status() == StatusCode::OK);
     let body = json_body(response).await;
     let stream = body.pointer("/data/result/0/stream").unwrap();
-    assert!(stream.get("_31mstatus") == Some(&json!("503")));
-    assert!(stream.get("\u{1b}[31mstatus").is_none());
-    assert!(
-        body.pointer("/data/result/0/values") == Some(&json!([["10", "colored parser error"]]))
-    );
+    check!(stream.get("_31mstatus") == Some(&json!("503")));
+    check!(stream.get("\u{1b}[31mstatus").is_none());
+    check!(body.pointer("/data/result/0/values") == Some(&json!([["10", "colored parser error"]])));
 }
 
 #[tokio::test]

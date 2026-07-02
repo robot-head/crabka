@@ -431,7 +431,7 @@ fn emit_heartbeat_span<T: opentelemetry::trace::Tracer>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use opentelemetry_sdk::error::OTelSdkResult;
     use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
     use std::sync::{Arc, Mutex};
@@ -532,12 +532,12 @@ mod tests {
             "crabka-broker",
         )
         .expect("enabled");
-        assert!(cfg.endpoint == "http://collector:4317");
-        assert!(cfg.protocol == OtlpProtocol::Grpc);
-        assert!((cfg.sample_ratio - 1.0).abs() < f64::EPSILON);
-        assert!(cfg.service_name == "crabka-broker");
-        assert!(cfg.service_instance_id == "7");
-        assert!(cfg.service_version == "0.1.1");
+        check!(cfg.endpoint == "http://collector:4317");
+        check!(cfg.protocol == OtlpProtocol::Grpc);
+        check!((cfg.sample_ratio - 1.0).abs() < f64::EPSILON);
+        check!(cfg.service_name == "crabka-broker");
+        check!(cfg.service_instance_id == "7");
+        check!(cfg.service_version == "0.1.1");
     }
 
     #[test]
@@ -709,10 +709,10 @@ mod tests {
         let spans = exporter.spans();
         assert!(spans.len() == 1);
         let span = &spans[0];
-        assert!(span.name == "crabka.telemetry.heartbeat");
-        assert!(span.parent_span_is_remote);
-        assert!(span.span_context.trace_flags() == TraceFlags::SAMPLED);
-        assert!(
+        check!(span.name == "crabka.telemetry.heartbeat");
+        check!(span.parent_span_is_remote);
+        check!(span.span_context.trace_flags() == TraceFlags::SAMPLED);
+        check!(
             span.attributes
                 .iter()
                 .any(|attr| attr.key.as_str() == "crabka.telemetry.sequence"
@@ -739,10 +739,14 @@ mod tests {
 
     #[test]
     fn protocol_parse_variants() {
-        assert!(OtlpProtocol::parse("grpc") == OtlpProtocol::Grpc);
-        assert!(OtlpProtocol::parse("http/protobuf") == OtlpProtocol::HttpProtobuf);
-        assert!(OtlpProtocol::parse("HTTP") == OtlpProtocol::HttpProtobuf);
-        assert!(OtlpProtocol::parse("nonsense") == OtlpProtocol::Grpc);
+        for (input, want) in [
+            ("grpc", OtlpProtocol::Grpc),
+            ("http/protobuf", OtlpProtocol::HttpProtobuf),
+            ("HTTP", OtlpProtocol::HttpProtobuf),
+            ("nonsense", OtlpProtocol::Grpc),
+        ] {
+            assert!(OtlpProtocol::parse(input) == want, "case {input:?}");
+        }
     }
 
     #[test]

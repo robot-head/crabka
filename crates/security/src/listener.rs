@@ -27,13 +27,17 @@ mod tests {
 
     #[test]
     fn tls_and_sasl_flags_per_protocol() {
-        assert!(!ListenerProtocol::Plaintext.requires_tls());
-        assert!(!ListenerProtocol::Plaintext.requires_sasl());
-        assert!(ListenerProtocol::Ssl.requires_tls());
-        assert!(!ListenerProtocol::Ssl.requires_sasl());
-        assert!(!ListenerProtocol::SaslPlaintext.requires_tls());
-        assert!(ListenerProtocol::SaslPlaintext.requires_sasl());
-        assert!(ListenerProtocol::SaslSsl.requires_tls());
-        assert!(ListenerProtocol::SaslSsl.requires_sasl());
+        for (protocol, tls, sasl) in [
+            (ListenerProtocol::Plaintext, false, false),
+            (ListenerProtocol::Ssl, true, false),
+            (ListenerProtocol::SaslPlaintext, false, true),
+            (ListenerProtocol::SaslSsl, true, true),
+        ] {
+            assert!(protocol.requires_tls() == tls, "requires_tls {protocol:?}");
+            assert!(
+                protocol.requires_sasl() == sasl,
+                "requires_sasl {protocol:?}"
+            );
+        }
     }
 }

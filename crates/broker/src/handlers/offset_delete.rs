@@ -376,11 +376,33 @@ mod tests {
     use super::*;
     use assert2::assert;
     use bytes::BufMut;
+    use crabka_protocol::UnknownTaggedFields;
     use crabka_protocol::owned::consumer_protocol_subscription::ConsumerProtocolSubscription;
     use crabka_protocol::owned::offset_delete_request::{
         OffsetDeleteRequestPartition, OffsetDeleteRequestTopic,
     };
     use std::collections::HashMap;
+
+    /// Fully-specified expected partition row (no struct-update syntax).
+    fn expected_row(partition_index: i32, error_code: i16) -> OffsetDeleteResponsePartition {
+        OffsetDeleteResponsePartition {
+            partition_index,
+            error_code,
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        }
+    }
+
+    /// Fully-specified expected topic row (no struct-update syntax).
+    fn expected_topic(
+        name: &str,
+        partitions: Vec<OffsetDeleteResponsePartition>,
+    ) -> OffsetDeleteResponseTopic {
+        OffsetDeleteResponseTopic {
+            name: name.to_string(),
+            partitions,
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        }
+    }
 
     // ── decode_subscribed_topics ─────────────────────────────────────
 
@@ -453,14 +475,25 @@ mod tests {
     fn whole_error_stamps_top_level_and_each_partition() {
         let req = req_with_topics(&[("t1", &[0, 1]), ("t2", &[5])]);
         let resp = whole_error(&req, codes::GROUP_AUTHORIZATION_FAILED);
-        assert!(resp.error_code == codes::GROUP_AUTHORIZATION_FAILED);
-        assert!(resp.topics.len() == 2);
-        assert!(resp.topics[0].partitions.len() == 2);
-        for t in &resp.topics {
-            for p in &t.partitions {
-                assert!(p.error_code == codes::GROUP_AUTHORIZATION_FAILED);
-            }
-        }
+        let expected = OffsetDeleteResponse {
+            error_code: codes::GROUP_AUTHORIZATION_FAILED,
+            throttle_time_ms: 0,
+            topics: vec![
+                expected_topic(
+                    "t1",
+                    vec![
+                        expected_row(0, codes::GROUP_AUTHORIZATION_FAILED),
+                        expected_row(1, codes::GROUP_AUTHORIZATION_FAILED),
+                    ],
+                ),
+                expected_topic(
+                    "t2",
+                    vec![expected_row(5, codes::GROUP_AUTHORIZATION_FAILED)],
+                ),
+            ],
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
     }
 
     #[test]
@@ -501,13 +534,21 @@ mod tests {
             ],
         )]);
         let resp = rewrite_success_as(rows, codes::UNKNOWN_SERVER_ERROR);
-        assert!(resp.error_code == codes::NONE);
-        assert!(resp.topics[0].partitions[0].error_code == codes::UNKNOWN_SERVER_ERROR);
-        assert!(
-            resp.topics[0].partitions[1].error_code == codes::TOPIC_AUTHORIZATION_FAILED,
-            "denied row stays denied"
-        );
-        assert!(resp.topics[0].partitions[2].error_code == codes::UNKNOWN_SERVER_ERROR);
+        // NONE rows are rewritten; the denied row stays denied.
+        let expected = OffsetDeleteResponse {
+            error_code: codes::NONE,
+            throttle_time_ms: 0,
+            topics: vec![expected_topic(
+                "t",
+                vec![
+                    expected_row(0, codes::UNKNOWN_SERVER_ERROR),
+                    expected_row(1, codes::TOPIC_AUTHORIZATION_FAILED),
+                    expected_row(2, codes::UNKNOWN_SERVER_ERROR),
+                ],
+            )],
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
     }
 
     #[test]
@@ -580,11 +621,18 @@ mod tests {
         let (out, tombs, to_remove) =
             build_response_rows("g", &req.topics, &decisions, &subscribed, &counts);
         // p=0 succeeds; p=99 and p=-1 each fail with UNKNOWN_TOPIC_OR_PARTITION.
-        assert!(out[0].partitions[0].error_code == codes::NONE);
-        assert!(out[0].partitions[1].error_code == codes::UNKNOWN_TOPIC_OR_PARTITION);
-        assert!(out[0].partitions[2].error_code == codes::UNKNOWN_TOPIC_OR_PARTITION);
-        assert!(tombs.len() == 1, "only p=0 queued");
-        assert!(to_remove == vec![("t1".to_string(), 0)]);
+        let expected = vec![expected_topic(
+            "t1",
+            vec![
+                expected_row(0, codes::NONE),
+                expected_row(99, codes::UNKNOWN_TOPIC_OR_PARTITION),
+                expected_row(-1, codes::UNKNOWN_TOPIC_OR_PARTITION),
+            ],
+        )];
+        use assert2::check;
+        check!(out == expected);
+        check!(tombs.len() == 1, "only p=0 queued");
+        check!(to_remove == vec![("t1".to_string(), 0)]);
     }
 
     #[test]
@@ -600,15 +648,12 @@ mod tests {
 
         let (out, tombs, to_remove) =
             build_response_rows("g", &req.topics, &decisions, &subscribed, &counts);
-        assert!(tombs.len() == 3, "3 partitions × 1 tombstone each");
-        // Offset deltas increase monotonically across the whole batch.
-        assert!(tombs[0].offset_delta == 0);
-        assert!(tombs[1].offset_delta == 1);
-        assert!(tombs[2].offset_delta == 2);
+        // 3 partitions × 1 tombstone each; offset deltas increase
+        // monotonically across the whole batch.
+        let deltas: Vec<i32> = tombs.iter().map(|t| t.offset_delta).collect();
+        assert!(deltas == vec![0, 1, 2]);
         // Tombstones carry null values.
-        assert!(tombs[0].value.is_none());
-        assert!(tombs[1].value.is_none());
-        assert!(tombs[2].value.is_none());
+        assert!(tombs.iter().all(|t| t.value.is_none()));
         for t in &out {
             for p in &t.partitions {
                 assert!(p.error_code == codes::NONE);

@@ -33,7 +33,7 @@ const FLEXIBLE_MIN: i16 = 9;
 
 /// The verbatim `records` field bytes for one `(topic, partition)` slot,
 /// captured zero-copy from the request frame.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartitionRecordSlice {
     /// Index of the topic within `ProduceRequest.topic_data` (wire order).
     pub topic_index: usize,
@@ -52,7 +52,7 @@ pub struct PartitionRecordSlice {
 /// to decide verbatim-passthrough vs owned-decode per partition: every field
 /// here comes straight off the wire framing; the actual record bytes are kept
 /// as zero-copy [`Bytes`] slices in [`ProduceFramingTopic::partitions`].
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProduceFraming {
     /// `transactional_id` (v≥3, nullable). Drives the txn ACL preamble.
     pub transactional_id: Option<String>,
@@ -65,7 +65,7 @@ pub struct ProduceFraming {
 }
 
 /// One topic's framing within a [`ProduceFraming`].
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProduceFramingTopic {
     /// Topic name (STRING for v≤12; empty for v≥13 which is id-only).
     pub name: String,
@@ -287,7 +287,7 @@ mod tests {
     use crate::Encode;
     use crate::owned::produce_request::{PartitionProduceData, ProduceRequest, TopicProduceData};
     use crate::records::{Record, RecordBatch, RecordsPayload};
-    use assert2::assert;
+    use assert2::{assert, check};
     use bytes::BytesMut;
 
     fn batch_with_value(v: &[u8], base_offset: i64) -> RecordBatch {
@@ -441,16 +441,16 @@ mod tests {
 
         let framing = produce_framing(body.clone(), version).unwrap();
 
-        assert!(framing.transactional_id == req.transactional_id);
-        assert!(framing.acks == req.acks);
-        assert!(framing.timeout_ms == req.timeout_ms);
+        check!(framing.transactional_id == req.transactional_id);
+        check!(framing.acks == req.acks);
+        check!(framing.timeout_ms == req.timeout_ms);
         assert!(framing.topics.len() == req.topic_data.len());
         for (ft, rt) in framing.topics.iter().zip(req.topic_data.iter()) {
-            assert!(ft.name == rt.name);
-            assert!(ft.topic_id.0 == rt.topic_id.0);
+            check!(ft.name == rt.name);
+            check!(ft.topic_id.0 == rt.topic_id.0);
             assert!(ft.partitions.len() == rt.partition_data.len());
             for (fp, rp) in ft.partitions.iter().zip(rt.partition_data.iter()) {
-                assert!(fp.partition == rp.index);
+                check!(fp.partition == rp.index);
                 let want = rp.records.as_ref().map(|rpld| {
                     let mut b = BytesMut::new();
                     <RecordsPayload as Encode>::encode(rpld, &mut b, version).unwrap();
@@ -493,12 +493,22 @@ mod tests {
         let mut buf = BytesMut::new();
         req.encode(&mut buf, version).unwrap();
         let framing = produce_framing(buf.freeze(), version).unwrap();
-        assert!(framing.transactional_id.as_deref() == Some("my-txn"));
-        assert!(framing.acks == -1);
-        assert!(framing.timeout_ms == 7777);
-        assert!(framing.topics.len() == 1);
-        assert!(framing.topics[0].partitions[0].partition == 3);
-        assert!(framing.topics[0].partitions[0].records.is_none());
+        let expected = ProduceFraming {
+            transactional_id: Some("my-txn".to_string()),
+            acks: -1,
+            timeout_ms: 7777,
+            topics: vec![ProduceFramingTopic {
+                name: "t".to_string(),
+                topic_id: Uuid::ZERO,
+                partitions: vec![PartitionRecordSlice {
+                    topic_index: 0,
+                    partition_index: 0,
+                    partition: 3,
+                    records: None,
+                }],
+            }],
+        };
+        assert!(framing == expected);
     }
 
     #[test]

@@ -5,7 +5,7 @@
 //! `Ingress`/`Route` objects, a `ConfigMap` whose advertised address is
 //! `<host>:443`, and a `ListenersReady=True` status.
 
-use assert2::assert;
+use assert2::{assert, check};
 use std::sync::Arc;
 
 use crabka_operator::controller::kafka::reconcile;
@@ -199,19 +199,19 @@ async fn ingress_listener_renders_ingress_objects_and_advertises_443() {
         &Method::PATCH,
         &format!("/ingresses/{name}-ext-0"),
     );
-    assert!(
+    check!(
         ing["metadata"]["annotations"]["nginx.ingress.kubernetes.io/ssl-passthrough"] == "true",
         "ingress = {ing}"
     );
-    assert!(
+    check!(
         ing["spec"]["ingressClassName"] == "nginx",
         "ingress = {ing}"
     );
-    assert!(
+    check!(
         ing["spec"]["rules"][0]["host"] == "broker-0.kafka.example.com",
         "ingress = {ing}"
     );
-    assert!(
+    check!(
         ing["spec"]["rules"][0]["http"]["paths"][0]["backend"]["service"]["name"]
             == format!("{name}-ext-0"),
         "ingress = {ing}"
@@ -296,19 +296,19 @@ async fn route_listener_renders_passthrough_route_objects() {
     let observed = state.take_observed();
 
     let route = body_of(&observed, &Method::PATCH, &format!("/routes/{name}-ext-0"));
-    assert!(
+    check!(
         route["spec"]["tls"]["termination"] == "passthrough",
         "route = {route}"
     );
-    assert!(
+    check!(
         route["spec"]["host"] == "broker-0.kafka.example.com",
         "route = {route}"
     );
-    assert!(
+    check!(
         route["spec"]["port"]["targetPort"] == 9094,
         "route = {route}"
     );
-    assert!(
+    check!(
         route["spec"]["to"]["name"] == format!("{name}-ext-0"),
         "route = {route}"
     );

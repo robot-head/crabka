@@ -26,8 +26,7 @@ fn borrowed_request_header_min_version_specific_values() {
     let mut cur = &frozen[..];
     let decoded = RequestHeader::decode_borrow(&mut cur, MIN_VERSION).unwrap();
     assert!(cur.is_empty(), "decoder left trailing bytes");
-    assert!(decoded.correlation_id == hdr.correlation_id);
-    assert!(decoded.request_api_key == hdr.request_api_key);
+    assert!(decoded == hdr);
 }
 
 #[test]
@@ -46,8 +45,7 @@ fn borrowed_request_header_max_version_with_client_id() {
     let mut cur = &frozen[..];
     let decoded = RequestHeader::decode_borrow(&mut cur, MAX_VERSION).unwrap();
     assert!(cur.is_empty(), "decoder left trailing bytes");
-    assert!(decoded.client_id == hdr.client_id);
-    assert!(decoded.correlation_id == hdr.correlation_id);
+    assert!(decoded == hdr);
 }
 
 #[test]

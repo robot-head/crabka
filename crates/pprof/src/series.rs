@@ -79,18 +79,29 @@ mod tests {
 
     #[test]
     fn step_secs_rejects_sub_millisecond_values() {
-        assert!(step_ms_from_secs(0.0001).is_err());
-        assert!(step_ms_from_secs(0.0005).is_err());
-        assert!(step_ms_from_secs(0.000_999_9).is_err());
-        assert!(step_ms_from_secs(0.001).unwrap() == 1);
+        for (step_secs, want) in [
+            (0.0001, None),
+            (0.0005, None),
+            (0.000_999_9, None),
+            (0.001, Some(1)),
+        ] {
+            assert!(step_ms_from_secs(step_secs).ok() == want, "{step_secs}");
+        }
     }
 
     #[test]
     fn bucket_start_is_step_floored() {
-        assert!(step_bucket_ms(17_000, 15_000) == 15_000);
-        assert!(step_bucket_ms(15_000, 15_000) == 15_000);
-        assert!(step_bucket_ms(14_999, 15_000) == 0);
-        assert!(step_bucket_ms(-1, 15_000) == -15_000);
+        for (timestamp_ms, want) in [
+            (17_000, 15_000),
+            (15_000, 15_000),
+            (14_999, 0),
+            (-1, -15_000),
+        ] {
+            assert!(
+                step_bucket_ms(timestamp_ms, 15_000) == want,
+                "{timestamp_ms}"
+            );
+        }
     }
 
     #[test]

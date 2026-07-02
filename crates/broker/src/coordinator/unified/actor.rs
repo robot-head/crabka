@@ -3714,13 +3714,13 @@ mod tests {
         // round-trip guarantees the downgrade completed. The lone hosted classic
         // member keeps it non-empty.
         let view = classic_inspect(&handle).await;
-        assert!(view.members.iter().any(|m| m.member_id == "m-classic"));
+        check!(view.members.iter().any(|m| m.member_id == "m-classic"));
 
         // The spawn-time kind is the stale `Consumer`; delete must not consult
         // it. A non-empty downgraded (live-classic) group reports `NonEmpty`,
         // NOT `NotFound` — proving delete sees it as classic.
-        assert!(handle.kind == GroupKindTag::Consumer);
-        assert!(
+        check!(handle.kind == GroupKindTag::Consumer);
+        check!(
             coord.delete_group("g").await == Err(crate::coordinator::DeleteGroupError::NonEmpty),
             "a downgraded non-empty group must report NonEmpty (seen as classic), \
              not the stale-handle.kind NotFound"

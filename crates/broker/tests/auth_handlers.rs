@@ -8,7 +8,7 @@
 //! this file with SASL/PLAIN, SASL/SCRAM, and `AlterUserScramCredentials`
 //! cases.
 
-use assert2::assert;
+use assert2::{assert, check};
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -1798,12 +1798,12 @@ async fn alter_scram_creds_super_user_can_provision() {
         .await
         .expect("PLAIN auth + AUSCR upsertion");
     assert!(resp.results.len() == 1, "one result row per upsertion");
-    assert!(
+    check!(
         resp.results[0].error_code == 0,
         "expected error_code=0, got {:?}",
         resp.results[0]
     );
-    assert!(resp.results[0].user == "alice");
+    check!(resp.results[0].user == "alice");
 
     // Round-trip: now log in as `alice` over SCRAM, proving the upserted
     // credential actually reached the metadata image. Wait briefly for the
@@ -1869,12 +1869,12 @@ async fn alter_scram_creds_super_user_can_provision_sha256() {
         .await
         .expect("PLAIN auth + AUSCR upsertion (SHA-256)");
     assert!(resp.results.len() == 1);
-    assert!(
+    check!(
         resp.results[0].error_code == 0,
         "expected error_code=0, got {:?}",
         resp.results[0]
     );
-    assert!(resp.results[0].user == "alice");
+    check!(resp.results[0].user == "alice");
 
     let mut last_err: Option<io::Error> = None;
     for _ in 0..40 {
@@ -2178,16 +2178,16 @@ async fn api_versions_reachable_pre_auth_on_sasl_listener() {
     let av_resp = ApiVersionsResponse::decode(&mut cur, 0)
         .expect("ApiVersionsResponse must decode successfully");
 
-    assert!(
+    check!(
         av_resp.error_code == 0,
         "ApiVersions error_code must be 0 on SASL listener pre-auth"
     );
-    assert!(
+    check!(
         av_resp.api_keys.iter().any(|k| k.api_key == 17),
         "ApiVersionsResponse must list SaslHandshake (17): {:?}",
         av_resp.api_keys
     );
-    assert!(
+    check!(
         av_resp.api_keys.iter().any(|k| k.api_key == 36),
         "ApiVersionsResponse must list SaslAuthenticate (36): {:?}",
         av_resp.api_keys

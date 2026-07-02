@@ -3,7 +3,7 @@
 //! shared `Client` so the exact `session_id` / `session_epoch` paths
 //! are exercised end-to-end.
 
-use assert2::assert;
+use assert2::{assert, check};
 mod support;
 
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
@@ -142,10 +142,10 @@ async fn new_session_then_incremental_filters_unchanged_partitions() {
         })
         .await
         .expect("Fetch new-session");
-    assert!(r1.error_code == 0, "no top-level error");
-    assert!(r1.session_id > 0, "broker allocated a session id");
+    check!(r1.error_code == 0, "no top-level error");
+    check!(r1.session_id > 0, "broker allocated a session id");
     assert!(r1.responses.len() == 1, "new session emits full response");
-    assert!(r1.responses[0].partitions.len() == 3, "all 3 partitions");
+    check!(r1.responses[0].partitions.len() == 3, "all 3 partitions");
     let sid = r1.session_id;
 
     // (2) Immediate incremental: nothing changed → empty response.
@@ -162,9 +162,9 @@ async fn new_session_then_incremental_filters_unchanged_partitions() {
         })
         .await
         .expect("Fetch incremental empty");
-    assert!(r2.error_code == 0);
-    assert!(r2.session_id == sid, "session id echoed");
-    assert!(
+    check!(r2.error_code == 0);
+    check!(r2.session_id == sid, "session id echoed");
+    check!(
         r2.responses.is_empty(),
         "no partition changed → no topics in response, got {:?}",
         r2.responses
@@ -185,11 +185,11 @@ async fn new_session_then_incremental_filters_unchanged_partitions() {
         })
         .await
         .expect("Fetch incremental after produce");
-    assert!(r3.error_code == 0);
-    assert!(r3.session_id == sid);
+    check!(r3.error_code == 0);
+    check!(r3.session_id == sid);
     assert!(r3.responses.len() == 1);
     assert!(r3.responses[0].partitions.len() == 1);
-    assert!(r3.responses[0].partitions[0].partition_index == 0);
+    check!(r3.responses[0].partitions[0].partition_index == 0);
     let batches = r3.responses[0].partitions[0]
         .records
         .as_ref()
@@ -305,9 +305,9 @@ async fn unknown_session_id_returns_not_found() {
         })
         .await
         .expect("Fetch unknown sid");
-    assert!(r.error_code == FETCH_SESSION_ID_NOT_FOUND);
-    assert!(r.session_id == 0);
-    assert!(r.responses.is_empty());
+    check!(r.error_code == FETCH_SESSION_ID_NOT_FOUND);
+    check!(r.session_id == 0);
+    check!(r.responses.is_empty());
     p.broker.shutdown().await;
 }
 
@@ -342,9 +342,9 @@ async fn stale_session_epoch_returns_invalid_epoch() {
         })
         .await
         .expect("stale epoch");
-    assert!(r2.error_code == INVALID_FETCH_SESSION_EPOCH);
-    assert!(r2.session_id == 0);
-    assert!(r2.responses.is_empty());
+    check!(r2.error_code == INVALID_FETCH_SESSION_EPOCH);
+    check!(r2.session_id == 0);
+    check!(r2.responses.is_empty());
     p.broker.shutdown().await;
 }
 
@@ -439,8 +439,8 @@ async fn sessionless_full_fetch_round_trip() {
         })
         .await
         .expect("sessionless");
-    assert!(r.error_code == 0);
-    assert!(r.session_id == 0, "sessionless → no allocation");
+    check!(r.error_code == 0);
+    check!(r.session_id == 0, "sessionless → no allocation");
     assert!(r.responses.len() == 1);
     let batches = r.responses[0].partitions[0]
         .records

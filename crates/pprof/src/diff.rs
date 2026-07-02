@@ -293,10 +293,9 @@ mod tests {
         let b_idx = i64::try_from(diff.names.iter().position(|name| name == "b").unwrap()).unwrap();
         let level1 = &diff.levels[1].values;
         let b_bar = level1.chunks(7).find(|chunk| chunk[6] == b_idx).unwrap();
-        assert!(b_bar[1] == 0);
-        assert!(b_bar[2] == 0);
-        assert!(b_bar[4] == 5);
-        assert!(b_bar[5] == 5);
+        for (index, want) in [(1, 0), (2, 0), (4, 5), (5, 5)] {
+            assert!(b_bar[index] == want, "b_bar[{index}]");
+        }
     }
 
     #[test]

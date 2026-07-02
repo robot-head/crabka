@@ -128,7 +128,7 @@ pub fn varlong_len(v: i64) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use bytes::BytesMut;
 
     #[test]
@@ -148,9 +148,9 @@ mod tests {
             put_uvarint(&mut buf, *v);
             assert!(&buf[..] == *expected, "encoding {v}");
             let mut cur = *expected;
-            assert!(get_uvarint(&mut cur).unwrap() == *v);
-            assert!(cur.is_empty());
-            assert!(uvarint_len(*v) == expected.len());
+            check!(get_uvarint(&mut cur).unwrap() == *v);
+            check!(cur.is_empty());
+            check!(uvarint_len(*v) == expected.len());
         }
     }
 

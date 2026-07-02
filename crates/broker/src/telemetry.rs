@@ -81,12 +81,16 @@ mod tests {
 
     #[test]
     fn api_name_known_and_unknown() {
-        assert!(api_name(0) == "Produce");
-        assert!(api_name(1) == "Fetch");
-        assert!(api_name(18) == "ApiVersions");
-        assert!(api_name(51) == "AlterUserScramCredentials");
-        assert!(api_name(30) == "CreateAcls");
-        assert!(api_name(9999) == "Unknown");
+        for (api_key, want) in [
+            (0, "Produce"),
+            (1, "Fetch"),
+            (18, "ApiVersions"),
+            (51, "AlterUserScramCredentials"),
+            (30, "CreateAcls"),
+            (9999, "Unknown"),
+        ] {
+            assert!(api_name(api_key) == want, "api key {api_key}");
+        }
     }
 
     #[test]
@@ -142,8 +146,9 @@ mod tests {
         });
 
         let g = captured.lock().unwrap();
-        assert!(g.name.as_deref() == Some("Produce"));
-        assert!(g.kind.as_deref() == Some("server"));
-        assert!(g.api_key == Some(0));
+        use assert2::check;
+        check!(g.name.as_deref() == Some("Produce"));
+        check!(g.kind.as_deref() == Some("server"));
+        check!(g.api_key == Some(0));
     }
 }

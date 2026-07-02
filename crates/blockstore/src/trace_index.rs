@@ -272,7 +272,7 @@ impl BlockIndex for TraceIndex {
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
-    use assert2::assert;
+    use assert2::{assert, check};
 
     use super::*;
     use crate::bloom::ShardedTraceBloom;
@@ -510,14 +510,14 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(snapshot_key.starts_with("index/traces/snapshots/"));
-        assert!(
+        check!(snapshot_key.starts_with("index/traces/snapshots/"));
+        check!(
             store
                 .head(&object_store::path::Path::from("index/traces.json"))
                 .await
                 .is_err()
         );
-        assert!(loaded.candidate_blocks_for_trace("t", &tid(1), 0, 1_000) == vec!["b1"]);
+        check!(loaded.candidate_blocks_for_trace("t", &tid(1), 0, 1_000) == vec!["b1"]);
     }
 
     #[tokio::test]

@@ -98,25 +98,30 @@ mod tests {
     #[test]
     fn single_pair_parses() {
         let r = ThrottledReplicas::parse("0:1").unwrap();
-        assert!(r.contains(0, 1));
-        assert!(!r.contains(0, 2));
-        assert!(!r.contains(1, 1));
+        for (partition, broker, want) in [(0, 1, true), (0, 2, false), (1, 1, false)] {
+            assert!(
+                r.contains(partition, broker) == want,
+                "{partition}:{broker}"
+            );
+        }
     }
 
     #[test]
     fn multiple_pairs_parse() {
         let r = ThrottledReplicas::parse("0:1,0:2,1:3").unwrap();
-        assert!(r.contains(0, 1));
-        assert!(r.contains(0, 2));
-        assert!(r.contains(1, 3));
-        assert!(!r.contains(1, 1));
+        for (partition, broker, want) in [(0, 1, true), (0, 2, true), (1, 3, true), (1, 1, false)] {
+            assert!(
+                r.contains(partition, broker) == want,
+                "{partition}:{broker}"
+            );
+        }
     }
 
     #[test]
     fn malformed_pair_rejected() {
-        assert!(ThrottledReplicas::parse("not-a-pair").is_err());
-        assert!(ThrottledReplicas::parse("0:x").is_err());
-        assert!(ThrottledReplicas::parse("x:1").is_err());
+        for input in ["not-a-pair", "0:x", "x:1"] {
+            assert!(ThrottledReplicas::parse(input).is_err(), "{input}");
+        }
     }
 
     #[test]

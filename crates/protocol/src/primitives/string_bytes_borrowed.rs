@@ -163,7 +163,7 @@ pub fn get_compact_nullable_bytes_borrowed<'de>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
 
     #[test]
     fn borrowed_decode_zero_copy() {
@@ -183,10 +183,10 @@ mod tests {
         let bytes = [0x00u8, 0x05, b'k', b'a', b'f', b'k', b'a'];
         let mut cur: &[u8] = &bytes;
         let s = get_string_borrowed(&mut cur).unwrap();
-        assert!(s == "kafka");
-        assert!(cur.is_empty());
+        check!(s == "kafka");
+        check!(cur.is_empty());
         // zero-copy: pointer is inside bytes
-        assert!(s.as_ptr() as usize >= bytes.as_ptr() as usize);
+        check!(s.as_ptr() as usize >= bytes.as_ptr() as usize);
     }
 
     #[test]

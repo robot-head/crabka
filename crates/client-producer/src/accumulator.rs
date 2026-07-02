@@ -157,16 +157,16 @@ fn approx_record_size(key: Option<&[u8]>, value: Option<&[u8]>, headers: &[Heade
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
 
     #[test]
     fn first_append_creates_batch() {
         let mut a = Accumulator::new(1024);
         let _ = a.try_append(None, Some(Bytes::from_static(b"hi")), vec![], 0);
         assert!(a.current.is_some());
-        assert!(a.current.as_ref().unwrap().records.len() == 1);
-        assert!(!a.current.as_ref().unwrap().is_empty());
-        assert!(
+        check!(a.current.as_ref().unwrap().records.len() == 1);
+        check!(!a.current.as_ref().unwrap().is_empty());
+        check!(
             a.current.as_ref().unwrap().size_bytes == approx_record_size(None, Some(b"hi"), &[])
         );
     }
@@ -177,10 +177,10 @@ mod tests {
         let mut a = Accumulator::new(record_size * 2 - 1);
         let _ = a.try_append(None, Some(Bytes::from(vec![0u8; 32])), vec![], 0);
         let _ = a.try_append(None, Some(Bytes::from(vec![0u8; 32])), vec![], 0);
-        assert!(a.ready.len() == 1);
+        check!(a.ready.len() == 1);
         assert!(a.current.is_some());
         assert!(a.current.as_ref().unwrap().records.len() == 1);
-        assert!(a.current.as_ref().unwrap().records[0].offset_delta == 0);
+        check!(a.current.as_ref().unwrap().records[0].offset_delta == 0);
     }
 
     #[test]
@@ -191,12 +191,12 @@ mod tests {
         let _ = a.try_append(None, Some(Bytes::from(vec![0u8; 32])), vec![], 0);
         let _ = a.try_append(None, Some(Bytes::from(vec![0u8; 32])), vec![], 0);
 
-        assert!(a.ready.is_empty());
+        check!(a.ready.is_empty());
         let current = a.current.as_ref().unwrap();
         assert!(current.records.len() == 2);
-        assert!(current.records[0].offset_delta == 0);
-        assert!(current.records[1].offset_delta == 1);
-        assert!(current.size_bytes == record_size * 2);
+        check!(current.records[0].offset_delta == 0);
+        check!(current.records[1].offset_delta == 1);
+        check!(current.size_bytes == record_size * 2);
     }
 
     #[test]

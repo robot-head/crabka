@@ -319,6 +319,7 @@ impl CachingSessionStore {
 mod tests {
     use super::*;
     use crate::store::byte::InMemoryBytes;
+    use assert2::check;
 
     fn ctx() -> RecordContext {
         RecordContext {
@@ -519,9 +520,9 @@ mod tests {
 
         store.clear().await;
 
-        assert!(store.find_sessions(b"k", 0, 1000).await.is_empty());
-        assert!(store.scan_all().await.is_empty());
-        assert!(store.flush().await.is_empty());
+        check!(store.find_sessions(b"k", 0, 1000).await.is_empty());
+        check!(store.scan_all().await.is_empty());
+        check!(store.flush().await.is_empty());
     }
 
     /// `flush` deletes a staged tombstone through to the inner store.

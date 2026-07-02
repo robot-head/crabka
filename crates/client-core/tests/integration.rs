@@ -44,7 +44,7 @@
 // Skip compilation on Windows runners where testcontainers + Docker reliability
 // is poor. On Linux CI the tests run via the `client-core-integration` job.
 
-use assert2::assert;
+use assert2::{assert, check};
 use std::time::Duration;
 
 use testcontainers::runners::AsyncRunner;
@@ -147,14 +147,14 @@ async fn api_versions_against_real_broker() {
         .await
         .expect("ApiVersions failed");
 
-    assert!(
+    check!(
         resp.error_code == 0,
         "ApiVersions returned error: {}",
         resp.error_code
     );
-    assert!(!resp.api_keys.is_empty(), "broker advertised no APIs");
+    check!(!resp.api_keys.is_empty(), "broker advertised no APIs");
     // ApiVersions (key 18) is always present in any modern Kafka broker.
-    assert!(
+    check!(
         resp.api_keys.iter().any(|k| k.api_key == 18),
         "ApiVersions key 18 not found in response"
     );

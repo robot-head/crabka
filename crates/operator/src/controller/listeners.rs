@@ -5349,16 +5349,16 @@ mod toml_rendering_tests {
         let parsed: crabka_broker::file_config::FileConfig =
             toml::from_str(&toml).expect("rendered TOML must parse with broker FileConfig");
         let ob = parsed.oauthbearer.expect("oauthbearer block emitted");
-        assert!(
+        check!(
             ob.jwks_endpoint_uri.as_deref()
                 == Some("https://kc.example.com/realms/kafka/protocol/openid-connect/certs")
         );
-        assert!(ob.valid_issuer_uri.as_deref() == Some("https://kc.example.com/realms/kafka"));
-        assert!(ob.expected_audience.as_deref() == Some("kafka"));
-        assert!(ob.principal_claim_name.as_deref() == Some("preferred_username"));
-        assert!(ob.custom_claim_check.as_deref() == Some("$.scope[?@ == 'kafka-broker']"));
-        assert!(ob.jwks_refresh_interval_ms == Some(300_000));
-        assert!(ob.allowable_clock_skew_ms == Some(30_000));
+        check!(ob.valid_issuer_uri.as_deref() == Some("https://kc.example.com/realms/kafka"));
+        check!(ob.expected_audience.as_deref() == Some("kafka"));
+        check!(ob.principal_claim_name.as_deref() == Some("preferred_username"));
+        check!(ob.custom_claim_check.as_deref() == Some("$.scope[?@ == 'kafka-broker']"));
+        check!(ob.jwks_refresh_interval_ms == Some(300_000));
+        check!(ob.allowable_clock_skew_ms == Some(30_000));
     }
 
     #[test]
@@ -5528,21 +5528,14 @@ mod toml_rendering_tests {
             &[],
             "",
         );
-        assert!(toml.contains("[oauthbearer]"), "TOML: {toml}");
-        assert!(
-            toml.contains("introspection_endpoint_uri = \"https://idp.example/introspect\""),
-            "TOML: {toml}"
-        );
-        assert!(
-            toml.contains("introspection_client_id = \"kafka-broker\""),
-            "TOML: {toml}"
-        );
-        assert!(
-            toml.contains(
-                "introspection_client_secret_path = \"/etc/crabka/oauth-introspection/client-secret\""
-            ),
-            "TOML: {toml}"
-        );
+        for needle in [
+            "[oauthbearer]",
+            "introspection_endpoint_uri = \"https://idp.example/introspect\"",
+            "introspection_client_id = \"kafka-broker\"",
+            "introspection_client_secret_path = \"/etc/crabka/oauth-introspection/client-secret\"",
+        ] {
+            assert!(toml.contains(needle), "missing {needle:?} in TOML: {toml}");
+        }
     }
 
     #[test]
@@ -5695,9 +5688,13 @@ mod toml_rendering_tests {
             &[],
             "",
         );
-        assert!(toml.contains("protocol = \"Ssl\""));
-        assert!(toml.contains("client_ca_path = \"/etc/crabka/clients-ca/ca.crt\""));
-        assert!(toml.contains("client_auth = \"Required\""));
+        for needle in [
+            "protocol = \"Ssl\"",
+            "client_ca_path = \"/etc/crabka/clients-ca/ca.crt\"",
+            "client_auth = \"Required\"",
+        ] {
+            assert!(toml.contains(needle), "missing {needle:?} in TOML: {toml}");
+        }
     }
 
     // -----------------------------------------------------------------
@@ -6009,18 +6006,16 @@ mod toml_rendering_tests {
             &[],
             "",
         );
-        assert!(
-            !toml.contains("jwks_min_refresh_pause_seconds"),
-            "TOML must omit jwks_min_refresh_pause_seconds when None; got:\n{toml}"
-        );
-        assert!(
-            !toml.contains("jwks_expiry_seconds"),
-            "TOML must omit jwks_expiry_seconds when None; got:\n{toml}"
-        );
-        assert!(
-            !toml.contains("jwks_ignore_key_use"),
-            "TOML must omit jwks_ignore_key_use when None; got:\n{toml}"
-        );
+        for key in [
+            "jwks_min_refresh_pause_seconds",
+            "jwks_expiry_seconds",
+            "jwks_ignore_key_use",
+        ] {
+            assert!(
+                !toml.contains(key),
+                "TOML must omit {key} when None; got:\n{toml}"
+            );
+        }
     }
 }
 
@@ -6492,7 +6487,7 @@ mod san_tests {
 #[cfg(test)]
 mod weak_auth_tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
 
     #[test]
     fn weak_auth_warnings_emitted_for_scram_without_tls() {
@@ -6507,8 +6502,8 @@ mod weak_auth_tests {
         }];
         let warnings = weak_auth_warnings(&listeners);
         assert!(warnings.len() == 1);
-        assert!(warnings[0].contains("scram-plain"));
-        assert!(warnings[0].contains("cleartext") || warnings[0].contains("TLS"));
+        check!(warnings[0].contains("scram-plain"));
+        check!(warnings[0].contains("cleartext") || warnings[0].contains("TLS"));
     }
 
     #[test]
@@ -6598,9 +6593,9 @@ mod weak_auth_tests {
         let listeners = vec![oauth_listener("oauth", "http://idp/jwks")];
         let warnings = weak_auth_warnings(&listeners);
         assert!(warnings.len() == 1);
-        assert!(warnings[0].contains("oauth"));
-        assert!(warnings[0].contains("http://"));
-        assert!(warnings[0].contains("https"));
+        for needle in ["oauth", "http://", "https"] {
+            check!(warnings[0].contains(needle), "missing {needle:?}");
+        }
     }
 
     #[test]
