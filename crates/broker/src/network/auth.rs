@@ -14,11 +14,15 @@
 use std::collections::HashMap;
 use std::hash::BuildHasher;
 
+use crabka_protocol::ApiKey;
 use crabka_protocol::owned::sasl_authenticate_request::SaslAuthenticateRequest;
 use crabka_protocol::owned::sasl_authenticate_response::SaslAuthenticateResponse;
 use crabka_protocol::owned::sasl_handshake_request::SaslHandshakeRequest;
 use crabka_protocol::owned::sasl_handshake_response::SaslHandshakeResponse;
 use crabka_security::{Principal, SaslMechanism, ScramServerExchange};
+
+use crate::codes::{ILLEGAL_SASL_STATE, UNSUPPORTED_SASL_MECHANISM};
+use crate::handlers::ApiKeyCode;
 
 /// Per-connection SASL state. Transitions:
 /// `Anonymous` -> (`SaslHandshake`) -> `Negotiating` -> (`SaslAuthenticate` ok)
@@ -172,10 +176,10 @@ impl ConnectionAuth {
     ///   dispatch layer closes the connection (KIP-368).
     /// - `Authenticated`: allow everything.
     #[must_use]
-    pub fn allows_request(&self, api_key: i16) -> bool {
+    pub fn allows_request(&self, api_key: ApiKeyCode) -> bool {
         match self {
             Self::Anonymous | Self::Negotiating { .. } => is_pre_auth_allowed(api_key),
-            Self::Reauthenticating { .. } => api_key == 36,
+            Self::Reauthenticating { .. } => api_key == ApiKey::SaslAuthenticate as i16,
             Self::Authenticated { .. } => true,
         }
     }
@@ -189,17 +193,16 @@ impl ConnectionAuth {
 /// (`ApiVersions` = 18) before authenticating. Everything else is rejected
 /// with `ILLEGAL_SASL_STATE` (34) and the connection is closed.
 #[must_use]
-pub fn is_pre_auth_allowed(api_key: i16) -> bool {
-    matches!(api_key, 17 | 36 | 18)
+pub fn is_pre_auth_allowed(api_key: ApiKeyCode) -> bool {
+    matches!(
+        ApiKey::from_i16(api_key),
+        Some(ApiKey::SaslHandshake | ApiKey::SaslAuthenticate | ApiKey::ApiVersions)
+    )
 }
-
-/// `UNSUPPORTED_SASL_MECHANISM` (33) — peer requested a mechanism the broker
-/// does not advertise. The connection stays open per Kafka behaviour so the
-/// client can retry with a supported mechanism from the returned list.
-const UNSUPPORTED_SASL_MECHANISM: i16 = 33;
 
 /// `SASL_AUTHENTICATION_FAILED` (58) — credential check rejected by the
 /// broker. The caller closes the connection after writing the response.
+/// (Not yet in `crate::codes` — this is its only use site.)
 const SASL_AUTHENTICATION_FAILED: i16 = 58;
 
 /// RFC 4752 server "maximum message size" advertised in the auth-only
@@ -267,8 +270,7 @@ pub fn handle_handshake(
                     "SaslHandshake: mechanism switch on authenticated connection (ILLEGAL_SASL_STATE)"
                 );
                 return SaslHandshakeResponse {
-                    // ILLEGAL_SASL_STATE per Apache Kafka protocol.
-                    error_code: 34,
+                    error_code: ILLEGAL_SASL_STATE,
                     mechanisms: enabled_names,
                     ..Default::default()
                 };

@@ -20,6 +20,9 @@ use crabka_metadata::NodeId;
 use crate::partition::Partition;
 use crate::partition_registry::PartitionRegistry;
 
+/// Default cadence of the broker-wide compaction sweep.
+const DEFAULT_COMPACTION_INTERVAL: Duration = Duration::from_secs(30);
+
 /// Tunables for [`run`].
 #[derive(Debug, Clone)]
 pub(crate) struct CleanerConfig {
@@ -29,7 +32,7 @@ pub(crate) struct CleanerConfig {
 impl Default for CleanerConfig {
     fn default() -> Self {
         Self {
-            interval: Duration::from_secs(30),
+            interval: DEFAULT_COMPACTION_INTERVAL,
         }
     }
 }

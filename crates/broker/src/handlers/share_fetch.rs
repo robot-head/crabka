@@ -38,6 +38,10 @@ use crate::share_partition::state::AckType;
 
 type WaitFut = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
 
+/// One piggybacked acknowledgement batch:
+/// `(first_offset, last_offset, per-offset acknowledge_types)`.
+type AckBatch = (i64, i64, Vec<i8>);
+
 /// One resolved `(topic, partition)` request row, carried through the acquire
 /// pass(es) so the response can be assembled once at the end.
 struct PendingPartition {
@@ -51,7 +55,7 @@ struct PendingPartition {
     leadable: bool,
     /// Acknowledgement batches piggybacked on this fetch (applied before the
     /// acquire pass).
-    ack_batches: Vec<(i64, i64, Vec<i8>)>,
+    ack_batches: Vec<AckBatch>,
     out: PartitionData,
 }
 
@@ -255,7 +259,7 @@ pub(crate) async fn handle(
 
 /// Collect the piggybacked acknowledgement batches off a request partition into
 /// `(first, last, acknowledge_types)` triples.
-fn collect_ack_batches(fp: &FetchPartition) -> Vec<(i64, i64, Vec<i8>)> {
+fn collect_ack_batches(fp: &FetchPartition) -> Vec<AckBatch> {
     fp.acknowledgement_batches
         .iter()
         .map(|b| (b.first_offset, b.last_offset, b.acknowledge_types.clone()))

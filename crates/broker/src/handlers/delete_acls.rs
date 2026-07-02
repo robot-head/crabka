@@ -9,8 +9,9 @@ use crabka_protocol::owned::delete_acls_response::{
 };
 
 use super::acl_wire::{
-    operation_filter, operation_to_wire, pattern_type_filter, pattern_type_to_wire,
-    permission_filter, permission_to_wire, resource_type_filter, resource_type_to_wire,
+    CLUSTER_RESOURCE_NAME, operation_filter, operation_to_wire, pattern_type_filter,
+    pattern_type_to_wire, permission_filter, permission_to_wire, resource_type_filter,
+    resource_type_to_wire,
 };
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
@@ -39,7 +40,7 @@ pub(crate) async fn handle(
             principal: ctx.principal,
             host: ctx.peer,
             resource_type: crabka_metadata::ResourceType::Cluster,
-            resource_name: "kafka-cluster",
+            resource_name: CLUSTER_RESOURCE_NAME,
             operation: crabka_metadata::AclOperation::Alter,
         },
     );

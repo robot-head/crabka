@@ -18,6 +18,68 @@ use crate::log_dir;
 use crate::partition::{Partition, WriterMessage};
 use crate::partition_registry::PartitionRegistry;
 
+/// Startup deadline for the controller quorum to elect a leader before
+/// `Broker::start` fails with a `Startup` error.
+const STARTUP_LEADER_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(2);
+
+/// Maximum broker self-registration submit attempts before `Broker::start`
+/// gives up and fails startup.
+const SELF_REGISTRATION_MAX_ATTEMPTS: u32 = 8;
+
+/// First delay of the exponential self-registration retry backoff.
+const SELF_REGISTRATION_BACKOFF_MIN: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Ceiling of the exponential self-registration retry backoff.
+const SELF_REGISTRATION_BACKOFF_MAX: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Max bytes per `__cluster_metadata` fetch issued by a broker-only node's
+/// metadata observer (1 MiB).
+const OBSERVER_FETCH_MAX_BYTES: u32 = 1_048_576;
+
+/// How often a broker-only node's metadata observer polls the controller
+/// quorum for new `__cluster_metadata` records.
+const OBSERVER_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Capacity of the bounded audit-event channel between `AuditLog::emit`
+/// callers and the `AuditWriter` drain task; events past this depth drop.
+const AUDIT_EVENT_QUEUE_CAPACITY: usize = 8192;
+
+/// Cadence at which the `AuditWriter` replays spooled audit records back
+/// into the audit topic.
+const AUDIT_SPOOL_REPLAY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Cadence at which audit spool stats are polled into Prometheus gauges.
+const AUDIT_STATS_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Startup wait for this broker's led audit partition to materialise before
+/// emitting the `BrokerStarted` lifecycle event (best-effort; on timeout the
+/// event is emitted anyway and may drop).
+const AUDIT_PARTITION_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Cadence of the controller-side liveness scan that fires leader-election
+/// callbacks on broker alive/dead transitions.
+const LIVENESS_TICK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Cadence of the background poll refreshing the partition/controller health
+/// gauges (`partitions_led`, URP, under-min-ISR, offline, `active_controller`).
+const GAUGE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Cadence of the KIP-714 client-metrics stale-entry eviction sweep.
+const CLIENT_METRICS_EVICTION_TICK: std::time::Duration = std::time::Duration::from_mins(1);
+
+/// KIP-714 eviction: a client-metrics entry is stale once this many push
+/// intervals have elapsed without a push.
+const CLIENT_METRICS_STALE_PUSH_INTERVALS: u32 = 3;
+
+/// KIP-714 eviction: floor on the staleness window, so clients on very short
+/// push intervals are not evicted between pushes.
+const CLIENT_METRICS_STALE_FLOOR: std::time::Duration = std::time::Duration::from_mins(10);
+
+/// Safety-net timeout shared by the test-helper `wait_*` awaiters: a
+/// condition that has not held within this window fails the test loudly.
+#[cfg(any(test, feature = "test-helpers"))]
+const TEST_AWAITER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// The running broker. Library callers get a [`BrokerHandle`] from
 /// [`Broker::start`]; this struct is the shared internal state.
 // `config`, `metadata`, `partitions` are consumed by the per-API handlers
@@ -485,7 +547,7 @@ impl BrokerHandle {
         topic_id: uuid::Uuid,
         partition: i32,
     ) {
-        let res = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let res = tokio::time::timeout(TEST_AWAITER_TIMEOUT, async {
             loop {
                 if self
                     .share_state_summary_for_test(group, topic_id, partition)
@@ -515,7 +577,7 @@ impl BrokerHandle {
         partition: i32,
         min: i64,
     ) {
-        let res = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let res = tokio::time::timeout(TEST_AWAITER_TIMEOUT, async {
             loop {
                 if let Some((_, _, spso, _)) = self
                     .share_state_summary_for_test(group, topic_id, partition)
@@ -545,7 +607,7 @@ impl BrokerHandle {
         partition: i32,
         min: i32,
     ) {
-        let res = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let res = tokio::time::timeout(TEST_AWAITER_TIMEOUT, async {
             loop {
                 if let Some((_, _, _, dcc)) = self
                     .share_state_summary_for_test(group, topic_id, partition)
@@ -577,7 +639,7 @@ impl BrokerHandle {
         partition: i32,
         n: i32,
     ) {
-        let res = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let res = tokio::time::timeout(TEST_AWAITER_TIMEOUT, async {
             loop {
                 if let Some(cell) = self
                     ._broker
@@ -631,7 +693,7 @@ impl BrokerHandle {
     #[cfg(any(test, feature = "test-helpers"))]
     #[allow(clippy::used_underscore_binding)]
     pub async fn wait_until_group_member_count(&self, group_id: &str, n: usize) {
-        let res = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let res = tokio::time::timeout(TEST_AWAITER_TIMEOUT, async {
             loop {
                 let count = self
                     .group_describe_for_test(group_id)
@@ -695,7 +757,7 @@ impl BrokerHandle {
     #[cfg(any(test, feature = "test-helpers"))]
     #[allow(clippy::used_underscore_binding)]
     pub async fn wait_until_classic_group_member_count(&self, group_id: &str, n: usize) {
-        let res = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let res = tokio::time::timeout(TEST_AWAITER_TIMEOUT, async {
             loop {
                 let count = self
                     .classic_group_inspect_for_test(group_id)
@@ -750,7 +812,7 @@ impl BrokerHandle {
     #[cfg(any(test, feature = "test-helpers"))]
     #[allow(clippy::used_underscore_binding)]
     pub async fn wait_until_streams_group_member_count(&self, group_id: &str, n: usize) {
-        let res = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let res = tokio::time::timeout(TEST_AWAITER_TIMEOUT, async {
             loop {
                 let count = self
                     .streams_group_describe_for_test(group_id)
@@ -941,7 +1003,7 @@ impl BrokerHandle {
     /// broker without hard-coding a node id.
     #[must_use]
     #[allow(clippy::used_underscore_binding)]
-    pub fn node_id(&self) -> u64 {
+    pub fn node_id(&self) -> crabka_raft::NodeId {
         self._broker.config.node_id
     }
 
@@ -1050,7 +1112,11 @@ impl BrokerHandle {
     #[cfg(any(test, feature = "test-helpers"))]
     #[must_use]
     #[allow(clippy::used_underscore_binding)]
-    pub fn partition_leader_for_test(&self, topic: &str, partition: i32) -> Option<u64> {
+    pub fn partition_leader_for_test(
+        &self,
+        topic: &str,
+        partition: i32,
+    ) -> Option<crabka_raft::NodeId> {
         let img = self._broker.controller.current_image();
         let p = img.partition(topic, partition)?;
         if p.leader == 0 { None } else { Some(p.leader) }
@@ -1062,7 +1128,11 @@ impl BrokerHandle {
     #[cfg(any(test, feature = "test-helpers"))]
     #[must_use]
     #[allow(clippy::used_underscore_binding)]
-    pub fn partition_isr_for_test(&self, topic: &str, partition: i32) -> Option<Vec<u64>> {
+    pub fn partition_isr_for_test(
+        &self,
+        topic: &str,
+        partition: i32,
+    ) -> Option<Vec<crabka_raft::NodeId>> {
         let img = self._broker.controller.current_image();
         let p = img.partition(topic, partition)?;
         Some(p.isr.clone())
@@ -1108,7 +1178,7 @@ impl BrokerHandle {
         F: Fn(&crabka_metadata::MetadataImage) -> bool,
     {
         let mut rx = self._broker.controller.watch_image();
-        let res = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let res = tokio::time::timeout(TEST_AWAITER_TIMEOUT, async {
             loop {
                 // Scope the borrow so it is dropped before the await.
                 if pred(&rx.borrow_and_update()) {
@@ -1129,7 +1199,7 @@ impl BrokerHandle {
     #[allow(clippy::used_underscore_binding)]
     pub async fn wait_until_controller_leader(&self) -> crabka_raft::NodeId {
         let mut rx = self.watch_leader_for_test();
-        let res = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let res = tokio::time::timeout(TEST_AWAITER_TIMEOUT, async {
             loop {
                 if let Some(id) = *rx.borrow_and_update()
                     && id != 0
@@ -1173,7 +1243,7 @@ impl BrokerHandle {
         &self,
         topic: &str,
         partition: i32,
-        exclude: u64,
+        exclude: crabka_raft::NodeId,
     ) {
         self.wait_for_image(|img| {
             img.partition(topic, partition)
@@ -1203,7 +1273,7 @@ impl BrokerHandle {
     #[cfg(any(test, feature = "test-helpers"))]
     #[allow(clippy::used_underscore_binding)]
     pub async fn wait_until_local_log_end_offset(&self, topic: &str, partition: i32, min: i64) {
-        let res = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let res = tokio::time::timeout(TEST_AWAITER_TIMEOUT, async {
             loop {
                 if let Some(part) = self._broker.partitions.get(topic, partition) {
                     let notified = part.append_notify.notified();
@@ -1244,7 +1314,7 @@ impl BrokerHandle {
         partition: i32,
         target: i64,
     ) {
-        let res = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let res = tokio::time::timeout(TEST_AWAITER_TIMEOUT, async {
             loop {
                 if let Some(part) = self._broker.partitions.get(topic, partition) {
                     let notified = part.append_notify.notified();
@@ -1904,8 +1974,8 @@ impl Broker {
                     dialer: dialer.clone(),
                     client_id: format!("crabka-broker-{}-observer", config.broker_id),
                     cluster_id: config.cluster_id.unwrap_or_else(uuid::Uuid::nil),
-                    max_bytes: 1_048_576,
-                    poll_interval: std::time::Duration::from_millis(100),
+                    max_bytes: OBSERVER_FETCH_MAX_BYTES,
+                    poll_interval: OBSERVER_POLL_INTERVAL,
                 },
             );
             let forwarder = crate::metadata_source::QuorumForwarder {
@@ -1963,12 +2033,12 @@ impl Broker {
         //    membership reconciliation can retry later.
         {
             let mut leader_rx = controller.watch_leader();
-            let deadline = std::time::Instant::now() + std::time::Duration::from_mins(2);
+            let deadline = std::time::Instant::now() + STARTUP_LEADER_WAIT_TIMEOUT;
             while leader_rx.borrow().is_none() {
                 if std::time::Instant::now() > deadline {
-                    return Err(BrokerError::Startup(
-                        "no leader elected within 2 min".into(),
-                    ));
+                    return Err(BrokerError::Startup(format!(
+                        "no leader elected within {STARTUP_LEADER_WAIT_TIMEOUT:?}"
+                    )));
                 }
                 let _ = tokio::time::timeout(
                     std::time::Duration::from_millis(100),
@@ -2022,9 +2092,9 @@ impl Broker {
                     },
                 );
                 let backoff = exponential_backoff::Backoff::new(
-                    8,
-                    std::time::Duration::from_millis(100),
-                    Some(std::time::Duration::from_secs(5)),
+                    SELF_REGISTRATION_MAX_ATTEMPTS,
+                    SELF_REGISTRATION_BACKOFF_MIN,
+                    Some(SELF_REGISTRATION_BACKOFF_MAX),
                 );
                 for (attempt_idx, delay) in backoff.into_iter().enumerate() {
                     let attempt = attempt_idx + 1;
@@ -2297,7 +2367,7 @@ impl Broker {
         };
 
         let audit_log = if config.audit_enabled {
-            let (log, rx) = crabka_audit::AuditLog::new(8192);
+            let (log, rx) = crabka_audit::AuditLog::new(AUDIT_EVENT_QUEUE_CAPACITY);
             if let Some(pidx) = audit_led_partition {
                 let sink = std::sync::Arc::new(crate::audit_sink::KafkaTopicAuditSink::new(
                     partitions.clone(),
@@ -2375,19 +2445,19 @@ impl Broker {
                         chain,
                         spool,
                         stats: stats.clone(),
-                        replay_every: std::time::Duration::from_secs(2),
+                        replay_every: AUDIT_SPOOL_REPLAY_INTERVAL,
                     },
                 );
                 tokio::spawn(writer.run());
 
-                // Poll spool stats into Prometheus once a second.
+                // Poll spool stats into Prometheus on each tick.
                 let poll_metrics = metrics.clone();
                 let poll_log = log.clone();
                 tokio::spawn(async move {
                     let mut last_spooled = 0u64;
                     let mut last_replayed = 0u64;
                     let mut last_dropped = 0u64;
-                    let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+                    let mut tick = tokio::time::interval(AUDIT_STATS_POLL_INTERVAL);
                     loop {
                         tick.tick().await;
                         let spooled = stats.spooled();
@@ -2516,7 +2586,7 @@ impl Broker {
         let metrics_for_ticker = metrics.clone();
         let recovery_for_ticker = unclean_recovery.clone();
         tokio::spawn(async move {
-            let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+            let mut tick = tokio::time::interval(LIVENESS_TICK_INTERVAL);
             loop {
                 tokio::select! {
                     _ = tick.tick() => {},
@@ -2647,17 +2717,20 @@ impl Broker {
                 ),
             ));
         }
-        // Periodic eviction of stale client-metrics entries (3× push
-        // interval, floor 600s). Child token of supervisor_shutdown.
+        // Periodic eviction of stale client-metrics entries. Child token of
+        // supervisor_shutdown.
         {
             let cm = client_metrics.clone();
             let token = supervisor_shutdown.child_token();
             tokio::spawn(async move {
-                let mut tick = tokio::time::interval(std::time::Duration::from_mins(1));
+                let mut tick = tokio::time::interval(CLIENT_METRICS_EVICTION_TICK);
                 loop {
                     tokio::select! {
                         () = token.cancelled() => break,
-                        _ = tick.tick() => cm.manager.evict_stale(3, std::time::Duration::from_mins(10)),
+                        _ = tick.tick() => cm.manager.evict_stale(
+                            CLIENT_METRICS_STALE_PUSH_INTERVALS,
+                            CLIENT_METRICS_STALE_FLOOR,
+                        ),
                     }
                 }
             });
@@ -2673,7 +2746,7 @@ impl Broker {
             let m = metrics.clone();
             let shutdown = supervisor_shutdown.child_token();
             tokio::spawn(async move {
-                let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+                let mut tick = tokio::time::interval(GAUGE_POLL_INTERVAL);
                 loop {
                     tokio::select! {
                         _ = tick.tick() => {}
@@ -2720,7 +2793,7 @@ impl Broker {
                         .map(|topic| {
                             let min_isr = image
                                 .topic_config(&topic.name)
-                                .and_then(|m| m.get("min.insync.replicas"))
+                                .and_then(|m| m.get(crate::config_keys::MIN_INSYNC_REPLICAS))
                                 .and_then(|v| v.parse::<usize>().ok())
                                 .unwrap_or(1);
                             (topic.name.as_str(), min_isr)
@@ -3336,7 +3409,7 @@ impl Broker {
         if let Some(led_pidx) = audit_led_partition {
             let audit_topic = broker.config.audit_topic.clone();
             let partitions_for_wait = broker.partitions.clone();
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let _ = tokio::time::timeout(AUDIT_PARTITION_WAIT_TIMEOUT, async {
                 loop {
                     // Wait for this broker's led audit partition to materialise.
                     if partitions_for_wait.contains(&audit_topic, led_pidx) {
@@ -3437,6 +3510,10 @@ const RLMM_RECONCILE_TICK: std::time::Duration = std::time::Duration::from_secs(
 /// Maximum backoff between successive topic-backed RLMM bootstrap attempts.
 const RLMM_BOOTSTRAP_BACKOFF_MAX: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// First backoff after a failed topic-backed RLMM bootstrap attempt; doubles
+/// per failure up to [`RLMM_BOOTSTRAP_BACKOFF_MAX`].
+const RLMM_BOOTSTRAP_BACKOFF_INITIAL: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// Next backoff after a failed RLMM bootstrap attempt: double, capped.
 fn next_rlmm_backoff(cur: std::time::Duration, max: std::time::Duration) -> std::time::Duration {
     (cur * 2).min(max)
@@ -3502,7 +3579,7 @@ async fn bootstrap_topic_rlmm(
     // Retry the topic-backed bootstrap with bounded backoff until it succeeds
     // or the broker shuts down. Until then the SwappableRlmm stays on the
     // fail-closed NotReadyRlmm placeholder.
-    let mut backoff = std::time::Duration::from_millis(250);
+    let mut backoff = RLMM_BOOTSTRAP_BACKOFF_INITIAL;
     let manager = loop {
         metrics.tiered_storage_rlmm_bootstrap_attempts.inc();
         // Race the attempt against shutdown: `KafkaMetadataEventLog::start`
@@ -3667,8 +3744,12 @@ pub(crate) fn spawn_partition(
     log_dir_status: crate::log_dir_status::LogDirRegistry,
     producer_state: Arc<crate::producer_state::ProducerState>,
 ) -> Arc<Partition> {
+    /// Depth of the per-partition writer mpsc queue: bounds how many
+    /// produce/replication appends may be in flight to one partition before
+    /// senders back-pressure.
+    const PARTITION_WRITER_QUEUE_DEPTH: usize = 64;
     let log = Arc::new(Mutex::new(log));
-    let (tx, rx) = tokio::sync::mpsc::channel::<WriterMessage>(64);
+    let (tx, rx) = tokio::sync::mpsc::channel::<WriterMessage>(PARTITION_WRITER_QUEUE_DEPTH);
     let notify = Arc::new(tokio::sync::Notify::new());
     let replica_state = Arc::new(tokio::sync::Mutex::new(
         crate::replica_state::ReplicaState::new(),
@@ -3710,6 +3791,9 @@ pub(crate) fn spawn_partition(
 /// `:` so IPv6 literals do not break on inner colons (we still expect
 /// IPv6 callers to wrap in `[...]`).
 fn parse_advertised_host_port(addr: &str) -> (String, u16) {
+    /// Kafka's canonical default plaintext port, used only as the fallback
+    /// when an advertised address fails to parse as `host:port`.
+    const DEFAULT_KAFKA_PORT: u16 = 9092;
     if let Some((h, p)) = addr.rsplit_once(':')
         && let Ok(port) = p.parse::<u16>()
     {
@@ -3719,7 +3803,7 @@ fn parse_advertised_host_port(addr: &str) -> (String, u16) {
         addr,
         "advertised not host:port; falling back to localhost:9092"
     );
-    ("localhost".into(), 9092)
+    ("localhost".into(), DEFAULT_KAFKA_PORT)
 }
 
 /// Build the KIP-595 static controller [`VoterSet`](crabka_metadata::VoterSet)
@@ -3898,6 +3982,15 @@ impl Drop for ConnectionGuard {
     }
 }
 
+/// KIP-612 quota key for accept-rate throttling; matches the
+/// `connection_creation_rate` config name Kafka's `AlterClientQuotas` uses
+/// for `ip` entities.
+const CONNECTION_CREATION_RATE_QUOTA_KEY: &str = "connection_creation_rate";
+
+/// Upper bound on the KIP-612 accept-throttle delay, so a very low configured
+/// rate cannot stall the accept loop for more than this per connection.
+const CONNECTION_CREATION_THROTTLE_MAX: std::time::Duration = std::time::Duration::from_secs(1);
+
 async fn accept_loop(
     broker: Arc<Broker>,
     listener: TcpListener,
@@ -3941,14 +4034,14 @@ async fn accept_loop(
                             crate::quota::lookup_ip_quota_with_key(
                                 &image,
                                 peer_ip,
-                                "connection_creation_rate",
+                                CONNECTION_CREATION_RATE_QUOTA_KEY,
                             )
                             && rate > 0.0
                         {
                             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                             let initial_rate = rate.max(1.0) as u64;
                             let bucket = broker.quota_buckets.get_or_create(
-                                "connection_creation_rate",
+                                CONNECTION_CREATION_RATE_QUOTA_KEY,
                                 &entity_key,
                                 initial_rate,
                             );
@@ -3961,7 +4054,7 @@ async fn accept_loop(
                                     ((1.0_f64 / rate) * 1_000_000.0) as u64;
                                 let delay =
                                     std::time::Duration::from_micros(delay_micros)
-                                        .min(std::time::Duration::from_secs(1));
+                                        .min(CONNECTION_CREATION_THROTTLE_MAX);
                                 tokio::time::sleep(delay).await;
                             }
                         }

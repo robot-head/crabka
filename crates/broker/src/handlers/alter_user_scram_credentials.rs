@@ -48,7 +48,12 @@ use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
 use crate::codes;
 
+/// Lowest PBKDF2 iteration count accepted for a SCRAM credential (KIP-554);
+/// upsertions below this get `UNACCEPTABLE_CREDENTIAL`.
 const MIN_ITERATIONS: i32 = 4096;
+
+/// KIP-554 wire byte identifying a SCRAM mechanism (see [`wire_to_mech`]).
+type MechanismWireByte = i8;
 
 /// Run the `AlterUserScramCredentials` request and return the typed
 /// response. The caller (dispatch.rs) is responsible for wire-encoding
@@ -76,7 +81,7 @@ pub(crate) async fn handle(
             principal: ctx.principal,
             host: ctx.peer,
             resource_type: crabka_metadata::ResourceType::Cluster,
-            resource_name: "kafka-cluster",
+            resource_name: crate::handlers::acl_wire::CLUSTER_RESOURCE_NAME,
             operation: AclOperation::Alter,
         },
     ) == AuthorizationResult::Allow;
@@ -104,7 +109,7 @@ pub(crate) async fn handle(
         };
     }
 
-    let mut seen: HashSet<(String, i8)> = HashSet::new();
+    let mut seen: HashSet<(String, MechanismWireByte)> = HashSet::new();
     let mut user_results: Vec<AlterUserScramCredentialsResult> = Vec::new();
     let mut records: Vec<MetadataRecord> = Vec::new();
 
@@ -146,7 +151,7 @@ fn process_deletion(
     broker: &Broker,
     d: ScramCredentialDeletion,
     authorized: bool,
-    seen: &mut HashSet<(String, i8)>,
+    seen: &mut HashSet<(String, MechanismWireByte)>,
     records: &mut Vec<MetadataRecord>,
 ) -> AlterUserScramCredentialsResult {
     let key = (d.name.clone(), d.mechanism);
@@ -186,7 +191,7 @@ fn process_deletion(
 fn process_upsertion(
     u: ScramCredentialUpsertion,
     authorized: bool,
-    seen: &mut HashSet<(String, i8)>,
+    seen: &mut HashSet<(String, MechanismWireByte)>,
     records: &mut Vec<MetadataRecord>,
 ) -> AlterUserScramCredentialsResult {
     let key = (u.name.clone(), u.mechanism);
@@ -239,7 +244,7 @@ fn process_upsertion(
 /// - `0` — unknown (reserved)
 /// - `1` — SCRAM-SHA-256
 /// - `2` — SCRAM-SHA-512
-fn wire_to_mech(wire: i8) -> Option<SaslMechanism> {
+fn wire_to_mech(wire: MechanismWireByte) -> Option<SaslMechanism> {
     match wire {
         1 => Some(SaslMechanism::ScramSha256),
         2 => Some(SaslMechanism::ScramSha512),

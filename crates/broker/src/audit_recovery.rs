@@ -5,6 +5,18 @@ use crabka_audit::{EVENT_CLASS_CHECKPOINT, HEADER_PREV_HASH, HEADER_SEQ};
 
 use crate::partition::Partition;
 
+/// Recovery scans at most this many trailing offsets of the audit partition;
+/// it comfortably exceeds the worst-case run of consecutive checkpoint
+/// records between two chained records.
+const TAIL_WINDOW_OFFSETS: i64 = 4096;
+
+/// Byte cap (1 MiB) on the tail read so recovery stays cheap; audit records
+/// are small.
+const TAIL_READ_MAX_BYTES: usize = 1 << 20;
+
+/// Audit record-header key carrying the event class (e.g. `checkpoint`).
+const HEADER_EVENT_CLASS: &str = "event_class";
+
 /// Read the tail of `partition` and return `(next_seq, head)` implied by the
 /// last chained (non-checkpoint) record, or `None` if there are none.
 #[must_use]
@@ -13,16 +25,14 @@ pub(crate) fn recover_from_partition_tail(partition: &Partition) -> Option<(u64,
     if leo <= 0 {
         return None;
     }
-    // Read a bounded tail window (audit records are small).  4096 offsets
-    // comfortably exceeds the worst-case run of consecutive checkpoints
-    // between chained records; the 1 MiB byte cap keeps the read cheap.
+    // Read a bounded tail window (audit records are small).
     let start = tail_window_start(leo);
-    let out = partition.read_log(start, 1 << 20).ok()?;
+    let out = partition.read_log(start, TAIL_READ_MAX_BYTES).ok()?;
     let mut last: Option<(u64, [u8; 32])> = None;
     for batch in &out.batches {
         for rec in &batch.records {
             // Skip checkpoint records (they don't advance the chained seq).
-            if header_bytes(rec, "event_class").as_deref()
+            if header_bytes(rec, HEADER_EVENT_CLASS).as_deref()
                 == Some(EVENT_CLASS_CHECKPOINT.as_bytes())
             {
                 continue;
@@ -54,7 +64,7 @@ fn header_str(rec: &crabka_protocol::records::Record, key: &str) -> Option<Strin
 }
 
 fn tail_window_start(log_end_offset: i64) -> i64 {
-    (log_end_offset - 4096).max(0)
+    (log_end_offset - TAIL_WINDOW_OFFSETS).max(0)
 }
 
 #[cfg(test)]

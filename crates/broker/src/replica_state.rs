@@ -13,9 +13,11 @@ use std::time::Instant;
 
 use crabka_raft::NodeId;
 
+use crate::partition::LogOffset;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct FollowerStats {
-    pub(crate) leo: i64,
+    pub(crate) leo: LogOffset,
     pub(crate) last_fetch: Instant,
     pub(crate) last_caught_up: Instant,
 }
@@ -24,7 +26,7 @@ pub(crate) struct FollowerStats {
 pub(crate) struct ReplicaState {
     pub(crate) isr: HashSet<NodeId>,
     pub(crate) per_follower: HashMap<NodeId, FollowerStats>,
-    pub(crate) hw: i64,
+    pub(crate) hw: LogOffset,
     pub(crate) current_leader_epoch: i32,
 }
 
@@ -79,10 +81,10 @@ impl ReplicaState {
     pub(crate) fn update_follower_leo(
         &mut self,
         follower: NodeId,
-        follower_leo: i64,
-        leader_leo: i64,
+        follower_leo: LogOffset,
+        leader_leo: LogOffset,
         now: Instant,
-    ) -> i64 {
+    ) -> LogOffset {
         let clamped = follower_leo.min(leader_leo);
         let stats = self.per_follower.entry(follower).or_insert(FollowerStats {
             leo: 0,
@@ -98,12 +100,12 @@ impl ReplicaState {
         self.hw
     }
 
-    pub(crate) fn recompute_hw_for_leader_append(&mut self, leader_leo: i64) -> i64 {
+    pub(crate) fn recompute_hw_for_leader_append(&mut self, leader_leo: LogOffset) -> LogOffset {
         self.hw = self.compute_hw(leader_leo);
         self.hw
     }
 
-    fn compute_hw(&self, leader_leo: i64) -> i64 {
+    fn compute_hw(&self, leader_leo: LogOffset) -> LogOffset {
         self.isr
             .iter()
             .filter_map(|follower| self.per_follower.get(follower).map(|stats| stats.leo))

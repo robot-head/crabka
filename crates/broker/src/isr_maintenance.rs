@@ -15,6 +15,15 @@ use tracing::{debug, warn};
 use crate::partition::Partition;
 use crate::partition_registry::PartitionRegistry;
 
+/// Cadence of the ISR maintenance scan: every leader partition's follower
+/// lag is re-evaluated once per tick.
+const ISR_SCAN_INTERVAL: Duration = Duration::from_secs(1);
+
+/// KIP-903 sentinel for an unknown broker epoch. Stamped when the metadata
+/// image has no epoch for a broker; tells the controller to skip the
+/// stale-replica epoch fence for that entry.
+const UNKNOWN_BROKER_EPOCH: i64 = -1;
+
 pub(crate) struct Config {
     pub node_id: NodeId,
     pub partitions: Arc<PartitionRegistry>,
@@ -27,7 +36,7 @@ pub(crate) struct Config {
 }
 
 pub(crate) async fn run(cfg: Config) {
-    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    let mut tick = tokio::time::interval(ISR_SCAN_INTERVAL);
     // Reused across ticks to avoid re-allocating the snapshot Vec each second.
     // Holds cheap `Arc<Partition>` clones (no String allocation, no second
     // registry lookup). Cleared and refilled each tick.
@@ -240,7 +249,7 @@ fn build_alter_partition_request(
             broker_id: bid,
             broker_epoch: image
                 .broker_epoch(u64::try_from(bid).unwrap_or(0))
-                .unwrap_or(-1),
+                .unwrap_or(UNKNOWN_BROKER_EPOCH),
             ..Default::default()
         })
         .collect();
@@ -252,7 +261,7 @@ fn build_alter_partition_request(
         // fence stale replicas. Unknown brokers fall back to -1 (skip-check).
         broker_epoch: image
             .broker_epoch(u64::try_from(broker_id).unwrap_or(0))
-            .unwrap_or(-1),
+            .unwrap_or(UNKNOWN_BROKER_EPOCH),
         topics: vec![TopicData {
             topic_id,
             partitions: vec![PartitionData {

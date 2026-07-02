@@ -11,13 +11,29 @@
 
 use bytes::Bytes;
 
+use crabka_protocol::api_key::ApiKey;
+
 use crate::error::BrokerError;
+
+/// Raw wire `api_key` (i16) selecting the RPC — the numeric form of a
+/// [`crabka_protocol::api_key::ApiKey`] variant, kept as `i16` because it
+/// arrives off the wire and may name an API this broker doesn't know.
+pub type ApiKeyCode = i16;
+
+/// Negotiated Kafka request/response schema version for a single RPC.
+pub type ApiVersion = i16;
+
+/// Kafka wire error code (`crate::codes::*`), `0` = NONE.
+pub type ErrorCode = i16;
+
+/// Client-chosen request correlation id, echoed verbatim in the response header.
+pub type CorrelationId = i32;
 
 /// Function signature every handler in this module exports.
 pub type HandlerFn = fn(
     broker: &crate::broker::Broker,
-    version: i16,
-    correlation_id: i32,
+    version: ApiVersion,
+    correlation_id: CorrelationId,
     req_bytes: &[u8],
 ) -> futures_util::future::BoxFuture<'static, Result<Bytes, BrokerError>>;
 
@@ -25,7 +41,7 @@ pub type HandlerFn = fn(
 /// per-API modules.
 #[derive(Default)]
 pub struct HandlerTable {
-    table: std::collections::HashMap<i16, HandlerFn>,
+    table: std::collections::HashMap<ApiKeyCode, HandlerFn>,
 }
 
 impl HandlerTable {
@@ -33,12 +49,12 @@ impl HandlerTable {
         Self::default()
     }
 
-    pub fn register(&mut self, api_key: i16, handler: HandlerFn) -> bool {
+    pub fn register(&mut self, api_key: ApiKeyCode, handler: HandlerFn) -> bool {
         self.table.insert(api_key, handler).is_none()
     }
 
     #[must_use]
-    pub fn get(&self, api_key: i16) -> Option<HandlerFn> {
+    pub fn get(&self, api_key: ApiKeyCode) -> Option<HandlerFn> {
         self.table.get(&api_key).copied()
     }
 }
@@ -268,14 +284,20 @@ pub(crate) fn build_table() -> HandlerTable {
     // 14 (SyncGroup) intercepted inline — Group Read ACL.
     // 15 (DescribeGroups) intercepted inline — see comment above.
     // 16 (ListGroups) intercepted inline — see comment above.
-    t.register(18, api_versions::handle);
+    t.register(ApiKey::ApiVersions as i16, api_versions::handle);
     // 21 (DeleteRecords) intercepted inline — see comment above.
     // 22 (InitProducerId) intercepted inline — see comment above.
     // 23 (OffsetForLeaderEpoch) intercepted inline — per-topic Describe ACL.
     // 24 (AddPartitionsToTxn) intercepted inline — see comment above.
-    t.register(25, crate::txn::handlers::add_offset_commits_to_txn::handle);
+    t.register(
+        ApiKey::AddOffsetsToTxn as i16,
+        crate::txn::handlers::add_offset_commits_to_txn::handle,
+    );
     // 26 (EndTxn) intercepted inline — see comment above.
-    t.register(27, crate::txn::handlers::write_txn_markers::handle);
+    t.register(
+        ApiKey::WriteTxnMarkers as i16,
+        crate::txn::handlers::write_txn_markers::handle,
+    );
     // 28 (TxnOffsetCommit) intercepted inline — see comment above.
     // 32 (DescribeConfigs) intercepted inline — per-resource DescribeConfigs ACL.
     // 33 (AlterConfigs) intercepted inline — see comment above.
@@ -284,29 +306,53 @@ pub(crate) fn build_table() -> HandlerTable {
     // 42 (DeleteGroups) intercepted inline — see comment above.
     // 44 (IncrementalAlterConfigs) intercepted inline — see comment above.
     // 56 (AlterPartition) intercepted inline — Cluster ClusterAction ACL.
-    t.register(73, assign_replicas_to_dirs::handle);
+    t.register(
+        ApiKey::AssignReplicasToDirs as i16,
+        assign_replicas_to_dirs::handle,
+    );
     // FetchSnapshot (api_key 59, KIP-630) — controller-snapshot byte-range
     // fetch. Plain 4-arg signature: no per-connection ACL context needed.
-    t.register(59, fetch_snapshot::handle);
+    t.register(ApiKey::FetchSnapshot as i16, fetch_snapshot::handle);
     // 60 (DescribeCluster) intercepted inline — see comment above.
     // 63 (BrokerHeartbeat) intercepted inline — Cluster ClusterAction ACL.
     // 93 (GetReplicaLogInfo, KIP-966) intercepted inline — Cluster
     // ClusterAction ACL. Inter-broker RPC the controller's unclean recovery
     // manager uses to read each replica's LEO + leader epoch.
     // 68 (ConsumerGroupHeartbeat) intercepted inline — Group Read ACL.
-    t.register(69, consumer_group_describe::handle);
+    t.register(
+        ApiKey::ConsumerGroupDescribe as i16,
+        consumer_group_describe::handle,
+    );
     // 76 (ShareGroupHeartbeat, KIP-932) intercepted inline — Group Read ACL.
     // 88 (StreamsGroupHeartbeat, KIP-1071) intercepted inline — Group Read ACL.
     // StreamsGroupDescribe (89) stays a plain 4-arg handler and does not apply
     // a per-group Describe ACL gate.
-    t.register(89, streams_group_describe::handle);
+    t.register(
+        ApiKey::StreamsGroupDescribe as i16,
+        streams_group_describe::handle,
+    );
     // KIP-932 share-state persister RPCs (api keys 83–87). Inter-broker
     // handlers, gated per-partition on local share-state leadership.
-    t.register(83, crate::share_coordinator::handlers::initialize::handle);
-    t.register(84, crate::share_coordinator::handlers::read::handle);
-    t.register(85, crate::share_coordinator::handlers::write::handle);
-    t.register(86, crate::share_coordinator::handlers::delete::handle);
-    t.register(87, crate::share_coordinator::handlers::read_summary::handle);
+    t.register(
+        ApiKey::InitializeShareGroupState as i16,
+        crate::share_coordinator::handlers::initialize::handle,
+    );
+    t.register(
+        ApiKey::ReadShareGroupState as i16,
+        crate::share_coordinator::handlers::read::handle,
+    );
+    t.register(
+        ApiKey::WriteShareGroupState as i16,
+        crate::share_coordinator::handlers::write::handle,
+    );
+    t.register(
+        ApiKey::DeleteShareGroupState as i16,
+        crate::share_coordinator::handlers::delete::handle,
+    );
+    t.register(
+        ApiKey::ReadShareGroupStateSummary as i16,
+        crate::share_coordinator::handlers::read_summary::handle,
+    );
     // 71 (GetTelemetrySubscriptions) intercepted inline in `network::dispatch`
     // so the handler receives the per-connection peer SocketAddr and software
     // name/version for KIP-714 subscription matching.

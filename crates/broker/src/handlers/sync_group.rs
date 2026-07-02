@@ -23,6 +23,10 @@ use crate::codes;
 use crate::coordinator::unified::actor::GroupActorMessage;
 use crate::error::BrokerError;
 
+/// Upper bound on how long a follower's `SyncGroup` is parked waiting for the
+/// leader's call to install assignments before giving up with
+/// `REBALANCE_IN_PROGRESS`. Matches Kafka's default group rebalance timeout
+/// order of magnitude so a healthy leader always beats the deadline.
 const FOLLOWER_WAIT: Duration = Duration::from_secs(30);
 
 #[tracing::instrument(
@@ -34,8 +38,8 @@ const FOLLOWER_WAIT: Duration = Duration::from_secs(30);
 )]
 pub(crate) async fn handle(
     broker: &Broker,
-    version: i16,
-    _correlation_id: i32,
+    version: crate::handlers::ApiVersion,
+    _correlation_id: crate::handlers::CorrelationId,
     req_bytes: &[u8],
     ctx: &crate::handlers::RequestContext<'_>,
 ) -> Result<Bytes, BrokerError> {
@@ -112,8 +116,8 @@ fn group_read_denied(
 }
 
 fn encode_err(
-    version: i16,
-    code: i16,
+    version: crate::handlers::ApiVersion,
+    code: crate::handlers::ErrorCode,
     protocol_type: Option<String>,
     protocol_name: Option<String>,
 ) -> Result<Bytes, BrokerError> {
@@ -126,7 +130,10 @@ fn encode_err(
     encode(version, &resp)
 }
 
-fn encode(version: i16, resp: &SyncGroupResponse) -> Result<Bytes, BrokerError> {
+fn encode(
+    version: crate::handlers::ApiVersion,
+    resp: &SyncGroupResponse,
+) -> Result<Bytes, BrokerError> {
     let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
     resp.encode(&mut buf, version)?;
     Ok(buf.freeze())

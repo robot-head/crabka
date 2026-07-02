@@ -128,7 +128,7 @@ pub(crate) async fn handle(
     }
 }
 
-fn is_controller_leader(leader: Option<u64>, node_id: u64) -> bool {
+fn is_controller_leader(leader: Option<NodeId>, node_id: NodeId) -> bool {
     leader == Some(node_id)
 }
 
@@ -179,7 +179,7 @@ fn cluster_action_denied(
             principal,
             host,
             resource_type: ResourceType::Cluster,
-            resource_name: "kafka-cluster",
+            resource_name: crate::handlers::acl_wire::CLUSTER_RESOURCE_NAME,
             operation: AclOperation::ClusterAction,
         },
     ) == AuthorizationResult::Deny
@@ -230,16 +230,15 @@ pub(crate) async fn failover_offline_dirs(
 async fn drain_leaderships_for_shutdown(
     controller: &Arc<dyn crate::metadata_source::MetadataSource>,
     liveness: &Arc<ControllerLivenessState>,
-    shutting_down: u64,
+    shutting_down: NodeId,
 ) -> Result<bool, BrokerError> {
     let image: Arc<MetadataImage> = controller.current_image();
-    let shutting_down_node: NodeId = shutting_down;
 
     let mut leader_count: usize = 0;
     let mut changes: Vec<MetadataRecord> = Vec::new();
     for topic in image.topics() {
         for pr in image.partitions_of(&topic.name) {
-            if pr.leader != shutting_down_node {
+            if pr.leader != shutting_down {
                 continue;
             }
             if let Ok(new_pr) = select_replacement_leader_for_shutdown(
@@ -247,7 +246,7 @@ async fn drain_leaderships_for_shutdown(
                 liveness,
                 &pr.topic,
                 pr.partition,
-                shutting_down_node,
+                shutting_down,
             )
             .await
             {

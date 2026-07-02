@@ -12,6 +12,9 @@ use crate::codes::{
     UNKNOWN_TOPIC_OR_PARTITION,
 };
 
+/// Per-row rejection: Kafka wire error code plus a human-readable message.
+type RowError = (i16, String);
+
 /// Process one (topic, partition, `target_opt`) row from an
 /// `AlterPartitionReassignments` request. Returns:
 ///   - `Ok(Some(PartitionRecord))` — submit this intermediate record
@@ -23,7 +26,7 @@ pub(crate) fn process_one_partition(
     partition: i32,
     target: Option<&[i32]>,
     allow_rf_change: bool,
-) -> Result<Option<PartitionRecord>, (i16, String)> {
+) -> Result<Option<PartitionRecord>, RowError> {
     let pr = image
         .partition(topic, partition)
         .ok_or((UNKNOWN_TOPIC_OR_PARTITION, "unknown partition".into()))?;
@@ -42,7 +45,7 @@ fn validate_target(
     image: &MetadataImage,
     allow_rf_change: bool,
     pr: &PartitionRecord,
-) -> Result<(), (i16, String)> {
+) -> Result<(), RowError> {
     if target.is_empty() {
         return Err((INVALID_REPLICA_ASSIGNMENT, "empty target".into()));
     }
@@ -81,7 +84,7 @@ fn validate_target(
     Ok(())
 }
 
-fn cancel_path(pr: &PartitionRecord) -> Result<Option<PartitionRecord>, (i16, String)> {
+fn cancel_path(pr: &PartitionRecord) -> Result<Option<PartitionRecord>, RowError> {
     if pr.adding_replicas.is_empty() && pr.removing_replicas.is_empty() {
         return Err((NO_REASSIGNMENT_IN_PROGRESS, "nothing to cancel".into()));
     }
@@ -205,7 +208,7 @@ pub(crate) async fn handle(
             principal: ctx.principal,
             host: ctx.peer,
             resource_type: ResourceType::Cluster,
-            resource_name: "kafka-cluster",
+            resource_name: crate::handlers::acl_wire::CLUSTER_RESOURCE_NAME,
             operation: crabka_metadata::AclOperation::Alter,
         },
     );

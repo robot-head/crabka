@@ -399,6 +399,9 @@ mod tests {
         tx
     }
 
+    /// Per-fetch soft byte cap used by every observer fixture (1 MiB).
+    const TEST_MAX_FETCH_BYTES: u32 = 1_048_576;
+
     #[test]
     fn voter_at_wraps_round_robin_by_modulo() {
         let voters = vec![
@@ -445,7 +448,7 @@ mod tests {
             dialer: Arc::new(crabka_raft::PlaintextDialer),
             client_id: "cancel-test".into(),
             cluster_id: Uuid::nil(),
-            max_bytes: 1_048_576,
+            max_bytes: TEST_MAX_FETCH_BYTES,
             poll_interval: Duration::from_mins(1),
         });
 
@@ -478,7 +481,7 @@ mod tests {
             }),
             client_id: "sleep-test".into(),
             cluster_id: Uuid::nil(),
-            max_bytes: 1_048_576,
+            max_bytes: TEST_MAX_FETCH_BYTES,
             poll_interval: Duration::from_millis(250),
         });
 
@@ -529,7 +532,7 @@ mod tests {
             }),
             client_id: "test-observer".into(),
             cluster_id: Uuid::nil(),
-            max_bytes: 1_048_576,
+            max_bytes: TEST_MAX_FETCH_BYTES,
             poll_interval: Duration::from_millis(50),
         });
 

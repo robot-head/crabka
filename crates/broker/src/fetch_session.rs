@@ -46,30 +46,46 @@ use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 
 use crate::codes;
 
+/// A KIP-227 fetch session id as carried on the wire (`FetchRequest.session_id`).
+/// `0` ([`INVALID_SESSION_ID`]) means "no session"; valid ids are strictly
+/// positive.
+pub type FetchSessionId = i32;
+
+/// A KIP-227 fetch session epoch as carried on the wire
+/// (`FetchRequest.session_epoch`). `0` ([`INITIAL_EPOCH`]) opens a session,
+/// `-1` ([`FINAL_EPOCH`]) closes one; valid incremental epochs are strictly
+/// positive.
+pub type FetchSessionEpoch = i32;
+
 /// Wire sentinel: "no session". A request with `session_id == 0` and
 /// `session_epoch == -1` is a sessionless full fetch; a response with
 /// `session_id == 0` tells the client that no session was allocated.
-pub const INVALID_SESSION_ID: i32 = 0;
+pub const INVALID_SESSION_ID: FetchSessionId = 0;
 
 /// Wire sentinel: "open a new session". A request with `session_id == 0`
 /// and `session_epoch == 0` asks the broker to allocate a new session.
-pub const INITIAL_EPOCH: i32 = 0;
+pub const INITIAL_EPOCH: FetchSessionEpoch = 0;
 
 /// Wire sentinel: "no session" / "close session". On a request with
 /// `session_id == 0`, `FINAL_EPOCH` means a sessionless full fetch. On
 /// a request with `session_id != 0`, it means close the named session.
-pub const FINAL_EPOCH: i32 = -1;
+pub const FINAL_EPOCH: FetchSessionEpoch = -1;
+
+/// The first id the allocator hands out. Ids count up from here: `0` is
+/// reserved as [`INVALID_SESSION_ID`] and negative ids never go on the wire
+/// (clients reject them).
+const FIRST_SESSION_ID: FetchSessionId = 1;
 
 /// Compute the epoch the broker expects on the next request after a
 /// successful incremental fetch. Wraps from `i32::MAX` back to `1`,
 /// skipping the two reserved sentinels (`0` = INITIAL, `-1` = FINAL).
 #[must_use]
-pub fn next_epoch(prev: i32) -> i32 {
+pub fn next_epoch(prev: FetchSessionEpoch) -> FetchSessionEpoch {
     let n = prev.wrapping_add(1);
     if n <= 0 { 1 } else { n }
 }
 
-fn session_id_is_reserved(candidate: i32) -> bool {
+fn session_id_is_reserved(candidate: FetchSessionId) -> bool {
     candidate <= 0
 }
 
@@ -104,11 +120,11 @@ pub struct CachedPartitionState {
 }
 
 pub struct FetchSession {
-    pub id: i32,
+    pub id: FetchSessionId,
     /// The epoch the *next* incremental request must carry. Initialized
     /// to `1` on allocation and bumped after each successful incremental
     /// fetch.
-    pub next_epoch: i32,
+    pub next_epoch: FetchSessionEpoch,
     pub privileged: bool,
     pub creator_principal: String,
     pub partitions: HashMap<FetchSessionKey, CachedPartitionState>,
@@ -133,23 +149,23 @@ pub enum SessionDecision {
     /// updates/new entries and `forgotten_topics_data` removed). Response
     /// only contains partitions whose state has changed.
     Incremental {
-        session_id: i32,
+        session_id: FetchSessionId,
         /// Already-incremented; goes nowhere on the wire (response has no
         /// epoch field) — but the cache uses it as the *next* expected
         /// epoch for the following request.
-        new_epoch: i32,
+        new_epoch: FetchSessionEpoch,
         partitions: Vec<(FetchSessionKey, CachedPartitionState)>,
     },
     /// `(session_id!=0, epoch=-1)` — serve from `req.topics` like a
     /// sessionless fetch, then drop the cached session.
-    Close { session_id: i32 },
+    Close { session_id: FetchSessionId },
     /// Protocol violation — emit an empty response with this top-level
     /// `error_code` and `session_id = 0`.
     Error { code: i16 },
 }
 
 struct Inner {
-    sessions: HashMap<i32, FetchSession>,
+    sessions: HashMap<FetchSessionId, FetchSession>,
 }
 
 pub struct FetchSessionCache {
@@ -228,9 +244,9 @@ impl FetchSessionCache {
             inner: Mutex::new(Inner {
                 sessions: HashMap::new(),
             }),
-            // Id allocation starts at 1 — id 0 is reserved as the
-            // INVALID_SESSION_ID sentinel.
-            next_id: AtomicI32::new(1),
+            // Id allocation starts at FIRST_SESSION_ID — id 0 is reserved
+            // as the INVALID_SESSION_ID sentinel.
+            next_id: AtomicI32::new(FIRST_SESSION_ID),
             max_slots,
             evictions: AtomicU64::new(0),
             num_sessions: AtomicUsize::new(0),
@@ -372,7 +388,7 @@ impl FetchSessionCache {
         privileged: bool,
         creator_principal: String,
         partitions: Vec<(FetchSessionKey, CachedPartitionState)>,
-    ) -> i32 {
+    ) -> FetchSessionId {
         if self.max_slots == 0 {
             return INVALID_SESSION_ID;
         }
@@ -383,7 +399,7 @@ impl FetchSessionCache {
             // otherwise (only when the caller is itself privileged) the
             // LRU session of any kind. Non-privileged callers cannot
             // evict privileged sessions — they fall back to sessionless.
-            let victim: Option<i32> = guard
+            let victim: Option<FetchSessionId> = guard
                 .sessions
                 .iter()
                 .filter(|(_, s)| if privileged { true } else { !s.privileged })
@@ -411,10 +427,10 @@ impl FetchSessionCache {
         for _ in 0..guard.sessions.len().saturating_add(3) {
             let candidate = self.next_id.fetch_add(1, Ordering::Relaxed);
             if session_id_is_reserved(candidate) {
-                // Wrapped past i32::MAX or hit zero. Reset to 1 and
-                // try again; the next iteration will fetch_add to 2
-                // and store 3.
-                self.next_id.store(1, Ordering::Relaxed);
+                // Wrapped past i32::MAX or hit zero. Reset to the first
+                // allocatable id and try again; the next iteration will
+                // fetch_add to 2 and store 3.
+                self.next_id.store(FIRST_SESSION_ID, Ordering::Relaxed);
                 continue;
             }
             if !guard.sessions.contains_key(&candidate) {
@@ -431,8 +447,8 @@ impl FetchSessionCache {
         let session = FetchSession {
             id,
             // Client's first incremental request after a new-session
-            // allocation must carry epoch=1.
-            next_epoch: 1,
+            // allocation must carry the epoch after INITIAL (i.e. 1).
+            next_epoch: next_epoch(INITIAL_EPOCH),
             privileged,
             creator_principal,
             partitions,
@@ -453,7 +469,7 @@ impl FetchSessionCache {
     /// were filtered).
     pub fn finalize_incremental(
         &self,
-        session_id: i32,
+        session_id: FetchSessionId,
         sent: &[(FetchSessionKey, CachedPartitionState)],
     ) {
         let mut guard = self.inner.lock().expect("poisoned");
@@ -475,7 +491,7 @@ impl FetchSessionCache {
     /// Drop the session. Called when the request is `Close` (existing
     /// session, epoch=-1) or after the handler decides to forcibly
     /// invalidate the session.
-    pub fn close(&self, session_id: i32) {
+    pub fn close(&self, session_id: FetchSessionId) {
         let mut guard = self.inner.lock().expect("poisoned");
         if let Some(session) = guard.sessions.remove(&session_id) {
             self.num_sessions.fetch_sub(1, Ordering::Relaxed);

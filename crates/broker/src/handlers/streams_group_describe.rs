@@ -31,6 +31,10 @@ use crate::coordinator::unified::streams::actor::{
 };
 use crate::error::BrokerError;
 
+/// Minimum finalized `streams.version` feature level at which the KIP-1071
+/// streams RPCs (heartbeat/describe) are served.
+const STREAMS_VERSION_MIN_LEVEL: i16 = 1;
+
 pub(crate) fn handle(
     broker: &Broker,
     version: i16,
@@ -48,8 +52,11 @@ pub(crate) fn handle(
         // KIP-1071: same gate as the heartbeat — finalized streams.version >= 1
         // AND the config kill-switch. If disabled, each requested group gets a
         // GROUP_ID_NOT_FOUND error row (the protocol does not serve here).
-        let enabled = crate::features::feature_enabled(&image, crate::features::STREAMS_VERSION, 1)
-            && streams_enabled;
+        let enabled = crate::features::feature_enabled(
+            &image,
+            crate::features::STREAMS_VERSION,
+            STREAMS_VERSION_MIN_LEVEL,
+        ) && streams_enabled;
 
         let mut groups: Vec<DescribedGroup> = Vec::with_capacity(req.group_ids.len());
         for gid in &req.group_ids {

@@ -44,6 +44,10 @@ const RESOURCE_TYPE_TOPIC: i8 = 2;
 const RESOURCE_TYPE_BROKER: i8 = 4;
 const RESOURCE_TYPE_CLIENT_METRICS: i8 = 16;
 
+/// `ConfigDef.Type::UNKNOWN` wire byte — Crabka doesn't report typed config
+/// metadata, matching brokers that predate KIP-226's typed responses.
+const CONFIG_TYPE_UNKNOWN: i8 = 0;
+
 /// Produce a `DescribeConfigsResourceResult` for a single `(key, value)` pair.
 fn make_entry(key: &str, value: &str, config_source: i8) -> DescribeConfigsResourceResult {
     DescribeConfigsResourceResult {
@@ -53,7 +57,7 @@ fn make_entry(key: &str, value: &str, config_source: i8) -> DescribeConfigsResou
         config_source,
         is_sensitive: false,
         synonyms: Vec::new(),
-        config_type: 0,
+        config_type: CONFIG_TYPE_UNKNOWN,
         documentation: None,
         ..Default::default()
     }
@@ -166,7 +170,7 @@ fn resource_authz_failure(
         ),
         RESOURCE_TYPE_BROKER => (
             ResourceType::Cluster,
-            "kafka-cluster",
+            crate::handlers::acl_wire::CLUSTER_RESOURCE_NAME,
             codes::CLUSTER_AUTHORIZATION_FAILED,
         ),
         _ => return None,

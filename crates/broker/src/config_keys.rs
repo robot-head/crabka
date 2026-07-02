@@ -88,13 +88,26 @@ pub(crate) const DELETE_RETENTION_MS: &str = "delete.retention.ms";
 pub(crate) const QOS_TIER: &str = "qos.tier";
 pub(crate) const DEFAULT_QOS_TIER: &str = "default";
 
+/// Kafka sentinel for `retention.ms` / `retention.bytes`: `-1` means
+/// unlimited retention, and is the lowest legal value.
+const RETENTION_UNLIMITED: i64 = -1;
+
+/// KIP-405 sentinel for `local.retention.ms` / `local.retention.bytes`:
+/// `-2` means "inherit the corresponding non-local retention setting", and
+/// is the lowest legal value (`-1` = unlimited also applies).
+const LOCAL_RETENTION_INHERIT: i64 = -2;
+
 /// Validate a single key/value pair. `Err(reason)` carries an
 /// operator-readable explanation that the handler propagates into the
 /// `error_message` field of the response.
 pub(crate) fn validate_topic_config(key: &str, value: &str) -> Result<(), String> {
     match key {
-        RETENTION_MS | RETENTION_BYTES => parse_i64_at_least(-1, value).map(|_| ()),
-        LOCAL_RETENTION_MS | LOCAL_RETENTION_BYTES => parse_i64_at_least(-2, value).map(|_| ()),
+        RETENTION_MS | RETENTION_BYTES => {
+            parse_i64_at_least(RETENTION_UNLIMITED, value).map(|_| ())
+        }
+        LOCAL_RETENTION_MS | LOCAL_RETENTION_BYTES => {
+            parse_i64_at_least(LOCAL_RETENTION_INHERIT, value).map(|_| ())
+        }
         DELETE_RETENTION_MS => parse_i64_at_least(0, value).map(|_| ()),
         SEGMENT_BYTES => parse_u64_at_least(1, value).map(|_| ()),
         CLEANUP_POLICY => match value {

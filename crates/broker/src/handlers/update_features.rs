@@ -29,13 +29,28 @@ fn dependencies_met(image: &crabka_metadata::MetadataImage, deps: &[(&str, i16)]
     })
 }
 
+/// KIP-584 `FeatureUpdate.UpgradeType` wire code: safe (lossless) downgrade.
+const UPGRADE_TYPE_SAFE_DOWNGRADE: i8 = 2;
+
+/// KIP-584 `FeatureUpdate.UpgradeType` wire code: unsafe downgrade — the
+/// caller accepts losing metadata written at the higher feature level.
+const UPGRADE_TYPE_UNSAFE_DOWNGRADE: i8 = 3;
+
+/// KIP-584: a requested `max_version_level` of `0` asks to *delete* the
+/// finalized feature rather than move it to another level.
+const DELETE_FINALIZED_LEVEL: i16 = 0;
+
 /// KIP-584 `FeatureUpdate.UpgradeType`: 1 = UPGRADE, 2 = `SAFE_DOWNGRADE`,
-/// 3 = `UNSAFE_DOWNGRADE`.
+/// 3 = `UNSAFE_DOWNGRADE`. Request v0 predates the field and carries the
+/// boolean `allow_downgrade` flag instead.
 fn downgrade_allowed(version: i16, allow_downgrade: bool, upgrade_type: i8) -> bool {
     if version == 0 {
         allow_downgrade
     } else {
-        matches!(upgrade_type, 2 | 3)
+        matches!(
+            upgrade_type,
+            UPGRADE_TYPE_SAFE_DOWNGRADE | UPGRADE_TYPE_UNSAFE_DOWNGRADE
+        )
     }
 }
 
@@ -61,7 +76,7 @@ pub(crate) async fn handle(
             principal: ctx.principal,
             host: ctx.peer,
             resource_type: crabka_metadata::ResourceType::Cluster,
-            resource_name: "kafka-cluster",
+            resource_name: crate::handlers::acl_wire::CLUSTER_RESOURCE_NAME,
             operation: AclOperation::Alter,
         },
     ) == AuthorizationResult::Allow;
@@ -141,7 +156,7 @@ pub(crate) async fn handle(
             ));
             continue;
         }
-        if level == 0 {
+        if level == DELETE_FINALIZED_LEVEL {
             // Delete the finalized feature; only valid if it exists and a
             // downgrade is permitted.
             if current.is_none() {

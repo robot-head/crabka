@@ -32,6 +32,8 @@ use testcontainers::{GenericImage, ImageExt};
 use tokio::sync::oneshot;
 
 const TENANT: &str = "tenant-a";
+/// Pyroscope HTTP port inside the container.
+const PYROSCOPE_HTTP_PORT: u16 = 4040;
 const PROFILE_ENV: &str = "pprofdiff";
 const PROFILE_TYPE: &str = "goroutines:goroutine:count:goroutine:count";
 const SELECTOR: &str = r#"{env="pprofdiff"}"#;
@@ -67,7 +69,7 @@ impl WalSink for CapturingSink {
 async fn real_pyroscope_render_matches_crabka_after_identical_ingest() -> TestResult {
     let client = reqwest::Client::new();
     let pyroscope = start_pyroscope().await?;
-    let pyroscope_base = mapped_base_url(&pyroscope, 4040).await?;
+    let pyroscope_base = mapped_base_url(&pyroscope, PYROSCOPE_HTTP_PORT).await?;
     wait_for_http_ok(&client, &pyroscope_base, &["/ready"]).await?;
     let gzipped_pprof = fetch_goroutine_pprof(&client, &pyroscope_base).await?;
 
@@ -176,7 +178,7 @@ async fn real_pyroscope_render_matches_crabka_after_identical_ingest() -> TestRe
 async fn real_pyroscope_series_and_stats_match_crabka_after_identical_ingest() -> TestResult {
     let client = reqwest::Client::new();
     let pyroscope = start_pyroscope().await?;
-    let pyroscope_base = mapped_base_url(&pyroscope, 4040).await?;
+    let pyroscope_base = mapped_base_url(&pyroscope, PYROSCOPE_HTTP_PORT).await?;
     wait_for_http_ok(&client, &pyroscope_base, &["/ready"]).await?;
     let gzipped_pprof = fetch_goroutine_pprof(&client, &pyroscope_base).await?;
 
@@ -748,7 +750,7 @@ async fn start_pyroscope() -> TestResult<testcontainers::ContainerAsync<GenericI
     let tag = std::env::var("CRABKA_PYROSCOPE_IMAGE_TAG").unwrap_or_else(|_| "latest".to_string());
     Ok(
         GenericImage::new("mirror.gcr.io/grafana/pyroscope".to_string(), tag)
-            .with_exposed_port(4040.tcp())
+            .with_exposed_port(PYROSCOPE_HTTP_PORT.tcp())
             .with_wait_for(WaitFor::seconds(3))
             .start()
             .await?,

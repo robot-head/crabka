@@ -45,6 +45,26 @@ use crate::txn::state::{TopicPartition, TxnEntry, TxnState};
 use crate::txn::util::now_millis;
 use crate::txn::version::TxnVersion;
 
+/// A producer's identity pair as carried on the wire:
+/// (`producer_id`, `producer_epoch`).
+pub(crate) type ProducerIdentity = (i64, i16);
+
+/// Kafka wire sentinel: "no producer id" (`RecordBatch.NO_PRODUCER_ID`).
+/// Returned on `EndTxn` error responses, where the identity is meaningless.
+const NO_PRODUCER_ID: i64 = -1;
+
+/// Kafka wire sentinel: "no producer epoch" (`RecordBatch.NO_PRODUCER_EPOCH`).
+const NO_PRODUCER_EPOCH: i16 = -1;
+
+/// Coordinator epoch stamped on outgoing `WriteTxnMarkers`. Apache Kafka
+/// increments it on each coordinator leadership change; coordinator failover
+/// tracking is not implemented yet, so every marker carries the initial epoch.
+const INITIAL_COORDINATOR_EPOCH: i32 = 0;
+
+/// TLS SNI server name used on inter-broker dials — matches the convention
+/// of the replicator / heartbeat / auto-join inter-broker clients.
+const INTER_BROKER_SNI: &str = "localhost";
+
 #[allow(clippy::too_many_lines)]
 #[tracing::instrument(
     name = "handle_end_txn",
@@ -350,7 +370,7 @@ pub(crate) fn next_producer_identity(
     pid: i64,
     epoch: i16,
     ids: &crate::producer_id_manager::ProducerIdManager,
-) -> (i64, i16) {
+) -> ProducerIdentity {
     if !txnv.verified() {
         return (pid, epoch);
     }
@@ -565,22 +585,20 @@ async fn send_write_txn_markers(
             producer_epoch: entry.producer_epoch,
             transaction_result: marker_type == MarkerType::Commit,
             topics,
-            // Hard-coded to 0. Coordinator leader-change tracking (real
-            // epoch increment on failover) is not yet implemented.
-            coordinator_epoch: 0,
+            // Coordinator leader-change tracking (real epoch increment on
+            // failover) is not yet implemented; see the constant's doc.
+            coordinator_epoch: INITIAL_COORDINATOR_EPOCH,
             ..Default::default()
         }],
         ..Default::default()
     };
 
-    // SNI server_name "localhost" matches the convention used by the
-    // replicator / heartbeat / auto-join inter-broker dials.
     let opts = crabka_client_core::ConnectionOptions {
         client_id: format!("crabka-broker-txn-{my_node_id}"),
         ..crabka_client_core::ConnectionOptions::default()
     };
     let conn = inter_broker_client
-        .connect_as_connection(&host, port, inter_broker_protocol, "localhost", opts)
+        .connect_as_connection(&host, port, inter_broker_protocol, INTER_BROKER_SNI, opts)
         .await
         .map_err(|e| BrokerError::Txn(format!("EndTxn: connect to {host}:{port}: {e}")))?;
 
@@ -599,8 +617,8 @@ async fn send_write_txn_markers(
 
 fn encode_err(version: i16, error_code: i16) -> Result<Bytes, BrokerError> {
     // On the error path the producer_id/epoch fields are not meaningful;
-    // leave them at the response default (-1, -1).
-    encode_response(version, error_code, -1, -1)
+    // leave them at the "no producer" wire sentinels.
+    encode_response(version, error_code, NO_PRODUCER_ID, NO_PRODUCER_EPOCH)
 }
 
 /// Encode a successful `EndTxn` response. `producer_id` / `producer_epoch` are

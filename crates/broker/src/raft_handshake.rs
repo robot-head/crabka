@@ -51,6 +51,29 @@ const API_KEY_SASL_HANDSHAKE: i16 = 17;
 const API_KEY_SASL_AUTHENTICATE: i16 = 36;
 const API_KEY_API_VERSIONS: i16 = 18;
 
+/// Fixed-size prefix of a request header before the client-id bytes:
+/// `api_key i16 + api_version i16 + correlation_id i32 + client_id_len i16`.
+const REQUEST_HEADER_PREFIX_LEN: usize = 10;
+
+/// `SaslAuthenticate (36)` switches to flexible (v2) request *and* response
+/// headers starting at this api_version (KIP-482 flexible-versions cutover).
+const SASL_AUTHENTICATE_FLEXIBLE_VERSION: i16 = 2;
+
+/// Pre-auth APIs advertised in the hand-rolled `ApiVersionsResponse v0`,
+/// in wire order: SaslHandshake, SaslAuthenticate, ApiVersions.
+const ADVERTISED_PRE_AUTH_APIS: [i16; 3] = [
+    API_KEY_SASL_HANDSHAKE,
+    API_KEY_SASL_AUTHENTICATE,
+    API_KEY_API_VERSIONS,
+];
+
+/// Version range advertised for every pre-auth API in the minimal
+/// `ApiVersionsResponse v0` (covers SaslHandshake v0-1, SaslAuthenticate
+/// v0-2, ApiVersions v0 — the versions the inbound state machine accepts).
+const ADVERTISED_MIN_VERSION: i16 = 0;
+/// See [`ADVERTISED_MIN_VERSION`].
+const ADVERTISED_MAX_VERSION: i16 = 2;
+
 /// Per-broker handshake adapter. Constructed in `Broker::start` and passed
 /// into `ControllerConfig::handshake`.
 pub struct BrokerRaftHandshake {
@@ -105,7 +128,7 @@ impl BrokerRaftHandshake {
                 principal,
                 host: peer,
                 resource_type: ResourceType::Cluster,
-                resource_name: "kafka-cluster",
+                resource_name: crate::handlers::acl_wire::CLUSTER_RESOURCE_NAME,
                 operation: AclOperation::ClusterAction,
             },
         );
@@ -311,14 +334,14 @@ async fn read_kafka_request(
     let size = u32::from_be_bytes(size_buf) as usize;
     let mut frame = vec![0u8; size];
     stream.read_exact(&mut frame).await?;
-    if frame.len() < 10 {
+    if frame.len() < REQUEST_HEADER_PREFIX_LEN {
         return Err(RaftHandshakeError::Protocol("short request header".into()));
     }
     let api_key = i16::from_be_bytes([frame[0], frame[1]]);
     let api_version = i16::from_be_bytes([frame[2], frame[3]]);
     let corr_id = i32::from_be_bytes([frame[4], frame[5], frame[6], frame[7]]);
     let client_id_len = i16::from_be_bytes([frame[8], frame[9]]);
-    let mut cursor: usize = 10;
+    let mut cursor: usize = REQUEST_HEADER_PREFIX_LEN;
     if client_id_len >= 0 {
         let cid_len = usize::try_from(client_id_len)
             .map_err(|_| RaftHandshakeError::Protocol("client_id_len overflow".into()))?;
@@ -383,7 +406,7 @@ async fn write_response<R: Encode>(
 /// other pre-auth APIs use the non-flexible v1 header.
 fn is_request_header_flexible(api_key: i16, api_version: i16) -> bool {
     match api_key {
-        API_KEY_SASL_AUTHENTICATE => api_version >= 2,
+        API_KEY_SASL_AUTHENTICATE => api_version >= SASL_AUTHENTICATE_FLEXIBLE_VERSION,
         // SaslHandshake v0/v1 — non-flexible. ApiVersions v0 — non-flexible.
         _ => false,
     }
@@ -400,7 +423,7 @@ fn is_response_header_flexible(api_key: i16, api_version: i16) -> bool {
     // at every version we accept; only SaslAuthenticate (36) flips to a
     // flexible response header starting at v2.
     match api_key {
-        API_KEY_SASL_AUTHENTICATE => api_version >= 2,
+        API_KEY_SASL_AUTHENTICATE => api_version >= SASL_AUTHENTICATE_FLEXIBLE_VERSION,
         _ => false,
     }
 }
@@ -412,17 +435,15 @@ fn is_response_header_flexible(api_key: i16, api_version: i16) -> bool {
 fn build_api_versions_response(corr_id: i32) -> Vec<u8> {
     // v0 body: error_code(i16) + api_versions array(i32 len, repeats of
     // {api_key i16, min i16, max i16}) + throttle_time_ms(i32).
-    let mut body = Vec::with_capacity(2 + 4 + 3 * 6 + 4);
+    let api_count =
+        i32::try_from(ADVERTISED_PRE_AUTH_APIS.len()).expect("advertised API count fits i32");
+    let mut body = Vec::with_capacity(2 + 4 + ADVERTISED_PRE_AUTH_APIS.len() * 6 + 4);
     body.extend_from_slice(&0i16.to_be_bytes()); // error_code
-    body.extend_from_slice(&3i32.to_be_bytes()); // array length
-    for k in [
-        API_KEY_SASL_HANDSHAKE,
-        API_KEY_SASL_AUTHENTICATE,
-        API_KEY_API_VERSIONS,
-    ] {
+    body.extend_from_slice(&api_count.to_be_bytes()); // array length
+    for k in ADVERTISED_PRE_AUTH_APIS {
         body.extend_from_slice(&k.to_be_bytes());
-        body.extend_from_slice(&0i16.to_be_bytes()); // min_version
-        body.extend_from_slice(&2i16.to_be_bytes()); // max_version
+        body.extend_from_slice(&ADVERTISED_MIN_VERSION.to_be_bytes()); // min_version
+        body.extend_from_slice(&ADVERTISED_MAX_VERSION.to_be_bytes()); // max_version
     }
     body.extend_from_slice(&0i32.to_be_bytes()); // throttle_time_ms
 

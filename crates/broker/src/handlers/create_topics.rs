@@ -21,6 +21,10 @@ use crate::codes;
 use crate::error::BrokerError;
 use crate::replicator_supervisor::materialize_partition;
 
+/// Leader epoch a freshly created partition starts at; the committed
+/// `PartitionRecord` and the handler-side leader-cache install must agree.
+const INITIAL_LEADER_EPOCH: i32 = 0;
+
 /// Round-robin replica placement.
 ///
 /// Given a sorted broker set `bs = [b0, b1, …, bk-1]` and a partition
@@ -143,7 +147,7 @@ pub(crate) async fn handle(
                 principal: ctx.principal,
                 host: ctx.peer,
                 resource_type: crabka_metadata::ResourceType::Cluster,
-                resource_name: "kafka-cluster",
+                resource_name: crate::handlers::acl_wire::CLUSTER_RESOURCE_NAME,
                 operation: AclOperation::Create,
             },
         );
@@ -256,7 +260,7 @@ pub(crate) async fn handle(
                     leader: replicas[0],
                     replicas: replicas.clone(),
                     isr: replicas.clone(),
-                    leader_epoch: 0,
+                    leader_epoch: INITIAL_LEADER_EPOCH,
                     adding_replicas: vec![],
                     removing_replicas: vec![],
                     directories: vec![],
@@ -332,7 +336,8 @@ pub(crate) async fn handle(
                             // instantly without waiting for followers.
                             if let Some(part) = partitions_map.get(&name, p_i32) {
                                 let leader = replicas[0];
-                                part.install_leader_change(leader, 0).await;
+                                part.install_leader_change(leader, INITIAL_LEADER_EPOCH)
+                                    .await;
                                 if is_local_leader(leader, node_id) {
                                     // At creation the ISR equals the full replica set.
                                     part.install_isr(replicas, replicas, leader).await;

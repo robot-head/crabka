@@ -27,6 +27,11 @@ use tokio::task::JoinHandle;
 use crate::error::BrokerError;
 use crate::replica_state::ReplicaState;
 
+/// Absolute record offset within a partition's log (base offset, log end
+/// offset, high watermark, truncation points, …). Alias only — clarifies
+/// which `i64`s in signatures are offsets vs. timestamps or counts.
+pub type LogOffset = i64;
+
 /// The records to append for a single produce job — either the producer's
 /// verbatim wire bytes (zero-copy passthrough fast path) or a fully owned,
 /// decoded [`RecordBatch`] (the fallback path used when passthrough is
@@ -54,7 +59,7 @@ pub struct ProduceJob {
     pub data: ProduceData,
     /// Oneshot for the writer to report success (base offset assigned)
     /// or failure back to the handler.
-    pub ack: oneshot::Sender<Result<i64, BrokerError>>,
+    pub ack: oneshot::Sender<Result<LogOffset, BrokerError>>,
 }
 
 /// All message kinds the partition's writer task accepts.
@@ -76,7 +81,7 @@ pub enum WriterMessage {
     /// Truncate the log so no records at offset `>= offset` remain. Used
     /// by the replicator's `OFFSET_OUT_OF_RANGE` recovery path.
     Truncate {
-        offset: i64,
+        offset: LogOffset,
         ack: oneshot::Sender<Result<(), BrokerError>>,
     },
     /// Drop every segment and recreate the active segment at `new_base`.
@@ -85,7 +90,7 @@ pub enum WriterMessage {
     /// follower must move its own `log_start` *forward* past records it
     /// never saw, which `Truncate` can't do.
     ResetTo {
-        new_base: i64,
+        new_base: LogOffset,
         ack: oneshot::Sender<Result<(), BrokerError>>,
     },
     /// Atomically swap the partition's `LogConfig`. The writer task
@@ -109,8 +114,8 @@ pub enum WriterMessage {
     /// `new_start` falls between segment boundaries — Kafka semantics).
     /// Used by the `DeleteRecords` handler.
     TrimToOffset {
-        new_start: i64,
-        ack: tokio::sync::oneshot::Sender<Result<i64, BrokerError>>,
+        new_start: LogOffset,
+        ack: tokio::sync::oneshot::Sender<Result<LogOffset, BrokerError>>,
     },
     /// Test-only: shift the in-memory `log_start_offset` without
     /// physically truncating segments. Simulates retention-driven
@@ -118,7 +123,7 @@ pub enum WriterMessage {
     /// replication integration test.
     #[cfg(any(test, feature = "test-helpers"))]
     TestSetLogStart {
-        new_start: i64,
+        new_start: LogOffset,
         ack: oneshot::Sender<Result<(), BrokerError>>,
     },
     /// Atomically swap the partition's `Log` to a future log that has
@@ -204,7 +209,7 @@ impl Partition {
     /// panicked). The caller treats that as "not making progress" and the
     /// writer-died path eventually surfaces a clearer error.
     #[must_use]
-    pub fn log_end_offset(&self) -> i64 {
+    pub fn log_end_offset(&self) -> LogOffset {
         match self.log.lock() {
             Ok(g) => g.log_end_offset(),
             Err(_) => 0,
@@ -219,7 +224,7 @@ impl Partition {
     /// panicked). The caller treats that as "not making progress" and the
     /// writer-died path eventually surfaces a clearer error.
     #[must_use]
-    pub fn lso(&self) -> i64 {
+    pub fn lso(&self) -> LogOffset {
         match self.log.lock() {
             Ok(g) => g.lso(),
             Err(_) => 0,
@@ -278,7 +283,7 @@ impl Partition {
     /// `>= offset`. Used by the replicator's `OFFSET_OUT_OF_RANGE`
     /// recovery path and the KIP-320 in-band `diverging_epoch` truncation
     /// path (which passes the leader's epoch boundary, not just 0).
-    pub async fn truncate_to(&self, offset: i64) -> Result<(), BrokerError> {
+    pub async fn truncate_to(&self, offset: LogOffset) -> Result<(), BrokerError> {
         let (ack_tx, ack_rx) = oneshot::channel();
         self.writer_tx
             .send(WriterMessage::Truncate {
@@ -294,7 +299,7 @@ impl Partition {
 
     /// Drop every segment and recreate the active segment at `new_base`.
     /// Goes through the writer task so it stays ordered with appends.
-    pub async fn reset_to(&self, new_base: i64) -> Result<(), BrokerError> {
+    pub async fn reset_to(&self, new_base: LogOffset) -> Result<(), BrokerError> {
         let (ack_tx, ack_rx) = oneshot::channel();
         self.writer_tx
             .send(WriterMessage::ResetTo {
@@ -315,7 +320,7 @@ impl Partition {
     ///
     /// Returns `BrokerError` if the writer is dead, the ack is dropped,
     /// or the underlying `Log::trim_to_offset` fails (negative offset).
-    pub async fn trim_to_offset(&self, new_start: i64) -> Result<i64, BrokerError> {
+    pub async fn trim_to_offset(&self, new_start: LogOffset) -> Result<LogOffset, BrokerError> {
         let (ack_tx, ack_rx) = oneshot::channel();
         self.writer_tx
             .send(WriterMessage::TrimToOffset {
@@ -349,7 +354,7 @@ impl Partition {
     /// Returns 0 if the log mutex is poisoned (i.e. the writer task panicked).
     /// Used by `TxnCoordinator::recover` to seed the replay scan offset.
     #[must_use]
-    pub(crate) fn log_start_offset(&self) -> i64 {
+    pub(crate) fn log_start_offset(&self) -> LogOffset {
         match self.log.lock() {
             Ok(g) => g.log_start_offset(),
             Err(_) => 0,
@@ -362,7 +367,7 @@ impl Partition {
     /// Locks the `Arc<Mutex<Log>>` briefly. Returns an empty `Vec` if
     /// the mutex is poisoned.
     #[must_use]
-    pub fn aborted_in_range(&self, start: i64, end: i64) -> Vec<AbortedTxn> {
+    pub fn aborted_in_range(&self, start: LogOffset, end: LogOffset) -> Vec<AbortedTxn> {
         match self.log.lock() {
             Ok(g) => g.aborted_in_range(start, end),
             Err(_) => Vec::new(),
@@ -381,7 +386,7 @@ impl Partition {
     /// (e.g. `offset < log_start_offset()`).
     pub(crate) fn read_log(
         &self,
-        offset: i64,
+        offset: LogOffset,
         max_bytes: usize,
     ) -> Result<ReadOutput, BrokerError> {
         self.log
@@ -401,7 +406,7 @@ impl Partition {
     ///
     /// Returns [`BrokerError::Txn`] if the writer task is dead or the ack
     /// channel closes before the writer replies.
-    pub(crate) async fn produce_batch(&self, batch: RecordBatch) -> Result<i64, BrokerError> {
+    pub(crate) async fn produce_batch(&self, batch: RecordBatch) -> Result<LogOffset, BrokerError> {
         let (ack_tx, ack_rx) = oneshot::channel();
         self.writer_tx
             .send(WriterMessage::Produce(ProduceJob {
@@ -418,7 +423,7 @@ impl Partition {
     /// Cached High Watermark. Awaits `replica_state` cooperatively so it
     /// doesn't block tokio worker threads.
     #[must_use]
-    pub async fn high_watermark(&self) -> i64 {
+    pub async fn high_watermark(&self) -> LogOffset {
         self.replica_state.lock().await.hw
     }
 
@@ -428,7 +433,7 @@ impl Partition {
     /// replicated yet) and only advances `hw` (HW is monotonic). Fires
     /// `hw_advance_notify` when it advances so a consumer parked at the old HW
     /// wakes.
-    pub async fn set_follower_hw(&self, reported_hw: i64) {
+    pub async fn set_follower_hw(&self, reported_hw: LogOffset) {
         let log_end = self.log_end_offset();
         let new_hw = reported_hw.min(log_end);
         let advanced = {
@@ -526,7 +531,7 @@ impl Partition {
     /// the target.
     pub async fn await_hw_at_least(
         &self,
-        target_offset: i64,
+        target_offset: LogOffset,
         deadline: std::time::Instant,
     ) -> Result<(), HwTimeout> {
         loop {
@@ -583,7 +588,7 @@ impl Partition {
     /// `new_start`. Goes through the writer task to maintain the
     /// single-writer invariant on the underlying `Log`.
     #[cfg(any(test, feature = "test-helpers"))]
-    pub async fn test_set_log_start(&self, new_start: i64) -> Result<(), BrokerError> {
+    pub async fn test_set_log_start(&self, new_start: LogOffset) -> Result<(), BrokerError> {
         let (ack_tx, ack_rx) = oneshot::channel();
         self.writer_tx
             .send(WriterMessage::TestSetLogStart {

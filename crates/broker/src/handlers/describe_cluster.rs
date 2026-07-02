@@ -20,6 +20,7 @@ use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
 use crate::codes;
 use crate::error::BrokerError;
+use crate::handlers::acl_wire::CLUSTER_RESOURCE_NAME;
 use crate::handlers::authorized_operations::authorized_operations_bits;
 
 /// `DescribeCluster` `endpoint_type` (KIP-919): `1` = BROKERS (default),
@@ -38,8 +39,8 @@ const ENDPOINT_TYPE_CONTROLLERS: i8 = 2;
 )]
 pub(crate) async fn handle(
     broker: &Broker,
-    version: i16,
-    _correlation_id: i32,
+    version: crate::handlers::ApiVersion,
+    _correlation_id: crate::handlers::CorrelationId,
     req_bytes: &[u8],
     ctx: &crate::handlers::RequestContext<'_>,
 ) -> Result<Bytes, BrokerError> {
@@ -57,7 +58,7 @@ pub(crate) async fn handle(
             principal: ctx.principal,
             host: ctx.peer,
             resource_type: crabka_metadata::ResourceType::Cluster,
-            resource_name: "kafka-cluster",
+            resource_name: CLUSTER_RESOURCE_NAME,
             operation: AclOperation::Describe,
         },
     );
@@ -139,7 +140,7 @@ pub(crate) async fn handle(
             ctx.principal,
             ctx.peer,
             ResourceType::Cluster,
-            "kafka-cluster",
+            CLUSTER_RESOURCE_NAME,
         )
     } else {
         i32::MIN

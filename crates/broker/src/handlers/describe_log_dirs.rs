@@ -212,7 +212,7 @@ fn cluster_describe_denied(
             principal,
             host,
             resource_type: ResourceType::Cluster,
-            resource_name: "kafka-cluster",
+            resource_name: crate::handlers::acl_wire::CLUSTER_RESOURCE_NAME,
             operation: AclOperation::Describe,
         },
     ) == AuthorizationResult::Deny

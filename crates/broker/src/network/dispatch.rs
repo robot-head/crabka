@@ -23,12 +23,26 @@ use tokio::net::TcpStream;
 use tokio_util::codec::Framed;
 use tracing::Instrument as _;
 
+use crabka_protocol::api_key::ApiKey;
+
 use crate::broker::Broker;
 use crate::codes;
 use crate::error::BrokerError;
+use crate::handlers::{ApiKeyCode, ApiVersion, CorrelationId};
 use crate::network::codec::{self, MAX_FRAME_BYTES};
 
-const API_VERSIONS_KEY: i16 = 18;
+/// `ApiVersions` wire api_key. Named separately because it is the one API
+/// whose response header is always v0 regardless of body flexibility, and
+/// whose v3+ request carries the KIP-511 client software name/version.
+const API_VERSIONS_KEY: ApiKeyCode = ApiKey::ApiVersions as i16;
+
+/// `SaslHandshake` wire api_key — handled inline (before the handler table)
+/// because it mutates the per-connection auth state.
+const SASL_HANDSHAKE_KEY: ApiKeyCode = ApiKey::SaslHandshake as i16;
+
+/// `SaslAuthenticate` wire api_key — handled inline (before the handler
+/// table) because it mutates the per-connection auth state.
+const SASL_AUTHENTICATE_KEY: ApiKeyCode = ApiKey::SaslAuthenticate as i16;
 
 /// Process-lifetime ANONYMOUS principal. `RequestContext` only borrows
 /// `&Principal`, so the defensive fallback (SASL pre-auth, where
@@ -474,24 +488,27 @@ async fn serve_connection_stream<S>(
                 }
             }};
         }
-        match peek_api_key(&frame).ok() {
-            Some(34) => intercept!(
+        // Route on the typed `ApiKey` registry. Wire keys with no `ApiKey`
+        // variant (and frames too short to peek) hit the `_` arm and fall
+        // through to `dispatch_one()` below, exactly like non-intercepted keys.
+        match peek_api_key(&frame).ok().and_then(ApiKey::from_i16) {
+            Some(ApiKey::AlterReplicaLogDirs) => intercept!(
                 handle_alter_replica_log_dirs_frame(&broker, &frame, &auth, &peer),
                 "ARLD"
             ),
-            Some(51) => intercept!(
+            Some(ApiKey::AlterUserScramCredentials) => intercept!(
                 handle_alter_user_scram_credentials_frame(&broker, &frame, &auth, &peer),
                 "AUSCR"
             ),
-            Some(57) => intercept!(
+            Some(ApiKey::UpdateFeatures) => intercept!(
                 handle_update_features_frame(&broker, &frame, &auth, &peer),
                 "UpdateFeatures"
             ),
-            Some(0) => intercept!(
+            Some(ApiKey::Produce) => intercept!(
                 handle_produce_frame(&broker, &frame, &auth, &peer),
                 "Produce"
             ),
-            Some(1) => {
+            Some(ApiKey::Fetch) => {
                 // Fetch takes the zero-copy write-plan path: build an ordered
                 // `WriteOp` plan, flush any buffered codec output, then drain
                 // the plan directly on the raw stream (vectored write / — in
@@ -531,255 +548,255 @@ async fn serve_connection_stream<S>(
                     }
                 }
             }
-            Some(3) => intercept!(
+            Some(ApiKey::Metadata) => intercept!(
                 handle_metadata_frame(&broker, &frame, &auth, &peer, &spec.name),
                 "Metadata"
             ),
-            Some(19) => intercept!(
+            Some(ApiKey::CreateTopics) => intercept!(
                 handle_create_topics_frame(&broker, &frame, &auth, &peer),
                 "CreateTopics"
             ),
-            Some(20) => intercept!(
+            Some(ApiKey::DeleteTopics) => intercept!(
                 handle_delete_topics_frame(&broker, &frame, &auth, &peer),
                 "DeleteTopics"
             ),
-            Some(33) => intercept!(
+            Some(ApiKey::AlterConfigs) => intercept!(
                 handle_alter_configs_frame(&broker, &frame, &auth, &peer),
                 "AlterConfigs"
             ),
-            Some(44) => intercept!(
+            Some(ApiKey::IncrementalAlterConfigs) => intercept!(
                 handle_incremental_alter_configs_frame(&broker, &frame, &auth, &peer),
                 "IncrementalAlterConfigs"
             ),
-            Some(21) => intercept!(
+            Some(ApiKey::DeleteRecords) => intercept!(
                 handle_delete_records_frame(&broker, &frame, &auth, &peer),
                 "DeleteRecords"
             ),
-            Some(37) => intercept!(
+            Some(ApiKey::CreatePartitions) => intercept!(
                 handle_create_partitions_frame(&broker, &frame, &auth, &peer),
                 "CreatePartitions"
             ),
-            Some(15) => intercept!(
+            Some(ApiKey::DescribeGroups) => intercept!(
                 handle_describe_groups_frame(&broker, &frame, &auth, &peer),
                 "DescribeGroups"
             ),
-            Some(16) => intercept!(
+            Some(ApiKey::ListGroups) => intercept!(
                 handle_list_groups_frame(&broker, &frame, &auth, &peer),
                 "ListGroups"
             ),
-            Some(77) => intercept!(
+            Some(ApiKey::ShareGroupDescribe) => intercept!(
                 handle_share_group_describe_frame(&broker, &frame, &auth, &peer),
                 "ShareGroupDescribe"
             ),
-            Some(78) => intercept!(
+            Some(ApiKey::ShareFetch) => intercept!(
                 handle_share_fetch_frame(&broker, &frame, &auth, &peer),
                 "ShareFetch"
             ),
-            Some(79) => intercept!(
+            Some(ApiKey::ShareAcknowledge) => intercept!(
                 handle_share_acknowledge_frame(&broker, &frame, &auth, &peer),
                 "ShareAcknowledge"
             ),
-            Some(90) => intercept!(
+            Some(ApiKey::DescribeShareGroupOffsets) => intercept!(
                 handle_describe_share_group_offsets_frame(&broker, &frame, &auth, &peer),
                 "DescribeShareGroupOffsets"
             ),
-            Some(91) => intercept!(
+            Some(ApiKey::AlterShareGroupOffsets) => intercept!(
                 handle_alter_share_group_offsets_frame(&broker, &frame, &auth, &peer),
                 "AlterShareGroupOffsets"
             ),
-            Some(92) => intercept!(
+            Some(ApiKey::DeleteShareGroupOffsets) => intercept!(
                 handle_delete_share_group_offsets_frame(&broker, &frame, &auth, &peer),
                 "DeleteShareGroupOffsets"
             ),
-            Some(42) => intercept!(
+            Some(ApiKey::DeleteGroups) => intercept!(
                 handle_delete_groups_frame(&broker, &frame, &auth, &peer),
                 "DeleteGroups"
             ),
-            Some(11) => intercept!(
+            Some(ApiKey::JoinGroup) => intercept!(
                 handle_join_group_frame(&broker, &frame, &auth, &peer),
                 "JoinGroup"
             ),
-            Some(8) => intercept!(
+            Some(ApiKey::OffsetCommit) => intercept!(
                 handle_offset_commit_frame(&broker, &frame, &auth, &peer),
                 "OffsetCommit"
             ),
-            Some(9) => intercept!(
+            Some(ApiKey::OffsetFetch) => intercept!(
                 handle_offset_fetch_frame(&broker, &frame, &auth, &peer),
                 "OffsetFetch"
             ),
-            Some(47) => intercept!(
+            Some(ApiKey::OffsetDelete) => intercept!(
                 handle_offset_delete_frame(&broker, &frame, &auth, &peer),
                 "OffsetDelete"
             ),
-            Some(60) => intercept!(
+            Some(ApiKey::DescribeCluster) => intercept!(
                 handle_describe_cluster_frame(&broker, &frame, &auth, &peer, &spec.name),
                 "DescribeCluster"
             ),
-            Some(61) => intercept!(
+            Some(ApiKey::DescribeProducers) => intercept!(
                 handle_describe_producers_frame(&broker, &frame, &auth, &peer),
                 "DescribeProducers"
             ),
-            Some(65) => intercept!(
+            Some(ApiKey::DescribeTransactions) => intercept!(
                 handle_describe_transactions_frame(&broker, &frame, &auth, &peer),
                 "DescribeTransactions"
             ),
-            Some(66) => intercept!(
+            Some(ApiKey::ListTransactions) => intercept!(
                 handle_list_transactions_frame(&broker, &frame, &auth, &peer),
                 "ListTransactions"
             ),
-            Some(64) => intercept!(
+            Some(ApiKey::UnregisterBroker) => intercept!(
                 handle_unregister_broker_frame(&broker, &frame, &auth, &peer),
                 "UnregisterBroker"
             ),
-            Some(75) => intercept!(
+            Some(ApiKey::DescribeTopicPartitions) => intercept!(
                 handle_describe_topic_partitions_frame(&broker, &frame, &auth, &peer),
                 "DescribeTopicPartitions"
             ),
-            Some(74) => intercept!(
+            Some(ApiKey::ListConfigResources) => intercept!(
                 handle_list_config_resources_frame(&broker, &frame, &auth, &peer),
                 "ListConfigResources"
             ),
-            Some(55) => intercept!(
+            Some(ApiKey::DescribeQuorum) => intercept!(
                 handle_describe_quorum_frame(&broker, &frame, &auth, &peer),
                 "DescribeQuorum"
             ),
-            Some(80) => intercept!(
+            Some(ApiKey::AddRaftVoter) => intercept!(
                 handle_add_raft_voter_frame(&broker, &frame, &auth, &peer),
                 "AddRaftVoter"
             ),
-            Some(81) => intercept!(
+            Some(ApiKey::RemoveRaftVoter) => intercept!(
                 handle_remove_raft_voter_frame(&broker, &frame, &auth, &peer),
                 "RemoveRaftVoter"
             ),
-            Some(82) => intercept!(
+            Some(ApiKey::UpdateRaftVoter) => intercept!(
                 handle_update_raft_voter_frame(&broker, &frame, &auth, &peer),
                 "UpdateRaftVoter"
             ),
-            Some(56) => intercept!(
+            Some(ApiKey::AlterPartition) => intercept!(
                 handle_alter_partition_frame(&broker, &frame, &auth, &peer),
                 "AlterPartition"
             ),
-            Some(63) => intercept!(
+            Some(ApiKey::BrokerHeartbeat) => intercept!(
                 handle_broker_heartbeat_frame(&broker, &frame, &auth, &peer),
                 "BrokerHeartbeat"
             ),
-            Some(93) => intercept!(
+            Some(ApiKey::GetReplicaLogInfo) => intercept!(
                 handle_get_replica_log_info_frame(&broker, &frame, &auth, &peer),
                 "GetReplicaLogInfo"
             ),
-            Some(12) => intercept!(
+            Some(ApiKey::Heartbeat) => intercept!(
                 handle_heartbeat_frame(&broker, &frame, &auth, &peer),
                 "Heartbeat"
             ),
-            Some(14) => intercept!(
+            Some(ApiKey::SyncGroup) => intercept!(
                 handle_sync_group_frame(&broker, &frame, &auth, &peer),
                 "SyncGroup"
             ),
-            Some(13) => intercept!(
+            Some(ApiKey::LeaveGroup) => intercept!(
                 handle_leave_group_frame(&broker, &frame, &auth, &peer),
                 "LeaveGroup"
             ),
-            Some(68) => intercept!(
+            Some(ApiKey::ConsumerGroupHeartbeat) => intercept!(
                 handle_consumer_group_heartbeat_frame(&broker, &frame, &auth, &peer),
                 "ConsumerGroupHeartbeat"
             ),
-            Some(76) => intercept!(
+            Some(ApiKey::ShareGroupHeartbeat) => intercept!(
                 handle_share_group_heartbeat_frame(&broker, &frame, &auth, &peer),
                 "ShareGroupHeartbeat"
             ),
-            Some(88) => intercept!(
+            Some(ApiKey::StreamsGroupHeartbeat) => intercept!(
                 handle_streams_group_heartbeat_frame(&broker, &frame, &auth, &peer),
                 "StreamsGroupHeartbeat"
             ),
-            Some(10) => intercept!(
+            Some(ApiKey::FindCoordinator) => intercept!(
                 handle_find_coordinator_frame(&broker, &frame, &auth, &peer, &spec.name),
                 "FindCoordinator"
             ),
-            Some(2) => intercept!(
+            Some(ApiKey::ListOffsets) => intercept!(
                 handle_list_offsets_frame(&broker, &frame, &auth, &peer),
                 "ListOffsets"
             ),
-            Some(23) => intercept!(
+            Some(ApiKey::OffsetForLeaderEpoch) => intercept!(
                 handle_offset_for_leader_epoch_frame(&broker, &frame, &auth, &peer),
                 "OffsetForLeaderEpoch"
             ),
-            Some(32) => intercept!(
+            Some(ApiKey::DescribeConfigs) => intercept!(
                 handle_describe_configs_frame(&broker, &frame, &auth, &peer),
                 "DescribeConfigs"
             ),
-            Some(35) => intercept!(
+            Some(ApiKey::DescribeLogDirs) => intercept!(
                 handle_describe_log_dirs_frame(&broker, &frame, &auth, &peer),
                 "DescribeLogDirs"
             ),
-            Some(29) => intercept!(
+            Some(ApiKey::DescribeAcls) => intercept!(
                 handle_describe_acls_frame(&broker, &frame, &auth, &peer),
                 "DescribeAcls"
             ),
-            Some(30) => intercept!(
+            Some(ApiKey::CreateAcls) => intercept!(
                 handle_create_acls_frame(&broker, &frame, &auth, &peer),
                 "CreateAcls"
             ),
-            Some(31) => intercept!(
+            Some(ApiKey::DeleteAcls) => intercept!(
                 handle_delete_acls_frame(&broker, &frame, &auth, &peer),
                 "DeleteAcls"
             ),
-            Some(43) => intercept!(
+            Some(ApiKey::ElectLeaders) => intercept!(
                 handle_elect_leaders_frame(&broker, &frame, &auth, &peer),
                 "ElectLeaders"
             ),
-            Some(45) => intercept!(
+            Some(ApiKey::AlterPartitionReassignments) => intercept!(
                 handle_alter_partition_reassignments_frame(&broker, &frame, &auth, &peer),
                 "AlterPartitionReassignments"
             ),
-            Some(46) => intercept!(
+            Some(ApiKey::ListPartitionReassignments) => intercept!(
                 handle_list_partition_reassignments_frame(&broker, &frame, &auth, &peer),
                 "ListPartitionReassignments"
             ),
-            Some(48) => intercept!(
+            Some(ApiKey::DescribeClientQuotas) => intercept!(
                 handle_describe_client_quotas_frame(&broker, &frame, &auth, &peer),
                 "DescribeClientQuotas"
             ),
-            Some(49) => intercept!(
+            Some(ApiKey::AlterClientQuotas) => intercept!(
                 handle_alter_client_quotas_frame(&broker, &frame, &auth, &peer),
                 "AlterClientQuotas"
             ),
-            Some(50) => intercept!(
+            Some(ApiKey::DescribeUserScramCredentials) => intercept!(
                 handle_describe_user_scram_credentials_frame(&broker, &frame, &auth, &peer),
                 "DescribeUserScramCredentials"
             ),
-            Some(38) => intercept!(
+            Some(ApiKey::CreateDelegationToken) => intercept!(
                 handle_create_delegation_token_frame(&broker, &frame, &auth),
                 "CreateDelegationToken"
             ),
-            Some(39) => intercept!(
+            Some(ApiKey::RenewDelegationToken) => intercept!(
                 handle_renew_delegation_token_frame(&broker, &frame, &auth),
                 "RenewDelegationToken"
             ),
-            Some(40) => intercept!(
+            Some(ApiKey::ExpireDelegationToken) => intercept!(
                 handle_expire_delegation_token_frame(&broker, &frame, &auth),
                 "ExpireDelegationToken"
             ),
-            Some(41) => intercept!(
+            Some(ApiKey::DescribeDelegationToken) => intercept!(
                 handle_describe_delegation_token_frame(&broker, &frame, &auth, &peer),
                 "DescribeDelegationToken"
             ),
-            Some(22) => intercept!(
+            Some(ApiKey::InitProducerId) => intercept!(
                 handle_init_producer_id_frame(&broker, &frame, &auth, &peer),
                 "InitProducerId"
             ),
-            Some(24) => intercept!(
+            Some(ApiKey::AddPartitionsToTxn) => intercept!(
                 handle_add_partitions_to_txn_frame(&broker, &frame, &auth, &peer),
                 "AddPartitionsToTxn"
             ),
-            Some(26) => intercept!(
+            Some(ApiKey::EndTxn) => intercept!(
                 handle_end_txn_frame(&broker, &frame, &auth, &peer),
                 "EndTxn"
             ),
-            Some(28) => intercept!(
+            Some(ApiKey::TxnOffsetCommit) => intercept!(
                 handle_txn_offset_commit_frame(&broker, &frame, &auth, &peer),
                 "TxnOffsetCommit"
             ),
-            Some(71) => intercept!(
+            Some(ApiKey::GetTelemetrySubscriptions) => intercept!(
                 handle_get_telemetry_subscriptions_frame(
                     &broker,
                     &frame,
@@ -789,7 +806,7 @@ async fn serve_connection_stream<S>(
                 ),
                 "GetTelemetrySubscriptions"
             ),
-            Some(72) => intercept!(
+            Some(ApiKey::PushTelemetry) => intercept!(
                 handle_push_telemetry_frame(
                     &broker,
                     &frame,
@@ -857,7 +874,10 @@ async fn serve_connection_stream<S>(
         // surface the request throttle in the response's leading ThrottleTimeMs
         // field (where present at this version, KIP-219) before muting the
         // channel, instead of muting silently.
-        let self_accounts = matches!(api_key, Some(0 | 1));
+        let self_accounts = matches!(
+            api_key.and_then(ApiKey::from_i16),
+            Some(ApiKey::Produce | ApiKey::Fetch)
+        );
         if !self_accounts && let Some(principal) = auth.principal() {
             let client_id_str = peek_client_id(&frame).unwrap_or("");
             let image = broker.controller.current_image();
@@ -912,7 +932,7 @@ async fn try_handle_sasl_frame(
     sasl_mechanisms: &[crabka_security::SaslMechanism],
 ) -> Option<Result<SaslFrameOutcome, BrokerError>> {
     let api_key = peek_api_key(frame).ok()?;
-    if api_key != 17 && api_key != 36 {
+    if api_key != SASL_HANDSHAKE_KEY && api_key != SASL_AUTHENTICATE_KEY {
         return None;
     }
     Some(handle_sasl_frame(broker, frame, auth, api_key, sasl_mechanisms).await)
@@ -922,7 +942,7 @@ async fn handle_sasl_frame(
     broker: &Broker,
     frame: &[u8],
     auth: &mut crate::network::auth::ConnectionAuth,
-    api_key: i16,
+    api_key: ApiKeyCode,
     sasl_mechanisms: &[crabka_security::SaslMechanism],
 ) -> Result<SaslFrameOutcome, BrokerError> {
     use crabka_protocol::{Decode, Encode};
@@ -932,7 +952,7 @@ async fn handle_sasl_frame(
     let body_flexible = handler_body_flexible(api_key, api_version);
 
     let (resp_body, close_after) = match api_key {
-        17 => {
+        SASL_HANDSHAKE_KEY => {
             let mut cur: &[u8] = body;
             let req = crabka_protocol::owned::sasl_handshake_request::SaslHandshakeRequest::decode(
                 &mut cur,
@@ -943,7 +963,7 @@ async fn handle_sasl_frame(
             resp.encode(&mut buf, api_version)?;
             (buf.freeze(), false)
         }
-        36 => {
+        SASL_AUTHENTICATE_KEY => {
             let mut cur: &[u8] = body;
             let req =
                 crabka_protocol::owned::sasl_authenticate_request::SaslAuthenticateRequest::decode(
@@ -1018,7 +1038,10 @@ async fn handle_sasl_frame(
             // ILLEGAL_SASL_STATE rejects (no prior handshake) land
             // under the `Unknown` sentinel so the metric stays
             // bounded.
-            let mech_label = mech_opt.map_or("Unknown", crabka_security::SaslMechanism::wire_name);
+            let mech_label = mech_opt.map_or(
+                crate::metrics::UNKNOWN_LABEL,
+                crabka_security::SaslMechanism::wire_name,
+            );
             broker
                 .metrics
                 .record_authentication(mech_label, resp.error_code == 0);
@@ -1077,7 +1100,7 @@ async fn handle_alter_replica_log_dirs_frame(
             principal: &principal,
             host: peer,
             resource_type: crabka_metadata::ResourceType::Cluster,
-            resource_name: "kafka-cluster",
+            resource_name: crate::handlers::acl_wire::CLUSTER_RESOURCE_NAME,
             operation: crabka_metadata::AclOperation::Alter,
         },
     ) == crate::authorizer::AuthorizationResult::Allow;
@@ -3969,7 +3992,7 @@ async fn handle_push_telemetry_frame(
 /// Read just the `api_key` (first 2 bytes) of a request frame without
 /// otherwise consuming or validating it. Used by the pre-auth gate so we
 /// can decide whether to even dispatch the frame.
-fn peek_api_key(frame: &[u8]) -> Result<i16, BrokerError> {
+fn peek_api_key(frame: &[u8]) -> Result<ApiKeyCode, BrokerError> {
     if frame.len() < 2 {
         return Err(BrokerError::Protocol(
             crabka_protocol::ProtocolError::InvalidValue(
@@ -4144,7 +4167,9 @@ impl Drop for ActiveConnectionGuard {
 }
 
 /// Parse `RequestHeader` and return `(api_key, version, corr_id, &body)`.
-fn parse_request_header(frame: &[u8]) -> Result<(i16, i16, i32, &[u8]), BrokerError> {
+fn parse_request_header(
+    frame: &[u8],
+) -> Result<(ApiKeyCode, ApiVersion, CorrelationId, &[u8]), BrokerError> {
     if frame.len() < 8 {
         return Err(BrokerError::Protocol(
             crabka_protocol::ProtocolError::InvalidValue("request frame < 8 bytes"),
@@ -4205,116 +4230,180 @@ fn parse_request_header(frame: &[u8]) -> Result<(i16, i16, i32, &[u8]), BrokerEr
 /// For the handful of APIs the MVP supports, this is a small static table;
 /// keep it next to the handler registry so adding a new handler updates one
 /// place.
-fn handler_body_flexible(api_key: i16, version: i16) -> bool {
+fn handler_body_flexible(api_key: ApiKeyCode, version: ApiVersion) -> bool {
     use crabka_protocol::owned;
-    match api_key {
-        0 => version >= owned::produce_request::FLEXIBLE_MIN,
-        1 => version >= owned::fetch_request::FLEXIBLE_MIN,
-        2 => version >= owned::list_offsets_request::FLEXIBLE_MIN,
-        3 => version >= owned::metadata_request::FLEXIBLE_MIN,
-        8 => version >= owned::offset_commit_request::FLEXIBLE_MIN,
-        9 => version >= owned::offset_fetch_request::FLEXIBLE_MIN,
-        10 => version >= owned::find_coordinator_request::FLEXIBLE_MIN,
-        11 => version >= owned::join_group_request::FLEXIBLE_MIN,
-        12 => version >= owned::heartbeat_request::FLEXIBLE_MIN,
-        13 => version >= owned::leave_group_request::FLEXIBLE_MIN,
-        14 => version >= owned::sync_group_request::FLEXIBLE_MIN,
-        15 => version >= owned::describe_groups_request::FLEXIBLE_MIN,
-        16 => version >= owned::list_groups_request::FLEXIBLE_MIN,
-        // SaslHandshake (17) is permanently non-flexible (its
+    let Some(key) = ApiKey::from_i16(api_key) else {
+        // Unknown wire keys are treated as non-flexible, as before.
+        return false;
+    };
+    match key {
+        ApiKey::Produce => version >= owned::produce_request::FLEXIBLE_MIN,
+        ApiKey::Fetch => version >= owned::fetch_request::FLEXIBLE_MIN,
+        ApiKey::ListOffsets => version >= owned::list_offsets_request::FLEXIBLE_MIN,
+        ApiKey::Metadata => version >= owned::metadata_request::FLEXIBLE_MIN,
+        ApiKey::OffsetCommit => version >= owned::offset_commit_request::FLEXIBLE_MIN,
+        ApiKey::OffsetFetch => version >= owned::offset_fetch_request::FLEXIBLE_MIN,
+        ApiKey::FindCoordinator => version >= owned::find_coordinator_request::FLEXIBLE_MIN,
+        ApiKey::JoinGroup => version >= owned::join_group_request::FLEXIBLE_MIN,
+        ApiKey::Heartbeat => version >= owned::heartbeat_request::FLEXIBLE_MIN,
+        ApiKey::LeaveGroup => version >= owned::leave_group_request::FLEXIBLE_MIN,
+        ApiKey::SyncGroup => version >= owned::sync_group_request::FLEXIBLE_MIN,
+        ApiKey::DescribeGroups => version >= owned::describe_groups_request::FLEXIBLE_MIN,
+        ApiKey::ListGroups => version >= owned::list_groups_request::FLEXIBLE_MIN,
+        // SaslHandshake is permanently non-flexible (its
         // `FLEXIBLE_MIN` is `i16::MAX` in the upstream schema); covered
         // by the `_ => false` arm below.
-        18 => version >= owned::api_versions_request::FLEXIBLE_MIN,
-        19 => version >= owned::create_topics_request::FLEXIBLE_MIN,
-        20 => version >= owned::delete_topics_request::FLEXIBLE_MIN,
-        21 => version >= owned::delete_records_request::FLEXIBLE_MIN,
-        22 => version >= owned::init_producer_id_request::FLEXIBLE_MIN,
-        23 => version >= owned::offset_for_leader_epoch_request::FLEXIBLE_MIN,
-        24 => version >= owned::add_partitions_to_txn_request::FLEXIBLE_MIN,
-        25 => version >= owned::add_offsets_to_txn_request::FLEXIBLE_MIN,
-        26 => version >= owned::end_txn_request::FLEXIBLE_MIN,
-        27 => version >= owned::write_txn_markers_request::FLEXIBLE_MIN,
-        28 => version >= owned::txn_offset_commit_request::FLEXIBLE_MIN,
-        29 => version >= owned::describe_acls_request::FLEXIBLE_MIN,
-        30 => version >= owned::create_acls_request::FLEXIBLE_MIN,
-        31 => version >= owned::delete_acls_request::FLEXIBLE_MIN,
-        32 => version >= owned::describe_configs_request::FLEXIBLE_MIN,
-        33 => version >= owned::alter_configs_request::FLEXIBLE_MIN,
-        34 => version >= owned::alter_replica_log_dirs_request::FLEXIBLE_MIN,
-        35 => version >= owned::describe_log_dirs_request::FLEXIBLE_MIN,
-        36 => version >= owned::sasl_authenticate_request::FLEXIBLE_MIN,
-        37 => version >= owned::create_partitions_request::FLEXIBLE_MIN,
-        38 => version >= owned::create_delegation_token_request::FLEXIBLE_MIN,
-        39 => version >= owned::renew_delegation_token_request::FLEXIBLE_MIN,
-        40 => version >= owned::expire_delegation_token_request::FLEXIBLE_MIN,
-        41 => version >= owned::describe_delegation_token_request::FLEXIBLE_MIN,
-        42 => version >= owned::delete_groups_request::FLEXIBLE_MIN,
-        43 => version >= owned::elect_leaders_request::FLEXIBLE_MIN,
-        44 => version >= owned::incremental_alter_configs_request::FLEXIBLE_MIN,
-        45 => version >= owned::alter_partition_reassignments_request::FLEXIBLE_MIN,
-        46 => version >= owned::list_partition_reassignments_request::FLEXIBLE_MIN,
-        // 47 (OffsetDelete, KIP-496) only exists at v0, which is non-flexible.
+        ApiKey::ApiVersions => version >= owned::api_versions_request::FLEXIBLE_MIN,
+        ApiKey::CreateTopics => version >= owned::create_topics_request::FLEXIBLE_MIN,
+        ApiKey::DeleteTopics => version >= owned::delete_topics_request::FLEXIBLE_MIN,
+        ApiKey::DeleteRecords => version >= owned::delete_records_request::FLEXIBLE_MIN,
+        ApiKey::InitProducerId => version >= owned::init_producer_id_request::FLEXIBLE_MIN,
+        ApiKey::OffsetForLeaderEpoch => {
+            version >= owned::offset_for_leader_epoch_request::FLEXIBLE_MIN
+        }
+        ApiKey::AddPartitionsToTxn => version >= owned::add_partitions_to_txn_request::FLEXIBLE_MIN,
+        ApiKey::AddOffsetsToTxn => version >= owned::add_offsets_to_txn_request::FLEXIBLE_MIN,
+        ApiKey::EndTxn => version >= owned::end_txn_request::FLEXIBLE_MIN,
+        ApiKey::WriteTxnMarkers => version >= owned::write_txn_markers_request::FLEXIBLE_MIN,
+        ApiKey::TxnOffsetCommit => version >= owned::txn_offset_commit_request::FLEXIBLE_MIN,
+        ApiKey::DescribeAcls => version >= owned::describe_acls_request::FLEXIBLE_MIN,
+        ApiKey::CreateAcls => version >= owned::create_acls_request::FLEXIBLE_MIN,
+        ApiKey::DeleteAcls => version >= owned::delete_acls_request::FLEXIBLE_MIN,
+        ApiKey::DescribeConfigs => version >= owned::describe_configs_request::FLEXIBLE_MIN,
+        ApiKey::AlterConfigs => version >= owned::alter_configs_request::FLEXIBLE_MIN,
+        ApiKey::AlterReplicaLogDirs => {
+            version >= owned::alter_replica_log_dirs_request::FLEXIBLE_MIN
+        }
+        ApiKey::DescribeLogDirs => version >= owned::describe_log_dirs_request::FLEXIBLE_MIN,
+        ApiKey::SaslAuthenticate => version >= owned::sasl_authenticate_request::FLEXIBLE_MIN,
+        ApiKey::CreatePartitions => version >= owned::create_partitions_request::FLEXIBLE_MIN,
+        ApiKey::CreateDelegationToken => {
+            version >= owned::create_delegation_token_request::FLEXIBLE_MIN
+        }
+        ApiKey::RenewDelegationToken => {
+            version >= owned::renew_delegation_token_request::FLEXIBLE_MIN
+        }
+        ApiKey::ExpireDelegationToken => {
+            version >= owned::expire_delegation_token_request::FLEXIBLE_MIN
+        }
+        ApiKey::DescribeDelegationToken => {
+            version >= owned::describe_delegation_token_request::FLEXIBLE_MIN
+        }
+        ApiKey::DeleteGroups => version >= owned::delete_groups_request::FLEXIBLE_MIN,
+        ApiKey::ElectLeaders => version >= owned::elect_leaders_request::FLEXIBLE_MIN,
+        ApiKey::IncrementalAlterConfigs => {
+            version >= owned::incremental_alter_configs_request::FLEXIBLE_MIN
+        }
+        ApiKey::AlterPartitionReassignments => {
+            version >= owned::alter_partition_reassignments_request::FLEXIBLE_MIN
+        }
+        ApiKey::ListPartitionReassignments => {
+            version >= owned::list_partition_reassignments_request::FLEXIBLE_MIN
+        }
+        // OffsetDelete (KIP-496) only exists at v0, which is non-flexible.
         // `FLEXIBLE_MIN` is `i16::MAX`, so an explicit `>=` arm triggers
         // `clippy::absurd_extreme_comparisons`. Fall through to `_ => false`.
-        48 => version >= owned::describe_client_quotas_request::FLEXIBLE_MIN,
-        49 => version >= owned::alter_client_quotas_request::FLEXIBLE_MIN,
-        50 => version >= owned::describe_user_scram_credentials_request::FLEXIBLE_MIN,
+        ApiKey::DescribeClientQuotas => {
+            version >= owned::describe_client_quotas_request::FLEXIBLE_MIN
+        }
+        ApiKey::AlterClientQuotas => version >= owned::alter_client_quotas_request::FLEXIBLE_MIN,
+        ApiKey::DescribeUserScramCredentials => {
+            version >= owned::describe_user_scram_credentials_request::FLEXIBLE_MIN
+        }
         // AlterUserScramCredentials (KIP-554) is flexible from v0.
-        51 => version >= owned::alter_user_scram_credentials_request::FLEXIBLE_MIN,
-        // DescribeQuorum (55, KIP-595) is flexible from v0.
-        55 => version >= owned::describe_quorum_request::FLEXIBLE_MIN,
-        56 => version >= owned::alter_partition_request::FLEXIBLE_MIN,
-        // UpdateFeatures (57, KIP-584) is flexible from v0.
-        57 => version >= owned::update_features_request::FLEXIBLE_MIN,
-        // FetchSnapshot (59, KIP-630) is flexible from v0.
-        59 => version >= owned::fetch_snapshot_request::FLEXIBLE_MIN,
-        60 => version >= owned::describe_cluster_request::FLEXIBLE_MIN,
-        // DescribeProducers (61, KIP-664) is flexible from v0.
-        61 => version >= owned::describe_producers_request::FLEXIBLE_MIN,
-        63 => version >= owned::broker_heartbeat_request::FLEXIBLE_MIN,
-        // UnregisterBroker (64, KIP-919) — flexible from v0.
-        64 => version >= owned::unregister_broker_request::FLEXIBLE_MIN,
-        // DescribeTransactions (65, KIP-664) and ListTransactions (66) — both flexible from v0.
-        65 => version >= owned::describe_transactions_request::FLEXIBLE_MIN,
-        66 => version >= owned::list_transactions_request::FLEXIBLE_MIN,
+        ApiKey::AlterUserScramCredentials => {
+            version >= owned::alter_user_scram_credentials_request::FLEXIBLE_MIN
+        }
+        // DescribeQuorum (KIP-595) is flexible from v0.
+        ApiKey::DescribeQuorum => version >= owned::describe_quorum_request::FLEXIBLE_MIN,
+        ApiKey::AlterPartition => version >= owned::alter_partition_request::FLEXIBLE_MIN,
+        // UpdateFeatures (KIP-584) is flexible from v0.
+        ApiKey::UpdateFeatures => version >= owned::update_features_request::FLEXIBLE_MIN,
+        // FetchSnapshot (KIP-630) is flexible from v0.
+        ApiKey::FetchSnapshot => version >= owned::fetch_snapshot_request::FLEXIBLE_MIN,
+        ApiKey::DescribeCluster => version >= owned::describe_cluster_request::FLEXIBLE_MIN,
+        // DescribeProducers (KIP-664) is flexible from v0.
+        ApiKey::DescribeProducers => version >= owned::describe_producers_request::FLEXIBLE_MIN,
+        ApiKey::BrokerHeartbeat => version >= owned::broker_heartbeat_request::FLEXIBLE_MIN,
+        // UnregisterBroker (KIP-919) — flexible from v0.
+        ApiKey::UnregisterBroker => version >= owned::unregister_broker_request::FLEXIBLE_MIN,
+        // DescribeTransactions (KIP-664) and ListTransactions — both flexible from v0.
+        ApiKey::DescribeTransactions => {
+            version >= owned::describe_transactions_request::FLEXIBLE_MIN
+        }
+        ApiKey::ListTransactions => version >= owned::list_transactions_request::FLEXIBLE_MIN,
         // KIP-848 next-gen consumer group pair; both are flexible from v0.
-        68 => version >= owned::consumer_group_heartbeat_request::FLEXIBLE_MIN,
-        69 => version >= owned::consumer_group_describe_request::FLEXIBLE_MIN,
+        ApiKey::ConsumerGroupHeartbeat => {
+            version >= owned::consumer_group_heartbeat_request::FLEXIBLE_MIN
+        }
+        ApiKey::ConsumerGroupDescribe => {
+            version >= owned::consumer_group_describe_request::FLEXIBLE_MIN
+        }
         // KIP-714 client-metrics push pair; both are flexible from v0.
-        71 => version >= owned::get_telemetry_subscriptions_request::FLEXIBLE_MIN,
-        72 => version >= owned::push_telemetry_request::FLEXIBLE_MIN,
+        ApiKey::GetTelemetrySubscriptions => {
+            version >= owned::get_telemetry_subscriptions_request::FLEXIBLE_MIN
+        }
+        ApiKey::PushTelemetry => version >= owned::push_telemetry_request::FLEXIBLE_MIN,
         // KIP-932 share-group membership pair; both are flexible from v0.
-        76 => version >= owned::share_group_heartbeat_request::FLEXIBLE_MIN,
-        77 => version >= owned::share_group_describe_request::FLEXIBLE_MIN,
+        ApiKey::ShareGroupHeartbeat => {
+            version >= owned::share_group_heartbeat_request::FLEXIBLE_MIN
+        }
+        ApiKey::ShareGroupDescribe => version >= owned::share_group_describe_request::FLEXIBLE_MIN,
         // KIP-1071 streams-group membership pair; both are flexible from v0.
-        88 => version >= owned::streams_group_heartbeat_request::FLEXIBLE_MIN,
-        89 => version >= owned::streams_group_describe_request::FLEXIBLE_MIN,
+        ApiKey::StreamsGroupHeartbeat => {
+            version >= owned::streams_group_heartbeat_request::FLEXIBLE_MIN
+        }
+        ApiKey::StreamsGroupDescribe => {
+            version >= owned::streams_group_describe_request::FLEXIBLE_MIN
+        }
         // KIP-932 ShareFetch / ShareAcknowledge — both flexible from v0.
-        78 => version >= owned::share_fetch_request::FLEXIBLE_MIN,
-        79 => version >= owned::share_acknowledge_request::FLEXIBLE_MIN,
+        ApiKey::ShareFetch => version >= owned::share_fetch_request::FLEXIBLE_MIN,
+        ApiKey::ShareAcknowledge => version >= owned::share_acknowledge_request::FLEXIBLE_MIN,
         // KIP-932 share-group admin offset RPCs — all flexible from v0.
-        90 => version >= owned::describe_share_group_offsets_request::FLEXIBLE_MIN,
-        91 => version >= owned::alter_share_group_offsets_request::FLEXIBLE_MIN,
-        92 => version >= owned::delete_share_group_offsets_request::FLEXIBLE_MIN,
-        // KIP-932 share-coordinator persister RPCs (83-87) — all flexible from v0.
-        83 => version >= owned::initialize_share_group_state_request::FLEXIBLE_MIN,
-        84 => version >= owned::read_share_group_state_request::FLEXIBLE_MIN,
-        85 => version >= owned::write_share_group_state_request::FLEXIBLE_MIN,
-        86 => version >= owned::delete_share_group_state_request::FLEXIBLE_MIN,
-        87 => version >= owned::read_share_group_state_summary_request::FLEXIBLE_MIN,
-        // ListConfigResources (74, KIP-1142) is flexible from v0.
-        74 => version >= owned::list_config_resources_request::FLEXIBLE_MIN,
-        // DescribeTopicPartitions (75, KIP-966) is flexible from v0.
-        75 => version >= owned::describe_topic_partitions_request::FLEXIBLE_MIN,
-        // AddRaftVoter / RemoveRaftVoter / UpdateRaftVoter (80/81/82,
-        // KIP-853) — all flexible from v0.
-        80 => version >= owned::add_raft_voter_request::FLEXIBLE_MIN,
-        81 => version >= owned::remove_raft_voter_request::FLEXIBLE_MIN,
-        82 => version >= owned::update_raft_voter_request::FLEXIBLE_MIN,
-        // GetReplicaLogInfo (93, KIP-966) is flexible from v0.
-        93 => version >= owned::get_replica_log_info_request::FLEXIBLE_MIN,
-        // AssignReplicasToDirs (73, KIP-858) is flexible from v0.
-        73 => version >= owned::assign_replicas_to_dirs_request::FLEXIBLE_MIN,
+        ApiKey::DescribeShareGroupOffsets => {
+            version >= owned::describe_share_group_offsets_request::FLEXIBLE_MIN
+        }
+        ApiKey::AlterShareGroupOffsets => {
+            version >= owned::alter_share_group_offsets_request::FLEXIBLE_MIN
+        }
+        ApiKey::DeleteShareGroupOffsets => {
+            version >= owned::delete_share_group_offsets_request::FLEXIBLE_MIN
+        }
+        // KIP-932 share-coordinator persister RPCs — all flexible from v0.
+        ApiKey::InitializeShareGroupState => {
+            version >= owned::initialize_share_group_state_request::FLEXIBLE_MIN
+        }
+        ApiKey::ReadShareGroupState => {
+            version >= owned::read_share_group_state_request::FLEXIBLE_MIN
+        }
+        ApiKey::WriteShareGroupState => {
+            version >= owned::write_share_group_state_request::FLEXIBLE_MIN
+        }
+        ApiKey::DeleteShareGroupState => {
+            version >= owned::delete_share_group_state_request::FLEXIBLE_MIN
+        }
+        ApiKey::ReadShareGroupStateSummary => {
+            version >= owned::read_share_group_state_summary_request::FLEXIBLE_MIN
+        }
+        // ListConfigResources (KIP-1142) is flexible from v0.
+        ApiKey::ListConfigResources => {
+            version >= owned::list_config_resources_request::FLEXIBLE_MIN
+        }
+        // DescribeTopicPartitions (KIP-966) is flexible from v0.
+        ApiKey::DescribeTopicPartitions => {
+            version >= owned::describe_topic_partitions_request::FLEXIBLE_MIN
+        }
+        // AddRaftVoter / RemoveRaftVoter / UpdateRaftVoter (KIP-853) — all
+        // flexible from v0.
+        ApiKey::AddRaftVoter => version >= owned::add_raft_voter_request::FLEXIBLE_MIN,
+        ApiKey::RemoveRaftVoter => version >= owned::remove_raft_voter_request::FLEXIBLE_MIN,
+        ApiKey::UpdateRaftVoter => version >= owned::update_raft_voter_request::FLEXIBLE_MIN,
+        // GetReplicaLogInfo (KIP-966) is flexible from v0.
+        ApiKey::GetReplicaLogInfo => version >= owned::get_replica_log_info_request::FLEXIBLE_MIN,
+        // AssignReplicasToDirs (KIP-858) is flexible from v0.
+        ApiKey::AssignReplicasToDirs => {
+            version >= owned::assign_replicas_to_dirs_request::FLEXIBLE_MIN
+        }
         _ => false,
     }
 }
@@ -4332,7 +4421,12 @@ fn handler_body_flexible(api_key: i16, version: i16) -> bool {
 // that vectored-writes header+body, which ripples through `codec.rs`, the
 // roundtrip test, and all ~50 `framed.send(bytes)` call sites in this file.
 // Out of scope for a single-file change; left as-is to keep wire bytes exact.
-fn encode_response(api_key: i16, correlation_id: i32, body_flexible: bool, body: &[u8]) -> Bytes {
+fn encode_response(
+    api_key: ApiKeyCode,
+    correlation_id: CorrelationId,
+    body_flexible: bool,
+    body: &[u8],
+) -> Bytes {
     let header_v1 = body_flexible && api_key != API_VERSIONS_KEY;
     let header_len = if header_v1 { 5 } else { 4 };
     debug_assert!(body.len() < MAX_FRAME_BYTES);
@@ -4353,16 +4447,28 @@ fn encode_response(api_key: i16, correlation_id: i32, body_flexible: bool, body:
 /// channel mute, just not echoed); Produce (0) / Fetch (1) self-account and
 /// never reach this path. `OffsetDelete` (47) is intentionally excluded — its
 /// leading field is `ErrorCode`, so patching would corrupt it.
-fn throttle_is_leading_field(api_key: i16, version: i16) -> bool {
-    match api_key {
-        // ListOffsets / JoinGroup / OffsetForLeaderEpoch
-        2 | 11 | 23 => version >= 2,
-        // Metadata / OffsetCommit / OffsetFetch
-        3 | 8 | 9 => version >= 3,
-        // FindCoordinator / Heartbeat / LeaveGroup / SyncGroup / DescribeGroups / ListGroups
-        10 | 12 | 13 | 14 | 15 | 16 => version >= 1,
+fn throttle_is_leading_field(api_key: ApiKeyCode, version: ApiVersion) -> bool {
+    // The version bounds are the schema versions at which each API moved
+    // `ThrottleTimeMs` to the front of its response (verified against the
+    // 4.x response schemas); they are deliberately kept as literals here
+    // and pinned by the schema-boundary tests.
+    match ApiKey::from_i16(api_key) {
+        Some(ApiKey::ListOffsets | ApiKey::JoinGroup | ApiKey::OffsetForLeaderEpoch) => {
+            version >= 2
+        }
+        Some(ApiKey::Metadata | ApiKey::OffsetCommit | ApiKey::OffsetFetch) => version >= 3,
+        Some(
+            ApiKey::FindCoordinator
+            | ApiKey::Heartbeat
+            | ApiKey::LeaveGroup
+            | ApiKey::SyncGroup
+            | ApiKey::DescribeGroups
+            | ApiKey::ListGroups,
+        ) => version >= 1,
         // InitProducerId / DescribeCluster / ConsumerGroupHeartbeat (all 0+)
-        22 | 60 | 68 => true,
+        Some(ApiKey::InitProducerId | ApiKey::DescribeCluster | ApiKey::ConsumerGroupHeartbeat) => {
+            true
+        }
         _ => false,
     }
 }
@@ -4372,7 +4478,12 @@ fn throttle_is_leading_field(api_key: i16, version: i16) -> bool {
 /// the response header, whose length mirrors `encode_response`: 5 bytes when the
 /// body is flexible and the api is not `ApiVersions`, else 4. Callers must first
 /// confirm `throttle_is_leading_field`.
-fn patch_leading_throttle(resp: Bytes, api_key: i16, version: i16, delay_ms: i32) -> Bytes {
+fn patch_leading_throttle(
+    resp: Bytes,
+    api_key: ApiKeyCode,
+    version: ApiVersion,
+    delay_ms: i32,
+) -> Bytes {
     let header_v1 = handler_body_flexible(api_key, version) && api_key != API_VERSIONS_KEY;
     let off = if header_v1 { 5 } else { 4 };
     if resp.len() < off + 4 {

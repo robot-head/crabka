@@ -39,6 +39,25 @@ const FETCH_MAX_BYTES: i32 = 1 << 20;
 const FETCH_MAX_WAIT_MS: i32 = 500;
 const FETCH_MIN_BYTES: i32 = 1;
 
+/// Sleep before re-checking the KIP-73 follower-in token bucket after it
+/// refused the fetch (bucket exhausted this round).
+const THROTTLE_EXHAUSTED_BACKOFF: Duration = Duration::from_millis(100);
+/// Backoff before reconnecting after an unexpected (non-transport)
+/// `client.send` error.
+const SEND_ERROR_BACKOFF: Duration = Duration::from_secs(1);
+/// Retry delay while the leader hasn't materialized its side of the
+/// partition yet (`CreateTopics`-vs-replicator race).
+const UNKNOWN_TOPIC_RETRY_DELAY: Duration = Duration::from_millis(100);
+/// Backoff between fetch rounds after a fenced/unknown leader epoch, so a
+/// persistent fence doesn't hot-spin fetch → `OffsetForLeaderEpoch`.
+const EPOCH_FENCE_BACKOFF: Duration = Duration::from_millis(200);
+/// Backoff after an unexpected fetch `error_code` before the next round.
+const UNEXPECTED_ERROR_BACKOFF: Duration = Duration::from_millis(500);
+/// First delay of the leader-connect exponential backoff.
+const RECONNECT_INITIAL_DELAY: Duration = Duration::from_millis(100);
+/// Ceiling for the leader-connect exponential backoff.
+const RECONNECT_DELAY_CAP: Duration = Duration::from_secs(5);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FetchThrottleDecision {
     Fetch(i32),
@@ -182,7 +201,7 @@ async fn run_inner(cfg: &Config) -> Result<(), String> {
                 // Bucket exhausted — yield and retry next loop iteration.
                 tokio::select! {
                     () = cfg.shutdown.cancelled() => return Ok(()),
-                    () = tokio::time::sleep(Duration::from_millis(100)) => {}
+                    () = tokio::time::sleep(THROTTLE_EXHAUSTED_BACKOFF) => {}
                 }
                 continue;
             }
@@ -207,7 +226,7 @@ async fn run_inner(cfg: &Config) -> Result<(), String> {
                     "replicator: client.send unexpected error; retrying after backoff");
                 tokio::select! {
                     () = cfg.shutdown.cancelled() => return Ok(()),
-                    () = tokio::time::sleep(Duration::from_secs(1)) => {}
+                    () = tokio::time::sleep(SEND_ERROR_BACKOFF) => {}
                 }
                 client = connect_with_backoff(cfg).await?;
                 continue;
@@ -489,7 +508,7 @@ async fn handle_response(mut resp: FetchResponse, cfg: &Config) -> LoopAction {
         codes::UNKNOWN_TOPIC_OR_PARTITION => {
             // Leader hasn't materialized its side yet
             // (CreateTopics-vs-replicator race).
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(UNKNOWN_TOPIC_RETRY_DELAY).await;
             LoopAction::Continue
         }
         codes::NOT_LEADER_OR_FOLLOWER => LoopAction::StopNotLeader,
@@ -519,7 +538,7 @@ async fn handle_response(mut resp: FetchResponse, cfg: &Config) -> LoopAction {
             // hot-spin the CPU between fetch and fence.
             tokio::select! {
                 () = cfg.shutdown.cancelled() => return LoopAction::StopNotLeader,
-                () = tokio::time::sleep(Duration::from_millis(200)) => {}
+                () = tokio::time::sleep(EPOCH_FENCE_BACKOFF) => {}
             }
             LoopAction::Continue
         }
@@ -528,7 +547,7 @@ async fn handle_response(mut resp: FetchResponse, cfg: &Config) -> LoopAction {
                 error_code = other,
                 "replicator: unexpected fetch error_code"
             );
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            tokio::time::sleep(UNEXPECTED_ERROR_BACKOFF).await;
             LoopAction::Continue
         }
     }
@@ -676,15 +695,15 @@ fn build_offset_for_leader_epoch_request(
 }
 
 /// Open a [`Connection`] against the partition's leader, retrying with
-/// exponential backoff (capped at 5s). Returns `Err` only if shutdown is
-/// requested while we were waiting.
+/// exponential backoff (capped at [`RECONNECT_DELAY_CAP`]). Returns `Err`
+/// only if shutdown is requested while we were waiting.
 ///
 /// Routes through the shared [`InterBrokerClient`] so TLS + SASL are run
 /// when the inter-broker listener demands them, and falls back to plain
 /// TCP for `ListenerProtocol::Plaintext`.
 async fn connect_with_backoff(cfg: &Config) -> Result<Connection, String> {
-    let mut delay = Duration::from_millis(100);
-    let cap = Duration::from_secs(5);
+    let mut delay = RECONNECT_INITIAL_DELAY;
+    let cap = RECONNECT_DELAY_CAP;
     loop {
         let opts = connection_options(&cfg.client_id);
         let attempt = cfg.inter_broker_client.connect_as_connection(

@@ -10,12 +10,16 @@ use crabka_protocol::owned::describe_client_quotas_response::{
     DescribeClientQuotasResponse, EntityData, EntryData, ValueData,
 };
 
+use super::acl_wire::CLUSTER_RESOURCE_NAME;
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
-use crate::codes::CLUSTER_AUTHORIZATION_FAILED;
+use crate::codes::{CLUSTER_AUTHORIZATION_FAILED, NONE};
 
+/// Wire `match_type`: entity name must equal `match_` exactly (KIP-546 `EXACT`).
 const MATCH_TYPE_EXACT: i8 = 0;
+/// Wire `match_type`: only the default (unnamed) entity matches (KIP-546 `DEFAULT`).
 const MATCH_TYPE_DEFAULT: i8 = 1;
+/// Wire `match_type`: any entity of the given type matches (KIP-546 `ANY`).
 const MATCH_TYPE_ANY: i8 = 2;
 
 #[allow(clippy::unused_async)]
@@ -39,7 +43,7 @@ pub(crate) async fn handle(
             principal: ctx.principal,
             host: ctx.peer,
             resource_type: ResourceType::Cluster,
-            resource_name: "kafka-cluster",
+            resource_name: CLUSTER_RESOURCE_NAME,
             operation: crabka_metadata::AclOperation::Describe,
         },
     );
@@ -82,7 +86,7 @@ pub(crate) async fn handle(
 
     let resp = DescribeClientQuotasResponse {
         throttle_time_ms: 0,
-        error_code: 0,
+        error_code: NONE,
         error_message: None,
         entries: Some(entries),
         ..Default::default()

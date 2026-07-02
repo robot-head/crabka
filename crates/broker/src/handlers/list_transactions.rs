@@ -31,6 +31,19 @@ use crate::codes;
 use crate::error::BrokerError;
 use crate::txn::state::TxnState;
 
+/// Every transaction state the coordinator can report. Filter strings outside
+/// this set (via [`txn_state_str`]) are echoed back in the KIP-664
+/// `unknown_state_filters` response field.
+const ALL_TXN_STATES: [TxnState; 7] = [
+    TxnState::Empty,
+    TxnState::Ongoing,
+    TxnState::PrepareCommit,
+    TxnState::PrepareAbort,
+    TxnState::CompleteCommit,
+    TxnState::CompleteAbort,
+    TxnState::Dead,
+];
+
 /// JVM-canonical string form of a Crabka [`TxnState`]. Matches the names
 /// the JVM coordinator emits on `TransactionState.toString()`.
 fn txn_state_str(s: TxnState) -> &'static str {
@@ -75,17 +88,8 @@ pub(crate) async fn handle(
     // KIP-664: if filtered states include a string the broker doesn't
     // recognize, surface it in `unknown_state_filters` so the client
     // knows its filter is overly conservative.
-    let known_states: std::collections::HashSet<&'static str> = [
-        "Empty",
-        "Ongoing",
-        "PrepareCommit",
-        "PrepareAbort",
-        "CompleteCommit",
-        "CompleteAbort",
-        "Dead",
-    ]
-    .into_iter()
-    .collect();
+    let known_states: std::collections::HashSet<&'static str> =
+        ALL_TXN_STATES.into_iter().map(txn_state_str).collect();
     let unknown_state_filters: Vec<String> = req
         .state_filters
         .iter()

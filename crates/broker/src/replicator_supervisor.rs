@@ -32,13 +32,17 @@ use crate::replicator;
 use crate::throttle::ThrottleState;
 use crate::txn::coordinator::TxnCoordinator;
 
+/// A `(topic, partition)` pair — the key the supervisor tracks follower
+/// tasks, local materialization, and dir-assignment reports by.
+pub(crate) type TopicPartition = (String, i32);
+
 /// `(topic, partition)` pairs where `node_id` is in `replicas` AND
 /// `leader != node_id` — i.e., the broker should run a follower
 /// replicator task.
 pub(crate) fn desired_follower_set(
     node_id: NodeId,
     image: &MetadataImage,
-) -> HashSet<(String, i32)> {
+) -> HashSet<TopicPartition> {
     let mut out = HashSet::new();
     for t in image.topics() {
         for p in image.partitions_of(&t.name) {
@@ -54,7 +58,7 @@ pub(crate) fn desired_follower_set(
 /// regardless of leader/follower role — every entry here means this
 /// broker hosts partition data on disk and must materialize the
 /// on-disk `Partition` locally.
-pub(crate) fn desired_local_set(node_id: NodeId, image: &MetadataImage) -> HashSet<(String, i32)> {
+pub(crate) fn desired_local_set(node_id: NodeId, image: &MetadataImage) -> HashSet<TopicPartition> {
     let mut out = HashSet::new();
     for t in image.topics() {
         for p in image.partitions_of(&t.name) {
@@ -117,7 +121,7 @@ pub(crate) fn materialize_partition(
 /// write inside `Log::set_config`. Errors on individual partitions are
 /// logged via `warn!` but don't propagate.
 pub(crate) async fn push_topic_configs(
-    desired: &HashSet<(String, i32)>,
+    desired: &HashSet<TopicPartition>,
     partitions: &PartitionRegistry,
     image: &MetadataImage,
 ) {
@@ -148,11 +152,11 @@ pub(crate) async fn push_topic_configs(
 /// scan present in the previous double-iteration approach.
 #[allow(clippy::type_complexity)]
 pub(crate) fn collect_changed_assignments(
-    local_set: &std::collections::HashSet<(String, i32)>,
+    local_set: &HashSet<TopicPartition>,
     partitions: &PartitionRegistry,
     log_dir_ids: &crate::log_dir_id::LogDirIds,
     image: &MetadataImage,
-    reported_dirs: &dashmap::DashMap<(String, i32), uuid::Uuid>,
+    reported_dirs: &dashmap::DashMap<TopicPartition, uuid::Uuid>,
 ) -> (
     Vec<(uuid::Uuid, i32, uuid::Uuid)>,
     Vec<(String, i32, uuid::Uuid)>,
@@ -226,11 +230,11 @@ pub(crate) struct ReplicatorSupervisor {
     log_dirs: Vec<PathBuf>,
     log_config: LogConfig,
     client_id: String,
-    tasks: DashMap<(String, i32), CancellationToken>,
+    tasks: DashMap<TopicPartition, CancellationToken>,
     /// Per-follower-partition (leader, `leader_epoch`) tuple captured at
     /// spawn time. On reconcile, if the tuple changes, the task is
     /// cancelled and respawned pointed at the new leader.
-    task_targets: DashMap<(String, i32), (NodeId, i32)>,
+    task_targets: DashMap<TopicPartition, (NodeId, i32)>,
     shutdown: CancellationToken,
     txn_coordinator: Option<Arc<TxnCoordinator>>,
     /// KIP-932 share coordinator. Its view of locally-led
@@ -269,7 +273,7 @@ pub(crate) struct ReplicatorSupervisor {
     /// KIP-858: tracks the last-reported dir UUID per (topic, partition) so
     /// we only send `AssignReplicasToDirs` on first materialization or after
     /// a KIP-113 log-dir swap.
-    reported_dirs: dashmap::DashMap<(String, i32), uuid::Uuid>,
+    reported_dirs: dashmap::DashMap<TopicPartition, uuid::Uuid>,
     assign_dirs_reporter: Arc<dyn AssignDirsReporter>,
 }
 
@@ -373,7 +377,7 @@ impl ReplicatorSupervisor {
         let desired = desired_follower_set(self.node_id, image);
 
         // 1. Cancel removed.
-        let current: Vec<(String, i32)> = self.tasks.iter().map(|e| e.key().clone()).collect();
+        let current: Vec<TopicPartition> = self.tasks.iter().map(|e| e.key().clone()).collect();
         for k in current {
             if !desired.contains(&k)
                 && let Some((_, token)) = self.tasks.remove(&k)
@@ -486,7 +490,7 @@ impl ReplicatorSupervisor {
     /// when at least one assignment has changed since the last successful send.
     async fn report_dir_assignments(
         &self,
-        local_set: &std::collections::HashSet<(String, i32)>,
+        local_set: &HashSet<TopicPartition>,
         image: &MetadataImage,
     ) {
         let (wire, updates) = collect_changed_assignments(

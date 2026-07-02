@@ -30,6 +30,10 @@ use crabka_protocol::owned::sync_group_request::{SyncGroupRequest, SyncGroupRequ
 const ERR_NONE: i16 = 0;
 const ERR_MEMBER_ID_REQUIRED: i16 = 79;
 
+/// Upper bound on a rejoin JoinGroup round-trip: covers the broker's ~3 s
+/// initial-rebalance delay with generous headroom.
+const JOIN_GROUP_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// A fixed, recognizable JoinGroup protocol-metadata blob. The byte
 /// shape is arbitrary (not a real `ConsumerProtocolSubscription`) — the
 /// point is exact round-trip through stored state into `member_metadata`.
@@ -116,7 +120,7 @@ async fn describe_groups_reports_member_metadata_and_protocol_name() {
     // ~3 s initial-rebalance-delay before the broker completes the
     // rebalance and returns NONE. This lone member is the leader. ──
     let r2 = tokio::time::timeout(
-        Duration::from_secs(10),
+        JOIN_GROUP_TIMEOUT,
         client.send(join_request(group_id, &member_id, KNOWN_METADATA)),
     )
     .await
@@ -237,7 +241,7 @@ async fn describe_groups_matches_real_kafka_range_subscription() {
     let member_id = r1.member_id;
 
     let r2 = tokio::time::timeout(
-        Duration::from_secs(10),
+        JOIN_GROUP_TIMEOUT,
         client.send(join_request(group_id, &member_id, REAL_KAFKA_SUBSCRIPTION)),
     )
     .await

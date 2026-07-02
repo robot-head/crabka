@@ -19,6 +19,7 @@ use crabka_protocol::{Decode, Encode};
 use crate::broker::Broker;
 use crate::codes;
 use crate::error::BrokerError;
+use crate::share_coordinator::coordinator::UNINITIALIZED_START_OFFSET;
 
 pub(crate) fn handle(
     broker: &Broker,
@@ -60,7 +61,7 @@ pub(crate) fn handle(
                         },
                         None => PartitionResult {
                             partition: pd.partition,
-                            start_offset: -1,
+                            start_offset: UNINITIALIZED_START_OFFSET,
                             delivery_complete_count: 0,
                             ..Default::default()
                         },
@@ -69,7 +70,7 @@ pub(crate) fn handle(
                     PartitionResult {
                         partition: pd.partition,
                         error_code: codes::NOT_COORDINATOR,
-                        start_offset: -1,
+                        start_offset: UNINITIALIZED_START_OFFSET,
                         delivery_complete_count: 0,
                         ..Default::default()
                     }

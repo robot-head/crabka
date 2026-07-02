@@ -12,8 +12,9 @@ use crabka_protocol::owned::describe_acls_response::{
 };
 
 use super::acl_wire::{
-    operation_filter, operation_to_wire, pattern_type_filter, pattern_type_to_wire,
-    permission_filter, permission_to_wire, resource_type_filter, resource_type_to_wire,
+    CLUSTER_RESOURCE_NAME, PatternTypeCode, ResourceTypeCode, operation_filter, operation_to_wire,
+    pattern_type_filter, pattern_type_to_wire, permission_filter, permission_to_wire,
+    resource_type_filter, resource_type_to_wire,
 };
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
@@ -41,9 +42,9 @@ fn acl_description(entry: &AclEntry) -> AclDescription {
 }
 
 fn describe_acls_resource(
-    resource_type: i8,
+    resource_type: ResourceTypeCode,
     resource_name: String,
-    pattern_type: i8,
+    pattern_type: PatternTypeCode,
     acls: Vec<AclDescription>,
 ) -> DescribeAclsResource {
     DescribeAclsResource {
@@ -86,7 +87,7 @@ pub(crate) async fn handle(
             principal: ctx.principal,
             host: ctx.peer,
             resource_type: crabka_metadata::ResourceType::Cluster,
-            resource_name: "kafka-cluster",
+            resource_name: CLUSTER_RESOURCE_NAME,
             operation: crabka_metadata::AclOperation::Describe,
         },
     );
@@ -107,8 +108,10 @@ pub(crate) async fn handle(
     // Collect matching ACLs and group by (resource_type, resource_name,
     // pattern_type) so the wire response can mirror Kafka's nested
     // shape.
-    let mut by_resource: std::collections::HashMap<(i8, String, i8), Vec<AclDescription>> =
-        std::collections::HashMap::new();
+    let mut by_resource: std::collections::HashMap<
+        (ResourceTypeCode, String, PatternTypeCode),
+        Vec<AclDescription>,
+    > = std::collections::HashMap::new();
     for entry in image.all_acls() {
         if !filter.matches(entry) {
             continue;

@@ -12,7 +12,7 @@ use crabka_protocol::owned::list_partition_reassignments_response::{
 
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
-use crate::codes::CLUSTER_AUTHORIZATION_FAILED;
+use crate::codes::{CLUSTER_AUTHORIZATION_FAILED, NONE};
 
 #[tracing::instrument(
     name = "handle_list_partition_reassignments",
@@ -34,7 +34,7 @@ pub(crate) async fn handle(
             principal: ctx.principal,
             host: ctx.peer,
             resource_type: ResourceType::Cluster,
-            resource_name: "kafka-cluster",
+            resource_name: crate::handlers::acl_wire::CLUSTER_RESOURCE_NAME,
             operation: crabka_metadata::AclOperation::Describe,
         },
     );
@@ -93,7 +93,7 @@ pub(crate) async fn handle(
         .collect();
     let resp = ListPartitionReassignmentsResponse {
         throttle_time_ms: 0,
-        error_code: 0,
+        error_code: NONE,
         error_message: None,
         topics,
         ..Default::default()

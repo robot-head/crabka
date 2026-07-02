@@ -23,8 +23,8 @@ use crate::error::BrokerError;
 
 pub(crate) fn handle(
     broker: &Broker,
-    version: i16,
-    _correlation_id: i32,
+    version: crate::handlers::ApiVersion,
+    _correlation_id: crate::handlers::CorrelationId,
     req_bytes: &[u8],
 ) -> BoxFuture<'static, Result<Bytes, BrokerError>> {
     let req_bytes = req_bytes.to_vec();
@@ -177,7 +177,10 @@ fn assignment_changes(
     )]
 }
 
-fn encode_resp(version: i16, resp: &AssignReplicasToDirsResponse) -> Result<Bytes, BrokerError> {
+fn encode_resp(
+    version: crate::handlers::ApiVersion,
+    resp: &AssignReplicasToDirsResponse,
+) -> Result<Bytes, BrokerError> {
     let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
     resp.encode(&mut buf, version)?;
     Ok(buf.freeze())

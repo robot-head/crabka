@@ -37,6 +37,11 @@ const REQUEST_DURATION_BUCKETS: [f64; 12] = [
 /// to register and we want lazy registration from multiple init paths.
 pub type SharedRegistry = Arc<Mutex<Registry>>;
 
+/// Sentinel label value that folds unbounded inputs (unrecognised
+/// `api_key`s, `SaslAuthenticate` without a prior handshake) into one
+/// series, keeping label cardinality bounded.
+pub(crate) const UNKNOWN_LABEL: &str = "Unknown";
+
 /// Per-topic label set. `EncodeLabelSet` is the prometheus-client
 /// derive that produces the `topic="<name>"` label on emitted samples.
 #[derive(Debug, Clone, Hash, PartialEq, Eq, EncodeLabelSet)]
@@ -809,13 +814,9 @@ impl BrokerMetrics {
     /// Account one dispatched request for `api_key`. The
     /// label is the human-readable variant name from
     /// `ApiKey::IntoStaticStr`; unknown keys fold under `"Unknown"`.
-    pub fn record_api_request(&self, api_key: i16) {
-        let name: &'static str = match crabka_protocol::api_key::ApiKey::from_i16(api_key) {
-            Some(k) => k.into(),
-            None => "Unknown",
-        };
+    pub fn record_api_request(&self, api_key: crate::handlers::ApiKeyCode) {
         let lbl = ApiKeyLabel {
-            api_key: name.to_string(),
+            api_key: api_key_label_name(api_key).to_string(),
         };
         self.api_requests.get_or_create(&lbl).inc();
     }
@@ -824,13 +825,9 @@ impl BrokerMetrics {
     /// `UNSUPPORTED_VERSION` because no handler matched `api_key`
     /// (e.g. unknown `api_key`, or known `api_key` with no version
     /// negotiated). Mirrors the labelling of `record_api_request`.
-    pub fn record_unsupported_api_request(&self, api_key: i16) {
-        let name: &'static str = match crabka_protocol::api_key::ApiKey::from_i16(api_key) {
-            Some(k) => k.into(),
-            None => "Unknown",
-        };
+    pub fn record_unsupported_api_request(&self, api_key: crate::handlers::ApiKeyCode) {
         let lbl = ApiKeyLabel {
-            api_key: name.to_string(),
+            api_key: api_key_label_name(api_key).to_string(),
         };
         self.unsupported_api_requests.get_or_create(&lbl).inc();
     }
@@ -1032,6 +1029,15 @@ impl BrokerMetrics {
 impl Default for BrokerMetrics {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Resolve a wire `api_key` to the `ApiKey` variant name used as the
+/// metric label, folding unrecognised keys under [`UNKNOWN_LABEL`].
+fn api_key_label_name(api_key: crate::handlers::ApiKeyCode) -> &'static str {
+    match crabka_protocol::api_key::ApiKey::from_i16(api_key) {
+        Some(k) => k.into(),
+        None => UNKNOWN_LABEL,
     }
 }
 

@@ -26,6 +26,18 @@ use crate::coordinator::unified::GroupType;
 use crate::coordinator::unified::classic_state::GroupState;
 use crate::error::BrokerError;
 
+/// Wire `group_type` string for classic (pre-KIP-848) groups.
+const GROUP_TYPE_CLASSIC: &str = "classic";
+/// Wire `group_type` string for KIP-848 next-gen consumer groups.
+const GROUP_TYPE_CONSUMER: &str = "consumer";
+/// Wire `group_type` string for KIP-932 share groups.
+const GROUP_TYPE_SHARE: &str = "share";
+/// Wire `group_type` string for KIP-1071 streams groups.
+const GROUP_TYPE_STREAMS: &str = "streams";
+/// Kafka's consumer embedded-protocol type (`ConsumerProtocol.PROTOCOL_TYPE`),
+/// reported as `protocol_type` for classic and next-gen consumer groups.
+const CONSUMER_PROTOCOL_TYPE: &str = "consumer";
+
 #[tracing::instrument(
     name = "handle_list_groups",
     level = "info",
@@ -93,16 +105,18 @@ pub(crate) async fn handle(
             && !req
                 .types_filter
                 .iter()
-                .any(|t| t.eq_ignore_ascii_case("classic"))
+                .any(|t| t.eq_ignore_ascii_case(GROUP_TYPE_CLASSIC))
         {
             continue;
         }
         emitted.insert(s.group_id.clone());
         groups.push(ListedGroup {
             group_id: s.group_id,
-            protocol_type: s.protocol_type.unwrap_or_else(|| "consumer".into()),
+            protocol_type: s
+                .protocol_type
+                .unwrap_or_else(|| CONSUMER_PROTOCOL_TYPE.into()),
             group_state: state_str.into(),
-            group_type: "classic".into(),
+            group_type: GROUP_TYPE_CLASSIC.into(),
             ..Default::default()
         });
     }
@@ -122,7 +136,7 @@ pub(crate) async fn handle(
     append_next_gen(
         &mut groups,
         &mut emitted,
-        "consumer",
+        GROUP_TYPE_CONSUMER,
         consumer_ids,
         &req,
         states_active,
@@ -136,7 +150,7 @@ pub(crate) async fn handle(
         append_next_gen(
             &mut groups,
             &mut emitted,
-            "share",
+            GROUP_TYPE_SHARE,
             ng.share_group_ids(),
             &req,
             states_active,
@@ -152,7 +166,7 @@ pub(crate) async fn handle(
         append_next_gen(
             &mut groups,
             &mut emitted,
-            "streams",
+            GROUP_TYPE_STREAMS,
             ng.streams_group_ids(),
             &req,
             states_active,
@@ -203,10 +217,10 @@ fn append_next_gen(
     }
     // Share and streams groups carry an empty protocol_type (Kafka emits no
     // consumer protocol for them); next-gen consumer groups use "consumer".
-    let protocol_type = if group_type == "share" || group_type == "streams" {
+    let protocol_type = if group_type == GROUP_TYPE_SHARE || group_type == GROUP_TYPE_STREAMS {
         String::new()
     } else {
-        "consumer".into()
+        CONSUMER_PROTOCOL_TYPE.into()
     };
     for gid in ids {
         if emitted.contains(&gid) || !authorized(&gid) {

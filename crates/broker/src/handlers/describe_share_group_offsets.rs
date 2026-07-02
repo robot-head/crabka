@@ -22,6 +22,7 @@ use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
 use crate::codes;
 use crate::error::BrokerError;
+use crate::share_coordinator::coordinator::UNINITIALIZED_START_OFFSET;
 
 #[tracing::instrument(
     name = "handle_describe_share_group_offsets",
@@ -152,7 +153,7 @@ async fn describe_topic(
             .into_iter()
             .map(|p| DescribeShareGroupOffsetsResponsePartition {
                 partition_index: p,
-                start_offset: -1,
+                start_offset: UNINITIALIZED_START_OFFSET,
                 leader_epoch: -1,
                 lag: -1,
                 error_code: codes::UNKNOWN_TOPIC_OR_PARTITION,
@@ -209,8 +210,8 @@ async fn describe_partition(
 ) -> DescribeShareGroupOffsetsResponsePartition {
     let (start_offset, error_code) = match persister.read_state(gid, topic_id, p).await {
         Ok(Some(state)) => (state.start_offset, codes::NONE),
-        Ok(None) => (-1, codes::NONE),
-        Err(_) => (-1, codes::COORDINATOR_NOT_AVAILABLE),
+        Ok(None) => (UNINITIALIZED_START_OFFSET, codes::NONE),
+        Err(_) => (UNINITIALIZED_START_OFFSET, codes::COORDINATOR_NOT_AVAILABLE),
     };
     let (leader_epoch, lag) = if let Some(part) = broker.partitions.get(topic_name, p) {
         let hwm = part.high_watermark().await;

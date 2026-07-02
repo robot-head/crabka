@@ -6,6 +6,28 @@
 
 use crabka_metadata::{AclOperation, PatternType, PermissionType, ResourceType};
 
+/// Kafka's singleton cluster resource name (`Resource.CLUSTER_NAME`);
+/// every cluster-scoped ACL and authorization check targets this name.
+pub const CLUSTER_RESOURCE_NAME: &str = "kafka-cluster";
+
+/// Wire `i8` discriminant of an ACL `resource_type` field.
+pub type ResourceTypeCode = i8;
+/// Wire `i8` discriminant of an ACL `pattern_type` field.
+pub type PatternTypeCode = i8;
+/// Wire `i8` discriminant of an ACL `operation` field.
+pub type OperationCode = i8;
+/// Wire `i8` discriminant of an ACL `permission_type` field.
+pub type PermissionTypeCode = i8;
+
+/// Wire byte for `UNKNOWN` (0) — shared by every ACL enum axis.
+const WIRE_UNKNOWN: i8 = 0;
+/// Wire byte for `ANY` (1) — a filter wildcard, never a concrete value;
+/// shared by every ACL enum axis.
+const WIRE_ANY: i8 = 1;
+/// Wire byte for `PatternType::MATCH` (2, KIP-290) — a filter-only
+/// wildcard that matches both literal and prefixed patterns.
+const WIRE_PATTERN_MATCH: i8 = 2;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WireAclError {
     UnknownDiscriminant,
@@ -15,7 +37,7 @@ pub enum WireAclError {
 
 /// Parse a wire `resource_type` byte into a concrete `ResourceType`.
 /// Used by `CreateAcls` where the resource must be concrete.
-pub fn resource_type_concrete(b: i8) -> Result<ResourceType, WireAclError> {
+pub fn resource_type_concrete(b: ResourceTypeCode) -> Result<ResourceType, WireAclError> {
     match b {
         2 => Ok(ResourceType::Topic),
         3 => Ok(ResourceType::Group),
@@ -23,7 +45,7 @@ pub fn resource_type_concrete(b: i8) -> Result<ResourceType, WireAclError> {
         5 => Ok(ResourceType::TransactionalId),
         6 => Ok(ResourceType::DelegationToken),
         // 7 (User) / 0 (Unknown) / 1 (Any) rejected.
-        0 | 1 => Err(WireAclError::AnyRequiresFilter),
+        WIRE_UNKNOWN | WIRE_ANY => Err(WireAclError::AnyRequiresFilter),
         _ => Err(WireAclError::UnknownDiscriminant),
     }
 }
@@ -31,9 +53,9 @@ pub fn resource_type_concrete(b: i8) -> Result<ResourceType, WireAclError> {
 /// Parse a wire `resource_type` byte into a filter slot.
 ///
 /// `Any` (1) maps to `None`. Used by `DeleteAcls` and `DescribeAcls`.
-pub fn resource_type_filter(b: i8) -> Result<Option<ResourceType>, WireAclError> {
+pub fn resource_type_filter(b: ResourceTypeCode) -> Result<Option<ResourceType>, WireAclError> {
     match b {
-        1 => Ok(None),
+        WIRE_ANY => Ok(None),
         2 => Ok(Some(ResourceType::Topic)),
         3 => Ok(Some(ResourceType::Group)),
         4 => Ok(Some(ResourceType::Cluster)),
@@ -45,7 +67,7 @@ pub fn resource_type_filter(b: i8) -> Result<Option<ResourceType>, WireAclError>
 
 /// Encode a `ResourceType` as its wire `i8` discriminant.
 #[must_use]
-pub fn resource_type_to_wire(rt: ResourceType) -> i8 {
+pub fn resource_type_to_wire(rt: ResourceType) -> ResourceTypeCode {
     match rt {
         ResourceType::Topic => 2,
         ResourceType::Group => 3,
@@ -57,11 +79,11 @@ pub fn resource_type_to_wire(rt: ResourceType) -> i8 {
 
 /// Parse a wire `pattern_type` byte into a concrete `PatternType`.
 /// Used by `CreateAcls` where the pattern must be concrete.
-pub fn pattern_type_concrete(b: i8) -> Result<PatternType, WireAclError> {
+pub fn pattern_type_concrete(b: PatternTypeCode) -> Result<PatternType, WireAclError> {
     match b {
         3 => Ok(PatternType::Literal),
         4 => Ok(PatternType::Prefixed),
-        0..=2 => Err(WireAclError::AnyRequiresFilter),
+        WIRE_UNKNOWN..=WIRE_PATTERN_MATCH => Err(WireAclError::AnyRequiresFilter),
         _ => Err(WireAclError::UnknownDiscriminant),
     }
 }
@@ -70,9 +92,10 @@ pub fn pattern_type_concrete(b: i8) -> Result<PatternType, WireAclError> {
 ///
 /// `Any` (1) and `Match` (2) both collapse to `None`. Used by
 /// `DeleteAcls` and `DescribeAcls`.
-pub fn pattern_type_filter(b: i8) -> Result<Option<PatternType>, WireAclError> {
+pub fn pattern_type_filter(b: PatternTypeCode) -> Result<Option<PatternType>, WireAclError> {
     match b {
-        1 | 2 => Ok(None), // ANY / MATCH both collapse to None for our matcher
+        // ANY / MATCH both collapse to None for our matcher.
+        WIRE_ANY | WIRE_PATTERN_MATCH => Ok(None),
         3 => Ok(Some(PatternType::Literal)),
         4 => Ok(Some(PatternType::Prefixed)),
         _ => Err(WireAclError::UnknownDiscriminant),
@@ -81,7 +104,7 @@ pub fn pattern_type_filter(b: i8) -> Result<Option<PatternType>, WireAclError> {
 
 /// Encode a `PatternType` as its wire `i8` discriminant.
 #[must_use]
-pub fn pattern_type_to_wire(pt: PatternType) -> i8 {
+pub fn pattern_type_to_wire(pt: PatternType) -> PatternTypeCode {
     match pt {
         PatternType::Literal => 3,
         PatternType::Prefixed => 4,
@@ -90,7 +113,7 @@ pub fn pattern_type_to_wire(pt: PatternType) -> i8 {
 
 /// Parse a wire `operation` byte into a concrete `AclOperation`.
 /// Used by `CreateAcls` where the operation must be concrete.
-pub fn operation_concrete(b: i8) -> Result<AclOperation, WireAclError> {
+pub fn operation_concrete(b: OperationCode) -> Result<AclOperation, WireAclError> {
     match b {
         2 => Ok(AclOperation::All),
         3 => Ok(AclOperation::Read),
@@ -104,7 +127,7 @@ pub fn operation_concrete(b: i8) -> Result<AclOperation, WireAclError> {
         11 => Ok(AclOperation::AlterConfigs),
         12 => Ok(AclOperation::IdempotentWrite),
         15 => Ok(AclOperation::TwoPhaseCommit),
-        0 | 1 => Err(WireAclError::AnyRequiresFilter),
+        WIRE_UNKNOWN | WIRE_ANY => Err(WireAclError::AnyRequiresFilter),
         _ => Err(WireAclError::UnknownDiscriminant),
     }
 }
@@ -112,9 +135,9 @@ pub fn operation_concrete(b: i8) -> Result<AclOperation, WireAclError> {
 /// Parse a wire `operation` byte into a filter slot.
 ///
 /// `Any` (1) maps to `None`. Used by `DeleteAcls` and `DescribeAcls`.
-pub fn operation_filter(b: i8) -> Result<Option<AclOperation>, WireAclError> {
+pub fn operation_filter(b: OperationCode) -> Result<Option<AclOperation>, WireAclError> {
     match b {
-        1 => Ok(None),
+        WIRE_ANY => Ok(None),
         2 => Ok(Some(AclOperation::All)),
         3 => Ok(Some(AclOperation::Read)),
         4 => Ok(Some(AclOperation::Write)),
@@ -133,7 +156,7 @@ pub fn operation_filter(b: i8) -> Result<Option<AclOperation>, WireAclError> {
 
 /// Encode an `AclOperation` as its wire `i8` discriminant.
 #[must_use]
-pub fn operation_to_wire(op: AclOperation) -> i8 {
+pub fn operation_to_wire(op: AclOperation) -> OperationCode {
     match op {
         AclOperation::All => 2,
         AclOperation::Read => 3,
@@ -152,11 +175,11 @@ pub fn operation_to_wire(op: AclOperation) -> i8 {
 
 /// Parse a wire `permission_type` byte into a concrete `PermissionType`.
 /// Used by `CreateAcls` where the permission must be concrete.
-pub fn permission_concrete(b: i8) -> Result<PermissionType, WireAclError> {
+pub fn permission_concrete(b: PermissionTypeCode) -> Result<PermissionType, WireAclError> {
     match b {
         2 => Ok(PermissionType::Deny),
         3 => Ok(PermissionType::Allow),
-        0 | 1 => Err(WireAclError::AnyRequiresFilter),
+        WIRE_UNKNOWN | WIRE_ANY => Err(WireAclError::AnyRequiresFilter),
         _ => Err(WireAclError::UnknownDiscriminant),
     }
 }
@@ -164,9 +187,9 @@ pub fn permission_concrete(b: i8) -> Result<PermissionType, WireAclError> {
 /// Parse a wire `permission_type` byte into a filter slot.
 ///
 /// `Any` (1) maps to `None`. Used by `DeleteAcls` and `DescribeAcls`.
-pub fn permission_filter(b: i8) -> Result<Option<PermissionType>, WireAclError> {
+pub fn permission_filter(b: PermissionTypeCode) -> Result<Option<PermissionType>, WireAclError> {
     match b {
-        1 => Ok(None),
+        WIRE_ANY => Ok(None),
         2 => Ok(Some(PermissionType::Deny)),
         3 => Ok(Some(PermissionType::Allow)),
         _ => Err(WireAclError::UnknownDiscriminant),
@@ -175,7 +198,7 @@ pub fn permission_filter(b: i8) -> Result<Option<PermissionType>, WireAclError> 
 
 /// Encode a `PermissionType` as its wire `i8` discriminant.
 #[must_use]
-pub fn permission_to_wire(pt: PermissionType) -> i8 {
+pub fn permission_to_wire(pt: PermissionType) -> PermissionTypeCode {
     match pt {
         PermissionType::Deny => 2,
         PermissionType::Allow => 3,

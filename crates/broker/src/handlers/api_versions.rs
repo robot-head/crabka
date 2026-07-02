@@ -24,6 +24,10 @@ use crate::broker::Broker;
 use crate::codes;
 use crate::error::BrokerError;
 
+/// First `ApiVersions` request version that carries the KIP-511
+/// `client_software_name` / `client_software_version` fields.
+const CLIENT_INFO_MIN_VERSION: i16 = 3;
+
 // KIP-584 feature surface. `supported_features` advertises `metadata.version`
 // over the full Kafka-faithful range MIN=7 (3.3-IV3) .. MAX=25 (4.0-IV3),
 // sourced from the `crabka_metadata::metadata_version` table via
@@ -117,7 +121,7 @@ pub(crate) fn handle(
         // actually carries the fields. On reject, return a degraded
         // response (error code, empty api_keys); clients are expected
         // to retry with a fixed name/version or give up.
-        if version >= 3
+        if version >= CLIENT_INFO_MIN_VERSION
             && (!is_valid_client_info(&req.client_software_name)
                 || !is_valid_client_info(&req.client_software_version))
         {
@@ -132,7 +136,7 @@ pub(crate) fn handle(
 
         // Accepted handshake. Bump the per-(name, version) counter on
         // v3+ only; older requests don't carry the fields.
-        if version >= 3 {
+        if version >= CLIENT_INFO_MIN_VERSION {
             metrics.record_client_software(&req.client_software_name, &req.client_software_version);
         }
 

@@ -8,6 +8,13 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use tokio::sync::Mutex;
 
+use crate::partition::LogOffset;
+
+/// Kafka producer id (PID) assigned by `InitProducerId`. Alias only —
+/// distinguishes the id from the offset/timestamp `i64`s that travel
+/// alongside it in produce-path signatures.
+pub type ProducerId = i64;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProducerEntry {
     pub epoch: i16,
@@ -16,8 +23,8 @@ pub struct ProducerEntry {
     /// (`base_offset + last_offset_delta`). Read by
     /// [`ProducerState::truncate`] to drop entries whose batch was truncated
     /// off the log.
-    pub last_offset: i64,
-    pub base_offset: i64,
+    pub last_offset: LogOffset,
+    pub base_offset: LogOffset,
     /// Timestamp of the last accepted batch for this producer.
     #[allow(dead_code)]
     pub last_timestamp: i64,
@@ -30,7 +37,7 @@ pub struct ProducerEntry {
 
 #[derive(Debug, Default)]
 pub struct PartitionProducerState {
-    pub entries: HashMap<i64, ProducerEntry>,
+    pub entries: HashMap<ProducerId, ProducerEntry>,
 }
 
 /// Outcome of a dedup check.
@@ -41,7 +48,7 @@ pub enum Decision {
     Append,
     /// Previously-committed sequence range. Caller should respond with
     /// `error_code = NONE` and `base_offset = base_offset`.
-    Duplicate { base_offset: i64 },
+    Duplicate { base_offset: LogOffset },
     /// `base_sequence != last_sequence + 1`. Caller responds with
     /// `OUT_OF_ORDER_SEQUENCE_NUMBER (45)`.
     OutOfOrder,
@@ -112,7 +119,7 @@ impl ProducerState {
         &self,
         topic: &str,
         partition: i32,
-        producer_id: i64,
+        producer_id: ProducerId,
         producer_epoch: i16,
         base_sequence: i32,
         last_offset_delta: i32,
@@ -129,11 +136,11 @@ impl ProducerState {
         &self,
         topic: &str,
         partition: i32,
-        producer_id: i64,
+        producer_id: ProducerId,
         producer_epoch: i16,
         base_sequence: i32,
         last_offset_delta: i32,
-        base_offset: i64,
+        base_offset: LogOffset,
         last_timestamp: i64,
     ) {
         let handle = self.handle(topic, partition);
@@ -166,7 +173,7 @@ impl ProducerState {
     /// retry re-append fresh instead. Mirrors Kafka's
     /// `ProducerStateManager.truncateAndReload`. Does not create state for a
     /// partition that has never been tracked.
-    pub async fn truncate(&self, topic: &str, partition: i32, offset: i64) {
+    pub async fn truncate(&self, topic: &str, partition: i32, offset: LogOffset) {
         let Some(parts) = self.by_topic.get(topic).map(|e| e.value().clone()) else {
             return;
         };
@@ -210,7 +217,7 @@ impl ProducerState {
     ///
     /// The snapshot drops the mutex before returning, so callers don't
     /// hold the per-partition lock across response encoding.
-    pub async fn snapshot(&self, topic: &str, partition: i32) -> Vec<(i64, ProducerEntry)> {
+    pub async fn snapshot(&self, topic: &str, partition: i32) -> Vec<(ProducerId, ProducerEntry)> {
         // Cheaper to bypass `handle` (which inserts on miss): a snapshot
         // for an unknown partition should report "no producers", not
         // wire up an empty entry. The borrowed `&str` / `i32` lookups
@@ -251,7 +258,7 @@ impl ProducerState {
         partition: i32,
         now_ms: i64,
         expiration_ms: i64,
-    ) -> HashMap<i64, i64> {
+    ) -> HashMap<ProducerId, LogOffset> {
         // Mirror `snapshot`: avoid inserting an empty entry for an unknown
         // partition (the borrowed lookups allocate nothing on a miss).
         let Some(topic_ref) = self.by_topic.get(topic) else {

@@ -34,6 +34,9 @@ use crabka_remote_storage::{
 use crate::partition::Partition;
 use crate::partition_registry::PartitionRegistry;
 
+/// Default cadence of the tiered-storage sweep (copy + retention passes).
+const DEFAULT_TIERING_INTERVAL: Duration = Duration::from_secs(30);
+
 /// Tunables for [`run`].
 #[derive(Debug, Clone)]
 pub(crate) struct RemoteLogManagerConfig {
@@ -43,7 +46,7 @@ pub(crate) struct RemoteLogManagerConfig {
 impl Default for RemoteLogManagerConfig {
     fn default() -> Self {
         Self {
-            interval: Duration::from_secs(30),
+            interval: DEFAULT_TIERING_INTERVAL,
         }
     }
 }

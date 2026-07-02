@@ -30,15 +30,41 @@ use crate::wire::{
     CrabkaMetadataFetchResponse, CrabkaSubmitChangeRequest, CrabkaSubmitChangeResponse,
 };
 
+/// Kafka request-header `api_key` (`RequestHeader` field 1).
+type ApiKey = i16;
+/// Kafka request-header `api_version` (`RequestHeader` field 2).
+type ApiVersion = i16;
+/// Kafka request-header `correlation_id`, echoed back in the response header.
+type CorrelationId = i32;
+
 /// Kafka's `ApiVersions` API key. The controller TCP listener answers this
 /// because `crabka_client_core::Connection::connect` performs an `ApiVersions`
 /// handshake before any other request.
-const API_KEY_API_VERSIONS: i16 = 18;
+const API_KEY_API_VERSIONS: ApiKey = 18;
+
+/// Highest `ApiVersions` request version this listener speaks: the advertised
+/// max in the `api_keys` table and the clamp applied to the response body codec
+/// (JVM controllers dial at v4; Crabka's own client at v0).
+const API_VERSIONS_MAX_VERSION: ApiVersion = 4;
 
 /// `DescribeCluster` (KIP-919) — served on the controller listener so an
 /// `AdminClient` bootstrapped with `--bootstrap-controller` can discover the
 /// quorum's controller (or broker) endpoints directly from the leader.
-const API_KEY_DESCRIBE_CLUSTER: i16 = 60;
+const API_KEY_DESCRIBE_CLUSTER: ApiKey = 60;
+
+/// `CrabkaSubmitChangeResponse::error_code`: the change was applied.
+const SUBMIT_CHANGE_APPLIED: i16 = 0;
+/// `CrabkaSubmitChangeResponse::error_code`: this node is not the leader;
+/// consult `leader_hint`.
+const SUBMIT_CHANGE_NOT_LEADER: i16 = 1;
+/// `CrabkaSubmitChangeResponse::error_code`: metadata validation rejected the
+/// records (also returned when the wincode body fails to decode).
+const SUBMIT_CHANGE_REJECTED: i16 = 2;
+/// `CrabkaSubmitChangeResponse::error_code`: any other engine failure.
+const SUBMIT_CHANGE_FAILED: i16 = 3;
+
+/// `leader_hint` sentinel meaning "the current leader is unknown".
+const LEADER_HINT_UNKNOWN: i64 = -1;
 
 pub(crate) async fn run(
     listener: TcpListener,
@@ -160,7 +186,9 @@ fn require_remaining(available: usize, required: usize) -> Result<(), RaftError>
     }
 }
 
-async fn read_one_request<S>(stream: &mut S) -> Result<(i16, i16, i32, Bytes), RaftError>
+async fn read_one_request<S>(
+    stream: &mut S,
+) -> Result<(ApiKey, ApiVersion, CorrelationId, Bytes), RaftError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -203,7 +231,7 @@ where
 
 async fn write_response<S>(
     stream: &mut S,
-    correlation_id: i32,
+    correlation_id: CorrelationId,
     body: Bytes,
 ) -> Result<(), RaftError>
 where
@@ -226,7 +254,7 @@ where
 /// `ApiVersions` v0 path, which decodes a `ResponseHeader v0`.
 async fn write_response_no_tagged_fields<S>(
     stream: &mut S,
-    correlation_id: i32,
+    correlation_id: CorrelationId,
     body: Bytes,
 ) -> Result<(), RaftError>
 where
@@ -258,24 +286,27 @@ where
 /// `throttle_time_ms(i32)`, response-level `tagged(0)`. Per the documented Kafka
 /// asymmetry, the *response header* stays v0 (no leading tagged-fields byte) —
 /// so this is written via [`write_response_no_tagged_fields`].
-fn api_versions_response_body(req_version: i16) -> Bytes {
+fn api_versions_response_body(req_version: ApiVersion) -> Bytes {
     use crabka_protocol::Encode;
-    use crabka_protocol::owned::api_versions_response::{ApiVersion, ApiVersionsResponse};
+    use crabka_protocol::owned::api_versions_response::{
+        ApiVersion as ApiVersionEntry, ApiVersionsResponse,
+    };
     // (api_key, max_version) — min_version/error_code/throttle_time_ms are all
-    // protocol defaults of 0, so leave them implicit.
-    const KEYS: &[(i16, i16)] = &[
-        (1, 17), // Fetch
-        (18, 4), // ApiVersions
-        (52, 2), // Vote
-        (53, 1), // BeginQuorumEpoch
-        (54, 1), // EndQuorumEpoch
-        (59, 1), // FetchSnapshot
-        (60, 2), // DescribeCluster (KIP-919)
+    // protocol defaults of 0, so leave them implicit. Each max_version is the
+    // highest version the engine's codec speaks for that API.
+    const KEYS: &[(ApiKey, ApiVersion)] = &[
+        (api_key::FETCH, 17),
+        (API_KEY_API_VERSIONS, API_VERSIONS_MAX_VERSION),
+        (api_key::VOTE, 2),
+        (api_key::BEGIN_QUORUM_EPOCH, 1),
+        (api_key::END_QUORUM_EPOCH, 1),
+        (api_key::FETCH_SNAPSHOT, 1),
+        (API_KEY_DESCRIBE_CLUSTER, 2),
     ];
     let resp = ApiVersionsResponse {
         api_keys: KEYS
             .iter()
-            .map(|&(api_key, max_version)| ApiVersion {
+            .map(|&(api_key, max_version)| ApiVersionEntry {
                 api_key,
                 max_version,
                 ..Default::default()
@@ -288,7 +319,7 @@ fn api_versions_response_body(req_version: i16) -> Bytes {
     // v0-shaped body, req v>=3 → flexible (compact) body. The v0 ApiVersions
     // response HEADER asymmetry lives in the framing (`write_response_no_tagged_fields`),
     // not here.
-    let body_version = req_version.clamp(0, 4);
+    let body_version = req_version.clamp(0, API_VERSIONS_MAX_VERSION);
     let mut buf = BytesMut::new();
     let _ = resp.encode(&mut buf, body_version);
     buf.freeze()
@@ -302,7 +333,7 @@ fn api_versions_response_body(req_version: i16) -> Bytes {
 /// request/response wire types.
 #[tracing::instrument(level = "debug", skip_all, fields(node = engine.node_id(), api_key = api_key_n), err)]
 async fn dispatch(
-    api_key_n: i16,
+    api_key_n: ApiKey,
     body: Bytes,
     engine: &KraftController,
 ) -> Result<Bytes, RaftError> {
@@ -358,8 +389,8 @@ async fn dispatch_submit_change(body: &[u8], engine: &KraftController) -> Result
         Err(e) => {
             tracing::warn!(error = %e, "submit-change body decode failed");
             let resp = CrabkaSubmitChangeResponse {
-                error_code: 2,
-                leader_hint: -1,
+                error_code: SUBMIT_CHANGE_REJECTED,
+                leader_hint: LEADER_HINT_UNKNOWN,
             };
             let mut out = Vec::with_capacity(16);
             resp.encode_v0(&mut out);
@@ -368,24 +399,24 @@ async fn dispatch_submit_change(body: &[u8], engine: &KraftController) -> Result
     };
     let resp = match engine.submit_change(records).await {
         Ok(()) => CrabkaSubmitChangeResponse {
-            error_code: 0,
-            leader_hint: -1,
+            error_code: SUBMIT_CHANGE_APPLIED,
+            leader_hint: LEADER_HINT_UNKNOWN,
         },
         Err(RaftError::Metadata(_)) => CrabkaSubmitChangeResponse {
-            error_code: 2,
-            leader_hint: -1,
+            error_code: SUBMIT_CHANGE_REJECTED,
+            leader_hint: LEADER_HINT_UNKNOWN,
         },
         Err(RaftError::NotLeader { current_leader }) => CrabkaSubmitChangeResponse {
-            error_code: 1,
+            error_code: SUBMIT_CHANGE_NOT_LEADER,
             leader_hint: current_leader
                 .and_then(|l| i64::try_from(l).ok())
-                .unwrap_or(-1),
+                .unwrap_or(LEADER_HINT_UNKNOWN),
         },
         Err(e) => {
             tracing::warn!(error = ?e, "submit-change failed");
             CrabkaSubmitChangeResponse {
-                error_code: 3,
-                leader_hint: -1,
+                error_code: SUBMIT_CHANGE_FAILED,
+                leader_hint: LEADER_HINT_UNKNOWN,
             }
         }
     };
@@ -411,7 +442,7 @@ async fn dispatch_metadata_fetch(
         .ok()
         .and_then(|qs| qs.leader_id)
         .and_then(|l| i64::try_from(l).ok())
-        .unwrap_or(-1);
+        .unwrap_or(LEADER_HINT_UNKNOWN);
 
     let resp = CrabkaMetadataFetchResponse {
         error_code: 0,
@@ -432,7 +463,7 @@ async fn dispatch_metadata_fetch(
 /// listener carries no principal/ACL context (it is the inter-node trust
 /// boundary, like `metadata_fetch`), so there is no auth gate.
 async fn describe_cluster_response_body(
-    version: i16,
+    version: ApiVersion,
     body: &[u8],
     engine: &KraftController,
 ) -> Result<Bytes, RaftError> {
@@ -495,7 +526,7 @@ async fn describe_cluster_response_body(
 /// Encode a `DescribeClusterResponse` body for `version` from already-projected
 /// node tuples. Pure (no engine), so the projection-and-encode is unit-testable.
 fn build_describe_cluster_body(
-    version: i16,
+    version: ApiVersion,
     endpoint_type: i8,
     voters: &[(i32, String, i32)],
     brokers: &[(i32, String, i32, Option<String>)],

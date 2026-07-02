@@ -22,6 +22,9 @@ use crate::error::RaftError;
 
 const SNAPSHOT_HEADER_BASE_OFFSET: i64 = 0;
 const SNAPSHOT_DATA_BASE_OFFSET: i64 = 1;
+/// Message version of the KIP-630 `SnapshotHeaderRecord` / `SnapshotFooterRecord`
+/// bodies written into the checkpoint's control batches (Kafka writes v0).
+const SNAPSHOT_CONTROL_RECORD_VERSION: i16 = 0;
 
 /// Identifies a snapshot by the log position it covers: `end_offset` is
 /// the offset of the last record contained in the snapshot, and `epoch`
@@ -54,7 +57,7 @@ impl SnapshotWriter {
             ..Default::default()
         };
         let mut header_body = BytesMut::new();
-        header.encode(&mut header_body, 0)?;
+        header.encode(&mut header_body, SNAPSHOT_CONTROL_RECORD_VERSION)?;
         out.put_slice(&encode_control_batch(
             SNAPSHOT_HEADER_BASE_OFFSET,
             control_record_key(ControlRecordType::SnapshotHeader),
@@ -118,7 +121,7 @@ impl SnapshotWriter {
             .saturating_add(i64::try_from(total_blobs).unwrap_or(i64::MAX));
         let footer = SnapshotFooterRecord::default();
         let mut footer_body = BytesMut::new();
-        footer.encode(&mut footer_body, 0)?;
+        footer.encode(&mut footer_body, SNAPSHOT_CONTROL_RECORD_VERSION)?;
         out.put_slice(&encode_control_batch(
             footer_base_offset,
             control_record_key(ControlRecordType::SnapshotFooter),

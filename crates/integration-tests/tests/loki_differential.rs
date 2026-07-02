@@ -38,6 +38,16 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
 use tower::ServiceExt;
 
 const LOKI_PORT: u16 = 3100;
+/// Loki release image the whole differential suite pins its wire semantics to.
+const LOKI_IMAGE: &str = "mirror.gcr.io/grafana/loki";
+/// Loki release tag the whole differential suite pins its wire semantics to.
+const LOKI_TAG: &str = "3.4.2";
+/// Seconds testcontainers waits after container start before `/ready` polling.
+const LOKI_STARTUP_WAIT_SECS: u64 = 2;
+/// Tenant id (`X-Scope-OrgID`) used for every push and query in this suite.
+const TENANT: &str = "tenant-a";
+/// Byte cap when draining an in-process response body (results are tiny).
+const MAX_BODY_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, PartialEq, ::prost::Message)]
 struct LokiProtoPushRequest {
@@ -180,9 +190,9 @@ fn labels<const N: usize>(pairs: [(&str, &str); N]) -> BTreeMap<String, String> 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_buildinfo_shape() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -208,9 +218,9 @@ async fn real_loki_and_crabka_return_same_buildinfo_shape() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_basic_status_probe_shapes() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -238,9 +248,9 @@ async fn real_loki_and_crabka_return_same_basic_status_probe_shapes() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_services_status_shape() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -266,9 +276,9 @@ async fn real_loki_and_crabka_return_same_services_status_shape() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_stable_config_status_lines() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -305,9 +315,9 @@ async fn real_loki_and_crabka_return_same_stable_config_status_lines() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_expose_same_stable_metrics_families() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -333,9 +343,9 @@ async fn real_loki_and_crabka_expose_same_stable_metrics_families() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_log_level_post_shapes() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -380,9 +390,9 @@ async fn real_loki_and_crabka_return_same_log_level_post_shapes() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_log_level_post_error_shapes() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -414,9 +424,9 @@ async fn real_loki_and_crabka_return_same_log_level_post_error_shapes() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_ingester_control_shapes() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -450,9 +460,9 @@ async fn real_loki_and_crabka_return_same_ingester_control_shapes() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_empty_ruler_inventory_shape() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -490,9 +500,9 @@ async fn real_loki_and_crabka_return_same_empty_ruler_inventory_shape() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_ring_status_page_shapes() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -528,9 +538,9 @@ async fn real_loki_and_crabka_return_same_ring_status_page_shapes() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_default_delete_api_is_absent_while_crabka_serves_lifecycle() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -600,9 +610,9 @@ async fn real_loki_default_delete_api_is_absent_while_crabka_serves_lifecycle() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_stream_query_range_result() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -736,9 +746,9 @@ async fn real_loki_and_crabka_return_same_stream_query_range_result() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_matcher_and_line_filter_results() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -843,9 +853,9 @@ async fn real_loki_and_crabka_return_same_matcher_and_line_filter_results() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_metric_query_range_result() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -1012,9 +1022,9 @@ async fn real_loki_and_crabka_return_same_metric_query_range_result() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_vector_aggregation_result() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -1139,9 +1149,9 @@ async fn real_loki_and_crabka_return_same_vector_aggregation_result() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_byte_metric_results() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -1238,9 +1248,9 @@ async fn real_loki_and_crabka_return_same_byte_metric_results() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_metadata_results() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -1437,9 +1447,9 @@ async fn real_loki_and_crabka_return_same_metadata_results() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_empty_metadata_shapes() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -1476,9 +1486,9 @@ async fn real_loki_and_crabka_return_same_empty_metadata_shapes() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_detected_fields_results() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -1491,7 +1501,7 @@ async fn real_loki_and_crabka_return_same_detected_fields_results() {
 
     let dir = TempDir::new().expect("querier root");
     let mut label_index = LabelIndex::default();
-    let api = label_index.insert_series("tenant-a", labels([("app", "api"), ("env", "prod")]));
+    let api = label_index.insert_series(TENANT, labels([("app", "api"), ("env", "prod")]));
     let base_ns = current_unix_second_ns() - 60_000_000_000;
     let json_line = r#"{"status":500,"ok":false,"path":"/checkout"}"#;
     let logfmt_line = "level=warn duration=12ms bytes=1.5MiB status=503";
@@ -1514,7 +1524,7 @@ async fn real_loki_and_crabka_return_same_detected_fields_results() {
     let block = write_log_block(
         dir.path(),
         &BlockKey::new(
-            "tenant-a",
+            TENANT,
             0,
             base_ns,
             base_ns + 1_000_000_000,
@@ -1547,9 +1557,9 @@ async fn real_loki_and_crabka_return_same_detected_fields_results() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_default_patterns_endpoint_is_unavailable_while_crabka_serves_patterns() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -1562,9 +1572,8 @@ async fn real_loki_default_patterns_endpoint_is_unavailable_while_crabka_serves_
 
     let dir = TempDir::new().expect("querier root");
     let mut label_index = LabelIndex::default();
-    let api = label_index.insert_series("tenant-a", labels([("app", "api"), ("env", "prod")]));
-    let worker =
-        label_index.insert_series("tenant-a", labels([("app", "worker"), ("env", "prod")]));
+    let api = label_index.insert_series(TENANT, labels([("app", "api"), ("env", "prod")]));
+    let worker = label_index.insert_series(TENANT, labels([("app", "worker"), ("env", "prod")]));
     let base_ns = current_unix_second_ns() - 60_000_000_000;
     let payload = json!({
         "streams": [
@@ -1594,7 +1603,7 @@ async fn real_loki_default_patterns_endpoint_is_unavailable_while_crabka_serves_
     let api_block = write_log_block(
         dir.path(),
         &BlockKey::new(
-            "tenant-a",
+            TENANT,
             0,
             base_ns,
             base_ns + 1_000_000_000,
@@ -1619,7 +1628,7 @@ async fn real_loki_default_patterns_endpoint_is_unavailable_while_crabka_serves_
     let worker_block = write_log_block(
         dir.path(),
         &BlockKey::new(
-            "tenant-a",
+            TENANT,
             1,
             base_ns + 2_000_000_000,
             base_ns + 2_000_000_000,
@@ -1673,9 +1682,9 @@ async fn real_loki_default_patterns_endpoint_is_unavailable_while_crabka_serves_
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_index_volume_shape() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -1688,9 +1697,8 @@ async fn real_loki_and_crabka_return_same_index_volume_shape() {
 
     let dir = TempDir::new().expect("querier root");
     let mut label_index = LabelIndex::default();
-    let api = label_index.insert_series("tenant-a", labels([("app", "api"), ("env", "prod")]));
-    let worker =
-        label_index.insert_series("tenant-a", labels([("app", "worker"), ("env", "prod")]));
+    let api = label_index.insert_series(TENANT, labels([("app", "api"), ("env", "prod")]));
+    let worker = label_index.insert_series(TENANT, labels([("app", "worker"), ("env", "prod")]));
     let base_ns = current_unix_second_ns() - 60_000_000_000;
     let payload = json!({
         "streams": [
@@ -1720,7 +1728,7 @@ async fn real_loki_and_crabka_return_same_index_volume_shape() {
     let api_block = write_log_block(
         dir.path(),
         &BlockKey::new(
-            "tenant-a",
+            TENANT,
             0,
             base_ns,
             base_ns + 1_000_000_000,
@@ -1740,7 +1748,7 @@ async fn real_loki_and_crabka_return_same_index_volume_shape() {
     let worker_block = write_log_block(
         dir.path(),
         &BlockKey::new(
-            "tenant-a",
+            TENANT,
             1,
             base_ns + 2_000_000_000,
             base_ns + 2_000_000_000,
@@ -1769,9 +1777,9 @@ async fn real_loki_and_crabka_return_same_index_volume_shape() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_index_stats_shape() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -1784,9 +1792,8 @@ async fn real_loki_and_crabka_return_same_index_stats_shape() {
 
     let dir = TempDir::new().expect("querier root");
     let mut label_index = LabelIndex::default();
-    let api = label_index.insert_series("tenant-a", labels([("app", "api"), ("env", "prod")]));
-    let worker =
-        label_index.insert_series("tenant-a", labels([("app", "worker"), ("env", "prod")]));
+    let api = label_index.insert_series(TENANT, labels([("app", "api"), ("env", "prod")]));
+    let worker = label_index.insert_series(TENANT, labels([("app", "worker"), ("env", "prod")]));
     let base_ns = current_unix_second_ns() - 60_000_000_000;
     let payload = json!({
         "streams": [
@@ -1816,7 +1823,7 @@ async fn real_loki_and_crabka_return_same_index_stats_shape() {
     let api_block = write_log_block(
         dir.path(),
         &BlockKey::new(
-            "tenant-a",
+            TENANT,
             0,
             base_ns,
             base_ns + 1_000_000_000,
@@ -1836,7 +1843,7 @@ async fn real_loki_and_crabka_return_same_index_stats_shape() {
     let worker_block = write_log_block(
         dir.path(),
         &BlockKey::new(
-            "tenant-a",
+            TENANT,
             1,
             base_ns + 2_000_000_000,
             base_ns + 2_000_000_000,
@@ -1864,9 +1871,9 @@ async fn real_loki_and_crabka_return_same_index_stats_shape() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_index_volume_range_shape() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -1879,9 +1886,8 @@ async fn real_loki_and_crabka_return_same_index_volume_range_shape() {
 
     let dir = TempDir::new().expect("querier root");
     let mut label_index = LabelIndex::default();
-    let api = label_index.insert_series("tenant-a", labels([("app", "api"), ("env", "prod")]));
-    let worker =
-        label_index.insert_series("tenant-a", labels([("app", "worker"), ("env", "prod")]));
+    let api = label_index.insert_series(TENANT, labels([("app", "api"), ("env", "prod")]));
+    let worker = label_index.insert_series(TENANT, labels([("app", "worker"), ("env", "prod")]));
     let base_ns = current_unix_second_ns() - 60_000_000_000;
     let payload = json!({
         "streams": [
@@ -1912,7 +1918,7 @@ async fn real_loki_and_crabka_return_same_index_volume_range_shape() {
     let api_block = write_log_block(
         dir.path(),
         &BlockKey::new(
-            "tenant-a",
+            TENANT,
             0,
             base_ns,
             base_ns + 1_000_000_000,
@@ -1932,7 +1938,7 @@ async fn real_loki_and_crabka_return_same_index_volume_range_shape() {
     let worker_block = write_log_block(
         dir.path(),
         &BlockKey::new(
-            "tenant-a",
+            TENANT,
             1,
             base_ns + 2_000_000_000,
             base_ns + 3_000_000_000,
@@ -1970,9 +1976,9 @@ async fn real_loki_and_crabka_return_same_index_volume_range_shape() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_parser_filter_results() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -2806,9 +2812,9 @@ async fn real_loki_and_crabka_return_same_parser_filter_results() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_parser_metric_results() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -2939,9 +2945,9 @@ async fn real_loki_and_crabka_return_same_parser_metric_results() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_instant_metric_query_result() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -3202,9 +3208,9 @@ async fn real_loki_and_crabka_return_same_instant_metric_query_result() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_scalar_query_range_result() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -3249,9 +3255,9 @@ async fn real_loki_and_crabka_return_same_scalar_query_range_result() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_label_replace_vector_function_result() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -3309,9 +3315,9 @@ async fn real_loki_and_crabka_return_same_label_replace_vector_function_result()
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_use_same_duplicate_query_param_precedence() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -3342,9 +3348,9 @@ async fn real_loki_and_crabka_use_same_duplicate_query_param_precedence() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_parser_error_labels() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -3444,9 +3450,9 @@ async fn real_loki_and_crabka_return_same_parser_error_labels() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_logfmt_malformed_field_results() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -3582,9 +3588,9 @@ async fn real_loki_and_crabka_return_same_logfmt_malformed_field_results() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_invalid_query_error() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -3619,9 +3625,9 @@ async fn real_loki_and_crabka_return_same_invalid_query_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_use_same_query_post_body_precedence() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -3664,9 +3670,9 @@ async fn real_loki_and_crabka_use_same_query_post_body_precedence() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_invalid_tail_query_errors() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -3697,9 +3703,9 @@ async fn real_loki_and_crabka_return_same_invalid_tail_query_errors() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_invalid_tail_delay_for_error() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -3726,9 +3732,9 @@ async fn real_loki_and_crabka_return_same_invalid_tail_delay_for_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_invalid_query_range_direction_error() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -3755,9 +3761,9 @@ async fn real_loki_and_crabka_return_same_invalid_query_range_direction_error() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_invalid_query_range_step_error() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -3784,9 +3790,9 @@ async fn real_loki_and_crabka_return_same_invalid_query_range_step_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_invalid_query_range_step_parse_error() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -3813,9 +3819,9 @@ async fn real_loki_and_crabka_return_same_invalid_query_range_step_parse_error()
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_excessive_query_range_resolution_error() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -3842,9 +3848,9 @@ async fn real_loki_and_crabka_return_same_excessive_query_range_resolution_error
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_oversized_query_range_error() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -3871,9 +3877,9 @@ async fn real_loki_and_crabka_return_same_oversized_query_range_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_invalid_index_volume_range_step_error() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -3904,9 +3910,9 @@ async fn real_loki_and_crabka_return_same_invalid_index_volume_range_step_error(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_invalid_index_volume_aggregate_by_error() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -3936,9 +3942,9 @@ async fn real_loki_and_crabka_return_same_invalid_index_volume_aggregate_by_erro
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_missing_index_volume_bounds_errors() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -3996,9 +4002,9 @@ async fn real_loki_and_crabka_return_same_missing_index_volume_bounds_errors() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_invalid_index_query_error() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -4030,9 +4036,9 @@ async fn real_loki_and_crabka_return_same_invalid_index_query_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_use_same_index_volume_duplicate_query_precedence() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -4067,9 +4073,9 @@ async fn real_loki_and_crabka_use_same_index_volume_duplicate_query_precedence()
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_oversized_index_stats_range_error() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -4104,9 +4110,9 @@ async fn real_loki_and_crabka_return_same_oversized_index_stats_range_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_use_same_index_stats_post_body_precedence() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -4137,9 +4143,9 @@ async fn real_loki_and_crabka_use_same_index_stats_post_body_precedence() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_missing_query_errors() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -4187,9 +4193,9 @@ async fn real_loki_and_crabka_return_same_missing_query_errors() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_missing_series_matcher_errors() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -4216,9 +4222,9 @@ async fn real_loki_and_crabka_return_same_missing_series_matcher_errors() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_empty_series_post_errors() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -4245,9 +4251,9 @@ async fn real_loki_and_crabka_return_same_empty_series_post_errors() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_invalid_detected_fields_step_error() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -4285,9 +4291,9 @@ async fn real_loki_and_crabka_return_same_invalid_detected_fields_step_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_invalid_detected_fields_query_error() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -4316,9 +4322,9 @@ async fn real_loki_and_crabka_return_same_invalid_detected_fields_query_error() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_oversized_detected_endpoint_range_errors() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -4352,9 +4358,9 @@ async fn real_loki_and_crabka_return_same_oversized_detected_endpoint_range_erro
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_use_same_detected_endpoint_duplicate_start_precedence() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -4388,9 +4394,9 @@ async fn real_loki_and_crabka_use_same_detected_endpoint_duplicate_start_precede
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_use_same_detected_endpoint_post_body_precedence() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -4426,9 +4432,9 @@ async fn real_loki_and_crabka_use_same_detected_endpoint_post_body_precedence() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_invalid_query_range_start_error() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -4455,9 +4461,9 @@ async fn real_loki_and_crabka_return_same_invalid_query_range_start_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_invalid_query_range_since_error() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -4484,9 +4490,9 @@ async fn real_loki_and_crabka_return_same_invalid_query_range_since_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_zero_query_range_interval_result() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -4517,9 +4523,9 @@ async fn real_loki_and_crabka_return_same_zero_query_range_interval_result() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_negative_query_range_interval_result() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -4550,9 +4556,9 @@ async fn real_loki_and_crabka_return_same_negative_query_range_interval_result()
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_invalid_query_limit_error() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -4579,9 +4585,9 @@ async fn real_loki_and_crabka_return_same_invalid_query_limit_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_negative_query_limit_error() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -4608,9 +4614,9 @@ async fn real_loki_and_crabka_return_same_negative_query_limit_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_format_query_result() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -4906,9 +4912,9 @@ async fn real_loki_and_crabka_return_same_format_query_result() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_format_query_errors() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -4972,9 +4978,9 @@ async fn real_loki_and_crabka_return_same_format_query_errors() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_invalid_metadata_query_errors() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -5009,9 +5015,9 @@ async fn real_loki_and_crabka_return_same_invalid_metadata_query_errors() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_oversized_metadata_range_errors() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -5044,9 +5050,9 @@ async fn real_loki_and_crabka_return_same_oversized_metadata_range_errors() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_use_same_metadata_post_body_precedence() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -5084,9 +5090,9 @@ async fn real_loki_and_crabka_use_same_metadata_post_body_precedence() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_invalid_push_label_error() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -5131,9 +5137,9 @@ async fn real_loki_and_crabka_return_same_invalid_push_label_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_stale_push_timestamp_error() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -5178,9 +5184,9 @@ async fn real_loki_and_crabka_return_same_stale_push_timestamp_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_invalid_push_timestamp_error() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -5225,9 +5231,9 @@ async fn real_loki_and_crabka_return_same_invalid_push_timestamp_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_non_string_push_timestamp_error() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -5258,9 +5264,9 @@ async fn real_loki_and_crabka_return_same_non_string_push_timestamp_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_deflated_json_push_response() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -5299,9 +5305,9 @@ async fn real_loki_and_crabka_return_same_deflated_json_push_response() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_malformed_gzip_push_error() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -5327,9 +5333,9 @@ async fn real_loki_and_crabka_return_same_malformed_gzip_push_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_malformed_deflate_push_error() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -5355,9 +5361,9 @@ async fn real_loki_and_crabka_return_same_malformed_deflate_push_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_unsupported_content_encoding_push_error() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -5394,9 +5400,9 @@ async fn real_loki_and_crabka_return_same_unsupported_content_encoding_push_erro
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_invalid_snappy_protobuf_push_error() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -5419,9 +5425,9 @@ async fn real_loki_and_crabka_return_same_invalid_snappy_protobuf_push_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_invalid_protobuf_push_error() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -5444,9 +5450,9 @@ async fn real_loki_and_crabka_return_same_invalid_protobuf_push_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_empty_protobuf_push_response() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -5472,9 +5478,9 @@ async fn real_loki_and_crabka_return_same_empty_protobuf_push_response() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_invalid_protobuf_label_push_error() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -5514,9 +5520,9 @@ async fn real_loki_and_crabka_return_same_invalid_protobuf_label_push_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_duplicate_protobuf_label_push_error() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -5556,9 +5562,9 @@ async fn real_loki_and_crabka_return_same_duplicate_protobuf_label_push_error() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_empty_protobuf_stream_label_push_response() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -5598,9 +5604,9 @@ async fn real_loki_and_crabka_return_same_empty_protobuf_stream_label_push_respo
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_empty_string_protobuf_stream_label_push_response() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -5640,9 +5646,9 @@ async fn real_loki_and_crabka_return_same_empty_string_protobuf_stream_label_pus
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_missing_protobuf_timestamp_push_response() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -5679,9 +5685,9 @@ async fn real_loki_and_crabka_return_same_missing_protobuf_timestamp_push_respon
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_negative_protobuf_timestamp_push_response() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -5747,9 +5753,9 @@ async fn real_loki_and_crabka_return_same_negative_protobuf_timestamp_push_respo
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_duplicate_protobuf_structured_metadata_push_error() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -5799,9 +5805,9 @@ async fn real_loki_and_crabka_return_same_duplicate_protobuf_structured_metadata
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_invalid_protobuf_structured_metadata_name_push_response()
 {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -5844,9 +5850,9 @@ async fn real_loki_and_crabka_return_same_invalid_protobuf_structured_metadata_n
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_empty_protobuf_structured_metadata_name_push_response() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -5889,9 +5895,9 @@ async fn real_loki_and_crabka_return_same_empty_protobuf_structured_metadata_nam
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_protobuf_parsed_label_query_result() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -5989,9 +5995,9 @@ async fn real_loki_and_crabka_return_same_protobuf_parsed_label_query_result() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_object_push_timestamp_error() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -6022,9 +6028,9 @@ async fn real_loki_and_crabka_return_same_object_push_timestamp_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_array_push_timestamp_error() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -6055,9 +6061,9 @@ async fn real_loki_and_crabka_return_same_array_push_timestamp_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_invalid_push_line_error() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -6102,9 +6108,9 @@ async fn real_loki_and_crabka_return_same_invalid_push_line_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_incomplete_push_value_error() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -6136,9 +6142,9 @@ async fn real_loki_and_crabka_return_same_incomplete_push_value_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_empty_push_value_error() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -6183,9 +6189,9 @@ async fn real_loki_and_crabka_return_same_empty_push_value_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_non_object_metadata_push_error() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -6217,9 +6223,9 @@ async fn real_loki_and_crabka_return_same_non_object_metadata_push_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_extra_push_value_field_error() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -6251,9 +6257,9 @@ async fn real_loki_and_crabka_return_same_extra_push_value_field_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_non_array_push_value_error() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -6288,9 +6294,9 @@ async fn real_loki_and_crabka_return_same_non_array_push_value_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_non_object_push_stream_error() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -6316,9 +6322,9 @@ async fn real_loki_and_crabka_return_same_non_object_push_stream_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_non_array_push_streams_error() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -6342,9 +6348,9 @@ async fn real_loki_and_crabka_return_same_non_array_push_streams_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_array_push_payload_error() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -6366,9 +6372,9 @@ async fn real_loki_and_crabka_return_same_array_push_payload_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_null_push_payload_error() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -6390,9 +6396,9 @@ async fn real_loki_and_crabka_return_same_null_push_payload_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_missing_push_streams_error() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -6414,9 +6420,9 @@ async fn real_loki_and_crabka_return_same_missing_push_streams_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_empty_push_streams_error() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -6440,9 +6446,9 @@ async fn real_loki_and_crabka_return_same_empty_push_streams_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_missing_push_values_error() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -6472,9 +6478,9 @@ async fn real_loki_and_crabka_return_same_missing_push_values_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_non_array_push_values_error() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -6505,9 +6511,9 @@ async fn real_loki_and_crabka_return_same_non_array_push_values_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_non_object_push_labels_error() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -6537,9 +6543,9 @@ async fn real_loki_and_crabka_return_same_non_object_push_labels_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_missing_push_labels_error() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -6568,9 +6574,9 @@ async fn real_loki_and_crabka_return_same_missing_push_labels_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_null_push_labels_error() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -6600,9 +6606,9 @@ async fn real_loki_and_crabka_return_same_null_push_labels_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_null_push_values_error() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -6633,9 +6639,9 @@ async fn real_loki_and_crabka_return_same_null_push_values_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_future_push_timestamp_error() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -6681,9 +6687,9 @@ async fn real_loki_and_crabka_return_same_future_push_timestamp_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_future_otlp_timestamp_error() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -6743,9 +6749,9 @@ async fn real_loki_and_crabka_return_same_future_otlp_timestamp_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_empty_push_label_error() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -6790,9 +6796,9 @@ async fn real_loki_and_crabka_return_same_empty_push_label_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_non_string_structured_metadata_push_error() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -6837,9 +6843,9 @@ async fn real_loki_and_crabka_return_same_non_string_structured_metadata_push_er
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_invalid_structured_metadata_name_push_error() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -6885,9 +6891,9 @@ async fn real_loki_and_crabka_return_same_invalid_structured_metadata_name_push_
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_duplicate_json_structured_metadata_push_response() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -6943,9 +6949,9 @@ async fn real_loki_and_crabka_return_same_duplicate_json_structured_metadata_pus
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_duplicate_push_label_error() {
-    let image = GenericImage::new("mirror.gcr.io/grafana/loki", "3.4.2")
+    let image = GenericImage::new(LOKI_IMAGE, LOKI_TAG)
         .with_exposed_port(LOKI_PORT.tcp())
-        .with_wait_for(WaitFor::seconds(2));
+        .with_wait_for(WaitFor::seconds(LOKI_STARTUP_WAIT_SECS));
     let loki = image.start().await.expect("start Loki container");
     let loki_base = format!(
         "http://127.0.0.1:{}",
@@ -7017,7 +7023,7 @@ async fn wait_for_loki_ready(http: &reqwest::Client, base: &str) {
 async fn push_loki_payload(http: &reqwest::Client, base: &str, payload: &Value) {
     let response = http
         .post(format!("{base}/loki/api/v1/push"))
-        .header("X-Scope-OrgID", "tenant-a")
+        .header("X-Scope-OrgID", TENANT)
         .json(payload)
         .send()
         .await
@@ -7035,7 +7041,7 @@ async fn push_crabka_payload(app: axum::Router, payload: &Value) {
             Request::builder()
                 .method("POST")
                 .uri("/loki/api/v1/push")
-                .header("X-Scope-OrgID", "tenant-a")
+                .header("X-Scope-OrgID", TENANT)
                 .header("content-type", "application/json")
                 .body(Body::from(payload.to_string()))
                 .unwrap(),
@@ -7067,7 +7073,7 @@ async fn loki_push_body_result(
 ) -> Value {
     let mut request = http
         .post(format!("{base}/loki/api/v1/push"))
-        .header("X-Scope-OrgID", "tenant-a");
+        .header("X-Scope-OrgID", TENANT);
     for (name, value) in headers {
         request = request.header(*name, *value);
     }
@@ -7101,7 +7107,7 @@ async fn crabka_push_body_result(
     let mut request = Request::builder()
         .method("POST")
         .uri("/loki/api/v1/push")
-        .header("X-Scope-OrgID", "tenant-a");
+        .header("X-Scope-OrgID", TENANT);
     for (name, value) in headers {
         request = request.header(*name, *value);
     }
@@ -7110,14 +7116,16 @@ async fn crabka_push_body_result(
         .await
         .unwrap();
     let status = response.status().as_u16();
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+        .await
+        .unwrap();
     stable_loki_error(status, std::str::from_utf8(&body).unwrap())
 }
 
 async fn loki_otlp_error(http: &reqwest::Client, base: &str, payload: &Value) -> Value {
     let response = http
         .post(format!("{base}/otlp/v1/logs"))
-        .header("X-Scope-OrgID", "tenant-a")
+        .header("X-Scope-OrgID", TENANT)
         .header("content-type", "application/json")
         .body(payload.to_string())
         .send()
@@ -7134,7 +7142,7 @@ async fn crabka_otlp_error(app: axum::Router, payload: &Value) -> Value {
             Request::builder()
                 .method("POST")
                 .uri("/otlp/v1/logs")
-                .header("X-Scope-OrgID", "tenant-a")
+                .header("X-Scope-OrgID", TENANT)
                 .header("content-type", "application/json")
                 .body(Body::from(payload.to_string()))
                 .unwrap(),
@@ -7142,7 +7150,9 @@ async fn crabka_otlp_error(app: axum::Router, payload: &Value) -> Value {
         .await
         .unwrap();
     let status = response.status().as_u16();
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+        .await
+        .unwrap();
     stable_loki_error(status, std::str::from_utf8(&body).unwrap())
 }
 
@@ -7399,14 +7409,16 @@ async fn crabka_query_result(app: axum::Router, query: &str, time_ns: i64) -> Va
         .oneshot(
             Request::builder()
                 .uri(uri)
-                .header("X-Scope-OrgID", "tenant-a")
+                .header("X-Scope-OrgID", TENANT)
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
     assert!(response.status() == StatusCode::OK);
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+        .await
+        .unwrap();
     stable_loki_result(&serde_json::from_slice(&body).unwrap())
 }
 
@@ -7428,14 +7440,16 @@ async fn crabka_raw_query_result(app: axum::Router, raw_query: &str) -> Value {
         .oneshot(
             Request::builder()
                 .uri(uri)
-                .header("X-Scope-OrgID", "tenant-a")
+                .header("X-Scope-OrgID", TENANT)
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
     assert!(response.status() == StatusCode::OK);
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+        .await
+        .unwrap();
     stable_scalar_or_vector_result(&serde_json::from_slice(&body).unwrap())
 }
 
@@ -7448,14 +7462,16 @@ async fn crabka_api_prom_query_result(app: axum::Router, query: &str, time_ns: i
         .oneshot(
             Request::builder()
                 .uri(uri)
-                .header("X-Scope-OrgID", "tenant-a")
+                .header("X-Scope-OrgID", TENANT)
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
     let status = response.status().as_u16();
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+        .await
+        .unwrap();
     if status != 200 {
         return json!({
             "httpStatus": status,
@@ -7479,14 +7495,16 @@ async fn crabka_query_range_result(
         .oneshot(
             Request::builder()
                 .uri(uri)
-                .header("X-Scope-OrgID", "tenant-a")
+                .header("X-Scope-OrgID", TENANT)
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
     assert!(response.status() == StatusCode::OK);
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+        .await
+        .unwrap();
     stable_loki_result(&serde_json::from_slice(&body).unwrap())
 }
 
@@ -7504,14 +7522,16 @@ async fn crabka_api_prom_query_range_result(
         .oneshot(
             Request::builder()
                 .uri(uri)
-                .header("X-Scope-OrgID", "tenant-a")
+                .header("X-Scope-OrgID", TENANT)
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
     let status = response.status().as_u16();
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+        .await
+        .unwrap();
     if status != StatusCode::OK.as_u16() {
         return stable_loki_error(status, std::str::from_utf8(&body).unwrap());
     }
@@ -7533,14 +7553,16 @@ async fn crabka_query_range_result_with_default_direction_and_limit(
         .oneshot(
             Request::builder()
                 .uri(uri)
-                .header("X-Scope-OrgID", "tenant-a")
+                .header("X-Scope-OrgID", TENANT)
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
     assert!(response.status() == StatusCode::OK);
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+        .await
+        .unwrap();
     stable_loki_result(&serde_json::from_slice(&body).unwrap())
 }
 
@@ -7560,14 +7582,16 @@ async fn crabka_query_range_result_with_step(
         .oneshot(
             Request::builder()
                 .uri(uri)
-                .header("X-Scope-OrgID", "tenant-a")
+                .header("X-Scope-OrgID", TENANT)
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
     assert!(response.status() == StatusCode::OK);
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+        .await
+        .unwrap();
     stable_loki_result(&serde_json::from_slice(&body).unwrap())
 }
 
@@ -7592,14 +7616,16 @@ async fn crabka_query_error(app: axum::Router, query: &str) -> Value {
         .oneshot(
             Request::builder()
                 .uri(uri)
-                .header("X-Scope-OrgID", "tenant-a")
+                .header("X-Scope-OrgID", TENANT)
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
     let status = response.status().as_u16();
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+        .await
+        .unwrap();
     stable_loki_error(status, std::str::from_utf8(&body).unwrap())
 }
 
@@ -7612,7 +7638,7 @@ async fn loki_post_query_precedence_response(
 ) -> Value {
     let response = http
         .post(format!("{base}{path}?{raw_query}"))
-        .header("X-Scope-OrgID", "tenant-a")
+        .header("X-Scope-OrgID", TENANT)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(body.to_string())
         .send()
@@ -7637,7 +7663,7 @@ async fn crabka_post_query_precedence_response(
             Request::builder()
                 .method("POST")
                 .uri(format!("{path}?{raw_query}"))
-                .header("X-Scope-OrgID", "tenant-a")
+                .header("X-Scope-OrgID", TENANT)
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from(body.to_string()))
                 .unwrap(),
@@ -7645,7 +7671,9 @@ async fn crabka_post_query_precedence_response(
         .await
         .unwrap();
     let status = response.status().as_u16();
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+        .await
+        .unwrap();
     stable_query_or_error_response(status, std::str::from_utf8(&body).unwrap())
 }
 
@@ -7676,7 +7704,7 @@ async fn loki_tail_ws_raw_error(base: &str, raw_query: &str) -> Value {
     let mut request = uri.into_client_request().unwrap();
     request
         .headers_mut()
-        .insert("X-Scope-OrgID", "tenant-a".parse().unwrap());
+        .insert("X-Scope-OrgID", TENANT.parse().unwrap());
     websocket_error_response(connect_async(request).await)
 }
 
@@ -7699,7 +7727,7 @@ async fn crabka_tail_ws_raw_error(app: axum::Router, raw_query: &str) -> Value {
     let mut request = uri.into_client_request().unwrap();
     request
         .headers_mut()
-        .insert("X-Scope-OrgID", "tenant-a".parse().unwrap());
+        .insert("X-Scope-OrgID", TENANT.parse().unwrap());
     let response = websocket_error_response(connect_async(request).await);
     server.abort();
     response
@@ -7782,14 +7810,16 @@ async fn crabka_query_limit_error(app: axum::Router, query: &str, limit: &str) -
         .oneshot(
             Request::builder()
                 .uri(uri)
-                .header("X-Scope-OrgID", "tenant-a")
+                .header("X-Scope-OrgID", TENANT)
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
     let status = response.status().as_u16();
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+        .await
+        .unwrap();
     stable_loki_error(status, std::str::from_utf8(&body).unwrap())
 }
 
@@ -7838,14 +7868,16 @@ async fn crabka_query_range_direction_error(
         .oneshot(
             Request::builder()
                 .uri(uri)
-                .header("X-Scope-OrgID", "tenant-a")
+                .header("X-Scope-OrgID", TENANT)
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
     let status = response.status().as_u16();
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+        .await
+        .unwrap();
     if status == 200 {
         return json!({
             "httpStatus": status,
@@ -7890,14 +7922,16 @@ async fn crabka_query_range_step_error(app: axum::Router, query: &str, step: &st
         .oneshot(
             Request::builder()
                 .uri(uri)
-                .header("X-Scope-OrgID", "tenant-a")
+                .header("X-Scope-OrgID", TENANT)
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
     let status = response.status().as_u16();
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+        .await
+        .unwrap();
     stable_loki_error(status, std::str::from_utf8(&body).unwrap())
 }
 
@@ -7934,7 +7968,7 @@ async fn crabka_query_range_resolution_error(app: axum::Router, query: &str) -> 
         .oneshot(
             Request::builder()
                 .uri(uri)
-                .header("X-Scope-OrgID", "tenant-a")
+                .header("X-Scope-OrgID", TENANT)
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -7944,7 +7978,9 @@ async fn crabka_query_range_resolution_error(app: axum::Router, query: &str) -> 
     if response.status().is_success() {
         return stable_loki_error(status, "<success>");
     }
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+        .await
+        .unwrap();
     stable_loki_error(status, std::str::from_utf8(&body).unwrap())
 }
 
@@ -7977,7 +8013,7 @@ async fn crabka_query_range_range_error(app: axum::Router, query: &str) -> Value
         .oneshot(
             Request::builder()
                 .uri(uri)
-                .header("X-Scope-OrgID", "tenant-a")
+                .header("X-Scope-OrgID", TENANT)
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -7987,7 +8023,9 @@ async fn crabka_query_range_range_error(app: axum::Router, query: &str) -> Value
     if response.status().is_success() {
         return stable_loki_error(status, "<success>");
     }
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+        .await
+        .unwrap();
     stable_loki_error(status, std::str::from_utf8(&body).unwrap())
 }
 
@@ -8005,7 +8043,7 @@ async fn loki_index_volume_range_step_error(
             ("end", "1000000000".to_string()),
             ("step", step.to_string()),
         ])
-        .header("X-Scope-OrgID", "tenant-a")
+        .header("X-Scope-OrgID", TENANT)
         .send()
         .await
         .expect("query Loki index volume range");
@@ -8027,14 +8065,16 @@ async fn crabka_index_volume_range_step_error(app: axum::Router, query: &str, st
         .oneshot(
             Request::builder()
                 .uri(uri)
-                .header("X-Scope-OrgID", "tenant-a")
+                .header("X-Scope-OrgID", TENANT)
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
     let status = response.status().as_u16();
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+        .await
+        .unwrap();
     stable_loki_error(status, std::str::from_utf8(&body).unwrap())
 }
 
@@ -8053,7 +8093,7 @@ async fn loki_index_volume_aggregate_by_error(
             ("end", "1000000000".to_string()),
             ("aggregateBy", aggregate_by.to_string()),
         ])
-        .header("X-Scope-OrgID", "tenant-a")
+        .header("X-Scope-OrgID", TENANT)
         .send()
         .await
         .expect("query Loki index volume");
@@ -8080,14 +8120,16 @@ async fn crabka_index_volume_aggregate_by_error(
         .oneshot(
             Request::builder()
                 .uri(uri)
-                .header("X-Scope-OrgID", "tenant-a")
+                .header("X-Scope-OrgID", TENANT)
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
     let status = response.status().as_u16();
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+        .await
+        .unwrap();
     stable_loki_error(status, std::str::from_utf8(&body).unwrap())
 }
 
@@ -8106,7 +8148,7 @@ async fn loki_index_query_error(
             ("start", start_ns.to_string()),
             ("end", end_ns.to_string()),
         ])
-        .header("X-Scope-OrgID", "tenant-a")
+        .header("X-Scope-OrgID", TENANT)
         .send()
         .await
         .expect("query Loki index endpoint");
@@ -8133,14 +8175,16 @@ async fn crabka_index_query_error(
         .oneshot(
             Request::builder()
                 .uri(uri)
-                .header("X-Scope-OrgID", "tenant-a")
+                .header("X-Scope-OrgID", TENANT)
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
     let status = response.status().as_u16();
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+        .await
+        .unwrap();
     stable_loki_error(status, std::str::from_utf8(&body).unwrap())
 }
 
@@ -8152,7 +8196,7 @@ async fn loki_index_stats_post_body_precedence_error(
     let response = http
         .post(format!("{base}/loki/api/v1/index/stats"))
         .query(&[("start", "not-a-number")])
-        .header("X-Scope-OrgID", "tenant-a")
+        .header("X-Scope-OrgID", TENANT)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(body.to_owned())
         .send()
@@ -8172,7 +8216,7 @@ async fn crabka_index_stats_post_body_precedence_error(app: axum::Router, body: 
             Request::builder()
                 .method("POST")
                 .uri("/loki/api/v1/index/stats?start=not-a-number")
-                .header("X-Scope-OrgID", "tenant-a")
+                .header("X-Scope-OrgID", TENANT)
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from(body.to_owned()))
                 .unwrap(),
@@ -8180,7 +8224,9 @@ async fn crabka_index_stats_post_body_precedence_error(app: axum::Router, body: 
         .await
         .unwrap();
     let status = response.status().as_u16();
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+        .await
+        .unwrap();
     stable_loki_error(status, std::str::from_utf8(&body).unwrap())
 }
 
@@ -8193,7 +8239,7 @@ async fn loki_index_volume_params_response(
     let response = http
         .get(format!("{base}/loki/api/v1/{path}"))
         .query(params)
-        .header("X-Scope-OrgID", "tenant-a")
+        .header("X-Scope-OrgID", TENANT)
         .send()
         .await
         .expect("query Loki index volume");
@@ -8224,14 +8270,16 @@ async fn crabka_index_volume_params_response(
         .oneshot(
             Request::builder()
                 .uri(uri)
-                .header("X-Scope-OrgID", "tenant-a")
+                .header("X-Scope-OrgID", TENANT)
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
     let status = response.status().as_u16();
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+        .await
+        .unwrap();
     stable_index_volume_response(status, std::str::from_utf8(&body).unwrap())
 }
 
@@ -8244,7 +8292,7 @@ async fn loki_missing_query_error(
     let response = http
         .get(format!("{base}/loki/api/v1/{path}"))
         .query(params)
-        .header("X-Scope-OrgID", "tenant-a")
+        .header("X-Scope-OrgID", TENANT)
         .send()
         .await
         .expect("query Loki missing query endpoint");
@@ -8275,14 +8323,16 @@ async fn crabka_missing_query_error(
         .oneshot(
             Request::builder()
                 .uri(uri)
-                .header("X-Scope-OrgID", "tenant-a")
+                .header("X-Scope-OrgID", TENANT)
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
     let status = response.status().as_u16();
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+        .await
+        .unwrap();
     stable_loki_error(status, std::str::from_utf8(&body).unwrap())
 }
 
@@ -8301,7 +8351,7 @@ async fn loki_detected_fields_step_error(
             ("end", "1000000000".to_string()),
             ("step", step.to_string()),
         ])
-        .header("X-Scope-OrgID", "tenant-a")
+        .header("X-Scope-OrgID", TENANT)
         .send()
         .await
         .expect("query Loki detected fields");
@@ -8328,14 +8378,16 @@ async fn crabka_detected_fields_step_error(
         .oneshot(
             Request::builder()
                 .uri(uri)
-                .header("X-Scope-OrgID", "tenant-a")
+                .header("X-Scope-OrgID", TENANT)
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
     let status = response.status().as_u16();
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+        .await
+        .unwrap();
     stable_loki_error(status, std::str::from_utf8(&body).unwrap())
 }
 
@@ -8352,7 +8404,7 @@ async fn loki_detected_fields_query_error(
             ("start", "0".to_string()),
             ("end", "1000000000".to_string()),
         ])
-        .header("X-Scope-OrgID", "tenant-a")
+        .header("X-Scope-OrgID", TENANT)
         .send()
         .await
         .expect("query Loki detected fields");
@@ -8377,14 +8429,16 @@ async fn crabka_detected_fields_query_error(
         .oneshot(
             Request::builder()
                 .uri(uri)
-                .header("X-Scope-OrgID", "tenant-a")
+                .header("X-Scope-OrgID", TENANT)
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
     let status = response.status().as_u16();
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+        .await
+        .unwrap();
     stable_loki_error(status, std::str::from_utf8(&body).unwrap())
 }
 
@@ -8404,7 +8458,7 @@ async fn loki_detected_endpoint_range_error(
     let response = http
         .get(format!("{base}/loki/api/v1/{endpoint}"))
         .query(&params)
-        .header("X-Scope-OrgID", "tenant-a")
+        .header("X-Scope-OrgID", TENANT)
         .send()
         .await
         .expect("query Loki detected endpoint");
@@ -8429,14 +8483,16 @@ async fn crabka_detected_endpoint_range_error(
         .oneshot(
             Request::builder()
                 .uri(uri)
-                .header("X-Scope-OrgID", "tenant-a")
+                .header("X-Scope-OrgID", TENANT)
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
     let status = response.status().as_u16();
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+        .await
+        .unwrap();
     stable_loki_error(status, std::str::from_utf8(&body).unwrap())
 }
 
@@ -8457,7 +8513,7 @@ async fn loki_detected_endpoint_duplicate_start_error(
     let response = http
         .get(format!("{base}/loki/api/v1/{endpoint}"))
         .query(&params)
-        .header("X-Scope-OrgID", "tenant-a")
+        .header("X-Scope-OrgID", TENANT)
         .send()
         .await
         .expect("query Loki detected endpoint with duplicate start");
@@ -8484,14 +8540,16 @@ async fn crabka_detected_endpoint_duplicate_start_error(
         .oneshot(
             Request::builder()
                 .uri(uri)
-                .header("X-Scope-OrgID", "tenant-a")
+                .header("X-Scope-OrgID", TENANT)
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
     let status = response.status().as_u16();
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+        .await
+        .unwrap();
     stable_loki_error(status, std::str::from_utf8(&body).unwrap())
 }
 
@@ -8508,7 +8566,7 @@ async fn loki_detected_endpoint_post_body_precedence_error(
     let response = http
         .post(format!("{base}/loki/api/v1/{endpoint}"))
         .query(&[("start", "not-a-number")])
-        .header("X-Scope-OrgID", "tenant-a")
+        .header("X-Scope-OrgID", TENANT)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(body)
         .send()
@@ -8536,7 +8594,7 @@ async fn crabka_detected_endpoint_post_body_precedence_error(
             Request::builder()
                 .method("POST")
                 .uri(format!("/loki/api/v1/{endpoint}?start=not-a-number"))
-                .header("X-Scope-OrgID", "tenant-a")
+                .header("X-Scope-OrgID", TENANT)
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from(body))
                 .unwrap(),
@@ -8544,7 +8602,9 @@ async fn crabka_detected_endpoint_post_body_precedence_error(
         .await
         .unwrap();
     let status = response.status().as_u16();
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+        .await
+        .unwrap();
     stable_loki_error(status, std::str::from_utf8(&body).unwrap())
 }
 
@@ -8582,14 +8642,16 @@ async fn crabka_query_range_start_error(app: axum::Router, query: &str, start: &
         .oneshot(
             Request::builder()
                 .uri(uri)
-                .header("X-Scope-OrgID", "tenant-a")
+                .header("X-Scope-OrgID", TENANT)
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
     let status = response.status().as_u16();
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+        .await
+        .unwrap();
     stable_loki_error(status, std::str::from_utf8(&body).unwrap())
 }
 
@@ -8627,14 +8689,16 @@ async fn crabka_query_range_since_error(app: axum::Router, query: &str, since: &
         .oneshot(
             Request::builder()
                 .uri(uri)
-                .header("X-Scope-OrgID", "tenant-a")
+                .header("X-Scope-OrgID", TENANT)
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
     let status = response.status().as_u16();
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+        .await
+        .unwrap();
     stable_loki_error(status, std::str::from_utf8(&body).unwrap())
 }
 
@@ -8687,14 +8751,16 @@ async fn crabka_query_range_interval_result(
         .oneshot(
             Request::builder()
                 .uri(uri)
-                .header("X-Scope-OrgID", "tenant-a")
+                .header("X-Scope-OrgID", TENANT)
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
     let status = response.status().as_u16();
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+        .await
+        .unwrap();
     if status == 200 {
         return json!({
             "httpStatus": status,
@@ -8727,7 +8793,9 @@ async fn crabka_buildinfo_result(app: axum::Router) -> Value {
         .await
         .unwrap();
     assert!(response.status() == StatusCode::OK);
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+        .await
+        .unwrap();
     stable_buildinfo_result(&serde_json::from_slice(&body).unwrap())
 }
 
@@ -8748,7 +8816,9 @@ async fn crabka_status_probe_result(app: axum::Router, path: &str) -> Value {
         .await
         .unwrap();
     let status = response.status().as_u16();
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+        .await
+        .unwrap();
     stable_status_probe_response(status, std::str::from_utf8(&body).unwrap())
 }
 
@@ -8791,7 +8861,9 @@ async fn crabka_config_result_with_query(app: axum::Router, raw_query: &str) -> 
         .await
         .unwrap();
     let status = response.status().as_u16();
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+        .await
+        .unwrap();
     stable_config_response(status, std::str::from_utf8(&body).unwrap())
 }
 
@@ -8817,7 +8889,9 @@ async fn crabka_metrics_result(app: axum::Router) -> Value {
         .await
         .unwrap();
     let status = response.status().as_u16();
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+        .await
+        .unwrap();
     stable_metrics_response(status, std::str::from_utf8(&body).unwrap())
 }
 
@@ -8867,7 +8941,9 @@ async fn crabka_log_level_post_result(
         .await
         .unwrap();
     let status = response.status().as_u16();
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+        .await
+        .unwrap();
     stable_status_probe_response(status, std::str::from_utf8(&body).unwrap())
 }
 
@@ -8914,7 +8990,9 @@ async fn crabka_ingester_control_result(app: axum::Router, method: &str, path: &
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned)
         .unwrap_or_default();
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+        .await
+        .unwrap();
     stable_lifecycle_control_response(status, &content_type, std::str::from_utf8(&body).unwrap())
 }
 
@@ -8950,7 +9028,9 @@ async fn crabka_ruler_inventory_result(app: axum::Router, path: &str) -> Value {
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default()
         .to_string();
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+        .await
+        .unwrap();
     stable_ruler_inventory_response(status, &content_type, std::str::from_utf8(&body).unwrap())
 }
 
@@ -8983,7 +9063,9 @@ async fn crabka_ring_status_result(app: axum::Router, path: &str) -> Value {
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default()
         .to_string();
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+        .await
+        .unwrap();
     stable_ring_status_response(status, &content_type, std::str::from_utf8(&body).unwrap())
 }
 
@@ -9028,7 +9110,7 @@ async fn loki_delete_request(
 ) -> Value {
     let response = http
         .request(method, format!("{base}{path}"))
-        .header("X-Scope-OrgID", "tenant-a")
+        .header("X-Scope-OrgID", TENANT)
         .send()
         .await
         .expect("query Loki delete API");
@@ -9050,7 +9132,7 @@ async fn loki_delete_list_request(
 ) -> (Value, Option<String>) {
     let response = http
         .request(reqwest::Method::GET, format!("{base}{path}"))
-        .header("X-Scope-OrgID", "tenant-a")
+        .header("X-Scope-OrgID", TENANT)
         .send()
         .await
         .expect("query Loki delete API");
@@ -9107,7 +9189,7 @@ async fn crabka_delete_request(app: axum::Router, method: &str, path: &str) -> V
             Request::builder()
                 .method(method)
                 .uri(path)
-                .header("X-Scope-OrgID", "tenant-a")
+                .header("X-Scope-OrgID", TENANT)
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -9120,7 +9202,9 @@ async fn crabka_delete_request(app: axum::Router, method: &str, path: &str) -> V
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default()
         .to_string();
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+        .await
+        .unwrap();
     stable_delete_response(status, &content_type, std::str::from_utf8(&body).unwrap())
 }
 
@@ -9130,7 +9214,7 @@ async fn crabka_delete_list_request(app: axum::Router, path: &str) -> (Value, Op
             Request::builder()
                 .method("GET")
                 .uri(path)
-                .header("X-Scope-OrgID", "tenant-a")
+                .header("X-Scope-OrgID", TENANT)
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -9143,7 +9227,9 @@ async fn crabka_delete_list_request(app: axum::Router, path: &str) -> (Value, Op
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default()
         .to_string();
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+        .await
+        .unwrap();
     let body = std::str::from_utf8(&body).unwrap();
     let request_id = raw_delete_request_id(body);
     (
@@ -9173,7 +9259,9 @@ async fn crabka_format_query_result(app: axum::Router, query: &str) -> Value {
         .await
         .unwrap();
     assert!(response.status() == StatusCode::OK);
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+        .await
+        .unwrap();
     serde_json::from_slice(&body).unwrap()
 }
 
@@ -9212,7 +9300,9 @@ async fn crabka_format_query_post_result(app: axum::Router, query: &str, form_bo
         .await
         .unwrap();
     assert!(response.status() == StatusCode::OK);
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+        .await
+        .unwrap();
     serde_json::from_slice(&body).unwrap()
 }
 
@@ -9244,14 +9334,16 @@ async fn crabka_format_query_error(app: axum::Router, query: Option<&str>) -> Va
         .await
         .unwrap();
     let status = response.status().as_u16();
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+        .await
+        .unwrap();
     stable_loki_error(status, std::str::from_utf8(&body).unwrap())
 }
 
 async fn loki_metadata_error(http: &reqwest::Client, base: &str, path: &str) -> Value {
     let response = http
         .get(format!("{base}/loki/api/v1/{path}"))
-        .header("X-Scope-OrgID", "tenant-a")
+        .header("X-Scope-OrgID", TENANT)
         .send()
         .await
         .expect("query Loki metadata");
@@ -9268,14 +9360,16 @@ async fn crabka_metadata_error(app: axum::Router, path: &str) -> Value {
         .oneshot(
             Request::builder()
                 .uri(format!("/loki/api/v1/{path}"))
-                .header("X-Scope-OrgID", "tenant-a")
+                .header("X-Scope-OrgID", TENANT)
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
     let status = response.status().as_u16();
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+        .await
+        .unwrap();
     stable_loki_error(status, std::str::from_utf8(&body).unwrap())
 }
 
@@ -9288,7 +9382,7 @@ async fn loki_metadata_post_body_precedence_error(
     let response = http
         .post(format!("{base}{path}"))
         .query(&[("start", "not-a-number")])
-        .header("X-Scope-OrgID", "tenant-a")
+        .header("X-Scope-OrgID", TENANT)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(body.to_owned())
         .send()
@@ -9312,7 +9406,7 @@ async fn crabka_metadata_post_body_precedence_error(
             Request::builder()
                 .method("POST")
                 .uri(format!("{path}?start=not-a-number"))
-                .header("X-Scope-OrgID", "tenant-a")
+                .header("X-Scope-OrgID", TENANT)
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from(body.to_owned()))
                 .unwrap(),
@@ -9320,14 +9414,16 @@ async fn crabka_metadata_post_body_precedence_error(
         .await
         .unwrap();
     let status = response.status().as_u16();
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+        .await
+        .unwrap();
     stable_loki_error(status, std::str::from_utf8(&body).unwrap())
 }
 
 async fn loki_raw_path_error(http: &reqwest::Client, base: &str, path: &str) -> Value {
     let response = http
         .get(format!("{base}{path}"))
-        .header("X-Scope-OrgID", "tenant-a")
+        .header("X-Scope-OrgID", TENANT)
         .send()
         .await
         .expect("query Loki raw path");
@@ -9341,21 +9437,23 @@ async fn crabka_raw_path_error(app: axum::Router, path: &str) -> Value {
         .oneshot(
             Request::builder()
                 .uri(path)
-                .header("X-Scope-OrgID", "tenant-a")
+                .header("X-Scope-OrgID", TENANT)
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
     let status = response.status().as_u16();
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+        .await
+        .unwrap();
     stable_loki_error(status, std::str::from_utf8(&body).unwrap())
 }
 
 async fn loki_raw_post_path_error(http: &reqwest::Client, base: &str, path: &str) -> Value {
     let response = http
         .post(format!("{base}{path}"))
-        .header("X-Scope-OrgID", "tenant-a")
+        .header("X-Scope-OrgID", TENANT)
         .send()
         .await
         .expect("post Loki raw path");
@@ -9370,14 +9468,16 @@ async fn crabka_raw_post_path_error(app: axum::Router, path: &str) -> Value {
             Request::builder()
                 .method("POST")
                 .uri(path)
-                .header("X-Scope-OrgID", "tenant-a")
+                .header("X-Scope-OrgID", TENANT)
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
     let status = response.status().as_u16();
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+        .await
+        .unwrap();
     stable_loki_error(status, std::str::from_utf8(&body).unwrap())
 }
 
@@ -9395,7 +9495,7 @@ async fn loki_metadata_result(
             .get(format!(
                 "{base}/loki/api/v1/{path}{separator}start={start_ns}&end={end_ns}"
             ))
-            .header("X-Scope-OrgID", "tenant-a")
+            .header("X-Scope-OrgID", TENANT)
             .send()
             .await
             .expect("query Loki metadata")
@@ -9425,14 +9525,16 @@ async fn crabka_metadata_result(
         .oneshot(
             Request::builder()
                 .uri(uri)
-                .header("X-Scope-OrgID", "tenant-a")
+                .header("X-Scope-OrgID", TENANT)
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
     assert!(response.status() == StatusCode::OK);
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+        .await
+        .unwrap();
     stable_metadata_result(&serde_json::from_slice(&body).unwrap())
 }
 
@@ -9451,7 +9553,7 @@ async fn loki_metadata_post_result(
             .post(format!(
                 "{base}/loki/api/v1/{path}{separator}start={start_ns}&end={end_ns}"
             ))
-            .header("X-Scope-OrgID", "tenant-a");
+            .header("X-Scope-OrgID", TENANT);
         if let Some(form_body) = form_body {
             request = request
                 .header("content-type", "application/x-www-form-urlencoded")
@@ -9487,7 +9589,7 @@ async fn crabka_metadata_post_result(
     let mut builder = Request::builder()
         .method("POST")
         .uri(uri)
-        .header("X-Scope-OrgID", "tenant-a");
+        .header("X-Scope-OrgID", TENANT);
     if form_body.is_some() {
         builder = builder.header("content-type", "application/x-www-form-urlencoded");
     }
@@ -9500,13 +9602,15 @@ async fn crabka_metadata_post_result(
         .await
         .unwrap();
     assert!(response.status() == StatusCode::OK);
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+        .await
+        .unwrap();
     stable_metadata_result(&serde_json::from_slice(&body).unwrap())
 }
 
 async fn loki_json_path_result(http: &reqwest::Client, base: &str, path: &str) -> Value {
     http.get(format!("{base}{path}"))
-        .header("X-Scope-OrgID", "tenant-a")
+        .header("X-Scope-OrgID", TENANT)
         .send()
         .await
         .expect("query Loki JSON path")
@@ -9520,14 +9624,16 @@ async fn crabka_json_path_result(app: axum::Router, path: &str) -> Value {
         .oneshot(
             Request::builder()
                 .uri(path)
-                .header("X-Scope-OrgID", "tenant-a")
+                .header("X-Scope-OrgID", TENANT)
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
     assert!(response.status() == StatusCode::OK, "{path}");
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+        .await
+        .unwrap();
     serde_json::from_slice(&body).unwrap()
 }
 
@@ -9545,7 +9651,7 @@ async fn loki_api_prom_metadata_result(
             .get(format!(
                 "{base}/api/prom/{path}{separator}start={start_ns}&end={end_ns}"
             ))
-            .header("X-Scope-OrgID", "tenant-a")
+            .header("X-Scope-OrgID", TENANT)
             .send()
             .await
             .expect("query Loki deprecated metadata alias");
@@ -9583,14 +9689,16 @@ async fn crabka_api_prom_metadata_result(
         .oneshot(
             Request::builder()
                 .uri(uri)
-                .header("X-Scope-OrgID", "tenant-a")
+                .header("X-Scope-OrgID", TENANT)
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
     assert!(response.status() == StatusCode::OK);
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+        .await
+        .unwrap();
     stable_api_prom_metadata_result(&serde_json::from_slice(&body).unwrap())
 }
 
@@ -9608,7 +9716,7 @@ async fn loki_detected_fields_result(
             .get(format!(
                 "{base}/loki/api/v1/{path}{separator}start={start_ns}&end={end_ns}",
             ))
-            .header("X-Scope-OrgID", "tenant-a")
+            .header("X-Scope-OrgID", TENANT)
             .send()
             .await
             .expect("query Loki detected fields")
@@ -9639,14 +9747,16 @@ async fn crabka_detected_fields_result(
         .oneshot(
             Request::builder()
                 .uri(uri)
-                .header("X-Scope-OrgID", "tenant-a")
+                .header("X-Scope-OrgID", TENANT)
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
     assert!(response.status() == StatusCode::OK);
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+        .await
+        .unwrap();
     stable_detected_fields_result(&serde_json::from_slice(&body).unwrap())
 }
 
@@ -9664,7 +9774,7 @@ async fn loki_detected_labels_result(
             .get(format!(
                 "{base}/loki/api/v1/{path}{separator}start={start_ns}&end={end_ns}",
             ))
-            .header("X-Scope-OrgID", "tenant-a")
+            .header("X-Scope-OrgID", TENANT)
             .send()
             .await
             .expect("query Loki detected labels")
@@ -9695,14 +9805,16 @@ async fn crabka_detected_labels_result(
         .oneshot(
             Request::builder()
                 .uri(uri)
-                .header("X-Scope-OrgID", "tenant-a")
+                .header("X-Scope-OrgID", TENANT)
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
     let status = response.status();
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+        .await
+        .unwrap();
     assert!(
         status == StatusCode::OK,
         "Crabka detected_labels failed: {}",
@@ -9723,7 +9835,7 @@ async fn loki_patterns_default_response(
         .get(format!(
             "{base}/loki/api/v1/{path}{separator}start={start_ns}&end={end_ns}",
         ))
-        .header("X-Scope-OrgID", "tenant-a")
+        .header("X-Scope-OrgID", TENANT)
         .send()
         .await
         .expect("query Loki patterns");
@@ -9744,14 +9856,16 @@ async fn crabka_patterns_result(
         .oneshot(
             Request::builder()
                 .uri(uri)
-                .header("X-Scope-OrgID", "tenant-a")
+                .header("X-Scope-OrgID", TENANT)
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
     let status = response.status().as_u16();
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+        .await
+        .unwrap();
     stable_patterns_response(status, std::str::from_utf8(&body).unwrap())
 }
 
@@ -9767,7 +9881,7 @@ async fn loki_index_stats_result(
         .get(format!(
             "{base}/loki/api/v1/{path}{separator}start={start_ns}&end={end_ns}",
         ))
-        .header("X-Scope-OrgID", "tenant-a")
+        .header("X-Scope-OrgID", TENANT)
         .send()
         .await
         .expect("query Loki index stats")
@@ -9789,14 +9903,16 @@ async fn crabka_index_stats_result(
         .oneshot(
             Request::builder()
                 .uri(uri)
-                .header("X-Scope-OrgID", "tenant-a")
+                .header("X-Scope-OrgID", TENANT)
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
     assert!(response.status() == StatusCode::OK);
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+        .await
+        .unwrap();
     stable_index_stats_result(&serde_json::from_slice(&body).unwrap())
 }
 
@@ -9814,7 +9930,7 @@ async fn loki_index_volume_result(
             .get(format!(
                 "{base}/loki/api/v1/{path}{separator}start={start_ns}&end={end_ns}",
             ))
-            .header("X-Scope-OrgID", "tenant-a")
+            .header("X-Scope-OrgID", TENANT)
             .send()
             .await
             .expect("query Loki index volume")
@@ -9845,14 +9961,16 @@ async fn crabka_index_volume_result(
         .oneshot(
             Request::builder()
                 .uri(uri)
-                .header("X-Scope-OrgID", "tenant-a")
+                .header("X-Scope-OrgID", TENANT)
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
     assert!(response.status() == StatusCode::OK);
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+        .await
+        .unwrap();
     stable_index_volume_result(&serde_json::from_slice(&body).unwrap())
 }
 

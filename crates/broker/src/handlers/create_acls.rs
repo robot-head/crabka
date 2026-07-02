@@ -11,14 +11,19 @@ use crabka_protocol::owned::create_acls_request::CreateAclsRequest;
 use crabka_protocol::owned::create_acls_response::{AclCreationResult, CreateAclsResponse};
 
 use super::acl_wire::{
-    operation_concrete, pattern_type_concrete, permission_concrete, resource_type_concrete,
+    CLUSTER_RESOURCE_NAME, operation_concrete, pattern_type_concrete, permission_concrete,
+    resource_type_concrete,
 };
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
 use crate::codes;
 
+/// Maximum accepted length (bytes) of an ACL principal string.
 const MAX_PRINCIPAL_LEN: usize = 256;
+/// Maximum accepted length (bytes) of an ACL resource name.
 const MAX_RESOURCE_NAME_LEN: usize = 256;
+/// Kafka principal-type prefix; the only principal type Crabka accepts.
+const USER_PRINCIPAL_PREFIX: &str = "User:";
 
 #[tracing::instrument(
     name = "handle_create_acls",
@@ -42,7 +47,7 @@ pub(crate) async fn handle(
             principal: ctx.principal,
             host: ctx.peer,
             resource_type: crabka_metadata::ResourceType::Cluster,
-            resource_name: "kafka-cluster",
+            resource_name: CLUSTER_RESOURCE_NAME,
             operation: crabka_metadata::AclOperation::Alter,
         },
     );
@@ -124,7 +129,7 @@ fn created_acl_resources(
 ) -> Vec<crabka_audit::AuditResource> {
     to_submit
         .iter()
-        .filter(|(idx, _)| results[*idx].error_code == 0)
+        .filter(|(idx, _)| results[*idx].error_code == codes::NONE)
         .map(|(idx, _)| crabka_audit::AuditResource {
             resource_type: "Acl".to_string(),
             name: req.creations[*idx].resource_name.clone(),
@@ -169,7 +174,7 @@ fn validate(
     if c.resource_name.contains('\0') {
         return Err((codes::INVALID_REQUEST, "resource_name contains NUL"));
     }
-    if !c.principal.starts_with("User:") {
+    if !c.principal.starts_with(USER_PRINCIPAL_PREFIX) {
         return Err((codes::INVALID_REQUEST, "principal must start with User:"));
     }
     if c.principal.len() > MAX_PRINCIPAL_LEN {

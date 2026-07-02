@@ -38,6 +38,39 @@ use super::offsets_log::OffsetsLog;
 use super::persistence_next_gen::MemberAssignmentState;
 use super::reconciler::{self, ReconcileInput};
 
+/// A Kafka wire `error_code` value, as carried in response `error_code`
+/// fields. The values live in [`crate::codes`].
+pub type ErrorCode = i16;
+
+/// Capacity of a group actor's mpsc mailbox. Senders back-pressure (await)
+/// once this many messages are queued unprocessed.
+const ACTOR_MAILBOX_CAPACITY: usize = 64;
+
+/// Cadence of the kind-agnostic session-expiry tick inside `actor_loop`.
+/// Expiry compares `last_seen` against each member's session timeout, so the
+/// tick rate only bounds detection latency, never the outcome.
+const SESSION_EXPIRY_TICK_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Fallback session timeout (30 s, in ms) used when a persisted or requested
+/// classic `session_timeout_ms` can't be represented in the target type.
+const FALLBACK_SESSION_TIMEOUT_MS: u64 = 30_000;
+
+/// [`FALLBACK_SESSION_TIMEOUT_MS`] as the persisted/wire `i32` field.
+#[allow(clippy::cast_possible_truncation)]
+const FALLBACK_SESSION_TIMEOUT_MS_I32: i32 = FALLBACK_SESSION_TIMEOUT_MS as i32;
+
+/// Fallback rebalance timeout (60 s, in ms) used when a persisted or requested
+/// `rebalance_timeout_ms` can't be represented in the target type.
+const FALLBACK_REBALANCE_TIMEOUT_MS: u64 = 60_000;
+
+/// [`FALLBACK_REBALANCE_TIMEOUT_MS`] as the persisted/wire `i32` field.
+#[allow(clippy::cast_possible_truncation)]
+const FALLBACK_REBALANCE_TIMEOUT_MS_I32: i32 = FALLBACK_REBALANCE_TIMEOUT_MS as i32;
+
+/// Fallback `heartbeat_interval_ms` (5 s — the KIP-848 default heartbeat
+/// interval) reported when the configured interval overflows the wire `i32`.
+const FALLBACK_HEARTBEAT_INTERVAL_MS: i32 = 5_000;
+
 /// Which protocol an actor's `Group` speaks. Fixed at spawn; exposed on the
 /// handle so the coordinator can route/reject cross-protocol RPCs and filter
 /// admin views without messaging the actor.
@@ -64,7 +97,7 @@ pub enum GroupActorMessage {
         /// The request's `generation_id_or_member_epoch` field; interpreted as the
         /// consumer `member_epoch` or the classic generation per the live kind.
         generation_or_epoch: i32,
-        reply: oneshot::Sender<Result<(), i16>>,
+        reply: oneshot::Sender<Result<(), ErrorCode>>,
     },
     Describe {
         reply: oneshot::Sender<DescribeView>,
@@ -82,7 +115,7 @@ pub enum GroupActorMessage {
     },
     ClassicHeartbeat {
         req: HeartbeatRequest,
-        reply: oneshot::Sender<i16>,
+        reply: oneshot::Sender<ErrorCode>,
     },
     ClassicLeave {
         req: LeaveGroupRequest,
@@ -130,7 +163,7 @@ pub enum GroupActorMessage {
 /// for the wire version. Mirrors the fields of `JoinGroupResponse`.
 #[derive(Debug, Default, Clone)]
 pub struct JoinResult {
-    pub error_code: i16,
+    pub error_code: ErrorCode,
     pub generation_id: i32,
     pub protocol_type: Option<String>,
     pub protocol_name: Option<String>,
@@ -149,7 +182,7 @@ pub struct JoinResultMember {
 /// Structured `SyncGroup` result handed back to the handler.
 #[derive(Debug, Default, Clone)]
 pub struct SyncResult {
-    pub error_code: i16,
+    pub error_code: ErrorCode,
     pub assignment: Bytes,
     pub protocol_type: Option<String>,
     pub protocol_name: Option<String>,
@@ -295,7 +328,7 @@ impl GroupActorHandle {
         offsets_log: Arc<dyn OffsetsLog>,
         coordinator: Arc<super::GroupCoordinator>,
     ) -> Self {
-        let (tx, rx) = mpsc::channel(64);
+        let (tx, rx) = mpsc::channel(ACTOR_MAILBOX_CAPACITY);
         let task = tokio::spawn(actor_loop(
             group_id,
             kind,
@@ -347,7 +380,7 @@ async fn actor_loop(
     // `last_seen`-vs-`session_timeout` comparison, so ticking once a second
     // (rather than on the heartbeat interval for consumer groups) only changes
     // how often we check, never the outcome.
-    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    let mut tick = tokio::time::interval(SESSION_EXPIRY_TICK_INTERVAL);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         let deadline = classic_deadline(&group);
@@ -439,7 +472,7 @@ async fn actor_loop(
                         }
                     }
                     GroupActorMessage::ValidateCommit { member_id, group_instance_id, generation_or_epoch, reply } => {
-                        let result: Result<(), i16> = if let Some(s) = group.as_consumer() {
+                        let result: Result<(), ErrorCode> = if let Some(s) = group.as_consumer() {
                             s.validate_commit_decision(&member_id, generation_or_epoch)
                         } else if let Some(s) = group.as_classic() {
                             match classic_ops::validate_commit(s, &member_id, group_instance_id.as_deref(), generation_or_epoch) {
@@ -951,7 +984,7 @@ fn apply_seed(state: &mut GroupState, seed: super::GroupSeed) {
             generation_id: group_generation,
             supported_protocols: c.supported_protocols.clone(),
             session_timeout: Duration::from_millis(
-                u64::try_from(c.session_timeout_ms.max(0)).unwrap_or(30_000),
+                u64::try_from(c.session_timeout_ms.max(0)).unwrap_or(FALLBACK_SESSION_TIMEOUT_MS),
             ),
             last_synced_assignment: c.last_synced_assignment.clone(),
             awaiting_sync: true,
@@ -967,7 +1000,8 @@ fn apply_seed(state: &mut GroupState, seed: super::GroupSeed) {
             compiled_regex: None,
             server_assignor: meta.server_assignor,
             rebalance_timeout: Duration::from_millis(
-                u64::try_from(meta.rebalance_timeout_ms.max(0)).unwrap_or(60_000),
+                u64::try_from(meta.rebalance_timeout_ms.max(0))
+                    .unwrap_or(FALLBACK_REBALANCE_TIMEOUT_MS),
             ),
             member_epoch: 0,
             previous_member_epoch: 0,
@@ -1036,10 +1070,12 @@ async fn classic_join_hosted(
         .iter()
         .map(|p| (p.name.clone(), p.metadata.clone()))
         .collect();
-    let session_timeout =
-        Duration::from_millis(u64::try_from(req.session_timeout_ms.max(0)).unwrap_or(30_000));
-    let rebalance_timeout =
-        Duration::from_millis(u64::try_from(req.rebalance_timeout_ms.max(0)).unwrap_or(60_000));
+    let session_timeout = Duration::from_millis(
+        u64::try_from(req.session_timeout_ms.max(0)).unwrap_or(FALLBACK_SESSION_TIMEOUT_MS),
+    );
+    let rebalance_timeout = Duration::from_millis(
+        u64::try_from(req.rebalance_timeout_ms.max(0)).unwrap_or(FALLBACK_REBALANCE_TIMEOUT_MS),
+    );
 
     let state = group
         .as_consumer_mut()
@@ -1360,7 +1396,7 @@ fn build_member(
         compiled_regex: None,
         server_assignor: req.server_assignor.clone(),
         rebalance_timeout: Duration::from_millis(
-            u64::try_from(req.rebalance_timeout_ms.max(0)).unwrap_or(60_000),
+            u64::try_from(req.rebalance_timeout_ms.max(0)).unwrap_or(FALLBACK_REBALANCE_TIMEOUT_MS),
         ),
         member_epoch: 0,
         previous_member_epoch: 0,
@@ -1373,7 +1409,7 @@ fn build_member(
 }
 
 fn base_resp(
-    error_code: i16,
+    error_code: ErrorCode,
     member_epoch: i32,
     config: &NextGenConfig,
 ) -> ConsumerGroupHeartbeatResponse {
@@ -1381,12 +1417,12 @@ fn base_resp(
         error_code,
         member_epoch,
         heartbeat_interval_ms: i32::try_from(config.heartbeat_interval.as_millis())
-            .unwrap_or(5_000),
+            .unwrap_or(FALLBACK_HEARTBEAT_INTERVAL_MS),
         ..Default::default()
     }
 }
 
-fn error_resp(error_code: i16, config: &NextGenConfig) -> ConsumerGroupHeartbeatResponse {
+fn error_resp(error_code: ErrorCode, config: &NextGenConfig) -> ConsumerGroupHeartbeatResponse {
     base_resp(error_code, 0, config)
 }
 
@@ -1611,7 +1647,8 @@ fn classic_member_metadata(
     m.classic
         .as_ref()
         .map(|f| super::persistence_next_gen::ClassicMemberMetadata {
-            session_timeout_ms: i32::try_from(f.session_timeout.as_millis()).unwrap_or(30_000),
+            session_timeout_ms: i32::try_from(f.session_timeout.as_millis())
+                .unwrap_or(FALLBACK_SESSION_TIMEOUT_MS_I32),
             supported_protocols: f.supported_protocols.clone(),
             last_synced_assignment: f.last_synced_assignment.clone(),
         })
@@ -1640,7 +1677,8 @@ pub(crate) fn snapshot_seed(state: &super::consumer_state::GroupState) -> super:
             subscribed_topic_names: m.subscribed_topic_names.iter().cloned().collect(),
             subscribed_topic_regex: m.subscribed_topic_regex.clone(),
             server_assignor: m.server_assignor.clone(),
-            rebalance_timeout_ms: i32::try_from(m.rebalance_timeout.as_millis()).unwrap_or(60_000),
+            rebalance_timeout_ms: i32::try_from(m.rebalance_timeout.as_millis())
+                .unwrap_or(FALLBACK_REBALANCE_TIMEOUT_MS_I32),
             classic: classic_member_metadata(m),
         };
         members.insert(mid.clone(), mm);
@@ -1729,7 +1767,7 @@ fn snapshot_pending_after_change(
                     subscribed_topic_regex: m.subscribed_topic_regex.clone(),
                     server_assignor: m.server_assignor.clone(),
                     rebalance_timeout_ms: i32::try_from(m.rebalance_timeout.as_millis())
-                        .unwrap_or(60_000),
+                        .unwrap_or(FALLBACK_REBALANCE_TIMEOUT_MS_I32),
                     classic: classic_member_metadata(m),
                 }),
             ));
@@ -1804,8 +1842,10 @@ pub(crate) fn classic_group_metadata_record(
             group_instance_id: m.group_instance_id.clone(),
             client_id: m.client_id.clone(),
             client_host: m.host.clone(),
-            rebalance_timeout_ms: i32::try_from(m.rebalance_timeout.as_millis()).unwrap_or(60_000),
-            session_timeout_ms: i32::try_from(m.session_timeout.as_millis()).unwrap_or(30_000),
+            rebalance_timeout_ms: i32::try_from(m.rebalance_timeout.as_millis())
+                .unwrap_or(FALLBACK_REBALANCE_TIMEOUT_MS_I32),
+            session_timeout_ms: i32::try_from(m.session_timeout.as_millis())
+                .unwrap_or(FALLBACK_SESSION_TIMEOUT_MS_I32),
             subscription: m.protocol_metadata.clone(),
             assignment: m.assignment.clone().unwrap_or_default(),
         })
@@ -1860,7 +1900,7 @@ pub(crate) async fn validate_group_commit(
     member_id: &str,
     generation_or_epoch: i32,
     group_instance_id: Option<&str>,
-) -> Option<i16> {
+) -> Option<ErrorCode> {
     let (tx, rx) = oneshot::channel();
     if handle
         .tx

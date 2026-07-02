@@ -82,7 +82,7 @@ pub(crate) async fn handle(
                     principal: ctx.principal,
                     host: ctx.peer,
                     resource_type: ResourceType::Cluster,
-                    resource_name: "kafka-cluster",
+                    resource_name: crate::handlers::acl_wire::CLUSTER_RESOURCE_NAME,
                     operation: AclOperation::IdempotentWrite,
                 };
                 if authorizer.authorize(&*image, &acl_req) == AuthorizationResult::Deny {

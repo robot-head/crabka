@@ -29,6 +29,18 @@ use crabka_security::{KafkaPrincipal, SecretBytes};
 use crate::network::auth::ConnectionAuth;
 use crate::time_util::now_ms;
 
+/// A relative span of milliseconds (token lifetime / renew period), as
+/// distinct from an absolute epoch timestamp in milliseconds.
+pub(crate) type DurationMs = i64;
+
+/// Wire sentinel: `CreateDelegationToken.max_lifetime_ms == -1` defers to the
+/// broker's configured lifetime ceiling (`delegation.token.max.lifetime.ms`).
+const USE_BROKER_LIFETIME_CEILING: i64 = -1;
+
+/// The only `KafkaPrincipal` type supported as an act-as token owner
+/// (Kafka's `KafkaPrincipal.USER_TYPE`; mTLS-DN owners are not supported).
+const USER_PRINCIPAL_TYPE: &str = "User";
+
 /// Wire convention: the JVM admin client serialises "not act-as" by
 /// either omitting the compact-nullable string (`None`) or sending an
 /// empty string. Treat both as "absent" so the act-as branch only fires
@@ -47,8 +59,8 @@ pub(crate) async fn handle<S: BuildHasher>(
     req: &CreateDelegationTokenRequest,
     auth: &ConnectionAuth,
     secret_key: Option<&SecretBytes>,
-    max_lifetime_ms: i64,
-    default_renew_period_ms: i64,
+    max_lifetime_ms: DurationMs,
+    default_renew_period_ms: DurationMs,
     controller: &dyn crate::metadata_source::MetadataSource,
     super_users: &HashSet<String, S>,
 ) -> CreateDelegationTokenResponse {
@@ -104,7 +116,7 @@ pub(crate) async fn handle<S: BuildHasher>(
             // returning INVALID_REQUEST for unsupported types here
             // rather than authorization-failed — the request is
             // syntactically wrong, not unauthorized.
-            if owner_type != "User" {
+            if owner_type != USER_PRINCIPAL_TYPE {
                 return err_response(crate::codes::INVALID_REQUEST);
             }
             KafkaPrincipal {
@@ -120,7 +132,7 @@ pub(crate) async fn handle<S: BuildHasher>(
     // ceiling; a positive value is clamped to the ceiling; anything
     // else is invalid (zero or non-`-1` negatives).
     let chosen_lifetime = match req.max_lifetime_ms {
-        -1 => max_lifetime_ms,
+        USE_BROKER_LIFETIME_CEILING => max_lifetime_ms,
         n if n > 0 => n.min(max_lifetime_ms),
         _ => return err_response(crate::codes::INVALID_REQUEST),
     };

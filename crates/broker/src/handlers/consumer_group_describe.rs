@@ -16,6 +16,15 @@ use crate::codes;
 use crate::coordinator::unified::actor::GroupActorMessage;
 use crate::error::BrokerError;
 
+/// KIP-848/KIP-584: minimum finalized `group.version` feature level that
+/// enables the next-gen consumer-group RPCs.
+const NEXT_GEN_MIN_GROUP_VERSION: i16 = 1;
+
+/// Wire `group_state` reported for a next-gen group with no members.
+const GROUP_STATE_EMPTY: &str = "EMPTY";
+/// Wire `group_state` reported for a next-gen group with at least one member.
+const GROUP_STATE_STABLE: &str = "STABLE";
+
 pub(crate) fn handle(
     broker: &Broker,
     version: i16,
@@ -99,7 +108,7 @@ fn group_version_disabled(image: &crabka_metadata::MetadataImage) -> bool {
     !crate::features::feature_enabled(
         image,
         crabka_metadata::group_version::GROUP_VERSION_FEATURE,
-        1,
+        NEXT_GEN_MIN_GROUP_VERSION,
     )
 }
 
@@ -109,8 +118,8 @@ fn next_gen_config_disabled(next_gen_enabled: bool) -> bool {
 
 fn group_state_for_member_count(members: usize) -> String {
     match members {
-        0 => "EMPTY".into(),
-        _ => "STABLE".into(),
+        0 => GROUP_STATE_EMPTY.into(),
+        _ => GROUP_STATE_STABLE.into(),
     }
 }
 

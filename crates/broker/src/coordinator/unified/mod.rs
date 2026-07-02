@@ -670,12 +670,15 @@ impl GroupCoordinator {
     }
 
     pub async fn shutdown_all(&self) {
+        /// Per-actor grace period to await a `Shutdown` ack before moving on
+        /// to the next actor.
+        const SHUTDOWN_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
         let handles: Vec<Arc<GroupActorHandle>> =
             self.groups.iter().map(|e| e.value().clone()).collect();
         for h in handles {
             let (tx, rx) = oneshot::channel();
             if h.tx.send(GroupActorMessage::Shutdown(tx)).await.is_ok() {
-                let _ = tokio::time::timeout(std::time::Duration::from_secs(5), rx).await;
+                let _ = tokio::time::timeout(SHUTDOWN_ACK_TIMEOUT, rx).await;
             }
         }
         let share_handles: Vec<Arc<ShareGroupActorHandle>> = self
@@ -690,7 +693,7 @@ impl GroupCoordinator {
                 .await
                 .is_ok()
             {
-                let _ = tokio::time::timeout(std::time::Duration::from_secs(5), rx).await;
+                let _ = tokio::time::timeout(SHUTDOWN_ACK_TIMEOUT, rx).await;
             }
         }
     }

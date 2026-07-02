@@ -97,18 +97,46 @@ pub enum AssignorRegistrationError {
     DuplicateName(String),
 }
 
+/// Default consumer session timeout: 45 s, matching Kafka's
+/// `group.consumer.session.timeout.ms`.
+pub const DEFAULT_SESSION_TIMEOUT: Duration = Duration::from_secs(45);
+
+/// Default consumer heartbeat interval: 5 s, matching Kafka's
+/// `group.consumer.heartbeat.interval.ms`.
+pub const DEFAULT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Lower bound on the negotiated session timeout: 45 s, matching Kafka's
+/// `group.consumer.min.session.timeout.ms`.
+pub const DEFAULT_MIN_SESSION_TIMEOUT: Duration = Duration::from_secs(45);
+
+/// Upper bound on the negotiated session timeout: 60 s, matching Kafka's
+/// `group.consumer.max.session.timeout.ms`.
+pub const DEFAULT_MAX_SESSION_TIMEOUT: Duration = Duration::from_mins(1);
+
+/// Lower bound on the negotiated heartbeat interval: 5 s, matching Kafka's
+/// `group.consumer.min.heartbeat.interval.ms`.
+pub const DEFAULT_MIN_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Upper bound on the negotiated heartbeat interval: 15 s, matching Kafka's
+/// `group.consumer.max.heartbeat.interval.ms`.
+pub const DEFAULT_MAX_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
+
+/// Crabka's default cap on consumer-group membership
+/// (`group.consumer.max.size`).
+pub const DEFAULT_MAX_GROUP_SIZE: usize = 200;
+
 impl Default for NextGenConfig {
     fn default() -> Self {
         Self {
             rebalance_protocols: vec![RebalanceProtocol::Classic, RebalanceProtocol::Consumer],
-            session_timeout: Duration::from_secs(45),
-            heartbeat_interval: Duration::from_secs(5),
-            min_session_timeout: Duration::from_secs(45),
-            max_session_timeout: Duration::from_mins(1),
-            min_heartbeat_interval: Duration::from_secs(5),
-            max_heartbeat_interval: Duration::from_secs(15),
+            session_timeout: DEFAULT_SESSION_TIMEOUT,
+            heartbeat_interval: DEFAULT_HEARTBEAT_INTERVAL,
+            min_session_timeout: DEFAULT_MIN_SESSION_TIMEOUT,
+            max_session_timeout: DEFAULT_MAX_SESSION_TIMEOUT,
+            min_heartbeat_interval: DEFAULT_MIN_HEARTBEAT_INTERVAL,
+            max_heartbeat_interval: DEFAULT_MAX_HEARTBEAT_INTERVAL,
             assignors: vec![Arc::new(UniformAssignor), Arc::new(RangeAssignor)],
-            max_size: 200,
+            max_size: DEFAULT_MAX_GROUP_SIZE,
             migration_policy: ConsumerGroupMigrationPolicy::default(),
         }
     }

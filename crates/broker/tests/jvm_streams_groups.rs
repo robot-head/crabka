@@ -56,6 +56,9 @@ const LISTEN: &str = "0.0.0.0:9092";
 /// `kafka-streams-groups.sh` admin tool (StreamsGroupDescribe / ListGroups).
 const KAFKA_IMAGE: &str = "mirror.gcr.io/apache/kafka:4.1.0";
 const STREAMS_GROUPS: &str = "/opt/kafka/bin/kafka-streams-groups.sh";
+/// Kafka `COORDINATOR_LOAD_IN_PROGRESS` — the first-join heartbeat is retried
+/// while the coordinator is still loading.
+const ERR_COORDINATOR_LOAD_IN_PROGRESS: i16 = 14;
 
 /// Boot one broker bound to `0.0.0.0:9092`, advertising `host.docker.internal:
 /// 9092` so the Docker container's post-Metadata connect targets a hostname it
@@ -225,8 +228,8 @@ async fn join_and_converge(
     let mut member_id = resp.member_id.clone();
 
     for _ in 0..tries {
-        // COORDINATOR_LOAD_IN_PROGRESS (14): retry the first join.
-        if resp.error_code == 14 {
+        // COORDINATOR_LOAD_IN_PROGRESS: retry the first join.
+        if resp.error_code == ERR_COORDINATOR_LOAD_IN_PROGRESS {
             resp = client
                 .send(first_join(group, topo.clone()))
                 .await

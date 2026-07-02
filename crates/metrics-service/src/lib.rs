@@ -933,7 +933,13 @@ struct CachedMetricBlockStore {
     cold: MetricBlockStore,
 }
 
+/// Lookback substituted for an unbounded (`i64::MIN..i64::MAX`) query range so
+/// metadata-style requests don't force a full cold-manifest scan.
 const UNBOUNDED_COMPATIBILITY_LOOKBACK: Duration = Duration::from_hours(1);
+
+/// How long a cached cold-block store snapshot is served before manifests are
+/// re-listed from the object store.
+const COLD_CACHE_TTL: Duration = Duration::from_secs(30);
 
 impl CachedMetricBlockStore {
     fn covers(&self, start_ms: i64, end_ms: i64, ttl: Duration) -> bool {
@@ -972,13 +978,12 @@ impl RefreshingMetricBlockStore {
         start_ms: i64,
         end_ms: i64,
     ) -> Result<MergedMetricStore<MetricBlockStore, WalHead>, MetricsServiceError> {
-        const TTL: Duration = Duration::from_secs(30);
         let (start_ms, end_ms) = normalize_refresh_range(start_ms, end_ms);
 
         {
             let guard = self.cold_cache.read().await;
             if let Some(entry) = guard.as_ref()
-                && entry.covers(start_ms, end_ms, TTL)
+                && entry.covers(start_ms, end_ms, COLD_CACHE_TTL)
             {
                 return Ok(MergedMetricStore::new(
                     entry.cold.clone(),
@@ -991,7 +996,7 @@ impl RefreshingMetricBlockStore {
         {
             let guard = self.cold_cache.read().await;
             if let Some(entry) = guard.as_ref()
-                && entry.covers(start_ms, end_ms, TTL)
+                && entry.covers(start_ms, end_ms, COLD_CACHE_TTL)
             {
                 return Ok(MergedMetricStore::new(
                     entry.cold.clone(),
@@ -2650,7 +2655,7 @@ rules:
 
         let result = super::replay_wal_head_records(
             &head,
-            "__crabka_metrics_wal",
+            crabka_metrics::WAL_TOPIC,
             &[
                 super::WalHeadConsumerRecord {
                     topic: "other".to_string(),
@@ -2659,7 +2664,7 @@ rules:
                     value: Some(encoded.clone()),
                 },
                 super::WalHeadConsumerRecord {
-                    topic: "__crabka_metrics_wal".to_string(),
+                    topic: crabka_metrics::WAL_TOPIC.to_string(),
                     partition: 2,
                     offset: 41,
                     value: Some(encoded),
@@ -2703,16 +2708,16 @@ rules:
 
         super::replay_wal_head_records(
             &head,
-            "__crabka_metrics_wal",
+            crabka_metrics::WAL_TOPIC,
             &[
                 super::WalHeadConsumerRecord {
-                    topic: "__crabka_metrics_wal".to_string(),
+                    topic: crabka_metrics::WAL_TOPIC.to_string(),
                     partition: 0,
                     offset: 1,
                     value: Some(record("old", 1_000).encode().unwrap()),
                 },
                 super::WalHeadConsumerRecord {
-                    topic: "__crabka_metrics_wal".to_string(),
+                    topic: crabka_metrics::WAL_TOPIC.to_string(),
                     partition: 0,
                     offset: 2,
                     value: Some(record("new", 10_000).encode().unwrap()),
@@ -2739,9 +2744,9 @@ rules:
         let head = crabka_promql::WalHead::new();
         let error = super::replay_wal_head_records(
             &head,
-            "__crabka_metrics_wal",
+            crabka_metrics::WAL_TOPIC,
             &[super::WalHeadConsumerRecord {
-                topic: "__crabka_metrics_wal".to_string(),
+                topic: crabka_metrics::WAL_TOPIC.to_string(),
                 partition: 1,
                 offset: 9,
                 value: None,
@@ -2773,7 +2778,7 @@ rules:
         };
         let mut consumer = RecordingWalHeadConsumer {
             batches: vec![vec![consumer_record(
-                "__crabka_metrics_wal",
+                crabka_metrics::WAL_TOPIC,
                 0,
                 4,
                 Some(record.encode().unwrap()),
@@ -2784,7 +2789,7 @@ rules:
         let result = super::poll_wal_head_consumer_once(
             &mut consumer,
             &head,
-            "__crabka_metrics_wal",
+            crabka_metrics::WAL_TOPIC,
             std::time::Duration::from_millis(1),
         )
         .await
@@ -2813,7 +2818,7 @@ rules:
         let result = super::poll_wal_head_consumer_once(
             &mut consumer,
             &head,
-            "__crabka_metrics_wal",
+            crabka_metrics::WAL_TOPIC,
             std::time::Duration::from_millis(1),
         )
         .await
@@ -2840,12 +2845,17 @@ rules:
         let mut consumer = RecordingWalHeadConsumer {
             batches: vec![
                 vec![consumer_record(
-                    "__crabka_metrics_wal",
+                    crabka_metrics::WAL_TOPIC,
                     0,
                     4,
                     Some(encoded.clone()),
                 )],
-                vec![consumer_record("__crabka_metrics_wal", 0, 5, Some(encoded))],
+                vec![consumer_record(
+                    crabka_metrics::WAL_TOPIC,
+                    0,
+                    5,
+                    Some(encoded),
+                )],
             ],
             commit_calls: 0,
         };
@@ -2853,7 +2863,7 @@ rules:
         let summary = super::run_wal_head_consumer_loop(
             &mut consumer,
             &head,
-            "__crabka_metrics_wal",
+            crabka_metrics::WAL_TOPIC,
             std::time::Duration::from_millis(1),
             |summary| summary.polls == 2,
         )

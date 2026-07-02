@@ -12,20 +12,44 @@ use crabka_protocol::owned::alter_client_quotas_response::{
 };
 use crabka_protocol::{Encode, UnknownTaggedFields};
 
+use super::acl_wire::CLUSTER_RESOURCE_NAME;
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
 use crate::codes::{
-    CLUSTER_AUTHORIZATION_FAILED, COORDINATOR_NOT_AVAILABLE, INVALID_CONFIG, INVALID_REQUEST,
+    CLUSTER_AUTHORIZATION_FAILED, COORDINATOR_NOT_AVAILABLE, INVALID_CONFIG, INVALID_REQUEST, NONE,
 };
 
+/// Quota key: produce-side bandwidth cap in bytes/sec (KIP-13).
+const PRODUCER_BYTE_RATE_KEY: &str = "producer_byte_rate";
+/// Quota key: fetch-side bandwidth cap in bytes/sec (KIP-13).
+const CONSUMER_BYTE_RATE_KEY: &str = "consumer_byte_rate";
+/// Quota key: request-handler time cap as a percentage of one thread (KIP-124).
+const REQUEST_PERCENTAGE_KEY: &str = "request_percentage";
+/// Quota key: per-IP connection creation rate (KIP-612).
+const CONNECTION_CREATION_RATE_KEY: &str = "connection_creation_rate";
+/// Quota key: controller mutation rate for topic/partition creation and deletion (KIP-599).
+const CONTROLLER_MUTATION_RATE_KEY: &str = "controller_mutation_rate";
+/// Upper bound for `request_percentage` — a percentage of one request-handler thread.
+const REQUEST_PERCENTAGE_MAX: f64 = 100.0;
+
+/// Quota keys Crabka accepts in `AlterClientQuotas` ops.
 const KNOWN_QUOTA_KEYS: &[&str] = &[
-    "producer_byte_rate",
-    "consumer_byte_rate",
-    "request_percentage",
-    "connection_creation_rate", // KIP-612 — only enforced when paired with ip entity
-    "controller_mutation_rate", // KIP-599
+    PRODUCER_BYTE_RATE_KEY,
+    CONSUMER_BYTE_RATE_KEY,
+    REQUEST_PERCENTAGE_KEY,
+    CONNECTION_CREATION_RATE_KEY, // KIP-612 — only enforced when paired with ip entity
+    CONTROLLER_MUTATION_RATE_KEY, // KIP-599
 ];
-const SUPPORTED_ENTITY_TYPES: &[&str] = &["user", "client-id", "ip"];
+
+/// Quota entity type: authenticated user principal (KIP-257).
+const ENTITY_TYPE_USER: &str = "user";
+/// Quota entity type: client id (KIP-257).
+const ENTITY_TYPE_CLIENT_ID: &str = "client-id";
+/// Quota entity type: client source IP address (KIP-612).
+const ENTITY_TYPE_IP: &str = "ip";
+
+/// Quota entity types Crabka accepts in `AlterClientQuotas` entries.
+const SUPPORTED_ENTITY_TYPES: &[&str] = &[ENTITY_TYPE_USER, ENTITY_TYPE_CLIENT_ID, ENTITY_TYPE_IP];
 
 #[tracing::instrument(
     name = "handle_alter_client_quotas",
@@ -47,7 +71,7 @@ pub(crate) async fn handle(
             principal: ctx.principal,
             host: ctx.peer,
             resource_type: ResourceType::Cluster,
-            resource_name: "kafka-cluster",
+            resource_name: CLUSTER_RESOURCE_NAME,
             operation: AclOperation::Alter,
         },
     );
@@ -110,7 +134,7 @@ pub(crate) fn process_one_entry(entry: &EntryData) -> Result<Vec<MetadataRecord>
             ));
         }
         // entity_name == None is fine for ip — that means the default ip entity.
-        if e.entity_type == "ip"
+        if e.entity_type == ENTITY_TYPE_IP
             && let Some(name) = &e.entity_name
             && name.parse::<std::net::Ipv4Addr>().is_err()
         {
@@ -129,7 +153,7 @@ pub(crate) fn process_one_entry(entry: &EntryData) -> Result<Vec<MetadataRecord>
                     format!("invalid value {} for {}", op.value, op.key),
                 ));
             }
-            if op.key == "request_percentage" && op.value > 100.0 {
+            if op.key == REQUEST_PERCENTAGE_KEY && op.value > REQUEST_PERCENTAGE_MAX {
                 return Err((
                     INVALID_CONFIG,
                     format!("request_percentage > 100.0: {}", op.value),
@@ -154,7 +178,7 @@ pub(crate) fn process_one_entry(entry: &EntryData) -> Result<Vec<MetadataRecord>
 
 fn ok_entry(entity: &[EntityData]) -> RespEntry {
     RespEntry {
-        error_code: 0,
+        error_code: NONE,
         error_message: None,
         entity: entity
             .iter()
@@ -187,7 +211,7 @@ fn err_entry(entity: &[EntityData], code: i16, msg: String) -> RespEntry {
 fn apply_submit_error(entry_results: &mut [RespEntry], error: impl std::fmt::Display) {
     let message = format!("submit failed: {error}");
     for r in entry_results {
-        if r.error_code == 0 {
+        if r.error_code == NONE {
             r.error_code = COORDINATOR_NOT_AVAILABLE;
             r.error_message = Some(message.clone());
         }

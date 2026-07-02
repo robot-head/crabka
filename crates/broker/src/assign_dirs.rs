@@ -15,6 +15,10 @@ use crabka_protocol::owned::assign_replicas_to_dirs_request::{
     AssignReplicasToDirsRequest, DirectoryData, PartitionData, TopicData,
 };
 
+/// Kafka sentinel for "broker epoch unknown" in `AssignReplicasToDirs`,
+/// matching the convention used by `send_alter_partition`.
+const UNKNOWN_BROKER_EPOCH: i64 = -1;
+
 /// Group flat `(topic_id, partition, dir_uuid)` assignments into the nested
 /// `AssignReplicasToDirs` wire shape:
 /// `directories[]` → `topics[]` → `partitions[]`.
@@ -71,7 +75,7 @@ pub(crate) fn build_request(
 
     AssignReplicasToDirsRequest {
         broker_id,
-        broker_epoch: -1,
+        broker_epoch: UNKNOWN_BROKER_EPOCH,
         directories,
         unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
     }

@@ -18,6 +18,14 @@ use crate::codes;
 use crate::error::BrokerError;
 use crate::handlers::context::TelemetryContext;
 
+/// Max allowed decompressed:compressed expansion ratio for a client-metrics
+/// payload (decompression-bomb guard).
+const MAX_DECOMPRESSION_RATIO: usize = 100;
+/// Floor on the decompressed-output bound, so tiny pushes still decompress.
+const DECOMPRESSED_OUTPUT_FLOOR: usize = 16 * 1024 * 1024;
+/// Hard ceiling on decompressed client-metrics output.
+const DECOMPRESSED_OUTPUT_CEILING: usize = 1024 * 1024 * 1024;
+
 #[allow(clippy::unused_async)] // signature symmetry with other inline-intercept handlers
 #[tracing::instrument(
     name = "handle_push_telemetry",
@@ -63,13 +71,12 @@ pub(crate) async fn handle(
             // instance and drops those metrics (best-effort, matches Kafka).
             let ct = codec.expect("authorize_push guarantees a supported codec on Accept");
             // Bound decompressed output to guard against a decompression bomb
-            // in the client-metrics payload: ≤100x the compressed size, with a
-            // 16 MiB floor and a 1 GiB ceiling.
+            // in the client-metrics payload.
             let max_output = req
                 .metrics
                 .len()
-                .saturating_mul(100)
-                .clamp(16 * 1024 * 1024, 1024 * 1024 * 1024);
+                .saturating_mul(MAX_DECOMPRESSION_RATIO)
+                .clamp(DECOMPRESSED_OUTPUT_FLOOR, DECOMPRESSED_OUTPUT_CEILING);
             match crabka_compression::decompress(ct, &req.metrics, max_output) {
                 Ok(raw) => match otlp::decode_metrics(&raw) {
                     Ok(md) => {

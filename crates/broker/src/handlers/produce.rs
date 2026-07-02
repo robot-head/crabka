@@ -35,18 +35,36 @@ use crate::partition::{Partition, ProduceData, ProduceJob, WriterMessage};
 use crate::partition_registry::PartitionRegistry;
 use crabka_log::VerbatimBatch;
 
+/// Kafka `acks` sentinel `-1` (producer `acks=all`): the leader must hold
+/// the response until the high watermark covers the append, i.e. every
+/// in-sync replica has it.
+const ACKS_ALL: i16 = -1;
+
+/// Kafka's default `min.insync.replicas` — every partition always has at
+/// least its leader in the ISR, so `1` preserves the legacy
+/// "any-ISR-counts" behavior.
+const DEFAULT_MIN_INSYNC_REPLICAS: i32 = 1;
+
+/// Wire sentinel: "no offset assigned" (`ProduceResponse.INVALID_OFFSET`).
+/// Stamped on partition rows that failed before any append happened.
+const INVALID_OFFSET: i64 = -1;
+
+/// Wire sentinel: "leader unknown" for the KIP-951 `current_leader` hint —
+/// used when the leader's `NodeId` doesn't fit the wire's `i32`.
+const NO_LEADER_ID: i32 = -1;
+
 /// Resolve `min.insync.replicas` for a topic from the metadata image.
 /// Defaults to `1` (Kafka's default — every cluster has at least the
-/// leader in ISR), and silently falls back to `1` on malformed values
-/// (the `AlterConfigs` validator already rejected invalid values, so
-/// any non-parseable string here is a corrupt metadata image — safer
+/// leader in ISR), and silently falls back to the default on malformed
+/// values (the `AlterConfigs` validator already rejected invalid values,
+/// so any non-parseable string here is a corrupt metadata image — safer
 /// to err toward the permissive default than to wedge produce).
 fn topic_min_insync_replicas(image: &crabka_metadata::MetadataImage, topic: &str) -> i32 {
     image
         .topic_config(topic)
         .and_then(|m| m.get(MIN_INSYNC_REPLICAS))
         .and_then(|v| v.parse::<i32>().ok())
-        .unwrap_or(1)
+        .unwrap_or(DEFAULT_MIN_INSYNC_REPLICAS)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -446,7 +464,7 @@ async fn process_partition(
     if leader != this_node_id {
         out.error_code = codes::NOT_LEADER_OR_FOLLOWER;
         out.current_leader = LeaderIdAndEpoch {
-            leader_id: i32::try_from(leader).unwrap_or(-1),
+            leader_id: i32::try_from(leader).unwrap_or(NO_LEADER_ID),
             leader_epoch,
             ..Default::default()
         };
@@ -461,7 +479,7 @@ async fn process_partition(
     let Some(part) = partitions.get(topic_name, idx) else {
         out.error_code = codes::NOT_LEADER_OR_FOLLOWER;
         out.current_leader = LeaderIdAndEpoch {
-            leader_id: i32::try_from(leader).unwrap_or(-1),
+            leader_id: i32::try_from(leader).unwrap_or(NO_LEADER_ID),
             leader_epoch,
             ..Default::default()
         };
@@ -488,7 +506,7 @@ async fn process_partition(
     // in-sync replicas ack" — fail fast with NOT_ENOUGH_REPLICAS (19)
     // before queueing work on the writer. Default `1` matches Apache
     // Kafka and preserves the legacy "any-ISR-counts" behavior.
-    if acks == -1
+    if acks == ACKS_ALL
         && let Some(pr) = image.partition(topic_name, idx)
     {
         let min_isr = topic_min_insync_replicas(image, topic_name);
@@ -618,7 +636,7 @@ async fn process_partition(
             // followers may not have it yet, and a leader crash
             // before they catch up would lose data the producer
             // believed acknowledged.
-            if acks == -1 {
+            if acks == ACKS_ALL {
                 let target = base_offset + i64::from(last_offset_delta) + 1;
                 let deadline = std::time::Instant::now() + timeout;
                 match part.await_hw_at_least(target, deadline).await {
@@ -744,7 +762,7 @@ async fn finalize_ack(
     key: &CommitKey<'_>,
 ) {
     let target = base_offset + i64::from(key.last_offset_delta) + 1;
-    if acks == -1 {
+    if acks == ACKS_ALL {
         let deadline = std::time::Instant::now() + timeout;
         out.error_code = match part.await_hw_at_least(target, deadline).await {
             Ok(()) => codes::NONE,
@@ -817,7 +835,7 @@ fn build_topic_error_response(
             .map(|p| PartitionProduceResponse {
                 index: p.index,
                 error_code: code,
-                base_offset: -1,
+                base_offset: INVALID_OFFSET,
                 ..Default::default()
             })
             .collect(),

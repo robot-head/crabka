@@ -42,6 +42,35 @@ use crate::share_coordinator::state::SharePartitionState;
 /// In-memory map key: `(group_id, topic_id, partition)`.
 type ShareStateKey3 = (String, uuid::Uuid, i32);
 
+/// KIP-932 share-group state epoch: bumped on (re-)initialization (e.g.
+/// `AlterShareGroupOffsets`); a write or initialize carrying an older epoch is
+/// fenced with `FENCED_STATE_EPOCH`.
+pub(crate) type StateEpoch = i32;
+
+/// Leader epoch of the share-partition leader that issued a state write; a
+/// stale value is fenced with `FENCED_LEADER_EPOCH`.
+pub(crate) type LeaderEpoch = i32;
+
+/// Index of a `__share_group_state` partition (the coordinator-topic partition
+/// a share key hashes to) — distinct from the data-topic partition index.
+pub(crate) type StatePartitionIndex = i32;
+
+/// Kafka wire error code (see [`crate::codes`]) returned per partition when a
+/// state-machine operation fails.
+pub(crate) type ShareErrorCode = i16;
+
+/// `(state_epoch, leader_epoch, start_offset, delivery_complete_count)` as
+/// returned by [`ShareCoordinator::read_summary`].
+pub(crate) type ShareStateSummary = (StateEpoch, LeaderEpoch, i64, i32);
+
+/// `start_offset` sentinel meaning "no persisted share state": tells the
+/// share-partition leader to initialize delivery from scratch (KIP-932).
+pub(crate) const UNINITIALIZED_START_OFFSET: i64 = -1;
+
+/// Read-chunk budget in bytes per `read_log` call while replaying
+/// `__share_group_state` partitions during recovery.
+const RECOVERY_READ_MAX_BYTES: usize = 1 << 20;
+
 /// Per-broker share-state coordinator. Constructed in `Broker::start` and
 /// shared via `Arc` with the share-state wire handlers.
 pub(crate) struct ShareCoordinator {
@@ -50,7 +79,7 @@ pub(crate) struct ShareCoordinator {
     /// Live in-memory state: `(group, topicId, partition)` → locked state.
     state: DashMap<ShareStateKey3, Arc<Mutex<SharePartitionState>>>,
     /// Set of `__share_group_state` partition indices this broker leads.
-    leader_partitions: RwLock<HashSet<i32>>,
+    leader_partitions: RwLock<HashSet<StatePartitionIndex>>,
     config: ShareCoordinatorConfig,
 }
 
@@ -83,7 +112,7 @@ impl ShareCoordinator {
     }
 
     /// Returns `true` if this broker leads `__share_group_state`-`state_partition`.
-    pub(crate) async fn is_leader(&self, state_partition: i32) -> bool {
+    pub(crate) async fn is_leader(&self, state_partition: StatePartitionIndex) -> bool {
         self.leader_partitions
             .read()
             .await
@@ -107,7 +136,7 @@ impl ShareCoordinator {
         group: &str,
         topic_id: &uuid::Uuid,
         partition: i32,
-    ) -> i32 {
+    ) -> StatePartitionIndex {
         partition_for_share_key(
             group,
             topic_id,
@@ -130,9 +159,9 @@ impl ShareCoordinator {
         group: &str,
         topic_id: uuid::Uuid,
         partition: i32,
-        state_epoch: i32,
+        state_epoch: StateEpoch,
         start_offset: i64,
-    ) -> Result<(), i16> {
+    ) -> Result<(), ShareErrorCode> {
         let map_key = (group.to_string(), topic_id, partition);
         let state_partition = self.state_partition_for(group, &topic_id, partition);
 
@@ -189,12 +218,12 @@ impl ShareCoordinator {
         group: &str,
         topic_id: uuid::Uuid,
         partition: i32,
-        state_epoch: i32,
-        leader_epoch: i32,
+        state_epoch: StateEpoch,
+        leader_epoch: LeaderEpoch,
         start_offset: i64,
         delivery_complete_count: i32,
         batches: Vec<StateBatch>,
-    ) -> Result<(), i16> {
+    ) -> Result<(), ShareErrorCode> {
         let map_key = (group.to_string(), topic_id, partition);
         let state_partition = self.state_partition_for(group, &topic_id, partition);
 
@@ -290,7 +319,7 @@ impl ShareCoordinator {
         group: &str,
         topic_id: uuid::Uuid,
         partition: i32,
-    ) -> Option<(i32, i32, i64, i32)> {
+    ) -> Option<ShareStateSummary> {
         let map_key = (group.to_string(), topic_id, partition);
         let handle = self.state.get(&map_key)?.value().clone();
         let st = handle.lock().await;
@@ -313,7 +342,7 @@ impl ShareCoordinator {
         group: &str,
         topic_id: uuid::Uuid,
         partition: i32,
-    ) -> Result<(), i16> {
+    ) -> Result<(), ShareErrorCode> {
         let map_key = (group.to_string(), topic_id, partition);
         let state_partition = self.state_partition_for(group, &topic_id, partition);
         let key = ShareStateKey {
@@ -341,7 +370,7 @@ impl ShareCoordinator {
     /// locally, or the underlying append error if `produce_batch` fails.
     async fn persist_record(
         &self,
-        state_partition: i32,
+        state_partition: StatePartitionIndex,
         key: ShareStateKey,
         value: Option<Bytes>,
     ) -> Result<i64, BrokerError> {
@@ -370,7 +399,7 @@ impl ShareCoordinator {
     /// current `log_start_offset`, trims the log up to it. Every retained key
     /// keeps its latest snapshot, so the trim is safe. Errors are logged and
     /// swallowed — pruning never fails a write.
-    async fn maybe_prune(&self, state_partition: i32) {
+    async fn maybe_prune(&self, state_partition: StatePartitionIndex) {
         let Some(part) = self.partitions.get(bootstrap::TOPIC, state_partition) else {
             return;
         };
@@ -426,7 +455,7 @@ impl ShareCoordinator {
     /// the in-memory state map. Assumes `leader_partitions` is already
     /// populated (via `refresh_leader_partitions`).
     async fn replay_led_partitions(&self) {
-        let local_partitions: Vec<i32> = self
+        let local_partitions: Vec<StatePartitionIndex> = self
             .leader_partitions
             .read()
             .await
@@ -441,7 +470,7 @@ impl ShareCoordinator {
 
             let mut offset = part.log_start_offset();
             loop {
-                let out = match part.read_log(offset, 1 << 20) {
+                let out = match part.read_log(offset, RECOVERY_READ_MAX_BYTES) {
                     Ok(o) => o,
                     Err(e) => {
                         warn!(

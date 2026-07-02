@@ -432,12 +432,20 @@ pub struct FileOpaConfig {
     pub expire_after_ms: i64,
 }
 
+/// Default OPA decision-cache capacity, in entries. Matches Strimzi's
+/// `KafkaAuthorizationOpa` default.
+const DEFAULT_OPA_MAXIMUM_CACHE_SIZE: usize = 50_000;
+
+/// Default OPA decision TTL: 1 hour, in milliseconds. Matches Strimzi's
+/// `KafkaAuthorizationOpa` default.
+const DEFAULT_OPA_EXPIRE_AFTER_MS: i64 = 60 * 60 * 1_000;
+
 fn default_opa_maximum_cache_size() -> usize {
-    50_000
+    DEFAULT_OPA_MAXIMUM_CACHE_SIZE
 }
 
 fn default_opa_expire_after_ms() -> i64 {
-    60 * 60 * 1_000
+    DEFAULT_OPA_EXPIRE_AFTER_MS
 }
 
 /// TOML shape of `[delegation_token]`. Maps to the three `delegation_token_*`
@@ -610,6 +618,14 @@ pub struct FileOAuthBearerConfig {
 /// Kafka protocol default for `sasl.kerberos.service.name`.
 const DEFAULT_KERBEROS_SERVICE_NAME: &str = "kafka";
 
+/// Default timeout for outbound introspection / userinfo HTTP requests,
+/// in milliseconds (10 s).
+const DEFAULT_INTROSPECTION_HTTP_TIMEOUT_MS: u64 = 10_000;
+
+/// Default clock-skew tolerance for `exp` / `iat` / `nbf` checks, in
+/// milliseconds. Matches the `crabka_security` validators' built-in default.
+const DEFAULT_ALLOWABLE_CLOCK_SKEW_MS: i64 = 30_000;
+
 /// TOML shape of `[gssapi]`. Maps to
 /// [`crabka_security::gssapi::GssapiConfig`]. `principal_to_local_rules`
 /// are parsed into `name::Rule` at `apply_to` time.
@@ -700,11 +716,11 @@ impl Default for FileAuditSpoolConfig {
 }
 
 fn default_spool_dir() -> String {
-    "audit-spool".to_string()
+    crate::config::DEFAULT_AUDIT_SPOOL_DIR.to_string()
 }
 
 fn default_spool_max_bytes() -> u64 {
-    1_073_741_824
+    crate::config::DEFAULT_AUDIT_SPOOL_MAX_BYTES
 }
 
 /// `[audit.signing]` — Ed25519 checkpoint signing key.
@@ -735,11 +751,11 @@ impl Default for FileAuditCheckpointConfig {
 }
 
 fn default_checkpoint_every_n() -> u64 {
-    1000
+    crate::config::DEFAULT_AUDIT_CHECKPOINT_EVERY_N
 }
 
 fn default_checkpoint_every_secs() -> u64 {
-    60
+    crate::config::DEFAULT_AUDIT_CHECKPOINT_EVERY_SECS
 }
 
 fn default_audit_enabled() -> bool {
@@ -747,7 +763,7 @@ fn default_audit_enabled() -> bool {
 }
 
 fn default_audit_topic() -> String {
-    "__crabka_audit".to_string()
+    crate::config::DEFAULT_AUDIT_TOPIC.to_string()
 }
 
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema, PartialEq)]
@@ -1054,9 +1070,11 @@ impl FileConfig {
                     *cfg.oauthbearer_jwks_signal_rx.lock().unwrap() = Some(signal_rx);
                     cfg.oauthbearer_jwks_last_successful_fetch_ms = last_successful;
                     cfg.oauthbearer_jwks_last_on_demand_refresh_ms = last_on_demand;
-                    cfg.oauthbearer_jwks_min_on_demand_pause = std::time::Duration::from_secs(
-                        u64::from(oauth.jwks_min_refresh_pause_seconds.unwrap_or(1)),
-                    );
+                    cfg.oauthbearer_jwks_min_on_demand_pause = oauth
+                        .jwks_min_refresh_pause_seconds
+                        .map_or(crate::config::DEFAULT_JWKS_MIN_ON_DEMAND_PAUSE, |s| {
+                            std::time::Duration::from_secs(u64::from(s))
+                        });
                     cfg.oauthbearer_jwks_ignore_key_use =
                         oauth.jwks_ignore_key_use.unwrap_or(false);
                 }
@@ -1088,7 +1106,9 @@ impl FileConfig {
                         .trim_end_matches(['\n', '\r'])
                         .to_string();
                     let timeout = std::time::Duration::from_millis(
-                        oauth.introspection_http_timeout_ms.unwrap_or(10_000),
+                        oauth
+                            .introspection_http_timeout_ms
+                            .unwrap_or(DEFAULT_INTROSPECTION_HTTP_TIMEOUT_MS),
                     );
                     let client = crate::oauth_introspection::ReqwestIntrospectionClient::new(
                         introspect_uri.clone(),
@@ -1111,7 +1131,9 @@ impl FileConfig {
                         // check for introspection (no JWT header).
                         custom_claim_check: custom_claim_check_compiled.clone(),
                         call_userinfo: oauth.userinfo_endpoint_uri.is_some(),
-                        allowable_clock_skew_ms: oauth.allowable_clock_skew_ms.unwrap_or(30_000),
+                        allowable_clock_skew_ms: oauth
+                            .allowable_clock_skew_ms
+                            .unwrap_or(DEFAULT_ALLOWABLE_CLOCK_SKEW_MS),
                         expected_audience: oauth.expected_audience.clone(),
                         // Claims mapping.
                         fallback_user_name_claim: oauth.fallback_user_name_claim.clone(),
@@ -1249,8 +1271,12 @@ impl FileConfig {
                     cfg.remote_log_metadata =
                         crate::config::RlmmKind::TopicBacked(crate::config::KafkaRlmmConfig {
                             bootstrap: km.map(|k| k.bootstrap.clone()).unwrap_or_default(),
-                            num_partitions: km.and_then(|k| k.num_partitions).unwrap_or(50),
-                            replication: km.and_then(|k| k.replication).unwrap_or(3),
+                            num_partitions: km
+                                .and_then(|k| k.num_partitions)
+                                .unwrap_or(crate::config::DEFAULT_RLMM_TOPIC_NUM_PARTITIONS),
+                            replication: km
+                                .and_then(|k| k.replication)
+                                .unwrap_or(crate::config::DEFAULT_RLMM_TOPIC_REPLICATION_FACTOR),
                             snapshot_interval: crate::config::DEFAULT_RLMM_SNAPSHOT_INTERVAL,
                             snapshot_dir: cfg.log_dir.join("remote-log-metadata"),
                             security: None,

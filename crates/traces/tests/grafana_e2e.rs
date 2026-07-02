@@ -100,6 +100,13 @@ struct TraceByIdResponse {
 
 const TENANT: &str = "tenant-a";
 const DOCKER_HOST_ALIAS: &str = "host.testcontainers.internal";
+/// Grafana HTTP port inside the container.
+const GRAFANA_HTTP_PORT: u16 = 3000;
+/// Prometheus HTTP port inside the container.
+const PROM_HTTP_PORT: u16 = 9090;
+/// Grafana admin username AND password (set via `GF_SECURITY_ADMIN_PASSWORD`,
+/// used as basic-auth on every Grafana API call).
+const GRAFANA_ADMIN: &str = "admin";
 const GRAFANA_TEMPO_DATASOURCE_UID: &str = "crabka-traces";
 const GRAFANA_PROM_DATASOURCE_UID: &str = "crabka-service-graph";
 /// `< 5` spans in the "big" trace -> forces a PARTIAL trace-by-id response.
@@ -902,9 +909,9 @@ async fn start_grafana() -> TestResult<ContainerAsync<GenericImage>> {
     let tag = std::env::var("CRABKA_GRAFANA_IMAGE_TAG").unwrap_or_else(|_| "latest".into());
     Ok(
         GenericImage::new("mirror.gcr.io/grafana/grafana".to_string(), tag)
-            .with_exposed_port(3000.tcp())
+            .with_exposed_port(GRAFANA_HTTP_PORT.tcp())
             .with_wait_for(WaitFor::seconds(5))
-            .with_env_var("GF_SECURITY_ADMIN_PASSWORD", "admin")
+            .with_env_var("GF_SECURITY_ADMIN_PASSWORD", GRAFANA_ADMIN)
             .with_host(DOCKER_HOST_ALIAS, Host::HostGateway)
             .start()
             .await?,
@@ -915,7 +922,7 @@ async fn start_prometheus() -> TestResult<ContainerAsync<GenericImage>> {
     let tag = std::env::var("CRABKA_PROM_IMAGE_TAG").unwrap_or_else(|_| "latest".into());
     Ok(
         GenericImage::new("mirror.gcr.io/prom/prometheus".to_string(), tag)
-            .with_exposed_port(9090.tcp())
+            .with_exposed_port(PROM_HTTP_PORT.tcp())
             .with_wait_for(WaitFor::message_on_stderr(
                 "Server is ready to receive web requests",
             ))
@@ -962,7 +969,7 @@ async fn wait_for_http_ok(client: &reqwest::Client, base: &str, paths: &[&str]) 
 async fn get_json(client: &reqwest::Client, url: &str) -> TestResult<JsonValue> {
     let resp = client
         .get(url)
-        .basic_auth("admin", Some("admin"))
+        .basic_auth(GRAFANA_ADMIN, Some(GRAFANA_ADMIN))
         .send()
         .await?;
     let status = resp.status();
@@ -978,7 +985,7 @@ async fn get_json(client: &reqwest::Client, url: &str) -> TestResult<JsonValue> 
 async fn get_text(client: &reqwest::Client, url: &str) -> TestResult<(ReqwestStatusCode, String)> {
     let resp = client
         .get(url)
-        .basic_auth("admin", Some("admin"))
+        .basic_auth(GRAFANA_ADMIN, Some(GRAFANA_ADMIN))
         .send()
         .await?;
     let status = resp.status();
@@ -1103,7 +1110,7 @@ async fn grafana_e2e_full_surface() -> TestResult {
 
     // ----- §4: Grafana + Tempo datasource + every Tempo endpoint. -----
     let grafana = start_grafana().await?;
-    let grafana_base = mapped_base_url(&grafana, 3000).await?;
+    let grafana_base = mapped_base_url(&grafana, GRAFANA_HTTP_PORT).await?;
     wait_for_http_ok(&client, &grafana_base, &["/api/health"]).await?;
 
     let tempo_ds = json!({
@@ -1118,7 +1125,7 @@ async fn grafana_e2e_full_surface() -> TestResult {
     });
     client
         .post(format!("{grafana_base}/api/datasources"))
-        .basic_auth("admin", Some("admin"))
+        .basic_auth(GRAFANA_ADMIN, Some(GRAFANA_ADMIN))
         .json(&tempo_ds)
         .send()
         .await?
@@ -1627,9 +1634,9 @@ async fn grafana_e2e_full_surface() -> TestResult {
 
     // ----- §5: Service Graph full loop through real Prometheus. -----
     let prom = start_prometheus().await?;
-    let prom_mapped = mapped_base_url(&prom, 9090).await?;
+    let prom_mapped = mapped_base_url(&prom, PROM_HTTP_PORT).await?;
     wait_for_http_ok(&client, &prom_mapped, &["/-/ready"]).await?;
-    let prom_port = prom.get_host_port_ipv4(9090).await?;
+    let prom_port = prom.get_host_port_ipv4(PROM_HTTP_PORT).await?;
     let rw_url = format!("{prom_mapped}/api/v1/write");
 
     // Drive the real metrics-generator chain: EdgeStore -> SeriesPayload ->
@@ -1678,7 +1685,7 @@ async fn grafana_e2e_full_surface() -> TestResult {
     });
     client
         .post(format!("{grafana_base}/api/datasources"))
-        .basic_auth("admin", Some("admin"))
+        .basic_auth(GRAFANA_ADMIN, Some(GRAFANA_ADMIN))
         .json(&prom_ds)
         .send()
         .await?

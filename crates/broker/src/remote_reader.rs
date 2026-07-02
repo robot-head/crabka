@@ -20,6 +20,15 @@ use tracing::warn;
 use zerocopy::byteorder::{I64, U32};
 use zerocopy::{BigEndian, FromBytes, Immutable, KnownLayout, Unaligned};
 
+/// Absolute (partition-level) log offset.
+pub(crate) type LogOffset = i64;
+/// Record timestamp in milliseconds since the Unix epoch.
+pub(crate) type TimestampMs = i64;
+/// Offset relative to a segment's base offset — the offset-index key.
+pub(crate) type RelativeOffset = u32;
+/// Byte position within a segment's `.log` file — the offset-index value.
+pub(crate) type BytePosition = u32;
+
 /// 8 bytes per entry: rel u32 BE + pos u32 BE. Mirrors
 /// `crabka_log::index::OffsetEntryRaw` so the remote-tier copy of an
 /// `OffsetIndex` file decodes through the same byte layout the local index
@@ -31,7 +40,10 @@ pub(crate) struct OffsetIndexEntry {
     position: U32<BigEndian>,
 }
 
-const _: () = assert!(std::mem::size_of::<OffsetIndexEntry>() == 8);
+/// Byte length of one serialized offset-index entry.
+const OFFSET_INDEX_ENTRY_LEN: usize = std::mem::size_of::<OffsetIndexEntry>();
+
+const _: () = assert!(OFFSET_INDEX_ENTRY_LEN == 8);
 
 /// 12 bytes per entry: ts i64 BE + rel u32 BE. Mirrors
 /// `crabka_log::index::TimeEntryRaw`.
@@ -42,7 +54,10 @@ pub(crate) struct TimeIndexEntry {
     relative_offset: U32<BigEndian>,
 }
 
-const _: () = assert!(std::mem::size_of::<TimeIndexEntry>() == 12);
+/// Byte length of one serialized time-index entry.
+const TIME_INDEX_ENTRY_LEN: usize = std::mem::size_of::<TimeIndexEntry>();
+
+const _: () = assert!(TIME_INDEX_ENTRY_LEN == 12);
 
 /// 24 bytes per entry: `start_offset` i64 BE + `last_offset` i64 BE +
 /// `producer_id` i64 BE. Mirrors `crabka_log::txn_index::AbortedTxnRaw` so the
@@ -56,13 +71,16 @@ pub(crate) struct AbortedTxnIndexEntry {
     producer_id: I64<BigEndian>,
 }
 
-const _: () = assert!(std::mem::size_of::<AbortedTxnIndexEntry>() == 24);
+/// Byte length of one serialized aborted-transaction index entry.
+const TXN_INDEX_ENTRY_LEN: usize = std::mem::size_of::<AbortedTxnIndexEntry>();
+
+const _: () = assert!(TXN_INDEX_ENTRY_LEN == 24);
 
 /// One decoded aborted-transaction entry from a remote segment's `.txnindex`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct AbortedTxnEntry {
-    pub(crate) start_offset: i64,
-    pub(crate) last_offset: i64,
+    pub(crate) start_offset: LogOffset,
+    pub(crate) last_offset: LogOffset,
     pub(crate) producer_id: i64,
 }
 
@@ -91,7 +109,7 @@ impl RemoteReader {
         &self,
         tp: &TopicIdPartition,
         leader_epoch: i32,
-        offset: i64,
+        offset: LogOffset,
         max_bytes: usize,
     ) -> Result<Option<RecordBatch>, RemoteStorageError> {
         // Primary lookup: epoch-indexed fast path.  The caller resolves
@@ -179,8 +197,8 @@ impl RemoteReader {
         &self,
         tp: &TopicIdPartition,
         leader_epoch: i32,
-        from_offset: i64,
-        to_offset: i64,
+        from_offset: LogOffset,
+        to_offset: LogOffset,
     ) -> Result<Vec<AbortedTxnEntry>, RemoteStorageError> {
         let Some(metadata) =
             self.rlmm
@@ -221,7 +239,7 @@ impl RemoteReader {
     pub(crate) fn earliest_offset(
         &self,
         tp: &TopicIdPartition,
-    ) -> Result<Option<i64>, RemoteStorageError> {
+    ) -> Result<Option<LogOffset>, RemoteStorageError> {
         let listed = self.rlmm.list_remote_log_segments(tp)?;
         Ok(listed
             .into_iter()
@@ -238,8 +256,8 @@ impl RemoteReader {
     pub(crate) async fn offset_for_timestamp(
         &self,
         tp: &TopicIdPartition,
-        target_timestamp: i64,
-    ) -> Result<Option<i64>, RemoteStorageError> {
+        target_timestamp: TimestampMs,
+    ) -> Result<Option<LogOffset>, RemoteStorageError> {
         let mut listed = self.rlmm.list_remote_log_segments(tp)?;
         listed.retain(|md| md.state() == RemoteLogSegmentState::CopySegmentFinished);
         listed.sort_by_key(RemoteLogSegmentMetadata::start_offset);
@@ -283,8 +301,8 @@ impl RemoteReader {
     async fn fetch_log_blocking(
         &self,
         metadata: RemoteLogSegmentMetadata,
-        start_position: u32,
-        end_position: Option<u32>,
+        start_position: BytePosition,
+        end_position: Option<BytePosition>,
     ) -> Result<Vec<u8>, RemoteStorageError> {
         let rsm = self.rsm.clone();
         match tokio::task::spawn_blocking(move || {
@@ -309,10 +327,10 @@ impl RemoteReader {
 /// `max_bytes` would reach or exceed `segment_size`. Otherwise the inclusive
 /// last byte to read.
 pub(crate) fn end_position_for(
-    start_position: u32,
+    start_position: BytePosition,
     segment_size: u32,
     max_bytes: usize,
-) -> Option<u32> {
+) -> Option<BytePosition> {
     if max_bytes == 0 {
         return None;
     }
@@ -340,7 +358,7 @@ fn corrupt_index(kind: &str) -> RemoteStorageError {
 /// `&[OffsetIndexEntry]` (8 bytes / entry: rel u32 BE + pos u32 BE). Trailing
 /// bytes that don't complete an 8-byte entry are ignored. Borrows from `bytes`.
 pub(crate) fn parse_offset_index(bytes: &[u8]) -> Result<&[OffsetIndexEntry], RemoteStorageError> {
-    let truncated_len = (bytes.len() / 8) * 8;
+    let truncated_len = (bytes.len() / OFFSET_INDEX_ENTRY_LEN) * OFFSET_INDEX_ENTRY_LEN;
     <[OffsetIndexEntry]>::ref_from_bytes(&bytes[..truncated_len])
         .map_err(|_| corrupt_index("offset"))
 }
@@ -349,7 +367,10 @@ pub(crate) fn parse_offset_index(bytes: &[u8]) -> Result<&[OffsetIndexEntry], Re
 /// or 0 when empty / target is before the first entry. Runs directly against
 /// the borrowed zero-copy slice — no owned `Vec` is materialized.
 #[must_use]
-pub(crate) fn position_for_relative_offset(entries: &[OffsetIndexEntry], target_rel: u32) -> u32 {
+pub(crate) fn position_for_relative_offset(
+    entries: &[OffsetIndexEntry],
+    target_rel: RelativeOffset,
+) -> BytePosition {
     match entries.binary_search_by_key(&target_rel, |e| e.relative_offset.get()) {
         Ok(i) => entries[i].position.get(),
         Err(0) => 0,
@@ -361,7 +382,7 @@ pub(crate) fn position_for_relative_offset(entries: &[OffsetIndexEntry], target_
 /// `&[TimeIndexEntry]` (12 bytes / entry: ts i64 BE + rel u32 BE). Trailing
 /// bytes that don't complete a 12-byte entry are ignored. Borrows from `bytes`.
 pub(crate) fn parse_time_index(bytes: &[u8]) -> Result<&[TimeIndexEntry], RemoteStorageError> {
-    let truncated_len = (bytes.len() / 12) * 12;
+    let truncated_len = (bytes.len() / TIME_INDEX_ENTRY_LEN) * TIME_INDEX_ENTRY_LEN;
     <[TimeIndexEntry]>::ref_from_bytes(&bytes[..truncated_len]).map_err(|_| corrupt_index("time"))
 }
 
@@ -370,7 +391,7 @@ pub(crate) fn parse_time_index(bytes: &[u8]) -> Result<&[TimeIndexEntry], Remote
 /// `last_offset` i64 BE, `producer_id` i64 BE). Trailing bytes that don't
 /// complete a 24-byte entry are ignored. Borrows from `bytes`.
 pub(crate) fn parse_txn_index(bytes: &[u8]) -> Result<&[AbortedTxnIndexEntry], RemoteStorageError> {
-    let truncated_len = (bytes.len() / 24) * 24;
+    let truncated_len = (bytes.len() / TXN_INDEX_ENTRY_LEN) * TXN_INDEX_ENTRY_LEN;
     <[AbortedTxnIndexEntry]>::ref_from_bytes(&bytes[..truncated_len])
         .map_err(|_| corrupt_index("transaction"))
 }
@@ -380,7 +401,11 @@ pub(crate) fn parse_txn_index(bytes: &[u8]) -> Result<&[AbortedTxnIndexEntry], R
 /// test against an inclusive range: the entry's `[start, last]` intersects
 /// `[from, to]` iff `start <= to && last >= from`.
 #[must_use]
-pub(crate) fn txn_overlaps(entry: &AbortedTxnIndexEntry, from_offset: i64, to_offset: i64) -> bool {
+pub(crate) fn txn_overlaps(
+    entry: &AbortedTxnIndexEntry,
+    from_offset: LogOffset,
+    to_offset: LogOffset,
+) -> bool {
     entry.start_offset.get() <= to_offset && entry.last_offset.get() >= from_offset
 }
 
@@ -389,8 +414,8 @@ pub(crate) fn txn_overlaps(entry: &AbortedTxnIndexEntry, from_offset: i64, to_of
 #[must_use]
 pub(crate) fn relative_offset_for_timestamp(
     entries: &[TimeIndexEntry],
-    target_ts: i64,
-) -> Option<u32> {
+    target_ts: TimestampMs,
+) -> Option<RelativeOffset> {
     entries
         .iter()
         .find(|e| e.timestamp.get() >= target_ts)
@@ -401,7 +426,7 @@ pub(crate) fn relative_offset_for_timestamp(
 /// `>= floor`. Used to skip past batches at the start of the returned byte
 /// range that the offset-index pointed at but that don't actually cover the
 /// requested offset (because Kafka offset indexes are sparse).
-fn first_batch_at_or_after(data: &[u8], floor: i64) -> Option<RecordBatch> {
+fn first_batch_at_or_after(data: &[u8], floor: LogOffset) -> Option<RecordBatch> {
     let mut cur: &[u8] = data;
     while !cur.is_empty() {
         let Ok(batch) = RecordBatch::decode(&mut cur) else {

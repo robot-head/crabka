@@ -45,6 +45,14 @@ const ERROR_SPAN_ID_HEX: &str = "0404040404040404";
 const OTLP_STATUS_CODE_ERROR: i32 = 2;
 const DOCKER_HOST_ALIAS: &str = "host.testcontainers.internal";
 const GRAFANA_TEMPO_DATASOURCE_UID: &str = "crabka-traces";
+/// Tempo query-frontend HTTP port inside the container (matches
+/// `http_listen_port` in [`TEMPO_CONFIG`]).
+const TEMPO_HTTP_PORT: u16 = 3200;
+/// Tempo OTLP/HTTP receiver port inside the container (matches the
+/// `distributor.receivers.otlp` endpoint in [`TEMPO_CONFIG`]).
+const TEMPO_OTLP_PORT: u16 = 4318;
+/// Grafana HTTP port inside the container.
+const GRAFANA_HTTP_PORT: u16 = 3000;
 const TEMPO_CONFIG: &str = r"
 multitenancy_enabled: false
 server:
@@ -144,8 +152,8 @@ fn differential_search_corpus_covers_selector_structural_and_pipeline_queries() 
 async fn real_tempo_and_crabka_match_basic_by_id_and_search() -> TestResult {
     let client = reqwest::Client::new();
     let tempo = start_tempo().await?;
-    let tempo_query = mapped_base_url(&tempo, 3200).await?;
-    let tempo_otlp = mapped_base_url(&tempo, 4318).await?;
+    let tempo_query = mapped_base_url(&tempo, TEMPO_HTTP_PORT).await?;
+    let tempo_otlp = mapped_base_url(&tempo, TEMPO_OTLP_PORT).await?;
     wait_for_http_ok(&client, &tempo_query, &["/ready", "/status"]).await?;
 
     let query_range = "start=0&end=1";
@@ -231,8 +239,8 @@ async fn real_tempo_and_crabka_match_basic_by_id_and_search() -> TestResult {
 async fn real_tempo_and_crabka_match_traceql_metrics_query_range() -> TestResult {
     let client = reqwest::Client::new();
     let tempo = start_tempo().await?;
-    let tempo_query = mapped_base_url(&tempo, 3200).await?;
-    let tempo_otlp = mapped_base_url(&tempo, 4318).await?;
+    let tempo_query = mapped_base_url(&tempo, TEMPO_HTTP_PORT).await?;
+    let tempo_otlp = mapped_base_url(&tempo, TEMPO_OTLP_PORT).await?;
     wait_for_http_ok(&client, &tempo_query, &["/ready", "/status"]).await?;
 
     let trace_start_secs = SystemTime::now()
@@ -287,8 +295,8 @@ async fn real_tempo_and_crabka_accept_query_param_alias() -> TestResult {
     // mirrors the live datasource exactly.
     let client = reqwest::Client::new();
     let tempo = start_tempo().await?;
-    let tempo_query = mapped_base_url(&tempo, 3200).await?;
-    let tempo_otlp = mapped_base_url(&tempo, 4318).await?;
+    let tempo_query = mapped_base_url(&tempo, TEMPO_HTTP_PORT).await?;
+    let tempo_otlp = mapped_base_url(&tempo, TEMPO_OTLP_PORT).await?;
     wait_for_http_ok(&client, &tempo_query, &["/ready", "/status"]).await?;
 
     let trace_start_secs = SystemTime::now()
@@ -345,8 +353,8 @@ async fn real_tempo_and_crabka_match_traceql_metrics_by_labels() -> TestResult {
     // breakdown blank even though the data and totals were correct.
     let client = reqwest::Client::new();
     let tempo = start_tempo().await?;
-    let tempo_query = mapped_base_url(&tempo, 3200).await?;
-    let tempo_otlp = mapped_base_url(&tempo, 4318).await?;
+    let tempo_query = mapped_base_url(&tempo, TEMPO_HTTP_PORT).await?;
+    let tempo_otlp = mapped_base_url(&tempo, TEMPO_OTLP_PORT).await?;
     wait_for_http_ok(&client, &tempo_query, &["/ready", "/status"]).await?;
 
     let trace_start_secs = SystemTime::now()
@@ -466,7 +474,7 @@ async fn grafana_accepts_tempo_datasource_pointing_at_crabka() -> TestResult {
     let crabka = start_crabka_pair_reachable_from_container(&otlp_body).await?;
 
     let grafana = start_grafana().await?;
-    let grafana_base = mapped_base_url(&grafana, 3000).await?;
+    let grafana_base = mapped_base_url(&grafana, GRAFANA_HTTP_PORT).await?;
     wait_for_http_ok(&client, &grafana_base, &["/api/health"]).await?;
 
     let payload = json!({
@@ -620,7 +628,7 @@ async fn grafana_service_graph_prometheus_datasource_and_series() -> TestResult 
     let client = reqwest::Client::new();
 
     let grafana = start_grafana().await?;
-    let grafana_base = mapped_base_url(&grafana, 3000).await?;
+    let grafana_base = mapped_base_url(&grafana, GRAFANA_HTTP_PORT).await?;
     wait_for_http_ok(&client, &grafana_base, &["/api/health"]).await?;
 
     // (1) Grafana-side wiring: provision the Prometheus datasource that backs the
@@ -898,8 +906,8 @@ async fn start_tempo() -> TestResult<testcontainers::ContainerAsync<GenericImage
     let tag = std::env::var("CRABKA_TEMPO_IMAGE_TAG").unwrap_or_else(|_| "latest".into());
     Ok(
         GenericImage::new("mirror.gcr.io/grafana/tempo".to_string(), tag)
-            .with_exposed_port(3200.tcp())
-            .with_exposed_port(4318.tcp())
+            .with_exposed_port(TEMPO_HTTP_PORT.tcp())
+            .with_exposed_port(TEMPO_OTLP_PORT.tcp())
             .with_wait_for(WaitFor::message_on_stderr("Tempo started"))
             .with_copy_to(
                 CopyTargetOptions::new("/tmp/tempo.yaml").with_mode(0o644),
@@ -916,7 +924,7 @@ async fn start_grafana() -> TestResult<testcontainers::ContainerAsync<GenericIma
     let tag = std::env::var("CRABKA_GRAFANA_IMAGE_TAG").unwrap_or_else(|_| "latest".into());
     Ok(
         GenericImage::new("mirror.gcr.io/grafana/grafana".to_string(), tag)
-            .with_exposed_port(3000.tcp())
+            .with_exposed_port(GRAFANA_HTTP_PORT.tcp())
             .with_wait_for(WaitFor::seconds(5))
             .with_env_var("GF_SECURITY_ADMIN_PASSWORD", "admin")
             .with_host(DOCKER_HOST_ALIAS, Host::HostGateway)
