@@ -1032,7 +1032,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
     env:
       # Run nextest under the `ci` profile so the test-group serialization in
       # .config/nextest.toml applies (the fixed-port broker / schema-registry
@@ -1066,7 +1066,7 @@ jobs:
           git diff "origin/${{ github.base_ref }}...HEAD" | tee git.diff
       - name: Mutants
         run: |
-          cargo mutants --no-shuffle -vV --shard ${{ matrix.shard }}/8 --baseline=skip --timeout 300 --in-place --in-diff git.diff
+          cargo mutants --no-shuffle -vV --shard ${{ matrix.shard }}/32 --baseline=skip --timeout 300 --in-place --in-diff git.diff
       - name: Archive mutants.out
         if: always()
         uses: actions/upload-artifact@v7
