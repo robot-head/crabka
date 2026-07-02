@@ -68,8 +68,8 @@ const ADVERTISED_PRE_AUTH_APIS: [i16; 3] = [
 ];
 
 /// Version range advertised for every pre-auth API in the minimal
-/// `ApiVersionsResponse v0` (covers SaslHandshake v0-1, SaslAuthenticate
-/// v0-2, ApiVersions v0 — the versions the inbound state machine accepts).
+/// `ApiVersionsResponse v0` (covers `SaslHandshake` v0-1, `SaslAuthenticate`
+/// v0-2, `ApiVersions` v0 — the versions the inbound state machine accepts).
 const ADVERTISED_MIN_VERSION: i16 = 0;
 /// See [`ADVERTISED_MIN_VERSION`].
 const ADVERTISED_MAX_VERSION: i16 = 2;
