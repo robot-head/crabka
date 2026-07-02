@@ -10,6 +10,14 @@ db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
 ignore = [
+    # quick-xml DoS advisories (quadratic duplicate-attribute check and
+    # unbounded namespace-declaration allocation). Patched only in
+    # quick-xml >= 0.41, which our dependents (polars-io and the S3 XML
+    # paths) do not accept yet; Crabka never feeds attacker-controlled XML
+    # into these parsers (S3/object-store responses are from configured
+    # endpoints). Drop these once upstreams take quick-xml 0.41.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
     # RSA "Marvin" timing side-channel. Pulled in transitively by `picky`
     # (a hard dependency of the vendored `sspi` Kerberos stack). Our GSSAPI
     # path is auth-only over AES keytab keys and performs no RSA private-key
