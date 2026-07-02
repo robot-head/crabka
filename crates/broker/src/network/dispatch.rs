@@ -31,16 +31,16 @@ use crate::error::BrokerError;
 use crate::handlers::{ApiKeyCode, ApiVersion, CorrelationId};
 use crate::network::codec::{self, MAX_FRAME_BYTES};
 
-/// `ApiVersions` wire api_key. Named separately because it is the one API
+/// `ApiVersions` wire `api_key`. Named separately because it is the one API
 /// whose response header is always v0 regardless of body flexibility, and
 /// whose v3+ request carries the KIP-511 client software name/version.
 const API_VERSIONS_KEY: ApiKeyCode = ApiKey::ApiVersions as i16;
 
-/// `SaslHandshake` wire api_key — handled inline (before the handler table)
+/// `SaslHandshake` wire `api_key` — handled inline (before the handler table)
 /// because it mutates the per-connection auth state.
 const SASL_HANDSHAKE_KEY: ApiKeyCode = ApiKey::SaslHandshake as i16;
 
-/// `SaslAuthenticate` wire api_key — handled inline (before the handler
+/// `SaslAuthenticate` wire `api_key` — handled inline (before the handler
 /// table) because it mutates the per-connection auth state.
 const SASL_AUTHENTICATE_KEY: ApiKeyCode = ApiKey::SaslAuthenticate as i16;
 
@@ -938,6 +938,7 @@ async fn try_handle_sasl_frame(
     Some(handle_sasl_frame(broker, frame, auth, api_key, sasl_mechanisms).await)
 }
 
+#[allow(clippy::too_many_lines)]
 async fn handle_sasl_frame(
     broker: &Broker,
     frame: &[u8],
@@ -4230,6 +4231,7 @@ fn parse_request_header(
 /// For the handful of APIs the MVP supports, this is a small static table;
 /// keep it next to the handler registry so adding a new handler updates one
 /// place.
+#[allow(clippy::too_many_lines)]
 fn handler_body_flexible(api_key: ApiKeyCode, version: ApiVersion) -> bool {
     use crabka_protocol::owned;
     let Some(key) = ApiKey::from_i16(api_key) else {

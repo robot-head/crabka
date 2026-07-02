@@ -295,7 +295,10 @@ mod tests {
             .unwrap();
         m.update_remote_log_segment_metadata(finish(10)).unwrap();
         let listed = m.list_remote_log_segments(&tp()).unwrap();
-        let start_offsets: Vec<i64> = listed.iter().map(|s| s.start_offset()).collect();
+        let start_offsets: Vec<i64> = listed
+            .iter()
+            .map(RemoteLogSegmentMetadata::start_offset)
+            .collect();
         assert!(start_offsets == [0, 100]);
     }
 

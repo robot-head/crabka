@@ -56,11 +56,11 @@ const API_KEY_API_VERSIONS: i16 = 18;
 const REQUEST_HEADER_PREFIX_LEN: usize = 10;
 
 /// `SaslAuthenticate (36)` switches to flexible (v2) request *and* response
-/// headers starting at this api_version (KIP-482 flexible-versions cutover).
+/// headers starting at this `api_version` (KIP-482 flexible-versions cutover).
 const SASL_AUTHENTICATE_FLEXIBLE_VERSION: i16 = 2;
 
 /// Pre-auth APIs advertised in the hand-rolled `ApiVersionsResponse v0`,
-/// in wire order: SaslHandshake, SaslAuthenticate, ApiVersions.
+/// in wire order: `SaslHandshake`, `SaslAuthenticate`, `ApiVersions`.
 const ADVERTISED_PRE_AUTH_APIS: [i16; 3] = [
     API_KEY_SASL_HANDSHAKE,
     API_KEY_SASL_AUTHENTICATE,
