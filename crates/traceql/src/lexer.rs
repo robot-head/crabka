@@ -368,64 +368,46 @@ mod tests {
 
     #[test]
     fn structural_maximal_munch() {
-        assert!(
-            toks("a >> b")
-                == vec![
-                    Token::Ident("a".into()),
-                    Token::Desc,
-                    Token::Ident("b".into())
-                ]
-        );
-        assert!(
-            toks("a !>> b")
-                == vec![
-                    Token::Ident("a".into()),
-                    Token::NegDesc,
-                    Token::Ident("b".into())
-                ]
-        );
-        assert!(
-            toks("a &>> b")
-                == vec![
-                    Token::Ident("a".into()),
-                    Token::UnionDesc,
-                    Token::Ident("b".into()),
-                ]
-        );
-        assert!(
-            toks("a !> b")
-                == vec![
-                    Token::Ident("a".into()),
-                    Token::NegChild,
-                    Token::Ident("b".into())
-                ]
-        );
-        assert!(
-            toks("a &~ b")
-                == vec![
-                    Token::Ident("a".into()),
-                    Token::UnionSibling,
-                    Token::Ident("b".into()),
-                ]
-        );
+        for (input, mid) in [
+            ("a >> b", Token::Desc),
+            ("a !>> b", Token::NegDesc),
+            ("a &>> b", Token::UnionDesc),
+            ("a !> b", Token::NegChild),
+            ("a &~ b", Token::UnionSibling),
+        ] {
+            assert!(
+                toks(input) == vec![Token::Ident("a".into()), mid, Token::Ident("b".into())],
+                "input: {input}"
+            );
+        }
     }
 
     #[test]
     fn comparison_and_regex_and_ge() {
-        assert!(
-            toks("x =~ \"a.*\"")
-                == vec![
+        for (input, want) in [
+            (
+                "x =~ \"a.*\"",
+                vec![
                     Token::Ident("x".into()),
                     Token::Re,
                     Token::Str("a.*".into()),
-                ]
-        );
-        assert!(
-            toks("x !~ \"a\"")
-                == vec![Token::Ident("x".into()), Token::Nre, Token::Str("a".into())]
-        );
-        assert!(toks("d >= 5") == vec![Token::Ident("d".into()), Token::Gte, Token::Int(5)]);
-        assert!(toks("d <= 5") == vec![Token::Ident("d".into()), Token::Lte, Token::Int(5)]);
+                ],
+            ),
+            (
+                "x !~ \"a\"",
+                vec![Token::Ident("x".into()), Token::Nre, Token::Str("a".into())],
+            ),
+            (
+                "d >= 5",
+                vec![Token::Ident("d".into()), Token::Gte, Token::Int(5)],
+            ),
+            (
+                "d <= 5",
+                vec![Token::Ident("d".into()), Token::Lte, Token::Int(5)],
+            ),
+        ] {
+            assert!(toks(input) == want, "input: {input}");
+        }
     }
 
     #[test]
@@ -450,31 +432,32 @@ mod tests {
 
     #[test]
     fn literals_and_nil_and_durations() {
-        assert!(toks("nil") == vec![Token::Nil]);
-        assert!(toks("true false") == vec![Token::Bool(true), Token::Bool(false)]);
-        assert!(toks("1.5") == vec![Token::Float(1.5)]);
-        assert!(toks("100ms") == vec![Token::Ident("100ms".into())]);
+        for (input, want) in [
+            ("nil", vec![Token::Nil]),
+            ("true false", vec![Token::Bool(true), Token::Bool(false)]),
+            ("1.5", vec![Token::Float(1.5)]),
+            ("100ms", vec![Token::Ident("100ms".into())]),
+        ] {
+            assert!(toks(input) == want, "input: {input}");
+        }
     }
 
     #[test]
     fn identifier_character_helpers_match_traceql_grammar() {
-        assert!(is_ident_start('_'));
-        assert!(is_ident_start('a'));
-        assert!(!is_ident_start('1'));
-        assert!(!is_ident_start('@'));
+        for (ch, want) in [('_', true), ('a', true), ('1', false), ('@', false)] {
+            assert!(is_ident_start(ch) == want, "ch: {ch:?}");
+        }
 
-        assert!(is_ident_continue('_'));
-        assert!(is_ident_continue('-'));
-        assert!(is_ident_continue('1'));
-        assert!(!is_ident_continue('@'));
+        for (ch, want) in [('_', true), ('-', true), ('1', true), ('@', false)] {
+            assert!(is_ident_continue(ch) == want, "ch: {ch:?}");
+        }
     }
 
     #[test]
     fn leading_dot_fraction_is_single_float_preserving_zeros() {
-        assert!(toks(".05") == vec![Token::Float(0.05)]);
-        assert!(toks(".99") == vec![Token::Float(0.99)]);
-        assert!(toks(".5") == vec![Token::Float(0.5)]);
-        assert!(toks(".009") == vec![Token::Float(0.009)]);
+        for (input, want) in [(".05", 0.05), (".99", 0.99), (".5", 0.5), (".009", 0.009)] {
+            assert!(toks(input) == vec![Token::Float(want)], "input: {input}");
+        }
     }
 
     #[test]
@@ -507,8 +490,11 @@ mod tests {
 
     #[test]
     fn advance_rejects_zero_or_out_of_bounds_progress() {
-        assert!(advance("abc", 0, 1).unwrap() == 1);
-        assert!(advance("abc", 1, 0).is_err());
-        assert!(advance("abc", 2, 2).is_err());
+        for (pos, len, want) in [(0, 1, Some(1)), (1, 0, None), (2, 2, None)] {
+            assert!(
+                advance("abc", pos, len).ok() == want,
+                "pos: {pos}, len: {len}"
+            );
+        }
     }
 }

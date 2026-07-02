@@ -242,7 +242,7 @@ impl SpanSource for MockSpanSource {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+    use assert2::{assert, check};
 
     use super::*;
     use crate::metricsgen::contract::{SpanKind, SpanRecord, StatusCode};
@@ -317,9 +317,9 @@ mod tests {
     async fn mock_sink_records_writes_and_can_fail_once() {
         let sink = MockRemoteWriteSink::default();
         sink.fail_next();
-        assert!(sink.write(&payload()).await.is_err());
-        assert!(sink.write(&payload()).await.is_ok());
-        assert!(sink.writes().len() == 1);
+        check!(sink.write(&payload()).await.is_err());
+        check!(sink.write(&payload()).await.is_ok());
+        check!(sink.writes().len() == 1);
     }
 
     #[tokio::test]
@@ -342,23 +342,26 @@ mod tests {
 
         let projected = project_wal_record(record, 123);
 
-        assert!(projected.tenant == "tenant-a");
-        assert!(projected.trace_id == [0xAB; 16]);
-        assert!(projected.span_id == [0xCD; 8]);
-        assert!(projected.parent_span_id == [0xEF; 8]);
-        assert!(projected.service_name == "checkout");
-        assert!(projected.size_bytes == 123);
-        assert!(
-            projected
-                .attributes
-                .iter()
-                .any(|(k, v)| k == "db.system" && v == "postgresql")
-        );
-        assert!(
-            projected
-                .attributes
-                .iter()
-                .any(|(k, v)| k == "http.status_code" && v == "200")
+        assert_eq!(
+            projected,
+            SpanRecord {
+                tenant: "tenant-a".into(),
+                trace_id: [0xAB; 16],
+                span_id: [0xCD; 8],
+                parent_span_id: [0xEF; 8],
+                name: "GET /checkout".into(),
+                kind: SpanKind::Server,
+                start_ns: 10,
+                duration_ns: 5_000_000,
+                status: StatusCode::Ok,
+                status_message: String::new(),
+                service_name: "checkout".into(),
+                attributes: vec![
+                    ("db.system".into(), "postgresql".into()),
+                    ("http.status_code".into(), "200".into()),
+                ],
+                size_bytes: 123,
+            }
         );
     }
 
@@ -394,8 +397,8 @@ mod tests {
 
         let projected = decode_consumer_records(records).unwrap();
 
-        assert!(projected.len() == 1);
-        assert!(projected[0].tenant == "tenant-a");
-        assert!(projected[0].size_bytes == u64::try_from(bytes.len()).unwrap());
+        assert_eq!(projected.len(), 1);
+        check!(projected[0].tenant == "tenant-a");
+        check!(projected[0].size_bytes == u64::try_from(bytes.len()).unwrap());
     }
 }

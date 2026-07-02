@@ -368,33 +368,22 @@ mod tests {
         m.record_query("search", true, 0.02);
         m.record_query("search", false, 0.03);
         m.record_query("tags", true, 0.01);
-        assert!(
-            m.query_requests
-                .get_or_create(&RouteStatusLabel {
-                    route: "search".into(),
-                    status: "ok".into()
-                })
-                .get()
-                == 2
-        );
-        assert!(
-            m.query_requests
-                .get_or_create(&RouteStatusLabel {
-                    route: "search".into(),
-                    status: "error".into()
-                })
-                .get()
-                == 1
-        );
-        assert!(
-            m.query_requests
-                .get_or_create(&RouteStatusLabel {
-                    route: "tags".into(),
-                    status: "ok".into()
-                })
-                .get()
-                == 1
-        );
+        for (route, status, want) in [
+            ("search", "ok", 2),
+            ("search", "error", 1),
+            ("tags", "ok", 1),
+        ] {
+            assert!(
+                m.query_requests
+                    .get_or_create(&RouteStatusLabel {
+                        route: route.into(),
+                        status: status.into()
+                    })
+                    .get()
+                    == want,
+                "case route={route} status={status}"
+            );
+        }
     }
 
     #[tokio::test]

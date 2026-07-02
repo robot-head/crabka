@@ -622,9 +622,9 @@ mod tests {
 
     #[test]
     fn validate_topic_name_rejects_invalid_chars() {
-        assert!(validate_kafka_topic_name("has space").is_err());
-        assert!(validate_kafka_topic_name("has/slash").is_err());
-        assert!(validate_kafka_topic_name("has@at").is_err());
+        for name in ["has space", "has/slash", "has@at"] {
+            assert!(validate_kafka_topic_name(name).is_err(), "case {name:?}");
+        }
     }
 
     #[test]

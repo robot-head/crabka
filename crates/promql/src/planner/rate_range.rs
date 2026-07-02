@@ -270,6 +270,7 @@ fn build_leaf_batch(
 mod tests {
     use arrow::array::{Float64Array, StringArray};
     use assert2::assert;
+    use assert2::check;
 
     use super::*;
 
@@ -330,9 +331,9 @@ mod tests {
                 got.push((job.value(row).to_string(), value.value(row)));
             }
         }
-        assert!(got.len() == 1);
-        assert!(got[0].0 == "a");
-        assert!(approx_eq(got[0].1, 5.0 / 300.0));
+        check!(got.len() == 1);
+        check!(got[0].0 == "a");
+        check!(approx_eq(got[0].1, 5.0 / 300.0));
     }
 
     /// `increase` reset correction flows through the chain: 1,2,1 -> 2.0.

@@ -4,7 +4,7 @@
 //! finalizer patches). Admin-client behavior is covered by the
 //! integration test in `crates/client-admin/tests/round_trip.rs`.
 
-use assert2::assert;
+use assert2::{assert, check};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -97,9 +97,13 @@ async fn missing_cluster_label_sets_status() {
         .expect("status PATCH must have been captured");
     let body: serde_json::Value = serde_json::from_slice(status_patch.body()).unwrap();
     let cond = &body["status"]["conditions"][0];
-    assert!(cond["type"] == "Ready");
-    assert!(cond["status"] == "False");
-    assert!(cond["reason"] == "MissingClusterLabel");
+    for (key, want) in [
+        ("type", "Ready"),
+        ("status", "False"),
+        ("reason", "MissingClusterLabel"),
+    ] {
+        assert!(cond[key] == want, "cond[{key:?}]");
+    }
 }
 
 /// `KafkaTopic` referencing a Kafka that doesn't exist → status
@@ -357,19 +361,19 @@ async fn creates_topic_on_first_reconcile() {
     assert!(matches!(&calls[0], RecordedCall::Metadata(t) if t == &vec![TOPIC_NAME.to_string()]));
     match &calls[1] {
         RecordedCall::CreateTopics(specs) => {
-            assert!(specs.len() == 1);
-            assert!(specs[0].name == TOPIC_NAME);
-            assert!(specs[0].partitions == 3);
-            assert!(specs[0].replicas == 1);
+            check!(specs.len() == 1);
+            check!(specs[0].name == TOPIC_NAME);
+            check!(specs[0].partitions == 3);
+            check!(specs[0].replicas == 1);
         }
         other => panic!("expected CreateTopics, got {other:?}"),
     }
 
     let body = last_status_patch_body(&state, TOPIC_NAME);
     let cond = &body["status"]["conditions"][0];
-    assert!(cond["status"] == "True");
-    assert!(cond["reason"] == "Ready");
-    assert!(
+    check!(cond["status"] == "True");
+    check!(cond["reason"] == "Ready");
+    check!(
         body["status"]["topicId"].is_string(),
         "topicId should be a uuid string, got {:?}",
         body["status"]["topicId"],
@@ -459,9 +463,9 @@ async fn partition_increase_triggers_create_partitions() {
             _ => None,
         })
         .expect("CreatePartitions call expected");
-    assert!(cp.len() == 1);
-    assert!(cp[0].name == TOPIC_NAME);
-    assert!(cp[0].new_total_count == 5);
+    check!(cp.len() == 1);
+    check!(cp[0].name == TOPIC_NAME);
+    check!(cp[0].new_total_count == 5);
 
     let body = last_status_patch_body(&state, TOPIC_NAME);
     assert!(body["status"]["conditions"][0]["status"] == "True");

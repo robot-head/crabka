@@ -20,7 +20,7 @@
 //! `broker-{id}.toml` key per pool — we have to enumerate the pools
 //! first to know which keys to emit.
 
-use assert2::assert;
+use assert2::{assert, check};
 use std::sync::Arc;
 
 use crabka_operator::controller::kafka::reconcile;
@@ -408,28 +408,38 @@ async fn kafka_applies_service_configmap_secret_no_statefulset() {
         );
     }
 
-    assert!(methods_and_uris[0].0 == Method::PATCH);
-    assert!(
-        methods_and_uris[0]
-            .1
-            .contains("/services/demo-broker-headless"),
-        "step 1 should patch the service: {}",
-        methods_and_uris[0].1
-    );
-
-    assert!(methods_and_uris[1].0 == Method::GET);
-    assert!(
-        methods_and_uris[1].1.contains("/secrets/demo-cluster-id"),
-        "step 2 should get the cluster-id secret: {}",
-        methods_and_uris[1].1
-    );
-
-    assert!(methods_and_uris[2].0 == Method::POST);
-    assert!(
-        methods_and_uris[2].1.contains("/namespaces/y/secrets"),
-        "step 3 should create the cluster-id secret: {}",
-        methods_and_uris[2].1
-    );
+    for (idx, want_method, want_substr, what) in [
+        (
+            0,
+            Method::PATCH,
+            "/services/demo-broker-headless",
+            "patch the service",
+        ),
+        (
+            1,
+            Method::GET,
+            "/secrets/demo-cluster-id",
+            "get the cluster-id secret",
+        ),
+        (
+            2,
+            Method::POST,
+            "/namespaces/y/secrets",
+            "create the cluster-id secret",
+        ),
+    ] {
+        let (method, uri) = &methods_and_uris[idx];
+        assert!(
+            *method == want_method,
+            "step {} should {what}: {uri}",
+            idx + 1
+        );
+        assert!(
+            uri.contains(want_substr),
+            "step {} should {what}: {uri}",
+            idx + 1
+        );
+    }
 
     // Steps 4-11: CA secret lifecycle.
     // After the POST, the next 8 requests are CA-related GETs and PATCHes.
@@ -458,14 +468,14 @@ async fn kafka_applies_service_configmap_secret_no_statefulset() {
         .iter()
         .position(|(m, u)| *m == Method::PATCH && u.contains("/configmaps/demo-broker-config"))
         .unwrap();
-    assert!(
+    check!(
         cm_idx > pool_list_idx,
         "configmap patch ({cm_idx}) must come after pool list ({pool_list_idx}): {}",
         cm_req.1
     );
 
     // Pool owner-ref adopt.
-    assert!(
+    check!(
         methods_and_uris
             .iter()
             .any(|(m, u)| *m == Method::PATCH && u.contains("/kafkanodepools/brokers")),
@@ -473,14 +483,14 @@ async fn kafka_applies_service_configmap_secret_no_statefulset() {
     );
 
     // Status patch is last.
-    assert!(methods_and_uris[16].0 == Method::PATCH);
-    assert!(
+    check!(methods_and_uris[16].0 == Method::PATCH);
+    check!(
         methods_and_uris[16].1.contains("/kafkas/demo/status"),
         "step 17 should patch Kafka status: {}",
         methods_and_uris[16].1
     );
 
-    assert!(
+    check!(
         state.remaining_rules() == 0,
         "every preloaded rule should have been consumed"
     );
@@ -504,13 +514,13 @@ async fn kafka_status_no_node_pools_when_list_empty() {
     let body: serde_json::Value =
         serde_json::from_slice(status_patch.body()).expect("status PATCH body is JSON");
     let cond = &body["status"]["conditions"][0];
-    assert!(cond["type"] == "Ready", "body = {body}");
-    assert!(cond["status"] == "False", "body = {body}");
-    assert!(cond["reason"] == "NoNodePools", "body = {body}");
-    assert!(body["status"]["replicas"] == json!(0), "body = {body}");
-    assert!(body["status"]["readyReplicas"] == json!(0), "body = {body}");
+    check!(cond["type"] == "Ready", "body = {body}");
+    check!(cond["status"] == "False", "body = {body}");
+    check!(cond["reason"] == "NoNodePools", "body = {body}");
+    check!(body["status"]["replicas"] == json!(0), "body = {body}");
+    check!(body["status"]["readyReplicas"] == json!(0), "body = {body}");
 
-    assert!(state.remaining_rules() == 0);
+    check!(state.remaining_rules() == 0);
 }
 
 #[tokio::test]
@@ -538,12 +548,12 @@ async fn kafka_status_aggregates_pool_readyreplicas() {
         .iter()
         .find(|c| c["type"] == "Ready")
         .expect("Ready condition present");
-    assert!(ready["status"] == "True", "body = {body}");
-    assert!(ready["reason"] == "Available", "body = {body}");
-    assert!(body["status"]["replicas"] == json!(1), "body = {body}");
-    assert!(body["status"]["readyReplicas"] == json!(1), "body = {body}");
+    check!(ready["status"] == "True", "body = {body}");
+    check!(ready["reason"] == "Available", "body = {body}");
+    check!(body["status"]["replicas"] == json!(1), "body = {body}");
+    check!(body["status"]["readyReplicas"] == json!(1), "body = {body}");
 
-    assert!(state.remaining_rules() == 0);
+    check!(state.remaining_rules() == 0);
 }
 
 #[tokio::test]
@@ -577,16 +587,16 @@ async fn kafka_patches_pool_label_with_config_hash() {
         .unwrap_or_else(|| {
             panic!("expected metadata.labels[crabka.io/config-hash] str, body = {body}")
         });
-    assert!(
+    check!(
         hash.len() == 16,
         "config-hash must be exactly 16 hex chars, got {hash:?}, body = {body}"
     );
-    assert!(
+    check!(
         hash.chars().all(|c| c.is_ascii_hexdigit()),
         "config-hash must contain only hex digits, got {hash:?}, body = {body}",
     );
 
-    assert!(state.remaining_rules() == 0);
+    check!(state.remaining_rules() == 0);
 }
 
 /// Variant carrying explicit `spec.kafkaVersion` + `spec.metadataVersion`
@@ -697,9 +707,9 @@ async fn kafka_inline_logging_renders_rust_log_key() {
     );
 
     let cond = logging_condition(&observed);
-    assert!(cond["status"] == "True");
-    assert!(cond["reason"] == "Available");
-    assert!(state.remaining_rules() == 0);
+    check!(cond["status"] == "True");
+    check!(cond["reason"] == "Available");
+    check!(state.remaining_rules() == 0);
 }
 
 /// A logging-unset cluster surfaces `LoggingReady=False/Disabled`
@@ -897,15 +907,15 @@ async fn kafka_metadata_version_too_high_blocks() {
         .iter()
         .find(|c| c["type"] == "KafkaVersionValid")
         .unwrap_or_else(|| panic!("KafkaVersionValid present, body = {body}"));
-    assert!(vcond["status"] == "False", "body = {body}");
-    assert!(vcond["reason"] == "MetadataVersionTooHigh", "body = {body}");
+    check!(vcond["status"] == "False", "body = {body}");
+    check!(vcond["reason"] == "MetadataVersionTooHigh", "body = {body}");
     // Finalized metadata version is not advanced (was never set).
-    assert!(
+    check!(
         body["status"]["metadataVersion"].is_null(),
         "metadataVersion must not be finalized on rejection, body = {body}"
     );
 
-    assert!(state.remaining_rules() == 0);
+    check!(state.remaining_rules() == 0);
 }
 
 #[tokio::test]
@@ -933,10 +943,10 @@ async fn kafka_status_includes_rolling_condition_stable() {
         .iter()
         .find(|c| c["type"] == "Rolling")
         .unwrap_or_else(|| panic!("Rolling condition present, body = {body}"));
-    assert!(rolling["status"] == "False", "body = {body}");
-    assert!(rolling["reason"] == "Stable", "body = {body}");
+    check!(rolling["status"] == "False", "body = {body}");
+    check!(rolling["reason"] == "Stable", "body = {body}");
 
-    assert!(state.remaining_rules() == 0);
+    check!(state.remaining_rules() == 0);
 }
 
 /// When `spec.listeners` is empty the operator synthesizes a
@@ -983,14 +993,14 @@ async fn kafka_status_synthesized_default_listener_is_valid_and_ready() {
         .as_array()
         .unwrap_or_else(|| panic!("status.listeners array, body = {body}"));
     assert!(listeners.len() == 1, "body = {body}");
-    assert!(listeners[0]["name"] == "PLAIN", "body = {body}");
-    assert!(listeners[0]["type"] == "internal", "body = {body}");
-    assert!(
+    check!(listeners[0]["name"] == "PLAIN", "body = {body}");
+    check!(listeners[0]["type"] == "internal", "body = {body}");
+    check!(
         listeners[0]["bootstrapServers"] == "demo-broker-headless.y.svc.cluster.local:9092",
         "body = {body}"
     );
 
-    assert!(state.remaining_rules() == 0);
+    check!(state.remaining_rules() == 0);
 }
 
 /// A listener with `authentication=Tls` (mTLS) but `tls=false`
@@ -1075,18 +1085,18 @@ async fn kafka_mtls_without_tls_blocks_broker_configmap_and_sets_conditions() {
         .iter()
         .find(|c| c["type"] == "ListenersReady")
         .unwrap_or_else(|| panic!("ListenersReady present, body = {body}"));
-    assert!(ready["status"] == "False", "body = {body}");
-    assert!(ready["reason"] == "ListenersInvalid", "body = {body}");
+    check!(ready["status"] == "False", "body = {body}");
+    check!(ready["reason"] == "ListenersInvalid", "body = {body}");
 
     // status.listeners is empty on the validation-failure path.
-    assert!(
+    check!(
         body["status"]["listeners"]
             .as_array()
             .is_none_or(Vec::is_empty),
         "body = {body}"
     );
 
-    assert!(state.remaining_rules() == 0);
+    check!(state.remaining_rules() == 0);
 }
 
 /// Helper: pull the `MetricsReady` condition out of a status PATCH body.
@@ -1131,10 +1141,10 @@ async fn metrics_disabled_no_dynamic_apply() {
     let body: serde_json::Value =
         serde_json::from_slice(status_patch.body()).expect("status body is JSON");
     let cond = metrics_ready_cond(&body);
-    assert!(cond["status"] == "False", "body = {body}");
-    assert!(cond["reason"] == "Disabled", "body = {body}");
+    check!(cond["status"] == "False", "body = {body}");
+    check!(cond["reason"] == "Disabled", "body = {body}");
 
-    assert!(state.remaining_rules() == 0);
+    check!(state.remaining_rules() == 0);
 }
 
 /// Faked apply-patch response that echoes a minimal `PodMonitor` body.
@@ -1216,17 +1226,17 @@ async fn pod_monitor_path_applies_one_resource() {
         "expected exactly one PodMonitor PATCH"
     );
     let uri = pm_patches[0].uri().to_string();
-    assert!(
+    check!(
         uri.contains("fieldManager=crabka-operator"),
         "PATCH must carry the operator's field manager: {uri}"
     );
-    assert!(
+    check!(
         uri.contains("force=true"),
         "PATCH must force-takeover: {uri}"
     );
 
     // No ServiceMonitor PATCH.
-    assert!(
+    check!(
         !observed.iter().any(|r| {
             r.method() == Method::PATCH
                 && r.uri().to_string().contains("/servicemonitors/demo-broker")
@@ -1243,10 +1253,10 @@ async fn pod_monitor_path_applies_one_resource() {
     let body: serde_json::Value =
         serde_json::from_slice(status_patch.body()).expect("status body is JSON");
     let cond = metrics_ready_cond(&body);
-    assert!(cond["status"] == "True", "body = {body}");
-    assert!(cond["reason"] == "Available", "body = {body}");
+    check!(cond["status"] == "True", "body = {body}");
+    check!(cond["reason"] == "Available", "body = {body}");
 
-    assert!(state.remaining_rules() == 0);
+    check!(state.remaining_rules() == 0);
 }
 
 /// `serviceMonitor` set. Reconcile applies the headless metrics
@@ -1332,10 +1342,10 @@ async fn service_monitor_path_applies_service_and_servicemonitor() {
     let body: serde_json::Value =
         serde_json::from_slice(status_patch.body()).expect("status body is JSON");
     let cond = metrics_ready_cond(&body);
-    assert!(cond["status"] == "True", "body = {body}");
-    assert!(cond["reason"] == "Available", "body = {body}");
+    check!(cond["status"] == "True", "body = {body}");
+    check!(cond["reason"] == "Available", "body = {body}");
 
-    assert!(state.remaining_rules() == 0);
+    check!(state.remaining_rules() == 0);
 }
 
 /// Both `podMonitor` and `serviceMonitor` set. Reconcile must
@@ -1378,10 +1388,10 @@ async fn mutually_exclusive_sets_condition_and_skips_apply() {
     let body: serde_json::Value =
         serde_json::from_slice(status_patch.body()).expect("status body is JSON");
     let cond = metrics_ready_cond(&body);
-    assert!(cond["status"] == "False", "body = {body}");
-    assert!(cond["reason"] == "MutuallyExclusive", "body = {body}");
+    check!(cond["status"] == "False", "body = {body}");
+    check!(cond["reason"] == "MutuallyExclusive", "body = {body}");
 
-    assert!(state.remaining_rules() == 0);
+    check!(state.remaining_rules() == 0);
 }
 
 /// The Prometheus Operator CRDs are not installed — the dynamic
@@ -1425,13 +1435,13 @@ async fn prom_operator_missing_sets_condition() {
     let body: serde_json::Value =
         serde_json::from_slice(status_patch.body()).expect("status body is JSON");
     let cond = metrics_ready_cond(&body);
-    assert!(cond["status"] == "False", "body = {body}");
-    assert!(
+    check!(cond["status"] == "False", "body = {body}");
+    check!(
         cond["reason"] == "PrometheusOperatorCrdsMissing",
         "body = {body}"
     );
 
-    assert!(state.remaining_rules() == 0);
+    check!(state.remaining_rules() == 0);
 }
 
 /// `spec.networkPolicy=None` (the default in `kafka_cr`)
@@ -1529,9 +1539,9 @@ async fn network_policy_enabled_applies_one_resource() {
         .iter()
         .find(|c| c["type"] == "NetworkPolicyReady")
         .expect("NetworkPolicyReady present");
-    assert!(cond["status"] == "True", "body = {body}");
-    assert!(cond["reason"] == "Available", "body = {body}");
-    assert!(state.remaining_rules() == 0);
+    check!(cond["status"] == "True", "body = {body}");
+    check!(cond["reason"] == "Available", "body = {body}");
+    check!(state.remaining_rules() == 0);
 }
 
 /// A Kafka CR with `status.conditions[NetworkPolicyReady].reason

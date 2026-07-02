@@ -1542,9 +1542,13 @@ mod san_tests {
         )
         .unwrap();
         let parsed_sans = parse_cert_sans(&leaf.cert_pem);
-        assert!(parsed_sans.iter().any(|s| s == "DNS:internal.svc"));
-        assert!(parsed_sans.iter().any(|s| s == "DNS:broker-0.example.com"));
-        assert!(parsed_sans.iter().any(|s| s == "IP:203.0.113.10"));
+        for want in [
+            "DNS:internal.svc",
+            "DNS:broker-0.example.com",
+            "IP:203.0.113.10",
+        ] {
+            assert!(parsed_sans.iter().any(|s| s == want), "missing {want:?}");
+        }
     }
 
     #[test]

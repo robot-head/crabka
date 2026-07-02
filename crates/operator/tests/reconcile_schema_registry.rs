@@ -212,10 +212,17 @@ async fn optional_topic_group_and_bearer_render_to_args() {
         .map(|a| a.as_str().unwrap())
         .collect::<Vec<_>>()
         .join(" ");
-    assert!(joined.contains("--schemas-topic=custom-schemas"));
-    assert!(joined.contains("--group-id=sr-grp"));
-    assert!(joined.contains("--bearer=unsecured"));
-    assert!(joined.contains("--bearer-principal-claim=email"));
+    for needle in [
+        "--schemas-topic=custom-schemas",
+        "--group-id=sr-grp",
+        "--bearer=unsecured",
+        "--bearer-principal-claim=email",
+    ] {
+        assert!(
+            joined.contains(needle),
+            "needle {needle:?}, joined: {joined}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -455,23 +462,33 @@ async fn full_security_fields_render_to_args_and_mounts() {
         .map(|a| a.as_str().unwrap())
         .collect::<Vec<_>>()
         .join(" ");
-    assert!(joined.contains("--tls-cert=/etc/sr/tls/tls.crt"));
-    assert!(joined.contains("--tls-client-auth=required"));
-    assert!(joined.contains("--tls-client-ca=/etc/sr/client-ca/ca.crt"));
-    assert!(joined.contains("--require-auth"));
-    assert!(joined.contains("--basic-auth-file=/etc/sr/basic/users"));
-    assert!(joined.contains("--authz"));
-    assert!(joined.contains("--super-user=User:admin"));
-    assert!(joined.contains("--acl-refresh-secs=15"));
+    for needle in [
+        "--tls-cert=/etc/sr/tls/tls.crt",
+        "--tls-client-auth=required",
+        "--tls-client-ca=/etc/sr/client-ca/ca.crt",
+        "--require-auth",
+        "--basic-auth-file=/etc/sr/basic/users",
+        "--authz",
+        "--super-user=User:admin",
+        "--acl-refresh-secs=15",
+    ] {
+        assert!(
+            joined.contains(needle),
+            "needle {needle:?}, joined: {joined}"
+        );
+    }
     // Mounts present for tls/client-ca/basic.
     let mounts = c["volumeMounts"].as_array().unwrap();
     let mount_paths: Vec<&str> = mounts
         .iter()
         .map(|m| m["mountPath"].as_str().unwrap())
         .collect();
-    assert!(mount_paths.contains(&"/etc/sr/tls"));
-    assert!(mount_paths.contains(&"/etc/sr/client-ca"));
-    assert!(mount_paths.contains(&"/etc/sr/basic"));
+    for path in ["/etc/sr/tls", "/etc/sr/client-ca", "/etc/sr/basic"] {
+        assert!(
+            mount_paths.contains(&path),
+            "mount {path:?}, mounts: {mount_paths:?}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -625,22 +642,17 @@ async fn kafka_client_sasl_ssl_renders_to_args_and_env() {
         .collect::<Vec<_>>()
         .join(" ");
     // Args
-    assert!(
-        joined.contains("--kafka-security-protocol=SASL_SSL"),
-        "joined: {joined}"
-    );
-    assert!(
-        joined.contains("--kafka-sasl-mechanism=PLAIN"),
-        "joined: {joined}"
-    );
-    assert!(
-        joined.contains("--kafka-tls-ca=/etc/sr/kafka-tls/ca.crt"),
-        "joined: {joined}"
-    );
-    assert!(
-        joined.contains("--kafka-tls-server-name=broker.internal"),
-        "joined: {joined}"
-    );
+    for needle in [
+        "--kafka-security-protocol=SASL_SSL",
+        "--kafka-sasl-mechanism=PLAIN",
+        "--kafka-tls-ca=/etc/sr/kafka-tls/ca.crt",
+        "--kafka-tls-server-name=broker.internal",
+    ] {
+        assert!(
+            joined.contains(needle),
+            "needle {needle:?}, joined: {joined}"
+        );
+    }
     // Env: SASL creds via secretKeyRef
     let env = c["env"].as_array().unwrap();
     let sasl_user = env
@@ -981,25 +993,17 @@ async fn bearer_jwks_renders_to_args() {
         .map(|a| a.as_str().unwrap())
         .collect::<Vec<_>>()
         .join(" ");
-    assert!(joined.contains("--bearer=jwks"), "joined: {joined}");
-    assert!(
-        joined.contains("--bearer-jwks-endpoint-uri=https://idp.example.com/jwks"),
-        "joined: {joined}"
-    );
-    assert!(
-        joined.contains("--bearer-jwks-valid-issuer=https://idp.example.com"),
-        "joined: {joined}"
-    );
-    assert!(
-        joined.contains("--bearer-jwks-expected-audience=kafka-sr"),
-        "joined: {joined}"
-    );
-    assert!(
-        joined.contains("--bearer-jwks-principal-claim=email"),
-        "joined: {joined}"
-    );
-    assert!(
-        joined.contains("--bearer-jwks-refresh-ms=30000"),
-        "joined: {joined}"
-    );
+    for needle in [
+        "--bearer=jwks",
+        "--bearer-jwks-endpoint-uri=https://idp.example.com/jwks",
+        "--bearer-jwks-valid-issuer=https://idp.example.com",
+        "--bearer-jwks-expected-audience=kafka-sr",
+        "--bearer-jwks-principal-claim=email",
+        "--bearer-jwks-refresh-ms=30000",
+    ] {
+        assert!(
+            joined.contains(needle),
+            "needle {needle:?}, joined: {joined}"
+        );
+    }
 }

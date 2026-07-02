@@ -1256,6 +1256,7 @@ fn spans_from_buckets(buckets: BTreeMap<i32, u64>) -> (Vec<BucketSpan>, Vec<f64>
 #[cfg(test)]
 mod tests {
     use assert2::assert;
+    use assert2::check;
     use crabka_blockstore::Labels;
     use opentelemetry_proto::tonic::common::v1::{
         AnyValue, InstrumentationScope, KeyValue, any_value,
@@ -1268,7 +1269,8 @@ mod tests {
     };
     use opentelemetry_proto::tonic::resource::v1::Resource;
 
-    use crate::{BucketSpan, wire::DecodedSample};
+    use crate::BucketSpan;
+    use crate::wire::{DecodedMetadata, DecodedSample, DecodedSeries};
 
     use super::{DeltaAccumulator, TranslationStrategy, decode_otlp, decode_otlp_stateful};
 
@@ -1361,15 +1363,28 @@ mod tests {
 
         let series = decode_otlp(&data, TranslationStrategy::default()).unwrap();
 
-        assert!(series.len() == 1);
-        assert!(
-            series[0].labels
-                == labels(&[
+        assert_eq!(
+            series,
+            vec![DecodedSeries {
+                labels: labels(&[
                     ("__name__", "system_cpu_utilization"),
                     ("host_name", "api-1")
-                ])
+                ]),
+                samples: vec![DecodedSample {
+                    timestamp_ms: 1,
+                    value: 0.42,
+                    start_timestamp_ms: None,
+                }],
+                histograms: Vec::new(),
+                exemplars: Vec::new(),
+                metadata: Some(DecodedMetadata {
+                    metric_family_name: "system_cpu_utilization".into(),
+                    metric_type: "gauge".into(),
+                    help: String::new(),
+                    unit: String::new(),
+                }),
+            }]
         );
-        assert!(series[0].samples == vec![(1, 0.42)]);
     }
 
     #[test]
@@ -1403,10 +1418,15 @@ mod tests {
         let series = decode_otlp(&data, TranslationStrategy::default()).unwrap();
 
         let metadata = series[0].metadata.as_ref().expect("metric metadata");
-        assert!(metadata.metric_family_name == "system_cpu_utilization");
-        assert!(metadata.metric_type == "gauge");
-        assert!(metadata.help == "CPU utilization ratio.");
-        assert!(metadata.unit == "1");
+        assert_eq!(
+            *metadata,
+            DecodedMetadata {
+                metric_family_name: "system_cpu_utilization".into(),
+                metric_type: "gauge".into(),
+                help: "CPU utilization ratio.".into(),
+                unit: "1".into(),
+            }
+        );
     }
 
     #[test]
@@ -1637,9 +1657,41 @@ mod tests {
 
         let series = decode_otlp(&data, TranslationStrategy::default()).unwrap();
 
-        assert!(series.len() == 2);
-        assert!(series[0].samples == vec![DecodedSample::with_start_timestamp(2, 7.0, Some(1))]);
-        assert!(series[1].samples == vec![DecodedSample::with_start_timestamp(3, 12.0, Some(1))]);
+        let expected_labels =
+            labels(&[("__name__", "http_server_requests_total"), ("route", "/v1")]);
+        let expected_metadata = Some(DecodedMetadata {
+            metric_family_name: "http_server_requests_total".into(),
+            metric_type: "counter".into(),
+            help: String::new(),
+            unit: String::new(),
+        });
+        assert_eq!(
+            series,
+            vec![
+                DecodedSeries {
+                    labels: expected_labels.clone(),
+                    samples: vec![DecodedSample {
+                        timestamp_ms: 2,
+                        value: 7.0,
+                        start_timestamp_ms: Some(1),
+                    }],
+                    histograms: Vec::new(),
+                    exemplars: Vec::new(),
+                    metadata: expected_metadata.clone(),
+                },
+                DecodedSeries {
+                    labels: expected_labels,
+                    samples: vec![DecodedSample {
+                        timestamp_ms: 3,
+                        value: 12.0,
+                        start_timestamp_ms: Some(1),
+                    }],
+                    histograms: Vec::new(),
+                    exemplars: Vec::new(),
+                    metadata: expected_metadata,
+                },
+            ]
+        );
     }
 
     #[test]
@@ -1678,11 +1730,11 @@ mod tests {
             .expect("matching bucket series");
         assert!(matching_bucket.exemplars.len() == 1);
         let exemplar = &matching_bucket.exemplars[0];
-        assert!(exemplar.timestamp_ms == 1);
-        assert!((exemplar.value - 0.9).abs() < f64::EPSILON);
-        assert!(exemplar.labels.get("trace_id") == Some("01234567"));
-        assert!(exemplar.labels.get("span_id") == Some("abcd"));
-        assert!(exemplar.labels.get("http_route") == Some("/v1"));
+        check!(exemplar.timestamp_ms == 1);
+        check!((exemplar.value - 0.9).abs() < f64::EPSILON);
+        check!(exemplar.labels.get("trace_id") == Some("01234567"));
+        check!(exemplar.labels.get("span_id") == Some("abcd"));
+        check!(exemplar.labels.get("http_route") == Some("/v1"));
 
         for series in &series {
             if series.labels.get("le") != Some("1") {
@@ -1735,22 +1787,70 @@ mod tests {
             decode_otlp_stateful(&second, TranslationStrategy::default(), &mut accumulator)
                 .unwrap();
 
-        assert!(
-            sample_value(&first_series, "rpc_server_duration_bucket", Some("0.5")) == Some(1.0)
-        );
-        assert!(
-            sample_value(&first_series, "rpc_server_duration_bucket", Some("+Inf")) == Some(5.0)
-        );
-        assert!(sample_value(&first_series, "rpc_server_duration_count", None) == Some(5.0));
-        assert!(sample_value(&first_series, "rpc_server_duration_sum", None) == Some(7.0));
-        assert!(
-            sample_value(&second_series, "rpc_server_duration_bucket", Some("0.5")) == Some(3.0)
-        );
-        assert!(
-            sample_value(&second_series, "rpc_server_duration_bucket", Some("+Inf")) == Some(8.0)
-        );
-        assert!(sample_value(&second_series, "rpc_server_duration_count", None) == Some(8.0));
-        assert!(sample_value(&second_series, "rpc_server_duration_sum", None) == Some(11.0));
+        let cases = [
+            (
+                "first payload",
+                &first_series,
+                "rpc_server_duration_bucket",
+                Some("0.5"),
+                1.0,
+            ),
+            (
+                "first payload",
+                &first_series,
+                "rpc_server_duration_bucket",
+                Some("+Inf"),
+                5.0,
+            ),
+            (
+                "first payload",
+                &first_series,
+                "rpc_server_duration_count",
+                None,
+                5.0,
+            ),
+            (
+                "first payload",
+                &first_series,
+                "rpc_server_duration_sum",
+                None,
+                7.0,
+            ),
+            (
+                "second payload",
+                &second_series,
+                "rpc_server_duration_bucket",
+                Some("0.5"),
+                3.0,
+            ),
+            (
+                "second payload",
+                &second_series,
+                "rpc_server_duration_bucket",
+                Some("+Inf"),
+                8.0,
+            ),
+            (
+                "second payload",
+                &second_series,
+                "rpc_server_duration_count",
+                None,
+                8.0,
+            ),
+            (
+                "second payload",
+                &second_series,
+                "rpc_server_duration_sum",
+                None,
+                11.0,
+            ),
+        ];
+        for (case, series, name, le, expected) in cases {
+            assert!(
+                sample_value(series, name, le) == Some(expected),
+                "case: {case} name={name} le={le:?}"
+            );
+        }
     }
 
     #[test]
@@ -1825,14 +1925,20 @@ mod tests {
             .iter()
             .find(|series| series.labels.get("__name__") == Some("http_server_active_requests"))
             .expect("metric series");
-        assert!(metric.labels.get("service_name") == Some("checkout"));
-        assert!(metric.labels.get("otel_scope_name") == Some("io.opentelemetry.http"));
-        assert!(metric.labels.get("otel_scope_version") == Some("1.2.3"));
-        assert!(
-            metric.labels.get("otel_scope_schema_url")
-                == Some("https://opentelemetry.io/schemas/1.24.0")
+        assert_eq!(
+            metric.labels,
+            labels(&[
+                ("__name__", "http_server_active_requests"),
+                ("otel_scope_library_language", "rust"),
+                ("otel_scope_name", "io.opentelemetry.http"),
+                (
+                    "otel_scope_schema_url",
+                    "https://opentelemetry.io/schemas/1.24.0"
+                ),
+                ("otel_scope_version", "1.2.3"),
+                ("service_name", "checkout"),
+            ])
         );
-        assert!(metric.labels.get("otel_scope_library_language") == Some("rust"));
 
         let target = series
             .iter()
@@ -1869,22 +1975,69 @@ mod tests {
 
         let series = decode_otlp(&data, TranslationStrategy::default()).unwrap();
 
-        assert!(series.len() == 4);
-        assert!(
-            series[0].labels
-                == labels(&[
-                    ("__name__", "rpc_server_duration"),
-                    ("quantile", "0.5"),
-                    ("route", "/v1")
-                ])
+        let expected_metadata = Some(DecodedMetadata {
+            metric_family_name: "rpc_server_duration".into(),
+            metric_type: "summary".into(),
+            help: String::new(),
+            unit: String::new(),
+        });
+        assert_eq!(
+            series,
+            vec![
+                DecodedSeries {
+                    labels: labels(&[
+                        ("__name__", "rpc_server_duration"),
+                        ("quantile", "0.5"),
+                        ("route", "/v1")
+                    ]),
+                    samples: vec![DecodedSample {
+                        timestamp_ms: 4,
+                        value: 2.0,
+                        start_timestamp_ms: None,
+                    }],
+                    histograms: Vec::new(),
+                    exemplars: Vec::new(),
+                    metadata: expected_metadata.clone(),
+                },
+                DecodedSeries {
+                    labels: labels(&[
+                        ("__name__", "rpc_server_duration"),
+                        ("quantile", "0.9"),
+                        ("route", "/v1")
+                    ]),
+                    samples: vec![DecodedSample {
+                        timestamp_ms: 4,
+                        value: 4.0,
+                        start_timestamp_ms: None,
+                    }],
+                    histograms: Vec::new(),
+                    exemplars: Vec::new(),
+                    metadata: expected_metadata.clone(),
+                },
+                DecodedSeries {
+                    labels: labels(&[("__name__", "rpc_server_duration_count"), ("route", "/v1")]),
+                    samples: vec![DecodedSample {
+                        timestamp_ms: 4,
+                        value: 9.0,
+                        start_timestamp_ms: None,
+                    }],
+                    histograms: Vec::new(),
+                    exemplars: Vec::new(),
+                    metadata: expected_metadata.clone(),
+                },
+                DecodedSeries {
+                    labels: labels(&[("__name__", "rpc_server_duration_sum"), ("route", "/v1")]),
+                    samples: vec![DecodedSample {
+                        timestamp_ms: 4,
+                        value: 12.5,
+                        start_timestamp_ms: None,
+                    }],
+                    histograms: Vec::new(),
+                    exemplars: Vec::new(),
+                    metadata: expected_metadata,
+                },
+            ]
         );
-        assert!(series[0].samples == vec![(4, 2.0)]);
-        assert!(series[1].labels.get("quantile") == Some("0.9"));
-        assert!(series[1].samples == vec![(4, 4.0)]);
-        assert!(series[2].labels.get("__name__") == Some("rpc_server_duration_count"));
-        assert!(series[2].samples == vec![(4, 9.0)]);
-        assert!(series[3].labels.get("__name__") == Some("rpc_server_duration_sum"));
-        assert!(series[3].samples == vec![(4, 12.5)]);
     }
 
     #[test]
@@ -1916,20 +2069,20 @@ mod tests {
 
         let series = decode_otlp(&data, TranslationStrategy::default()).unwrap();
 
-        assert!(series.len() == 1);
-        assert!(series[0].labels.get("__name__") == Some("rpc_server_duration"));
-        assert!(series[0].histograms.len() == 1);
+        check!(series.len() == 1);
+        check!(series[0].labels.get("__name__") == Some("rpc_server_duration"));
+        check!(series[0].histograms.len() == 1);
         let (timestamp_ms, hist) = &series[0].histograms[0];
-        assert!(*timestamp_ms == 3);
-        assert!(hist.schema == 3);
-        assert!((hist.count - 6.0).abs() < f64::EPSILON);
-        assert!((hist.sum - 12.0).abs() < f64::EPSILON);
-        assert!((hist.zero_count - 1.0).abs() < f64::EPSILON);
-        assert!(hist.positive_spans[0].offset == 0);
-        assert!(hist.positive_counts == vec![2.0, 3.0]);
-        assert!(hist.negative_spans[0].offset == 5);
-        assert!(hist.negative_counts == vec![1.0]);
-        assert!(hist.start_timestamp_ms == Some(1));
+        check!(*timestamp_ms == 3);
+        check!(hist.schema == 3);
+        check!((hist.count - 6.0).abs() < f64::EPSILON);
+        check!((hist.sum - 12.0).abs() < f64::EPSILON);
+        check!((hist.zero_count - 1.0).abs() < f64::EPSILON);
+        check!(hist.positive_spans[0].offset == 0);
+        check!(hist.positive_counts == vec![2.0, 3.0]);
+        check!(hist.negative_spans[0].offset == 5);
+        check!(hist.negative_counts == vec![1.0]);
+        check!(hist.start_timestamp_ms == Some(1));
     }
 
     #[test]
@@ -1965,11 +2118,11 @@ mod tests {
         assert!(series.len() == 1);
         assert!(series[0].exemplars.len() == 1);
         let exemplar = &series[0].exemplars[0];
-        assert!(exemplar.timestamp_ms == 2);
-        assert!((exemplar.value - 2.5).abs() < f64::EPSILON);
-        assert!(exemplar.labels.get("trace_id") == Some("01234567"));
-        assert!(exemplar.labels.get("span_id") == Some("abcd"));
-        assert!(exemplar.labels.get("span_kind") == Some("server"));
+        check!(exemplar.timestamp_ms == 2);
+        check!((exemplar.value - 2.5).abs() < f64::EPSILON);
+        check!(exemplar.labels.get("trace_id") == Some("01234567"));
+        check!(exemplar.labels.get("span_id") == Some("abcd"));
+        check!(exemplar.labels.get("span_kind") == Some("server"));
     }
 
     #[test]
@@ -2023,17 +2176,17 @@ mod tests {
                 .unwrap();
 
         let first_hist = &first_series[0].histograms[0].1;
-        assert!((first_hist.count - 4.0).abs() < f64::EPSILON);
-        assert!((first_hist.sum - 6.0).abs() < f64::EPSILON);
-        assert!((first_hist.zero_count - 1.0).abs() < f64::EPSILON);
-        assert!(first_hist.positive_counts == vec![2.0, 1.0]);
+        check!((first_hist.count - 4.0).abs() < f64::EPSILON);
+        check!((first_hist.sum - 6.0).abs() < f64::EPSILON);
+        check!((first_hist.zero_count - 1.0).abs() < f64::EPSILON);
+        check!(first_hist.positive_counts == vec![2.0, 1.0]);
 
         let second_hist = &second_series[0].histograms[0].1;
-        assert!((second_hist.count - 7.0).abs() < f64::EPSILON);
-        assert!((second_hist.sum - 11.0).abs() < f64::EPSILON);
-        assert!((second_hist.zero_count - 3.0).abs() < f64::EPSILON);
-        assert!(second_hist.positive_counts == vec![3.0, 3.0]);
-        assert!(second_hist.start_timestamp_ms == Some(1));
+        check!((second_hist.count - 7.0).abs() < f64::EPSILON);
+        check!((second_hist.sum - 11.0).abs() < f64::EPSILON);
+        check!((second_hist.zero_count - 3.0).abs() < f64::EPSILON);
+        check!(second_hist.positive_counts == vec![3.0, 3.0]);
+        check!(second_hist.start_timestamp_ms == Some(1));
     }
 
     #[test]
@@ -2084,16 +2237,16 @@ mod tests {
                 .unwrap();
 
         let second_hist = &second_series[0].histograms[0].1;
-        assert!((second_hist.count - 5.0).abs() < f64::EPSILON);
-        assert!((second_hist.sum - 8.0).abs() < f64::EPSILON);
-        assert!(
+        check!((second_hist.count - 5.0).abs() < f64::EPSILON);
+        check!((second_hist.sum - 8.0).abs() < f64::EPSILON);
+        check!(
             second_hist.positive_spans
                 == vec![BucketSpan {
                     offset: 1,
                     length: 2
                 }]
         );
-        assert!(second_hist.positive_counts == vec![2.0, 3.0]);
+        check!(second_hist.positive_counts == vec![2.0, 3.0]);
     }
 
     #[test]

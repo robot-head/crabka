@@ -550,6 +550,13 @@ mod tests {
             .collect()
     }
 
+    fn assigned(items: &[(&str, &[(&str, i32)])]) -> HashMap<String, Vec<(String, i32)>> {
+        items
+            .iter()
+            .map(|(id, partitions)| ((*id).to_string(), tp(partitions)))
+            .collect()
+    }
+
     #[test]
     fn single_member_takes_all() {
         let mut topic_parts = HashMap::new();
@@ -573,9 +580,7 @@ mod tests {
             ],
             &topic_parts,
         );
-        assert!(a["m1"].len() == 2);
-        assert!(a["m2"].len() == 2);
-        assert!(total_assigned(&a) == 4);
+        assert!(a == assigned(&[("m1", &[("t", 0), ("t", 2)]), ("m2", &[("t", 1), ("t", 3)])]));
     }
 
     #[test]
@@ -604,9 +609,7 @@ mod tests {
             &topic_parts,
         );
 
-        assert!(out["m1"] == tp(&[("t", 0)]));
-        assert!(out["m2"].is_empty());
-        assert!(out["m3"].is_empty());
+        assert!(out == current(&[("m1", &[("t", 0)]), ("m2", &[]), ("m3", &[])]));
     }
 
     #[test]
@@ -624,80 +627,114 @@ mod tests {
 
     #[test]
     fn general_assign_keeps_previous_owner_only_when_subscribed_and_not_overloaded() {
-        let out = general_assign(
-            &member_ids(&["m1", "m2"]),
-            &subs(&[("m1", &["t"]), ("m2", &["t"])]),
-            &current(&[("m1", &[]), ("m2", &[("t", 0)])]),
-            &topic_parts(&[("t", 2)]),
-        );
-
-        assert!(out["m1"] == tp(&[("t", 1)]));
-        assert!(out["m2"] == tp(&[("t", 0)]));
-
-        let unsubscribed_previous_owner = general_assign(
-            &member_ids(&["m1", "m2"]),
-            &subs(&[("m1", &["t"]), ("m2", &["u"])]),
-            &current(&[("m1", &[]), ("m2", &[("t", 0)])]),
-            &topic_parts(&[("t", 1), ("u", 1)]),
-        );
-        assert!(unsubscribed_previous_owner["m1"] == tp(&[("t", 0)]));
-        assert!(unsubscribed_previous_owner["m2"] == tp(&[("u", 0)]));
-
-        let overloaded_previous_owner = general_assign(
-            &member_ids(&["m1", "m2", "m3"]),
-            &subs(&[("m1", &["t"]), ("m2", &["t"]), ("m3", &["t"])]),
-            &current(&[("m1", &[("t", 0), ("t", 1)]), ("m2", &[]), ("m3", &[])]),
-            &topic_parts(&[("t", 3)]),
-        );
-        assert!(overloaded_previous_owner["m1"] == tp(&[("t", 0)]));
-        assert!(overloaded_previous_owner["m2"] == tp(&[("t", 1)]));
-        assert!(overloaded_previous_owner["m3"] == tp(&[("t", 2)]));
+        for (ids, member_subs, current_assignment, topic_partitions, expected) in [
+            // Subscribed, not-overloaded previous owner keeps its partition.
+            (
+                member_ids(&["m1", "m2"]),
+                subs(&[("m1", &["t"]), ("m2", &["t"])]),
+                current(&[("m1", &[]), ("m2", &[("t", 0)])]),
+                topic_parts(&[("t", 2)]),
+                assigned(&[("m1", &[("t", 1)]), ("m2", &[("t", 0)])]),
+            ),
+            // Unsubscribed previous owner loses the partition.
+            (
+                member_ids(&["m1", "m2"]),
+                subs(&[("m1", &["t"]), ("m2", &["u"])]),
+                current(&[("m1", &[]), ("m2", &[("t", 0)])]),
+                topic_parts(&[("t", 1), ("u", 1)]),
+                assigned(&[("m1", &[("t", 0)]), ("m2", &[("u", 0)])]),
+            ),
+            // Overloaded previous owner keeps only up to the load bound.
+            (
+                member_ids(&["m1", "m2", "m3"]),
+                subs(&[("m1", &["t"]), ("m2", &["t"]), ("m3", &["t"])]),
+                current(&[("m1", &[("t", 0), ("t", 1)]), ("m2", &[]), ("m3", &[])]),
+                topic_parts(&[("t", 3)]),
+                assigned(&[
+                    ("m1", &[("t", 0)]),
+                    ("m2", &[("t", 1)]),
+                    ("m3", &[("t", 2)]),
+                ]),
+            ),
+        ] {
+            let out = general_assign(&ids, &member_subs, &current_assignment, &topic_partitions);
+            assert!(out == expected);
+        }
     }
 
     #[test]
     fn pick_least_loaded_prefers_lower_load_then_lexicographic_id() {
         let subscribed: BTreeSet<String> = member_ids(&["m1", "m2", "m3"]).into_iter().collect();
-        let assignment = current(&[
-            ("m1", &[("t", 0)]),
-            ("m2", &[]),
-            ("m3", &[("t", 1), ("t", 2)]),
-        ]);
-
-        assert!(pick_least_loaded(&subscribed, &assignment) == "m2");
-
-        let tied = current(&[
-            ("m1", &[("t", 0)]),
-            ("m2", &[("t", 1)]),
-            ("m3", &[("t", 2), ("t", 3)]),
-        ]);
-        assert!(pick_least_loaded(&subscribed, &tied) == "m1");
+        for (assignment, expected) in [
+            // Unique minimum load wins.
+            (
+                current(&[
+                    ("m1", &[("t", 0)]),
+                    ("m2", &[]),
+                    ("m3", &[("t", 1), ("t", 2)]),
+                ]),
+                "m2",
+            ),
+            // Tied minimum load: lexicographically-first id wins.
+            (
+                current(&[
+                    ("m1", &[("t", 0)]),
+                    ("m2", &[("t", 1)]),
+                    ("m3", &[("t", 2), ("t", 3)]),
+                ]),
+                "m1",
+            ),
+        ] {
+            assert!(pick_least_loaded(&subscribed, &assignment) == expected);
+        }
     }
 
     #[test]
     fn choose_assignment_owner_uses_least_loaded_and_sticky_previous_owner_bounds() {
         let subscribed: BTreeSet<String> = member_ids(&["m1", "m2", "m3"]).into_iter().collect();
-        let assignment = current(&[
-            ("m1", &[("a", 0)]),
-            ("m2", &[]),
-            ("m3", &[("b", 0), ("b", 1)]),
-        ]);
         let tp = ("t".to_string(), 0);
-
-        assert!(choose_assignment_owner(&tp, &subscribed, &HashMap::new(), &assignment) == "m2");
-
-        let sticky = HashMap::from([(tp.clone(), "m1".to_string())]);
-        assert!(choose_assignment_owner(&tp, &subscribed, &sticky, &assignment) == "m2");
-
-        let mut less_loaded_assignment = assignment.clone();
-        less_loaded_assignment.insert("m1".to_string(), Vec::new());
-        assert!(
-            choose_assignment_owner(&tp, &subscribed, &sticky, &less_loaded_assignment) == "m1"
-        );
-
-        let unsubscribed_sticky = HashMap::from([(tp.clone(), "mx".to_string())]);
-        assert!(
-            choose_assignment_owner(&tp, &subscribed, &unsubscribed_sticky, &assignment) == "m2"
-        );
+        for (prev_owner, assignment, expected) in [
+            // No previous owner: least-loaded member wins.
+            (
+                HashMap::new(),
+                current(&[
+                    ("m1", &[("a", 0)]),
+                    ("m2", &[]),
+                    ("m3", &[("b", 0), ("b", 1)]),
+                ]),
+                "m2",
+            ),
+            // Sticky previous owner above the min load: least-loaded wins.
+            (
+                HashMap::from([(tp.clone(), "m1".to_string())]),
+                current(&[
+                    ("m1", &[("a", 0)]),
+                    ("m2", &[]),
+                    ("m3", &[("b", 0), ("b", 1)]),
+                ]),
+                "m2",
+            ),
+            // Sticky previous owner at the min load keeps the partition.
+            (
+                HashMap::from([(tp.clone(), "m1".to_string())]),
+                current(&[("m1", &[]), ("m2", &[]), ("m3", &[("b", 0), ("b", 1)])]),
+                "m1",
+            ),
+            // Unsubscribed previous owner: least-loaded wins.
+            (
+                HashMap::from([(tp.clone(), "mx".to_string())]),
+                current(&[
+                    ("m1", &[("a", 0)]),
+                    ("m2", &[]),
+                    ("m3", &[("b", 0), ("b", 1)]),
+                ]),
+                "m2",
+            ),
+        ] {
+            assert!(
+                choose_assignment_owner(&tp, &subscribed, &prev_owner, &assignment) == expected
+            );
+        }
     }
 
     #[test]
@@ -719,9 +756,14 @@ mod tests {
 
         balance_assignment(&ids, &subs, &prev_owner, &mut assignment, 8);
 
-        assert!(assignment["m1"] == tp(&[("t", 2), ("t", 3)]));
-        assert!(assignment["m2"] == tp(&[("t", 0)]));
-        assert!(assignment["m3"] == tp(&[("t", 1)]));
+        assert!(
+            assignment
+                == current(&[
+                    ("m1", &[("t", 2), ("t", 3)]),
+                    ("m2", &[("t", 0)]),
+                    ("m3", &[("t", 1)]),
+                ])
+        );
     }
 
     #[test]
@@ -737,9 +779,14 @@ mod tests {
 
         balance_assignment(&ids, &subs, &prev_owner, &mut assignment, 1);
 
-        assert!(assignment["m1"] == tp(&[("t", 0)]));
-        assert!(assignment["m2"] == tp(&[("t", 1), ("t", 2)]));
-        assert!(assignment["m3"].is_empty());
+        assert!(
+            assignment
+                == current(&[
+                    ("m1", &[("t", 0)]),
+                    ("m2", &[("t", 1), ("t", 2)]),
+                    ("m3", &[]),
+                ])
+        );
     }
 
     #[test]
@@ -754,9 +801,14 @@ mod tests {
 
         balance_assignment(&ids, &subs, &HashMap::new(), &mut assignment, 1);
 
-        assert!(assignment["m1"] == tp(&[("t", 1)]));
-        assert!(assignment["m2"] == tp(&[("t", 2), ("t", 3)]));
-        assert!(assignment["m3"] == tp(&[("t", 0)]));
+        assert!(
+            assignment
+                == current(&[
+                    ("m1", &[("t", 1)]),
+                    ("m2", &[("t", 2), ("t", 3)]),
+                    ("m3", &[("t", 0)]),
+                ])
+        );
     }
 
     #[test]
@@ -784,9 +836,14 @@ mod tests {
 
         balance_assignment(&ids, &subs, &HashMap::new(), &mut assignment, 8);
 
-        assert!(assignment["m1"] == tp(&[("t", 0), ("t", 1)]));
-        assert!(assignment["m2"] == tp(&[("t", 2)]));
-        assert!(assignment["m3"] == tp(&[("t", 3)]));
+        assert!(
+            assignment
+                == current(&[
+                    ("m1", &[("t", 0), ("t", 1)]),
+                    ("m2", &[("t", 2)]),
+                    ("m3", &[("t", 3)]),
+                ])
+        );
     }
 
     #[test]
@@ -802,9 +859,7 @@ mod tests {
             ],
             &topic_parts,
         );
-        assert!(a["m1"] == owned_m1);
-        assert!(a["m2"] == owned_m2);
-        assert!(total_assigned(&a) == 4);
+        assert!(a == assigned(&[("m1", &[("t", 0), ("t", 1)]), ("m2", &[("t", 2), ("t", 3)])]));
     }
 
     #[test]
@@ -828,18 +883,15 @@ mod tests {
             &topic_parts,
         );
 
-        // m1, m2 each keep 3 of their owned; m3 only receives brand-new
-        // (unowned) partitions in phase 1. Partition 8 was unowned, so it
-        // goes to m3 in phase 1.
-        assert!(a["m1"].len() == 3);
-        assert!(a["m2"].len() == 3);
-        // m3 picks up unowned partitions only in phase 1.
-        assert!(a["m3"].len() <= 1, "m3 got {:?}", a["m3"]);
-        // Total < 9 — the partitions being moved are omitted.
+        // m1, m2 each keep the first 3 of their owned; m3 only receives
+        // brand-new (unowned) partitions in phase 1 — partition 8. The two
+        // released partitions ((t,3) and (t,7)) are omitted this round.
         assert!(
-            total_assigned(&a) < 9,
-            "expected omitted partitions, got {} total",
-            total_assigned(&a)
+            a == assigned(&[
+                ("m1", &[("t", 0), ("t", 1), ("t", 2)]),
+                ("m2", &[("t", 4), ("t", 5), ("t", 6)]),
+                ("m3", &[("t", 8)]),
+            ])
         );
         // m3's slot must not contain any partition still owned by m1/m2's new list.
         for tp_m3 in &a["m3"] {
@@ -884,10 +936,16 @@ mod tests {
             &topic_parts,
         );
 
-        assert!(total_assigned(&phase2) == 9, "phase 2 must place all 9");
-        assert!(phase2["m1"].len() == 3);
-        assert!(phase2["m2"].len() == 3);
-        assert!(phase2["m3"].len() == 3);
+        // Phase 2 places all 9: m3 keeps its unowned pickup ((t,8)) and now
+        // also receives the two partitions released in phase 1.
+        assert!(
+            phase2
+                == assigned(&[
+                    ("m1", &[("t", 0), ("t", 1), ("t", 2)]),
+                    ("m2", &[("t", 4), ("t", 5), ("t", 6)]),
+                    ("m3", &[("t", 3), ("t", 7), ("t", 8)]),
+                ])
+        );
     }
 
     #[test]
@@ -929,13 +987,13 @@ mod tests {
         for (t, _) in &a["m2"] {
             assert!(t == "t1");
         }
-        // m1 gets both t2 partitions (only it can hold them).
-        let m1_t2: Vec<&(String, i32)> = a["m1"].iter().filter(|(t, _)| t == "t2").collect();
-        assert!(m1_t2.len() == 2);
-        assert!(total_assigned(&a) == 4);
-        // Balanced: 2/2.
-        assert!(a["m1"].len() == 2);
-        assert!(a["m2"].len() == 2);
+        // m1 gets both t2 partitions (only it can hold them); balanced 2/2.
+        assert!(
+            a == assigned(&[
+                ("m1", &[("t2", 0), ("t2", 1)]),
+                ("m2", &[("t1", 0), ("t1", 1)]),
+            ])
+        );
     }
 
     #[test]
@@ -960,11 +1018,9 @@ mod tests {
             ],
             &topic_parts,
         );
-        // m1 keeps both of its claims (post zombie resolution).
-        assert!(a["m1"].contains(&("t".to_string(), 0)));
-        assert!(a["m1"].contains(&("t".to_string(), 1)));
-        // m2 doesn't get (t,0) since m1 effectively owns it.
-        assert!(!a["m2"].contains(&("t".to_string(), 0)));
+        // m1 keeps both of its claims (post zombie resolution); m2 doesn't
+        // get (t,0) since m1 effectively owns it, and receives the rest.
+        assert!(a == assigned(&[("m1", &[("t", 0), ("t", 1)]), ("m2", &[("t", 2), ("t", 3)])]));
     }
 
     #[test]
@@ -1012,10 +1068,8 @@ mod tests {
             ],
             &topic_parts,
         );
-        assert!(total_assigned(&a) == 3);
         // 2/1 split, lex-first gets the extra.
-        assert!(a["m1"].len() == 2);
-        assert!(a["m2"].len() == 1);
+        assert!(a == assigned(&[("m1", &[("newt", 0), ("newt", 2)]), ("m2", &[("newt", 1)])]));
     }
 
     #[test]

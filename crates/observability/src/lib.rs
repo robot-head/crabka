@@ -20198,6 +20198,8 @@ impl IntoResponse for HttpQueryError {
 
 #[cfg(test)]
 mod tests {
+    use assert2::check;
+
     use super::*;
 
     /// `ingest_tenant` returns a present non-empty `X-Scope-OrgID` verbatim,
@@ -20735,53 +20737,20 @@ mod tests {
         .await
         .unwrap();
 
+        // Exactly one PUT is allowed: the new shard manifest. The global
+        // tenant manifest, the shard catalog, and the old shard manifests
+        // must not be rewritten.
         let put_paths = store.put_paths();
-        assert!(
-            !put_paths.contains(
-                &crabka_blockstore::log_tenant_index_manifest_object_path(&prefix, tenant)
-                    .to_string()
-            ),
-            "global tenant manifest should not be rewritten: {put_paths:?}"
-        );
-        assert!(
-            !put_paths.contains(
-                &crabka_blockstore::log_tenant_index_shard_catalog_object_path(&prefix, tenant)
-                    .to_string()
-            ),
-            "shard catalog should not be rewritten: {put_paths:?}"
-        );
-        assert!(
-            put_paths.contains(
-                &crabka_blockstore::log_tenant_index_shard_manifest_object_path(
+        assert_eq!(
+            put_paths,
+            vec![
+                crabka_blockstore::log_tenant_index_shard_manifest_object_path(
                     &prefix, tenant, new_range
                 )
                 .to_string()
-            ),
-            "new shard manifest should be written: {put_paths:?}"
+            ],
+            "only the new shard manifest should be written"
         );
-        assert!(
-            !put_paths.contains(
-                &crabka_blockstore::log_tenant_index_shard_manifest_object_path(
-                    &prefix,
-                    tenant,
-                    old_range_a,
-                )
-                .to_string()
-            ),
-            "old shard A should not be rewritten: {put_paths:?}"
-        );
-        assert!(
-            !put_paths.contains(
-                &crabka_blockstore::log_tenant_index_shard_manifest_object_path(
-                    &prefix,
-                    tenant,
-                    old_range_b,
-                )
-                .to_string()
-            ),
-            "old shard B should not be rewritten: {put_paths:?}"
-        );
-        assert_eq!(put_paths.len(), 1, "unexpected PUT chatter: {put_paths:?}");
     }
 
     #[test]
@@ -21039,10 +21008,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(first.label_index.label_names(tenant) == BTreeSet::from(["app".to_string()]));
-        assert!(second.label_index.label_names(tenant) == BTreeSet::from(["app".to_string()]));
-        assert!(first.block_index.blocks().len() == 2);
-        assert!(second.block_index.blocks().len() == 2);
+        for state in [&first, &second] {
+            check!(state.label_index.label_names(tenant) == BTreeSet::from(["app".to_string()]));
+            check!(state.block_index.blocks().len() == 2);
+        }
 
         let shard_prefix =
             crabka_blockstore::log_tenant_index_shards_object_prefix(&prefix, tenant).to_string();
@@ -21074,12 +21043,12 @@ mod tests {
             .filter(|path| path == &shard_manifest_b)
             .count();
 
-        assert!(list_count == 1, "shard prefix should be listed once");
-        assert!(
+        check!(list_count == 1, "shard prefix should be listed once");
+        check!(
             shard_get_count_a == 1,
             "shard manifest A should be fetched once"
         );
-        assert!(
+        check!(
             shard_get_count_b == 1,
             "shard manifest B should be fetched once"
         );
@@ -21151,17 +21120,17 @@ mod tests {
         let range = metadata_index_range(&SeriesParams::default()).unwrap();
         let after = current_unix_time_ns();
 
-        assert!(
+        check!(
             range.start_ns >= before - SIX_HOURS_NS,
             "default metadata index start should be within Loki's default recent window"
         );
-        assert!(
+        check!(
             range.end_ns <= after,
             "default metadata index end should be now-ish, got {} after {}",
             range.end_ns,
             after
         );
-        assert!(
+        check!(
             range.end_ns - range.start_ns <= SIX_HOURS_NS,
             "default metadata index range should not be all time"
         );
@@ -21350,13 +21319,13 @@ mod tests {
                 "topic".to_string(),
             );
 
-        assert!(deps.metrics.is_some());
-        assert!(deps.wal_sink.is_some());
-        assert!(deps.ingest_limiter.is_some());
-        assert!(deps.query_authorizer.is_some());
-        assert!(deps.hot_tail.is_some());
-        assert!(deps.deferred_wal_consumer_connect.is_some());
-        assert!(Arc::ptr_eq(
+        check!(deps.metrics.is_some());
+        check!(deps.wal_sink.is_some());
+        check!(deps.ingest_limiter.is_some());
+        check!(deps.query_authorizer.is_some());
+        check!(deps.hot_tail.is_some());
+        check!(deps.deferred_wal_consumer_connect.is_some());
+        check!(Arc::ptr_eq(
             &deps.metrics.as_ref().unwrap().registry,
             &metrics.registry
         ));
@@ -21415,36 +21384,38 @@ mod tests {
             PermissionType::Deny,
         );
 
-        assert!(matches_acl_topic_pattern(
-            &allow_write,
-            "__crabka_observability_logs_wal"
-        ));
-        assert!(matches_acl_topic_pattern(
-            &allow_read,
-            "__crabka_observability_logs_wal"
-        ));
-        assert!(!matches_acl_topic_pattern(&allow_read, "other-topic"));
-        assert!(acl_matches_tenant_wal_write(
-            &allow_write,
-            "User:tenant-a",
-            "__crabka_observability_logs_wal"
-        ));
-        assert!(acl_matches_tenant_wal_read(
-            &allow_read,
-            "User:tenant-a",
-            "__crabka_observability_logs_wal"
-        ));
-        assert!(!acl_matches_tenant_wal_write(
-            &allow_read,
-            "User:tenant-a",
-            "__crabka_observability_logs_wal"
-        ));
-        assert!(!acl_matches_tenant_wal_read(
+        for (entry, topic, want) in [
+            (&allow_write, "__crabka_observability_logs_wal", true),
+            (&allow_read, "__crabka_observability_logs_wal", true),
+            (&allow_read, "other-topic", false),
+        ] {
+            check!(
+                matches_acl_topic_pattern(entry, topic) == want,
+                "pattern={} topic={topic}",
+                entry.resource_name
+            );
+        }
+        check!(acl_matches_tenant_wal_write(
             &allow_write,
             "User:tenant-a",
             "__crabka_observability_logs_wal"
         ));
-        assert!(!acl_matches_tenant_wal_write(
+        check!(acl_matches_tenant_wal_read(
+            &allow_read,
+            "User:tenant-a",
+            "__crabka_observability_logs_wal"
+        ));
+        check!(!acl_matches_tenant_wal_write(
+            &allow_read,
+            "User:tenant-a",
+            "__crabka_observability_logs_wal"
+        ));
+        check!(!acl_matches_tenant_wal_read(
+            &allow_write,
+            "User:tenant-a",
+            "__crabka_observability_logs_wal"
+        ));
+        check!(!acl_matches_tenant_wal_write(
             &acl_entry(
                 ResourceType::Group,
                 "__crabka_observability_logs_wal",
@@ -21456,7 +21427,7 @@ mod tests {
             "User:tenant-a",
             "__crabka_observability_logs_wal",
         ));
-        assert!(
+        check!(
             check_tenant_wal_write_acl(
                 "tenant-a",
                 "__crabka_observability_logs_wal",
@@ -21464,7 +21435,7 @@ mod tests {
             )
             .is_ok()
         );
-        assert!(
+        check!(
             check_tenant_wal_read_acl(
                 "tenant-a",
                 "__crabka_observability_logs_wal",
@@ -21472,7 +21443,7 @@ mod tests {
             )
             .is_ok()
         );
-        assert!(
+        check!(
             check_tenant_wal_write_acl(
                 "tenant-a",
                 "__crabka_observability_logs_wal",
@@ -21480,7 +21451,7 @@ mod tests {
             )
             .is_err()
         );
-        assert!(
+        check!(
             check_tenant_wal_read_acl(
                 "tenant-a",
                 "__crabka_observability_logs_wal",

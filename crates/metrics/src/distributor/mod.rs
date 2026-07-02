@@ -1242,6 +1242,7 @@ mod tests {
     use std::sync::Mutex;
 
     use assert2::assert;
+    use assert2::check;
     use axum::body::Body;
     use axum::http::Request;
     use crabka_blockstore::Labels;
@@ -1701,9 +1702,19 @@ mod tests {
 
         let records = sink.records();
         assert!(response.status() == StatusCode::NO_CONTENT);
-        assert!(records.len() == 1);
-        assert!(records[0].tenant == "tenant-a");
-        assert!(records[0].labels == vec![("__name__".to_string(), "up".to_string())]);
+        assert_eq!(
+            records,
+            vec![WalRecord {
+                tenant: "tenant-a".to_string(),
+                labels: vec![("__name__".to_string(), "up".to_string())],
+                payload: SamplePayload::Float {
+                    timestamp_ms: 100,
+                    value: 1.0,
+                    start_timestamp_ms: None,
+                },
+                exemplars: Vec::new(),
+            }]
+        );
     }
 
     #[tokio::test]
@@ -1800,15 +1811,15 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(response.status() == StatusCode::NO_CONTENT);
-        assert!(
+        check!(response.status() == StatusCode::NO_CONTENT);
+        check!(
             response
                 .headers()
                 .get("X-Prometheus-Remote-Write-Samples-Written")
                 .and_then(|value| value.to_str().ok())
                 == Some("1")
         );
-        assert!(sink.records().len() == 1);
+        check!(sink.records().len() == 1);
     }
 
     #[tokio::test]

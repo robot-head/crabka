@@ -429,16 +429,35 @@ mod tests {
             },
         };
         let json = serde_json::to_value(&resp).unwrap();
-        assert!(json["traces"][0]["traceID"] == "0a".repeat(16));
-        assert!(json["traces"][0]["rootServiceName"] == "checkout");
-        assert!(json["traces"][0]["startTimeUnixNano"] == "1700000000000000000");
-        assert!(json["traces"][0]["durationMs"] == 42);
-        assert!(json["traces"][0]["spanSets"][0]["spans"][0]["spanID"] == "0b".repeat(8));
-        assert!(json["traces"][0]["spanSets"][0]["spans"][0]["durationNanos"] == "42000000");
-        assert!(json["traces"][0]["spanSets"][0]["matched"] == 1);
-        assert!(json["metrics"]["totalJobs"] == 3);
-        assert!(json["metrics"]["completedJobs"] == 3);
-        assert!(json["metrics"]["inspectedBytes"] == 4096);
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "traces": [{
+                    "traceID": "0a".repeat(16),
+                    "rootServiceName": "checkout",
+                    "rootTraceName": "POST /pay",
+                    "startTimeUnixNano": "1700000000000000000",
+                    "durationMs": 42,
+                    "spanSets": [{
+                        "spans": [{
+                            "spanID": "0b".repeat(8),
+                            "startTimeUnixNano": "1700000000000000000",
+                            "durationNanos": "42000000",
+                            "attributes": []
+                        }],
+                        "matched": 1
+                    }]
+                }],
+                "metrics": {
+                    "totalJobs": 3,
+                    "completedJobs": 3,
+                    "totalBlocks": 2,
+                    "inspectedTraces": 10,
+                    "inspectedBytes": 4096,
+                    "inspectedSpans": 50
+                }
+            })
+        );
     }
 
     #[test]
@@ -468,13 +487,44 @@ mod tests {
             "metrics": { "totalBlocks": "2", "inspectedTraces": "3", "inspectedBytes": "5" }
         });
         let resp: SearchResponseJson = serde_json::from_value(body).unwrap();
-        assert!(resp.traces.len() == 1);
-        assert!(resp.metrics.total_blocks == 2);
-        assert!(resp.metrics.inspected_traces == 3);
-        assert!(resp.metrics.inspected_bytes == 5);
-        let attrs = &resp.traces[0].span_sets[0].spans[0].attributes;
-        assert!(attrs[0].value == AnyValueJson::StringValue("GET".to_string()));
-        assert!(attrs[1].value == AnyValueJson::IntValue("200".to_string()));
+        assert_eq!(
+            resp,
+            SearchResponseJson {
+                traces: vec![TraceJson {
+                    trace_id: "ab".repeat(16),
+                    root_service_name: "svc".to_string(),
+                    root_trace_name: "GET /".to_string(),
+                    start_time_unix_nano: "5".to_string(),
+                    duration_ms: 12,
+                    span_sets: vec![SpanSetJson {
+                        spans: vec![SpanJson {
+                            span_id: "cd".repeat(8),
+                            start_time_unix_nano: "5".to_string(),
+                            duration_nanos: "1000".to_string(),
+                            attributes: vec![
+                                KeyValueJson {
+                                    key: "http.method".to_string(),
+                                    value: AnyValueJson::StringValue("GET".to_string()),
+                                },
+                                KeyValueJson {
+                                    key: "http.status".to_string(),
+                                    value: AnyValueJson::IntValue("200".to_string()),
+                                },
+                            ],
+                        }],
+                        matched: 3,
+                    }],
+                }],
+                metrics: Metrics {
+                    total_jobs: 0,
+                    completed_jobs: 0,
+                    total_blocks: 2,
+                    inspected_traces: 3,
+                    inspected_bytes: 5,
+                    inspected_spans: 0,
+                },
+            }
+        );
     }
 
     #[test]
@@ -496,10 +546,17 @@ mod tests {
             inspected_bytes: 200,
             inspected_spans: 11,
         });
-        assert!(a.total_jobs == 2);
-        assert!(a.inspected_traces == 5);
-        assert!(a.inspected_bytes == 300);
-        assert!(a.inspected_spans == 20);
+        assert_eq!(
+            a,
+            Metrics {
+                total_jobs: 2,
+                completed_jobs: 2,
+                total_blocks: 2,
+                inspected_traces: 5,
+                inspected_bytes: 300,
+                inspected_spans: 20,
+            }
+        );
     }
 
     #[test]
@@ -545,10 +602,38 @@ mod tests {
         };
         let json = TraceJson::from(&trace);
         let back = TraceResult::from(&json);
-        assert!(back.trace_id == trace.trace_id);
-        assert!(back.start_time_unix_nano == 1234);
-        assert!(back.span_sets[0].spans[0].span_id == [7; 8]);
-        assert!(back.span_sets[0].spans[0].duration_nanos == 56);
-        assert!(back.span_sets[0].spans[0].attributes[0].1 == AttrValue::Int(9));
+        assert_eq!(
+            back,
+            TraceResult {
+                trace_id: [3; 16],
+                root_service_name: "svc".into(),
+                root_trace_name: "GET /".into(),
+                start_time_unix_nano: 1234,
+                duration_nanos: 5_000_000,
+                duration_ms: 5,
+                span_sets: vec![SpanSet {
+                    spans: vec![SpanRef {
+                        span_id: [7; 8],
+                        parent_span_id: None,
+                        name: String::new(),
+                        kind: 0,
+                        nested_set_left: 0,
+                        nested_set_right: 0,
+                        nested_set_parent: 0,
+                        start_time_unix_nano: 1234,
+                        duration_nanos: 56,
+                        status_code: 0,
+                        status_message: String::new(),
+                        instrumentation_name: String::new(),
+                        instrumentation_version: String::new(),
+                        resource_attributes: Vec::new(),
+                        attributes: vec![("k".into(), AttrValue::Int(9))],
+                        events: Vec::new(),
+                        links: Vec::new(),
+                    }],
+                    matched: 1,
+                }],
+            }
+        );
     }
 }

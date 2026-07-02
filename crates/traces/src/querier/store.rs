@@ -2570,7 +2570,7 @@ mod tests {
         StringDictionaryBuilder,
     };
     use arrow::datatypes::{DataType, Field, Int32Type, Schema, SchemaRef};
-    use assert2::assert;
+    use assert2::{assert, check};
     use crabka_blockstore::{
         AttrValue as BlockAttrValue, BlockWriter, NestedSet as BlockNestedSet, PromotedSpanAttr,
         SCOL_START_NANO, SCOL_TRACE_ID, ShardedTraceBloom, SpanAttr, SpanKind as BlockSpanKind,
@@ -2754,72 +2754,82 @@ mod tests {
     fn resource_matches_service_name_uses_root_service_column() {
         let batch = batch();
 
-        assert!(
-            resource_matches(
-                &batch,
-                0,
-                &resource_service_matcher(MatchCmp::Eq, MatchValue::Str("api".into()))
-            )
-            .unwrap()
-        );
-        assert!(
-            !resource_matches(
-                &batch,
-                0,
-                &resource_service_matcher(MatchCmp::Eq, MatchValue::Str("web".into()))
-            )
-            .unwrap()
-        );
-        assert!(
-            resource_matches(
-                &batch,
-                0,
-                &resource_service_matcher(MatchCmp::Neq, MatchValue::Nil)
-            )
-            .unwrap()
-        );
-        assert!(
-            !resource_matches(
-                &batch,
-                0,
-                &SpanMatcher {
+        for (i, (matcher, want)) in [
+            (
+                resource_service_matcher(MatchCmp::Eq, MatchValue::Str("api".into())),
+                true,
+            ),
+            (
+                resource_service_matcher(MatchCmp::Eq, MatchValue::Str("web".into())),
+                false,
+            ),
+            (
+                resource_service_matcher(MatchCmp::Neq, MatchValue::Nil),
+                true,
+            ),
+            (
+                SpanMatcher {
                     scope: MatchScope::Resource,
                     key: "missing".into(),
                     op: MatchCmp::Neq,
                     value: MatchValue::Nil,
                     negated: false,
                 },
-            )
-            .unwrap()
-        );
+                false,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            check!(
+                resource_matches(&batch, 0, &matcher).unwrap() == want,
+                "case {i}"
+            );
+        }
     }
 
     #[test]
     fn root_service_matches_preserves_nil_and_string_semantics() {
-        assert!(root_service_matches(
-            "api",
-            &resource_service_matcher(MatchCmp::Eq, MatchValue::Str("api".into()))
-        ));
-        assert!(!root_service_matches(
-            "api",
-            &resource_service_matcher(MatchCmp::Eq, MatchValue::Str("web".into()))
-        ));
-        assert!(root_service_matches(
-            "api",
-            &resource_service_matcher(MatchCmp::Neq, MatchValue::Nil)
-        ));
-        assert!(!root_service_matches(
-            "api",
-            &resource_service_matcher(MatchCmp::Eq, MatchValue::Nil)
-        ));
-        assert!(root_service_matches(
-            "",
-            &resource_service_matcher(MatchCmp::Eq, MatchValue::Nil)
-        ));
-        assert!(!root_service_matches(
-            "",
-            &resource_service_matcher(MatchCmp::Neq, MatchValue::Nil)
-        ));
+        for (i, (service, matcher, want)) in [
+            (
+                "api",
+                resource_service_matcher(MatchCmp::Eq, MatchValue::Str("api".into())),
+                true,
+            ),
+            (
+                "api",
+                resource_service_matcher(MatchCmp::Eq, MatchValue::Str("web".into())),
+                false,
+            ),
+            (
+                "api",
+                resource_service_matcher(MatchCmp::Neq, MatchValue::Nil),
+                true,
+            ),
+            (
+                "api",
+                resource_service_matcher(MatchCmp::Eq, MatchValue::Nil),
+                false,
+            ),
+            (
+                "",
+                resource_service_matcher(MatchCmp::Eq, MatchValue::Nil),
+                true,
+            ),
+            (
+                "",
+                resource_service_matcher(MatchCmp::Neq, MatchValue::Nil),
+                false,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            check!(
+                root_service_matches(service, &matcher) == want,
+                "case {i}: service {service:?}"
+            );
+        }
     }
 
     #[test]
@@ -2827,9 +2837,9 @@ mod tests {
         let got = trace_from_batches(&[7; 16], vec![batch()])
             .unwrap()
             .unwrap();
-        assert!(got.root_service_name == "api");
-        assert!(got.spans.len() == 1);
-        assert!(got.spans[0].attributes == vec![("svc".into(), AttrValue::Str("a".into()))]);
+        check!(got.root_service_name == "api");
+        check!(got.spans.len() == 1);
+        check!(got.spans[0].attributes == vec![("svc".into(), AttrValue::Str("a".into()))]);
     }
 
     #[test]
@@ -2869,19 +2879,19 @@ mod tests {
     #[test]
     fn cold_intrinsic_values_include_child_count_and_instrumentation() {
         let batches = vec![batch()];
-        assert!(
+        check!(
             intrinsic_values_from_batches("span:childCount", &batches)
                 .unwrap()
                 .iter()
                 .any(|value| value.type_ == "int" && value.value == "0")
         );
-        assert!(
+        check!(
             intrinsic_values_from_batches("instrumentation:name", &batches)
                 .unwrap()
                 .iter()
                 .any(|value| value.type_ == "string" && value.value == "tracer")
         );
-        assert!(
+        check!(
             intrinsic_values_from_batches("instrumentation:version", &batches)
                 .unwrap()
                 .iter()
@@ -2942,20 +2952,28 @@ mod tests {
 
         let out = recompute_batch_nested_sets(&batch).unwrap();
         // Per-trace `left` reset (collision confirms the multi-trace scenario).
-        assert!(int32_value(&out, COL_NS_LEFT, 0).unwrap() == 1);
-        assert!(int32_value(&out, COL_NS_LEFT, 2).unwrap() == 1);
+        for (row, want) in [(0, 1), (2, 1)] {
+            check!(
+                int32_value(&out, COL_NS_LEFT, row).unwrap() == want,
+                "row {row}"
+            );
+        }
         // Each root has exactly one child; children have none — NOT inflated to 2.
-        assert!(int32_value(&out, COL_CHILD_COUNT, 0).unwrap() == 1);
-        assert!(int32_value(&out, COL_CHILD_COUNT, 1).unwrap() == 0);
-        assert!(int32_value(&out, COL_CHILD_COUNT, 2).unwrap() == 1);
-        assert!(int32_value(&out, COL_CHILD_COUNT, 3).unwrap() == 0);
+        for (row, want) in [(0, 1), (1, 0), (2, 1), (3, 0)] {
+            check!(
+                int32_value(&out, COL_CHILD_COUNT, row).unwrap() == want,
+                "row {row}"
+            );
+        }
         // Roots encode nestedSetParent = -1 (Tempo no-parent sentinel) so the
         // Drilldown's `nestedSetParent < 0` primary signal selects them; each
         // child points at its root's `left` (1 after the per-trace reset).
-        assert!(int32_value(&out, COL_PARENT_ID, 0).unwrap() == -1);
-        assert!(int32_value(&out, COL_PARENT_ID, 1).unwrap() == 1);
-        assert!(int32_value(&out, COL_PARENT_ID, 2).unwrap() == -1);
-        assert!(int32_value(&out, COL_PARENT_ID, 3).unwrap() == 1);
+        for (row, want) in [(0, -1), (1, 1), (2, -1), (3, 1)] {
+            check!(
+                int32_value(&out, COL_PARENT_ID, row).unwrap() == want,
+                "row {row}"
+            );
+        }
     }
 
     #[test]

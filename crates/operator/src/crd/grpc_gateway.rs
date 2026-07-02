@@ -334,16 +334,16 @@ pub struct KafkaGrpcGatewayStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use kube::CustomResourceExt as _;
 
     #[test]
     fn crd_metadata_is_correct() {
         let crd = KafkaGrpcGateway::crd();
-        assert!(crd.spec.group == "crabka.io");
-        assert!(crd.spec.names.kind == "KafkaGrpcGateway");
-        assert!(crd.spec.names.plural == "kafkagrpcgateways");
-        assert!(
+        check!(crd.spec.group == "crabka.io");
+        check!(crd.spec.names.kind == "KafkaGrpcGateway");
+        check!(crd.spec.names.plural == "kafkagrpcgateways");
+        check!(
             crd.spec
                 .names
                 .short_names
@@ -351,18 +351,28 @@ mod tests {
                 .is_some_and(|v| v.contains(&"kgg".to_string())),
             "expected shortname `kgg`",
         );
-        assert!(crd.spec.versions.len() == 1);
-        assert!(crd.spec.versions[0].name == "v1alpha1");
+        check!(crd.spec.versions.len() == 1);
+        check!(crd.spec.versions[0].name == "v1alpha1");
     }
 
     #[test]
     fn minimal_spec_parses() {
         let json = r"{}";
         let spec: KafkaGrpcGatewaySpec = serde_json::from_str(json).unwrap();
-        assert!(spec.replicas.is_none());
-        assert!(spec.image.is_none());
-        assert!(spec.webhooks.is_empty());
-        assert!(spec.outbound_subscriptions.is_empty());
+        assert!(
+            spec == KafkaGrpcGatewaySpec {
+                replicas: None,
+                image: None,
+                resources: None,
+                dedup: None,
+                tls: None,
+                authz: None,
+                webhooks: vec![],
+                outbound_subscriptions: vec![],
+                allowed_targets: vec![],
+                telemetry: None,
+            }
+        );
     }
 
     #[test]
@@ -437,19 +447,14 @@ mod tests {
             },
         );
         let json = serde_json::to_string(&gw).unwrap();
-        assert!(json.contains("\"replicas\":2"), "got: {json}");
-        assert!(
-            json.contains("\"targetTopic\":\"raw-orders\""),
-            "got: {json}"
-        );
-        assert!(
-            json.contains("\"targetUrl\":\"https://example.com/hook\""),
-            "got: {json}"
-        );
-        assert!(
-            json.contains("\"otlpEndpoint\":\"http://otel:4317\""),
-            "got: {json}"
-        );
+        for want in [
+            "\"replicas\":2",
+            "\"targetTopic\":\"raw-orders\"",
+            "\"targetUrl\":\"https://example.com/hook\"",
+            "\"otlpEndpoint\":\"http://otel:4317\"",
+        ] {
+            assert!(json.contains(want), "case {want:?}; got: {json}");
+        }
         let back: KafkaGrpcGateway = serde_json::from_str(&json).unwrap();
         assert!(back.spec == gw.spec);
     }
@@ -469,11 +474,15 @@ mod tests {
             telemetry: None,
         };
         let j = serde_json::to_string(&spec).unwrap();
-        assert!(!j.contains("replicas"), "got: {j}");
-        assert!(!j.contains("image"), "got: {j}");
-        assert!(!j.contains("webhooks"), "got: {j}");
-        assert!(!j.contains("outboundSubscriptions"), "got: {j}");
-        assert!(!j.contains("telemetry"), "got: {j}");
+        for absent in [
+            "replicas",
+            "image",
+            "webhooks",
+            "outboundSubscriptions",
+            "telemetry",
+        ] {
+            assert!(!j.contains(absent), "case {absent:?}; got: {j}");
+        }
     }
 
     #[test]

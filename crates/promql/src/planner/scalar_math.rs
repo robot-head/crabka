@@ -181,6 +181,7 @@ fn build_leaf_batch(
 mod tests {
     use arrow::array::Float64Array as Float64ArrayT;
     use assert2::assert;
+    use assert2::check;
 
     use super::*;
 
@@ -247,9 +248,9 @@ mod tests {
     #[tokio::test]
     async fn sqrt_negative_preserves_nan_row() {
         let got = run(vec![labeled("m", "x", -1.0)], ScalarMathOp::Sqrt, &[]).await;
-        assert!(got.len() == 1);
-        assert!(got[0].0 == "x");
-        assert!(got[0].1.is_nan());
+        check!(got.len() == 1);
+        check!(got[0].0 == "x");
+        check!(got[0].1.is_nan());
     }
 
     #[tokio::test]

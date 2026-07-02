@@ -263,7 +263,7 @@ mod tests {
     use arrow::array::{Array, Float64Array, Int64Array};
     use arrow::compute::concat_batches;
     use arrow::datatypes::{DataType, Field, Schema};
-    use assert2::assert;
+    use assert2::{assert, check};
     use datafusion::catalog::MemTable;
     use datafusion::datasource::memory::MemorySourceConfig;
     use datafusion::logical_expr::{Extension, UserDefinedLogicalNodeCore, col};
@@ -322,15 +322,15 @@ mod tests {
             input: input.clone(),
         };
 
-        assert!(UserDefinedLogicalNodeCore::name(&node) == "InstantManipulate");
+        check!(UserDefinedLogicalNodeCore::name(&node) == "InstantManipulate");
         let plan = LogicalPlan::Extension(Extension {
             node: Arc::new(node),
         });
         let explain = format!("{plan}");
-        assert!(explain.starts_with(
+        check!(explain.starts_with(
             "PromInstantManipulate: start_ms=0, end_ms=60000, step_ms=15000, lookback_delta_ms=300000"
         ));
-        assert!(explain.contains("TableScan: leaf projection=[timestamp, value]"));
+        check!(explain.contains("TableScan: leaf projection=[timestamp, value]"));
 
         let node = InstantManipulate {
             start_ms: 0,
@@ -341,20 +341,26 @@ mod tests {
             field_column: "value".to_string(),
             input: input.clone(),
         };
-        assert!(
+        check!(
             node.with_exprs_and_inputs(vec![col("timestamp")], vec![input.clone()])
                 .is_err()
         );
-        assert!(node.with_exprs_and_inputs(vec![], vec![]).is_err());
+        check!(node.with_exprs_and_inputs(vec![], vec![]).is_err());
         let rewritten = node
-            .with_exprs_and_inputs(vec![], vec![input])
+            .with_exprs_and_inputs(vec![], vec![input.clone()])
             .expect("valid rewrite");
-        assert!(rewritten.start_ms == 0);
-        assert!(rewritten.end_ms == 60_000);
-        assert!(rewritten.step_ms == 15_000);
-        assert!(rewritten.lookback_delta_ms == 300_000);
-        assert!(rewritten.time_index == "timestamp");
-        assert!(rewritten.field_column == "value");
+        assert!(
+            rewritten
+                == InstantManipulate {
+                    start_ms: 0,
+                    end_ms: 60_000,
+                    step_ms: 15_000,
+                    lookback_delta_ms: 300_000,
+                    time_index: "timestamp".to_string(),
+                    field_column: "value".to_string(),
+                    input,
+                }
+        );
     }
 
     #[test]
@@ -370,18 +376,18 @@ mod tests {
             Arc::clone(&input),
         ));
 
-        assert!(exec.name() == "InstantManipulateExec");
+        check!(exec.name() == "InstantManipulateExec");
         let display = format!(
             "{}",
             DisplayableExecutionPlan::new(exec.as_ref()).indent(false)
         );
-        assert!(display.starts_with(
+        check!(display.starts_with(
             "PromInstantManipulateExec: start_ms=0, end_ms=60000, step_ms=15000, lookback_delta_ms=300000"
         ));
-        assert!(display.contains("DataSourceExec: partitions=1"));
-        assert!(exec.maintains_input_order() == vec![false]);
-        assert!(Arc::clone(&exec).with_new_children(vec![]).is_err());
-        assert!(
+        check!(display.contains("DataSourceExec: partitions=1"));
+        check!(exec.maintains_input_order() == vec![false]);
+        check!(Arc::clone(&exec).with_new_children(vec![]).is_err());
+        check!(
             Arc::clone(&exec)
                 .with_new_children(vec![input])
                 .expect("valid child rewrite")
@@ -514,8 +520,8 @@ mod tests {
             .downcast_ref::<Float64Array>()
             .unwrap();
         // Exactly one row survives: the genuine NaN. The stale marker is dropped.
-        assert!(val.len() == 1);
-        assert!(val.value(0).is_nan());
-        assert!(!super::super::is_stale_nan(val.value(0)));
+        check!(val.len() == 1);
+        check!(val.value(0).is_nan());
+        check!(!super::super::is_stale_nan(val.value(0)));
     }
 }

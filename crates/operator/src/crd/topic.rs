@@ -74,16 +74,16 @@ pub struct KafkaTopicStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use kube::CustomResourceExt as _;
 
     #[test]
     fn crd_metadata_is_correct() {
         let crd = KafkaTopic::crd();
-        assert!(crd.spec.group == "crabka.io");
-        assert!(crd.spec.names.kind == "KafkaTopic");
-        assert!(crd.spec.names.plural == "kafkatopics");
-        assert!(
+        check!(crd.spec.group == "crabka.io");
+        check!(crd.spec.names.kind == "KafkaTopic");
+        check!(crd.spec.names.plural == "kafkatopics");
+        check!(
             crd.spec
                 .names
                 .short_names
@@ -91,8 +91,8 @@ mod tests {
                 .is_some_and(|v| v.contains(&"kt".to_string())),
             "expected shortname `kt`",
         );
-        assert!(crd.spec.versions.len() == 1);
-        assert!(crd.spec.versions[0].name == "v1alpha1");
+        check!(crd.spec.versions.len() == 1);
+        check!(crd.spec.versions[0].name == "v1alpha1");
     }
 
     #[test]
@@ -111,9 +111,13 @@ mod tests {
             },
         );
         let json = serde_json::to_string(&kt).unwrap();
-        assert!(json.contains("\"topicName\":\"Demo.Topic\""), "got: {json}");
-        assert!(json.contains("\"partitions\":3"), "got: {json}");
-        assert!(json.contains("\"preserveTopic\":true"), "got: {json}");
+        for want in [
+            "\"topicName\":\"Demo.Topic\"",
+            "\"partitions\":3",
+            "\"preserveTopic\":true",
+        ] {
+            assert!(json.contains(want), "case {want:?}; got: {json}");
+        }
         let back: KafkaTopic = serde_json::from_str(&json).unwrap();
         assert!(back.spec == kt.spec);
     }
@@ -131,10 +135,10 @@ mod tests {
             },
         );
         let j = serde_json::to_string(&kt.spec).unwrap();
-        assert!(!j.contains("topicName"), "got: {j}");
-        assert!(!j.contains("config"), "got: {j}");
+        check!(!j.contains("topicName"), "got: {j}");
+        check!(!j.contains("config"), "got: {j}");
         // `preserveTopic` is a plain bool — serde emits it.
-        assert!(j.contains("\"preserveTopic\":false"), "got: {j}");
+        check!(j.contains("\"preserveTopic\":false"), "got: {j}");
     }
 
     #[test]
@@ -154,10 +158,14 @@ mod tests {
     fn minimum_required_spec_parses() {
         let json = r#"{"partitions":1,"replicas":1}"#;
         let spec: KafkaTopicSpec = serde_json::from_str(json).unwrap();
-        assert!(spec.partitions == 1);
-        assert!(spec.replicas == 1);
-        assert!(spec.topic_name.is_none());
-        assert!(spec.config.is_none());
-        assert!(!spec.preserve_topic);
+        assert!(
+            spec == KafkaTopicSpec {
+                topic_name: None,
+                partitions: 1,
+                replicas: 1,
+                config: None,
+                preserve_topic: false,
+            }
+        );
     }
 }

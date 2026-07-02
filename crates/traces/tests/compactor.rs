@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use arrow::array::{FixedSizeBinaryArray, Int32Array};
-use assert2::assert;
+use assert2::{assert, check};
 use crabka_blockstore::{BlockWriter, TraceIndex, read_block};
 use crabka_traces::{
     AttrValue, KeyValue, Span, SpanKind, SpanRecord, StatusCode,
@@ -84,15 +84,15 @@ async fn compact_block_keys_merges_late_spans_and_replaces_index_entries() {
     .await
     .unwrap();
 
-    assert!(meta.object_key == output_key);
-    assert!(meta.row_count == 2);
-    assert!(meta.min_ts == 100);
-    assert!(meta.max_ts == 200);
-    assert!(
+    check!(meta.object_key == output_key);
+    check!(meta.row_count == 2);
+    check!(meta.min_ts == 100);
+    check!(meta.max_ts == 200);
+    check!(
         index.candidate_blocks_for_trace("tenant-a", &[1; 16], 0, 1_000)
             == vec![output_key.clone()]
     );
-    assert!(
+    check!(
         index.prune_blocks_by_tag("tenant-a", "service.name", Some("api"), 0, 1_000)
             == vec![output_key.clone()]
     );
@@ -181,7 +181,7 @@ async fn compact_block_keys_recomputes_nested_sets_for_late_children() {
         .find(|row| span_ids.value(*row) == [2; 8])
         .unwrap();
 
-    assert!(parent_id.value(child) == left.value(root));
-    assert!(left.value(root) < left.value(child));
-    assert!(right.value(child) < right.value(root));
+    check!(parent_id.value(child) == left.value(root));
+    check!(left.value(root) < left.value(child));
+    check!(right.value(child) < right.value(root));
 }

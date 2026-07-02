@@ -1392,11 +1392,33 @@ mod tests {
         let mut s = InMemorySpanStore::new();
         s.push_trace("t", "svc", "op", vec![span(1, None, "root", vec![])]);
         let got = s.trace_by_id("t", &[7; 16]).await.unwrap().unwrap();
-        assert!(got.trace_id == [7; 16]);
-        assert!(got.root_service_name == "svc");
-        assert!(got.root_trace_name == "op");
-        assert!(got.spans.len() == 1);
-        assert!(got.spans[0].name == "root");
+        assert!(
+            got == TraceSpans {
+                trace_id: [7; 16],
+                root_service_name: "svc".into(),
+                root_trace_name: "op".into(),
+                resource_attributes: vec![("service.name".into(), AttrValue::Str("svc".into()))],
+                spans: vec![SpanRef {
+                    span_id: [1; 8],
+                    parent_span_id: None,
+                    name: "root".into(),
+                    kind: 0,
+                    nested_set_left: 1,
+                    nested_set_right: 2,
+                    nested_set_parent: -1,
+                    start_time_unix_nano: 1000,
+                    duration_nanos: 5,
+                    status_code: 0,
+                    status_message: String::new(),
+                    instrumentation_name: String::new(),
+                    instrumentation_version: String::new(),
+                    resource_attributes: Vec::new(),
+                    attributes: Vec::new(),
+                    events: Vec::new(),
+                    links: Vec::new(),
+                }],
+            }
+        );
         assert!(s.trace_by_id("t", &[9; 16]).await.unwrap().is_none());
     }
 
@@ -1416,13 +1438,25 @@ mod tests {
         );
 
         let got = s.tag_names("t", None, 0, 10_000).await.unwrap();
-        assert!(got.len() == 3);
-        assert!(got[0].scope == TagScope::Resource);
-        assert!(got[0].tags == vec!["service.name"]);
-        assert!(got[1].scope == TagScope::Span);
-        assert!(got[1].tags == vec!["svc"]);
-        assert!(got[2].scope == TagScope::Intrinsic);
-        assert!(got[2].tags == INTRINSIC_TAGS);
+        assert!(
+            got == vec![
+                ScopedTag {
+                    scope: TagScope::Resource,
+                    tags: vec!["service.name".into()],
+                },
+                ScopedTag {
+                    scope: TagScope::Span,
+                    tags: vec!["svc".into()],
+                },
+                ScopedTag {
+                    scope: TagScope::Intrinsic,
+                    tags: INTRINSIC_TAGS
+                        .iter()
+                        .map(|tag| (*tag).to_string())
+                        .collect(),
+                },
+            ]
+        );
     }
 
     #[tokio::test]
@@ -1443,9 +1477,15 @@ mod tests {
             .tag_names("t", Some(TagScope::Instrumentation), 0, 10_000)
             .await
             .unwrap();
-        assert!(got.len() == 1);
-        assert!(got[0].scope == TagScope::Instrumentation);
-        assert!(got[0].tags == vec!["instrumentation:name", "instrumentation:version"]);
+        assert!(
+            got == vec![ScopedTag {
+                scope: TagScope::Instrumentation,
+                tags: vec![
+                    "instrumentation:name".into(),
+                    "instrumentation:version".into()
+                ],
+            }]
+        );
     }
 
     #[tokio::test]
@@ -1468,80 +1508,54 @@ mod tests {
             .tag_names("t", Some(TagScope::Event), 0, 10_000)
             .await
             .unwrap();
-        assert!(event_names.len() == 1);
-        assert!(event_names[0].scope == TagScope::Event);
-        assert!(event_names[0].tags == vec!["cache.key", "event:name", "event:timeSinceStart"]);
+        assert!(
+            event_names
+                == vec![ScopedTag {
+                    scope: TagScope::Event,
+                    tags: vec![
+                        "cache.key".into(),
+                        "event:name".into(),
+                        "event:timeSinceStart".into()
+                    ],
+                }]
+        );
 
         let link_names = s
             .tag_names("t", Some(TagScope::Link), 0, 10_000)
             .await
             .unwrap();
-        assert!(link_names.len() == 1);
-        assert!(link_names[0].scope == TagScope::Link);
-        assert!(link_names[0].tags == vec!["link.kind", "link:spanID", "link:traceID"]);
+        assert!(
+            link_names
+                == vec![ScopedTag {
+                    scope: TagScope::Link,
+                    tags: vec![
+                        "link.kind".into(),
+                        "link:spanID".into(),
+                        "link:traceID".into()
+                    ],
+                }]
+        );
 
-        assert!(
-            s.tag_values("t", "event:name", 0, 10_000).await.unwrap()
-                == vec![TypedValue {
-                    type_: "string".into(),
-                    value: "exception".into(),
-                }]
-        );
-        assert!(
-            s.tag_values("t", "event:timeSinceStart", 0, 10_000)
-                .await
-                .unwrap()
-                == vec![TypedValue {
-                    type_: "duration".into(),
-                    value: "50".into(),
-                }]
-        );
-        assert!(
-            s.tag_values("t", "cache.key", 0, 10_000).await.unwrap()
-                == vec![TypedValue {
-                    type_: "string".into(),
-                    value: "users".into(),
-                }]
-        );
-        assert!(
-            s.tag_values("t", "event.cache.key", 0, 10_000)
-                .await
-                .unwrap()
-                == vec![TypedValue {
-                    type_: "string".into(),
-                    value: "users".into(),
-                }]
-        );
-        assert!(
-            s.tag_values("t", "link:traceID", 0, 10_000).await.unwrap()
-                == vec![TypedValue {
-                    type_: "string".into(),
-                    value: "09090909090909090909090909090909".into(),
-                }]
-        );
-        assert!(
-            s.tag_values("t", "link:spanID", 0, 10_000).await.unwrap()
-                == vec![TypedValue {
-                    type_: "string".into(),
-                    value: "0808080808080808".into(),
-                }]
-        );
-        assert!(
-            s.tag_values("t", "link.kind", 0, 10_000).await.unwrap()
-                == vec![TypedValue {
-                    type_: "string".into(),
-                    value: "retry".into(),
-                }]
-        );
-        assert!(
-            s.tag_values("t", "link.link.kind", 0, 10_000)
-                .await
-                .unwrap()
-                == vec![TypedValue {
-                    type_: "string".into(),
-                    value: "retry".into(),
-                }]
-        );
+        let cases = [
+            ("event:name", "string", "exception"),
+            ("event:timeSinceStart", "duration", "50"),
+            ("cache.key", "string", "users"),
+            ("event.cache.key", "string", "users"),
+            ("link:traceID", "string", "09090909090909090909090909090909"),
+            ("link:spanID", "string", "0808080808080808"),
+            ("link.kind", "string", "retry"),
+            ("link.link.kind", "string", "retry"),
+        ];
+        for (tag, type_, value) in cases {
+            let got = s.tag_values("t", tag, 0, 10_000).await.unwrap();
+            assert!(
+                got == vec![TypedValue {
+                    type_: type_.into(),
+                    value: value.into(),
+                }],
+                "tag {tag}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1553,27 +1567,27 @@ mod tests {
             .tag_names("t", Some(TagScope::Intrinsic), 0, 10_000)
             .await
             .unwrap();
-        assert!(got.len() == 1);
-        assert!(got[0].scope == TagScope::Intrinsic);
         assert!(
-            got[0].tags
-                == vec![
-                    "span:childCount",
-                    "span:duration",
-                    "span:id",
-                    "span:kind",
-                    "span:name",
-                    "span:parentID",
-                    "span:nestedSetLeft",
-                    "span:nestedSetParent",
-                    "span:nestedSetRight",
-                    "span:status",
-                    "span:statusMessage",
-                    "trace:duration",
-                    "trace:id",
-                    "trace:rootName",
-                    "trace:rootService",
-                ]
+            got == vec![ScopedTag {
+                scope: TagScope::Intrinsic,
+                tags: vec![
+                    "span:childCount".into(),
+                    "span:duration".into(),
+                    "span:id".into(),
+                    "span:kind".into(),
+                    "span:name".into(),
+                    "span:parentID".into(),
+                    "span:nestedSetLeft".into(),
+                    "span:nestedSetParent".into(),
+                    "span:nestedSetRight".into(),
+                    "span:status".into(),
+                    "span:statusMessage".into(),
+                    "trace:duration".into(),
+                    "trace:id".into(),
+                    "trace:rootName".into(),
+                    "trace:rootService".into(),
+                ],
+            }]
         );
     }
 
@@ -1790,163 +1804,76 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(
-        clippy::too_many_lines,
-        reason = "exhaustive per-intrinsic matcher test"
-    )]
     async fn intrinsic_matchers_match_each_intrinsic() {
-        // String intrinsics.
-        assert!(
-            scan_matches(&[matcher(
-                MatchScope::Intrinsic,
+        // trace:id and span:id are hex strings. Nested-set left/right are
+        // >= 0; a root span's nestedSetParent is -1 (Tempo's no-parent
+        // sentinel), so it matches < 0 — the same predicate Grafana's Traces
+        // Drilldown uses to find roots.
+        let cases = [
+            // String intrinsics.
+            (
                 "span:name",
                 MatchCmp::Eq,
                 MatchValue::Str("checkout".into()),
-            )])
-            .await
-                == 1
-        );
-        assert!(
-            scan_matches(&[matcher(
-                MatchScope::Intrinsic,
+            ),
+            (
                 "span:statusMessage",
                 MatchCmp::Eq,
                 MatchValue::Str("boom".into()),
-            )])
-            .await
-                == 1
-        );
-        assert!(
-            scan_matches(&[matcher(
-                MatchScope::Intrinsic,
+            ),
+            (
                 "trace:rootService",
                 MatchCmp::Eq,
                 MatchValue::Str("checkout".into()),
-            )])
-            .await
-                == 1
-        );
-        assert!(
-            scan_matches(&[matcher(
-                MatchScope::Intrinsic,
+            ),
+            (
                 "trace:rootName",
                 MatchCmp::Eq,
                 MatchValue::Str("POST /pay".into()),
-            )])
-            .await
-                == 1
-        );
-        // trace:id and span:id are hex strings.
-        assert!(
-            scan_matches(&[matcher(
-                MatchScope::Intrinsic,
+            ),
+            (
                 "trace:id",
                 MatchCmp::Eq,
                 MatchValue::Str("07070707070707070707070707070707".into()),
-            )])
-            .await
-                == 1
-        );
-        assert!(
-            scan_matches(&[matcher(
-                MatchScope::Intrinsic,
+            ),
+            (
                 "span:id",
                 MatchCmp::Eq,
                 MatchValue::Str("0101010101010101".into()),
-            )])
-            .await
-                == 1
-        );
-        // span:parentID present.
-        assert!(
-            scan_matches(&[matcher(
-                MatchScope::Intrinsic,
+            ),
+            // span:parentID present.
+            (
                 "span:parentID",
                 MatchCmp::Eq,
                 MatchValue::Str("0202020202020202".into()),
-            )])
-            .await
-                == 1
-        );
-        // Numeric / duration intrinsics.
-        assert!(
-            scan_matches(&[matcher(
-                MatchScope::Intrinsic,
-                "span:duration",
-                MatchCmp::Gt,
-                MatchValue::Int(1_000_000),
-            )])
-            .await
-                == 1
-        );
-        assert!(
-            scan_matches(&[matcher(
-                MatchScope::Intrinsic,
-                "trace:duration",
-                MatchCmp::Gte,
-                MatchValue::Int(0),
-            )])
-            .await
-                == 1
-        );
-        assert!(
-            scan_matches(&[matcher(
-                MatchScope::Intrinsic,
-                "span:childCount",
-                MatchCmp::Gte,
-                MatchValue::Int(0),
-            )])
-            .await
-                == 1
-        );
-        // Nested-set intrinsics. left/right are >= 0; a root span's
-        // nestedSetParent is -1 (Tempo's no-parent sentinel), so it matches < 0
-        // — the same predicate Grafana's Traces Drilldown uses to find roots.
-        for key in ["span:nestedSetLeft", "span:nestedSetRight"] {
-            assert!(
-                scan_matches(&[matcher(
-                    MatchScope::Intrinsic,
-                    key,
-                    MatchCmp::Gte,
-                    MatchValue::Int(0),
-                )])
-                .await
-                    == 1,
-                "nested-set intrinsic {key} should match"
-            );
-        }
-        assert!(
-            scan_matches(&[matcher(
-                MatchScope::Intrinsic,
-                "span:nestedSetParent",
-                MatchCmp::Lt,
-                MatchValue::Int(0),
-            )])
-            .await
-                == 1,
-            "root span nestedSetParent should match < 0"
-        );
-        // Instrumentation intrinsics.
-        assert!(
-            scan_matches(&[matcher(
-                MatchScope::Intrinsic,
+            ),
+            // Numeric / duration intrinsics.
+            ("span:duration", MatchCmp::Gt, MatchValue::Int(1_000_000)),
+            ("trace:duration", MatchCmp::Gte, MatchValue::Int(0)),
+            ("span:childCount", MatchCmp::Gte, MatchValue::Int(0)),
+            // Nested-set intrinsics.
+            ("span:nestedSetLeft", MatchCmp::Gte, MatchValue::Int(0)),
+            ("span:nestedSetRight", MatchCmp::Gte, MatchValue::Int(0)),
+            ("span:nestedSetParent", MatchCmp::Lt, MatchValue::Int(0)),
+            // Instrumentation intrinsics.
+            (
                 "instrumentation:name",
                 MatchCmp::Eq,
                 MatchValue::Str("tracer".into()),
-            )])
-            .await
-                == 1
-        );
-        assert!(
-            scan_matches(&[matcher(
-                MatchScope::Intrinsic,
+            ),
+            (
                 "instrumentation:version",
                 MatchCmp::Eq,
                 MatchValue::Str("1.2.3".into()),
-            )])
-            .await
-                == 1
-        );
+            ),
+        ];
+        for (key, op, value) in cases {
+            let desc = format!("{key} {op:?} {value:?}");
+            assert!(
+                scan_matches(&[matcher(MatchScope::Intrinsic, key, op, value)]).await == 1,
+                "intrinsic {desc} should match"
+            );
+        }
     }
 
     #[tokio::test]

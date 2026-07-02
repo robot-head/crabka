@@ -324,7 +324,7 @@ mod tests {
     use arrow::array::Float64Array;
     use arrow::datatypes::{Field, Schema};
     use arrow::record_batch::RecordBatch;
-    use assert2::assert;
+    use assert2::{assert, check};
     use datafusion::common::ScalarValue;
 
     use super::*;
@@ -478,36 +478,40 @@ mod tests {
         let values = value_range(&[&[1.0, 2.0]]);
         let range_ms = ColumnarValue::Scalar(ScalarValue::Int64(Some(60_000)));
 
-        assert!(
-            udf.invoke_with_args(invoke_args(
-                Arc::clone(&eval),
-                timestamp_range(&[&[0, 60_000], &[0, 60_000]]),
-                Arc::clone(&values),
-                range_ms.clone(),
-                1,
-            ))
-            .is_err()
-        );
-        assert!(
-            udf.invoke_with_args(invoke_args(
-                Arc::clone(&eval),
-                Arc::clone(&timestamps),
-                value_range(&[&[1.0, 2.0], &[1.0, 2.0]]),
-                range_ms.clone(),
-                1,
-            ))
-            .is_err()
-        );
-        assert!(
-            udf.invoke_with_args(invoke_args(
-                Arc::new(Int64Array::from(vec![60_000_i64, 120_000])),
-                timestamps,
-                values,
-                range_ms,
-                1,
-            ))
-            .is_err()
-        );
+        for (case, args) in [
+            (
+                "timestamp_range has extra rows",
+                invoke_args(
+                    Arc::clone(&eval),
+                    timestamp_range(&[&[0, 60_000], &[0, 60_000]]),
+                    Arc::clone(&values),
+                    range_ms.clone(),
+                    1,
+                ),
+            ),
+            (
+                "value_range has extra rows",
+                invoke_args(
+                    Arc::clone(&eval),
+                    Arc::clone(&timestamps),
+                    value_range(&[&[1.0, 2.0], &[1.0, 2.0]]),
+                    range_ms.clone(),
+                    1,
+                ),
+            ),
+            (
+                "eval_timestamp has extra rows",
+                invoke_args(
+                    Arc::new(Int64Array::from(vec![60_000_i64, 120_000])),
+                    timestamps,
+                    values,
+                    range_ms,
+                    1,
+                ),
+            ),
+        ] {
+            assert!(udf.invoke_with_args(args).is_err(), "case {case}");
+        }
     }
 
     #[test]
@@ -583,8 +587,9 @@ mod tests {
             300_000,
         );
         assert!(out.len() == 2);
-        assert!(approx_eq(out[0], 4.0 / 300.0));
-        assert!(approx_eq(out[1], 5.0 / 300.0));
+        for (step, want) in [(0_usize, 4.0 / 300.0), (1, 5.0 / 300.0)] {
+            assert!(approx_eq(out[step], want), "step {step}");
+        }
     }
 
     /// `prom_increase` reproduces the engine's reset correction: 1,2,1 -> 2.0.
@@ -732,11 +737,11 @@ mod tests {
         let range = RangeArray::from_ranges(values, [(0_u32, 2_u32), (2, 1)]).unwrap();
         let dict: ArrayRef = Arc::new(range.into_dict_array().unwrap());
         let back = decode_range_column(&dict, "value_range", "prom_rate").unwrap();
-        assert!(back.len() == 2);
-        assert!(back.value_slice(0).unwrap() == [1.0, 2.0]);
+        check!(back.len() == 2);
+        check!(back.value_slice(0).unwrap() == [1.0, 2.0]);
 
         // A non-dictionary column is rejected.
         let plain: ArrayRef = Arc::new(Int64Array::from(vec![1, 2, 3]));
-        assert!(decode_range_column(&plain, "value_range", "prom_rate").is_err());
+        check!(decode_range_column(&plain, "value_range", "prom_rate").is_err());
     }
 }

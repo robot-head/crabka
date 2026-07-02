@@ -838,7 +838,7 @@ fn structural_is_union(op: StructuralOp) -> bool {
 mod tests {
     use arrow::array::Array;
     use arrow::record_batch::RecordBatch;
-    use assert2::assert;
+    use assert2::{assert, check};
     use datafusion::arrow::array::AsArray;
 
     use super::*;
@@ -1018,9 +1018,9 @@ mod tests {
             Pipeline::Aggregate(Aggregate::CountOverTime),
             Pipeline::By(by),
         ];
-        assert!(grouped_no_filter_by(&non_preserving).is_none());
-        assert!(is_search_preserving_aggregate(&Aggregate::Count));
-        assert!(!is_search_preserving_aggregate(&Aggregate::CountOverTime));
+        check!(grouped_no_filter_by(&non_preserving).is_none());
+        check!(is_search_preserving_aggregate(&Aggregate::Count));
+        check!(!is_search_preserving_aggregate(&Aggregate::CountOverTime));
     }
 
     #[test]

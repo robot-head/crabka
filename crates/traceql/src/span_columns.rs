@@ -211,7 +211,7 @@ pub fn assign_nested_set(spans: &[InputSpan]) -> Vec<NestedSet> {
 mod tests {
     use super::*;
     use arrow::datatypes::DataType;
-    use assert2::assert;
+    use assert2::{assert, check};
 
     fn sid(n: u8) -> [u8; 8] {
         [n, 0, 0, 0, 0, 0, 0, 0]
@@ -243,28 +243,18 @@ mod tests {
     #[test]
     fn schema_contains_traceql_planning_columns() {
         let schema = span_schema();
-        assert!(
-            schema.column_with_name(COL_TRACE_ID).unwrap().1.data_type()
-                == &DataType::FixedSizeBinary(16)
-        );
-        assert!(schema.column_with_name(COL_NAME).unwrap().1.data_type() == &DataType::Utf8);
-        assert!(schema.column_with_name(COL_NS_LEFT).unwrap().1.data_type() == &DataType::Int32);
-        assert!(
-            schema
-                .column_with_name(COL_CHILD_COUNT)
-                .unwrap()
-                .1
-                .data_type()
-                == &DataType::Int32
-        );
-        assert!(
-            schema
-                .column_with_name(COL_TRACE_DURATION)
-                .unwrap()
-                .1
-                .data_type()
-                == &DataType::Int64
-        );
+        for (col, want) in [
+            (COL_TRACE_ID, DataType::FixedSizeBinary(16)),
+            (COL_NAME, DataType::Utf8),
+            (COL_NS_LEFT, DataType::Int32),
+            (COL_CHILD_COUNT, DataType::Int32),
+            (COL_TRACE_DURATION, DataType::Int64),
+        ] {
+            assert!(
+                schema.column_with_name(col).unwrap().1.data_type() == &want,
+                "column: {col}"
+            );
+        }
     }
 
     #[test]
@@ -282,10 +272,10 @@ mod tests {
         ];
         let ns = assign_nested_set(&spans);
         let root_left = ns[idx(&spans, 1)].left;
-        assert!(ns[idx(&spans, 1)].parent_id == -1); // root: Tempo nestedSetParent sentinel
-        assert!(ns[idx(&spans, 2)].parent_id == root_left);
-        assert!(ns[idx(&spans, 3)].parent_id == root_left);
-        assert!(ns[idx(&spans, 4)].parent_id == ns[idx(&spans, 3)].left);
+        check!(ns[idx(&spans, 1)].parent_id == -1); // root: Tempo nestedSetParent sentinel
+        check!(ns[idx(&spans, 2)].parent_id == root_left);
+        check!(ns[idx(&spans, 3)].parent_id == root_left);
+        check!(ns[idx(&spans, 4)].parent_id == ns[idx(&spans, 3)].left);
     }
 
     #[test]
@@ -302,32 +292,43 @@ mod tests {
         let parent = ns[idx(&spans, 3)];
         let child = ns[idx(&spans, 4)];
 
-        assert!(root.left < child.left && child.right < root.right);
-        assert!(parent.left < child.left && child.right < parent.right);
-        assert!(!(peer.left < child.left && child.right < peer.right));
+        check!(root.left < child.left && child.right < root.right);
+        check!(parent.left < child.left && child.right < parent.right);
+        check!(!(peer.left < child.left && child.right < peer.right));
     }
 
     #[test]
     fn orphan_parent_is_treated_as_root() {
         let spans = vec![span(9, Some(99))];
         let ns = assign_nested_set(&spans);
-        assert!(ns[0].parent_id == -1); // dangling parent → root sentinel
-        assert!(ns[0].left == 1);
-        assert!(ns[0].right == 2);
+        // dangling parent → root sentinel
+        assert!(
+            ns == vec![NestedSet {
+                left: 1,
+                right: 2,
+                parent_id: -1,
+            }]
+        );
     }
 
     #[test]
     fn self_parented_span_keeps_input_order_root_position() {
         let spans = vec![span(1, Some(1)), span(2, None)];
         let ns = assign_nested_set(&spans);
-        let self_parented = ns[idx(&spans, 1)];
-        let later_root = ns[idx(&spans, 2)];
-
-        assert!(self_parented.parent_id == -1);
-        assert!(self_parented.left == 1);
-        assert!(self_parented.right == 2);
-        assert!(later_root.left == 3);
-        assert!(later_root.right == 4);
+        assert!(
+            ns == vec![
+                NestedSet {
+                    left: 1,
+                    right: 2,
+                    parent_id: -1,
+                },
+                NestedSet {
+                    left: 3,
+                    right: 4,
+                    parent_id: -1,
+                },
+            ]
+        );
     }
 
     #[test]
@@ -341,11 +342,11 @@ mod tests {
             assert!(entry.left > 0);
             assert!(entry.left < entry.right);
         }
-        assert!(ns[0].parent_id == -1);
-        assert!(ns[1].parent_id == ns[0].left);
-        assert!(ns[0].left < ns[1].left && ns[1].right < ns[0].right);
+        check!(ns[0].parent_id == -1);
+        check!(ns[1].parent_id == ns[0].left);
+        check!(ns[0].left < ns[1].left && ns[1].right < ns[0].right);
         // The two intervals must be distinct (no collision at 0).
-        assert!(ns[0].left != ns[1].left);
+        check!(ns[0].left != ns[1].left);
     }
 
     #[test]

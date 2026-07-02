@@ -1,6 +1,6 @@
 use arrow::array::{DictionaryArray, StringArray};
 use arrow::datatypes::Int32Type;
-use assert2::assert;
+use assert2::{assert, check};
 use bytes::Bytes;
 use crabka_blockstore::{BlockWriter, PromotedSpanAttr, TraceIndex, read_block};
 use crabka_client_consumer::ConsumerRecord;
@@ -85,9 +85,9 @@ fn object_key_is_deterministic_and_offset_scoped() {
     let b = object_key("tenant-a", 3, 10, 20, 1_000);
     let c = object_key("tenant-a", 3, 10, 21, 1_000);
 
-    assert!(a == b);
-    assert!(a != c);
-    assert!(a == "traces/tenant-a/00003/00000000000000000010-00000000000000000020-1000.parquet");
+    check!(a == b);
+    check!(a != c);
+    check!(a == "traces/tenant-a/00003/00000000000000000010-00000000000000000020-1000.parquet");
 }
 
 #[test]
@@ -124,11 +124,11 @@ fn decode_consumer_records_groups_by_partition_and_tracks_offsets() {
     ])
     .unwrap();
 
-    assert!(windows.len() == 2);
-    assert!(windows[&1].offset_range == (11, 12));
-    assert!(windows[&1].records.len() == 2);
-    assert!(windows[&2].offset_range == (7, 7));
-    assert!(windows[&2].records[0].tenant == "tenant-b");
+    check!(windows.len() == 2);
+    check!(windows[&1].offset_range == (11, 12));
+    check!(windows[&1].records.len() == 2);
+    check!(windows[&2].offset_range == (7, 7));
+    check!(windows[&2].records[0].tenant == "tenant-b");
 }
 
 #[tokio::test]
@@ -146,29 +146,29 @@ async fn build_blocks_writes_span_block_and_updates_trace_index() {
         .await
         .unwrap();
 
-    assert!(metas.len() == 1);
-    assert!(metas[0].tenant == "tenant-a");
-    assert!(metas[0].row_count == 2);
-    assert!(metas[0].min_ts == 100);
-    assert!(metas[0].max_ts == 200);
+    check!(metas.len() == 1);
+    check!(metas[0].tenant == "tenant-a");
+    check!(metas[0].row_count == 2);
+    check!(metas[0].min_ts == 100);
+    check!(metas[0].max_ts == 200);
 
     let batches = read_block(store, &metas[0].object_key).await.unwrap();
-    assert!(
+    check!(
         batches
             .iter()
             .map(arrow::record_batch::RecordBatch::num_rows)
             .sum::<usize>()
             == 2
     );
-    assert!(
+    check!(
         index.candidate_blocks_for_trace("tenant-a", &[1; 16], 0, 1_000)
             == vec![metas[0].object_key.clone()]
     );
-    assert!(
+    check!(
         index.prune_blocks_by_tag("tenant-a", "service.name", Some("api"), 0, 1_000)
             == vec![metas[0].object_key.clone()]
     );
-    assert!(
+    check!(
         index
             .candidate_blocks_for_trace("tenant-b", &[2; 16], 0, 1_000)
             .is_empty()
@@ -192,12 +192,12 @@ async fn replaying_same_offset_window_is_idempotent_in_trace_index() {
         .await
         .unwrap();
 
-    assert!(first[0].object_key == replay[0].object_key);
-    assert!(
+    check!(first[0].object_key == replay[0].object_key);
+    check!(
         index.candidate_blocks_for_trace("tenant-a", &[1; 16], 0, 1_000)
             == vec![first[0].object_key.clone()]
     );
-    assert!(
+    check!(
         index.prune_blocks_by_tag("tenant-a", "service.name", Some("api"), 0, 1_000)
             == vec![first[0].object_key.clone()]
     );
@@ -318,17 +318,17 @@ async fn multiple_polls_below_threshold_flush_one_block_per_partition() {
     let key = "traces/tenant-a/00007/00000000000000000010-00000000000000000012-100.parquet";
     let batches = read_block(store, key).await.unwrap();
     // Both spans of trace [1;16] grouped across polls + the lone span of [2;16].
-    assert!(
+    check!(
         batches
             .iter()
             .map(arrow::record_batch::RecordBatch::num_rows)
             .sum::<usize>()
             == 3
     );
-    assert!(
+    check!(
         index.candidate_blocks_for_trace("tenant-a", &[1; 16], 0, 1_000) == vec![key.to_string()]
     );
-    assert!(
+    check!(
         index.candidate_blocks_for_trace("tenant-a", &[2; 16], 0, 1_000) == vec![key.to_string()]
     );
 }
@@ -499,13 +499,13 @@ async fn build_blocks_with_prefix_scopes_block_keys() {
     .await
     .unwrap();
 
-    assert!(metas.len() == 1);
-    assert!(
+    check!(metas.len() == 1);
+    check!(
         metas[0].object_key
             == "tempo/traces/traces/tenant-a/00007/00000000000000000010-00000000000000000020-100.parquet"
     );
-    assert!(read_block(store, &metas[0].object_key).await.is_ok());
-    assert!(
+    check!(read_block(store, &metas[0].object_key).await.is_ok());
+    check!(
         index.candidate_blocks_for_trace("tenant-a", &[1; 16], 0, 1_000)
             == vec![metas[0].object_key.clone()]
     );
@@ -764,13 +764,13 @@ async fn run_commits_offsets_only_after_a_durable_block_write() {
     // would put "commit" first and fail this.
     let recorded = events.lock().expect("events lock").clone();
     let commit_index = recorded.iter().position(|e| e == "commit").unwrap();
-    assert!(commit_index == recorded.len() - 1);
-    assert!(
+    check!(commit_index == recorded.len() - 1);
+    check!(
         recorded[..commit_index]
             .iter()
             .all(|e| e.starts_with("put:"))
     );
-    assert!(commit_index >= 1);
+    check!(commit_index >= 1);
 
     // The block is durable and the index references it: no data lost.
     let key = "traces/tenant-a/00003/00000000000000000010-00000000000000000011-100.parquet";

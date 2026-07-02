@@ -1298,6 +1298,7 @@ fn should_prime_missing_partition(seen: bool) -> bool {
 mod retry_tests {
     use super::*;
     use assert2::assert;
+    use crabka_protocol::UnknownTaggedFields;
     use std::io;
     use std::net::SocketAddr;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1317,9 +1318,14 @@ mod retry_tests {
     fn find_coordinator_request_populates_legacy_and_batched_group_keys() {
         let req = build_find_coordinator_request("group-a".into());
 
-        assert!(req.key == "group-a");
-        assert!(req.key_type == 0);
-        assert!(req.coordinator_keys == vec!["group-a"]);
+        assert!(
+            req == FindCoordinatorRequest {
+                key: "group-a".into(),
+                key_type: 0,
+                coordinator_keys: vec!["group-a".into()],
+                unknown_tagged_fields: UnknownTaggedFields(vec![]),
+            }
+        );
     }
 
     #[test]
@@ -1328,15 +1334,19 @@ mod retry_tests {
         let one: HashMap<String, i32> = [("logs".to_string(), 1)].into_iter().collect();
         let three: HashMap<String, i32> = [("logs".to_string(), 3)].into_iter().collect();
 
-        // Cold-start race: topic absent at join, created later -> growth -> rejoin.
-        assert!(subscribed_topics_grew(&empty, &one));
-        // Topic gained partitions -> rejoin to (re)distribute them.
-        assert!(subscribed_topics_grew(&one, &three));
-        // Steady state: unchanged -> no spurious rejoin.
-        assert!(!subscribed_topics_grew(&one, &one));
-        // A topic shrinking/disappearing is not "growth" -> no rejoin.
-        assert!(!subscribed_topics_grew(&three, &one));
-        assert!(!subscribed_topics_grew(&one, &empty));
+        for (known, current, expected) in [
+            // Cold-start race: topic absent at join, created later -> growth -> rejoin.
+            (&empty, &one, true),
+            // Topic gained partitions -> rejoin to (re)distribute them.
+            (&one, &three, true),
+            // Steady state: unchanged -> no spurious rejoin.
+            (&one, &one, false),
+            // A topic shrinking/disappearing is not "growth" -> no rejoin.
+            (&three, &one, false),
+            (&one, &empty, false),
+        ] {
+            assert!(subscribed_topics_grew(known, current) == expected);
+        }
     }
 
     #[test]
@@ -1385,17 +1395,25 @@ mod retry_tests {
 
     #[test]
     fn next_backoff_doubles_until_cap() {
-        assert!(
-            next_backoff(Duration::from_millis(100), Duration::from_secs(1))
-                == Duration::from_millis(200)
-        );
-        assert!(
-            next_backoff(Duration::from_millis(800), Duration::from_secs(1))
-                == Duration::from_secs(1)
-        );
-        assert!(
-            next_backoff(Duration::from_secs(1), Duration::from_secs(1)) == Duration::from_secs(1)
-        );
+        for (backoff, max_backoff, expected) in [
+            (
+                Duration::from_millis(100),
+                Duration::from_secs(1),
+                Duration::from_millis(200),
+            ),
+            (
+                Duration::from_millis(800),
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+            ),
+            (
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+            ),
+        ] {
+            assert!(next_backoff(backoff, max_backoff) == expected);
+        }
     }
 
     #[test]
@@ -1406,11 +1424,19 @@ mod retry_tests {
             Some("instance-a".into()),
         );
 
-        assert!(req.group_id == "group-a");
-        assert!(req.member_id == "member-a");
-        assert!(req.members.len() == 1);
-        assert!(req.members[0].member_id == "member-a");
-        assert!(req.members[0].group_instance_id.as_deref() == Some("instance-a"));
+        assert!(
+            req == LeaveGroupRequest {
+                group_id: "group-a".into(),
+                member_id: "member-a".into(),
+                members: vec![MemberIdentity {
+                    member_id: "member-a".into(),
+                    group_instance_id: Some("instance-a".into()),
+                    reason: None,
+                    unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                }],
+                unknown_tagged_fields: UnknownTaggedFields(vec![]),
+            }
+        );
     }
 
     #[test]

@@ -1025,6 +1025,7 @@ mod service_rendering_tests {
     use super::*;
     use crate::crd::{BootstrapConfig, BrokerOverride, KafkaSpec, ListenerConfiguration};
     use assert2::assert;
+    use assert2::check;
 
     fn kafka(name: &str) -> Kafka {
         let mut k = Kafka::new(
@@ -1078,9 +1079,9 @@ mod service_rendering_tests {
         let spec = svc.spec.as_ref().unwrap();
         assert!(spec.type_.as_deref() == Some("NodePort"));
         let sel = spec.selector.as_ref().unwrap();
-        assert!(sel.get("statefulset.kubernetes.io/pod-name") == Some(&"demo-pool-0".to_string()));
-        assert!(spec.ports.as_ref().unwrap()[0].port == 9094);
-        assert!(spec.ports.as_ref().unwrap()[0].node_port == Some(32100));
+        check!(sel.get("statefulset.kubernetes.io/pod-name") == Some(&"demo-pool-0".to_string()));
+        check!(spec.ports.as_ref().unwrap()[0].port == 9094);
+        check!(spec.ports.as_ref().unwrap()[0].node_port == Some(32100));
     }
 
     #[test]
@@ -1132,9 +1133,9 @@ mod service_rendering_tests {
         assert!(svc.metadata.name.as_deref() == Some("demo-external-bootstrap"));
         let spec = svc.spec.as_ref().unwrap();
         let sel = spec.selector.as_ref().unwrap();
-        assert!(sel.get("app.kubernetes.io/instance") == Some(&"demo".to_string()));
-        assert!(sel.get("statefulset.kubernetes.io/pod-name").is_none());
-        assert!(spec.ports.as_ref().unwrap()[0].node_port == Some(32099));
+        check!(sel.get("app.kubernetes.io/instance") == Some(&"demo".to_string()));
+        check!(sel.get("statefulset.kubernetes.io/pod-name").is_none());
+        check!(spec.ports.as_ref().unwrap()[0].node_port == Some(32099));
     }
 
     fn ingress_listener(type_: ListenerType) -> Listener {
@@ -1222,14 +1223,21 @@ mod service_rendering_tests {
         let k = kafka("demo");
         let l = ingress_listener(ListenerType::Route);
         let route = render_broker_route(&k, &l, 0, "broker-0.kafka.example.com").unwrap();
-        assert!(route["apiVersion"] == "route.openshift.io/v1");
-        assert!(route["kind"] == "Route");
-        assert!(route["metadata"]["name"] == "demo-ext-0");
-        assert!(route["spec"]["host"] == "broker-0.kafka.example.com");
-        assert!(route["spec"]["tls"]["termination"] == "passthrough");
-        assert!(route["spec"]["port"]["targetPort"] == 9094);
-        assert!(route["spec"]["to"]["kind"] == "Service");
-        assert!(route["spec"]["to"]["name"] == "demo-ext-0");
+        for (pointer, want) in [
+            ("/apiVersion", serde_json::json!("route.openshift.io/v1")),
+            ("/kind", serde_json::json!("Route")),
+            ("/metadata/name", serde_json::json!("demo-ext-0")),
+            (
+                "/spec/host",
+                serde_json::json!("broker-0.kafka.example.com"),
+            ),
+            ("/spec/tls/termination", serde_json::json!("passthrough")),
+            ("/spec/port/targetPort", serde_json::json!(9094)),
+            ("/spec/to/kind", serde_json::json!("Service")),
+            ("/spec/to/name", serde_json::json!("demo-ext-0")),
+        ] {
+            assert!(route.pointer(pointer) == Some(&want), "pointer {pointer}");
+        }
     }
 
     #[test]
@@ -1237,9 +1245,16 @@ mod service_rendering_tests {
         let k = kafka("demo");
         let l = ingress_listener(ListenerType::Route);
         let route = render_bootstrap_route(&k, &l, "bootstrap.kafka.example.com").unwrap();
-        assert!(route["metadata"]["name"] == "demo-ext-bootstrap");
-        assert!(route["spec"]["host"] == "bootstrap.kafka.example.com");
-        assert!(route["spec"]["to"]["name"] == "demo-ext-bootstrap");
+        for (pointer, want) in [
+            ("/metadata/name", serde_json::json!("demo-ext-bootstrap")),
+            (
+                "/spec/host",
+                serde_json::json!("bootstrap.kafka.example.com"),
+            ),
+            ("/spec/to/name", serde_json::json!("demo-ext-bootstrap")),
+        ] {
+            assert!(route.pointer(pointer) == Some(&want), "pointer {pointer}");
+        }
     }
 }
 
@@ -3473,6 +3488,7 @@ pub fn synthesized_default_listener() -> Listener {
 mod toml_rendering_tests {
     use super::*;
     use assert2::assert;
+    use assert2::check;
 
     #[test]
     fn renders_minimal_broker_toml_and_round_trips() {
@@ -3505,15 +3521,15 @@ mod toml_rendering_tests {
         // Sanity: parses cleanly with the broker's FileConfig.
         let parsed: crabka_broker::file_config::FileConfig =
             toml::from_str(&toml_str).expect("rendered TOML must parse with broker FileConfig");
-        assert!(parsed.broker_id == Some(0));
-        assert!(parsed.inter_broker_listener_name.as_deref() == Some("PLAIN"));
-        assert!(parsed.heartbeat_interval_ms == Some(500));
-        assert!(parsed.heartbeat_timeout_ms == Some(3000));
-        assert!(parsed.replica_lag_time_max_ms == Some(2000));
-        assert!(parsed.controller_election_timeout_ms == Some(500));
-        assert!(parsed.controller_heartbeat_interval_ms == Some(100));
-        assert!(parsed.listeners.len() == 1);
-        assert!(parsed.listeners[0].advertised == "demo-0.svc.local:9092");
+        check!(parsed.broker_id == Some(0));
+        check!(parsed.inter_broker_listener_name.as_deref() == Some("PLAIN"));
+        check!(parsed.heartbeat_interval_ms == Some(500));
+        check!(parsed.heartbeat_timeout_ms == Some(3000));
+        check!(parsed.replica_lag_time_max_ms == Some(2000));
+        check!(parsed.controller_election_timeout_ms == Some(500));
+        check!(parsed.controller_heartbeat_interval_ms == Some(100));
+        check!(parsed.listeners.len() == 1);
+        check!(parsed.listeners[0].advertised == "demo-0.svc.local:9092");
     }
 
     #[test]
@@ -3785,18 +3801,17 @@ mod toml_rendering_tests {
             &[],
             "",
         );
-        assert!(
-            t.contains("[authorization]"),
-            "expected auto-injected [authorization] block, got:\n{t}"
-        );
-        assert!(
-            t.contains("type = \"simple\""),
-            "expected type = \"simple\", got:\n{t}"
-        );
-        assert!(
-            t.contains("super_users = [\"ANONYMOUS\"]"),
-            "expected ANONYMOUS super-user line when delegation tokens are enabled, got:\n{t}"
-        );
+        for needle in [
+            "[authorization]",
+            "type = \"simple\"",
+            "super_users = [\"ANONYMOUS\"]",
+        ] {
+            assert!(
+                t.contains(needle),
+                "expected {needle:?} in the auto-injected [authorization] block when \
+                 delegation tokens are enabled, got:\n{t}"
+            );
+        }
         // Round-trip: the broker's FileConfig must accept the rendered
         // block and the `[authorization].super_users` field must carry
         // ANONYMOUS.
@@ -3878,23 +3893,18 @@ mod toml_rendering_tests {
             &[],
             "",
         );
-        assert!(
-            t.contains("[authorization]"),
-            "expected [authorization] section, got:\n{t}"
-        );
-        assert!(
-            t.contains("type = \"simple\""),
-            "expected type = \"simple\" line, got:\n{t}"
-        );
-        assert!(
-            t.contains("super_users = [\"admin\"]"),
-            "expected super_users = [\"admin\"] line, got:\n{t}"
-        );
         // No OPA subtable when type = simple.
-        assert!(
-            !t.contains("[authorization.opa]"),
-            "[authorization.opa] must NOT be emitted for type = simple, got:\n{t}"
-        );
+        for (needle, want) in [
+            ("[authorization]", true),
+            ("type = \"simple\"", true),
+            ("super_users = [\"admin\"]", true),
+            ("[authorization.opa]", false),
+        ] {
+            assert!(
+                t.contains(needle) == want,
+                "needle {needle:?}: expected contains == {want}, got:\n{t}"
+            );
+        }
         // Round-trip through the broker's FileConfig.
         let parsed: crabka_broker::file_config::FileConfig =
             toml::from_str(&t).expect("rendered TOML must parse with broker FileConfig");
@@ -3936,41 +3946,24 @@ mod toml_rendering_tests {
             &[],
             "",
         );
-        assert!(
-            t.contains("type = \"opa\""),
-            "expected type = \"opa\" line, got:\n{t}"
-        );
-        assert!(
-            t.contains("super_users = [\"ANONYMOUS\"]"),
-            "expected super_users = [\"ANONYMOUS\"] line, got:\n{t}"
-        );
-        assert!(
-            t.contains("[authorization.opa]"),
-            "expected [authorization.opa] subtable, got:\n{t}"
-        );
-        assert!(
-            t.contains("url = \"http://opa:8181/v1/data/k/a\""),
-            "expected url line in [authorization.opa], got:\n{t}"
-        );
-        assert!(
-            t.contains("allow_on_error = false"),
-            "expected allow_on_error = false, got:\n{t}"
-        );
-        assert!(
-            t.contains("maximum_cache_size = 1000"),
-            "expected maximum_cache_size = 1000, got:\n{t}"
-        );
-        assert!(
-            t.contains("expire_after_ms = 60000"),
-            "expected expire_after_ms = 60000, got:\n{t}"
-        );
         // The CRD-level `initial_cache_capacity` MUST NOT be emitted:
         // the broker's `FileOpaConfig` uses `deny_unknown_fields` and
         // has no such field. A leaked key would refuse to parse.
-        assert!(
-            !t.contains("initial_cache_capacity"),
-            "initial_cache_capacity MUST NOT be emitted (broker rejects unknown fields), got:\n{t}"
-        );
+        for (needle, want) in [
+            ("type = \"opa\"", true),
+            ("super_users = [\"ANONYMOUS\"]", true),
+            ("[authorization.opa]", true),
+            ("url = \"http://opa:8181/v1/data/k/a\"", true),
+            ("allow_on_error = false", true),
+            ("maximum_cache_size = 1000", true),
+            ("expire_after_ms = 60000", true),
+            ("initial_cache_capacity", false),
+        ] {
+            assert!(
+                t.contains(needle) == want,
+                "needle {needle:?}: expected contains == {want}, got:\n{t}"
+            );
+        }
     }
 
     #[test]
@@ -4034,9 +4027,13 @@ mod toml_rendering_tests {
             &[],
             "",
         );
-        assert!(t.contains("[authorization]"), "TOML:\n{t}");
-        assert!(t.contains("type = \"simple\""), "TOML:\n{t}");
-        assert!(t.contains("super_users = [\"ANONYMOUS\"]"), "TOML:\n{t}");
+        for needle in [
+            "[authorization]",
+            "type = \"simple\"",
+            "super_users = [\"ANONYMOUS\"]",
+        ] {
+            assert!(t.contains(needle), "needle {needle:?}, TOML:\n{t}");
+        }
         // Verify the merge path too: explicit Simple + delegation_token
         // merges ANONYMOUS into the user's super-users list.
         let authz =
@@ -4190,22 +4187,14 @@ mod toml_rendering_tests {
             &[],
             "",
         );
-        assert!(
-            t.contains("[remote_storage.kafka_metadata]"),
-            "expected kafka_metadata block, got:\n{t}"
-        );
-        assert!(
-            t.contains("bootstrap = \"127.0.0.1:9094\""),
-            "bootstrap line missing, got:\n{t}"
-        );
-        assert!(
-            t.contains("num_partitions = 8"),
-            "num_partitions missing, got:\n{t}"
-        );
-        assert!(
-            t.contains("replication = 1"),
-            "replication missing, got:\n{t}"
-        );
+        for needle in [
+            "[remote_storage.kafka_metadata]",
+            "bootstrap = \"127.0.0.1:9094\"",
+            "num_partitions = 8",
+            "replication = 1",
+        ] {
+            assert!(t.contains(needle), "needle {needle:?} missing, got:\n{t}");
+        }
         // Round-trip through the broker's FileConfig.
         let parsed: crabka_broker::file_config::FileConfig =
             toml::from_str(&t).expect("rendered TOML must parse with broker FileConfig");
@@ -4214,9 +4203,9 @@ mod toml_rendering_tests {
             .expect("[remote_storage] round-trips")
             .kafka_metadata
             .expect("kafka_metadata round-trips");
-        assert!(km.bootstrap == "127.0.0.1:9094");
-        assert!(km.num_partitions == Some(8));
-        assert!(km.replication == Some(1));
+        check!(km.bootstrap == "127.0.0.1:9094");
+        check!(km.num_partitions == Some(8));
+        check!(km.replication == Some(1));
     }
 
     #[test]
@@ -4395,45 +4384,40 @@ mod toml_rendering_tests {
             &[],
             "",
         );
-        assert!(t.contains("[remote_storage]"), "missing block:\n{t}");
-        assert!(
-            t.contains("[remote_storage.s3]"),
-            "missing s3 subtable:\n{t}"
-        );
-        assert!(t.contains("bucket = \"crabka-tier\""), "bucket:\n{t}");
-        assert!(t.contains("region = \"us-east-1\""), "region:\n{t}");
-        assert!(t.contains("prefix = \"cluster-a\""), "prefix:\n{t}");
-        assert!(
-            t.contains("endpoint = \"http://minio.svc:9000\""),
-            "endpoint:\n{t}"
-        );
-        assert!(t.contains("allow_http = true"), "allow_http:\n{t}");
-        assert!(t.contains("multipart_threshold = 4096"), "threshold:\n{t}");
-        assert!(t.contains("multipart_chunk_size = 1024"), "chunk:\n{t}");
         // Credentials must NEVER appear in the TOML — they're sourced
         // from pod env via `secretKeyRef`.
-        assert!(
-            !t.contains("access_key_id"),
-            "credentials must not be rendered into TOML, got:\n{t}"
-        );
-        assert!(
-            !t.contains("secret_access_key"),
-            "credentials must not be rendered into TOML, got:\n{t}"
-        );
+        for (needle, want) in [
+            ("[remote_storage]", true),
+            ("[remote_storage.s3]", true),
+            ("bucket = \"crabka-tier\"", true),
+            ("region = \"us-east-1\"", true),
+            ("prefix = \"cluster-a\"", true),
+            ("endpoint = \"http://minio.svc:9000\"", true),
+            ("allow_http = true", true),
+            ("multipart_threshold = 4096", true),
+            ("multipart_chunk_size = 1024", true),
+            ("access_key_id", false),
+            ("secret_access_key", false),
+        ] {
+            assert!(
+                t.contains(needle) == want,
+                "needle {needle:?}: expected contains == {want}, got:\n{t}"
+            );
+        }
         // Broker round-trip.
         let parsed: crabka_broker::file_config::FileConfig =
             toml::from_str(&t).expect("rendered TOML must parse with broker FileConfig");
         let rs = parsed.remote_storage.expect("[remote_storage] round-trips");
         let s3 = rs.s3.expect("[remote_storage.s3] round-trips");
-        assert!(s3.bucket == "crabka-tier");
-        assert!(s3.region == "us-east-1");
-        assert!(s3.prefix.as_deref() == Some("cluster-a"));
-        assert!(s3.endpoint.as_deref() == Some("http://minio.svc:9000"));
-        assert!(s3.allow_http);
-        assert!(s3.multipart_threshold == Some(4096));
-        assert!(s3.multipart_chunk_size == Some(1024));
-        assert!(s3.access_key_id.is_none());
-        assert!(s3.secret_access_key.is_none());
+        check!(s3.bucket == "crabka-tier");
+        check!(s3.region == "us-east-1");
+        check!(s3.prefix.as_deref() == Some("cluster-a"));
+        check!(s3.endpoint.as_deref() == Some("http://minio.svc:9000"));
+        check!(s3.allow_http);
+        check!(s3.multipart_threshold == Some(4096));
+        check!(s3.multipart_chunk_size == Some(1024));
+        check!(s3.access_key_id.is_none());
+        check!(s3.secret_access_key.is_none());
     }
 
     /// Minimal S3 spec — only `bucket` + `region` set. Optional fields
@@ -4476,25 +4460,24 @@ mod toml_rendering_tests {
             &[],
             "",
         );
-        assert!(t.contains("[remote_storage.s3]"));
-        assert!(t.contains("bucket = \"b\""));
-        assert!(t.contains("region = \"r\""));
-        assert!(!t.contains("prefix ="), "no prefix:\n{t}");
-        assert!(!t.contains("endpoint ="), "no endpoint:\n{t}");
-        assert!(!t.contains("allow_http"), "no allow_http:\n{t}");
-        assert!(
-            !t.contains("multipart_threshold"),
-            "no multipart_threshold:\n{t}"
-        );
-        assert!(
-            !t.contains("multipart_chunk_size"),
-            "no multipart_chunk_size:\n{t}"
-        );
-        // S3 must NOT render the Local `storage_dir` key.
-        assert!(
-            !t.contains("storage_dir"),
-            "S3 must not render storage_dir:\n{t}"
-        );
+        // S3 must NOT render the Local `storage_dir` key, and all unset
+        // optional fields must be omitted.
+        for (needle, want) in [
+            ("[remote_storage.s3]", true),
+            ("bucket = \"b\"", true),
+            ("region = \"r\"", true),
+            ("prefix =", false),
+            ("endpoint =", false),
+            ("allow_http", false),
+            ("multipart_threshold", false),
+            ("multipart_chunk_size", false),
+            ("storage_dir", false),
+        ] {
+            assert!(
+                t.contains(needle) == want,
+                "needle {needle:?}: expected contains == {want}, got:\n{t}"
+            );
+        }
         // Broker round-trip.
         let parsed: crabka_broker::file_config::FileConfig =
             toml::from_str(&t).expect("rendered TOML must parse with broker FileConfig");
@@ -4608,29 +4591,27 @@ mod toml_rendering_tests {
             &[],
             "",
         );
-        assert!(t.contains("[remote_storage]"), "missing block:\n{t}");
-        assert!(
-            t.contains("[remote_storage.gcs]"),
-            "missing gcs subtable:\n{t}"
-        );
-        assert!(t.contains("bucket = \"crabka-tier\""), "bucket:\n{t}");
-        assert!(t.contains("prefix = \"cluster-a\""), "prefix:\n{t}");
-        assert!(
-            t.contains("endpoint = \"http://fake-gcs.svc:4443\""),
-            "endpoint:\n{t}"
-        );
-        assert!(t.contains("allow_http = true"), "allow_http:\n{t}");
-        assert!(
-            t.contains("service_account_path = \"/etc/crabka/gcs-credentials/key.json\""),
-            "service_account_path:\n{t}"
-        );
-        assert!(t.contains("multipart_threshold = 4096"), "threshold:\n{t}");
-        assert!(t.contains("multipart_chunk_size = 1024"), "chunk:\n{t}");
         // The Local-only `storage_dir` key must never appear for GCS.
-        assert!(
-            !t.contains("storage_dir"),
-            "GCS must not render storage_dir:\n{t}"
-        );
+        for (needle, want) in [
+            ("[remote_storage]", true),
+            ("[remote_storage.gcs]", true),
+            ("bucket = \"crabka-tier\"", true),
+            ("prefix = \"cluster-a\"", true),
+            ("endpoint = \"http://fake-gcs.svc:4443\"", true),
+            ("allow_http = true", true),
+            (
+                "service_account_path = \"/etc/crabka/gcs-credentials/key.json\"",
+                true,
+            ),
+            ("multipart_threshold = 4096", true),
+            ("multipart_chunk_size = 1024", true),
+            ("storage_dir", false),
+        ] {
+            assert!(
+                t.contains(needle) == want,
+                "needle {needle:?}: expected contains == {want}, got:\n{t}"
+            );
+        }
         // Broker round-trip: the rendered TOML must parse into FileConfig.
         let parsed: crabka_broker::file_config::FileConfig =
             toml::from_str(&t).expect("rendered TOML must parse with broker FileConfig");
@@ -4639,15 +4620,13 @@ mod toml_rendering_tests {
             .expect("[remote_storage] round-trips")
             .gcs
             .expect("[remote_storage.gcs] round-trips");
-        assert!(gcs.bucket == "crabka-tier");
-        assert!(gcs.prefix.as_deref() == Some("cluster-a"));
-        assert!(gcs.endpoint.as_deref() == Some("http://fake-gcs.svc:4443"));
-        assert!(gcs.allow_http);
-        assert!(
-            gcs.service_account_path.as_deref() == Some("/etc/crabka/gcs-credentials/key.json")
-        );
-        assert!(gcs.multipart_threshold == Some(4096));
-        assert!(gcs.multipart_chunk_size == Some(1024));
+        check!(gcs.bucket == "crabka-tier");
+        check!(gcs.prefix.as_deref() == Some("cluster-a"));
+        check!(gcs.endpoint.as_deref() == Some("http://fake-gcs.svc:4443"));
+        check!(gcs.allow_http);
+        check!(gcs.service_account_path.as_deref() == Some("/etc/crabka/gcs-credentials/key.json"));
+        check!(gcs.multipart_threshold == Some(4096));
+        check!(gcs.multipart_chunk_size == Some(1024));
     }
 
     /// Keyless GCS (Workload Identity / ADC): with `credentials` unset,
@@ -4688,19 +4667,21 @@ mod toml_rendering_tests {
             &[],
             "",
         );
-        assert!(
-            t.contains("[remote_storage.gcs]"),
-            "missing gcs block:\n{t}"
-        );
-        assert!(t.contains("bucket = \"b\""), "bucket:\n{t}");
-        assert!(
-            !t.contains("service_account_path"),
-            "keyless GCS must not render service_account_path:\n{t}"
-        );
-        // Optional fields omitted → broker defaults apply.
-        assert!(!t.contains("prefix ="), "no prefix:\n{t}");
-        assert!(!t.contains("endpoint ="), "no endpoint:\n{t}");
-        assert!(!t.contains("allow_http"), "no allow_http:\n{t}");
+        // Keyless GCS must not render service_account_path; optional
+        // fields omitted → broker defaults apply.
+        for (needle, want) in [
+            ("[remote_storage.gcs]", true),
+            ("bucket = \"b\"", true),
+            ("service_account_path", false),
+            ("prefix =", false),
+            ("endpoint =", false),
+            ("allow_http", false),
+        ] {
+            assert!(
+                t.contains(needle) == want,
+                "needle {needle:?}: expected contains == {want}, got:\n{t}"
+            );
+        }
         let parsed: crabka_broker::file_config::FileConfig =
             toml::from_str(&t).expect("rendered TOML must parse with broker FileConfig");
         let gcs = parsed
@@ -4837,10 +4818,14 @@ mod toml_rendering_tests {
             &[],
             "",
         );
-        assert!(toml.contains("protocol = \"SaslSsl\""), "TOML: {toml}");
-        assert!(toml.contains("tls_config = { cert_path = \"/etc/crabka/broker-tls/0.crt\""));
-        assert!(toml.contains("sasl_config = { enabled_mechanisms = [\"SCRAM-SHA-512\"] }"));
-        assert!(toml.contains("[tls_config]"));
+        for needle in [
+            "protocol = \"SaslSsl\"",
+            "tls_config = { cert_path = \"/etc/crabka/broker-tls/0.crt\"",
+            "sasl_config = { enabled_mechanisms = [\"SCRAM-SHA-512\"] }",
+            "[tls_config]",
+        ] {
+            assert!(toml.contains(needle), "needle {needle:?}, TOML: {toml}");
+        }
     }
 
     fn oauth_full_cfg() -> crate::crd::ListenerAuthenticationOAuth {
@@ -4963,12 +4948,19 @@ mod toml_rendering_tests {
             &[],
             "",
         );
-        assert!(toml.contains("[gssapi]"), "toml:\n{toml}");
-        assert!(toml.contains(r#"keytab_path = "/etc/crabka/gssapi-keytab/keytab""#));
-        assert!(toml.contains(r#"service_name = "kafka""#));
-        assert!(toml.contains(r#"principal_to_local_rules = ["DEFAULT"]"#));
-        assert!(toml.contains(r#"enabled_mechanisms = ["GSSAPI"]"#));
-        assert!(!toml.contains("[inter_broker_credentials]"));
+        for (needle, want) in [
+            ("[gssapi]", true),
+            (r#"keytab_path = "/etc/crabka/gssapi-keytab/keytab""#, true),
+            (r#"service_name = "kafka""#, true),
+            (r#"principal_to_local_rules = ["DEFAULT"]"#, true),
+            (r#"enabled_mechanisms = ["GSSAPI"]"#, true),
+            ("[inter_broker_credentials]", false),
+        ] {
+            assert!(
+                toml.contains(needle) == want,
+                "needle {needle:?}: expected contains == {want}, toml:\n{toml}"
+            );
+        }
     }
 
     #[test]
@@ -4995,11 +4987,15 @@ mod toml_rendering_tests {
             &[],
             "",
         );
-        assert!(toml.contains("[inter_broker_credentials]"), "toml:\n{toml}");
-        assert!(toml.contains(r#"type = "gssapi""#));
-        assert!(toml.contains(r#"keytab_path = "/etc/crabka/gssapi-keytab/keytab""#));
-        assert!(toml.contains(r#"client_principal = "kafka@EXAMPLE.COM""#));
-        assert!(toml.contains(r#"kdc_url = "tcp://kdc:88""#));
+        for needle in [
+            "[inter_broker_credentials]",
+            r#"type = "gssapi""#,
+            r#"keytab_path = "/etc/crabka/gssapi-keytab/keytab""#,
+            r#"client_principal = "kafka@EXAMPLE.COM""#,
+            r#"kdc_url = "tcp://kdc:88""#,
+        ] {
+            assert!(toml.contains(needle), "needle {needle:?}, toml:\n{toml}");
+        }
     }
 
     #[test]
@@ -5026,20 +5022,18 @@ mod toml_rendering_tests {
             &[],
             "",
         );
-        assert!(toml.contains("[oauthbearer]"), "TOML: {toml}");
-        assert!(
-            toml.contains("jwks_endpoint_uri = \"https://kc.example.com/realms/kafka/protocol/openid-connect/certs\""),
-            "TOML: {toml}"
-        );
-        assert!(
-            toml.contains("valid_issuer_uri = \"https://kc.example.com/realms/kafka\""),
-            "TOML: {toml}"
-        );
-        assert!(toml.contains("expected_audience = \"kafka\""));
-        assert!(toml.contains("principal_claim_name = \"preferred_username\""));
-        assert!(toml.contains("jwks_refresh_interval_ms = 300000"));
-        assert!(toml.contains("allowable_clock_skew_ms = 30000"));
-        assert!(toml.contains("custom_claim_check = '''$.scope[?@ == 'kafka-broker']'''"));
+        for needle in [
+            "[oauthbearer]",
+            "jwks_endpoint_uri = \"https://kc.example.com/realms/kafka/protocol/openid-connect/certs\"",
+            "valid_issuer_uri = \"https://kc.example.com/realms/kafka\"",
+            "expected_audience = \"kafka\"",
+            "principal_claim_name = \"preferred_username\"",
+            "jwks_refresh_interval_ms = 300000",
+            "allowable_clock_skew_ms = 30000",
+            "custom_claim_check = '''$.scope[?@ == 'kafka-broker']'''",
+        ] {
+            assert!(toml.contains(needle), "needle {needle:?}, TOML: {toml}");
+        }
     }
 
     #[test]
@@ -5087,15 +5081,25 @@ mod toml_rendering_tests {
             &[],
             "",
         );
-        assert!(toml.contains("[oauthbearer]"));
-        assert!(toml.contains("jwks_endpoint_uri = \"https://issuer.example.com/jwks\""));
-        assert!(toml.contains("valid_issuer_uri = \"https://issuer.example.com/\""));
-        assert!(!toml.contains("expected_audience"), "TOML: {toml}");
-        assert!(!toml.contains("principal_claim_name"));
-        assert!(!toml.contains("scope_claim_name"));
-        assert!(!toml.contains("required_scope"));
-        assert!(!toml.contains("jwks_refresh_interval_ms"));
-        assert!(!toml.contains("allowable_clock_skew_ms"));
+        for (needle, want) in [
+            ("[oauthbearer]", true),
+            (
+                "jwks_endpoint_uri = \"https://issuer.example.com/jwks\"",
+                true,
+            ),
+            ("valid_issuer_uri = \"https://issuer.example.com/\"", true),
+            ("expected_audience", false),
+            ("principal_claim_name", false),
+            ("scope_claim_name", false),
+            ("required_scope", false),
+            ("jwks_refresh_interval_ms", false),
+            ("allowable_clock_skew_ms", false),
+        ] {
+            assert!(
+                toml.contains(needle) == want,
+                "needle {needle:?}: expected contains == {want}, TOML: {toml}"
+            );
+        }
     }
 
     #[test]

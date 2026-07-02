@@ -233,19 +233,32 @@ mod tests {
     #[test]
     fn attribute_size_cap_enforced() {
         let limits = limits_with(0, 4);
-        let ok = vec![("ab".to_string(), 2_u64)];
-        let bad_key = vec![("toolong".to_string(), 1_u64)];
-        let bad_value = vec![("a".to_string(), 7_u64)];
 
-        assert!(IngestEnforcer::check_attributes(&limits, &ok).is_ok());
-        assert!(matches!(
-            IngestEnforcer::check_attributes(&limits, &bad_key),
-            Err(LimitError::AttributeTooLong { .. })
-        ));
-        assert!(matches!(
-            IngestEnforcer::check_attributes(&limits, &bad_value),
-            Err(LimitError::AttributeTooLong { .. })
-        ));
+        for (attrs, want) in [
+            (vec![("ab".to_string(), 2_u64)], Ok(())),
+            (
+                // Over-long key.
+                vec![("toolong".to_string(), 1_u64)],
+                Err(LimitError::AttributeTooLong {
+                    limit: 4,
+                    observed: 7,
+                }),
+            ),
+            (
+                // Over-long value.
+                vec![("a".to_string(), 7_u64)],
+                Err(LimitError::AttributeTooLong {
+                    limit: 4,
+                    observed: 7,
+                }),
+            ),
+        ] {
+            assert_eq!(
+                IngestEnforcer::check_attributes(&limits, &attrs),
+                want,
+                "case {attrs:?}"
+            );
+        }
     }
 
     #[test]

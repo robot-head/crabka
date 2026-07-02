@@ -272,7 +272,7 @@ mod tests {
     use arrow::array::{Float64Array, Float64Builder, Int64Array};
     use arrow::datatypes::{Field, Schema};
     use arrow::record_batch::RecordBatch;
-    use assert2::assert;
+    use assert2::{assert, check};
 
     use super::*;
 
@@ -287,23 +287,17 @@ mod tests {
         let range_array = RangeArray::from_ranges(values, [(0_u32, 3_u32), (2, 3)]).unwrap();
         assert!(range_array.len() == 2);
 
-        let window = range_array.get(0).unwrap();
-        let window = window.as_any().downcast_ref::<Float64Array>().unwrap();
-        assert!(
-            (0..window.len())
-                .map(|index| window.value(index))
-                .collect::<Vec<_>>()
-                == vec![10.0, 11.0, 12.0]
-        );
-
-        let window = range_array.get(1).unwrap();
-        let window = window.as_any().downcast_ref::<Float64Array>().unwrap();
-        assert!(
-            (0..window.len())
-                .map(|index| window.value(index))
-                .collect::<Vec<_>>()
-                == vec![12.0, 13.0, 14.0]
-        );
+        for (index, want) in [(0, vec![10.0, 11.0, 12.0]), (1, vec![12.0, 13.0, 14.0])] {
+            let window = range_array.get(index).unwrap();
+            let window = window.as_any().downcast_ref::<Float64Array>().unwrap();
+            assert!(
+                (0..window.len())
+                    .map(|i| window.value(i))
+                    .collect::<Vec<_>>()
+                    == want,
+                "case {index}"
+            );
+        }
     }
 
     #[test]
@@ -316,15 +310,15 @@ mod tests {
     fn basic_accessors_report_empty_state_and_exact_ranges() {
         let values = Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])) as ArrayRef;
         let empty = RangeArray::from_ranges(values.clone(), []).unwrap();
-        assert!(empty.len() == 0);
-        assert!(empty.is_empty());
-        assert!(empty.ranges().is_empty());
+        check!(empty.len() == 0);
+        check!(empty.is_empty());
+        check!(empty.ranges().is_empty());
 
         let range_array =
             RangeArray::from_ranges(values, [(1_u32, 0_u32), (0, 2), (2, 1)]).unwrap();
-        assert!(range_array.len() == 3);
-        assert!(!range_array.is_empty());
-        assert!(range_array.ranges() == [(1, 0), (0, 2), (2, 1)]);
+        check!(range_array.len() == 3);
+        check!(!range_array.is_empty());
+        check!(range_array.ranges() == [(1, 0), (0, 2), (2, 1)]);
     }
 
     #[test]
@@ -335,23 +329,17 @@ mod tests {
         let back = RangeArray::try_from_dict_array(&dict).unwrap();
         assert!(back.len() == range_array.len());
 
-        let window = back.get(0).unwrap();
-        let window = window.as_any().downcast_ref::<Float64Array>().unwrap();
-        assert!(
-            (0..window.len())
-                .map(|index| window.value(index))
-                .collect::<Vec<_>>()
-                == vec![1.0, 2.0]
-        );
-
-        let window = back.get(1).unwrap();
-        let window = window.as_any().downcast_ref::<Float64Array>().unwrap();
-        assert!(
-            (0..window.len())
-                .map(|index| window.value(index))
-                .collect::<Vec<_>>()
-                == vec![2.0, 3.0, 4.0]
-        );
+        for (index, want) in [(0, vec![1.0, 2.0]), (1, vec![2.0, 3.0, 4.0])] {
+            let window = back.get(index).unwrap();
+            let window = window.as_any().downcast_ref::<Float64Array>().unwrap();
+            assert!(
+                (0..window.len())
+                    .map(|i| window.value(i))
+                    .collect::<Vec<_>>()
+                    == want,
+                "case {index}"
+            );
+        }
     }
 
     #[test]
@@ -364,10 +352,19 @@ mod tests {
         assert!(value_ranges.ranges() == ts_ranges.ranges());
         assert!(value_ranges.len() == 2);
 
-        assert!(value_ranges.value_slice(0).unwrap() == [10.0, 11.0, 12.0]);
-        assert!(ts_ranges.timestamp_slice(0).unwrap() == [0, 15, 30]);
-        assert!(value_ranges.value_slice(1).unwrap() == [12.0, 13.0, 14.0]);
-        assert!(ts_ranges.timestamp_slice(1).unwrap() == [30, 45, 60]);
+        for (index, want_values, want_timestamps) in [
+            (0, [10.0, 11.0, 12.0], [0_i64, 15, 30]),
+            (1, [12.0, 13.0, 14.0], [30, 45, 60]),
+        ] {
+            assert!(
+                value_ranges.value_slice(index).unwrap() == want_values,
+                "case {index}"
+            );
+            assert!(
+                ts_ranges.timestamp_slice(index).unwrap() == want_timestamps,
+                "case {index}"
+            );
+        }
     }
 
     #[test]
@@ -382,9 +379,13 @@ mod tests {
         let values = Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])) as ArrayRef;
         let range_array = RangeArray::from_ranges(values, [(0_u32, 2_u32), (1, 3)]).unwrap();
 
-        assert!(range_array.value_slice(0).unwrap() == [1.0, 2.0]);
-        assert!(range_array.value_slice(1).unwrap() == [2.0, 3.0, 4.0]);
-        assert!(range_array.value_slice(2).is_none());
+        for (index, want) in [
+            (0, Some(&[1.0, 2.0][..])),
+            (1, Some(&[2.0, 3.0, 4.0][..])),
+            (2, None),
+        ] {
+            assert!(range_array.value_slice(index) == want, "case {index}");
+        }
         // A timestamp accessor on a float backing yields None (wrong type).
         assert!(range_array.timestamp_slice(0).is_none());
     }
@@ -394,9 +395,13 @@ mod tests {
         let timestamps = Arc::new(Int64Array::from(vec![0_i64, 15, 30, 45])) as ArrayRef;
         let range_array = RangeArray::from_ranges(timestamps, [(0_u32, 2_u32), (2, 2)]).unwrap();
 
-        assert!(range_array.timestamp_slice(0).unwrap() == [0, 15]);
-        assert!(range_array.timestamp_slice(1).unwrap() == [30, 45]);
-        assert!(range_array.timestamp_slice(2).is_none());
+        for (index, want) in [
+            (0, Some(&[0_i64, 15][..])),
+            (1, Some(&[30, 45][..])),
+            (2, None),
+        ] {
+            assert!(range_array.timestamp_slice(index) == want, "case {index}");
+        }
     }
 
     #[test]
@@ -405,10 +410,9 @@ mod tests {
         let range_array =
             RangeArray::from_ranges(values, [(0_u32, 2_u32), (2, 0), (1, 1)]).unwrap();
 
-        assert!(range_array.cell_len(0) == Some(2));
-        assert!(range_array.cell_len(1) == Some(0));
-        assert!(range_array.cell_len(2) == Some(1));
-        assert!(range_array.cell_len(3).is_none());
+        for (index, want) in [(0, Some(2)), (1, Some(0)), (2, Some(1)), (3, None)] {
+            assert!(range_array.cell_len(index) == want, "case {index}");
+        }
 
         // An empty cell yields an empty slice, not None.
         assert!(range_array.value_slice(1).unwrap().is_empty());

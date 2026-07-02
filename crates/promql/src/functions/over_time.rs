@@ -500,7 +500,7 @@ pub fn register_over_time_udfs(ctx: &SessionContext) {
 #[cfg(test)]
 mod tests {
     use arrow::datatypes::Field;
-    use assert2::assert;
+    use assert2::{assert, check};
 
     use super::*;
 
@@ -604,22 +604,21 @@ mod tests {
     #[test]
     fn basic_reductions_match_engine() {
         let window: &[(i64, &[i64], &[f64])] = &[(120_000, &[60_000, 120_000], &[3.0, 5.0])];
-        assert!(approx_eq(run_udf(OverTimeFamily::Sum, window, 0.0)[0], 8.0));
-        assert!(approx_eq(run_udf(OverTimeFamily::Avg, window, 0.0)[0], 4.0));
-        assert!(approx_eq(
-            run_udf(OverTimeFamily::Count, window, 0.0)[0],
-            2.0
-        ));
-        assert!(approx_eq(run_udf(OverTimeFamily::Min, window, 0.0)[0], 3.0));
-        assert!(approx_eq(run_udf(OverTimeFamily::Max, window, 0.0)[0], 5.0));
-        assert!(approx_eq(
-            run_udf(OverTimeFamily::Last, window, 0.0)[0],
-            5.0
-        ));
-        assert!(approx_eq(
-            run_udf(OverTimeFamily::Present, window, 0.0)[0],
-            1.0
-        ));
+        for (family, want) in [
+            (OverTimeFamily::Sum, 8.0),
+            (OverTimeFamily::Avg, 4.0),
+            (OverTimeFamily::Count, 2.0),
+            (OverTimeFamily::Min, 3.0),
+            (OverTimeFamily::Max, 5.0),
+            (OverTimeFamily::Last, 5.0),
+            (OverTimeFamily::Present, 1.0),
+        ] {
+            let got = run_udf(family, window, 0.0)[0];
+            assert!(
+                approx_eq(got, want),
+                "case {family:?}: got {got}, want {want}"
+            );
+        }
     }
 
     /// Population stddev/stdvar over 2,4,4,4,5,5,7,9 reproduce the engine's
@@ -632,18 +631,17 @@ mod tests {
             .map(|i| (i + 1) * 60_000)
             .collect();
         let window: &[(i64, &[i64], &[f64])] = &[(480_000, &ts, vals)];
-        assert!(approx_eq(
-            run_udf(OverTimeFamily::Stdvar, window, 0.0)[0],
-            4.0
-        ));
-        assert!(approx_eq(
-            run_udf(OverTimeFamily::Stddev, window, 0.0)[0],
-            2.0
-        ));
-        assert!(approx_eq(
-            run_udf(OverTimeFamily::Quantile, window, 0.5)[0],
-            4.5
-        ));
+        for (family, phi, want) in [
+            (OverTimeFamily::Stdvar, 0.0, 4.0),
+            (OverTimeFamily::Stddev, 0.0, 2.0),
+            (OverTimeFamily::Quantile, 0.5, 4.5),
+        ] {
+            let got = run_udf(family, window, phi)[0];
+            assert!(
+                approx_eq(got, want),
+                "case {family:?}: got {got}, want {want}"
+            );
+        }
     }
 
     #[test]
@@ -672,37 +670,59 @@ mod tests {
 
     #[test]
     fn infinite_mean_guard_matches_prometheus_cases() {
-        assert!(keep_infinite_mean(f64::INFINITY, f64::INFINITY));
-        assert!(keep_infinite_mean(f64::INFINITY, 1.0));
-        assert!(keep_infinite_mean(f64::NEG_INFINITY, f64::NEG_INFINITY));
-        assert!(keep_infinite_mean(f64::NEG_INFINITY, -1.0));
-
-        assert!(!keep_infinite_mean(f64::INFINITY, f64::NEG_INFINITY));
-        assert!(!keep_infinite_mean(f64::NEG_INFINITY, f64::INFINITY));
-        assert!(!keep_infinite_mean(f64::INFINITY, f64::NAN));
-        assert!(!keep_infinite_mean(1.0, 1.0));
+        for (mean, value, want) in [
+            (f64::INFINITY, f64::INFINITY, true),
+            (f64::INFINITY, 1.0, true),
+            (f64::NEG_INFINITY, f64::NEG_INFINITY, true),
+            (f64::NEG_INFINITY, -1.0, true),
+            (f64::INFINITY, f64::NEG_INFINITY, false),
+            (f64::NEG_INFINITY, f64::INFINITY, false),
+            (f64::INFINITY, f64::NAN, false),
+            (1.0, 1.0, false),
+        ] {
+            assert!(
+                keep_infinite_mean(mean, value) == want,
+                "case (mean={mean}, value={value})"
+            );
+        }
     }
 
     #[test]
     fn kahan_sum_inc_recovers_lost_low_bits() {
-        let (sum, comp) = kahan_sum_inc(1e-16, 1.0, 0.0);
-        assert!(sum.to_bits() == 1.0_f64.to_bits());
-        assert!(comp.to_bits() == 1e-16_f64.to_bits());
-
-        let (sum, comp) = kahan_sum_inc(1.0, 1e-16, 0.0);
-        assert!(sum.to_bits() == 1.0_f64.to_bits());
-        assert!(comp.to_bits() == 1e-16_f64.to_bits());
+        // Both operand orders (|sum| >= |increment| and the swapped branch)
+        // recover the low bits into the compensation term.
+        for (increment, initial_sum) in [(1e-16, 1.0), (1.0, 1e-16)] {
+            let (sum, comp) = kahan_sum_inc(increment, initial_sum, 0.0);
+            assert!(
+                sum.to_bits() == 1.0_f64.to_bits(),
+                "sum for increment={increment}"
+            );
+            assert!(
+                comp.to_bits() == 1e-16_f64.to_bits(),
+                "comp for increment={increment}"
+            );
+        }
     }
 
     #[test]
     fn quantile_boundaries_match_prometheus() {
         let values = [3.0, 1.0, 2.0];
-        assert!(quantile_value(-0.1, &values).unwrap().is_infinite());
-        assert!(quantile_value(-0.1, &values).unwrap().is_sign_negative());
-        assert!(approx_eq(quantile_value(0.0, &values).unwrap(), 1.0));
-        assert!(approx_eq(quantile_value(1.0, &values).unwrap(), 3.0));
-        assert!(quantile_value(1.1, &values).unwrap().is_infinite());
-        assert!(quantile_value(1.1, &values).unwrap().is_sign_positive());
+        for (phi, want) in [
+            (-0.1, f64::NEG_INFINITY),
+            (0.0, 1.0),
+            (1.0, 3.0),
+            (1.1, f64::INFINITY),
+        ] {
+            let got = quantile_value(phi, &values).unwrap();
+            // Out-of-range phi yields an exact signed infinity; in-range keeps
+            // the epsilon comparison.
+            let matches = if want.is_infinite() {
+                got == want
+            } else {
+                approx_eq(got, want)
+            };
+            assert!(matches, "case phi={phi}: got {got}, want {want}");
+        }
     }
 
     fn dict_i64(values: Vec<i64>, ranges: impl IntoIterator<Item = (u32, u32)>) -> ArrayRef {
@@ -806,10 +826,17 @@ mod tests {
     #[test]
     fn empty_window_yields_null() {
         let window: &[(i64, &[i64], &[f64])] = &[(60_000, &[], &[])];
-        assert!(run_udf_nullable(OverTimeFamily::Sum, window, 0.0)[0].is_none());
-        assert!(run_udf_nullable(OverTimeFamily::Count, window, 0.0)[0].is_none());
-        assert!(run_udf_nullable(OverTimeFamily::Present, window, 0.0)[0].is_none());
-        assert!(run_udf_nullable(OverTimeFamily::Quantile, window, 0.5)[0].is_none());
+        for (family, phi) in [
+            (OverTimeFamily::Sum, 0.0),
+            (OverTimeFamily::Count, 0.0),
+            (OverTimeFamily::Present, 0.0),
+            (OverTimeFamily::Quantile, 0.5),
+        ] {
+            assert!(
+                run_udf_nullable(family, window, phi)[0].is_none(),
+                "case {family:?}"
+            );
+        }
     }
 
     /// A genuinely-computed reduction is kept as a non-null float even when it is
@@ -830,22 +857,35 @@ mod tests {
     /// non-NaN samples, and is NaN only when *every* sample is NaN.
     #[test]
     fn min_max_over_time_ignore_nan() {
-        let ts: &[i64] = &[60_000, 120_000, 180_000];
-        // {NaN, 1, 2}: min=1, max=2 (the leading NaN is folded out).
-        let window: &[(i64, &[i64], &[f64])] = &[(180_000, ts, &[f64::NAN, 1.0, 2.0])];
-        assert!(approx_eq(run_udf(OverTimeFamily::Min, window, 0.0)[0], 1.0));
-        assert!(approx_eq(run_udf(OverTimeFamily::Max, window, 0.0)[0], 2.0));
-
-        // {1, NaN}: a trailing NaN never displaces the running extremum.
-        let window: &[(i64, &[i64], &[f64])] = &[(120_000, &[60_000, 120_000], &[1.0, f64::NAN])];
-        assert!(approx_eq(run_udf(OverTimeFamily::Min, window, 0.0)[0], 1.0));
-        assert!(approx_eq(run_udf(OverTimeFamily::Max, window, 0.0)[0], 1.0));
-
-        // {NaN, NaN}: an all-NaN window stays NaN.
-        let window: &[(i64, &[i64], &[f64])] =
-            &[(120_000, &[60_000, 120_000], &[f64::NAN, f64::NAN])];
-        assert!(run_udf(OverTimeFamily::Min, window, 0.0)[0].is_nan());
-        assert!(run_udf(OverTimeFamily::Max, window, 0.0)[0].is_nan());
+        let cases: &[(&[f64], f64, f64)] = &[
+            // {NaN, 1, 2}: min=1, max=2 (the leading NaN is folded out).
+            (&[f64::NAN, 1.0, 2.0], 1.0, 2.0),
+            // {1, NaN}: a trailing NaN never displaces the running extremum.
+            (&[1.0, f64::NAN], 1.0, 1.0),
+            // {NaN, NaN}: an all-NaN window stays NaN.
+            (&[f64::NAN, f64::NAN], f64::NAN, f64::NAN),
+        ];
+        for &(vals, want_min, want_max) in cases {
+            let ts: Vec<i64> = (1..=i64::try_from(vals.len()).unwrap())
+                .map(|i| i * 60_000)
+                .collect();
+            let window: &[(i64, &[i64], &[f64])] = &[(*ts.last().unwrap(), &ts, vals)];
+            for (family, want) in [
+                (OverTimeFamily::Min, want_min),
+                (OverTimeFamily::Max, want_max),
+            ] {
+                let got = run_udf(family, window, 0.0)[0];
+                let matches = if want.is_nan() {
+                    got.is_nan()
+                } else {
+                    approx_eq(got, want)
+                };
+                assert!(
+                    matches,
+                    "case {family:?} over {vals:?}: got {got}, want {want}"
+                );
+            }
+        }
     }
 
     /// M16: `stdvar`/`stddev_over_time` over a large-offset close-valued window
@@ -856,10 +896,10 @@ mod tests {
         let vals: &[f64] = &[1e8, 1e8 + 1.0, 1e8 + 2.0];
         let ts: &[i64] = &[60_000, 120_000, 180_000];
         let window: &[(i64, &[i64], &[f64])] = &[(180_000, ts, vals)];
-        // population variance of {0,1,2} == 2/3; stddev == sqrt(2/3).
+        // population variance of {0,1,2} == 2/3; stddev == sqrt(2/3). Pinning
+        // the exact positive value also rules out the cancellation failure
+        // (a negative variance whose sqrt is NaN).
         let stdvar = run_udf(OverTimeFamily::Stdvar, window, 0.0)[0];
-        assert!(!stdvar.is_nan(), "stdvar must be finite, got NaN");
-        assert!(stdvar > 0.0, "stdvar must be positive, got {stdvar}");
         assert!(approx_eq(stdvar, 2.0 / 3.0), "stdvar == 2/3, got {stdvar}");
         let stddev = run_udf(OverTimeFamily::Stddev, window, 0.0)[0];
         assert!(approx_eq(stddev, (2.0_f64 / 3.0).sqrt()));
@@ -889,9 +929,9 @@ mod tests {
             ],
             0.0,
         );
-        assert!(out.len() == 2);
-        assert!(approx_eq(out[0], 3.0));
-        assert!(approx_eq(out[1], 7.0));
+        check!(out.len() == 2);
+        check!(approx_eq(out[0], 3.0));
+        check!(approx_eq(out[1], 7.0));
     }
 
     /// The UDFs install onto a `SessionContext` under their Prometheus-prefixed
@@ -925,10 +965,10 @@ mod tests {
         let range = RangeArray::from_ranges(values, [(0_u32, 2_u32), (2, 1)]).unwrap();
         let dict: ArrayRef = Arc::new(range.into_dict_array().unwrap());
         let back = decode_range_column(&dict, "value_range", "prom_sum_over_time").unwrap();
-        assert!(back.len() == 2);
-        assert!(back.value_slice(0).unwrap() == [1.0, 2.0]);
+        check!(back.len() == 2);
+        check!(back.value_slice(0).unwrap() == [1.0, 2.0]);
 
         let plain: ArrayRef = Arc::new(Int64Array::from(vec![1, 2, 3]));
-        assert!(decode_range_column(&plain, "value_range", "prom_sum_over_time").is_err());
+        check!(decode_range_column(&plain, "value_range", "prom_sum_over_time").is_err());
     }
 }

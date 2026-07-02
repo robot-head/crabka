@@ -223,10 +223,14 @@ mod tests {
             "(.*)-.*",
         )
         .unwrap();
-        assert!(out.len() == 1);
-        assert!(out[0].labels.get("dst") == Some("a"));
-        // `__name__` is preserved (label_replace does not drop it).
-        assert!(out[0].labels.get("__name__") == Some("m"));
+        // `dst` gets the capture-group expansion; `__name__` is preserved
+        // (label_replace does not drop it).
+        assert!(
+            out == vec![sample(
+                &[("__name__", "m"), ("src", "a-b"), ("dst", "a")],
+                1.0
+            )]
+        );
     }
 
     #[test]

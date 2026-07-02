@@ -8,7 +8,7 @@
 //! reconciler wiring.
 #![allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
 
-use assert2::assert;
+use assert2::{assert, check};
 #[path = "shared/mod.rs"]
 mod shared;
 
@@ -258,17 +258,17 @@ async fn cluster_ca_within_renewal_window_renews_same_key() {
         .expect("cluster-ca-cert PATCH");
     let body: Value = serde_json::from_slice(cert_patch.body()).expect("cert PATCH JSON");
     let bundle_b64 = body["data"]["ca.crt"].as_str().expect("ca.crt data");
-    assert!(
+    check!(
         count_cert_blocks(bundle_b64) == 2,
         "renewal must leave the old cert in the bundle until it expires; body = {body}"
     );
-    assert!(
+    check!(
         body["metadata"]["annotations"]["crabka.io/ca-cert-generation"] == "1",
         "cert generation must bump on renewal; body = {body}"
     );
 
     // The clients-ca-cert must NOT be patched (fresh).
-    assert!(
+    check!(
         !observed.iter().any(|r| r.method() == Method::PATCH
             && r.uri()
                 .to_string()
@@ -287,10 +287,10 @@ async fn cluster_ca_within_renewal_window_renews_same_key() {
         .expect("status PATCH");
     let sbody: Value = serde_json::from_slice(status_patch.body()).expect("status JSON");
     let rot = status_condition(&sbody, "CaRotation");
-    assert!(rot["status"] == "True", "body = {sbody}");
-    assert!(rot["reason"] == "RenewingCert", "body = {sbody}");
+    check!(rot["status"] == "True", "body = {sbody}");
+    check!(rot["reason"] == "RenewingCert", "body = {sbody}");
 
-    assert!(state.remaining_rules() == 0, "all rules consumed");
+    check!(state.remaining_rules() == 0, "all rules consumed");
 }
 
 // ---------------------------------------------------------------------------
@@ -435,8 +435,8 @@ async fn force_replace_key_starts_staged_rotation() {
         .expect("status PATCH");
     let sbody: Value = serde_json::from_slice(status_patch.body()).expect("status JSON");
     let rot = status_condition(&sbody, "CaRotation");
-    assert!(rot["status"] == "True", "body = {sbody}");
-    assert!(rot["reason"] == "DistributingTrust", "body = {sbody}");
+    check!(rot["status"] == "True", "body = {sbody}");
+    check!(rot["reason"] == "DistributingTrust", "body = {sbody}");
 
-    assert!(state.remaining_rules() == 0, "all rules consumed");
+    check!(state.remaining_rules() == 0, "all rules consumed");
 }

@@ -233,10 +233,9 @@ mod tests {
 
     #[test]
     fn parse_rejects_junk() {
-        assert!(KafkaVersion::parse("banana").is_err());
-        assert!(KafkaVersion::parse("").is_err());
-        assert!(KafkaVersion::parse("3.x").is_err());
-        assert!(KafkaVersion::parse("1.2.3.4").is_err());
+        for input in ["banana", "", "3.x", "1.2.3.4"] {
+            assert!(KafkaVersion::parse(input).is_err(), "case {input:?}");
+        }
     }
 
     #[test]

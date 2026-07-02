@@ -633,15 +633,34 @@ authentication:
         let Some(ListenerAuthentication::OAuth(oauth)) = l.authentication else {
             panic!("expected OAuth authentication, got {:?}", l.authentication);
         };
-        assert!(oauth.valid_issuer_uri == "https://issuer.example.com/");
-        assert!(oauth.jwks_endpoint_uri.as_deref() == Some("https://issuer.example.com/jwks"));
-        assert!(oauth.valid_audience == None);
-        assert!(oauth.user_name_claim == None);
-        assert!(oauth.custom_claim_check == None);
-        assert!(oauth.jwks_refresh_seconds == None);
-        assert!(oauth.max_clock_skew_seconds == None);
         // `enable_oauth_bearer` defaults to true when omitted.
-        assert!(oauth.enable_oauth_bearer);
+        let expected = ListenerAuthenticationOAuth {
+            valid_issuer_uri: "https://issuer.example.com/".into(),
+            jwks_endpoint_uri: Some("https://issuer.example.com/jwks".into()),
+            valid_audience: None,
+            user_name_claim: None,
+            custom_claim_check: None,
+            jwks_refresh_seconds: None,
+            max_clock_skew_seconds: None,
+            enable_oauth_bearer: true,
+            tls_trusted_certificates: vec![],
+            access_token_is_jwt: true,
+            introspection_endpoint_uri: None,
+            user_info_endpoint_uri: None,
+            client_id: None,
+            client_secret: None,
+            introspection_http_timeout_seconds: None,
+            max_seconds_without_reauthentication: None,
+            valid_token_type: None,
+            fallback_user_name_claim: None,
+            fallback_user_name_prefix: None,
+            groups_claim: None,
+            groups_claim_delimiter: None,
+            jwks_min_refresh_pause_seconds: None,
+            jwks_expiry_seconds: None,
+            jwks_ignore_key_use: None,
+        };
+        assert!(oauth == expected);
     }
 
     #[test]
@@ -970,24 +989,14 @@ authentication:
             jwks_ignore_key_use: None,
         };
         let json = serde_json::to_string(&original).unwrap();
-        assert!(
-            json.contains("\"accessTokenIsJwt\":false"),
-            "expected accessTokenIsJwt:false in JSON; got: {json}"
-        );
-        assert!(
-            json.contains("\"introspectionEndpointUri\":\"https://issuer.example.com/introspect\""),
-            "expected introspectionEndpointUri in JSON; got: {json}"
-        );
-        assert!(
-            json.contains("\"clientId\":\"kafka-broker\""),
-            "expected clientId in JSON; got: {json}"
-        );
-        assert!(
-            json.contains(
-                "\"clientSecret\":{\"secretName\":\"kafka-broker-oauth\",\"key\":\"client-secret\"}"
-            ),
-            "expected clientSecret object in JSON; got: {json}"
-        );
+        for want in [
+            "\"accessTokenIsJwt\":false",
+            "\"introspectionEndpointUri\":\"https://issuer.example.com/introspect\"",
+            "\"clientId\":\"kafka-broker\"",
+            "\"clientSecret\":{\"secretName\":\"kafka-broker-oauth\",\"key\":\"client-secret\"}",
+        ] {
+            assert!(json.contains(want), "case {want:?}; got: {json}");
+        }
         let round_tripped: ListenerAuthenticationOAuth = serde_json::from_str(&json).unwrap();
         assert!(round_tripped == original);
     }
@@ -1254,10 +1263,33 @@ groupsClaimDelimiter: ","
         let ListenerAuthentication::OAuth(oauth) = &parsed else {
             panic!("expected oauth variant");
         };
-        assert!(oauth.fallback_user_name_claim.as_deref() == Some("client_id"));
-        assert!(oauth.fallback_user_name_prefix.as_deref() == Some("service-account-"));
-        assert!(oauth.groups_claim.as_deref() == Some("$.realm_access.roles[*]"));
-        assert!(oauth.groups_claim_delimiter.as_deref() == Some(","));
+        let expected = ListenerAuthenticationOAuth {
+            valid_issuer_uri: "https://issuer.example/".into(),
+            jwks_endpoint_uri: Some("https://issuer.example/jwks".into()),
+            valid_audience: None,
+            user_name_claim: None,
+            custom_claim_check: None,
+            jwks_refresh_seconds: None,
+            max_clock_skew_seconds: None,
+            enable_oauth_bearer: true,
+            tls_trusted_certificates: vec![],
+            access_token_is_jwt: true,
+            introspection_endpoint_uri: None,
+            user_info_endpoint_uri: None,
+            client_id: None,
+            client_secret: None,
+            introspection_http_timeout_seconds: None,
+            max_seconds_without_reauthentication: None,
+            valid_token_type: None,
+            fallback_user_name_claim: Some("client_id".into()),
+            fallback_user_name_prefix: Some("service-account-".into()),
+            groups_claim: Some("$.realm_access.roles[*]".into()),
+            groups_claim_delimiter: Some(",".into()),
+            jwks_min_refresh_pause_seconds: None,
+            jwks_expiry_seconds: None,
+            jwks_ignore_key_use: None,
+        };
+        assert!(*oauth == expected);
     }
 
     #[test]
@@ -1314,9 +1346,33 @@ jwksIgnoreKeyUse: false
         let ListenerAuthentication::OAuth(oauth) = &parsed else {
             panic!("expected oauth variant");
         };
-        assert!(oauth.jwks_min_refresh_pause_seconds == Some(1));
-        assert!(oauth.jwks_expiry_seconds == Some(3600));
-        assert!(oauth.jwks_ignore_key_use == Some(false));
+        let expected = ListenerAuthenticationOAuth {
+            valid_issuer_uri: "https://issuer.example/".into(),
+            jwks_endpoint_uri: Some("https://issuer.example/jwks".into()),
+            valid_audience: None,
+            user_name_claim: None,
+            custom_claim_check: None,
+            jwks_refresh_seconds: None,
+            max_clock_skew_seconds: None,
+            enable_oauth_bearer: true,
+            tls_trusted_certificates: vec![],
+            access_token_is_jwt: true,
+            introspection_endpoint_uri: None,
+            user_info_endpoint_uri: None,
+            client_id: None,
+            client_secret: None,
+            introspection_http_timeout_seconds: None,
+            max_seconds_without_reauthentication: None,
+            valid_token_type: None,
+            fallback_user_name_claim: None,
+            fallback_user_name_prefix: None,
+            groups_claim: None,
+            groups_claim_delimiter: None,
+            jwks_min_refresh_pause_seconds: Some(1),
+            jwks_expiry_seconds: Some(3600),
+            jwks_ignore_key_use: Some(false),
+        };
+        assert!(*oauth == expected);
     }
 
     #[test]

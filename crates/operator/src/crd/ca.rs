@@ -83,9 +83,13 @@ mod tests {
     #[test]
     fn defaults_match_strimzi() {
         let d = CertificateAuthority::default();
-        assert!(d.generate_certificate_authority);
-        assert!(d.validity_days == 365);
-        assert!(d.renewal_days == 30);
+        assert!(
+            d == CertificateAuthority {
+                generate_certificate_authority: true,
+                validity_days: 365,
+                renewal_days: 30,
+            }
+        );
     }
 
     #[test]
@@ -102,8 +106,12 @@ mod tests {
             "renewalDays": 7,
         }))
         .expect("parse");
-        assert!(!v.generate_certificate_authority);
-        assert!(v.validity_days == 90);
-        assert!(v.renewal_days == 7);
+        assert!(
+            v == CertificateAuthority {
+                generate_certificate_authority: false,
+                validity_days: 90,
+                renewal_days: 7,
+            }
+        );
     }
 }

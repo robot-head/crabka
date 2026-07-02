@@ -301,33 +301,30 @@ mod tests {
 
     #[test]
     fn status_parses_pbjson_enum_names() {
-        assert!(
-            ProposalStatus::from_json(&json!("PROPOSAL_STATUS_COMPUTED"))
-                == ProposalStatus::Computed
-        );
-        assert!(
-            ProposalStatus::from_json(&json!("PROPOSAL_STATUS_EXECUTING"))
-                == ProposalStatus::Executing
-        );
-        assert!(
-            ProposalStatus::from_json(&json!("PROPOSAL_STATUS_COMPLETED"))
-                == ProposalStatus::Completed
-        );
-        assert!(
-            ProposalStatus::from_json(&json!("PROPOSAL_STATUS_FAILED")) == ProposalStatus::Failed
-        );
-        assert!(
-            ProposalStatus::from_json(&json!("PROPOSAL_STATUS_CANCELLED"))
-                == ProposalStatus::Cancelled
-        );
+        for (input, want) in [
+            ("PROPOSAL_STATUS_COMPUTED", ProposalStatus::Computed),
+            ("PROPOSAL_STATUS_EXECUTING", ProposalStatus::Executing),
+            ("PROPOSAL_STATUS_COMPLETED", ProposalStatus::Completed),
+            ("PROPOSAL_STATUS_FAILED", ProposalStatus::Failed),
+            ("PROPOSAL_STATUS_CANCELLED", ProposalStatus::Cancelled),
+        ] {
+            assert!(
+                ProposalStatus::from_json(&json!(input)) == want,
+                "case {input:?}"
+            );
+        }
     }
 
     #[test]
     fn status_parses_numeric_ordinals_and_unknown() {
-        assert!(ProposalStatus::from_json(&json!(1)) == ProposalStatus::Computed);
-        assert!(ProposalStatus::from_json(&json!(2)) == ProposalStatus::Executing);
-        assert!(ProposalStatus::from_json(&json!("WAT")) == ProposalStatus::Unspecified);
-        assert!(ProposalStatus::from_json(&Value::Null) == ProposalStatus::Unspecified);
+        for (input, want) in [
+            (json!(1), ProposalStatus::Computed),
+            (json!(2), ProposalStatus::Executing),
+            (json!("WAT"), ProposalStatus::Unspecified),
+            (Value::Null, ProposalStatus::Unspecified),
+        ] {
+            assert!(ProposalStatus::from_json(&input) == want, "case {input:?}");
+        }
     }
 
     #[test]
@@ -349,13 +346,23 @@ mod tests {
             "throttleBytesPerSec": "52428800"
         });
         let p = proposal_from_json(&body);
-        assert!(p.id == "abc-123");
-        assert!(p.status == ProposalStatus::Computed);
-        assert!(p.goals_applied == vec!["RackAware", "ReplicaDistribution"]);
-        assert!(p.summary.replica_movements == 4);
-        assert!(p.summary.max_replicas_after == 7);
-        assert!(p.movement_count == 4);
-        assert!(p.failure_reason.is_none());
+        assert!(
+            p == RebalancerProposal {
+                id: "abc-123".to_string(),
+                status: ProposalStatus::Computed,
+                summary: ProposalSummary {
+                    replica_movements: 4,
+                    leader_movements: 2,
+                    max_replicas_before: 10,
+                    max_replicas_after: 7,
+                    max_leaders_before: 6,
+                    max_leaders_after: 4,
+                },
+                goals_applied: vec!["RackAware".to_string(), "ReplicaDistribution".to_string()],
+                movement_count: 4,
+                failure_reason: None,
+            }
+        );
     }
 
     #[test]
@@ -381,9 +388,23 @@ mod tests {
             "status": "PROPOSAL_STATUS_COMPUTED"
         });
         let p = proposal_from_json(&body);
-        assert!(p.summary == ProposalSummary::default());
-        assert!(p.movement_count == 0);
-        assert!(p.goals_applied.is_empty());
+        assert!(
+            p == RebalancerProposal {
+                id: "empty".to_string(),
+                status: ProposalStatus::Computed,
+                summary: ProposalSummary {
+                    replica_movements: 0,
+                    leader_movements: 0,
+                    max_replicas_before: 0,
+                    max_replicas_after: 0,
+                    max_leaders_before: 0,
+                    max_leaders_after: 0,
+                },
+                goals_applied: vec![],
+                movement_count: 0,
+                failure_reason: None,
+            }
+        );
     }
 
     #[test]
@@ -428,9 +449,9 @@ mod tests {
     #[test]
     fn json_i32_accepts_number_string_and_missing() {
         let obj = json!({ "a": 5, "b": "9" });
-        assert!(json_i32(&obj, "a", "a") == 5);
-        assert!(json_i32(&obj, "b", "b") == 9);
-        assert!(json_i32(&obj, "missing", "missing") == 0);
+        for (key, want) in [("a", 5), ("b", 9), ("missing", 0)] {
+            assert!(json_i32(&obj, key, key) == want, "case {key:?}");
+        }
     }
 
     #[test]

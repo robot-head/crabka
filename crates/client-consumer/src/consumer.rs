@@ -856,14 +856,14 @@ impl Consumer {
 #[cfg(test)]
 mod security_arg_tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use crabka_client_core::security::{ClientSecurity, SaslCredentials};
     use crabka_client_core::{ClientError, MockBroker};
-    use crabka_protocol::Encode;
     use crabka_protocol::owned::api_versions_request;
     use crabka_protocol::owned::api_versions_response::{ApiVersion, ApiVersionsResponse};
     use crabka_protocol::owned::leave_group_request;
     use crabka_protocol::owned::leave_group_response::{self, LeaveGroupResponse};
+    use crabka_protocol::{Encode, UnknownTaggedFields};
     use crabka_security::ListenerProtocol;
 
     fn api_versions_for_startup_cleanup() -> Vec<u8> {
@@ -943,10 +943,10 @@ mod security_arg_tests {
         let bytes = initial_subscription_bytes(&["topic".into()], Some("rack-a"));
         let decoded = decode_subscription(&bytes);
 
-        assert!(decoded.topics == vec!["topic"]);
-        assert!(decoded.owned.is_empty());
-        assert!(decoded.generation_id == -1);
-        assert!(decoded.rack_id.as_deref() == Some("rack-a"));
+        check!(decoded.topics == vec!["topic"]);
+        check!(decoded.owned.is_empty());
+        check!(decoded.generation_id == -1);
+        check!(decoded.rack_id.as_deref() == Some("rack-a"));
     }
 
     #[test]
@@ -962,15 +962,23 @@ mod security_arg_tests {
             60_000,
         );
 
-        assert!(req.group_id == "group-a");
-        assert!(req.protocol_type == "consumer");
-        assert!(req.member_id == "member-a");
-        assert!(req.group_instance_id.as_deref() == Some("instance-a"));
-        assert!(req.session_timeout_ms == 45_000);
-        assert!(req.rebalance_timeout_ms == 60_000);
-        assert!(req.protocols.len() == 1);
-        assert!(req.protocols[0].name == "range");
-        assert!(req.protocols[0].metadata == metadata);
+        assert!(
+            req == JoinGroupRequest {
+                group_id: "group-a".into(),
+                session_timeout_ms: 45_000,
+                rebalance_timeout_ms: 60_000,
+                member_id: "member-a".into(),
+                group_instance_id: Some("instance-a".into()),
+                protocol_type: "consumer".into(),
+                protocols: vec![JoinGroupRequestProtocol {
+                    name: "range".into(),
+                    metadata,
+                    unknown_tagged_fields: UnknownTaggedFields::default(),
+                }],
+                reason: None,
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            }
+        );
     }
 
     #[test]
@@ -1014,17 +1022,31 @@ mod security_arg_tests {
     fn is_subscribed_topic_matches_exact_topic_names() {
         let subscribe = vec!["orders".to_string(), "payments".to_string()];
 
-        assert!(is_subscribed_topic(&subscribe, "orders"));
-        assert!(is_subscribed_topic(&subscribe, "payments"));
-        assert!(!is_subscribed_topic(&subscribe, "shipments"));
-        assert!(!is_subscribed_topic(&subscribe, "order"));
+        for (name, expected) in [
+            ("orders", true),
+            ("payments", true),
+            ("shipments", false),
+            ("order", false),
+        ] {
+            assert!(
+                is_subscribed_topic(&subscribe, name) == expected,
+                "name: {name}"
+            );
+        }
     }
 
     #[test]
     fn is_group_leader_matches_exact_member_id() {
-        assert!(is_group_leader("member-a", "member-a"));
-        assert!(!is_group_leader("member-a", "member-b"));
-        assert!(!is_group_leader("member-a", ""));
+        for (leader, member_id, expected) in [
+            ("member-a", "member-a", true),
+            ("member-a", "member-b", false),
+            ("member-a", "", false),
+        ] {
+            assert!(
+                is_group_leader(leader, member_id) == expected,
+                "leader: {leader}, member_id: {member_id}"
+            );
+        }
     }
 
     #[test]
@@ -1048,30 +1070,51 @@ mod security_arg_tests {
             vec![assignment.clone()],
         );
 
-        assert!(req.group_id == "group-a");
-        assert!(req.generation_id == 7);
-        assert!(req.member_id == "member-a");
-        assert!(req.group_instance_id.as_deref() == Some("instance-a"));
-        assert!(req.protocol_type.as_deref() == Some("consumer"));
-        assert!(req.protocol_name.as_deref() == Some("range"));
-        assert!(req.assignments == vec![assignment]);
+        assert!(
+            req == SyncGroupRequest {
+                group_id: "group-a".into(),
+                generation_id: 7,
+                member_id: "member-a".into(),
+                group_instance_id: Some("instance-a".into()),
+                protocol_type: Some("consumer".into()),
+                protocol_name: Some("range".into()),
+                assignments: vec![assignment],
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            }
+        );
     }
 
     #[test]
     fn offset_prime_helpers_preserve_assignment_presence_offsets_and_epochs() {
-        assert!(!has_assigned_partitions(&[]));
-        assert!(has_assigned_partitions(&[("orders".into(), 0)]));
+        for (partitions, expected) in [(vec![], false), (vec![("orders".to_string(), 0)], true)] {
+            assert!(
+                has_assigned_partitions(&partitions) == expected,
+                "partitions: {partitions:?}"
+            );
+        }
 
-        assert!(starting_offset(12, AutoOffsetReset::Earliest) == 12);
-        assert!(starting_offset(-1, AutoOffsetReset::Earliest) == 0);
-        assert!(starting_offset(-1, AutoOffsetReset::Latest) == i64::MAX);
-        assert!(starting_offset(-1, AutoOffsetReset::None) == i64::MAX);
+        for (committed, reset, expected) in [
+            (12, AutoOffsetReset::Earliest, 12),
+            (-1, AutoOffsetReset::Earliest, 0),
+            (-1, AutoOffsetReset::Latest, i64::MAX),
+            (-1, AutoOffsetReset::None, i64::MAX),
+        ] {
+            assert!(
+                starting_offset(committed, reset) == expected,
+                "committed: {committed}, reset: {reset:?}"
+            );
+        }
 
         let position = primed_position(9);
-        assert!(position.offset_epoch == 9);
-        assert!(position.leader_id == -1);
-        assert!(position.leader_epoch == -1);
-        assert!(!position.awaiting_validation);
+        assert!(
+            position
+                == crate::position::PartitionPosition {
+                    offset_epoch: 9,
+                    leader_id: -1,
+                    leader_epoch: -1,
+                    awaiting_validation: false,
+                }
+        );
     }
 
     #[tokio::test]
@@ -1163,17 +1206,22 @@ mod security_arg_tests {
     async fn accessors_return_consumer_identity_subscription_and_assignment() {
         let consumer = test_consumer().await;
 
-        assert!(consumer.group_id() == "group-a");
-        assert!(consumer.member_id() == "member-a");
-        assert!(consumer.generation_id() == 7);
-        assert!(consumer.subscribed_topics() == ["orders".to_string(), "payments".to_string()]);
-        assert!(consumer.assignment().await == vec![("orders".into(), 0)]);
+        check!(consumer.group_id() == "group-a");
+        check!(consumer.member_id() == "member-a");
+        check!(consumer.generation_id() == 7);
+        check!(consumer.subscribed_topics() == ["orders".to_string(), "payments".to_string()]);
+        check!(consumer.assignment().await == vec![("orders".into(), 0)]);
 
         let metadata = consumer.group_metadata();
-        assert!(metadata.group_id == "group-a");
-        assert!(metadata.member_id == "member-a");
-        assert!(metadata.generation_id == 7);
-        assert!(metadata.group_instance_id.as_deref() == Some("instance-a"));
+        assert!(
+            metadata
+                == ConsumerGroupMetadata {
+                    group_id: "group-a".into(),
+                    generation_id: 7,
+                    member_id: "member-a".into(),
+                    group_instance_id: Some("instance-a".into()),
+                }
+        );
     }
 
     /// Regression: the generation the commit path stamps must track the

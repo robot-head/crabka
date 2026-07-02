@@ -380,20 +380,12 @@ async fn oauth_introspection_managed_pod_template_mounts_secret_with_projected_i
         intro_vol["secret"]["secretName"] == SOURCE_SECRET_NAME,
         "volume sources the user's Secret directly; body = {body}"
     );
-    let items = intro_vol["secret"]["items"]
-        .as_array()
-        .unwrap_or_else(|| panic!("projected items present; body = {body}"));
+    // Exactly one projected item pinning the user's source key to the
+    // fixed broker filename.
     assert!(
-        items.len() == 1,
-        "exactly one projected item; body = {body}"
-    );
-    assert!(
-        items[0]["key"] == SOURCE_KEY,
-        "items[0].key must be the user's source key; body = {body}"
-    );
-    assert!(
-        items[0]["path"] == "client-secret",
-        "items[0].path must be the fixed broker filename; body = {body}"
+        intro_vol["secret"]["items"]
+            == serde_json::json!([{ "key": SOURCE_KEY, "path": "client-secret" }]),
+        "projected items must map the user's key to client-secret; body = {body}"
     );
 }
 
@@ -422,17 +414,18 @@ async fn oauth_introspection_with_userinfo_renders_userinfo_endpoint_in_toml() {
     let observed = state.take_observed();
     let toml = extract_broker0_toml(&observed, "c7");
 
-    assert!(toml.contains("[oauthbearer]"), "TOML: {toml}");
-    assert!(
-        toml.contains(&format!("userinfo_endpoint_uri = \"{USERINFO_URI}\"")),
-        "userinfo_endpoint_uri must be present in [oauthbearer] TOML when userInfoEndpointUri is set; TOML: {toml}",
-    );
-    assert!(
-        toml.contains(&format!(
-            "introspection_endpoint_uri = \"{INTROSPECTION_URI}\""
-        )),
-        "introspection_endpoint_uri must still be present; TOML: {toml}",
-    );
+    // With userInfoEndpointUri set, the [oauthbearer] block must carry the
+    // userinfo endpoint AND still carry the introspection endpoint.
+    for needle in [
+        "[oauthbearer]".to_string(),
+        format!("userinfo_endpoint_uri = \"{USERINFO_URI}\""),
+        format!("introspection_endpoint_uri = \"{INTROSPECTION_URI}\""),
+    ] {
+        assert!(
+            toml.contains(&needle),
+            "{needle} must be present in the rendered TOML; TOML: {toml}",
+        );
+    }
 }
 
 // ── test 8: StatefulSet mounts the introspection Secret end-to-end ─────────

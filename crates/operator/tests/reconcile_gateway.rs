@@ -16,7 +16,7 @@
 //!  11. GET deployments/<gw>                   — read back ready-replica count
 //!  12. PATCH kafkagrpcgateways/<gw>/status    — write final status
 
-use assert2::assert;
+use assert2::{assert, check};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -260,43 +260,40 @@ async fn happy_path_all_objects_created_ready() {
         .filter_map(|a| a.as_str())
         .collect::<Vec<_>>()
         .join(" ");
-    assert!(
-        args_joined.contains("--broker-tls-cert=/etc/crabka-gw/broker-client/user.crt"),
-        "Deployment args must include broker-tls-cert; args = {args_joined}"
-    );
-    assert!(
-        args_joined.contains("--broker-tls-key=/etc/crabka-gw/broker-client/user.key"),
-        "Deployment args must include broker-tls-key; args = {args_joined}"
-    );
-    assert!(
-        args_joined.contains("--broker-tls-ca=/etc/crabka-gw/cluster-ca/ca.crt"),
-        "Deployment args must include broker-tls-ca; args = {args_joined}"
-    );
-    assert!(
-        args_joined.contains("--tls-cert=/etc/crabka-gw/serving/tls.crt"),
-        "Deployment args must include tls-cert; args = {args_joined}"
-    );
-
-    // --- Assert the broker bootstrap + SNI resolve to the TLS listener ---
-    // The parent fixture exposes a plaintext PLAIN:9092 AND a TLS+mTLS
-    // `tls-internal`:9093. The gateway must dial the SECURED listener
-    // (port 9093), never the plaintext :9092, and its SNI must be the
-    // broker headless-svc SAN.
-    assert!(
-        args_joined
-            .contains("--bootstrap-servers=demo-broker-headless.default.svc.cluster.local:9093"),
-        "bootstrap must resolve the TLS listener (:9093), not plaintext :9092; args = {args_joined}"
-    );
-    assert!(
-        !args_joined
-            .contains("--bootstrap-servers=demo-broker-headless.default.svc.cluster.local:9092"),
-        "bootstrap must NOT point at the plaintext :9092 listener; args = {args_joined}"
-    );
-    assert!(
-        args_joined
-            .contains("--broker-tls-server-name=demo-broker-headless.default.svc.cluster.local"),
-        "broker SNI must be the headless-svc SAN; args = {args_joined}"
-    );
+    // The broker-TLS cert/key/CA and serving-cert args must point at the
+    // mounted paths. The parent fixture exposes a plaintext PLAIN:9092 AND a
+    // TLS+mTLS `tls-internal`:9093 — the gateway must dial the SECURED
+    // listener (port 9093), never the plaintext :9092, and its SNI must be
+    // the broker headless-svc SAN.
+    for (needle, want) in [
+        (
+            "--broker-tls-cert=/etc/crabka-gw/broker-client/user.crt",
+            true,
+        ),
+        (
+            "--broker-tls-key=/etc/crabka-gw/broker-client/user.key",
+            true,
+        ),
+        ("--broker-tls-ca=/etc/crabka-gw/cluster-ca/ca.crt", true),
+        ("--tls-cert=/etc/crabka-gw/serving/tls.crt", true),
+        (
+            "--bootstrap-servers=demo-broker-headless.default.svc.cluster.local:9093",
+            true,
+        ),
+        (
+            "--bootstrap-servers=demo-broker-headless.default.svc.cluster.local:9092",
+            false,
+        ),
+        (
+            "--broker-tls-server-name=demo-broker-headless.default.svc.cluster.local",
+            true,
+        ),
+    ] {
+        assert!(
+            args_joined.contains(needle) == want,
+            "Deployment arg fragment {needle:?}: expected present={want}; args = {args_joined}"
+        );
+    }
 
     // --- Assert final status carries Ready=True / Available ---
     let status_patch = observed
@@ -318,17 +315,17 @@ async fn happy_path_all_objects_created_ready() {
         .iter()
         .find(|c| c["type"] == "Ready")
         .unwrap_or_else(|| panic!("Ready condition missing; body = {status_body}"));
-    assert!(
+    check!(
         ready["status"] == "True",
         "Ready condition must be True when 1/1 replicas ready; body = {status_body}"
     );
-    assert!(
+    check!(
         ready["reason"] == "Available",
         "Ready reason must be Available; body = {status_body}"
     );
 
     // All 12 rules must have been consumed.
-    assert!(
+    check!(
         state.remaining_rules() == 0,
         "all FIFO rules must be consumed, {} remaining",
         state.remaining_rules()

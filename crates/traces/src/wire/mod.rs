@@ -39,14 +39,26 @@ mod tests {
 
     #[test]
     fn negotiate_trace_push_paths() {
-        assert!(
-            negotiate("/v1/traces", Some("application/x-protobuf")).unwrap() == WireFormat::Otlp
-        );
-        assert!(negotiate("/api/push", None).unwrap() == WireFormat::Otlp);
-        assert!(
-            negotiate("/api/v2/spans", Some("application/json")).unwrap() == WireFormat::Zipkin
-        );
-        assert!(negotiate("/api/traces", None).unwrap() == WireFormat::Jaeger);
+        for (path, content_type, want) in [
+            (
+                "/v1/traces",
+                Some("application/x-protobuf"),
+                WireFormat::Otlp,
+            ),
+            ("/api/push", None, WireFormat::Otlp),
+            (
+                "/api/v2/spans",
+                Some("application/json"),
+                WireFormat::Zipkin,
+            ),
+            ("/api/traces", None, WireFormat::Jaeger),
+        ] {
+            assert_eq!(
+                negotiate(path, content_type).unwrap(),
+                want,
+                "case {path:?}"
+            );
+        }
     }
 
     #[test]

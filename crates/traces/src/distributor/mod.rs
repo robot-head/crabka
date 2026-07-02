@@ -780,7 +780,7 @@ fn error_response(err: &TracesError) -> Response {
 mod tests {
     use std::sync::Mutex;
 
-    use assert2::assert;
+    use assert2::{assert, check};
     use axum::body::Body;
     use axum::http::Request;
     use flate2::Compression;
@@ -921,9 +921,9 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(resp.status() == StatusCode::OK);
-        assert!(sink.count() == 1);
-        assert!(sink.tenant(0) == "tenant-a");
+        check!(resp.status() == StatusCode::OK);
+        assert_eq!(sink.count(), 1);
+        check!(sink.tenant(0) == "tenant-a");
     }
 
     #[tokio::test]
@@ -1025,9 +1025,9 @@ mod tests {
 
         let resp = service.export(req).await.unwrap();
 
-        assert!(resp.into_inner().partial_success.is_none());
-        assert!(sink.count() == 1);
-        assert!(sink.tenant(0) == "tenant-a");
+        check!(resp.into_inner().partial_success.is_none());
+        assert_eq!(sink.count(), 1);
+        check!(sink.tenant(0) == "tenant-a");
     }
 
     #[tokio::test]
@@ -1075,10 +1075,10 @@ mod tests {
 
         let resp = service.post_spans(req).await.unwrap();
 
-        assert!(sink.count() == 1);
-        assert!(sink.tenant(0) == "tenant-a");
-        assert!(sink.span_name(0) == "GET /grpc");
-        assert!(resp.into_inner() == crate::wire::jaeger_grpc::api_v2::PostSpansResponse {});
+        assert_eq!(sink.count(), 1);
+        check!(sink.tenant(0) == "tenant-a");
+        check!(sink.span_name(0) == "GET /grpc");
+        check!(resp.into_inner() == crate::wire::jaeger_grpc::api_v2::PostSpansResponse {});
     }
 
     #[tokio::test]
@@ -1134,9 +1134,9 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(resp.status() == StatusCode::ACCEPTED);
-        assert!(sink.count() == 1);
-        assert!(sink.span_name(0) == "GET /");
+        check!(resp.status() == StatusCode::ACCEPTED);
+        assert_eq!(sink.count(), 1);
+        check!(sink.span_name(0) == "GET /");
     }
 
     #[tokio::test]
@@ -1155,9 +1155,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(resp.status() == StatusCode::ACCEPTED);
-        assert!(sink.count() == 1);
-        assert!(sink.span_name(0) == "GET /binary");
+        check!(resp.status() == StatusCode::ACCEPTED);
+        assert_eq!(sink.count(), 1);
+        check!(sink.span_name(0) == "GET /binary");
     }
 
     #[tokio::test]
@@ -1172,9 +1172,9 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(sink.count() == 1);
-        assert!(sink.tenant(0) == "tenant-a");
-        assert!(sink.span_name(0) == "GET /");
+        assert_eq!(sink.count(), 1);
+        check!(sink.tenant(0) == "tenant-a");
+        check!(sink.span_name(0) == "GET /");
     }
 
     #[tokio::test]
@@ -1242,13 +1242,13 @@ mod tests {
         assert!(resp.status() == StatusCode::BAD_REQUEST);
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(json["status"] == "error");
-        assert!(
+        check!(json["status"] == "error");
+        check!(
             json["error"]
                 .as_str()
                 .is_some_and(|message| message.contains("max spans per trace"))
         );
-        assert!(sink.count() == 0);
+        check!(sink.count() == 0);
     }
 
     #[tokio::test]
@@ -1288,11 +1288,11 @@ overrides:
             .await
             .unwrap();
 
-        assert!(tight.status() == StatusCode::BAD_REQUEST);
-        assert!(loose.status() == StatusCode::OK);
-        assert!(sink.count() == 2);
-        assert!(sink.tenant(0) == "tenant-loose");
-        assert!(sink.tenant(1) == "tenant-loose");
+        check!(tight.status() == StatusCode::BAD_REQUEST);
+        check!(loose.status() == StatusCode::OK);
+        assert_eq!(sink.count(), 2);
+        check!(sink.tenant(0) == "tenant-loose");
+        check!(sink.tenant(1) == "tenant-loose");
     }
 
     #[tokio::test]
@@ -1345,16 +1345,16 @@ overrides:
         assert!(second.status() == StatusCode::TOO_MANY_REQUESTS);
         let body = second.into_body().collect().await.unwrap().to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(json["status"] == "error");
-        assert!(
+        check!(json["status"] == "error");
+        check!(
             json["error"]
                 .as_str()
                 .is_some_and(|message| message.contains("ingestion rate"))
         );
-        assert!(other_tenant.status() == StatusCode::OK);
-        assert!(sink.count() == 2);
-        assert!(sink.tenant(0) == "tenant-a");
-        assert!(sink.tenant(1) == "tenant-b");
+        check!(other_tenant.status() == StatusCode::OK);
+        assert_eq!(sink.count(), 2);
+        check!(sink.tenant(0) == "tenant-a");
+        check!(sink.tenant(1) == "tenant-b");
     }
 
     #[tokio::test]
@@ -1403,12 +1403,12 @@ overrides:
             .await
             .unwrap();
 
-        assert!(first.status() == StatusCode::OK);
-        assert!(second.status() == StatusCode::TOO_MANY_REQUESTS);
-        assert!(other_tenant.status() == StatusCode::OK);
-        assert!(sink.count() == 2);
-        assert!(sink.tenant(0) == "tenant-a");
-        assert!(sink.tenant(1) == "tenant-b");
+        check!(first.status() == StatusCode::OK);
+        check!(second.status() == StatusCode::TOO_MANY_REQUESTS);
+        check!(other_tenant.status() == StatusCode::OK);
+        assert_eq!(sink.count(), 2);
+        check!(sink.tenant(0) == "tenant-a");
+        check!(sink.tenant(1) == "tenant-b");
     }
 
     #[tokio::test]

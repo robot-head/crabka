@@ -105,16 +105,16 @@ pub struct KafkaRebalanceStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use kube::CustomResourceExt as _;
 
     #[test]
     fn crd_metadata_is_correct() {
         let crd = KafkaRebalance::crd();
-        assert!(crd.spec.group == "crabka.io");
-        assert!(crd.spec.names.kind == "KafkaRebalance");
-        assert!(crd.spec.names.plural == "kafkarebalances");
-        assert!(
+        check!(crd.spec.group == "crabka.io");
+        check!(crd.spec.names.kind == "KafkaRebalance");
+        check!(crd.spec.names.plural == "kafkarebalances");
+        check!(
             crd.spec
                 .names
                 .short_names
@@ -122,8 +122,8 @@ mod tests {
                 .is_some_and(|v| v.contains(&"kr".to_string())),
             "expected shortname `kr`",
         );
-        assert!(crd.spec.versions.len() == 1);
-        assert!(crd.spec.versions[0].name == "v1alpha1");
+        check!(crd.spec.versions.len() == 1);
+        check!(crd.spec.versions[0].name == "v1alpha1");
     }
 
     #[test]
@@ -137,15 +137,13 @@ mod tests {
             },
         );
         let json = serde_json::to_string(&kr).unwrap();
-        assert!(json.contains("\"goals\":[\"RackAware\""), "got: {json}");
-        assert!(
-            json.contains("\"throttleBytesPerSec\":10000000"),
-            "got: {json}"
-        );
-        assert!(
-            json.contains("\"endpoint\":\"http://r.kafka.svc:9300\""),
-            "got: {json}"
-        );
+        for want in [
+            "\"goals\":[\"RackAware\"",
+            "\"throttleBytesPerSec\":10000000",
+            "\"endpoint\":\"http://r.kafka.svc:9300\"",
+        ] {
+            assert!(json.contains(want), "case {want:?}; got: {json}");
+        }
         let back: KafkaRebalance = serde_json::from_str(&json).unwrap();
         assert!(back.spec == kr.spec);
     }
@@ -153,9 +151,13 @@ mod tests {
     #[test]
     fn empty_spec_parses_and_omits_optionals() {
         let spec: KafkaRebalanceSpec = serde_json::from_str("{}").unwrap();
-        assert!(spec.goals.is_none());
-        assert!(spec.throttle_bytes_per_sec.is_none());
-        assert!(spec.endpoint.is_none());
+        assert!(
+            spec == KafkaRebalanceSpec {
+                goals: None,
+                throttle_bytes_per_sec: None,
+                endpoint: None,
+            }
+        );
         let j = serde_json::to_string(&spec).unwrap();
         assert!(j == "{}", "all-default spec must serialize to empty object");
     }
@@ -169,16 +171,24 @@ mod tests {
             optimization_result: None,
         };
         let j = serde_json::to_string(&status).unwrap();
-        assert!(!j.contains("sessionId"), "got: {j}");
-        assert!(!j.contains("optimizationResult"), "got: {j}");
-        assert!(j.contains("\"observedGeneration\":3"), "got: {j}");
+        check!(!j.contains("sessionId"), "got: {j}");
+        check!(!j.contains("optimizationResult"), "got: {j}");
+        check!(j.contains("\"observedGeneration\":3"), "got: {j}");
     }
 
     #[test]
     fn optimization_result_defaults_to_zeroes() {
         let r: OptimizationResult = serde_json::from_str("{}").unwrap();
-        assert!(r == OptimizationResult::default());
-        assert!(r.replica_movements == 0);
-        assert!(r.goals.is_empty());
+        assert!(
+            r == OptimizationResult {
+                replica_movements: 0,
+                leader_movements: 0,
+                max_replicas_before: 0,
+                max_replicas_after: 0,
+                max_leaders_before: 0,
+                max_leaders_after: 0,
+                goals: vec![],
+            }
+        );
     }
 }

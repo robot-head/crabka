@@ -654,7 +654,12 @@ mod tests {
     use object_store::ObjectStore;
     use object_store::memory::InMemory;
 
-    use crate::{EngineOpts, MetricStore, PromqlEngine, QueryResult, SampleValue};
+    use assert2::check;
+
+    use crate::{
+        EngineOpts, InstantSample, MetadataRecord, MetricStore, NamedTsdbStat, PromqlEngine,
+        QueryResult, SampleValue, TsdbBlock, TsdbHeadStats, TsdbStats,
+    };
 
     use super::MetricBlockStore;
 
@@ -697,10 +702,14 @@ mod tests {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected instant vector");
         };
-        assert!(samples.len() == 1);
-        assert!(samples[0].labels == series_labels);
-        assert!(samples[0].ts_ms == 1_000);
-        assert!(samples[0].value == SampleValue::Float(1.0));
+        assert!(
+            samples
+                == vec![InstantSample {
+                    labels: series_labels,
+                    ts_ms: 1_000,
+                    value: SampleValue::Float(1.0),
+                }]
+        );
     }
 
     #[tokio::test]
@@ -746,9 +755,14 @@ mod tests {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected instant vector");
         };
-        assert!(samples.len() == 1);
-        assert!(samples[0].labels == series_labels);
-        assert!(samples[0].value == SampleValue::Float(1.0));
+        assert!(
+            samples
+                == vec![InstantSample {
+                    labels: series_labels,
+                    ts_ms: 1_000,
+                    value: SampleValue::Float(1.0),
+                }]
+        );
     }
 
     #[tokio::test]
@@ -790,12 +804,16 @@ mod tests {
         let store = MetricBlockStore::from_compaction_manifests(fresh_store, None, &[manifest]);
         let blocks = store.tsdb_blocks("tenant-a").await.unwrap();
 
-        assert!(blocks.len() == 1);
-        assert!(blocks[0].id == "metrics/float/0002.parquet");
-        assert!(blocks[0].min_time == 1_000);
-        assert!(blocks[0].max_time == 2_000);
-        assert!(blocks[0].num_samples == 2);
-        assert!(blocks[0].num_series == 1);
+        assert!(
+            blocks
+                == vec![TsdbBlock {
+                    id: "metrics/float/0002.parquet".to_string(),
+                    min_time: 1_000,
+                    max_time: 2_000,
+                    num_samples: 2,
+                    num_series: 1,
+                }]
+        );
     }
 
     #[tokio::test]
@@ -869,33 +887,41 @@ mod tests {
         );
 
         let stats = store.tsdb_stats("tenant-a").await.unwrap();
-        assert!(stats.head_stats.num_series == 2);
-        assert!(stats.head_stats.num_samples == 0);
-        assert!(stats.head_stats.num_chunks == 2);
-        assert!(stats.head_stats.min_time == 0);
-        assert!(stats.head_stats.max_time == 0);
         assert!(
-            named_pairs(&stats.series_count_by_metric_name)
-                == vec![("http_request_duration_seconds", 1), ("up", 1)]
-        );
-        assert!(
-            named_pairs(&stats.label_value_count_by_label_name)
-                == vec![("__name__", 2), ("instance", 2), ("job", 1), ("le", 1)]
-        );
-        assert!(
-            named_pairs(&stats.memory_in_bytes_by_label_name)
-                == vec![("__name__", 47), ("instance", 18), ("job", 12), ("le", 5)]
-        );
-        assert!(
-            named_pairs(&stats.series_count_by_label_value_pair)
-                == vec![
-                    ("job=api", 2),
-                    ("__name__=http_request_duration_seconds", 1),
-                    ("__name__=up", 1),
-                    ("instance=a", 1),
-                    ("instance=b", 1),
-                    ("le=0.5", 1),
-                ]
+            stats
+                == TsdbStats {
+                    head_stats: TsdbHeadStats {
+                        num_series: 2,
+                        num_samples: 0,
+                        num_chunks: 2,
+                        min_time: 0,
+                        max_time: 0,
+                    },
+                    series_count_by_metric_name: expected_stats(&[
+                        ("http_request_duration_seconds", 1),
+                        ("up", 1),
+                    ]),
+                    label_value_count_by_label_name: expected_stats(&[
+                        ("__name__", 2),
+                        ("instance", 2),
+                        ("job", 1),
+                        ("le", 1),
+                    ]),
+                    memory_in_bytes_by_label_name: expected_stats(&[
+                        ("__name__", 47),
+                        ("instance", 18),
+                        ("job", 12),
+                        ("le", 5),
+                    ]),
+                    series_count_by_label_value_pair: expected_stats(&[
+                        ("job=api", 2),
+                        ("__name__=http_request_duration_seconds", 1),
+                        ("__name__=up", 1),
+                        ("instance=a", 1),
+                        ("instance=b", 1),
+                        ("le=0.5", 1),
+                    ]),
+                }
         );
     }
 
@@ -950,13 +976,13 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(exemplars.len() == 1);
-        assert!(exemplars[0].series_labels == series_labels);
-        assert!(exemplars[0].labels.get("trace_id") == Some("abc"));
-        assert!(exemplars[0].labels.get("span_id") == Some("def"));
-        assert!(exemplars[0].labels.get("kind") == Some("slow"));
-        assert!(exemplars[0].ts_ms == 10_500);
-        assert!((exemplars[0].value - 7.0).abs() < f64::EPSILON);
+        check!(exemplars.len() == 1);
+        check!(exemplars[0].series_labels == series_labels);
+        check!(exemplars[0].labels.get("trace_id") == Some("abc"));
+        check!(exemplars[0].labels.get("span_id") == Some("def"));
+        check!(exemplars[0].labels.get("kind") == Some("slow"));
+        check!(exemplars[0].ts_ms == 10_500);
+        check!((exemplars[0].value - 7.0).abs() < f64::EPSILON);
     }
 
     #[tokio::test]
@@ -1015,19 +1041,30 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(exemplars.len() == 2);
-        assert!(exemplars[0].series_labels == series_labels);
-        assert!(exemplars[0].labels.get("trace_id") == Some("start"));
-        assert!(exemplars[0].labels.get("span_id") == Some("s2"));
-        assert!(exemplars[0].labels.get("kind") == Some("inside"));
-        assert!(exemplars[0].ts_ms == 10_000);
-        assert!(exemplars[0].value.to_bits() == 2.0_f64.to_bits());
-        assert!(exemplars[1].series_labels == series_labels);
-        assert!(exemplars[1].labels.get("trace_id") == Some("end"));
-        assert!(exemplars[1].labels.get("span_id") == Some("s3"));
-        assert!(exemplars[1].labels.get("kind") == Some("inside"));
-        assert!(exemplars[1].ts_ms == 11_000);
-        assert!(exemplars[1].value.to_bits() == 3.0_f64.to_bits());
+        check!(exemplars.len() == 2);
+        for (row, trace_id, span_id, ts_ms, value) in [
+            (0_usize, "start", "s2", 10_000_i64, 2.0_f64),
+            (1, "end", "s3", 11_000, 3.0),
+        ] {
+            check!(exemplars[row].series_labels == series_labels, "row {row}");
+            check!(
+                exemplars[row].labels.get("trace_id") == Some(trace_id),
+                "row {row}"
+            );
+            check!(
+                exemplars[row].labels.get("span_id") == Some(span_id),
+                "row {row}"
+            );
+            check!(
+                exemplars[row].labels.get("kind") == Some("inside"),
+                "row {row}"
+            );
+            check!(exemplars[row].ts_ms == ts_ms, "row {row}");
+            check!(
+                exemplars[row].value.to_bits() == value.to_bits(),
+                "row {row}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1078,11 +1115,15 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(metadata.len() == 1);
-        assert!(metadata[0].metric_family_name == "http_requests_total");
-        assert!(metadata[0].metric_type == "counter");
-        assert!(metadata[0].help == "Total HTTP requests.");
-        assert!(metadata[0].unit == "requests");
+        assert!(
+            metadata
+                == vec![MetadataRecord {
+                    metric_family_name: "http_requests_total".to_string(),
+                    metric_type: "counter".to_string(),
+                    help: "Total HTTP requests.".to_string(),
+                    unit: "requests".to_string(),
+                }]
+        );
     }
 
     fn exemplar_batch(
@@ -1176,10 +1217,13 @@ mod tests {
         RecordBatch::try_new(metadata_schema(), columns).unwrap()
     }
 
-    fn named_pairs(stats: &[crate::NamedTsdbStat]) -> Vec<(&str, usize)> {
-        stats
+    fn expected_stats(pairs: &[(&str, usize)]) -> Vec<NamedTsdbStat> {
+        pairs
             .iter()
-            .map(|stat| (stat.name.as_str(), stat.value))
+            .map(|(name, value)| NamedTsdbStat {
+                name: (*name).to_string(),
+                value: *value,
+            })
             .collect()
     }
 }

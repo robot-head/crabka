@@ -2428,7 +2428,7 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::sync::Arc;
 
-    use assert2::assert;
+    use assert2::{assert, check};
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use crabka_blockstore::{
@@ -2535,10 +2535,14 @@ mod tests {
 
     #[test]
     fn match_all_query_requires_only_empty_selector() {
-        assert!(is_match_all_query("{}"));
-        assert!(is_match_all_query("{ \n\t }"));
-        assert!(!is_match_all_query("{ .service.name = \"api\" }"));
-        assert!(!is_match_all_query("{ } | count()"));
+        for (input, want) in [
+            ("{}", true),
+            ("{ \n\t }", true),
+            ("{ .service.name = \"api\" }", false),
+            ("{ } | count()", false),
+        ] {
+            check!(is_match_all_query(input) == want, "input={input:?}");
+        }
     }
 
     #[test]
@@ -2548,65 +2552,59 @@ mod tests {
             key: key.into(),
         };
 
-        assert!(field_matches_tag(
-            &field(Scope::Both, "service.name"),
-            "service.name"
-        ));
-        assert!(field_matches_tag(
-            &field(Scope::Both, "service.name"),
-            ".service.name"
-        ));
-        assert!(!field_matches_tag(
-            &field(Scope::Both, "service.name"),
-            "resource.service.name"
-        ));
-        assert!(field_matches_tag(
-            &field(Scope::Span, "service.name"),
-            "span.service.name"
-        ));
-        assert!(field_matches_tag(
-            &field(Scope::Resource, "service.name"),
-            "resource.service.name"
-        ));
-        assert!(field_matches_tag(&field(Scope::Parent, "id"), "parent.id"));
-        assert!(field_matches_tag(
-            &field(Scope::Event, "name"),
-            "event.name"
-        ));
-        assert!(field_matches_tag(
-            &field(Scope::Link, "span_id"),
-            "link.span_id"
-        ));
-        assert!(field_matches_tag(
-            &field(Scope::Instrumentation, "name"),
-            "instrumentation.name"
-        ));
-        assert!(field_matches_tag(
-            &field(Scope::Intrinsic(Intrinsic::Name), ""),
-            "span:name"
-        ));
-        assert!(field_matches_tag(
-            &field(Scope::Intrinsic(Intrinsic::TraceRootService), ""),
-            "trace:rootService"
-        ));
-        assert!(!field_matches_tag(
-            &field(Scope::Intrinsic(Intrinsic::TraceRootService), ""),
-            "span:name"
-        ));
+        for (scope, key, tag, want) in [
+            (Scope::Both, "service.name", "service.name", true),
+            (Scope::Both, "service.name", ".service.name", true),
+            (Scope::Both, "service.name", "resource.service.name", false),
+            (Scope::Span, "service.name", "span.service.name", true),
+            (
+                Scope::Resource,
+                "service.name",
+                "resource.service.name",
+                true,
+            ),
+            (Scope::Parent, "id", "parent.id", true),
+            (Scope::Event, "name", "event.name", true),
+            (Scope::Link, "span_id", "link.span_id", true),
+            (Scope::Instrumentation, "name", "instrumentation.name", true),
+            (Scope::Intrinsic(Intrinsic::Name), "", "span:name", true),
+            (
+                Scope::Intrinsic(Intrinsic::TraceRootService),
+                "",
+                "trace:rootService",
+                true,
+            ),
+            (
+                Scope::Intrinsic(Intrinsic::TraceRootService),
+                "",
+                "span:name",
+                false,
+            ),
+        ] {
+            let scope_for_msg = scope.clone();
+            check!(
+                field_matches_tag(&field(scope, key), tag) == want,
+                "scope={scope_for_msg:?} key={key:?} tag={tag:?}"
+            );
+        }
     }
 
     #[test]
     fn typed_traceql_value_keeps_only_supported_values() {
-        assert!(
+        check!(
             typed_traceql_value(&TraceqlValue::Float(1.5))
                 == Some(TypedValue {
                     type_: "float".into(),
                     value: "1.5".into(),
                 })
         );
-        assert!(typed_traceql_value(&TraceqlValue::Float(f64::NAN)).is_none());
-        assert!(typed_traceql_value(&TraceqlValue::Float(f64::INFINITY)).is_none());
-        assert!(typed_traceql_value(&TraceqlValue::Nil).is_none());
+        for value in [
+            TraceqlValue::Float(f64::NAN),
+            TraceqlValue::Float(f64::INFINITY),
+            TraceqlValue::Nil,
+        ] {
+            check!(typed_traceql_value(&value).is_none(), "value={value:?}");
+        }
     }
 
     async fn get_json(uri: &str) -> (StatusCode, Value) {
@@ -5072,8 +5070,8 @@ overrides:
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
 
-        assert!(status == StatusCode::OK);
-        assert!(
+        check!(status == StatusCode::OK);
+        check!(
             body == json!({
                 "tagValues": [{
                     "type": "string",
@@ -5084,7 +5082,7 @@ overrides:
                 }
             })
         );
-        assert!(store.scans.load(std::sync::atomic::Ordering::SeqCst) == 0);
+        check!(store.scans.load(std::sync::atomic::Ordering::SeqCst) == 0);
     }
 
     #[tokio::test]

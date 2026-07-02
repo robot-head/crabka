@@ -390,16 +390,30 @@ mod tests {
             200,
         );
         let resp = merge_search(vec![p0, p1], 20, 10);
-        assert!(resp.traces.len() == 1);
-        let total_spans: usize = resp.traces[0]
-            .span_sets
-            .iter()
-            .map(|ss| ss.spans.len())
-            .sum();
-        assert!(total_spans == 2);
-        assert!(resp.traces[0].start_time_unix_nano == "8");
-        assert!(resp.metrics.inspected_bytes == 300);
-        assert!(resp.metrics.completed_jobs == 2);
+        assert_eq!(
+            resp,
+            SearchResponseJson {
+                traces: vec![TraceJson {
+                    trace_id: "01".to_string(),
+                    root_service_name: "checkout".to_string(),
+                    root_trace_name: "GET /".to_string(),
+                    start_time_unix_nano: "8".to_string(),
+                    duration_ms: 1,
+                    span_sets: vec![SpanSetJson {
+                        spans: vec![span("01", 10, 5), span("02", 8, 9)],
+                        matched: 2,
+                    }],
+                }],
+                metrics: Metrics {
+                    total_jobs: 2,
+                    completed_jobs: 2,
+                    total_blocks: 0,
+                    inspected_traces: 2,
+                    inspected_bytes: 300,
+                    inspected_spans: 0,
+                },
+            }
+        );
     }
 
     #[test]
@@ -491,9 +505,13 @@ mod tests {
             10,
         );
         let resp = merge_search(vec![p], 2, 10);
-        assert!(resp.traces.len() == 2);
-        assert!(resp.traces[0].start_time_unix_nano == "300");
-        assert!(resp.traces[1].start_time_unix_nano == "200");
+        assert_eq!(
+            resp.traces,
+            vec![
+                trace("02", "b", 300, vec![span("02", 300, 1)]),
+                trace("03", "c", 200, vec![span("03", 200, 1)]),
+            ]
+        );
     }
 
     #[test]
@@ -548,10 +566,21 @@ mod tests {
     fn assemble_returns_none_when_no_querier_has_it() {
         let p0 = by_id_partial(TraceByIdResponseJson::default(), 5);
         let p1 = by_id_partial(TraceByIdResponseJson::default(), 5);
-        let (trace, metrics, status) = assemble_trace(vec![p0, p1], 1_000_000);
-        assert!(trace.is_none());
-        assert!(metrics.inspected_bytes == 10);
-        assert!(matches!(status, TraceStatus::Complete));
+        assert_eq!(
+            assemble_trace(vec![p0, p1], 1_000_000),
+            (
+                None,
+                Metrics {
+                    total_jobs: 0,
+                    completed_jobs: 2,
+                    total_blocks: 0,
+                    inspected_traces: 0,
+                    inspected_bytes: 10,
+                    inspected_spans: 0,
+                },
+                TraceStatus::Complete,
+            )
+        );
     }
 
     #[test]
@@ -561,9 +590,19 @@ mod tests {
         let p1 = by_id_partial(by_id_body(&["02", "03"], "COMPLETE"), 100);
         let (trace, metrics, status) = assemble_trace(vec![p0, p1], 1_000_000);
         let trace = trace.unwrap();
-        assert!(assembled_span_count(&trace) == 3);
-        assert!(metrics.completed_jobs == 2);
-        assert!(matches!(status, TraceStatus::Complete));
+        assert_eq!(assembled_span_count(&trace), 3);
+        assert_eq!(
+            metrics,
+            Metrics {
+                total_jobs: 0,
+                completed_jobs: 2,
+                total_blocks: 0,
+                inspected_traces: 0,
+                inspected_bytes: 200,
+                inspected_spans: 0,
+            }
+        );
+        assert_eq!(status, TraceStatus::Complete);
     }
 
     #[test]
@@ -606,14 +645,23 @@ mod tests {
             }],
             metrics: tag_metrics(20),
         };
-        let (merged, m) = merge_tag_names(vec![a, b]);
-        let span_scope = merged
-            .iter()
-            .find(|s| matches!(s.scope, TagScope::Span))
-            .unwrap();
-        assert!(span_scope.tags.len() == 2);
-        assert!(span_scope.tags.contains(&"http.method".to_string()));
-        assert!(m.inspected_bytes == 30);
+        assert_eq!(
+            merge_tag_names(vec![a, b]),
+            (
+                vec![ScopedTag {
+                    scope: TagScope::Span,
+                    tags: vec!["http.method".to_string(), "http.status_code".to_string()],
+                }],
+                Metrics {
+                    total_jobs: 2,
+                    completed_jobs: 2,
+                    total_blocks: 0,
+                    inspected_traces: 0,
+                    inspected_bytes: 30,
+                    inspected_spans: 0,
+                },
+            )
+        );
     }
 
     #[test]
@@ -639,9 +687,19 @@ mod tests {
             metrics: tag_metrics(1),
         };
         let (merged, _) = merge_tag_values(vec![a, b]);
-        assert!(merged.len() == 2);
         // sorted by (type, value).
-        assert!(merged[0].value == "GET");
-        assert!(merged[1].value == "POST");
+        assert_eq!(
+            merged,
+            vec![
+                TypedValue {
+                    type_: "string".to_string(),
+                    value: "GET".to_string(),
+                },
+                TypedValue {
+                    type_: "string".to_string(),
+                    value: "POST".to_string(),
+                },
+            ]
+        );
     }
 }

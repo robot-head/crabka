@@ -278,7 +278,7 @@ async fn export(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt as _;
@@ -318,32 +318,17 @@ mod tests {
             "crabka_metrics_query_eval_duration_seconds",
             "crabka_metrics_query_errors_total",
             "crabka_metrics_active_queries",
+            "route=\"query\"",
+            "route=\"query_range\"",
+            "status=\"error\"",
+            // The `r#type` field must encode as the bare `type` label key.
+            "type=\"instant\"",
+            "type=\"range\"",
+            // One `query_started` is still outstanding (2 inc, 1 dec) → gauge == 1.
+            "crabka_metrics_active_queries 1",
         ] {
             assert!(buf.contains(needle), "missing {needle} in:\n{buf}");
         }
-        assert!(buf.contains("route=\"query\""), "query route label missing");
-        assert!(
-            buf.contains("route=\"query_range\""),
-            "query_range route label missing"
-        );
-        assert!(
-            buf.contains("status=\"error\""),
-            "error status label missing"
-        );
-        // The `r#type` field must encode as the bare `type` label key.
-        assert!(
-            buf.contains("type=\"instant\""),
-            "instant query type label missing in:\n{buf}"
-        );
-        assert!(
-            buf.contains("type=\"range\""),
-            "range query type label missing in:\n{buf}"
-        );
-        // One `query_started` is still outstanding (2 inc, 1 dec) → gauge == 1.
-        assert!(
-            buf.contains("crabka_metrics_active_queries 1"),
-            "active_queries gauge should read 1 in:\n{buf}"
-        );
     }
 
     #[tokio::test]
@@ -360,12 +345,12 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(resp.status() == StatusCode::OK);
+        check!(resp.status() == StatusCode::OK);
         let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
             .await
             .unwrap();
         let s = std::str::from_utf8(&body).unwrap();
-        assert!(s.contains("crabka_metrics_query_requests_total"), "{s}");
-        assert!(s.contains("# EOF"), "{s}");
+        check!(s.contains("crabka_metrics_query_requests_total"), "{s}");
+        check!(s.contains("# EOF"), "{s}");
     }
 }

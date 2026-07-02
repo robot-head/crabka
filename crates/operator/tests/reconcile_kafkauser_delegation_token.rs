@@ -189,11 +189,12 @@ async fn delegation_token_user_reconcile_creates_secret_and_status() {
         )),
         _ => None,
     });
-    let (owner, renewers, max_lifetime_ms) =
-        create_call.expect("CreateDelegationToken must have been issued");
-    assert!(owner == "alice", "owner principal name (no User: prefix)");
-    assert!(renewers == vec!["User:bob".to_string()]);
-    assert!(max_lifetime_ms == -1, "unset spec field → broker default");
+    // Owner principal name carries no `User:` prefix; unset
+    // spec.max_lifetime_ms → -1 (broker default).
+    assert!(
+        create_call == Some(("alice".to_string(), vec!["User:bob".to_string()], -1_i64,)),
+        "CreateDelegationToken must have been issued with these exact args",
+    );
 
     // ── Secret PATCH body: four KIP-48 keys ────────────────────────
     let observed = state.take_observed();

@@ -253,7 +253,7 @@ async fn run_trace_by_id_case(engine: &TraceqlEngine<InMemorySpanStore>, case: C
     result
 }
 
-#[derive(Default)]
+#[derive(Debug, Default, PartialEq)]
 struct Case {
     name: String,
     kind: String,
@@ -449,6 +449,7 @@ fn span(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_dir(name: &str) -> std::path::PathBuf {
@@ -481,9 +482,13 @@ mod tests {
         };
 
         let text = report.to_text();
-        assert!(text.contains("TraceQL conformance: 1/2 cases passed"));
-        assert!(text.contains("PASS ok (1/1)"));
-        assert!(text.contains("FAIL bad (1/2) mismatch"));
+        for needle in [
+            "TraceQL conformance: 1/2 cases passed",
+            "PASS ok (1/1)",
+            "FAIL bad (1/2) mismatch",
+        ] {
+            assert!(text.contains(needle), "missing: {needle}");
+        }
 
         let dir = temp_dir("report");
         let path = dir.join("nested").join("report.txt");
@@ -531,10 +536,24 @@ query: { .svc = "x" }
     fn span_helper_offsets_start_time_by_span_id() {
         let span = span(9, 2, Some(1), "child", 123, vec![]);
 
-        assert!(span.trace_id == [9; 16]);
-        assert!(span.span_id == [2; 8]);
-        assert!(span.parent_span_id == Some([1; 8]));
-        assert!(span.start_unix_nano == 1_002);
+        assert!(
+            span == InputSpan {
+                trace_id: [9; 16],
+                span_id: [2; 8],
+                parent_span_id: Some([1; 8]),
+                name: "child".into(),
+                kind: 0,
+                start_unix_nano: 1_002,
+                duration_nanos: 123,
+                status_code: 0,
+                status_message: String::new(),
+                instrumentation_name: String::new(),
+                instrumentation_version: String::new(),
+                attrs: vec![],
+                events: Vec::new(),
+                links: Vec::new(),
+            }
+        );
     }
 
     #[test]
@@ -548,9 +567,19 @@ expect_span_ids: 1
 "#,
         );
 
-        assert!(cases.len() == 1);
-        assert!(cases[0].name == "selectors.case#1");
-        assert!(cases[0].kind == "search");
+        assert!(
+            cases
+                == vec![Case {
+                    name: "selectors.case#1".into(),
+                    kind: "search".into(),
+                    query: Some(r#"{ .svc = "a" }"#.into()),
+                    trace_id: None,
+                    expect_trace_ids: Some("1".into()),
+                    expect_span_ids: Some("1".into()),
+                    expect_series_count: None,
+                    expect_span_count: None,
+                }]
+        );
     }
 
     #[test]
@@ -571,12 +600,30 @@ expect_series_count: 1
 "#,
         );
 
-        assert!(cases.len() == 2);
-        assert!(cases[0].name == "selectors.case:first");
-        assert!(cases[0].kind == "search");
-        assert!(cases[0].query.as_deref() == Some(r#"{ .svc = "a" }"#));
-        assert!(cases[1].name == "selectors.case:second");
-        assert!(cases[1].kind == "metrics");
-        assert!(cases[1].expect_series_count == Some(1));
+        assert!(
+            cases
+                == vec![
+                    Case {
+                        name: "selectors.case:first".into(),
+                        kind: "search".into(),
+                        query: Some(r#"{ .svc = "a" }"#.into()),
+                        trace_id: None,
+                        expect_trace_ids: None,
+                        expect_span_ids: None,
+                        expect_series_count: None,
+                        expect_span_count: None,
+                    },
+                    Case {
+                        name: "selectors.case:second".into(),
+                        kind: "metrics".into(),
+                        query: Some(r#"{ .svc = "b" } | count_over_time()"#.into()),
+                        trace_id: None,
+                        expect_trace_ids: None,
+                        expect_span_ids: None,
+                        expect_series_count: Some(1),
+                        expect_span_count: None,
+                    },
+                ]
+        );
     }
 }

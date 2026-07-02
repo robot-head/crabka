@@ -299,14 +299,45 @@ mod tests {
     #[test]
     fn render_pod_monitor_minimal_defaults() {
         let pm = render_pod_monitor(&test_kafka(), &PodMonitorSpec::default()).unwrap();
-        assert!(pm["kind"] == "PodMonitor");
-        let ep = &pm["spec"]["podMetricsEndpoints"][0];
-        assert!(ep["port"] == "metrics");
-        assert!(ep["path"] == "/metrics");
-        assert!(ep["interval"] == "30s");
-        assert!(ep["scrapeTimeout"] == "10s");
-        assert!(pm["spec"]["selector"]["matchLabels"]["app.kubernetes.io/name"] == "crabka-broker");
-        assert!(pm["spec"]["selector"]["matchLabels"]["app.kubernetes.io/instance"] == "demo");
+        assert!(
+            pm == json!({
+                "apiVersion": "monitoring.coreos.com/v1",
+                "kind": "PodMonitor",
+                "metadata": {
+                    "name": "demo-broker",
+                    "namespace": "default",
+                    "labels": {
+                        "app.kubernetes.io/instance": "demo",
+                        "app.kubernetes.io/managed-by": "crabka-operator",
+                        "app.kubernetes.io/name": "crabka-broker",
+                        "app.kubernetes.io/version": "0.1.1",
+                    },
+                    "ownerReferences": [{
+                        "apiVersion": "crabka.io/v1alpha1",
+                        "blockOwnerDeletion": true,
+                        "controller": true,
+                        "kind": "Kafka",
+                        "name": "demo",
+                        "uid": "00000000-0000-0000-0000-000000000001",
+                    }],
+                },
+                "spec": {
+                    "namespaceSelector": { "matchNames": ["default"] },
+                    "selector": {
+                        "matchLabels": {
+                            "app.kubernetes.io/name": "crabka-broker",
+                            "app.kubernetes.io/instance": "demo",
+                        }
+                    },
+                    "podMetricsEndpoints": [{
+                        "port": "metrics",
+                        "path": "/metrics",
+                        "interval": "30s",
+                        "scrapeTimeout": "10s",
+                    }],
+                }
+            })
+        );
     }
 
     #[test]
@@ -317,18 +348,90 @@ mod tests {
             labels: [("team".to_string(), "platform".to_string())].into(),
         };
         let pm = render_pod_monitor(&test_kafka(), &pm_spec).unwrap();
-        assert!(pm["spec"]["podMetricsEndpoints"][0]["interval"] == "15s");
-        assert!(pm["spec"]["podMetricsEndpoints"][0]["scrapeTimeout"] == "5s");
-        assert!(pm["metadata"]["labels"]["team"] == "platform");
-        assert!(pm["metadata"]["labels"]["app.kubernetes.io/name"] == "crabka-broker");
+        assert!(
+            pm == json!({
+                "apiVersion": "monitoring.coreos.com/v1",
+                "kind": "PodMonitor",
+                "metadata": {
+                    "name": "demo-broker",
+                    "namespace": "default",
+                    "labels": {
+                        "app.kubernetes.io/instance": "demo",
+                        "app.kubernetes.io/managed-by": "crabka-operator",
+                        "app.kubernetes.io/name": "crabka-broker",
+                        "app.kubernetes.io/version": "0.1.1",
+                        "team": "platform",
+                    },
+                    "ownerReferences": [{
+                        "apiVersion": "crabka.io/v1alpha1",
+                        "blockOwnerDeletion": true,
+                        "controller": true,
+                        "kind": "Kafka",
+                        "name": "demo",
+                        "uid": "00000000-0000-0000-0000-000000000001",
+                    }],
+                },
+                "spec": {
+                    "namespaceSelector": { "matchNames": ["default"] },
+                    "selector": {
+                        "matchLabels": {
+                            "app.kubernetes.io/name": "crabka-broker",
+                            "app.kubernetes.io/instance": "demo",
+                        }
+                    },
+                    "podMetricsEndpoints": [{
+                        "port": "metrics",
+                        "path": "/metrics",
+                        "interval": "15s",
+                        "scrapeTimeout": "5s",
+                    }],
+                }
+            })
+        );
     }
 
     #[test]
     fn render_service_monitor_kind_and_endpoints_key() {
         let sm = render_service_monitor(&test_kafka(), &ServiceMonitorSpec::default()).unwrap();
-        assert!(sm["kind"] == "ServiceMonitor");
-        assert!(sm["spec"]["endpoints"].is_array());
-        assert!(sm["spec"]["podMetricsEndpoints"].is_null());
+        assert!(
+            sm == json!({
+                "apiVersion": "monitoring.coreos.com/v1",
+                "kind": "ServiceMonitor",
+                "metadata": {
+                    "name": "demo-broker",
+                    "namespace": "default",
+                    "labels": {
+                        "app.kubernetes.io/instance": "demo",
+                        "app.kubernetes.io/managed-by": "crabka-operator",
+                        "app.kubernetes.io/name": "crabka-broker",
+                        "app.kubernetes.io/version": "0.1.1",
+                    },
+                    "ownerReferences": [{
+                        "apiVersion": "crabka.io/v1alpha1",
+                        "blockOwnerDeletion": true,
+                        "controller": true,
+                        "kind": "Kafka",
+                        "name": "demo",
+                        "uid": "00000000-0000-0000-0000-000000000001",
+                    }],
+                },
+                "spec": {
+                    "namespaceSelector": { "matchNames": ["default"] },
+                    "selector": {
+                        "matchLabels": {
+                            "app.kubernetes.io/name": "crabka-broker",
+                            "app.kubernetes.io/instance": "demo",
+                        }
+                    },
+                    "endpoints": [{
+                        "port": "metrics",
+                        "path": "/metrics",
+                        "interval": "30s",
+                        "scrapeTimeout": "10s",
+                    }],
+                }
+            })
+        );
     }
 
     #[test]
@@ -336,14 +439,20 @@ mod tests {
         let svc = render_metrics_service(&test_kafka(), &ServiceMonitorSpec::default()).unwrap();
         let spec = svc.spec.unwrap();
         assert!(spec.cluster_ip.as_deref() == Some("None"));
-        let port = &spec.ports.unwrap()[0];
-        assert!(port.name.as_deref() == Some("metrics"));
-        assert!(port.port == METRICS_PORT);
         assert!(
-            port.target_port.as_ref().unwrap()
-                == &k8s_openapi::apimachinery::pkg::util::intstr::IntOrString::String(
-                    "metrics".into()
-                )
+            spec.ports
+                == Some(vec![k8s_openapi::api::core::v1::ServicePort {
+                    app_protocol: None,
+                    name: Some("metrics".into()),
+                    node_port: None,
+                    port: 9404,
+                    protocol: Some("TCP".into()),
+                    target_port: Some(
+                        k8s_openapi::apimachinery::pkg::util::intstr::IntOrString::String(
+                            "metrics".into()
+                        )
+                    ),
+                }])
         );
     }
 }

@@ -216,16 +216,16 @@ pub struct KafkaNodePoolStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use kube::CustomResourceExt as _;
 
     #[test]
     fn crd_metadata_is_correct() {
         let crd = KafkaNodePool::crd();
-        assert!(crd.spec.group == "crabka.io");
-        assert!(crd.spec.names.kind == "KafkaNodePool");
-        assert!(crd.spec.names.plural == "kafkanodepools");
-        assert!(
+        check!(crd.spec.group == "crabka.io");
+        check!(crd.spec.names.kind == "KafkaNodePool");
+        check!(crd.spec.names.plural == "kafkanodepools");
+        check!(
             crd.spec
                 .names
                 .short_names
@@ -234,8 +234,8 @@ mod tests {
             "expected shortname `knp`, got {:?}",
             crd.spec.names.short_names
         );
-        assert!(crd.spec.versions.len() == 1);
-        assert!(crd.spec.versions[0].name == "v1alpha1");
+        check!(crd.spec.versions.len() == 1);
+        check!(crd.spec.versions[0].name == "v1alpha1");
     }
 
     #[test]
@@ -269,9 +269,17 @@ mod tests {
     fn spec_defaults_replicas_to_one() {
         let json = r#"{"roles":["Controller","Broker"],"nodeIdStart":0}"#;
         let spec: KafkaNodePoolSpec = serde_json::from_str(json).unwrap();
-        assert!(spec.replicas == 1);
-        assert!(spec.image.is_none());
-        assert!(spec.resources.is_none());
+        assert!(
+            spec == KafkaNodePoolSpec {
+                roles: vec![NodeRole::Controller, NodeRole::Broker],
+                replicas: 1,
+                node_id_start: 0,
+                image: None,
+                resources: None,
+                template: None,
+                storage: None,
+            }
+        );
     }
 
     #[test]
@@ -323,9 +331,9 @@ mod tests {
         );
 
         let json = serde_json::to_string(&pool).unwrap();
-        assert!(json.contains("\"team\":\"platform\""), "labels: {json}");
-        assert!(json.contains("\"dedicated\""), "tolerations: {json}");
-        assert!(json.contains("\"nodeSelector\""), "node_selector: {json}");
+        for want in ["\"team\":\"platform\"", "\"dedicated\"", "\"nodeSelector\""] {
+            assert!(json.contains(want), "case {want:?}; got: {json}");
+        }
         let back: KafkaNodePool = serde_json::from_str(&json).unwrap();
         assert!(back.spec == pool.spec);
     }
@@ -372,10 +380,14 @@ mod tests {
             },
         );
         let json = serde_json::to_string(&pool).unwrap();
-        assert!(json.contains("\"type\":\"PersistentClaim\""), "got: {json}");
-        assert!(json.contains("\"size\":\"10Gi\""), "got: {json}");
-        assert!(json.contains("\"class\":\"fast-ssd\""), "got: {json}");
-        assert!(json.contains("\"deleteClaim\":true"), "got: {json}");
+        for want in [
+            "\"type\":\"PersistentClaim\"",
+            "\"size\":\"10Gi\"",
+            "\"class\":\"fast-ssd\"",
+            "\"deleteClaim\":true",
+        ] {
+            assert!(json.contains(want), "case {want:?}; got: {json}");
+        }
         let back: KafkaNodePool = serde_json::from_str(&json).unwrap();
         assert!(back.spec == pool.spec);
     }
@@ -416,12 +428,16 @@ mod tests {
             },
         );
         let json = serde_json::to_string(&pool).unwrap();
-        assert!(json.contains("\"type\":\"Jbod\""), "got: {json}");
-        assert!(json.contains("\"volumes\":["), "got: {json}");
-        assert!(json.contains("\"id\":0"), "got: {json}");
-        assert!(json.contains("\"size\":\"20Gi\""), "got: {json}");
-        assert!(json.contains("\"class\":\"fast-ssd\""), "got: {json}");
-        assert!(json.contains("\"deleteClaim\":true"), "got: {json}");
+        for want in [
+            "\"type\":\"Jbod\"",
+            "\"volumes\":[",
+            "\"id\":0",
+            "\"size\":\"20Gi\"",
+            "\"class\":\"fast-ssd\"",
+            "\"deleteClaim\":true",
+        ] {
+            assert!(json.contains(want), "case {want:?}; got: {json}");
+        }
         let back: KafkaNodePool = serde_json::from_str(&json).unwrap();
         assert!(back.spec == pool.spec);
     }
@@ -439,9 +455,24 @@ mod tests {
         let spec: KafkaNodePoolSpec = serde_json::from_str(json).unwrap();
         match spec.storage {
             Some(Storage::Jbod(j)) => {
-                assert!(j.volumes.len() == 2);
-                assert!(j.volumes[0].id == 0);
-                assert!(!j.delete_claim, "deleteClaim defaults to false");
+                // deleteClaim defaults to false.
+                assert!(
+                    j == JbodSpec {
+                        volumes: vec![
+                            JbodVolume {
+                                id: 0,
+                                size: "1Gi".to_string(),
+                                class: None,
+                            },
+                            JbodVolume {
+                                id: 1,
+                                size: "1Gi".to_string(),
+                                class: None,
+                            },
+                        ],
+                        delete_claim: false,
+                    }
+                );
             }
             other => panic!("expected Jbod, got {other:?}"),
         }

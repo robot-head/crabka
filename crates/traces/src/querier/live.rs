@@ -512,7 +512,7 @@ mod tests {
     use std::sync::Arc;
 
     use arrow::record_batch::RecordBatch;
-    use assert2::assert;
+    use assert2::check;
     use crabka_traceql::{AttrValue, ScopedTag, SpanRef, TagScope, TraceSpans, TypedValue};
 
     use super::*;
@@ -615,14 +615,14 @@ mod tests {
         source.frontiers.insert("tenant-a".into(), 1_500);
         let live = LiveTier::new(Arc::new(source));
 
-        assert!(live.block_builder_frontier_ns("tenant-a") == 1_500);
-        assert!(
+        check!(live.block_builder_frontier_ns("tenant-a") == 1_500);
+        check!(
             live.span_batches("tenant-a", 0, 5_000)
                 .await
                 .unwrap()
                 .is_empty()
         );
-        assert!(
+        check!(
             live.trace_spans("tenant-a", &[1; 16])
                 .await
                 .unwrap()
@@ -631,13 +631,13 @@ mod tests {
                 .len()
                 == 1
         );
-        assert!(
+        check!(
             live.tag_names("tenant-a", Some(TagScope::Span), 0, 5_000)
                 .await
                 .unwrap()[0]
                 .tags
                 == vec!["svc"]
         );
-        assert!(live.tag_values("tenant-a", ".svc", 0, 5_000).await.unwrap()[0].value == "api");
+        check!(live.tag_values("tenant-a", ".svc", 0, 5_000).await.unwrap()[0].value == "api");
     }
 }

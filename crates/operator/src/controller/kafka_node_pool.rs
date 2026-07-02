@@ -1618,6 +1618,7 @@ mod tests {
         KafkaNodePoolSpec, KafkaSpec, MetadataTemplate, PersistentClaimSpec, PodTemplate, Storage,
     };
     use assert2::assert;
+    use assert2::check;
     use std::collections::BTreeMap;
 
     fn parent_fixture(name: &str) -> Kafka {
@@ -2016,9 +2017,9 @@ mod tests {
         let pool = pool_fixture("brokers", "demo", 1);
         let sts = render_statefulset(&parent_fixture("demo"), &pool, "img:1").unwrap();
         let spec = sts.spec.unwrap().template.spec.unwrap();
-        assert!(spec.affinity.is_none());
-        assert!(spec.tolerations.is_none() || spec.tolerations.as_ref().unwrap().is_empty());
-        assert!(spec.node_selector.is_none() || spec.node_selector.as_ref().unwrap().is_empty());
+        check!(spec.affinity.is_none());
+        check!(spec.tolerations.is_none() || spec.tolerations.as_ref().unwrap().is_empty());
+        check!(spec.node_selector.is_none() || spec.node_selector.as_ref().unwrap().is_empty());
     }
 
     #[test]
@@ -2239,9 +2240,18 @@ mod tests {
 
     #[test]
     fn validate_storage_change_first_reconcile_accepts_any() {
-        assert!(validate_storage_change(None, None).is_ok());
-        assert!(validate_storage_change(Some(&Storage::Ephemeral), None).is_ok());
-        assert!(validate_storage_change(Some(&pc("10Gi", None)), None).is_ok());
+        let ephemeral = Storage::Ephemeral;
+        let persistent = pc("10Gi", None);
+        for (case, desired) in [
+            ("none", None),
+            ("ephemeral", Some(&ephemeral)),
+            ("persistent-claim", Some(&persistent)),
+        ] {
+            assert!(
+                validate_storage_change(desired, None).is_ok(),
+                "case {case}"
+            );
+        }
     }
 
     #[test]
@@ -2380,32 +2390,20 @@ mod tests {
         let vct = sts.spec.unwrap().volume_claim_templates.unwrap();
         assert!(vct.len() == 2);
         // Primary (lowest id) keeps the `data` name.
-        assert!(vct[0].metadata.name.as_deref() == Some("data"));
-        assert!(vct[1].metadata.name.as_deref() == Some("data-1"));
-        let req0 = vct[0]
-            .spec
-            .as_ref()
-            .unwrap()
-            .resources
-            .as_ref()
-            .unwrap()
-            .requests
-            .as_ref()
-            .unwrap();
-        assert!(req0.get("storage").map(|q| q.0.as_str()) == Some("10Gi"));
-        let req1 = vct[1]
-            .spec
-            .as_ref()
-            .unwrap()
-            .resources
-            .as_ref()
-            .unwrap()
-            .requests
-            .as_ref()
-            .unwrap();
-        assert!(req1.get("storage").map(|q| q.0.as_str()) == Some("20Gi"));
-        assert!(vct[0].spec.as_ref().unwrap().storage_class_name.as_deref() == None);
-        assert!(vct[1].spec.as_ref().unwrap().storage_class_name.as_deref() == Some("fast-ssd"));
+        for (i, name, size, class) in [
+            (0, "data", "10Gi", None),
+            (1, "data-1", "20Gi", Some("fast-ssd")),
+        ] {
+            let tmpl = &vct[i];
+            check!(tmpl.metadata.name.as_deref() == Some(name), "case {i}");
+            let spec = tmpl.spec.as_ref().unwrap();
+            let req = spec.resources.as_ref().unwrap().requests.as_ref().unwrap();
+            check!(
+                req.get("storage").map(|q| q.0.as_str()) == Some(size),
+                "case {i}"
+            );
+            check!(spec.storage_class_name.as_deref() == class, "case {i}");
+        }
     }
 
     #[test]
@@ -2607,12 +2605,12 @@ mod tests {
     #[test]
     fn build_main_script_enabled_appends_metrics_flag() {
         let s = build_main_script(true);
-        assert!(
+        check!(
             s.contains("--metrics-listen-addr=0.0.0.0:9404"),
             "got: {s:?}"
         );
-        assert!(s.contains("--config-file=/run/crabka/broker.toml"));
-        assert!(s.ends_with('\n'));
+        check!(s.contains("--config-file=/run/crabka/broker.toml"));
+        check!(s.ends_with('\n'));
     }
 
     #[test]
@@ -2628,18 +2626,13 @@ mod tests {
             .iter()
             .map(|m| m.mount_path.as_str())
             .collect();
-        assert!(
-            mounts.contains(&"/etc/crabka/cluster-ca"),
-            "missing /etc/crabka/cluster-ca; got {mounts:?}"
-        );
-        assert!(
-            mounts.contains(&"/etc/crabka/broker-tls"),
-            "missing /etc/crabka/broker-tls; got {mounts:?}"
-        );
-        assert!(
-            mounts.contains(&"/etc/crabka/clients-ca"),
-            "missing /etc/crabka/clients-ca; got {mounts:?}"
-        );
+        for path in [
+            "/etc/crabka/cluster-ca",
+            "/etc/crabka/broker-tls",
+            "/etc/crabka/clients-ca",
+        ] {
+            assert!(mounts.contains(&path), "missing {path}; got {mounts:?}");
+        }
     }
 
     #[test]
@@ -2691,9 +2684,14 @@ mod tests {
         let secret = kt.secret.as_ref().expect("keytab volume is a Secret");
         assert!(secret.secret_name.as_deref() == Some("broker-keytab"));
         let items = secret.items.as_ref().expect("projected items");
-        assert!(items.len() == 1);
-        assert!(items[0].key == "krb5.keytab");
-        assert!(items[0].path == "keytab");
+        assert!(
+            *items
+                == vec![k8s_openapi::api::core::v1::KeyToPath {
+                    key: "krb5.keytab".into(),
+                    mode: None,
+                    path: "keytab".into(),
+                }]
+        );
     }
 
     #[test]
@@ -2757,18 +2755,10 @@ mod tests {
             .iter()
             .filter_map(|v| v.secret.as_ref().and_then(|s| s.secret_name.clone()))
             .collect();
-        assert!(
-            names.contains(&format!("{cluster}-cluster-ca-cert")),
-            "missing {cluster}-cluster-ca-cert; got {names:?}"
-        );
-        assert!(
-            names.contains(&format!("{cluster}-kafka-brokers")),
-            "missing {cluster}-kafka-brokers; got {names:?}"
-        );
-        assert!(
-            names.contains(&format!("{cluster}-clients-ca-cert")),
-            "missing {cluster}-clients-ca-cert; got {names:?}"
-        );
+        for suffix in ["cluster-ca-cert", "kafka-brokers", "clients-ca-cert"] {
+            let want = format!("{cluster}-{suffix}");
+            assert!(names.contains(&want), "missing {want}; got {names:?}");
+        }
     }
 
     #[test]
@@ -2821,9 +2811,14 @@ mod tests {
             .as_ref()
             .and_then(|vf| vf.config_map_key_ref.as_ref())
             .expect("RUST_LOG sourced from configMapKeyRef");
-        assert!(cm_ref.name == "demo-broker-config");
-        assert!(cm_ref.key == "rust.log");
-        assert!(cm_ref.optional == Some(true));
+        assert!(
+            *cm_ref
+                == k8s_openapi::api::core::v1::ConfigMapKeySelector {
+                    key: "rust.log".into(),
+                    name: "demo-broker-config".into(),
+                    optional: Some(true),
+                }
+        );
         // Value must be sourced (not literal) so a ConfigMap update + config
         // hash roll re-reads it.
         assert!(rust_log.value.is_none());
@@ -3196,9 +3191,14 @@ mod tests {
         assert!(secret.secret_name.as_deref() == Some("my-oauth-secret"));
         assert!(secret.default_mode == Some(0o400));
         let items = secret.items.as_ref().expect("projected items present");
-        assert!(items.len() == 1);
-        assert!(items[0].key == "my-key");
-        assert!(items[0].path == "client-secret");
+        assert!(
+            *items
+                == vec![k8s_openapi::api::core::v1::KeyToPath {
+                    key: "my-key".into(),
+                    mode: None,
+                    path: "client-secret".into(),
+                }]
+        );
     }
 
     /// JWT-mode OAuth listeners (the default —
@@ -3498,9 +3498,14 @@ mod tests {
             .expect("gcs-credentials is a Secret volume");
         assert!(secret.secret_name.as_deref() == Some("crabka-gcs-creds"));
         let items = secret.items.as_ref().expect("projected items");
-        assert!(items.len() == 1);
-        assert!(items[0].key == "key.json");
-        assert!(items[0].path == "key.json");
+        assert!(
+            *items
+                == vec![k8s_openapi::api::core::v1::KeyToPath {
+                    key: "key.json".into(),
+                    mode: None,
+                    path: "key.json".into(),
+                }]
+        );
 
         // Read-only mount at the canonical credentials dir.
         let broker = pod_spec
@@ -3842,12 +3847,16 @@ mod tests {
                 .clone()
                 .unwrap_or_default()
         };
-        assert!(by_name("CRABKA_OTLP_ENABLED") == "true");
-        assert!(by_name("CRABKA_OTLP_ENDPOINT") == "http://otel:4317");
-        assert!(by_name("CRABKA_OTLP_PROTOCOL") == "http/protobuf");
-        assert!(by_name("CRABKA_OTLP_SAMPLE_RATIO") == "0.25");
-        assert!(by_name("OTEL_SERVICE_NAME") == "svc");
-        assert!(by_name("CRABKA_OTLP_TIMEOUT_SECS") == "7");
+        for (name, want) in [
+            ("CRABKA_OTLP_ENABLED", "true"),
+            ("CRABKA_OTLP_ENDPOINT", "http://otel:4317"),
+            ("CRABKA_OTLP_PROTOCOL", "http/protobuf"),
+            ("CRABKA_OTLP_SAMPLE_RATIO", "0.25"),
+            ("OTEL_SERVICE_NAME", "svc"),
+            ("CRABKA_OTLP_TIMEOUT_SECS", "7"),
+        ] {
+            assert!(by_name(name) == want, "case {name}");
+        }
     }
 
     #[test]
@@ -3974,10 +3983,10 @@ mod tests {
         let parent = parent_with_version_status("demo", Some(false), None);
         match version_gate(&parent) {
             VersionGate::Blocked(cond) => {
-                assert!(cond.type_ == "Ready");
-                assert!(cond.status == "False");
-                assert!(cond.reason == "KafkaVersionInvalid");
-                assert!(
+                check!(cond.type_ == "Ready");
+                check!(cond.status == "False");
+                check!(cond.reason == "KafkaVersionInvalid");
+                check!(
                     cond.message.contains("KafkaVersionValid=False"),
                     "pool condition should surface the parent's verdict, got: {}",
                     cond.message
@@ -3999,9 +4008,9 @@ mod tests {
         assert!(parent.status.is_none(), "fixture precondition");
         match version_gate(&parent) {
             VersionGate::Blocked(cond) => {
-                assert!(cond.type_ == "Ready");
-                assert!(cond.status == "False");
-                assert!(cond.reason == "WaitingForVersionValidation");
+                check!(cond.type_ == "Ready");
+                check!(cond.status == "False");
+                check!(cond.reason == "WaitingForVersionValidation");
             }
             VersionGate::Cleared => {
                 panic!("missing parent version status must block pod creation")

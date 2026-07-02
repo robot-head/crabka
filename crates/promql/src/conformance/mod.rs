@@ -1967,46 +1967,37 @@ clear
         )
         .unwrap();
 
-        assert!(file.statements.len() == 3);
-
-        assert!(let
-            Statement::Load { step_ms, series } = &file.statements[0]
-        );
-        assert!(*step_ms == 60_000);
-        assert!(series.len() == 1);
-        assert!(series[0].metric == r#"metric{a="b"}"#);
-        assert!(series[0].values.len() == 5);
-        assert_sample_value(&series[0].values[0], 0.0);
-        assert_sample_value(&series[0].values[1], 1.0);
-        assert_sample_value(&series[0].values[2], 2.0);
-        assert_sample_value(&series[0].values[3], 3.0);
-        assert_sample_value(&series[0].values[4], 4.0);
-
-        assert!(let
-            Statement::EvalInstant {
-                at_ms,
-                expr,
-                expect,
-                annotations: _,
-                range_expect,
-                fail_message,
-            } = &file.statements[1]
-        );
-        assert!(*at_ms == 180_000);
-        assert!(expr == r#"metric{a="b"}"#);
-        assert!(range_expect.is_none());
-        assert!(fail_message.is_none());
-        assert!(expect.len() == 1);
-        assert!(expect[0].metric == r#"metric{a="b"}"#);
-        assert!(expect[0].values.len() == 1);
-        assert_sample_value(&expect[0].values[0], 3.0);
-
+        let expected = TestFile {
+            statements: vec![
+                Statement::Load {
+                    step_ms: 60_000,
+                    series: vec![LoadSeries {
+                        metric: r#"metric{a="b"}"#.to_string(),
+                        values: vec![
+                            SampleSpec::Value(0.0),
+                            SampleSpec::Value(1.0),
+                            SampleSpec::Value(2.0),
+                            SampleSpec::Value(3.0),
+                            SampleSpec::Value(4.0),
+                        ],
+                    }],
+                },
+                Statement::EvalInstant {
+                    at_ms: 180_000,
+                    expr: r#"metric{a="b"}"#.to_string(),
+                    expect: vec![ExpectLine {
+                        metric: r#"metric{a="b"}"#.to_string(),
+                        values: vec![SampleSpec::Value(3.0)],
+                    }],
+                    annotations: Vec::new(),
+                    range_expect: None,
+                    fail_message: None,
+                },
+                Statement::Clear,
+            ],
+        };
+        assert!(file == expected);
         assert!(matches!(file.statements[2], Statement::Clear));
-    }
-
-    fn assert_sample_value(sample: &SampleSpec, expected: f64) {
-        assert!(let SampleSpec::Value(actual) = sample);
-        assert!((actual - expected).abs() < f64::EPSILON);
     }
 
     fn test_line(raw: &str) -> Line<'_> {
@@ -2030,10 +2021,14 @@ load 1m
         let Statement::Load { series, .. } = &file.statements[0] else {
             panic!("expected load statement");
         };
-        assert!(series[0].values.len() == 3);
-        assert_sample_value(&series[0].values[0], 99.0);
-        assert_sample_value(&series[0].values[1], 98.0);
-        assert_sample_value(&series[0].values[2], 97.0);
+        assert!(
+            series[0].values
+                == vec![
+                    SampleSpec::Value(99.0),
+                    SampleSpec::Value(98.0),
+                    SampleSpec::Value(97.0),
+                ]
+        );
     }
 
     #[test]
@@ -2042,53 +2037,53 @@ load 1m
             r#"metric{label="hello world",brace="{",escaped="quoted \" space",rbrace="}" next="value"} 1 2"#,
         );
 
-        let (metric, tail) = split_metric_and_tail(line.trimmed, line).unwrap();
-
         assert!(
-            metric
-                == r#"metric{label="hello world",brace="{",escaped="quoted \" space",rbrace="}" next="value"}"#
+            split_metric_and_tail(line.trimmed, line).unwrap()
+                == (
+                    r#"metric{label="hello world",brace="{",escaped="quoted \" space",rbrace="}" next="value"}"#,
+                    "1 2",
+                )
         );
-        assert!(tail == "1 2");
 
         let line = test_line(r"metric\ 1 2");
-        let (metric, tail) = split_metric_and_tail(line.trimmed, line).unwrap();
-
-        assert!(metric == r"metric\");
-        assert!(tail == "1 2");
+        assert!(split_metric_and_tail(line.trimmed, line).unwrap() == (r"metric\", "1 2"));
     }
 
     #[test]
     fn parses_signed_expanding_point_notation() {
-        let line = test_line("+1+2x2");
-        let positive = parse_sample_token(line.trimmed, line).unwrap();
-        assert!(positive.len() == 3);
-        assert_sample_value(&positive[0], 1.0);
-        assert_sample_value(&positive[1], 3.0);
-        assert_sample_value(&positive[2], 5.0);
-
-        let line = test_line("-1+2x2");
-        let negative = parse_sample_token(line.trimmed, line).unwrap();
-        assert!(negative.len() == 3);
-        assert_sample_value(&negative[0], -1.0);
-        assert_sample_value(&negative[1], 1.0);
-        assert_sample_value(&negative[2], 3.0);
+        for (token, want) in [
+            (
+                "+1+2x2",
+                vec![
+                    SampleSpec::Value(1.0),
+                    SampleSpec::Value(3.0),
+                    SampleSpec::Value(5.0),
+                ],
+            ),
+            (
+                "-1+2x2",
+                vec![
+                    SampleSpec::Value(-1.0),
+                    SampleSpec::Value(1.0),
+                    SampleSpec::Value(3.0),
+                ],
+            ),
+        ] {
+            let line = test_line(token);
+            assert!(
+                parse_sample_token(line.trimmed, line).unwrap() == want,
+                "case {token:?}"
+            );
+        }
     }
 
     #[test]
     fn parses_infinite_native_histogram_bucket_bounds() {
-        let line = test_line("+Inf");
-
-        let positive_with_sign = parse_bucket_bound("+Inf", line).unwrap();
-        assert!(positive_with_sign.is_infinite());
-        assert!(positive_with_sign.is_sign_positive());
-
-        let positive_without_sign = parse_bucket_bound("Inf", line).unwrap();
-        assert!(positive_without_sign.is_infinite());
-        assert!(positive_without_sign.is_sign_positive());
-
-        let negative = parse_bucket_bound("-Inf", line).unwrap();
-        assert!(negative.is_infinite());
-        assert!(negative.is_sign_negative());
+        for (input, want_positive) in [("+Inf", true), ("Inf", true), ("-Inf", false)] {
+            let bound = parse_bucket_bound(input, test_line(input)).unwrap();
+            assert!(bound.is_infinite(), "case {input:?}");
+            assert!(bound.is_sign_positive() == want_positive, "case {input:?}");
+        }
     }
 
     #[test]
@@ -2221,28 +2216,30 @@ load 1m
             panic!("expected native histogram sample");
         };
 
-        assert!(histogram.schema == 1);
-        assert!(histogram.reset_hint == ResetHint::Gauge);
-        assert_float(histogram.zero_threshold, 0.05);
-        assert_float(histogram.zero_count, 7.1);
-        assert_float(histogram.count, 3.1);
-        assert_float(histogram.sum, -0.3);
         assert!(
-            histogram.positive_spans
-                == vec![BucketSpan {
-                    offset: -3,
-                    length: 3,
-                }]
+            *histogram
+                == NativeHistogram {
+                    schema: 1,
+                    is_float: true,
+                    reset_hint: ResetHint::Gauge,
+                    zero_threshold: 0.05,
+                    zero_count: 7.1,
+                    count: 3.1,
+                    sum: -0.3,
+                    positive_spans: vec![BucketSpan {
+                        offset: -3,
+                        length: 3,
+                    }],
+                    positive_counts: vec![5.1, 10.0, 7.0],
+                    negative_spans: vec![BucketSpan {
+                        offset: -5,
+                        length: 2,
+                    }],
+                    negative_counts: vec![4.1, 5.0],
+                    custom_values: None,
+                    start_timestamp_ms: None,
+                }
         );
-        assert!(histogram.positive_counts == vec![5.1, 10.0, 7.0]);
-        assert!(
-            histogram.negative_spans
-                == vec![BucketSpan {
-                    offset: -5,
-                    length: 2,
-                }]
-        );
-        assert!(histogram.negative_counts == vec![4.1, 5.0]);
     }
 
     #[test]
@@ -2258,16 +2255,32 @@ load 1m
         let Statement::Load { series, .. } = &file.statements[0] else {
             panic!("expected load statement");
         };
-        assert!(series[0].values.len() == 3);
-        for value in &series[0].values {
-            let SampleSpec::Histogram(histogram) = value else {
-                panic!("expected native histogram sample");
-            };
-            assert!(histogram.schema == 1);
-            assert_float(histogram.sum, 15.0);
-            assert_float(histogram.count, 10.0);
-            assert!(histogram.positive_counts == vec![3.0, 2.0, 5.0, 7.0, 9.0]);
-        }
+        let expected = NativeHistogram {
+            schema: 1,
+            is_float: true,
+            reset_hint: ResetHint::Unknown,
+            zero_threshold: 0.0,
+            zero_count: 0.0,
+            count: 10.0,
+            sum: 15.0,
+            positive_spans: vec![BucketSpan {
+                offset: 0,
+                length: 5,
+            }],
+            positive_counts: vec![3.0, 2.0, 5.0, 7.0, 9.0],
+            negative_spans: Vec::new(),
+            negative_counts: Vec::new(),
+            custom_values: None,
+            start_timestamp_ms: None,
+        };
+        assert!(
+            series[0].values
+                == vec![
+                    SampleSpec::Histogram(expected.clone()),
+                    SampleSpec::Histogram(expected.clone()),
+                    SampleSpec::Histogram(expected),
+                ]
+        );
     }
 
     #[test]
@@ -2287,21 +2300,27 @@ load 1m
         let SampleSpec::Histogram(histogram) = &series[0].values[1] else {
             panic!("expected native histogram sample");
         };
-        assert_float(histogram.sum, 6.0);
-        assert_float(histogram.count, 5.0);
         assert!(
-            histogram.positive_spans
-                == vec![BucketSpan {
-                    offset: 0,
-                    length: 3,
-                }]
+            *histogram
+                == NativeHistogram {
+                    schema: 0,
+                    is_float: true,
+                    reset_hint: ResetHint::Unknown,
+                    zero_threshold: 0.0,
+                    zero_count: 0.0,
+                    count: 5.0,
+                    sum: 6.0,
+                    positive_spans: vec![BucketSpan {
+                        offset: 0,
+                        length: 3,
+                    }],
+                    positive_counts: vec![1.0, 3.0, 1.0],
+                    negative_spans: Vec::new(),
+                    negative_counts: Vec::new(),
+                    custom_values: None,
+                    start_timestamp_ms: None,
+                }
         );
-        assert!(histogram.positive_counts == vec![1.0, 3.0, 1.0]);
-        assert!(histogram.reset_hint == ResetHint::Unknown);
-    }
-
-    fn assert_float(actual: f64, expected: f64) {
-        assert!((actual - expected).abs() < f64::EPSILON);
     }
 
     #[tokio::test]

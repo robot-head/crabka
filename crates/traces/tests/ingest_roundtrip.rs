@@ -5,7 +5,7 @@ mod support;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use assert2::assert;
+use assert2::{assert, check};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use crabka_blockstore::{BlockWriter, TraceIndex};
@@ -70,10 +70,10 @@ async fn otlp_lands_as_span_block() {
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
 
-    assert!(decoded.len() == 2);
-    assert!(decoded.iter().all(|record| record.tenant == "tenant-a"));
-    assert!(decoded.iter().all(|record| record.span.trace_id == [1; 16]));
-    assert!(
+    check!(decoded.len() == 2);
+    check!(decoded.iter().all(|record| record.tenant == "tenant-a"));
+    check!(decoded.iter().all(|record| record.span.trace_id == [1; 16]));
+    check!(
         records
             .iter()
             .all(|record| record.partition == records[0].partition)
@@ -97,10 +97,10 @@ async fn otlp_lands_as_span_block() {
     .await
     .unwrap();
 
-    assert!(metas.len() == 1);
-    assert!(metas[0].tenant == "tenant-a");
-    assert!(metas[0].row_count == 2);
-    assert!(
+    check!(metas.len() == 1);
+    check!(metas[0].tenant == "tenant-a");
+    check!(metas[0].row_count == 2);
+    check!(
         index.candidate_blocks_for_trace("tenant-a", &[1; 16], 0, 10_000)
             == vec![metas[0].object_key.clone()]
     );

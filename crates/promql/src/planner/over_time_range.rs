@@ -243,6 +243,7 @@ fn build_leaf_batch(
 #[cfg(test)]
 mod tests {
     use assert2::assert;
+    use assert2::check;
 
     use super::*;
 
@@ -306,33 +307,35 @@ mod tests {
     async fn avg_over_time_plan_reduces_window() {
         let samples = vec![labeled("a", 60_000, 3.0), labeled("a", 120_000, 5.0)];
         let got = run(samples, 120_000, 120_000, OverTimeFamily::Avg, 0.0).await;
-        assert!(got.len() == 1);
-        assert!(got[0].0 == "a");
-        assert!(approx_eq(got[0].1, 4.0));
+        check!(got.len() == 1);
+        check!(got[0].0 == "a");
+        check!(approx_eq(got[0].1, 4.0));
     }
 
     #[test]
     fn over_time_family_lookup_covers_operator_families() {
         let cases = [
-            ("sum_over_time", OverTimeFamily::Sum),
-            ("avg_over_time", OverTimeFamily::Avg),
-            ("count_over_time", OverTimeFamily::Count),
-            ("min_over_time", OverTimeFamily::Min),
-            ("max_over_time", OverTimeFamily::Max),
-            ("stddev_over_time", OverTimeFamily::Stddev),
-            ("stdvar_over_time", OverTimeFamily::Stdvar),
-            ("last_over_time", OverTimeFamily::Last),
-            ("present_over_time", OverTimeFamily::Present),
-            ("quantile_over_time", OverTimeFamily::Quantile),
+            ("sum_over_time", Some(OverTimeFamily::Sum)),
+            ("avg_over_time", Some(OverTimeFamily::Avg)),
+            ("count_over_time", Some(OverTimeFamily::Count)),
+            ("min_over_time", Some(OverTimeFamily::Min)),
+            ("max_over_time", Some(OverTimeFamily::Max)),
+            ("stddev_over_time", Some(OverTimeFamily::Stddev)),
+            ("stdvar_over_time", Some(OverTimeFamily::Stdvar)),
+            ("last_over_time", Some(OverTimeFamily::Last)),
+            ("present_over_time", Some(OverTimeFamily::Present)),
+            ("quantile_over_time", Some(OverTimeFamily::Quantile)),
+            ("mad_over_time", None),
+            ("first_over_time", None),
+            ("ts_of_min_over_time", None),
+            ("rate", None),
         ];
-        for (name, family) in cases {
-            assert!(over_time_family_from_function_name(name) == Some(family));
+        for (name, want) in cases {
+            assert!(
+                over_time_family_from_function_name(name) == want,
+                "case {name:?}"
+            );
         }
-
-        assert!(over_time_family_from_function_name("mad_over_time").is_none());
-        assert!(over_time_family_from_function_name("first_over_time").is_none());
-        assert!(over_time_family_from_function_name("ts_of_min_over_time").is_none());
-        assert!(over_time_family_from_function_name("rate").is_none());
     }
 
     /// `quantile_over_time(0.5, ...)` over 2,4,4,4,5,5,7,9 yields the median 4.5.

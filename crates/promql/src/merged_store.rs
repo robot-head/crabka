@@ -437,8 +437,9 @@ mod tests {
     use crabka_blockstore::Labels;
 
     use crate::{
-        EngineOpts, InMemoryMetricStore, MergedMetricStore, MetricStore, PromqlEngine, QueryResult,
-        SampleValue,
+        EngineOpts, ExemplarRecord, InMemoryMetricStore, InstantSample, MergedMetricStore,
+        MetricStore, NamedTsdbStat, PromqlEngine, QueryResult, SampleValue, TsdbHeadStats,
+        TsdbStats,
     };
 
     fn labels(pairs: &[(&str, &str)]) -> Labels {
@@ -467,10 +468,14 @@ mod tests {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected instant vector");
         };
-        assert!(samples.len() == 1);
-        assert!(samples[0].labels == labels);
-        assert!(samples[0].ts_ms == 20_000);
-        assert!(samples[0].value == SampleValue::Float(2.0));
+        assert!(
+            samples
+                == vec![InstantSample {
+                    labels,
+                    ts_ms: 20_000,
+                    value: SampleValue::Float(2.0),
+                }]
+        );
     }
 
     #[tokio::test]
@@ -551,15 +556,23 @@ mod tests {
         let store = MergedMetricStore::new(cold, hot);
         let exemplars = store.exemplars("tenant-a", &[], 0, 30_000).await.unwrap();
 
-        assert!(exemplars.len() == 2);
-        assert!(exemplars[0].series_labels == series);
-        assert!(exemplars[0].labels == labels(&[("trace_id", "cold")]));
-        assert!(exemplars[0].ts_ms == 10_000);
-        assert!(exemplars[0].value.to_bits() == 1.0_f64.to_bits());
-        assert!(exemplars[1].series_labels == series);
-        assert!(exemplars[1].labels == labels(&[("trace_id", "hot")]));
-        assert!(exemplars[1].ts_ms == 20_000);
-        assert!(exemplars[1].value.to_bits() == 2.0_f64.to_bits());
+        assert!(
+            exemplars
+                == vec![
+                    ExemplarRecord {
+                        series_labels: series.clone(),
+                        labels: labels(&[("trace_id", "cold")]),
+                        ts_ms: 10_000,
+                        value: 1.0,
+                    },
+                    ExemplarRecord {
+                        series_labels: series,
+                        labels: labels(&[("trace_id", "hot")]),
+                        ts_ms: 20_000,
+                        value: 2.0,
+                    },
+                ]
+        );
     }
 
     #[tokio::test]
@@ -683,26 +696,33 @@ mod tests {
         let store = MergedMetricStore::new(cold, hot);
         let stats = store.tsdb_stats("tenant-a").await.unwrap();
 
-        assert!(stats.head_stats.num_series == 2);
-        assert!(stats.head_stats.num_samples == 3);
-        assert!(stats.head_stats.num_chunks == 2);
-        assert!(stats.head_stats.min_time == 10_000);
-        assert!(stats.head_stats.max_time == 30_000);
+        let stat = |name: &str, value: usize| NamedTsdbStat {
+            name: name.to_string(),
+            value,
+        };
         assert!(
-            named_pairs(&stats.series_count_by_metric_name) == vec![("errors_total", 1), ("up", 1)]
-        );
-        assert!(
-            named_pairs(&stats.label_value_count_by_label_name)
-                == vec![("__name__", 2), ("job", 2)]
-        );
-        assert!(
-            named_pairs(&stats.series_count_by_label_value_pair)
-                == vec![
-                    ("__name__=errors_total", 1),
-                    ("__name__=up", 1),
-                    ("job=api", 1),
-                    ("job=worker", 1),
-                ]
+            stats
+                == TsdbStats {
+                    head_stats: TsdbHeadStats {
+                        num_series: 2,
+                        num_samples: 3,
+                        num_chunks: 2,
+                        min_time: 10_000,
+                        max_time: 30_000,
+                    },
+                    series_count_by_metric_name: vec![stat("errors_total", 1), stat("up", 1)],
+                    label_value_count_by_label_name: vec![stat("__name__", 2), stat("job", 2)],
+                    // Byte counts sum name.len() + value.len() per series:
+                    // "__name__"+"up" (10) + "__name__"+"errors_total" (20) = 30;
+                    // "job"+"api" (6) + "job"+"worker" (9) = 15.
+                    memory_in_bytes_by_label_name: vec![stat("__name__", 30), stat("job", 15)],
+                    series_count_by_label_value_pair: vec![
+                        stat("__name__=errors_total", 1),
+                        stat("__name__=up", 1),
+                        stat("job=api", 1),
+                        stat("job=worker", 1),
+                    ],
+                }
         );
     }
 
@@ -749,25 +769,25 @@ mod tests {
         assert!(ids == vec!["cold-a", "hot-a", "cold-b"]);
     }
 
-    fn named_pairs(stats: &[crate::NamedTsdbStat]) -> Vec<(&str, usize)> {
-        stats
-            .iter()
-            .map(|stat| (stat.name.as_str(), stat.value))
-            .collect()
-    }
-
     #[test]
     fn min_present_time_preserves_legitimate_zero_min_time() {
         // A store that holds samples whose earliest is epoch 0 must report 0,
         // not be treated as empty and discarded in favor of the other store.
-        assert!(super::min_present_time(Some(0), Some(50)) == 0);
-        assert!(super::min_present_time(Some(0), None) == 0);
-        assert!(super::min_present_time(None, Some(0)) == 0);
         // Absent stores fall back to the present one; both-empty is 0.
-        assert!(super::min_present_time(None, Some(50)) == 50);
-        assert!(super::min_present_time(Some(50), None) == 50);
-        assert!(super::min_present_time(None, None) == 0);
-        assert!(super::min_present_time(Some(20), Some(50)) == 20);
+        for (left, right, want) in [
+            (Some(0), Some(50), 0),
+            (Some(0), None, 0),
+            (None, Some(0), 0),
+            (None, Some(50), 50),
+            (Some(50), None, 50),
+            (None, None, 0),
+            (Some(20), Some(50), 20),
+        ] {
+            assert!(
+                super::min_present_time(left, right) == want,
+                "case ({left:?}, {right:?})"
+            );
+        }
     }
 
     #[tokio::test]

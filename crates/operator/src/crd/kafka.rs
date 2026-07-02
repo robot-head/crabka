@@ -849,17 +849,17 @@ pub struct KafkaCondition {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use kube::CustomResourceExt as _;
 
     #[test]
     fn crd_metadata_is_correct() {
         let crd = Kafka::crd();
-        assert!(crd.spec.group == "crabka.io");
-        assert!(crd.spec.names.kind == "Kafka");
-        assert!(crd.spec.names.plural == "kafkas");
-        assert!(crd.spec.versions.len() == 1);
-        assert!(crd.spec.versions[0].name == "v1alpha1");
+        check!(crd.spec.group == "crabka.io");
+        check!(crd.spec.names.kind == "Kafka");
+        check!(crd.spec.names.plural == "kafkas");
+        check!(crd.spec.versions.len() == 1);
+        check!(crd.spec.versions[0].name == "v1alpha1");
     }
 
     #[test]
@@ -949,7 +949,7 @@ mod tests {
 
     #[test]
     fn spec_carries_listeners() {
-        use crate::crd::ListenerType;
+        use crate::crd::{Listener, ListenerType};
 
         let json = r#"{
             "kafkaVersion":"0.1.1",
@@ -957,9 +957,18 @@ mod tests {
             "interBrokerListenerName":"PLAIN"
         }"#;
         let spec: KafkaSpec = serde_json::from_str(json).unwrap();
-        assert!(spec.listeners.len() == 1);
-        assert!(spec.listeners[0].name == "PLAIN");
-        assert!(spec.listeners[0].type_ == ListenerType::Internal);
+        assert!(
+            spec.listeners
+                == vec![Listener {
+                    name: "PLAIN".to_string(),
+                    port: 9092,
+                    type_: ListenerType::Internal,
+                    tls: false,
+                    authentication: None,
+                    configuration: None,
+                    network_policy_peers: None,
+                }]
+        );
         assert!(spec.inter_broker_listener_name.as_deref() == Some("PLAIN"));
     }
 
@@ -1216,23 +1225,28 @@ authorization:
         let Some(Authorization::Opa(opa)) = spec.authorization.clone() else {
             panic!("expected Opa variant, got {:?}", spec.authorization);
         };
-        assert!(opa.url == "http://opa.opa.svc:8181/v1/data/kafka/authz/allow");
-        assert!(opa.allow_on_error == Some(true));
-        assert!(opa.initial_cache_capacity == Some(1000));
-        assert!(opa.maximum_cache_size == Some(50_000));
-        assert!(opa.expire_after_ms == Some(60_000));
-        assert!(opa.super_users == vec!["User:admin".to_string(), "ANONYMOUS".to_string()]);
+        assert!(
+            opa == OpaAuthorization {
+                url: "http://opa.opa.svc:8181/v1/data/kafka/authz/allow".to_string(),
+                allow_on_error: Some(true),
+                initial_cache_capacity: Some(1000),
+                maximum_cache_size: Some(50_000),
+                expire_after_ms: Some(60_000),
+                super_users: vec!["User:admin".to_string(), "ANONYMOUS".to_string()],
+            }
+        );
 
         let json = serde_json::to_string(&spec).unwrap();
-        assert!(json.contains("\"type\":\"opa\""), "got: {json}");
         // Every numeric knob must round-trip in camelCase form.
-        assert!(json.contains("\"allowOnError\":true"), "got: {json}");
-        assert!(
-            json.contains("\"initialCacheCapacity\":1000"),
-            "got: {json}"
-        );
-        assert!(json.contains("\"maximumCacheSize\":50000"), "got: {json}");
-        assert!(json.contains("\"expireAfterMs\":60000"), "got: {json}");
+        for want in [
+            "\"type\":\"opa\"",
+            "\"allowOnError\":true",
+            "\"initialCacheCapacity\":1000",
+            "\"maximumCacheSize\":50000",
+            "\"expireAfterMs\":60000",
+        ] {
+            assert!(json.contains(want), "case {want:?}; got: {json}");
+        }
         let back: KafkaSpec = serde_json::from_str(&json).unwrap();
         assert!(back == spec);
     }
@@ -1253,12 +1267,16 @@ authorization:
         let Some(Authorization::Opa(opa)) = spec.authorization.clone() else {
             panic!("expected Opa variant, got {:?}", spec.authorization);
         };
-        assert!(opa.url == "http://opa.opa.svc:8181/v1/data/kafka/authz/allow");
-        assert!(opa.allow_on_error == None);
-        assert!(opa.initial_cache_capacity == None);
-        assert!(opa.maximum_cache_size == None);
-        assert!(opa.expire_after_ms == None);
-        assert!(opa.super_users.is_empty());
+        assert!(
+            opa == OpaAuthorization {
+                url: "http://opa.opa.svc:8181/v1/data/kafka/authz/allow".to_string(),
+                allow_on_error: None,
+                initial_cache_capacity: None,
+                maximum_cache_size: None,
+                expire_after_ms: None,
+                super_users: vec![],
+            }
+        );
 
         let json = serde_json::to_string(&spec).unwrap();
         for absent in [
@@ -1341,12 +1359,16 @@ authorization:
             persistence: None,
         };
         let j = serde_json::to_string(&ts).unwrap();
-        assert!(j.contains("\"type\":\"S3\""), "got: {j}");
-        assert!(j.contains("\"s3\""), "got: {j}");
-        assert!(j.contains("\"accessKeyId\""), "got: {j}");
-        assert!(j.contains("\"secretAccessKey\""), "got: {j}");
-        assert!(j.contains("\"allowHttp\":true"), "got: {j}");
-        assert!(j.contains("\"multipartThreshold\":1024"), "got: {j}");
+        for want in [
+            "\"type\":\"S3\"",
+            "\"s3\"",
+            "\"accessKeyId\"",
+            "\"secretAccessKey\"",
+            "\"allowHttp\":true",
+            "\"multipartThreshold\":1024",
+        ] {
+            assert!(j.contains(want), "case {want:?}; got: {j}");
+        }
         let back: TieredStorage = serde_json::from_str(&j).unwrap();
         assert!(back == ts);
     }
@@ -1457,11 +1479,15 @@ authorization:
             persistence: None,
         };
         let j = serde_json::to_string(&ts).unwrap();
-        assert!(j.contains("\"type\":\"Gcs\""), "got: {j}");
-        assert!(j.contains("\"gcs\""), "got: {j}");
-        assert!(j.contains("\"serviceAccountKey\""), "got: {j}");
-        assert!(j.contains("\"allowHttp\":true"), "got: {j}");
-        assert!(j.contains("\"multipartThreshold\":1024"), "got: {j}");
+        for want in [
+            "\"type\":\"Gcs\"",
+            "\"gcs\"",
+            "\"serviceAccountKey\"",
+            "\"allowHttp\":true",
+            "\"multipartThreshold\":1024",
+        ] {
+            assert!(j.contains(want), "case {want:?}; got: {j}");
+        }
         let back: TieredStorage = serde_json::from_str(&j).unwrap();
         assert!(back == ts);
     }

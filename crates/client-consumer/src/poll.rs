@@ -699,7 +699,7 @@ mod offset_advance_tests {
     use std::collections::HashMap;
 
     use super::*;
-    use assert2::assert;
+    use assert2::{assert, check};
     use crabka_protocol::primitives::uuid::Uuid as WireUuid;
     use crabka_protocol::records::{RecordBatch, RecordsPayload};
 
@@ -711,14 +711,14 @@ mod offset_advance_tests {
 
     #[test]
     fn fetch_leader_id_uses_known_non_negative_leader_or_bootstrap() {
-        assert!(BOOTSTRAP_LEADER == -1);
-        assert!(UNKNOWN_LEADER_ID == -1);
-        assert!(UNKNOWN_FETCH_OFFSET == -1);
-        assert!(fetch_leader_id(3, true) == 3);
-        assert!(fetch_leader_id(-1, true) == BOOTSTRAP_LEADER);
-        assert!(fetch_leader_id(3, false) == BOOTSTRAP_LEADER);
-        assert!(should_use_bootstrap_leader(BOOTSTRAP_LEADER));
-        assert!(!should_use_bootstrap_leader(3));
+        check!(BOOTSTRAP_LEADER == -1);
+        check!(UNKNOWN_LEADER_ID == -1);
+        check!(UNKNOWN_FETCH_OFFSET == -1);
+        check!(fetch_leader_id(3, true) == 3);
+        check!(fetch_leader_id(-1, true) == BOOTSTRAP_LEADER);
+        check!(fetch_leader_id(3, false) == BOOTSTRAP_LEADER);
+        check!(should_use_bootstrap_leader(BOOTSTRAP_LEADER));
+        check!(!should_use_bootstrap_leader(3));
     }
 
     #[test]
@@ -728,19 +728,19 @@ mod offset_advance_tests {
 
         assert!(fetch_offset_or_unknown(&offsets, &key) == UNKNOWN_FETCH_OFFSET);
         offsets.insert(key.clone(), 42);
-        assert!(fetch_offset_or_unknown(&offsets, &key) == 42);
+        check!(fetch_offset_or_unknown(&offsets, &key) == 42);
 
-        assert!(is_read_committed(IsolationLevel::ReadCommitted));
-        assert!(!is_read_committed(IsolationLevel::ReadUncommitted));
-        assert!(aborted_txn_started(10, 10));
-        assert!(aborted_txn_started(10, 11));
-        assert!(!aborted_txn_started(11, 10));
-        assert!(should_drop_aborted_batch(true, true, true));
-        assert!(!should_drop_aborted_batch(false, true, true));
-        assert!(!should_drop_aborted_batch(true, false, true));
-        assert!(!should_drop_aborted_batch(true, true, false));
-        assert!(record_offset(100, 7) == 107);
-        assert!(record_timestamp(1000, 33) == 1033);
+        check!(is_read_committed(IsolationLevel::ReadCommitted));
+        check!(!is_read_committed(IsolationLevel::ReadUncommitted));
+        check!(aborted_txn_started(10, 10));
+        check!(aborted_txn_started(10, 11));
+        check!(!aborted_txn_started(11, 10));
+        check!(should_drop_aborted_batch(true, true, true));
+        check!(!should_drop_aborted_batch(false, true, true));
+        check!(!should_drop_aborted_batch(true, false, true));
+        check!(!should_drop_aborted_batch(true, true, false));
+        check!(record_offset(100, 7) == 107);
+        check!(record_timestamp(1000, 33) == 1033);
     }
 
     #[test]

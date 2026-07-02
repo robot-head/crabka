@@ -9,7 +9,7 @@
 //!   6. `byo_mode_without_pre_existing_secrets_errors_gracefully`
 //!   7. `reconciler_does_not_renew_valid_leaf_certs`
 
-use assert2::assert;
+use assert2::{assert, check};
 #[path = "shared/mod.rs"]
 mod shared;
 
@@ -265,39 +265,22 @@ async fn default_flow_creates_cluster_ca_clients_ca_and_broker_keystore() {
         ca_patches
     );
 
-    // cluster-ca key + cert PATCHes present
-    assert!(
-        methods_uris
-            .iter()
-            .any(|(m, u)| *m == Method::PATCH && u.contains(&cluster_ca_key)),
-        "cluster-ca key PATCH must be present",
-    );
-    assert!(
-        methods_uris
-            .iter()
-            .any(|(m, u)| *m == Method::PATCH && u.contains(&cluster_ca_cert)),
-        "cluster-ca cert PATCH must be present",
-    );
-    // clients-ca key + cert PATCHes present
-    assert!(
-        methods_uris
-            .iter()
-            .any(|(m, u)| *m == Method::PATCH && u.contains(&clients_ca_key)),
-        "clients-ca key PATCH must be present",
-    );
-    assert!(
-        methods_uris
-            .iter()
-            .any(|(m, u)| *m == Method::PATCH && u.contains(&clients_ca_cert)),
-        "clients-ca cert PATCH must be present",
-    );
-    // keystore PATCH present
-    assert!(
-        methods_uris
-            .iter()
-            .any(|(m, u)| *m == Method::PATCH && u.contains(&keystore_name)),
-        "broker keystore PATCH must be present",
-    );
+    // cluster-ca key + cert, clients-ca key + cert, and broker keystore
+    // PATCHes must all be present.
+    for target in [
+        &cluster_ca_key,
+        &cluster_ca_cert,
+        &clients_ca_key,
+        &clients_ca_cert,
+        &keystore_name,
+    ] {
+        assert!(
+            methods_uris
+                .iter()
+                .any(|(m, u)| *m == Method::PATCH && u.contains(target.as_str())),
+            "PATCH for {target} must be present",
+        );
+    }
 
     // Status PATCH lands with ClusterCaReady + ClientsCaReady conditions.
     let status_patch = observed
@@ -324,10 +307,10 @@ async fn default_flow_creates_cluster_ca_clients_ca_and_broker_keystore() {
         .iter()
         .find(|c| c["type"] == "ClientsCaReady")
         .unwrap_or_else(|| panic!("ClientsCaReady condition missing, body = {body}"));
-    assert!(clients_ca_cond["status"] == "True", "body = {body}");
-    assert!(clients_ca_cond["reason"] == "CaReady", "body = {body}");
+    check!(clients_ca_cond["status"] == "True", "body = {body}");
+    check!(clients_ca_cond["reason"] == "CaReady", "body = {body}");
 
-    assert!(
+    check!(
         state.remaining_rules() == 0,
         "all preloaded rules must have been consumed"
     );
@@ -633,16 +616,16 @@ async fn byo_mode_without_pre_existing_secrets_errors_gracefully() {
         .iter()
         .find(|c| c["type"] == "ClusterCaReady")
         .unwrap_or_else(|| panic!("ClusterCaReady condition missing, body = {body}"));
-    assert!(
+    check!(
         cluster_ca_cond["status"] == "False",
         "ByoCaMissing: ClusterCaReady must be False, body = {body}"
     );
-    assert!(
+    check!(
         cluster_ca_cond["reason"] == "ByoCaMissing",
         "ByoCaMissing: reason must be ByoCaMissing, body = {body}"
     );
 
-    assert!(
+    check!(
         state.remaining_rules() == 0,
         "all preloaded rules must have been consumed"
     );
@@ -1131,18 +1114,13 @@ async fn broker_leaf_certs_chain_to_cluster_ca() {
     let pod_name = format!("{name}-{pool_name}-0");
     let pod_fqdn = format!("{pod_name}.{name}-broker-headless.{ns}.svc.cluster.local");
     let headless_fqdn = format!("{name}-broker-headless.{ns}.svc.cluster.local");
-    assert!(
-        dns_names.contains(&pod_fqdn),
-        "SANs must include pod FQDN {pod_fqdn}; got DNS={dns_names:?}",
-    );
-    assert!(
-        dns_names.contains(&pod_name),
-        "SANs must include pod short-name {pod_name}; got DNS={dns_names:?}",
-    );
-    assert!(
-        dns_names.contains(&headless_fqdn),
-        "SANs must include headless FQDN {headless_fqdn}; got DNS={dns_names:?}",
-    );
+    // Pod FQDN, pod short-name, headless FQDN.
+    for want in [&pod_fqdn, &pod_name, &headless_fqdn] {
+        assert!(
+            dns_names.contains(want),
+            "SANs must include {want}; got DNS={dns_names:?}",
+        );
+    }
     assert!(
         has_ip_localhost,
         "SANs must include 127.0.0.1; got GNs={:?}",

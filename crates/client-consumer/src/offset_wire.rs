@@ -143,6 +143,7 @@ pub(crate) fn id_to_name(topic_ids: &HashMap<String, WireUuid>) -> HashMap<WireU
 mod tests {
     use super::*;
     use assert2::assert;
+    use crabka_protocol::UnknownTaggedFields;
     use crabka_protocol::owned::offset_fetch_response::{
         OffsetFetchResponse, OffsetFetchResponseGroup, OffsetFetchResponsePartition,
         OffsetFetchResponsePartitions, OffsetFetchResponseTopic, OffsetFetchResponseTopics,
@@ -162,16 +163,31 @@ mod tests {
         ids.insert("t".to_string(), id(7));
 
         let req = build_offset_fetch("g", &by_topic, &ids);
-        assert!(req.group_id == "g");
-        // Legacy single-group fields (v0-7).
-        let legacy = req.topics.as_ref().expect("legacy topics");
-        assert!(legacy.len() == 1 && legacy[0].name == "t");
-        assert!(legacy[0].partition_indexes == vec![0, 1]);
-        // v8+ groups[] with topic_id (v10).
-        assert!(req.groups.len() == 1 && req.groups[0].group_id == "g");
-        let gtops = req.groups[0].topics.as_ref().expect("group topics");
-        assert!(gtops[0].name == "t" && gtops[0].topic_id == id(7));
-        assert!(gtops[0].partition_indexes == vec![0, 1]);
+        // Legacy single-group fields (v0-7) AND v8+ groups[] with topic_id (v10).
+        assert!(
+            req == OffsetFetchRequest {
+                group_id: "g".to_string(),
+                topics: Some(vec![OffsetFetchRequestTopic {
+                    name: "t".to_string(),
+                    partition_indexes: vec![0, 1],
+                    unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                }]),
+                groups: vec![OffsetFetchRequestGroup {
+                    group_id: "g".to_string(),
+                    member_id: None,
+                    member_epoch: -1,
+                    topics: Some(vec![OffsetFetchRequestTopics {
+                        name: "t".to_string(),
+                        topic_id: id(7),
+                        partition_indexes: vec![0, 1],
+                        unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                    }]),
+                    unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                }],
+                require_stable: false,
+                unknown_tagged_fields: UnknownTaggedFields(vec![]),
+            }
+        );
     }
 
     #[test]
@@ -258,12 +274,21 @@ mod tests {
         let mut ids = HashMap::new();
         ids.insert("t".to_string(), id(7));
         let topics = build_commit_topics(offsets, &ids);
-        assert!(topics.len() == 1);
-        assert!(topics[0].name == "t" && topics[0].topic_id == id(7));
-        assert!(topics[0].partitions[0].partition_index == 3);
-        assert!(topics[0].partitions[0].committed_offset == 100);
-        assert!(topics[0].partitions[0].committed_leader_epoch == 5);
-        assert!(topics[0].partitions[0].committed_metadata == Some(String::new()));
+        assert!(
+            topics
+                == vec![OffsetCommitRequestTopic {
+                    name: "t".to_string(),
+                    topic_id: id(7),
+                    partitions: vec![OffsetCommitRequestPartition {
+                        partition_index: 3,
+                        committed_offset: 100,
+                        committed_leader_epoch: 5,
+                        committed_metadata: Some(String::new()),
+                        unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                    }],
+                    unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                }]
+        );
 
         // Missing id → ZERO default.
         let mut o2 = HashMap::new();

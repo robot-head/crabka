@@ -1053,7 +1053,7 @@ mod tests {
         AclOp, AclPatternType, AclPermission, AclResource, AclResourceKind, AclRule,
         KafkaUserSimpleAuthorization as SimpleAuthorization,
     };
-    use assert2::assert;
+    use assert2::{assert, check};
 
     fn rule(kind: AclResourceKind, name: &str, ops: &[AclOp]) -> AclRule {
         AclRule {
@@ -1093,13 +1093,18 @@ mod tests {
             acls: vec![rule(AclResourceKind::Topic, "orders", &[AclOp::Read])],
         });
         let entries = expand_spec_acls(Some(&auth), "User:alice");
-        assert!(entries.len() == 1);
-        let e = &entries[0];
-        assert!(e.resource_type == ResourceType::Topic);
-        assert!(e.resource_name == "orders");
-        assert!(e.principal == "User:alice");
-        assert!(e.operation == AclOperation::Read);
-        assert!(e.permission_type == PermissionType::Allow);
+        assert!(
+            entries
+                == vec![AclEntry {
+                    resource_type: ResourceType::Topic,
+                    resource_name: "orders".into(),
+                    pattern_type: PatternType::Literal,
+                    principal: "User:alice".into(),
+                    host: "*".into(),
+                    operation: AclOperation::Read,
+                    permission_type: PermissionType::Allow,
+                }]
+        );
     }
 
     #[test]
@@ -1114,9 +1119,13 @@ mod tests {
         let entries = expand_spec_acls(Some(&auth), "User:alice");
         assert!(entries.len() == 3);
         let ops: Vec<_> = entries.iter().map(|e| e.operation).collect();
-        assert!(ops.contains(&AclOperation::Read));
-        assert!(ops.contains(&AclOperation::Describe));
-        assert!(ops.contains(&AclOperation::Write));
+        for op in [
+            AclOperation::Read,
+            AclOperation::Describe,
+            AclOperation::Write,
+        ] {
+            assert!(ops.contains(&op), "missing {op:?} in {ops:?}");
+        }
     }
 
     #[test]
@@ -1226,22 +1235,26 @@ mod tests {
             permission_type: PermissionType::Allow,
         };
         let f = entry_to_exact_filter(&e);
-        assert!(f.resource_type == Some(ResourceType::Topic));
-        assert!(f.resource_name.as_deref() == Some("orders"));
-        assert!(f.pattern_type == Some(PatternType::Literal));
-        assert!(f.principal.as_deref() == Some("User:alice"));
-        assert!(f.host.as_deref() == Some("*"));
-        assert!(f.operation == Some(AclOperation::Read));
-        assert!(f.permission_type == Some(PermissionType::Allow));
+        assert!(
+            f == AclEntryFilter {
+                resource_type: Some(ResourceType::Topic),
+                resource_name: Some("orders".into()),
+                pattern_type: Some(PatternType::Literal),
+                principal: Some("User:alice".into()),
+                host: Some("*".into()),
+                operation: Some(AclOperation::Read),
+                permission_type: Some(PermissionType::Allow),
+            }
+        );
     }
 
     #[test]
     fn random_password_is_base64_and_uniform_length() {
         let p1 = random_password(32);
         let p2 = random_password(32);
-        assert!(p1.len() == p2.len()); // base64 of 32 random bytes = 43 chars
-        assert!(p1 != p2);
-        assert!(
+        check!(p1.len() == p2.len()); // base64 of 32 random bytes = 43 chars
+        check!(p1 != p2);
+        check!(
             p1.chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
             "got: {p1}"

@@ -965,29 +965,33 @@ mod tests {
     #[test]
     fn bare_dot_is_both_scope() {
         let q = parse("{ .service = \"checkout\" }").unwrap();
-        let SpansetExpr::Selector(fe) = &q.root else {
-            panic!("selector")
-        };
-        let FieldExpr::Comparison { lhs, op, rhs } = fe.as_ref() else {
-            panic!("cmp")
-        };
-        assert!(lhs.scope == Scope::Both && lhs.key == "service");
-        assert!(*op == ComparisonOp::Eq);
-        assert!(*rhs == Value::Str("checkout".into()));
+        assert!(
+            q.root
+                == SpansetExpr::Selector(Box::new(FieldExpr::Comparison {
+                    lhs: Field {
+                        scope: Scope::Both,
+                        key: "service".into(),
+                    },
+                    op: ComparisonOp::Eq,
+                    rhs: Value::Str("checkout".into()),
+                }))
+        );
     }
 
     #[test]
     fn span_colon_intrinsic_duration() {
         let q = parse("{ span:duration > 100ms }").unwrap();
-        let SpansetExpr::Selector(fe) = &q.root else {
-            panic!()
-        };
-        let FieldExpr::Comparison { lhs, op, rhs } = fe.as_ref() else {
-            panic!()
-        };
-        assert!(lhs.scope == Scope::Intrinsic(Intrinsic::Duration));
-        assert!(*op == ComparisonOp::Gt);
-        assert!(*rhs == Value::Duration(100_000_000));
+        assert!(
+            q.root
+                == SpansetExpr::Selector(Box::new(FieldExpr::Comparison {
+                    lhs: Field {
+                        scope: Scope::Intrinsic(Intrinsic::Duration),
+                        key: "duration".into(),
+                    },
+                    op: ComparisonOp::Gt,
+                    rhs: Value::Duration(100_000_000),
+                }))
+        );
     }
 
     #[test]
@@ -1183,43 +1187,49 @@ mod tests {
     #[test]
     fn pipeline_count_with_filter() {
         let q = parse("{ .a = 1 } | count() > 2").unwrap();
-        assert!(q.pipeline.len() == 2);
-        assert!(q.pipeline[0] == Pipeline::Aggregate(Aggregate::Count));
         assert!(
-            q.pipeline[1]
-                == Pipeline::Filter {
-                    op: ComparisonOp::Gt,
-                    value: 2.0,
-                }
+            q.pipeline
+                == vec![
+                    Pipeline::Aggregate(Aggregate::Count),
+                    Pipeline::Filter {
+                        op: ComparisonOp::Gt,
+                        value: 2.0,
+                    },
+                ]
         );
     }
 
     #[test]
     fn pipeline_scalar_filter_accepts_literal_arithmetic() {
         let q = parse("{ .a = 1 } | count() > 1 + 2 * 3").unwrap();
-        assert!(q.pipeline.len() == 2);
-        assert!(q.pipeline[0] == Pipeline::Aggregate(Aggregate::Count));
         assert!(
-            q.pipeline[1]
-                == Pipeline::Filter {
-                    op: ComparisonOp::Gt,
-                    value: 7.0,
-                }
+            q.pipeline
+                == vec![
+                    Pipeline::Aggregate(Aggregate::Count),
+                    Pipeline::Filter {
+                        op: ComparisonOp::Gt,
+                        value: 7.0,
+                    },
+                ]
         );
     }
 
     #[test]
     fn pipeline_adjacent_by_parses_before_filter() {
         let q = parse("{ .a = 1 } | count() by(span.svc) > 2").unwrap();
-        assert!(q.pipeline.len() == 3);
-        assert!(q.pipeline[0] == Pipeline::Aggregate(Aggregate::Count));
-        assert!(matches!(q.pipeline[1], Pipeline::By(_)));
         assert!(
-            q.pipeline[2]
-                == Pipeline::Filter {
-                    op: ComparisonOp::Gt,
-                    value: 2.0,
-                }
+            q.pipeline
+                == vec![
+                    Pipeline::Aggregate(Aggregate::Count),
+                    Pipeline::By(vec![Field {
+                        scope: Scope::Span,
+                        key: "svc".into(),
+                    }]),
+                    Pipeline::Filter {
+                        op: ComparisonOp::Gt,
+                        value: 2.0,
+                    },
+                ]
         );
     }
 
@@ -1341,17 +1351,15 @@ mod tests {
     #[test]
     fn compare_parses_optional_start_end_window() {
         let q = parse("{} | compare({}, 5, 1000, 2000)").unwrap();
-        let [
-            Pipeline::Compare {
-                top_n, start, end, ..
-            },
-        ] = q.pipeline.as_slice()
-        else {
-            panic!("compare pipeline")
-        };
-        assert!(*top_n == 5);
-        assert!(*start == Some(1000));
-        assert!(*end == Some(2000));
+        assert!(
+            q.pipeline
+                == vec![Pipeline::Compare {
+                    selection: Box::new(SpansetExpr::Selector(Box::new(FieldExpr::Const(true)))),
+                    top_n: 5,
+                    start: Some(1000),
+                    end: Some(2000),
+                }]
+        );
     }
 
     #[test]
@@ -1446,23 +1454,12 @@ mod tests {
 
     #[test]
     fn value_fold_div_and_mod_still_work() {
-        let q = parse("{ .x = 6 / 2 }").unwrap();
-        let SpansetExpr::Selector(fe) = &q.root else {
-            panic!("selector")
-        };
-        let FieldExpr::Comparison { rhs, .. } = fe.as_ref() else {
-            panic!("cmp")
-        };
-        assert!(*rhs == Value::Int(3));
-
-        let q = parse("{ .x = 7 % 3 }").unwrap();
-        let SpansetExpr::Selector(fe) = &q.root else {
-            panic!("selector")
-        };
-        let FieldExpr::Comparison { rhs, .. } = fe.as_ref() else {
-            panic!("cmp")
-        };
-        assert!(*rhs == Value::Int(1));
+        for (query, want) in [
+            ("{ .x = 6 / 2 }", Value::Int(3)),
+            ("{ .x = 7 % 3 }", Value::Int(1)),
+        ] {
+            assert!(selector_rhs(query) == want, "value mismatch for {query}");
+        }
     }
 
     #[test]
@@ -1535,63 +1532,74 @@ mod tests {
 
     #[test]
     fn sum_avg_max_min_aggregates_parse() {
-        let q = parse("{ .a = 1 } | sum(.x)").unwrap();
-        assert!(matches!(
-            q.pipeline.as_slice(),
-            [Pipeline::Aggregate(Aggregate::Sum(_))]
-        ));
-        let q = parse("{ .a = 1 } | avg(.x)").unwrap();
-        assert!(matches!(
-            q.pipeline.as_slice(),
-            [Pipeline::Aggregate(Aggregate::Avg(_))]
-        ));
-        let q = parse("{ .a = 1 } | max(.x)").unwrap();
-        assert!(matches!(
-            q.pipeline.as_slice(),
-            [Pipeline::Aggregate(Aggregate::Max(_))]
-        ));
-        let q = parse("{ .a = 1 } | min(.x)").unwrap();
-        assert!(matches!(
-            q.pipeline.as_slice(),
-            [Pipeline::Aggregate(Aggregate::Min(_))]
-        ));
+        for (query, want) in [
+            (
+                "{ .a = 1 } | sum(.x)",
+                Aggregate::Sum(Field {
+                    scope: Scope::Both,
+                    key: "x".into(),
+                }),
+            ),
+            (
+                "{ .a = 1 } | avg(.x)",
+                Aggregate::Avg(Field {
+                    scope: Scope::Both,
+                    key: "x".into(),
+                }),
+            ),
+            (
+                "{ .a = 1 } | max(.x)",
+                Aggregate::Max(Field {
+                    scope: Scope::Both,
+                    key: "x".into(),
+                }),
+            ),
+            (
+                "{ .a = 1 } | min(.x)",
+                Aggregate::Min(Field {
+                    scope: Scope::Both,
+                    key: "x".into(),
+                }),
+            ),
+        ] {
+            let q = parse(query).unwrap();
+            assert!(
+                q.pipeline == vec![Pipeline::Aggregate(want)],
+                "aggregate mismatch for {query}"
+            );
+        }
     }
 
     #[test]
     fn over_time_aggregates_parse() {
-        for (query, ok) in [
+        for (query, want) in [
             (
                 "{ .a = 1 } | sum_over_time(span:duration)",
-                matches!(
-                    parse("{ .a = 1 } | sum_over_time(span:duration)")
-                        .unwrap()
-                        .pipeline
-                        .as_slice(),
-                    [Pipeline::Aggregate(Aggregate::SumOverTime(_))]
-                ),
+                Aggregate::SumOverTime(Field {
+                    scope: Scope::Intrinsic(Intrinsic::Duration),
+                    key: "duration".into(),
+                }),
             ),
             (
                 "{ .a = 1 } | min_over_time(span:duration)",
-                matches!(
-                    parse("{ .a = 1 } | min_over_time(span:duration)")
-                        .unwrap()
-                        .pipeline
-                        .as_slice(),
-                    [Pipeline::Aggregate(Aggregate::MinOverTime(_))]
-                ),
+                Aggregate::MinOverTime(Field {
+                    scope: Scope::Intrinsic(Intrinsic::Duration),
+                    key: "duration".into(),
+                }),
             ),
             (
                 "{ .a = 1 } | max_over_time(span:duration)",
-                matches!(
-                    parse("{ .a = 1 } | max_over_time(span:duration)")
-                        .unwrap()
-                        .pipeline
-                        .as_slice(),
-                    [Pipeline::Aggregate(Aggregate::MaxOverTime(_))]
-                ),
+                Aggregate::MaxOverTime(Field {
+                    scope: Scope::Intrinsic(Intrinsic::Duration),
+                    key: "duration".into(),
+                }),
             ),
         ] {
-            assert!(ok, "over-time aggregate failed for {query}");
+            let q = parse(query).unwrap();
+            assert!(
+                q.pipeline == vec![Pipeline::Aggregate(want)],
+                "over-time aggregate mismatch for {query}"
+            );
         }
     }
 
@@ -1609,12 +1617,19 @@ mod tests {
     #[test]
     fn select_and_coalesce_pipeline_stages_parse() {
         let q = parse("{ .a = 1 } | select(.x, .y)").unwrap();
-        let [Pipeline::Select(fields)] = q.pipeline.as_slice() else {
-            panic!("select pipeline")
-        };
-        assert!(fields.len() == 2);
-        assert!(fields[0].key == "x");
-        assert!(fields[1].key == "y");
+        assert!(
+            q.pipeline
+                == vec![Pipeline::Select(vec![
+                    Field {
+                        scope: Scope::Both,
+                        key: "x".into(),
+                    },
+                    Field {
+                        scope: Scope::Both,
+                        key: "y".into(),
+                    },
+                ])]
+        );
 
         let q = parse("{ .a = 1 } | coalesce()").unwrap();
         assert!(q.pipeline == vec![Pipeline::Coalesce]);
@@ -1623,12 +1638,25 @@ mod tests {
     #[test]
     fn with_pipeline_supports_multiple_bindings() {
         let q = parse("{ .a = 1 } | with(x = .foo, y = .bar)").unwrap();
-        let [Pipeline::With(bindings)] = q.pipeline.as_slice() else {
-            panic!("with pipeline")
-        };
-        assert!(bindings.len() == 2);
-        assert!(bindings[0].name == "x");
-        assert!(bindings[1].name == "y");
+        assert!(
+            q.pipeline
+                == vec![Pipeline::With(vec![
+                    WithBinding {
+                        name: "x".into(),
+                        expr: FieldExpr::Field(Field {
+                            scope: Scope::Both,
+                            key: "foo".into(),
+                        }),
+                    },
+                    WithBinding {
+                        name: "y".into(),
+                        expr: FieldExpr::Field(Field {
+                            scope: Scope::Both,
+                            key: "bar".into(),
+                        }),
+                    },
+                ])]
+        );
     }
 
     // ---- rank limits ----
@@ -1811,13 +1839,17 @@ mod tests {
 
     #[test]
     fn primary_values_cover_all_literal_kinds() {
-        assert!(selector_rhs("{ .a = \"s\" }") == Value::Str("s".into()));
-        assert!(selector_rhs("{ .a = 42 }") == Value::Int(42));
-        assert!(selector_rhs("{ .a = 1.5 }") == Value::Float(1.5));
-        assert!(selector_rhs("{ .a = true }") == Value::Bool(true));
-        assert!(selector_rhs("{ .a = nil }") == Value::Nil);
-        // bare identifier on a non-duration field folds to a string value.
-        assert!(selector_rhs("{ .a = ident }") == Value::Str("ident".into()));
+        for (query, want) in [
+            ("{ .a = \"s\" }", Value::Str("s".into())),
+            ("{ .a = 42 }", Value::Int(42)),
+            ("{ .a = 1.5 }", Value::Float(1.5)),
+            ("{ .a = true }", Value::Bool(true)),
+            ("{ .a = nil }", Value::Nil),
+            // bare identifier on a non-duration field folds to a string value.
+            ("{ .a = ident }", Value::Str("ident".into())),
+        ] {
+            assert!(selector_rhs(query) == want, "value mismatch for {query}");
+        }
     }
 
     #[test]
@@ -1853,27 +1885,37 @@ mod tests {
 
     #[test]
     fn mixed_int_float_arithmetic_promotes_to_float() {
-        assert!(selector_rhs("{ .a = 1 + 2.0 }") == Value::Float(3.0));
-        assert!(selector_rhs("{ .a = 2.0 + 1 }") == Value::Float(3.0));
-        assert!(selector_rhs("{ .a = 5 - 1.5 }") == Value::Float(3.5));
-        assert!(selector_rhs("{ .a = 5.5 - 1 }") == Value::Float(4.5));
-        assert!(selector_rhs("{ .a = 2 * 1.5 }") == Value::Float(3.0));
-        assert!(selector_rhs("{ .a = 1.5 * 2 }") == Value::Float(3.0));
-        assert!(selector_rhs("{ .a = 3 / 1.5 }") == Value::Float(2.0));
-        assert!(selector_rhs("{ .a = 3.0 / 2 }") == Value::Float(1.5));
-        assert!(selector_rhs("{ .a = 1.0 + 2.0 }") == Value::Float(3.0));
-        assert!(selector_rhs("{ .a = 6.0 / 2.0 }") == Value::Float(3.0));
-        assert!(selector_rhs("{ .a = 1.0 - 0.5 }") == Value::Float(0.5));
-        assert!(selector_rhs("{ .a = 2.0 * 2.0 }") == Value::Float(4.0));
-        assert!(selector_rhs("{ .a = 2.0 * 3.0 }") == Value::Float(6.0));
-        assert!(selector_rhs("{ .a = 5 / 2 }") == Value::Float(2.5));
+        for (query, want) in [
+            ("{ .a = 1 + 2.0 }", 3.0),
+            ("{ .a = 2.0 + 1 }", 3.0),
+            ("{ .a = 5 - 1.5 }", 3.5),
+            ("{ .a = 5.5 - 1 }", 4.5),
+            ("{ .a = 2 * 1.5 }", 3.0),
+            ("{ .a = 1.5 * 2 }", 3.0),
+            ("{ .a = 3 / 1.5 }", 2.0),
+            ("{ .a = 3.0 / 2 }", 1.5),
+            ("{ .a = 1.0 + 2.0 }", 3.0),
+            ("{ .a = 6.0 / 2.0 }", 3.0),
+            ("{ .a = 1.0 - 0.5 }", 0.5),
+            ("{ .a = 2.0 * 2.0 }", 4.0),
+            ("{ .a = 2.0 * 3.0 }", 6.0),
+            ("{ .a = 5 / 2 }", 2.5),
+        ] {
+            assert!(
+                selector_rhs(query) == Value::Float(want),
+                "value mismatch for {query}"
+            );
+        }
     }
 
     #[test]
     fn float_power_variants_fold() {
-        assert!(selector_rhs("{ .a = 2.0 ^ 2.0 }") == Value::Float(4.0));
-        assert!(selector_rhs("{ .a = 2 ^ 2.0 }") == Value::Float(4.0));
-        assert!(selector_rhs("{ .a = 2.0 ^ 2 }") == Value::Float(4.0));
+        for query in ["{ .a = 2.0 ^ 2.0 }", "{ .a = 2 ^ 2.0 }", "{ .a = 2.0 ^ 2 }"] {
+            assert!(
+                selector_rhs(query) == Value::Float(4.0),
+                "value mismatch for {query}"
+            );
+        }
     }
 
     // ---- duration arithmetic ----
@@ -1975,12 +2017,19 @@ mod tests {
 
     #[test]
     fn duration_units_all_resolve() {
-        assert!(selector_rhs("{ span:duration = 5ns }") == Value::Duration(5));
-        assert!(selector_rhs("{ span:duration = 5us }") == Value::Duration(5_000));
-        assert!(selector_rhs("{ span:duration = 5ms }") == Value::Duration(5_000_000));
-        assert!(selector_rhs("{ span:duration = 5s }") == Value::Duration(5_000_000_000));
-        assert!(selector_rhs("{ span:duration = 2m }") == Value::Duration(120_000_000_000));
-        assert!(selector_rhs("{ span:duration = 1h }") == Value::Duration(3_600_000_000_000));
+        for (query, want_ns) in [
+            ("{ span:duration = 5ns }", 5),
+            ("{ span:duration = 5us }", 5_000),
+            ("{ span:duration = 5ms }", 5_000_000),
+            ("{ span:duration = 5s }", 5_000_000_000),
+            ("{ span:duration = 2m }", 120_000_000_000),
+            ("{ span:duration = 1h }", 3_600_000_000_000),
+        ] {
+            assert!(
+                selector_rhs(query) == Value::Duration(want_ns),
+                "duration mismatch for {query}"
+            );
+        }
     }
 
     #[test]

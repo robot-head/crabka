@@ -199,29 +199,19 @@ mod tests {
     fn is_cert_expiring_soon_boundary_cases() {
         let now = OffsetDateTime::now_utc();
 
-        let in_60_days = now + time::Duration::days(60);
-        assert!(
-            !is_cert_expiring_soon(&in_60_days, 30, now),
-            "60d > 30d window: not expiring"
-        );
-
-        let in_30_days = now + time::Duration::days(30);
-        assert!(
-            is_cert_expiring_soon(&in_30_days, 30, now),
-            "30d == 30d window: at boundary, treat as expiring (<=)"
-        );
-
-        let in_1_day = now + time::Duration::days(1);
-        assert!(
-            is_cert_expiring_soon(&in_1_day, 30, now),
-            "1d within 30d window: expiring"
-        );
-
-        let yesterday = now - time::Duration::days(1);
-        assert!(
-            is_cert_expiring_soon(&yesterday, 30, now),
-            "already past notAfter: expiring"
-        );
+        for (days_from_now, want, why) in [
+            (60, false, "60d > 30d window: not expiring"),
+            (
+                30,
+                true,
+                "30d == 30d window: at boundary, treat as expiring (<=)",
+            ),
+            (1, true, "1d within 30d window: expiring"),
+            (-1, true, "already past notAfter: expiring"),
+        ] {
+            let not_after = now + time::Duration::days(days_from_now);
+            assert!(is_cert_expiring_soon(&not_after, 30, now) == want, "{why}");
+        }
     }
 
     #[test]
@@ -242,14 +232,15 @@ mod tests {
 
     #[test]
     fn cert_not_after_from_pem_returns_none_on_malformed_input() {
-        assert!(cert_not_after_from_pem("not a pem").is_none());
-        assert!(cert_not_after_from_pem("").is_none());
-        // Valid PEM framing, garbage body — exercises the parse_x509 failure
-        // branch.
-        assert!(
-            cert_not_after_from_pem("-----BEGIN CERTIFICATE-----\nQUFB\n-----END CERTIFICATE-----")
-                .is_none()
-        );
+        // The last case is valid PEM framing with a garbage body —
+        // exercises the parse_x509 failure branch.
+        for input in [
+            "not a pem",
+            "",
+            "-----BEGIN CERTIFICATE-----\nQUFB\n-----END CERTIFICATE-----",
+        ] {
+            assert!(cert_not_after_from_pem(input).is_none(), "case {input:?}");
+        }
     }
 
     #[test]
@@ -339,17 +330,39 @@ mod tests {
         assert!(secret.metadata.name.as_deref() == Some("alice"));
         assert!(secret.metadata.namespace.as_deref() == Some("ns"));
         let labels = secret.metadata.labels.as_ref().expect("labels");
-        assert!(labels.get("crabka.io/auth").map(String::as_str) == Some("tls"));
-        assert!(labels.get("crabka.io/user").map(String::as_str) == Some("alice"));
-        assert!(labels.get("crabka.io/cluster").map(String::as_str) == Some("demo"));
+        for (key, want) in [
+            ("crabka.io/auth", "tls"),
+            ("crabka.io/user", "alice"),
+            ("crabka.io/cluster", "demo"),
+        ] {
+            assert!(
+                labels.get(key).map(String::as_str) == Some(want),
+                "label {key:?}"
+            );
+        }
         let owners = secret.metadata.owner_references.as_ref().expect("owner");
-        assert!(owners.len() == 1);
-        assert!(owners[0].kind == "KafkaUser");
-        assert!(owners[0].uid == "user-uid");
+        assert!(
+            *owners
+                == vec![OwnerReference {
+                    api_version: "crabka.io/v1alpha1".into(),
+                    block_owner_deletion: Some(true),
+                    controller: Some(true),
+                    kind: "KafkaUser".into(),
+                    name: "alice".into(),
+                    uid: "user-uid".into(),
+                }]
+        );
         let data = secret.data.as_ref().expect("data");
-        assert!(data.get("user.crt").map(|bs| bs.0.as_slice()) == Some(b"CERT".as_slice()));
-        assert!(data.get("user.key").map(|bs| bs.0.as_slice()) == Some(b"KEY".as_slice()));
-        assert!(data.get("ca.crt").map(|bs| bs.0.as_slice()) == Some(b"CA-CERT".as_slice()));
+        for (key, want) in [
+            ("user.crt", b"CERT".as_slice()),
+            ("user.key", b"KEY".as_slice()),
+            ("ca.crt", b"CA-CERT".as_slice()),
+        ] {
+            assert!(
+                data.get(key).map(|bs| bs.0.as_slice()) == Some(want),
+                "data key {key:?}"
+            );
+        }
     }
 
     #[test]
@@ -380,10 +393,16 @@ mod tests {
     fn user_owner_ref_carries_block_owner_deletion() {
         let ku = dummy_ku();
         let owner = user_owner_ref(&ku).expect("owner ref");
-        assert!(owner.kind == "KafkaUser");
-        assert!(owner.name == "alice");
-        assert!(owner.uid == "user-uid");
-        assert!(owner.controller == Some(true));
-        assert!(owner.block_owner_deletion == Some(true));
+        assert!(
+            owner
+                == OwnerReference {
+                    api_version: "crabka.io/v1alpha1".into(),
+                    block_owner_deletion: Some(true),
+                    controller: Some(true),
+                    kind: "KafkaUser".into(),
+                    name: "alice".into(),
+                    uid: "user-uid".into(),
+                }
+        );
     }
 }

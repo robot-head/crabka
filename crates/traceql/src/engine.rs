@@ -2522,7 +2522,7 @@ mod tests {
         StringDictionaryBuilder,
     };
     use arrow::datatypes::{Field as ArrowField, Int32Type, Schema};
-    use assert2::assert;
+    use assert2::{assert, check};
     use datafusion::catalog::MemTable;
     use datafusion::prelude::SessionContext;
 
@@ -2697,11 +2697,11 @@ mod tests {
             .search("t", "{ .svc = \"b\" }", 0, 100_000, 20)
             .await
             .unwrap();
-        assert!(r.traces.len() == 1);
-        assert!(r.traces[0].trace_id == [9; 16]);
-        assert!(r.traces[0].root_service_name == "a");
-        assert!(r.traces[0].span_sets[0].matched == 1);
-        assert!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
+        check!(r.traces.len() == 1);
+        check!(r.traces[0].trace_id == [9; 16]);
+        check!(r.traces[0].root_service_name == "a");
+        check!(r.traces[0].span_sets[0].matched == 1);
+        check!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
     }
 
     #[tokio::test]
@@ -2743,10 +2743,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(r.traces.len() == 1);
-        assert!(r.traces[0].span_sets[0].matched == 1);
-        assert!(r.traces[0].span_sets[0].spans.len() == 1);
-        assert!(r.traces[0].span_sets[0].spans[0].span_id == [1; 8]);
+        check!(r.traces.len() == 1);
+        check!(r.traces[0].span_sets[0].matched == 1);
+        check!(r.traces[0].span_sets[0].spans.len() == 1);
+        check!(r.traces[0].span_sets[0].spans[0].span_id == [1; 8]);
     }
 
     #[tokio::test]
@@ -2785,10 +2785,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(r.traces.len() == 1);
-        assert!(r.traces[0].trace_id == [9; 16]);
-        assert!(r.traces[0].span_sets[0].matched == 1);
-        assert!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
+        check!(r.traces.len() == 1);
+        check!(r.traces[0].trace_id == [9; 16]);
+        check!(r.traces[0].span_sets[0].matched == 1);
+        check!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
     }
 
     #[tokio::test]
@@ -2798,9 +2798,9 @@ mod tests {
             .search("t", "{ .svc = \"a\" } && { .svc = \"b\" }", 0, 100_000, 20)
             .await
             .unwrap();
-        assert!(r.traces.len() == 1);
-        assert!(r.traces[0].trace_id == [9; 16]);
-        assert!(r.traces[0].span_sets[0].matched == 2);
+        check!(r.traces.len() == 1);
+        check!(r.traces[0].trace_id == [9; 16]);
+        check!(r.traces[0].span_sets[0].matched == 2);
     }
 
     #[tokio::test]
@@ -2829,35 +2829,24 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(r.traces.len() == 1);
-        assert!(r.traces[0].trace_id == [9; 16]);
-        assert!(r.traces[0].span_sets[0].matched == 2);
+        check!(r.traces.len() == 1);
+        check!(r.traces[0].trace_id == [9; 16]);
+        check!(r.traces[0].span_sets[0].matched == 2);
         let spans = &r.traces[0].span_sets[0].spans;
-        assert!(spans.iter().any(|span| span.span_id == [1; 8]));
-        assert!(spans.iter().any(|span| span.span_id == [2; 8]));
+        check!(spans.iter().any(|span| span.span_id == [1; 8]));
+        check!(spans.iter().any(|span| span.span_id == [2; 8]));
     }
 
     #[tokio::test]
-    async fn search_descendant_structural() {
+    async fn search_descendant_structural_returns_right_hand_spans() {
         let e = engine();
         let r = e
             .search("t", "{ .svc = \"a\" } >> { .svc = \"b\" }", 0, 100_000, 20)
             .await
             .unwrap();
-        assert!(r.traces.len() == 1);
-        assert!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
-    }
-
-    #[tokio::test]
-    async fn structural_operators_return_right_hand_spans() {
-        let e = engine();
-        let r = e
-            .search("t", "{ .svc = \"a\" } >> { .svc = \"b\" }", 0, 100_000, 20)
-            .await
-            .unwrap();
-        assert!(r.traces.len() == 1);
-        assert!(r.traces[0].span_sets[0].matched == 1);
-        assert!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
+        check!(r.traces.len() == 1);
+        check!(r.traces[0].span_sets[0].matched == 1);
+        check!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
     }
 
     #[tokio::test]
@@ -2867,10 +2856,10 @@ mod tests {
             .search("t", "{ span:childCount = 1 }", 0, 100_000, 20)
             .await
             .unwrap();
-        assert!(r.traces.len() == 1);
-        assert!(r.traces[0].trace_id == [9; 16]);
-        assert!(r.traces[0].span_sets[0].matched == 1);
-        assert!(r.traces[0].span_sets[0].spans[0].span_id == [1; 8]);
+        check!(r.traces.len() == 1);
+        check!(r.traces[0].trace_id == [9; 16]);
+        check!(r.traces[0].span_sets[0].matched == 1);
+        check!(r.traces[0].span_sets[0].spans[0].span_id == [1; 8]);
     }
 
     #[tokio::test]
@@ -2948,9 +2937,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(r.traces.len() == 1);
-        assert!(r.traces[0].trace_id == [9; 16]);
-        assert!(r.traces[0].span_sets[0].matched == 2);
+        check!(r.traces.len() == 1);
+        check!(r.traces[0].trace_id == [9; 16]);
+        check!(r.traces[0].span_sets[0].matched == 2);
     }
 
     #[tokio::test]
@@ -2961,10 +2950,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(r.traces.len() == 1);
-        assert!(r.traces[0].trace_id == [9; 16]);
-        assert!(r.traces[0].span_sets[0].matched == 1);
-        assert!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
+        check!(r.traces.len() == 1);
+        check!(r.traces[0].trace_id == [9; 16]);
+        check!(r.traces[0].span_sets[0].matched == 1);
+        check!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
     }
 
     #[tokio::test]
@@ -2981,10 +2970,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(r.traces.len() == 1);
-        assert!(r.traces[0].trace_id == [9; 16]);
-        assert!(r.traces[0].span_sets[0].matched == 1);
-        assert!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
+        check!(r.traces.len() == 1);
+        check!(r.traces[0].trace_id == [9; 16]);
+        check!(r.traces[0].span_sets[0].matched == 1);
+        check!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
     }
 
     #[tokio::test]
@@ -3004,10 +2993,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(r.traces.len() == 1);
-        assert!(r.traces[0].trace_id == [9; 16]);
-        assert!(r.traces[0].span_sets[0].matched == 1);
-        assert!(r.traces[0].span_sets[0].spans[0].span_id == [1; 8]);
+        check!(r.traces.len() == 1);
+        check!(r.traces[0].trace_id == [9; 16]);
+        check!(r.traces[0].span_sets[0].matched == 1);
+        check!(r.traces[0].span_sets[0].spans[0].span_id == [1; 8]);
     }
 
     #[tokio::test]
@@ -3028,9 +3017,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(r.traces.len() == 1);
-        assert!(r.traces[0].span_sets[0].matched == 1);
-        assert!(r.traces[0].span_sets[0].spans[0].span_id == [1; 8]);
+        check!(r.traces.len() == 1);
+        check!(r.traces[0].span_sets[0].matched == 1);
+        check!(r.traces[0].span_sets[0].spans[0].span_id == [1; 8]);
     }
 
     #[tokio::test]
@@ -3051,9 +3040,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(r.traces.len() == 1);
-        assert!(r.traces[0].span_sets[0].matched == 1);
-        assert!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
+        check!(r.traces.len() == 1);
+        check!(r.traces[0].span_sets[0].matched == 1);
+        check!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
     }
 
     #[tokio::test]
