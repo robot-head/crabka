@@ -21,6 +21,7 @@ use std::{
 };
 
 use bytes::{Bytes, BytesMut};
+use crabka_ids::Offset;
 use crabka_protocol::records::RecordBatch;
 use tracing::instrument;
 
@@ -315,7 +316,7 @@ mod core_tests {
 /// `last_offset = base_offset - 1` until a tail-scan populates it,
 /// and `Segment::read(base_offset, ..)` would short-circuit to empty).
 fn read_all_batches(seg: &Segment) -> Result<Vec<RecordBatch>, LogError> {
-    let path = name::log_path(seg.dir(), seg.base_offset());
+    let path = name::log_path(seg.dir(), seg.base_offset().0);
     let bytes = std::fs::read(&path)?;
     let mut cursor: &[u8] = &bytes;
     let mut out: Vec<RecordBatch> = Vec::new();
@@ -340,11 +341,11 @@ fn read_all_batches(seg: &Segment) -> Result<Vec<RecordBatch>, LogError> {
     fields(segments = segments.len(), keys = tracing::field::Empty),
     err,
 )]
-pub fn build_offset_map(segments: &[&Segment]) -> Result<HashMap<Bytes, i64>, LogError> {
+pub fn build_offset_map(segments: &[&Segment]) -> Result<HashMap<Bytes, Offset>, LogError> {
     // Keyed by `Bytes` (cheap refcounted clone of the record key) rather
     // than `Vec<u8>` to avoid a heap copy of every key. Zero-length keys
     // are legal in Kafka and dedup as a distinct "empty key" like any other.
-    let mut map: HashMap<Bytes, i64> = HashMap::new();
+    let mut map: HashMap<Bytes, Offset> = HashMap::new();
     for seg in segments {
         for batch in read_all_batches(seg)? {
             // Control batches (txn commit/abort markers) carry a control-type
@@ -359,7 +360,7 @@ pub fn build_offset_map(segments: &[&Segment]) -> Result<HashMap<Bytes, i64>, Lo
                     continue;
                 }
                 let key_bytes = record.key.as_ref().expect("should_index_key checked Some");
-                let absolute = batch.base_offset + i64::from(record.offset_delta);
+                let absolute = Offset(batch.base_offset + i64::from(record.offset_delta));
                 map.insert(key_bytes.clone(), absolute);
             }
         }
@@ -397,7 +398,7 @@ impl CleanedTransactionMetadata {
     )]
     pub fn build(
         segments: &[&Segment],
-        offset_map: &HashMap<Bytes, i64>,
+        offset_map: &HashMap<Bytes, Offset>,
     ) -> Result<Self, LogError> {
         let mut survivors: HashSet<i64> = HashSet::new();
         let mut aborted: Vec<AbortedTxn> = Vec::new();
@@ -422,7 +423,7 @@ impl CleanedTransactionMetadata {
                     let Some(key_bytes) = record.key.as_ref() else {
                         continue;
                     };
-                    let absolute = batch.base_offset + i64::from(record.offset_delta);
+                    let absolute = Offset(batch.base_offset + i64::from(record.offset_delta));
                     if offset_map.get(key_bytes.as_ref()).copied() == Some(absolute) {
                         survivors.insert(batch.producer_id);
                         break;
@@ -468,6 +469,7 @@ impl CleanedTransactionMetadata {
 mod build_map_tests {
     use assert2::assert;
     use bytes::Bytes;
+    use crabka_ids::Offset;
     use crabka_protocol::records::{Attributes, Record};
     use tempfile::tempdir;
 
@@ -491,7 +493,7 @@ mod build_map_tests {
         base_offset: i64,
         records: Vec<Record>,
     ) -> Segment {
-        let mut seg = Segment::create(dir, base_offset).unwrap();
+        let mut seg = Segment::create(dir, Offset(base_offset)).unwrap();
         let n = i32::try_from(records.len()).expect("record count fits i32");
         let max_ts = records.iter().map(|r| r.timestamp_delta).max().unwrap_or(0);
         let batch = RecordBatch {
@@ -512,7 +514,7 @@ mod build_map_tests {
     /// control batches and mixed data/control layouts.
     pub(super) fn write_sealed_batches(dir: &Path, batches: &[RecordBatch]) -> Segment {
         let base = batches.first().map_or(0, |b| b.base_offset);
-        let mut seg = Segment::create(dir, base).unwrap();
+        let mut seg = Segment::create(dir, Offset(base)).unwrap();
         for batch in batches {
             seg.append(batch, 4096).unwrap();
         }
@@ -563,7 +565,7 @@ mod build_map_tests {
         let segs: Vec<&Segment> = vec![&seg];
         let map = build_offset_map(&segs).unwrap();
         // The data key is present.
-        assert!(map.get(b"k1".as_ref()) == Some(&1));
+        assert!(map.get(b"k1".as_ref()) == Some(&Offset(1)));
         // The control-marker key (\x00\x00\x00\x01) is NOT present.
         let marker_key: &[u8] = &[0, 0, 0, 1];
         assert!(map.get(marker_key) == None);
@@ -584,8 +586,8 @@ mod build_map_tests {
         );
         let segs: Vec<&Segment> = vec![&seg0];
         let map = build_offset_map(&segs).unwrap();
-        assert!(map.get(b"k1".as_ref()) == Some(&2));
-        assert!(map.get(b"k2".as_ref()) == Some(&1));
+        assert!(map.get(b"k1".as_ref()) == Some(&Offset(2)));
+        assert!(map.get(b"k2".as_ref()) == Some(&Offset(1)));
     }
 
     #[test]
@@ -603,7 +605,7 @@ mod build_map_tests {
         let segs: Vec<&Segment> = vec![&seg0];
         let map = build_offset_map(&segs).unwrap();
         assert!(map.len() == 1);
-        assert!(map.get(b"k1".as_ref()) == Some(&1));
+        assert!(map.get(b"k1".as_ref()) == Some(&Offset(1)));
     }
 
     #[test]
@@ -621,7 +623,7 @@ mod build_map_tests {
         );
         let segs: Vec<&Segment> = vec![&seg0, &seg1];
         let map = build_offset_map(&segs).unwrap();
-        assert!(map.get(b"k1".as_ref()) == Some(&10));
+        assert!(map.get(b"k1".as_ref()) == Some(&Offset(10)));
     }
 }
 
@@ -632,10 +634,10 @@ pub struct RewriteOutput {
     pub index_swap: PathBuf,
     pub timeindex_swap: PathBuf,
     /// `base_offset` of the new segment (== lowest input segment).
-    pub new_base_offset: i64,
+    pub new_base_offset: Offset,
     /// Highest absolute offset of any surviving record.
     #[allow(dead_code)]
-    pub new_last_offset: i64,
+    pub new_last_offset: Offset,
     /// Path to the rewritten survivor `.txnindex`, written only when any
     /// aborted-txn entries were carried forward. `None` when no aborted
     /// transactions survive.
@@ -678,22 +680,22 @@ pub struct RewriteOutput {
 pub fn rewrite_segments(
     dir: &Path,
     segments: &[&Segment],
-    offset_map: &HashMap<Bytes, i64>,
+    offset_map: &HashMap<Bytes, Offset>,
     txn_meta: &CleanedTransactionMetadata,
     now_ms: i64,
     delete_retention_ms: i64,
-    active_producers: &HashMap<i64, i64>,
+    active_producers: &HashMap<i64, Offset>,
     _index_interval_bytes: u32,
 ) -> Result<RewriteOutput, LogError> {
     let first = segments
         .first()
         .ok_or_else(|| LogError::Io(std::io::Error::other("rewrite_segments: empty input")))?;
     let new_base = first.base_offset();
-    tracing::Span::current().record("new_base", new_base);
+    tracing::Span::current().record("new_base", new_base.0);
 
-    let log_swap = swap_path(dir, new_base, "log");
-    let index_swap = swap_path(dir, new_base, "index");
-    let timeindex_swap = swap_path(dir, new_base, "timeindex");
+    let log_swap = swap_path(dir, new_base.0, "log");
+    let index_swap = swap_path(dir, new_base.0, "index");
+    let timeindex_swap = swap_path(dir, new_base.0, "timeindex");
 
     // Truncate (or create) all three swap files. We rewrite the .log
     // file proper here; for the index sidecars we write empty files
@@ -748,7 +750,7 @@ pub fn rewrite_segments(
         // decision asks for it (stamp once per batch).
         let mut stamp_horizon: Option<i64> = None;
         for record in &batch.records {
-            let absolute = batch.base_offset + i64::from(record.offset_delta);
+            let absolute = Offset(batch.base_offset + i64::from(record.offset_delta));
             let is_newest_for_key = record
                 .key
                 .as_ref()
@@ -800,7 +802,7 @@ pub fn rewrite_segments(
             let mut buf = BytesMut::with_capacity(out_batch.encoded_len());
             out_batch.encode(&mut buf)?;
             log_file.write_all(&buf)?;
-            let batch_last = out_batch.base_offset + i64::from(out_batch.last_offset_delta);
+            let batch_last = Offset(out_batch.base_offset + i64::from(out_batch.last_offset_delta));
             if batch_last > last_kept_offset {
                 last_kept_offset = batch_last;
             }
@@ -834,7 +836,7 @@ pub fn rewrite_segments(
         out_batch.encode(&mut buf)?;
         log_file.write_all(&buf)?;
 
-        let batch_last = out_batch.base_offset + i64::from(out_batch.last_offset_delta);
+        let batch_last = Offset(out_batch.base_offset + i64::from(out_batch.last_offset_delta));
         if batch_last > last_kept_offset {
             last_kept_offset = batch_last;
         }
@@ -848,7 +850,7 @@ pub fn rewrite_segments(
     let txnindex_swap = if retained.is_empty() {
         None
     } else {
-        let path = swap_path(dir, new_base, "txnindex");
+        let path = swap_path(dir, new_base.0, "txnindex");
         // Truncate any stale swap, then append the retained entries.
         OpenOptions::new()
             .write(true)
@@ -862,7 +864,7 @@ pub fn rewrite_segments(
         Some(path)
     };
 
-    tracing::Span::current().record("new_last_offset", last_kept_offset);
+    tracing::Span::current().record("new_last_offset", last_kept_offset.0);
     Ok(RewriteOutput {
         log_swap,
         index_swap,
@@ -887,6 +889,7 @@ mod rewrite_tests {
     use std::fs;
 
     use assert2::{assert, check};
+    use crabka_ids::Offset;
     use crabka_protocol::records::Record;
 
     use super::{
@@ -902,7 +905,7 @@ mod rewrite_tests {
     fn rewrite_simple(dir: &Path, segs: &[&Segment]) -> RewriteOutput {
         let map = build_offset_map(segs).unwrap();
         let txn = CleanedTransactionMetadata::build(segs, &map).unwrap();
-        let active: HashMap<i64, i64> = HashMap::new();
+        let active: HashMap<i64, Offset> = HashMap::new();
         rewrite_segments(
             dir,
             segs,
@@ -942,7 +945,7 @@ mod rewrite_tests {
         );
         let segs = vec![&seg0];
         let out = rewrite_simple(dir.path(), &segs);
-        assert!(out.new_base_offset == 0);
+        assert!(out.new_base_offset == Offset(0));
 
         // Decode the swap .log to verify contents.
         let bytes = fs::read(&out.log_swap).unwrap();
@@ -992,8 +995,8 @@ mod rewrite_tests {
         );
         let segs = vec![&seg0];
         let out = rewrite_simple(dir.path(), &segs);
-        assert!(out.new_base_offset == 100);
-        assert!(out.new_last_offset == 102);
+        assert!(out.new_base_offset == Offset(100));
+        assert!(out.new_last_offset == Offset(102));
 
         let bytes = std::fs::read(&out.log_swap).unwrap();
         let mut cursor = &bytes[..];
@@ -1170,7 +1173,7 @@ mod rewrite_tests {
         let map = build_offset_map(&segs).unwrap();
         let txn = CleanedTransactionMetadata::build(&segs, &map).unwrap();
         let mut active = HashMap::new();
-        active.insert(1000i64, 0i64); // pid 1000 active, last batch base 0
+        active.insert(1000i64, Offset(0)); // pid 1000 active, last batch base 0
         let out =
             rewrite_segments(dir.path(), &segs, &map, &txn, 0, RET_MS, &active, 4096).unwrap();
         let bytes = fs::read(&out.log_swap).unwrap();
@@ -1206,13 +1209,13 @@ mod rewrite_tests {
     fields(
         dir = %dir.display(),
         consumed = consumed_base_offsets.len(),
-        new_base = rewrite.new_base_offset,
+        new_base = rewrite.new_base_offset.0,
     ),
     err,
 )]
 pub fn atomic_swap(
     dir: &Path,
-    consumed_base_offsets: &[i64],
+    consumed_base_offsets: &[Offset],
     rewrite: &RewriteOutput,
 ) -> Result<(), LogError> {
     // Step 1: fsync swap files. Open with write access so
@@ -1237,27 +1240,30 @@ pub fn atomic_swap(
     // rewritten survivor `.txnindex` carries forward only surviving aborted
     // transactions).
     for base in consumed_base_offsets {
-        let _ = std::fs::remove_file(name::log_path(dir, *base));
-        let _ = std::fs::remove_file(name::index_path(dir, *base));
-        let _ = std::fs::remove_file(name::timeindex_path(dir, *base));
-        let _ = std::fs::remove_file(name::txnindex_path(dir, *base));
+        let _ = std::fs::remove_file(name::log_path(dir, base.0));
+        let _ = std::fs::remove_file(name::index_path(dir, base.0));
+        let _ = std::fs::remove_file(name::timeindex_path(dir, base.0));
+        let _ = std::fs::remove_file(name::txnindex_path(dir, base.0));
     }
 
     // Step 3: rename swap → final.
     std::fs::rename(
         &rewrite.log_swap,
-        name::log_path(dir, rewrite.new_base_offset),
+        name::log_path(dir, rewrite.new_base_offset.0),
     )?;
     std::fs::rename(
         &rewrite.index_swap,
-        name::index_path(dir, rewrite.new_base_offset),
+        name::index_path(dir, rewrite.new_base_offset.0),
     )?;
     std::fs::rename(
         &rewrite.timeindex_swap,
-        name::timeindex_path(dir, rewrite.new_base_offset),
+        name::timeindex_path(dir, rewrite.new_base_offset.0),
     )?;
     if let Some(txn_swap) = &rewrite.txnindex_swap {
-        std::fs::rename(txn_swap, name::txnindex_path(dir, rewrite.new_base_offset))?;
+        std::fs::rename(
+            txn_swap,
+            name::txnindex_path(dir, rewrite.new_base_offset.0),
+        )?;
     }
 
     // Step 4: fsync the directory. On Windows this is a no-op
@@ -1275,6 +1281,7 @@ pub fn atomic_swap(
 #[allow(clippy::similar_names)]
 mod swap_tests {
     use assert2::check;
+    use crabka_ids::Offset;
 
     use super::{
         build_map_tests::{make_record, write_sealed_segment},
@@ -1314,7 +1321,7 @@ mod swap_tests {
             .unwrap()
             // seg0, seg1 dropped here — file handles closed
         };
-        atomic_swap(dir.path(), &[0, 10], &rewrite).unwrap();
+        atomic_swap(dir.path(), &[Offset(0), Offset(10)], &rewrite).unwrap();
 
         // After swap: only one .log (base 0). The base 10 segment is gone.
         check!(name::log_path(dir.path(), 0).exists());

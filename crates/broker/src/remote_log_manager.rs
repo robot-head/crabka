@@ -20,7 +20,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use crabka_log::{LogConfig, SegmentExport};
+use crabka_log::{LogConfig, Offset, SegmentExport};
 use crabka_metadata::NodeId;
 use crabka_remote_storage::{
     LogSegmentData, RemoteLogMetadataManager, RemoteLogSegmentId, RemoteLogSegmentMetadata,
@@ -140,7 +140,7 @@ pub(crate) async fn copy_eligible(
 
     let mut copied = 0;
     for ex in exports {
-        if known.contains(&ex.base_offset) {
+        if known.contains(&ex.base_offset.0) {
             continue;
         }
         if copy_one(tp, broker_id, leader_epoch, &ex, rsm, rlmm).await {
@@ -178,7 +178,7 @@ pub(crate) fn local_retention_target(
 
     let mut delete_through_last: Option<i64> = None;
     for ex in exports {
-        if !finished_bases.contains(&ex.base_offset) {
+        if !finished_bases.contains(&ex.base_offset.0) {
             break;
         }
         let by_time = matches!(
@@ -189,7 +189,7 @@ pub(crate) fn local_retention_target(
         if !(by_time || by_size) {
             break;
         }
-        delete_through_last = Some(ex.last_offset);
+        delete_through_last = Some(ex.last_offset.0);
         if by_size {
             deletable_size_remaining = deletable_size_remaining.saturating_sub(ex.size_bytes);
         }
@@ -246,7 +246,7 @@ pub(crate) async fn local_retention_pass(
 
     let result = {
         let mut log = partition.log.lock().expect("log mutex poisoned");
-        log.delete_local_segments_through(target)
+        log.delete_local_segments_through(Offset(target))
     };
     match result {
         Ok(n) => {
@@ -547,17 +547,22 @@ async fn copy_one(
     rlmm: &Arc<dyn RemoteLogMetadataManager>,
 ) -> bool {
     let id = RemoteLogSegmentId::new(tp.clone(), Uuid::new_v4());
+    // Unwrap the log-layer `Offset`s into the remote-storage metadata's `i64`
+    // world at the seam (`RemoteLogSegmentMetadata` stays raw `i64`).
     let epochs: BTreeMap<i32, i64> = if ex.leader_epochs.is_empty() {
-        BTreeMap::from([(leader_epoch.max(0), ex.base_offset)])
+        BTreeMap::from([(leader_epoch.max(0), ex.base_offset.0)])
     } else {
-        ex.leader_epochs.iter().copied().collect()
+        ex.leader_epochs
+            .iter()
+            .map(|&(epoch, off)| (epoch, off.0))
+            .collect()
     };
     let size = i32::try_from(ex.size_bytes).unwrap_or(i32::MAX);
 
     let metadata = match RemoteLogSegmentMetadata::new(
         id.clone(),
-        ex.base_offset,
-        ex.last_offset,
+        ex.base_offset.0,
+        ex.last_offset.0,
         ex.max_timestamp,
         broker_id,
         now_ms(),
@@ -567,7 +572,7 @@ async fn copy_one(
     ) {
         Ok(m) => m,
         Err(e) => {
-            warn!(topic = %tp.topic, partition = tp.partition, base = ex.base_offset,
+            warn!(topic = %tp.topic, partition = tp.partition, base = ex.base_offset.0,
                   error = %e, "remote-log-manager: skipping segment with invalid metadata");
             return false;
         }
@@ -583,7 +588,7 @@ async fn copy_one(
     let md_started = metadata.clone();
     if let Err(e) = rlmm_mutate(rlmm, move |m| m.add_remote_log_segment_metadata(md_started)).await
     {
-        warn!(topic = %tp.topic, partition = tp.partition, base = ex.base_offset,
+        warn!(topic = %tp.topic, partition = tp.partition, base = ex.base_offset.0,
               error = %e, "remote-log-manager: failed to record CopySegmentStarted");
         return false;
     }
@@ -615,21 +620,21 @@ async fn copy_one(
         };
         if let Err(e) = rlmm_mutate(rlmm, move |m| m.update_remote_log_segment_metadata(upd)).await
         {
-            warn!(topic = %tp.topic, partition = tp.partition, base = ex.base_offset,
+            warn!(topic = %tp.topic, partition = tp.partition, base = ex.base_offset.0,
                   error = %e, "remote-log-manager: failed to record CopySegmentFinished");
             return false;
         }
-        debug!(topic = %tp.topic, partition = tp.partition, base = ex.base_offset,
-               end = ex.last_offset, "remote-log-manager: copied segment to remote tier");
+        debug!(topic = %tp.topic, partition = tp.partition, base = ex.base_offset.0,
+               end = ex.last_offset.0, "remote-log-manager: copied segment to remote tier");
         return true;
     }
 
     // Copy failed (or the blocking task panicked): clean up so the segment
     // is retried next tick.
     match copy_result {
-        Ok(Err(e)) => warn!(topic = %tp.topic, partition = tp.partition, base = ex.base_offset,
+        Ok(Err(e)) => warn!(topic = %tp.topic, partition = tp.partition, base = ex.base_offset.0,
                             error = %e, "remote-log-manager: segment copy failed"),
-        Err(e) => warn!(topic = %tp.topic, partition = tp.partition, base = ex.base_offset,
+        Err(e) => warn!(topic = %tp.topic, partition = tp.partition, base = ex.base_offset.0,
                         error = %e, "remote-log-manager: segment copy task panicked"),
         Ok(Ok(_)) => unreachable!("copy_ok handled above"),
     }
@@ -1168,8 +1173,8 @@ mod tests {
             p
         };
         let export = SegmentExport {
-            base_offset: 0,
-            last_offset: 9,
+            base_offset: Offset(0),
+            last_offset: Offset(9),
             max_timestamp: 42,
             size_bytes: 10,
             log_path: write("00.log", b"0123456789"),
@@ -1188,8 +1193,8 @@ mod tests {
 
     fn synth_export(base: i64, last: i64, max_ts: i64, size: u64) -> SegmentExport {
         SegmentExport {
-            base_offset: base,
-            last_offset: last,
+            base_offset: Offset(base),
+            last_offset: Offset(last),
             max_timestamp: max_ts,
             size_bytes: size,
             log_path: std::path::PathBuf::new(),
@@ -1312,7 +1317,7 @@ mod tests {
         ) else {
             return 0;
         };
-        log.delete_local_segments_through(target).unwrap()
+        log.delete_local_segments_through(Offset(target)).unwrap()
     }
 
     #[tokio::test]

@@ -5,6 +5,7 @@
 
 use std::path::Path;
 
+use crabka_ids::Offset;
 use crabka_log::{Log, LogConfig, RawRead};
 use crabka_protocol::records::RecordBatch;
 
@@ -16,7 +17,7 @@ use crate::{
 pub struct KraftLog {
     log: Log,
     /// Highest committed offset (consensus state; crabka-log does not track it).
-    hwm: i64,
+    hwm: Offset,
 }
 
 impl KraftLog {
@@ -34,15 +35,15 @@ impl KraftLog {
     }
 
     #[must_use]
-    pub fn log_start_offset(&self) -> i64 {
+    pub fn log_start_offset(&self) -> Offset {
         self.log.log_start_offset()
     }
     #[must_use]
-    pub fn log_end_offset(&self) -> i64 {
+    pub fn log_end_offset(&self) -> Offset {
         self.log.log_end_offset()
     }
     #[must_use]
-    pub fn hwm(&self) -> i64 {
+    pub fn hwm(&self) -> Offset {
         self.hwm
     }
 
@@ -51,7 +52,7 @@ impl KraftLog {
     ///
     /// # Errors
     /// Returns [`RaftError`] if the underlying append fails.
-    pub fn append(&mut self, batch: &mut RecordBatch) -> Result<i64, RaftError> {
+    pub fn append(&mut self, batch: &mut RecordBatch) -> Result<Offset, RaftError> {
         Ok(self.log.append(batch)?)
     }
 
@@ -60,7 +61,7 @@ impl KraftLog {
     /// # Errors
     /// Returns [`RaftError`] if the underlying append fails (e.g. `offset` does
     /// not equal the current log end offset).
-    pub fn append_at(&mut self, batch: &mut RecordBatch, offset: i64) -> Result<(), RaftError> {
+    pub fn append_at(&mut self, batch: &mut RecordBatch, offset: Offset) -> Result<(), RaftError> {
         self.log.append_at(batch, offset)?;
         Ok(())
     }
@@ -71,7 +72,7 @@ impl KraftLog {
     /// Returns [`RaftError`] if the underlying read fails.
     pub fn read_decoded(
         &self,
-        offset: i64,
+        offset: Offset,
         max_bytes: usize,
     ) -> Result<Vec<RecordBatch>, RaftError> {
         Ok(self.log.read(offset, max_bytes)?.batches)
@@ -81,13 +82,13 @@ impl KraftLog {
     ///
     /// # Errors
     /// Returns [`RaftError`] if the underlying raw read fails.
-    pub fn read_committed(&self, offset: i64, max_bytes: usize) -> Result<RawRead, RaftError> {
+    pub fn read_committed(&self, offset: Offset, max_bytes: usize) -> Result<RawRead, RaftError> {
         let limit = self.hwm.min(self.log.log_end_offset());
         Ok(self.log.read_raw(offset, limit, max_bytes)?)
     }
 
     /// Advance the high watermark (monotonic; never past the log end).
-    pub fn advance_hwm(&mut self, new_hwm: i64) {
+    pub fn advance_hwm(&mut self, new_hwm: Offset) {
         let clamped = new_hwm.min(self.log.log_end_offset());
         self.hwm = self.hwm.max(clamped);
         debug_assert!(self.hwm <= self.log.log_end_offset());
@@ -97,7 +98,7 @@ impl KraftLog {
     ///
     /// # Errors
     /// Returns [`RaftError`] if the underlying truncation fails.
-    pub fn truncate_to(&mut self, offset: i64) -> Result<(), RaftError> {
+    pub fn truncate_to(&mut self, offset: Offset) -> Result<(), RaftError> {
         debug_assert!(offset >= self.log.log_start_offset());
         self.log.truncate_to(offset)?;
         self.hwm = self.hwm.min(offset);
@@ -110,7 +111,7 @@ impl KraftLog {
     ///
     /// # Errors
     /// Returns [`RaftError`] if the underlying log operations fail.
-    pub fn prune_to(&mut self, end_offset: i64) -> Result<(), RaftError> {
+    pub fn prune_to(&mut self, end_offset: Offset) -> Result<(), RaftError> {
         if end_offset <= self.log.log_start_offset() {
             return Ok(());
         }
@@ -125,7 +126,7 @@ impl KraftLog {
     ///
     /// # Errors
     /// Returns [`RaftError`] if the underlying reset fails.
-    pub fn install_snapshot(&mut self, end_offset: i64) -> Result<(), RaftError> {
+    pub fn install_snapshot(&mut self, end_offset: Offset) -> Result<(), RaftError> {
         self.log.reset_to(end_offset)?;
         self.hwm = end_offset;
         Ok(())
@@ -133,8 +134,11 @@ impl KraftLog {
 }
 
 impl LogView for KraftLog {
+    // `LogView` is defined by the pure `crabka-kraft-core` consensus engine and
+    // speaks raw `i64` offsets; unwrap the `crabka-log` `Offset`s with `.0` at
+    // this boundary so the core sees the integers it expects.
     fn end_offset(&self) -> i64 {
-        self.log.log_end_offset()
+        self.log.log_end_offset().0
     }
     fn last_epoch(&self) -> LeaderEpoch {
         // crabka-log epochs are i32 and non-negative; 0 for an empty log.
@@ -147,6 +151,7 @@ impl LogView for KraftLog {
             .log
             .epoch_checkpoint()
             .end_offset_for_epoch(epoch_i32, log_end)
+            .0
         {
             -1 => None,
             off => Some(off),
@@ -193,9 +198,9 @@ mod tests {
     #[test]
     fn opens_empty_at_offset_zero() {
         let (log, _dir) = open_tmp();
-        check!(log.log_start_offset() == 0);
-        check!(log.log_end_offset() == 0);
-        check!(log.hwm() == 0);
+        check!(log.log_start_offset() == Offset(0));
+        check!(log.log_end_offset() == Offset(0));
+        check!(log.hwm() == Offset(0));
     }
 
     #[test]
@@ -203,10 +208,10 @@ mod tests {
         let (mut log, _dir) = open_tmp();
         let off0 = log.append(&mut batch(0, 1, b"a")).unwrap();
         let off1 = log.append(&mut batch(0, 1, b"b")).unwrap();
-        assert!(off0 == 0 && off1 == 1);
-        assert!(log.log_end_offset() == 2);
+        assert!(off0 == Offset(0) && off1 == Offset(1));
+        assert!(log.log_end_offset() == Offset(2));
         // read back decoded
-        let out = log.read_decoded(0, 1 << 20).unwrap();
+        let out = log.read_decoded(Offset(0), 1 << 20).unwrap();
         assert!(out.len() == 2);
         assert!(out[0].partition_leader_epoch == 1);
     }
@@ -217,15 +222,15 @@ mod tests {
 
         let first = log.append(&mut batch(0, 1, b"a")).unwrap();
         let second = log.append(&mut batch(0, 1, b"b")).unwrap();
-        let decoded = log.read_decoded(0, 1 << 20).unwrap();
+        let decoded = log.read_decoded(Offset(0), 1 << 20).unwrap();
 
-        check!(first == 0);
-        check!(second == 1);
+        check!(first == Offset(0));
+        check!(second == Offset(1));
         assert!(decoded.len() == 2);
-        check!(decoded[0].base_offset == first);
-        check!(decoded[1].base_offset == second);
-        check!(log.log_end_offset() == i64::try_from(decoded.len()).unwrap());
-        check!(log.log_end_offset() == LogView::end_offset(&log));
+        check!(decoded[0].base_offset == first.0);
+        check!(decoded[1].base_offset == second.0);
+        check!(log.log_end_offset() == Offset(i64::try_from(decoded.len()).unwrap()));
+        check!(log.log_end_offset().0 == LogView::end_offset(&log));
     }
 
     #[test]
@@ -234,22 +239,22 @@ mod tests {
         for _ in 0..3 {
             log.append(&mut batch(0, 1, b"x")).unwrap();
         }
-        log.advance_hwm(2);
-        assert!(log.hwm() == 2);
+        log.advance_hwm(Offset(2));
+        assert!(log.hwm() == Offset(2));
 
-        log.install_snapshot(9).unwrap();
-        check!(log.hwm() == 9);
-        check!(log.log_start_offset() == 9);
-        check!(log.log_end_offset() == 9);
+        log.install_snapshot(Offset(9)).unwrap();
+        check!(log.hwm() == Offset(9));
+        check!(log.log_start_offset() == Offset(9));
+        check!(log.log_end_offset() == Offset(9));
     }
 
     #[test]
     fn append_at_preserves_leader_offset() {
         let (mut log, _dir) = open_tmp();
         // follower applies a leader-assigned batch at offset 0
-        log.append_at(&mut batch(0, 2, b"x"), 0).unwrap();
-        assert!(log.log_end_offset() == 1);
-        assert!(log.read_decoded(0, 1 << 20).unwrap()[0].partition_leader_epoch == 2);
+        log.append_at(&mut batch(0, 2, b"x"), Offset(0)).unwrap();
+        assert!(log.log_end_offset() == Offset(1));
+        assert!(log.read_decoded(Offset(0), 1 << 20).unwrap()[0].partition_leader_epoch == 2);
     }
 
     #[test]
@@ -288,13 +293,13 @@ mod tests {
         for _ in 0..5 {
             log.append(&mut batch(0, 1, b"x")).unwrap();
         } // offsets 0..5
-        log.advance_hwm(3);
-        let r = log.read_committed(0, 1 << 20).unwrap();
+        log.advance_hwm(Offset(3));
+        let r = log.read_committed(Offset(0), 1 << 20).unwrap();
         // bytes contain only batches with base_offset < 3 (offsets 0,1,2)
-        let decoded = log.read_decoded(0, 1 << 20).unwrap();
+        let decoded = log.read_decoded(Offset(0), 1 << 20).unwrap();
         let committed: Vec<_> = decoded.into_iter().filter(|b| b.base_offset < 3).collect();
         check!(committed.len() == 3);
-        check!(r.start_offset == 0);
+        check!(r.start_offset == Offset(0));
         // total committed bytes equals the size of the first 3 batches
         check!(!r.bytes.is_empty());
     }
@@ -303,10 +308,10 @@ mod tests {
     fn advance_hwm_is_monotonic_and_clamped_to_log_end() {
         let (mut log, _dir) = open_tmp();
         log.append(&mut batch(0, 1, b"x")).unwrap(); // log_end = 1
-        log.advance_hwm(5); // clamp to log_end
-        assert!(log.hwm() == 1);
-        log.advance_hwm(0); // never regress
-        assert!(log.hwm() == 1);
+        log.advance_hwm(Offset(5)); // clamp to log_end
+        assert!(log.hwm() == Offset(1));
+        log.advance_hwm(Offset(0)); // never regress
+        assert!(log.hwm() == Offset(1));
     }
 
     #[test]
@@ -316,11 +321,11 @@ mod tests {
             log.append(&mut batch(0, 1, b"x")).unwrap();
         }
         log.advance_hwm(log.log_end_offset());
-        assert!(log.log_start_offset() == 0);
-        log.prune_to(3).unwrap();
-        assert!(log.log_start_offset() == 3);
-        log.prune_to(2).unwrap(); // <= current start: no-op
-        assert!(log.log_start_offset() == 3);
+        assert!(log.log_start_offset() == Offset(0));
+        log.prune_to(Offset(3)).unwrap();
+        assert!(log.log_start_offset() == Offset(3));
+        log.prune_to(Offset(2)).unwrap(); // <= current start: no-op
+        assert!(log.log_start_offset() == Offset(3));
     }
 
     #[test]
@@ -329,12 +334,12 @@ mod tests {
         for _ in 0..4 {
             log.append(&mut batch(0, 1, b"x")).unwrap();
         }
-        log.install_snapshot(100).unwrap();
-        check!(log.log_start_offset() == 100);
-        check!(log.log_end_offset() == 100);
-        check!(log.hwm() == 100);
+        log.install_snapshot(Offset(100)).unwrap();
+        check!(log.log_start_offset() == Offset(100));
+        check!(log.log_end_offset() == Offset(100));
+        check!(log.hwm() == Offset(100));
         let base = log.append(&mut batch(0, 1, b"x")).unwrap();
-        assert!(base == 100);
+        assert!(base == Offset(100));
     }
 
     #[test]
@@ -343,9 +348,9 @@ mod tests {
         for _ in 0..5 {
             log.append(&mut batch(0, 1, b"x")).unwrap();
         }
-        log.advance_hwm(5);
-        log.truncate_to(2).unwrap();
-        assert!(log.log_end_offset() == 2);
-        assert!(log.hwm() == 2); // hwm clamped down to the truncation point
+        log.advance_hwm(Offset(5));
+        log.truncate_to(Offset(2)).unwrap();
+        assert!(log.log_end_offset() == Offset(2));
+        assert!(log.hwm() == Offset(2)); // hwm clamped down to the truncation point
     }
 }

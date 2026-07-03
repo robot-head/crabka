@@ -13,6 +13,7 @@
 use std::{sync::Arc, time::Duration};
 
 use bytes::BytesMut;
+use crabka_log::Offset;
 use crabka_metadata::AclOperation;
 use crabka_protocol::{
     Decode, Encode,
@@ -347,11 +348,11 @@ pub(crate) async fn handle(
                     log.epoch_checkpoint()
                         .epoch_and_offset_for(req_last_fetched_epoch, leo)
                 };
-                if found_epoch < req_last_fetched_epoch || end_offset < fetch_offset {
+                if found_epoch < req_last_fetched_epoch || end_offset.0 < fetch_offset {
                     out.error_code = codes::NONE;
                     out.diverging_epoch = EpochEndOffset {
                         epoch: found_epoch,
-                        end_offset,
+                        end_offset: end_offset.0,
                         ..Default::default()
                     };
                     pending.push(PendingRead {
@@ -1088,9 +1089,10 @@ async fn do_read(
 
     let (log_start, w, plan) = {
         let log = part.log.lock().expect("log mutex poisoned");
-        let log_start = log.log_start_offset();
-        let log_end = log.log_end_offset();
-        let lso = log.lso();
+        // Unwrap the log-layer `Offset`s into broker's `i64` world at the seam.
+        let log_start = log.log_start_offset().0;
+        let log_end = log.log_end_offset().0;
+        let lso = log.lso().0;
         let w = compute_visibility_window(
             is_follower_fetch,
             read_committed,
@@ -1159,7 +1161,11 @@ async fn do_read(
                 let records: RecordsPayload = {
                     let mut chosen: Option<RecordsPayload> = None;
                     if sendfile_capable {
-                        let desc = log.read_raw_desc(fetch_offset, limit_offset, read_max)?;
+                        let desc = log.read_raw_desc(
+                            Offset(fetch_offset),
+                            Offset(limit_offset),
+                            read_max,
+                        )?;
                         if desc.total >= crate::network::fetch_writer::SENDFILE_MIN_BYTES
                             && !desc.regions.is_empty()
                         {
@@ -1169,7 +1175,8 @@ async fn do_read(
                     match chosen {
                         Some(p) => p,
                         None => RecordsPayload::Raw(
-                            log.read_raw(fetch_offset, limit_offset, read_max)?.bytes,
+                            log.read_raw(Offset(fetch_offset), Offset(limit_offset), read_max)?
+                                .bytes,
                         ),
                     }
                 };
@@ -1186,7 +1193,10 @@ async fn do_read(
                 )))]
                 let records: RecordsPayload = {
                     let _ = sendfile_capable;
-                    RecordsPayload::Raw(log.read_raw(fetch_offset, limit_offset, read_max)?.bytes)
+                    RecordsPayload::Raw(
+                        log.read_raw(Offset(fetch_offset), Offset(limit_offset), read_max)?
+                            .bytes,
+                    )
                 };
 
                 // read_committed does NO server-side batch filtering: verbatim
@@ -1196,17 +1206,18 @@ async fn do_read(
                 // entirely when there are no aborted txns in range.
                 let aborted = if read_committed_aborts {
                     let mut it = log
-                        .aborted_in_range(fetch_offset, effective_lso)
+                        .aborted_in_range(Offset(fetch_offset), Offset(effective_lso))
                         .into_iter();
                     if let Some(first) = it.next() {
                         let mut v = vec![AbortedTransaction {
                             producer_id: first.producer_id,
-                            first_offset: first.start_offset,
+                            // Unwrap the log-layer `Offset` into the wire `i64` field.
+                            first_offset: first.start_offset.0,
                             ..Default::default()
                         }];
                         v.extend(it.map(|e| AbortedTransaction {
                             producer_id: e.producer_id,
-                            first_offset: e.start_offset,
+                            first_offset: e.start_offset.0,
                             ..Default::default()
                         }));
                         v
@@ -1296,7 +1307,7 @@ async fn try_remote_read(broker: &Broker, p: &mut PendingRead, part: &Partition)
     let leader_epoch = {
         let log = part.log.lock().expect("log mutex poisoned");
         log.epoch_checkpoint()
-            .epoch_for_offset(p.fetch_offset)
+            .epoch_for_offset(Offset(p.fetch_offset))
             .unwrap_or(current_leader_epoch)
     };
     let max_bytes = usize::try_from(p.max_bytes.max(0)).unwrap_or(0);

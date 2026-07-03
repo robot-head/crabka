@@ -277,7 +277,9 @@ fn future_offset_lag(
                 .future_log
                 .lock()
                 .expect("future log mutex poisoned")
+                // Unwrap the log-layer `Offset` into broker's `i64` world at the seam.
                 .log_end_offset()
+                .0
         });
     (current_leo - future_leo).max(0)
 }

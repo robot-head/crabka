@@ -9,6 +9,7 @@ use std::{
 };
 
 use bytes::Bytes;
+use crabka_ids::Offset;
 use crabka_protocol::records::{
     HEADER_LEN, RecordBatch, RecordBatchHeader, patch_base_offset_and_leader_epoch,
 };
@@ -81,7 +82,7 @@ fn read_at(file: &File, offset: u64, buf: &mut [u8]) -> std::io::Result<usize> {
 pub struct Segment {
     #[allow(dead_code)] // used by later phases (Log retention, recovery).
     dir: PathBuf,
-    base_offset: i64,
+    base_offset: Offset,
     /// The `.log` data file. Wrapped in `Arc` so the zero-copy fetch path
     /// (Increment D) can hand a `FileRegion { file: Arc<File>, .. }` to the
     /// connection's async `sendfile` loop; the `Arc` pins the inode through the
@@ -98,16 +99,16 @@ pub struct Segment {
     /// Highest timestamp observed across all batches written here.
     max_timestamp: i64,
     /// Last absolute offset (inclusive) of any batch in this segment.
-    last_offset: i64,
+    last_offset: Offset,
 }
 
 /// Verbatim, decode-free output of [`Segment::read_raw`].
 #[derive(Debug, Clone)]
 pub struct RawSegmentRead {
     /// `base_offset` of the first included batch (≤ requested offset).
-    pub start_offset: i64,
+    pub start_offset: Offset,
     /// Last absolute offset covered by `bytes` (`start_offset - 1` if empty).
-    pub last_offset: i64,
+    pub last_offset: Offset,
     /// Verbatim `.log` bytes — one or more complete v2 batches.
     pub bytes: Bytes,
 }
@@ -122,9 +123,9 @@ crate::sendfile_cfg! {
     #[derive(Debug, Clone)]
     pub struct RawSegmentDesc {
         /// `base_offset` of the first included batch (≤ requested offset).
-        pub start_offset: i64,
+        pub start_offset: Offset,
         /// Last absolute offset covered by the region (`start_offset - 1` if empty).
-        pub last_offset: i64,
+        pub last_offset: Offset,
         /// The records run, as a file-backed descriptor. `None` when no complete
         /// batch was found in range.
         pub region: Option<crabka_protocol::records::FileRegion>,
@@ -133,8 +134,8 @@ crate::sendfile_cfg! {
     impl RawSegmentDesc {
         fn empty() -> Self {
             Self {
-                start_offset: 0,
-                last_offset: -1,
+                start_offset: Offset(0),
+                last_offset: Offset(-1),
                 region: None,
             }
         }
@@ -156,8 +157,8 @@ crate::sendfile_cfg! {
 impl RawSegmentRead {
     fn empty() -> Self {
         Self {
-            start_offset: 0,
-            last_offset: -1,
+            start_offset: Offset(0),
+            last_offset: Offset(-1),
             bytes: Bytes::new(),
         }
     }
@@ -175,18 +176,18 @@ impl Segment {
     #[instrument(
         level = "debug",
         skip_all,
-        fields(dir = %dir.display(), base_offset),
+        fields(dir = %dir.display(), base_offset = base_offset.0),
         err,
     )]
-    pub fn create(dir: &Path, base_offset: i64) -> Result<Self, LogError> {
-        let log_path = name::log_path(dir, base_offset);
+    pub fn create(dir: &Path, base_offset: Offset) -> Result<Self, LogError> {
+        let log_path = name::log_path(dir, base_offset.0);
         let log_file = OpenOptions::new()
             .read(true)
             .write(true)
             .create_new(true)
             .open(&log_path)?;
-        let offset_index = OffsetIndex::open(&name::index_path(dir, base_offset))?;
-        let time_index = TimeIndex::open(&name::timeindex_path(dir, base_offset))?;
+        let offset_index = OffsetIndex::open(&name::index_path(dir, base_offset.0))?;
+        let time_index = TimeIndex::open(&name::timeindex_path(dir, base_offset.0))?;
         Ok(Self {
             dir: dir.to_path_buf(),
             base_offset,
@@ -207,10 +208,10 @@ impl Segment {
     #[instrument(
         level = "info",
         skip_all,
-        fields(dir = %dir.display(), base_offset, validate),
+        fields(dir = %dir.display(), base_offset = base_offset.0, validate),
         err,
     )]
-    pub fn open_active(dir: &Path, base_offset: i64, validate: bool) -> Result<Self, LogError> {
+    pub fn open_active(dir: &Path, base_offset: Offset, validate: bool) -> Result<Self, LogError> {
         let mut seg = Self::open(dir, base_offset)?;
         if validate {
             seg.recover_active_tail()?;
@@ -222,7 +223,7 @@ impl Segment {
         level = "debug",
         skip_all,
         fields(
-            base_offset = self.base_offset,
+            base_offset = self.base_offset.0,
             log_size = self.log_size,
             recovered_last_offset = tracing::field::Empty,
         ),
@@ -251,7 +252,7 @@ impl Segment {
                 break;
             };
             consumed += (before - cur.len()) as u64;
-            last_offset = batch.base_offset + i64::from(batch.last_offset_delta);
+            last_offset = Offset(batch.base_offset + i64::from(batch.last_offset_delta));
             if batch.max_timestamp > max_ts {
                 max_ts = batch.max_timestamp;
             }
@@ -265,7 +266,7 @@ impl Segment {
         seek_to_log_size(&self.log_file, self.log_size)?;
         self.last_offset = last_offset;
         self.max_timestamp = max_ts;
-        tracing::Span::current().record("recovered_last_offset", last_offset);
+        tracing::Span::current().record("recovered_last_offset", last_offset.0);
         Ok(())
     }
 
@@ -277,16 +278,16 @@ impl Segment {
     #[instrument(
         level = "debug",
         skip_all,
-        fields(dir = %dir.display(), base_offset),
+        fields(dir = %dir.display(), base_offset = base_offset.0),
         err,
     )]
-    pub fn open(dir: &Path, base_offset: i64) -> Result<Self, LogError> {
-        let log_path = name::log_path(dir, base_offset);
+    pub fn open(dir: &Path, base_offset: Offset) -> Result<Self, LogError> {
+        let log_path = name::log_path(dir, base_offset.0);
         let log_file = OpenOptions::new().read(true).write(true).open(&log_path)?;
         let log_size = log_file.metadata()?.len();
         seek_to_log_size(&log_file, log_size)?;
-        let offset_index = OffsetIndex::open(&name::index_path(dir, base_offset))?;
-        let time_index = TimeIndex::open(&name::timeindex_path(dir, base_offset))?;
+        let offset_index = OffsetIndex::open(&name::index_path(dir, base_offset.0))?;
+        let time_index = TimeIndex::open(&name::timeindex_path(dir, base_offset.0))?;
         Ok(Self {
             dir: dir.to_path_buf(),
             base_offset,
@@ -302,14 +303,14 @@ impl Segment {
 
     /// Absolute offset of the first record this segment can hold.
     #[must_use]
-    pub fn base_offset(&self) -> i64 {
+    pub fn base_offset(&self) -> Offset {
         self.base_offset
     }
 
     /// Path to this segment's `.txnindex` file (may not exist yet).
     #[must_use]
     pub fn txn_index_path(&self) -> std::path::PathBuf {
-        crate::name::txnindex_path(&self.dir, self.base_offset)
+        crate::name::txnindex_path(&self.dir, self.base_offset.0)
     }
 
     /// Path to the per-partition `.leader-epoch-checkpoint` file in this
@@ -323,7 +324,7 @@ impl Segment {
     /// Highest absolute offset (inclusive) of any batch appended to this
     /// segment. Returns `base_offset - 1` for an empty segment.
     #[must_use]
-    pub fn last_offset(&self) -> i64 {
+    pub fn last_offset(&self) -> Offset {
         self.last_offset
     }
 
@@ -347,7 +348,7 @@ impl Segment {
     /// scan — matching Kafka's `LogSegment.findOffsetByTimestamp`).
     /// Returns `None` when no record in this segment qualifies.
     #[must_use]
-    pub fn offset_for_timestamp(&self, target_ts: i64) -> Option<(i64, i64)> {
+    pub fn offset_for_timestamp(&self, target_ts: i64) -> Option<(Offset, i64)> {
         let floor_rel = self.time_index.lookup(target_ts);
         let scan_from = self.base_offset + i64::from(floor_rel);
         self.scan_from_floor(scan_from, |ts| ts >= target_ts)
@@ -359,7 +360,7 @@ impl Segment {
     /// index's floor for the max to start the scan, then scans forward
     /// for the first record whose timestamp equals the segment max.
     #[must_use]
-    pub fn offset_of_max_timestamp(&self) -> Option<(i64, i64)> {
+    pub fn offset_of_max_timestamp(&self) -> Option<(Offset, i64)> {
         if self.max_timestamp == i64::MIN {
             return None;
         }
@@ -382,7 +383,11 @@ impl Segment {
     /// past the last batch read and the next window is fetched. The loop
     /// terminates once the cursor passes `last_offset` (see termination
     /// argument in [`Segment::scan_from_floor_windowed`]).
-    fn scan_from_floor(&self, floor_offset: i64, pred: impl Fn(i64) -> bool) -> Option<(i64, i64)> {
+    fn scan_from_floor(
+        &self,
+        floor_offset: Offset,
+        pred: impl Fn(i64) -> bool,
+    ) -> Option<(Offset, i64)> {
         // One window roughly covers a default index interval's worth of
         // log bytes, so a floor lookup typically lands a match in the
         // first read.
@@ -403,10 +408,10 @@ impl Segment {
     /// window is bounded by the largest batch rather than the whole tail.
     fn scan_from_floor_windowed(
         &self,
-        floor_offset: i64,
+        floor_offset: Offset,
         window_bytes: usize,
         pred: impl Fn(i64) -> bool,
-    ) -> Option<(i64, i64)> {
+    ) -> Option<(Offset, i64)> {
         let mut cursor = floor_offset;
         let mut window = window_bytes.max(1);
         loop {
@@ -425,7 +430,7 @@ impl Segment {
                 for rec in &batch.records {
                     let ts = batch.base_timestamp + rec.timestamp_delta;
                     if pred(ts) {
-                        return Some((batch.base_offset + i64::from(rec.offset_delta), ts));
+                        return Some((Offset(batch.base_offset + i64::from(rec.offset_delta)), ts));
                     }
                 }
             }
@@ -433,7 +438,7 @@ impl Segment {
             // read. `read` includes the batch covering `cursor`, so
             // `last_read` >= cursor and the cursor strictly advances.
             let last = batches.last().expect("non-empty checked above");
-            let last_read = last.base_offset + i64::from(last.last_offset_delta);
+            let last_read = Offset(last.base_offset + i64::from(last.last_offset_delta));
             cursor = last_read + 1;
         }
     }
@@ -451,14 +456,14 @@ impl Segment {
     #[instrument(
         level = "debug",
         skip(self),
-        fields(base_offset = self.base_offset, batches = tracing::field::Empty),
+        fields(base_offset = self.base_offset.0, batches = tracing::field::Empty),
         err,
     )]
-    pub fn read(&self, offset: i64, max_bytes: usize) -> Result<Vec<RecordBatch>, LogError> {
+    pub fn read(&self, offset: Offset, max_bytes: usize) -> Result<Vec<RecordBatch>, LogError> {
         if offset > self.last_offset {
             return Ok(vec![]);
         }
-        let target_rel = u32::try_from((offset - self.base_offset).max(0))
+        let target_rel = u32::try_from((offset.0 - self.base_offset.0).max(0))
             .map_err(|_| LogError::BadSegmentName("target offset out of range".into()))?;
         let start_pos = u64::from(self.offset_index.lookup(target_rel));
 
@@ -475,7 +480,7 @@ impl Segment {
                 break; // partial trailing batch — stop.
             };
             let consumed = before - cursor.len();
-            let batch_last = batch.base_offset + i64::from(batch.last_offset_delta);
+            let batch_last = Offset(batch.base_offset + i64::from(batch.last_offset_delta));
             if batch_last >= offset {
                 out.push(batch);
                 total += consumed;
@@ -496,19 +501,19 @@ impl Segment {
     #[instrument(
         level = "debug",
         skip(self),
-        fields(base_offset = self.base_offset, bytes = tracing::field::Empty),
+        fields(base_offset = self.base_offset.0, bytes = tracing::field::Empty),
         err,
     )]
     pub fn read_raw(
         &self,
-        fetch_offset: i64,
-        limit_offset: i64,
+        fetch_offset: Offset,
+        limit_offset: Offset,
         max_bytes: usize,
     ) -> Result<RawSegmentRead, LogError> {
         if fetch_offset > self.last_offset || fetch_offset >= limit_offset {
             return Ok(RawSegmentRead::empty());
         }
-        let target_rel = u32::try_from((fetch_offset - self.base_offset).max(0))
+        let target_rel = u32::try_from((fetch_offset.0 - self.base_offset.0).max(0))
             .map_err(|_| LogError::Corrupt("read_raw target offset out of range".into()))?;
         let start_pos = u64::from(self.offset_index.lookup(target_rel));
 
@@ -528,16 +533,17 @@ impl Segment {
             }
             let hdr = RecordBatchHeader::ref_from_bytes(&buf[pos..pos + HEADER_LEN])
                 .map_err(|_| LogError::Corrupt("record batch header".into()))?;
+            // Wire values from the fixed v2 header stay raw `i64`.
             let base = hdr.base_offset.get();
             let batch_len = usize::try_from(hdr.batch_length.get().max(0)).unwrap_or(0);
             let total = 12 + batch_len;
             let batch_last = base + i64::from(hdr.last_offset_delta.get());
 
-            if batch_last < fetch_offset {
+            if batch_last < fetch_offset.0 {
                 pos += total;
                 continue;
             }
-            if base >= limit_offset {
+            if base >= limit_offset.0 {
                 break;
             }
             if pos + total > buf.len() {
@@ -548,8 +554,8 @@ impl Segment {
                         break;
                     }
                     return Ok(RawSegmentRead {
-                        start_offset: base,
-                        last_offset: batch_last,
+                        start_offset: Offset(base),
+                        last_offset: Offset(batch_last),
                         bytes: Bytes::from(one),
                     });
                 }
@@ -558,10 +564,10 @@ impl Segment {
 
             if range_start.is_none() {
                 range_start = Some(pos);
-                start_offset = base;
+                start_offset = Offset(base);
             }
             range_end = pos + total;
-            last_offset = batch_last;
+            last_offset = Offset(batch_last);
             pos += total;
 
             if range_end - range_start.expect("set above") >= max_bytes {
@@ -597,19 +603,19 @@ impl Segment {
     #[instrument(
         level = "debug",
         skip(self),
-        fields(base_offset = self.base_offset),
+        fields(base_offset = self.base_offset.0),
         err,
     )]
     pub fn read_raw_desc(
         &self,
-        fetch_offset: i64,
-        limit_offset: i64,
+        fetch_offset: Offset,
+        limit_offset: Offset,
         max_bytes: usize,
     ) -> Result<RawSegmentDesc, LogError> {
         if fetch_offset > self.last_offset || fetch_offset >= limit_offset {
             return Ok(RawSegmentDesc::empty());
         }
-        let target_rel = u32::try_from((fetch_offset - self.base_offset).max(0))
+        let target_rel = u32::try_from((fetch_offset.0 - self.base_offset.0).max(0))
             .map_err(|_| LogError::Corrupt("read_raw_desc target offset out of range".into()))?;
         let start_pos = u64::from(self.offset_index.lookup(target_rel));
 
@@ -644,16 +650,17 @@ impl Segment {
             }
             let hdr = RecordBatchHeader::ref_from_bytes(&hdr_buf)
                 .map_err(|_| LogError::Corrupt("record batch header".into()))?;
+            // Wire values from the fixed v2 header stay raw `i64`.
             let base = hdr.base_offset.get();
             let batch_len = usize::try_from(hdr.batch_length.get().max(0)).unwrap_or(0);
             let total = 12 + batch_len as u64;
             let batch_last = base + i64::from(hdr.last_offset_delta.get());
 
-            if batch_last < fetch_offset {
+            if batch_last < fetch_offset.0 {
                 pos += total;
                 continue;
             }
-            if base >= limit_offset {
+            if base >= limit_offset.0 {
                 break;
             }
             // Batch straddles the window end. `read_raw` re-reads exactly one
@@ -668,8 +675,8 @@ impl Segment {
                     let len = usize::try_from(total)
                         .map_err(|_| LogError::Corrupt("read_raw_desc batch too large".into()))?;
                     return Ok(RawSegmentDesc {
-                        start_offset: base,
-                        last_offset: batch_last,
+                        start_offset: Offset(base),
+                        last_offset: Offset(batch_last),
                         region: Some(crabka_protocol::records::FileRegion {
                             file: Arc::clone(&self.log_file),
                             offset: start_pos + pos,
@@ -682,10 +689,10 @@ impl Segment {
 
             if range_start.is_none() {
                 range_start = Some(pos);
-                start_offset = base;
+                start_offset = Offset(base);
             }
             range_end = pos + total;
-            last_offset = batch_last;
+            last_offset = Offset(batch_last);
             pos += total;
 
             if range_end - range_start.expect("set above") >= max_bytes as u64 {
@@ -739,7 +746,7 @@ impl Segment {
         level = "debug",
         skip(self, batch),
         fields(
-            base_offset = self.base_offset,
+            base_offset = self.base_offset.0,
             batch_base = batch.base_offset,
             bytes = batch.encoded_len(),
             position = tracing::field::Empty,
@@ -765,7 +772,7 @@ impl Segment {
         (&*self.log_file).write_all(&bytes)?;
         self.log_size += bytes.len() as u64;
 
-        let last_offset = batch.base_offset + i64::from(batch.last_offset_delta);
+        let last_offset = Offset(batch.base_offset + i64::from(batch.last_offset_delta));
         self.last_offset = last_offset;
         if batch.max_timestamp > self.max_timestamp {
             self.max_timestamp = batch.max_timestamp;
@@ -778,7 +785,7 @@ impl Segment {
             }
         };
         if should_index {
-            let rel = u32::try_from(batch.base_offset - self.base_offset)
+            let rel = u32::try_from(batch.base_offset - self.base_offset.0)
                 .map_err(|_| LogError::BadSegmentName("offset overflow in segment".into()))?;
             let pos_u32 = u32::try_from(position)
                 .map_err(|_| LogError::BadSegmentName("position overflow in segment".into()))?;
@@ -811,8 +818,8 @@ impl Segment {
         level = "debug",
         skip(self, bytes),
         fields(
-            seg_base_offset = self.base_offset,
-            base_offset,
+            seg_base_offset = self.base_offset.0,
+            base_offset = base_offset.0,
             bytes_len = bytes.len(),
             position = tracing::field::Empty,
         ),
@@ -821,7 +828,7 @@ impl Segment {
     pub fn append_verbatim(
         &mut self,
         bytes: &[u8],
-        base_offset: i64,
+        base_offset: Offset,
         last_offset_delta: i32,
         max_timestamp: i64,
         leader_epoch: i32,
@@ -847,7 +854,7 @@ impl Segment {
         // body without an lseek or full-payload copy.
         let mut header = [0u8; HEADER_LEN];
         header.copy_from_slice(&bytes[..HEADER_LEN]);
-        patch_base_offset_and_leader_epoch(&mut header, base_offset, leader_epoch);
+        patch_base_offset_and_leader_epoch(&mut header, base_offset.0, leader_epoch);
 
         let position = self.log_size;
         let mut bufs = [IoSlice::new(&header), IoSlice::new(&bytes[HEADER_LEN..])];
@@ -867,7 +874,7 @@ impl Segment {
             }
         };
         if should_index {
-            let rel = u32::try_from(base_offset - self.base_offset)
+            let rel = u32::try_from(base_offset.0 - self.base_offset.0)
                 .map_err(|_| LogError::BadSegmentName("offset overflow in segment".into()))?;
             let pos_u32 = u32::try_from(position)
                 .map_err(|_| LogError::BadSegmentName("position overflow in segment".into()))?;
@@ -895,7 +902,7 @@ impl Segment {
     /// fetch_offset` — would skip the first sealed segment after a restart and
     /// serve a later segment's base offset, manufacturing an offset gap (a
     /// follower fetching at 0 then loops on the resulting append mismatch).
-    pub fn seal_at(&mut self, last: i64) {
+    pub fn seal_at(&mut self, last: Offset) {
         self.sealed = true;
         self.last_offset = last;
     }
@@ -914,7 +921,7 @@ impl Segment {
     #[instrument(
         level = "debug",
         skip_all,
-        fields(base_offset = self.base_offset, log_size = self.log_size),
+        fields(base_offset = self.base_offset.0, log_size = self.log_size),
         err,
     )]
     pub fn flush(&mut self) -> Result<(), LogError> {
@@ -929,7 +936,7 @@ impl Segment {
     #[instrument(
         level = "info",
         skip(self),
-        fields(base_offset = self.base_offset, new_last_offset = tracing::field::Empty),
+        fields(base_offset = self.base_offset.0, new_last_offset = tracing::field::Empty),
         err,
     )]
     pub fn truncate_to_relative(&mut self, rel: u32) -> Result<(), LogError> {
@@ -955,7 +962,7 @@ impl Segment {
             let Ok(batch) = RecordBatch::decode(&mut cur) else {
                 break;
             };
-            let batch_last_offset = batch.base_offset + i64::from(batch.last_offset_delta);
+            let batch_last_offset = Offset(batch.base_offset + i64::from(batch.last_offset_delta));
             if batch_last_offset >= target_abs {
                 break;
             }
@@ -977,7 +984,7 @@ impl Segment {
         self.offset_index.truncate_by_position(pos_u32)?;
         self.time_index.truncate_by_relative_offset(rel)?;
         self.sealed = false;
-        tracing::Span::current().record("new_last_offset", self.last_offset);
+        tracing::Span::current().record("new_last_offset", self.last_offset.0);
         Ok(())
     }
 }
@@ -986,6 +993,7 @@ impl Segment {
 mod tests {
     use assert2::{assert, check};
     use bytes::Bytes;
+    use crabka_ids::Offset;
     use crabka_protocol::records::{Record, RecordBatch};
     use tempfile::tempdir;
 
@@ -1014,7 +1022,7 @@ mod tests {
     #[test]
     fn offset_for_timestamp_finds_first_ge() {
         let dir = tempdir().unwrap();
-        let mut seg = Segment::create(dir.path(), 0).unwrap();
+        let mut seg = Segment::create(dir.path(), Offset(0)).unwrap();
         // Two batches: offsets 0..=2 ts 100..=102, offsets 3..=4 ts 200..=201.
         seg.append(&sample_batch(0, 3, 100), 0).unwrap();
         seg.append(&sample_batch(3, 2, 200), 0).unwrap();
@@ -1022,10 +1030,10 @@ mod tests {
         // Batch 1 records: (off0,ts100),(off1,ts101),(off2,ts102).
         // Batch 2 records: (off3,ts200),(off4,ts201).
         for (ts, want) in [
-            (100, Some((0, 100))),
-            (101, Some((1, 101))),
-            (150, Some((3, 200))),
-            (201, Some((4, 201))),
+            (100, Some((Offset(0), 100))),
+            (101, Some((Offset(1), 101))),
+            (150, Some((Offset(3), 200))),
+            (201, Some((Offset(4), 201))),
             (202, None),
         ] {
             check!(seg.offset_for_timestamp(ts) == want, "ts={ts}");
@@ -1036,7 +1044,7 @@ mod tests {
     #[test]
     fn scan_from_floor_finds_match_beyond_first_window() {
         let dir = tempdir().unwrap();
-        let mut seg = Segment::create(dir.path(), 0).unwrap();
+        let mut seg = Segment::create(dir.path(), Offset(0)).unwrap();
         // Many single-record batches with increasing timestamps. With a
         // tiny scan window each batch lands in its own window, so a match
         // at the tail forces the windowed loop to advance many times.
@@ -1061,10 +1069,10 @@ mod tests {
         // Target ts is the very last record's, so the loop must advance
         // through every window before matching.
         let target = 1_000 + (n - 1);
-        let got = seg.scan_from_floor_windowed(0, 1, |ts| ts >= target);
-        assert!(got == Some((n - 1, target)));
+        let got = seg.scan_from_floor_windowed(Offset(0), 1, |ts| ts >= target);
+        assert!(got == Some((Offset(n - 1), target)));
         // No-match case must terminate (cursor passes last_offset) → None.
-        let none = seg.scan_from_floor_windowed(0, 1, |ts| ts > 10_000);
+        let none = seg.scan_from_floor_windowed(Offset(0), 1, |ts| ts > 10_000);
         assert!(none == None);
         drop(dir);
     }
@@ -1072,16 +1080,16 @@ mod tests {
     #[test]
     fn offset_of_max_timestamp_earliest_on_tie() {
         let dir = tempdir().unwrap();
-        let mut seg = Segment::create(dir.path(), 0).unwrap();
+        let mut seg = Segment::create(dir.path(), Offset(0)).unwrap();
         // Batch records ts: 100,101,102 (max in batch = 102 at offset 2).
         seg.append(&sample_batch(0, 3, 100), 0).unwrap();
         // Second batch: offsets 3,4 ts 200,201 — segment max becomes 201 @4.
         seg.append(&sample_batch(3, 2, 200), 0).unwrap();
-        assert!(seg.offset_of_max_timestamp() == Some((4, 201)));
+        assert!(seg.offset_of_max_timestamp() == Some((Offset(4), 201)));
 
         // Empty segment → None.
         let dir2 = tempdir().unwrap();
-        let empty = Segment::create(dir2.path(), 0).unwrap();
+        let empty = Segment::create(dir2.path(), Offset(0)).unwrap();
         assert!(empty.offset_of_max_timestamp() == None);
         drop(dir);
         drop(dir2);
@@ -1090,7 +1098,7 @@ mod tests {
     #[test]
     fn offset_of_max_timestamp_tie_picks_earliest() {
         let dir = tempdir().unwrap();
-        let mut seg = Segment::create(dir.path(), 0).unwrap();
+        let mut seg = Segment::create(dir.path(), Offset(0)).unwrap();
         // All three records share timestamp 500; earliest offset is 0.
         let mut b = RecordBatch {
             base_offset: 0,
@@ -1108,20 +1116,20 @@ mod tests {
             });
         }
         seg.append(&b, 0).unwrap();
-        assert!(seg.offset_of_max_timestamp() == Some((0, 500)));
+        assert!(seg.offset_of_max_timestamp() == Some((Offset(0), 500)));
         drop(dir);
     }
 
     #[test]
     fn append_then_read_back() {
         let dir = tempdir().unwrap();
-        let mut seg = Segment::create(dir.path(), 0).unwrap();
+        let mut seg = Segment::create(dir.path(), Offset(0)).unwrap();
         let b1 = sample_batch(0, 3, 1_000_000);
         let b2 = sample_batch(3, 2, 2_000_000);
         seg.append(&b1, 4096).unwrap();
         seg.append(&b2, 4096).unwrap();
-        assert!(seg.last_offset() == 4);
-        let read = seg.read(0, usize::MAX).unwrap();
+        assert!(seg.last_offset() == Offset(4));
+        let read = seg.read(Offset(0), usize::MAX).unwrap();
         let record_counts: Vec<usize> = read.iter().map(|b| b.records.len()).collect();
         assert!(record_counts == [3, 2]);
     }
@@ -1130,17 +1138,17 @@ mod tests {
     fn append_after_open_active_writes_at_eof() {
         let dir = tempdir().unwrap();
         {
-            let mut seg = Segment::create(dir.path(), 0).unwrap();
+            let mut seg = Segment::create(dir.path(), Offset(0)).unwrap();
             seg.append(&sample_batch(0, 1, 100), 0).unwrap();
             seg.append(&sample_batch(1, 1, 200), 0).unwrap();
         }
 
-        let mut seg = Segment::open_active(dir.path(), 0, true).unwrap();
+        let mut seg = Segment::open_active(dir.path(), Offset(0), true).unwrap();
         let position = seg.append(&sample_batch(2, 1, 300), 0).unwrap();
 
         assert!(position > 0);
-        assert!(seg.last_offset() == 2);
-        let read = seg.read(0, usize::MAX).unwrap();
+        assert!(seg.last_offset() == Offset(2));
+        let read = seg.read(Offset(0), usize::MAX).unwrap();
         let base_offsets: Vec<i64> = read.iter().map(|b| b.base_offset).collect();
         assert!(base_offsets == [0, 1, 2]);
     }
@@ -1148,7 +1156,7 @@ mod tests {
     #[test]
     fn append_after_truncate_writes_at_new_eof() {
         let dir = tempdir().unwrap();
-        let mut seg = Segment::create(dir.path(), 0).unwrap();
+        let mut seg = Segment::create(dir.path(), Offset(0)).unwrap();
         seg.append(&sample_batch(0, 1, 100), 0).unwrap();
         let expected_position = seg.size_bytes();
         seg.append(&sample_batch(1, 1, 200), 0).unwrap();
@@ -1157,8 +1165,8 @@ mod tests {
         let position = seg.append(&sample_batch(1, 1, 300), 0).unwrap();
 
         assert!(position == expected_position);
-        assert!(seg.last_offset() == 1);
-        let read = seg.read(0, usize::MAX).unwrap();
+        assert!(seg.last_offset() == Offset(1));
+        let read = seg.read(Offset(0), usize::MAX).unwrap();
         let base_offsets: Vec<i64> = read.iter().map(|b| b.base_offset).collect();
         assert!(base_offsets == [0, 1]);
     }
@@ -1166,10 +1174,10 @@ mod tests {
     #[test]
     fn read_at_higher_offset_skips_earlier_batches() {
         let dir = tempdir().unwrap();
-        let mut seg = Segment::create(dir.path(), 0).unwrap();
+        let mut seg = Segment::create(dir.path(), Offset(0)).unwrap();
         seg.append(&sample_batch(0, 3, 1_000_000), 4096).unwrap();
         seg.append(&sample_batch(3, 2, 2_000_000), 4096).unwrap();
-        let read = seg.read(4, usize::MAX).unwrap();
+        let read = seg.read(Offset(4), usize::MAX).unwrap();
         // Offset 4 falls inside the second batch (offsets 3..=4).
         assert!(read.len() == 1);
         assert!(read[0].base_offset == 3);
@@ -1178,7 +1186,7 @@ mod tests {
     #[test]
     fn append_to_sealed_segment_errors() {
         let dir = tempdir().unwrap();
-        let mut seg = Segment::create(dir.path(), 0).unwrap();
+        let mut seg = Segment::create(dir.path(), Offset(0)).unwrap();
         seg.seal();
         assert!(seg.is_sealed());
         let err = seg.append(&sample_batch(0, 1, 0), 4096).unwrap_err();
@@ -1188,16 +1196,16 @@ mod tests {
     #[test]
     fn read_past_last_offset_returns_empty() {
         let dir = tempdir().unwrap();
-        let mut seg = Segment::create(dir.path(), 0).unwrap();
+        let mut seg = Segment::create(dir.path(), Offset(0)).unwrap();
         seg.append(&sample_batch(0, 2, 1_000), 4096).unwrap();
-        let read = seg.read(100, usize::MAX).unwrap();
+        let read = seg.read(Offset(100), usize::MAX).unwrap();
         assert!(read.is_empty());
     }
 
     #[test]
     fn flush_succeeds() {
         let dir = tempdir().unwrap();
-        let mut seg = Segment::create(dir.path(), 0).unwrap();
+        let mut seg = Segment::create(dir.path(), Offset(0)).unwrap();
         seg.append(&sample_batch(0, 1, 42), 4096).unwrap();
         seg.flush().unwrap();
     }
@@ -1206,7 +1214,7 @@ mod tests {
 
     fn test_segment() -> (tempfile::TempDir, Segment) {
         let dir = tempdir().unwrap();
-        let seg = Segment::create(dir.path(), 0).unwrap();
+        let seg = Segment::create(dir.path(), Offset(0)).unwrap();
         (dir, seg)
     }
 
@@ -1237,9 +1245,11 @@ mod tests {
             b.encode(&mut wire).unwrap();
         }
         let wire = wire.freeze();
-        let r = seg.read_raw(0, 3, 10 * 1024 * 1024).unwrap();
-        check!(r.start_offset == 0);
-        check!(r.last_offset == 2);
+        let r = seg
+            .read_raw(Offset(0), Offset(3), 10 * 1024 * 1024)
+            .unwrap();
+        check!(r.start_offset == Offset(0));
+        check!(r.last_offset == Offset(2));
         check!(
             &r.bytes[..] == &wire[..],
             "raw bytes must equal the on-disk concatenation"
@@ -1260,8 +1270,10 @@ mod tests {
         for off in 0..3i64 {
             seg.append(&test_batch_at(off), 0).unwrap();
         }
-        let r = seg.read_raw(0, 2, 10 * 1024 * 1024).unwrap();
-        assert!(r.last_offset == 1);
+        let r = seg
+            .read_raw(Offset(0), Offset(2), 10 * 1024 * 1024)
+            .unwrap();
+        assert!(r.last_offset == Offset(1));
         drop(dir);
     }
 
@@ -1269,9 +1281,9 @@ mod tests {
     fn read_raw_returns_at_least_one_batch_over_budget() {
         let (dir, mut seg) = test_segment();
         seg.append(&test_batch_at(0), 0).unwrap();
-        let r = seg.read_raw(0, 1, 1).unwrap();
-        check!(r.start_offset == 0);
-        check!(r.last_offset == 0);
+        let r = seg.read_raw(Offset(0), Offset(1), 1).unwrap();
+        check!(r.start_offset == Offset(0));
+        check!(r.last_offset == Offset(0));
         check!(!r.bytes.is_empty());
         drop(dir);
     }
@@ -1314,8 +1326,8 @@ mod tests {
             (4, 5, 10 * 1024 * 1024),            // last batch
         ];
         for (fo, lo, mb) in cases {
-            let raw = seg.read_raw(fo, lo, mb).unwrap();
-            let desc = seg.read_raw_desc(fo, lo, mb).unwrap();
+            let raw = seg.read_raw(Offset(fo), Offset(lo), mb).unwrap();
+            let desc = seg.read_raw_desc(Offset(fo), Offset(lo), mb).unwrap();
             assert!(
                 desc.start_offset == raw.start_offset,
                 "start_offset mismatch for case ({fo},{lo},{mb})"
@@ -1349,8 +1361,8 @@ mod tests {
             seg.append(&test_batch_at(off), 0).unwrap();
         }
         // Budget that admits ~2-3 batches (each batch is small but > a few bytes).
-        let raw = seg.read_raw(0, 6, 80).unwrap();
-        let desc = seg.read_raw_desc(0, 6, 80).unwrap();
+        let raw = seg.read_raw(Offset(0), Offset(6), 80).unwrap();
+        let desc = seg.read_raw_desc(Offset(0), Offset(6), 80).unwrap();
         assert!(desc.start_offset == raw.start_offset);
         assert!(desc.last_offset == raw.last_offset);
         let region = desc.region.expect("non-empty");
@@ -1377,11 +1389,11 @@ mod tests {
         let wire = wire.freeze();
 
         // Append verbatim with an assigned base_offset and a stamped epoch.
-        let assigned_base = 0i64;
+        let assigned_base = Offset(0);
         let stamped_epoch = 7i32;
         seg.append_verbatim(&wire, assigned_base, 0, 1_000, stamped_epoch, 0)
             .unwrap();
-        assert!(seg.last_offset() == 0);
+        assert!(seg.last_offset() == Offset(0));
 
         // Read back the raw .log bytes.
         let mut on_disk = Vec::new();
@@ -1389,7 +1401,7 @@ mod tests {
         assert!(on_disk.len() == wire.len(), "size must be unchanged");
 
         // base_offset (0..8) patched to the assigned value.
-        check!(i64::from_be_bytes(on_disk[0..8].try_into().unwrap()) == assigned_base);
+        check!(i64::from_be_bytes(on_disk[0..8].try_into().unwrap()) == assigned_base.0);
         // partition_leader_epoch (12..16) patched to the stamped epoch.
         check!(i32::from_be_bytes(on_disk[12..16].try_into().unwrap()) == stamped_epoch);
         // CRC field (17..21) byte-identical to the producer's.
@@ -1406,7 +1418,7 @@ mod tests {
         // And it decodes (CRC still valid).
         let mut cur: &[u8] = &on_disk;
         let decoded = crabka_protocol::records::RecordBatch::decode(&mut cur).unwrap();
-        assert!(decoded.base_offset == assigned_base);
+        assert!(decoded.base_offset == assigned_base.0);
         assert!(decoded.partition_leader_epoch == stamped_epoch);
         drop(dir);
     }
@@ -1421,11 +1433,12 @@ mod tests {
         producer.encode(&mut wire).unwrap();
         let wire = wire.freeze();
 
-        seg.append_verbatim(&wire, 0, 2, 5_000, 0, 0).unwrap();
-        assert!(seg.last_offset() == 2);
+        seg.append_verbatim(&wire, Offset(0), 2, 5_000, 0, 0)
+            .unwrap();
+        assert!(seg.last_offset() == Offset(2));
         assert!(seg.max_timestamp() == 5_000);
         // Reading at offset 2 (inside the batch) returns the batch.
-        let read = seg.read(2, usize::MAX).unwrap();
+        let read = seg.read(Offset(2), usize::MAX).unwrap();
         assert!(read.len() == 1);
         assert!(read[0].base_offset == 0);
         drop(dir);
@@ -1438,7 +1451,7 @@ mod tests {
         let mut wire = bytes::BytesMut::new();
         test_batch_at(0).encode(&mut wire).unwrap();
         let err = seg
-            .append_verbatim(&wire.freeze(), 0, 0, 0, 0, 0)
+            .append_verbatim(&wire.freeze(), Offset(0), 0, 0, 0, 0)
             .unwrap_err();
         assert!(matches!(err, LogError::Io(_)));
         drop(dir);

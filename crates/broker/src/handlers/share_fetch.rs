@@ -20,6 +20,7 @@ use std::{
 };
 
 use bytes::{Bytes, BytesMut};
+use crabka_log::Offset;
 use crabka_metadata::{AclOperation, ResourceType};
 use crabka_protocol::{
     Decode, Encode,
@@ -473,7 +474,7 @@ async fn read_acquired_bytes(
     let log = part.log.clone();
     let join = tokio::task::spawn_blocking(move || {
         let log = log.lock().expect("log mutex poisoned");
-        log.read_raw(fetch_offset, limit_offset, read_max)
+        log.read_raw(Offset(fetch_offset), Offset(limit_offset), read_max)
     });
     let raw = match join.await {
         Ok(res) => res?,

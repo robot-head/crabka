@@ -26,6 +26,7 @@
 //! ## Quick start
 //!
 //! ```no_run
+//! use crabka_ids::Offset;
 //! use crabka_log::{Log, LogConfig};
 //! use crabka_protocol::records::RecordBatch;
 //!
@@ -34,7 +35,7 @@
 //! // ... fill the batch ...
 //! let assigned_offset = log.append(&mut batch).unwrap();
 //!
-//! let out = log.read(0, 1024 * 1024).unwrap();
+//! let out = log.read(Offset(0), 1024 * 1024).unwrap();
 //! # let _ = (assigned_offset, out);
 //! ```
 //! ## Exporting a segment
@@ -97,6 +98,7 @@ mod segment;
 mod txn_index;
 
 pub use config::{CleanupPolicy, LogConfig};
+pub use crabka_ids::Offset;
 pub use error::LogError;
 pub use leader_epoch_checkpoint::{
     EpochEntry, LeaderEpochCheckpoint, epoch_and_offset_for_entries,

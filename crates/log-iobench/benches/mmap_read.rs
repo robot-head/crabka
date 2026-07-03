@@ -37,7 +37,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use crabka_log::{Log, LogConfig};
+use crabka_log::{Log, LogConfig, Offset};
 use crabka_protocol::records::{Record, RecordBatch};
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use memmap2::Mmap;
@@ -181,7 +181,7 @@ fn bench_segment_io(c: &mut Criterion) {
 fn bench_full_path(c: &mut Criterion) {
     let (_dir, log, _path, _size) = build_log();
     let end = log.log_end_offset();
-    let mid = end / 2;
+    let mid = Offset(end.0 / 2);
 
     let mut group = c.benchmark_group("full_path");
     group.bench_function("log_read_1MiB_decoded", |b| {

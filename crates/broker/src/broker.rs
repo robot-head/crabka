@@ -5195,9 +5195,9 @@ mod tests {
             .log
             .lock()
             .expect("helper partition log lock")
-            .read(2, 1 << 20)
+            .read(crabka_log::Offset(2), 1 << 20)
             .expect("read helper partition records");
-        assert!(read.start_offset == 2);
+        assert!(read.start_offset == crabka_log::Offset(2));
         assert!(!read.batches.is_empty());
         let records: Vec<_> = read
             .batches

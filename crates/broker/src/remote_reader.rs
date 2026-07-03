@@ -881,15 +881,20 @@ mod tests {
         // without the broker-side dependencies).
         for ex in &exports {
             let id = crabka_remote_storage::RemoteLogSegmentId::new(tp(), Uuid::new_v4());
+            // Unwrap the log-layer `Offset`s into the remote-storage metadata's
+            // `i64` world at the seam.
             let epochs: BTreeMap<i32, i64> = if ex.leader_epochs.is_empty() {
-                BTreeMap::from([(0, ex.base_offset)])
+                BTreeMap::from([(0, ex.base_offset.0)])
             } else {
-                ex.leader_epochs.iter().copied().collect()
+                ex.leader_epochs
+                    .iter()
+                    .map(|&(epoch, off)| (epoch, off.0))
+                    .collect()
             };
             let md = RemoteLogSegmentMetadata::new(
                 id.clone(),
-                ex.base_offset,
-                ex.last_offset,
+                ex.base_offset.0,
+                ex.last_offset.0,
                 ex.max_timestamp,
                 1,
                 ex.max_timestamp,
@@ -957,7 +962,8 @@ mod tests {
         // Write a `.txnindex` next to the first sealed segment's `.log` so the
         // export below picks it up. The abort covers the whole first segment.
         let first = &exports[0];
-        let abort = (first.base_offset, first.last_offset, 7777_i64);
+        // Unwrap the log-layer `Offset`s into this helper's `i64` tuple at the seam.
+        let abort = (first.base_offset.0, first.last_offset.0, 7777_i64);
         let mut txn_bytes = Vec::new();
         txn_bytes.extend_from_slice(&abort.0.to_be_bytes());
         txn_bytes.extend_from_slice(&abort.1.to_be_bytes());
@@ -977,15 +983,20 @@ mod tests {
             Arc::new(InmemoryRemoteLogMetadataManager::new());
         for ex in &exports {
             let id = crabka_remote_storage::RemoteLogSegmentId::new(tp(), Uuid::new_v4());
+            // Unwrap the log-layer `Offset`s into the remote-storage metadata's
+            // `i64` world at the seam.
             let epochs: BTreeMap<i32, i64> = if ex.leader_epochs.is_empty() {
-                BTreeMap::from([(0, ex.base_offset)])
+                BTreeMap::from([(0, ex.base_offset.0)])
             } else {
-                ex.leader_epochs.iter().copied().collect()
+                ex.leader_epochs
+                    .iter()
+                    .map(|&(epoch, off)| (epoch, off.0))
+                    .collect()
             };
             let md = RemoteLogSegmentMetadata::new(
                 id.clone(),
-                ex.base_offset,
-                ex.last_offset,
+                ex.base_offset.0,
+                ex.last_offset.0,
                 ex.max_timestamp,
                 1,
                 ex.max_timestamp,
@@ -1054,7 +1065,7 @@ mod tests {
         let seg = &exports[0];
 
         let got = reader
-            .aborted_transactions(&tp(), 0, seg.base_offset, seg.last_offset)
+            .aborted_transactions(&tp(), 0, seg.base_offset.0, seg.last_offset.0)
             .await
             .expect("ok");
         assert!(
@@ -1072,7 +1083,8 @@ mod tests {
         // Pick an offset inside the second sealed segment. Each batch covers
         // two records, so base_offset=2 lives in segment[1] (base=2).
         let exports = log.tierable_segments();
-        let target_offset = exports[1].base_offset;
+        // Unwrap the log-layer `Offset` into this test's `i64` world at the seam.
+        let target_offset = exports[1].base_offset.0;
 
         let got = reader
             .fetch_batch(&tp(), 0, target_offset, 4096)
@@ -1171,7 +1183,8 @@ mod tests {
         let remote_dir = tempfile::tempdir().unwrap();
         let (reader, log) = populated_reader(log_dir.path(), remote_dir.path());
         let exports = log.tierable_segments();
-        let expected = exports.iter().map(|e| e.base_offset).min().unwrap();
+        // Unwrap the log-layer `Offset` into this test's `i64` world at the seam.
+        let expected = exports.iter().map(|e| e.base_offset.0).min().unwrap();
         let got = reader.earliest_offset(&tp()).unwrap();
         assert!(got == Some(expected));
     }
@@ -1204,7 +1217,8 @@ mod tests {
             .unwrap()
             .expect("first segment matches ts=0");
         // The first finished segment is the lowest-base one.
-        let expected = exports.iter().map(|e| e.base_offset).min().unwrap();
+        // Unwrap the log-layer `Offset` into this test's `i64` world at the seam.
+        let expected = exports.iter().map(|e| e.base_offset.0).min().unwrap();
         assert!(got == expected);
     }
 
@@ -1482,7 +1496,8 @@ mod tests {
 
         // Pick an offset inside the first sealed segment.
         let exports = log.tierable_segments();
-        let target_offset = exports[0].base_offset;
+        // Unwrap the log-layer `Offset` into this test's `i64` world at the seam.
+        let target_offset = exports[0].base_offset.0;
 
         // Query with epoch 1 — the RLMM epoch-indexed primary path returns
         // None because the segment's `segment_leader_epochs` only contains

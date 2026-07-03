@@ -32,6 +32,7 @@
 use std::{path::PathBuf, sync::Arc};
 
 use bytes::BufMut;
+use crabka_ids::Offset;
 use crabka_metadata::{
     MetadataImage, MetadataRecord, VotersRecord, from_kraft_value, to_kraft_values,
 };
@@ -131,7 +132,7 @@ struct Engine {
     snapshot_interval_records: u64,
     /// HWM at which the last checkpoint was written (and the log pruned to).
     /// Seeded from the recovered checkpoint on `open`.
-    last_snapshot_end_offset: i64,
+    last_snapshot_end_offset: Offset,
     /// In-flight follower snapshot reassembly, if any.
     snapshot_fetch: Option<SnapshotFetchState>,
     /// Set when a snapshot was just installed; the next follower Fetch carries
@@ -146,8 +147,8 @@ struct CommitWaiter {
     /// Base (append) offset of this waiter's batch. Its appended range is
     /// `[base_offset, need_offset)`; a committed-record rejection only attaches
     /// to a waiter whose range actually contains the failing offset (FIX 2).
-    base_offset: i64,
-    need_offset: i64,
+    base_offset: Offset,
+    need_offset: Offset,
     /// First per-record rejection observed at apply time, if any.
     rejection: Option<RaftError>,
     reply: oneshot::Sender<Result<(), RaftError>>,
@@ -253,19 +254,23 @@ fn instant_from_clock_base(clock_base: Instant, deadline: SimInstant) -> Instant
         .unwrap_or(clock_base)
 }
 
-fn assigned_record_offset(assign_base: i64, delta: i64) -> i64 {
-    assign_base.saturating_add(delta)
+fn assigned_record_offset(assign_base: Offset, delta: i64) -> i64 {
+    assign_base.0.saturating_add(delta)
 }
 
-fn append_result_is_consistent(expected_base: i64, returned_base: i64, log_end_after: i64) -> bool {
+fn append_result_is_consistent(
+    expected_base: Offset,
+    returned_base: Offset,
+    log_end_after: Offset,
+) -> bool {
     returned_base.cmp(&expected_base).is_eq() && log_end_after.cmp(&expected_base).is_gt()
 }
 
 fn validate_append_result(
     context: &str,
-    expected_base: i64,
-    returned_base: i64,
-    log_end_after: i64,
+    expected_base: Offset,
+    returned_base: Offset,
+    log_end_after: Offset,
 ) -> Result<(), RaftError> {
     if append_result_is_consistent(expected_base, returned_base, log_end_after) {
         Ok(())
@@ -276,25 +281,25 @@ fn validate_append_result(
     }
 }
 
-fn submit_waiter_need_offset(base: i64, blob_count: usize) -> i64 {
-    base.saturating_add(i64::try_from(blob_count).unwrap_or(1))
+fn submit_waiter_need_offset(base: Offset, blob_count: usize) -> Offset {
+    base + i64::try_from(blob_count).unwrap_or(1)
 }
 
 fn is_single_voter_majority(majority: usize) -> bool {
     matches!(majority, 1)
 }
 
-fn batch_base_in_apply_window(base_offset: i64, prev_hwm: i64, applied_hwm: i64) -> bool {
-    match base_offset.checked_sub(prev_hwm) {
+fn batch_base_in_apply_window(base_offset: i64, prev_hwm: Offset, applied_hwm: Offset) -> bool {
+    match base_offset.checked_sub(prev_hwm.0) {
         Some(distance_from_prev) if distance_from_prev >= 0 => {
-            matches!(applied_hwm.checked_sub(base_offset), Some(distance_to_hwm) if distance_to_hwm > 0)
+            matches!(applied_hwm.0.checked_sub(base_offset), Some(distance_to_hwm) if distance_to_hwm > 0)
         }
         _ => false,
     }
 }
 
-fn committed_records_since_snapshot(hwm: i64, last_snapshot_end_offset: i64) -> u64 {
-    u64::try_from(hwm.saturating_sub(last_snapshot_end_offset)).unwrap_or(0)
+fn committed_records_since_snapshot(hwm: Offset, last_snapshot_end_offset: Offset) -> u64 {
+    u64::try_from(hwm.0.saturating_sub(last_snapshot_end_offset.0)).unwrap_or(0)
 }
 
 fn snapshot_interval_reached(advanced: u64, snapshot_interval_records: u64) -> bool {
@@ -304,37 +309,37 @@ fn snapshot_interval_reached(advanced: u64, snapshot_interval_records: u64) -> b
     )
 }
 
-fn expected_hwm_after_advance(prev_hwm: i64, new_hwm: i64, log_end: i64) -> i64 {
+fn expected_hwm_after_advance(prev_hwm: Offset, new_hwm: Offset, log_end: Offset) -> Offset {
     prev_hwm.max(new_hwm.min(log_end))
 }
 
-fn hwm_advanced_as_expected(applied_hwm: i64, expected_hwm: i64) -> bool {
+fn hwm_advanced_as_expected(applied_hwm: Offset, expected_hwm: Offset) -> bool {
     !applied_hwm.cmp(&expected_hwm).is_lt()
 }
 
-fn hwm_reaches_waiter(hwm: i64, need_offset: i64) -> bool {
+fn hwm_reaches_waiter(hwm: Offset, need_offset: Offset) -> bool {
     matches!(
         hwm.cmp(&need_offset),
         std::cmp::Ordering::Equal | std::cmp::Ordering::Greater
     )
 }
 
-fn metadata_fetch_offset_in_committed_window(fetch_offset: i64, high_watermark: i64) -> bool {
-    (0..high_watermark).contains(&fetch_offset)
+fn metadata_fetch_offset_in_committed_window(fetch_offset: Offset, high_watermark: Offset) -> bool {
+    (0..high_watermark.0).contains(&fetch_offset.0)
 }
 
-fn fetch_batch_committed_before_hwm(base_offset: i64, high_watermark: i64) -> bool {
-    (i64::MIN..high_watermark).contains(&base_offset)
+fn fetch_batch_committed_before_hwm(base_offset: i64, high_watermark: Offset) -> bool {
+    (i64::MIN..high_watermark.0).contains(&base_offset)
 }
 
-fn fetch_offset_has_records(fetch_offset: i64, log_end: i64) -> bool {
-    (0..log_end).contains(&fetch_offset)
+fn fetch_offset_has_records(fetch_offset: Offset, log_end: Offset) -> bool {
+    (0..log_end.0).contains(&fetch_offset.0)
 }
 
 fn fetch_epoch_for_request(
     installed_snapshot_epoch: Option<LeaderEpoch>,
-    log_start: i64,
-    log_end: i64,
+    log_start: Offset,
+    log_end: Offset,
     last_epoch: LeaderEpoch,
 ) -> LeaderEpoch {
     match installed_snapshot_epoch {
@@ -350,7 +355,7 @@ enum FetchBatchDisposition {
     Gap,
 }
 
-fn classify_fetch_batch(at: i64, log_end: i64) -> FetchBatchDisposition {
+fn classify_fetch_batch(at: Offset, log_end: Offset) -> FetchBatchDisposition {
     match at.cmp(&log_end) {
         std::cmp::Ordering::Less => FetchBatchDisposition::AlreadyPresent,
         std::cmp::Ordering::Equal => FetchBatchDisposition::Append,
@@ -360,10 +365,10 @@ fn classify_fetch_batch(at: i64, log_end: i64) -> FetchBatchDisposition {
 
 fn should_start_snapshot_fetch(
     snapshot_id: (i64, i32),
-    log_end: i64,
+    log_end: Offset,
     active_snapshot_id: Option<(i64, i32)>,
 ) -> bool {
-    snapshot_id.0.cmp(&log_end).is_gt()
+    snapshot_id.0.cmp(&log_end.0).is_gt()
         && !matches!(active_snapshot_id, Some(id) if id == snapshot_id)
 }
 
@@ -387,7 +392,7 @@ impl KraftController {
     pub fn spawn(config: KraftConfig, log: KraftLog, data_dir: PathBuf) -> Self {
         let cluster_id = config.cluster_id;
         let image = MetadataImage::new(cluster_id);
-        Self::spawn_with_image(config, log, data_dir, image, 0)
+        Self::spawn_with_image(config, log, data_dir, image, Offset(0))
     }
 
     /// Spawn the engine starting from an already-recovered [`MetadataImage`]
@@ -398,7 +403,7 @@ impl KraftController {
         log: KraftLog,
         data_dir: PathBuf,
         image: MetadataImage,
-        last_snapshot_end_offset: i64,
+        last_snapshot_end_offset: Offset,
     ) -> Self {
         let KraftConfig {
             me,
@@ -430,9 +435,9 @@ impl KraftController {
         let initial_snapshot = QuorumStateSnapshot {
             leader_id: initial_leader,
             leader_epoch: initial_epoch,
-            high_watermark: log.hwm(),
-            log_end_offset: log.log_end_offset(),
-            log_start_offset: log.log_start_offset(),
+            high_watermark: log.hwm().0,
+            log_end_offset: log.log_end_offset().0,
+            log_start_offset: log.log_start_offset().0,
             voters: initial_state_voters(&core),
             per_voter_fetch_offset: std::collections::BTreeMap::new(),
         };
@@ -518,19 +523,20 @@ impl KraftController {
         // (the HWM is not persisted separately; the log only holds committed
         // metadata here, so we apply the full log end).
         let mut image = MetadataImage::new(cluster_id);
-        let mut last_snapshot_end_offset = 0;
+        let mut last_snapshot_end_offset = Offset(0);
         if let Some(bytes) = load_latest_checkpoint(&checkpoint_dir(&data_dir))? {
             let records = crate::snapshot::SnapshotReader::read_records(&bytes)?;
             image = MetadataImage::from_records(cluster_id, &records);
             if let Some((off, _ep)) = latest_checkpoint_id(&checkpoint_dir(&data_dir)) {
-                last_snapshot_end_offset = off;
+                // Checkpoint filenames encode the raw offset (on-disk boundary).
+                last_snapshot_end_offset = Offset(off);
             }
             // Checkpoints cover the in-memory image, not a log
             // prefix offset, so replay the full log on top (idempotent:
             // duplicate records fail validate and are skipped). A precise
             // checkpoint-offset cursor.
         }
-        replay_committed(&log, &mut image, 0);
+        replay_committed(&log, &mut image, Offset(0));
         log.advance_hwm(log.log_end_offset());
 
         // Seed the durable quorum state from the file, falling back to a fresh
@@ -954,8 +960,11 @@ impl Engine {
                     // If the follower's fetch offset is below our pruned
                     // log-start, it cannot replicate from the log — point it at
                     // the latest snapshot instead (KIP-630).
+                    // `fetch_offset` arrives raw on the KIP-595 wire; wrap it into
+                    // the `KraftLog` offset domain to compare against log bounds.
+                    let fetch_offset = Offset(fetch_offset);
                     let log_start = self.log.log_start_offset();
-                    let snapshot_id = if fetch_offset >= 0 && fetch_offset < log_start {
+                    let snapshot_id = if fetch_offset >= Offset(0) && fetch_offset < log_start {
                         self.latest_snapshot_id()
                     } else {
                         None
@@ -983,7 +992,7 @@ impl Engine {
                         leader_epoch: self.core.quorum_state().leader_epoch,
                         diverging,
                         snapshot_id,
-                        hwm: self.log.hwm(),
+                        hwm: self.log.hwm().0,
                         records,
                     };
                     let _ = reply.send(resp.encode());
@@ -1105,10 +1114,12 @@ impl Engine {
                 }
             }
             Action::AdvanceHighWatermark(n) => {
-                self.advance_and_apply(n);
+                // `n` is the core's raw i64 HWM target; wrap into the log domain.
+                self.advance_and_apply(Offset(n));
             }
             Action::TruncateTo(point) => {
-                if let Err(e) = self.log.truncate_to(point.offset) {
+                // `point.offset` is the core's raw i64 divergence point.
+                if let Err(e) = self.log.truncate_to(Offset(point.offset)) {
                     tracing::error!(?e, "kraft: truncate failed");
                 }
             }
@@ -1197,7 +1208,7 @@ impl Engine {
 
     /// Append the leader's `LeaderChange` control marker for `epoch`.
     #[tracing::instrument(level = "info", skip_all, fields(node = self.me, epoch), err)]
-    fn append_leader_change(&mut self, epoch: LeaderEpoch) -> Result<i64, RaftError> {
+    fn append_leader_change(&mut self, epoch: LeaderEpoch) -> Result<Offset, RaftError> {
         let voter_ids: Vec<NodeId> = self.core.quorum_state().voters.ids().into_iter().collect();
         let mut batch = leader_change_batch(epoch, self.me, &voter_ids);
         let expected_base = self.log.log_end_offset();
@@ -1378,7 +1389,8 @@ impl Engine {
             return -1;
         }
         self.advance_and_apply(self.log.log_end_offset());
-        base
+        // Test helper returns the raw base offset (compared against `-1` sentinel).
+        base.0
     }
 
     /// Advance the HWM and apply the records newly committed by it to the
@@ -1386,20 +1398,20 @@ impl Engine {
     #[tracing::instrument(
         level = "debug",
         skip_all,
-        fields(node = self.me, new_hwm, prev_hwm = tracing::field::Empty)
+        fields(node = self.me, new_hwm = new_hwm.0, prev_hwm = tracing::field::Empty)
     )]
-    fn advance_and_apply(&mut self, new_hwm: i64) {
+    fn advance_and_apply(&mut self, new_hwm: Offset) {
         let prev_hwm = self.log.hwm();
-        tracing::Span::current().record("prev_hwm", prev_hwm);
+        tracing::Span::current().record("prev_hwm", prev_hwm.0);
         let expected_hwm = expected_hwm_after_advance(prev_hwm, new_hwm, self.log.log_end_offset());
         self.log.advance_hwm(new_hwm);
         let applied_hwm = self.log.hwm();
         if !hwm_advanced_as_expected(applied_hwm, expected_hwm) {
             tracing::error!(
-                prev_hwm,
-                new_hwm,
-                expected_hwm,
-                applied_hwm,
+                prev_hwm = prev_hwm.0,
+                new_hwm = new_hwm.0,
+                expected_hwm = expected_hwm.0,
+                applied_hwm = applied_hwm.0,
                 "kraft: high watermark failed to advance"
             );
             self.fail_waiters_reached_by(
@@ -1440,7 +1452,7 @@ impl Engine {
                                     // Record the first rejection against any
                                     // waiter that covers this offset so the
                                     // submitter learns the canonical error.
-                                    self.note_rejection(batch.base_offset, &e);
+                                    self.note_rejection(Offset(batch.base_offset), &e);
                                     tracing::debug!(
                                         ?e,
                                         "kraft: rejected committed record on apply"
@@ -1481,7 +1493,7 @@ impl Engine {
         if !snapshot_interval_reached(advanced, self.snapshot_interval_records) {
             return;
         }
-        tracing::Span::current().record("hwm", hwm);
+        tracing::Span::current().record("hwm", hwm.0);
         let bytes = match crate::snapshot::SnapshotWriter::serialize(&self.image, 0) {
             Ok(b) => b,
             Err(e) => {
@@ -1490,7 +1502,8 @@ impl Engine {
             }
         };
         let epoch = i32::try_from(self.core.quorum_state().leader_epoch).unwrap_or(i32::MAX);
-        if let Err(e) = write_checkpoint(&checkpoint_dir(&self.data_dir), hwm, epoch, &bytes) {
+        // Checkpoint filenames encode the raw offset (on-disk boundary).
+        if let Err(e) = write_checkpoint(&checkpoint_dir(&self.data_dir), hwm.0, epoch, &bytes) {
             tracing::error!(?e, "kraft: checkpoint write failed; skipping prune");
             return;
         }
@@ -1512,7 +1525,7 @@ impl Engine {
     /// both bounds (not just `need_offset > record_offset`) prevents a failing
     /// record from bleeding its rejection onto later, unrelated waiters whose
     /// own records committed fine (FIX 2).
-    fn note_rejection(&mut self, record_offset: i64, err: &crabka_metadata::MetadataError) {
+    fn note_rejection(&mut self, record_offset: Offset, err: &crabka_metadata::MetadataError) {
         for w in &mut self.commit_waiters {
             if w.base_offset <= record_offset
                 && record_offset < w.need_offset
@@ -1538,7 +1551,7 @@ impl Engine {
         self.commit_waiters = still;
     }
 
-    fn fail_waiters_reached_by(&mut self, hwm: i64, reason: &str) {
+    fn fail_waiters_reached_by(&mut self, hwm: Offset, reason: &str) {
         let mut still = Vec::new();
         for w in self.commit_waiters.drain(..) {
             if hwm_reaches_waiter(hwm, w.need_offset) {
@@ -1556,14 +1569,15 @@ impl Engine {
     #[tracing::instrument(
         level = "info",
         skip_all,
-        fields(node = self.me, epoch = self.core.quorum_state().leader_epoch, end_offset = self.log.hwm()),
+        fields(node = self.me, epoch = self.core.quorum_state().leader_epoch, end_offset = self.log.hwm().0),
         err
     )]
     fn do_trigger_snapshot(&self) -> Result<(), RaftError> {
         let bytes = crate::snapshot::SnapshotWriter::serialize(&self.image, 0)?;
         let end_offset = self.log.hwm();
         let epoch = i32::try_from(self.core.quorum_state().leader_epoch).unwrap_or(i32::MAX);
-        write_checkpoint(&checkpoint_dir(&self.data_dir), end_offset, epoch, &bytes)
+        // Checkpoint filenames encode the raw offset (on-disk boundary).
+        write_checkpoint(&checkpoint_dir(&self.data_dir), end_offset.0, epoch, &bytes)
     }
 
     /// Persist the durable quorum state atomically.
@@ -1582,7 +1596,9 @@ impl Engine {
             // insert its own entry explicitly (otherwise a single-voter quorum
             // reports an empty matched-index map and `DescribeQuorum` returns
             // the JVM "unknown" sentinel -1 for the leader).
-            per_voter_fetch_offset.insert(self.core.me(), self.log.log_end_offset());
+            // `per_voter_fetch_offset` is a wire-facing DescribeQuorum DTO of raw
+            // `i64`s; the peer entries already come from the core as `i64`.
+            per_voter_fetch_offset.insert(self.core.me(), self.log.log_end_offset().0);
             for (id, progress) in replicas {
                 per_voter_fetch_offset.insert(*id, progress.fetch_offset);
             }
@@ -1590,9 +1606,9 @@ impl Engine {
         QuorumStateSnapshot {
             leader_id: qs.leader_id,
             leader_epoch: qs.leader_epoch,
-            high_watermark: self.log.hwm(),
-            log_end_offset: self.log.log_end_offset(),
-            log_start_offset: self.log.log_start_offset(),
+            high_watermark: self.log.hwm().0,
+            log_end_offset: self.log.log_end_offset().0,
+            log_start_offset: self.log.log_start_offset().0,
             voters: qs.voters.ids().into_iter().collect(),
             per_voter_fetch_offset,
         }
@@ -1604,6 +1620,9 @@ impl Engine {
     /// records are already Kafka record batches). At least the first batch is
     /// always emitted so the observer makes progress.
     fn metadata_fetch_slice(&self, fetch_offset: i64, max_bytes: usize) -> MetadataFetchSlice {
+        // `fetch_offset` arrives raw on the observer metadata-fetch wire; wrap it
+        // into the `KraftLog` offset domain for the log-bound comparisons/read.
+        let fetch_offset = Offset(fetch_offset);
         let high_watermark = self.log.hwm();
         let log_start_offset = self.log.log_start_offset();
         let records = if metadata_fetch_offset_in_committed_window(fetch_offset, high_watermark) {
@@ -1625,8 +1644,9 @@ impl Engine {
         };
         MetadataFetchSlice {
             records,
-            log_start_offset,
-            high_watermark,
+            // `MetadataFetchSlice` is a wire-facing DTO of raw `i64` offsets.
+            log_start_offset: log_start_offset.0,
+            high_watermark: high_watermark.0,
         }
     }
 
@@ -1736,7 +1756,7 @@ impl Engine {
     /// the HWM — the HWM is carried separately in the response and gates apply on
     /// the follower); this is what moves real record bytes so multi-voter
     /// `submit_change` waiters can commit once a majority has fetched.
-    fn serve_fetch_records(&self, fetch_offset: i64) -> bytes::Bytes {
+    fn serve_fetch_records(&self, fetch_offset: Offset) -> bytes::Bytes {
         let log_end = self.log.log_end_offset();
         if !fetch_offset_has_records(fetch_offset, log_end) {
             return bytes::Bytes::new();
@@ -1759,7 +1779,7 @@ impl Engine {
     #[tracing::instrument(
         level = "debug",
         skip_all,
-        fields(node = self.me, from, log_end = self.log.log_end_offset())
+        fields(node = self.me, from, log_end = self.log.log_end_offset().0)
     )]
     fn on_fetch_response(&mut self, from: NodeId, body: &[u8]) {
         let Some(wire::PeerResponse::Fetch {
@@ -1793,11 +1813,15 @@ impl Engine {
             return;
         }
 
+        // `hwm` arrives raw on the KIP-595 Fetch response wire; wrap into the
+        // log offset domain.
+        let hwm = Offset(hwm);
         if let Some(point) = diverging {
             // Diverged: truncate to the leader's hint. The follower will
             // re-fetch from the truncation point on the next cycle. We still
             // feed the core event below so it processes the divergence too.
-            if let Err(e) = self.log.truncate_to(point.offset) {
+            // `point.offset` is the core's raw i64 divergence point.
+            if let Err(e) = self.log.truncate_to(Offset(point.offset)) {
                 tracing::error!(?e, "kraft: follower truncate failed");
             }
         } else if !records.is_empty() {
@@ -1807,7 +1831,9 @@ impl Engine {
             match decode_batches(&records) {
                 Ok(batches) => {
                     for mut batch in batches {
-                        let at = batch.base_offset;
+                        // `base_offset` is a raw record-format field; wrap into
+                        // the log offset domain for the append.
+                        let at = Offset(batch.base_offset);
                         let log_end = self.log.log_end_offset();
                         match classify_fetch_batch(at, log_end) {
                             FetchBatchDisposition::AlreadyPresent => {
@@ -1821,7 +1847,7 @@ impl Engine {
                             }
                         }
                         if let Err(e) = self.log.append_at(&mut batch, at) {
-                            tracing::error!(?e, at, "kraft: follower append_at failed");
+                            tracing::error!(?e, at = at.0, "kraft: follower append_at failed");
                             break;
                         }
                         // Appended past the snapshot boundary: the log now has a
@@ -1905,10 +1931,13 @@ impl Engine {
         err
     )]
     fn install_fetched_snapshot(&mut self, id: (i64, i32), bytes: &[u8]) -> Result<(), RaftError> {
+        // `end_offset` is the snapshot id's raw offset (wire / checkpoint-filename
+        // boundary); wrap into the log offset domain where it addresses the log.
         let (end_offset, epoch) = id;
+        let end_offset_pos = Offset(end_offset);
         // Validate the bytes decode before mutating any durable state.
         let records = crate::snapshot::SnapshotReader::read_records(bytes)?;
-        if end_offset <= self.log.log_end_offset() {
+        if end_offset_pos <= self.log.log_end_offset() {
             return Ok(()); // stale; we already advanced past this snapshot
         }
         let cluster_id = self.image.cluster_id();
@@ -1925,8 +1954,8 @@ impl Engine {
         }));
         write_checkpoint(&checkpoint_dir(&self.data_dir), end_offset, epoch, bytes)?;
         self.image = new_image;
-        self.log.install_snapshot(end_offset)?;
-        self.last_snapshot_end_offset = end_offset;
+        self.log.install_snapshot(end_offset_pos)?;
+        self.last_snapshot_end_offset = end_offset_pos;
         self.installed_snapshot_epoch = Some(u32::try_from(epoch).unwrap_or(0));
         let _ = self.image_tx.send(Arc::new(self.image.clone()));
         retain_latest_checkpoint(&checkpoint_dir(&self.data_dir));
@@ -2109,7 +2138,7 @@ fn leader_change_batch(epoch: LeaderEpoch, leader_id: NodeId, voter_ids: &[NodeI
 
 /// Replay committed log batches starting at `from` into `image` (idempotent:
 /// records that fail `validate` are skipped). Used by restart recovery.
-fn replay_committed(log: &KraftLog, image: &mut MetadataImage, from: i64) {
+fn replay_committed(log: &KraftLog, image: &mut MetadataImage, from: Offset) {
     match log.read_decoded(from, MAX_APPLY_BYTES) {
         Ok(batches) => {
             for batch in &batches {
@@ -2390,9 +2419,9 @@ mod tests {
         let initial_snapshot = QuorumStateSnapshot {
             leader_id: core.quorum_state().leader_id,
             leader_epoch: core.quorum_state().leader_epoch,
-            high_watermark: log.hwm(),
-            log_end_offset: log.log_end_offset(),
-            log_start_offset: log.log_start_offset(),
+            high_watermark: log.hwm().0,
+            log_end_offset: log.log_end_offset().0,
+            log_start_offset: log.log_start_offset().0,
             voters: initial_state_voters(&core),
             per_voter_fetch_offset: std::collections::BTreeMap::new(),
         };
@@ -2422,7 +2451,7 @@ mod tests {
                 was_leader,
                 held_epoch,
                 snapshot_interval_records: 0,
-                last_snapshot_end_offset: 0,
+                last_snapshot_end_offset: Offset(0),
                 snapshot_fetch: None,
                 installed_snapshot_epoch: None,
             },
@@ -2658,11 +2687,12 @@ mod tests {
     fn submit_offset_helpers_use_base_plus_blob_count() {
         for (base, count, want) in [(9, 0, 9), (9, 3, 12)] {
             assert!(
-                assigned_record_offset(base, count) == want,
+                assigned_record_offset(Offset(base), count) == want,
                 "assigned_record_offset({base}, {count})"
             );
             assert!(
-                submit_waiter_need_offset(base, usize::try_from(count).unwrap()) == want,
+                submit_waiter_need_offset(Offset(base), usize::try_from(count).unwrap())
+                    == Offset(want),
                 "submit_waiter_need_offset({base}, {count})"
             );
         }
@@ -2677,12 +2707,16 @@ mod tests {
             (4, 4, 4, false),
         ] {
             assert!(
-                append_result_is_consistent(expected_base, returned_base, log_end_after) == want,
+                append_result_is_consistent(
+                    Offset(expected_base),
+                    Offset(returned_base),
+                    Offset(log_end_after)
+                ) == want,
                 "expected_base {expected_base}, returned_base {returned_base}, log_end_after {log_end_after}"
             );
         }
-        assert!(validate_append_result("test", 4, 4, 5).is_ok());
-        assert!(validate_append_result("test", 4, -1, 4).is_err());
+        assert!(validate_append_result("test", Offset(4), Offset(4), Offset(5)).is_ok());
+        assert!(validate_append_result("test", Offset(4), Offset(-1), Offset(4)).is_err());
     }
 
     #[test]
@@ -2704,7 +2738,8 @@ mod tests {
             (8, 5, 8, false),
         ] {
             assert!(
-                batch_base_in_apply_window(base_offset, prev_hwm, applied_hwm) == want,
+                batch_base_in_apply_window(base_offset, Offset(prev_hwm), Offset(applied_hwm))
+                    == want,
                 "base_offset {base_offset}, prev_hwm {prev_hwm}, applied_hwm {applied_hwm}"
             );
         }
@@ -2714,7 +2749,7 @@ mod tests {
     fn snapshot_threshold_uses_positive_hwm_delta_from_last_snapshot() {
         for (hwm, last_snapshot_end, want) in [(10, 4, 6), (4, 10, 0)] {
             assert!(
-                committed_records_since_snapshot(hwm, last_snapshot_end) == want,
+                committed_records_since_snapshot(Offset(hwm), Offset(last_snapshot_end)) == want,
                 "hwm {hwm}, last_snapshot_end {last_snapshot_end}"
             );
         }
@@ -2730,13 +2765,14 @@ mod tests {
     fn expected_hwm_after_advance_is_monotonic_and_clamped_to_log_end() {
         for (prev_hwm, new_hwm, log_end, want) in [(2, 5, 4, 4), (2, 1, 4, 2), (2, 3, 4, 3)] {
             assert!(
-                expected_hwm_after_advance(prev_hwm, new_hwm, log_end) == want,
+                expected_hwm_after_advance(Offset(prev_hwm), Offset(new_hwm), Offset(log_end))
+                    == Offset(want),
                 "prev_hwm {prev_hwm}, new_hwm {new_hwm}, log_end {log_end}"
             );
         }
         for (applied_hwm, expected_hwm, want) in [(4, 4, true), (5, 4, true), (3, 4, false)] {
             assert!(
-                hwm_advanced_as_expected(applied_hwm, expected_hwm) == want,
+                hwm_advanced_as_expected(Offset(applied_hwm), Offset(expected_hwm)) == want,
                 "applied_hwm {applied_hwm}, expected_hwm {expected_hwm}"
             );
         }
@@ -2746,7 +2782,7 @@ mod tests {
     fn waiter_resolution_requires_hwm_to_reach_need_offset() {
         for (hwm, need_offset, want) in [(5, 5, true), (6, 5, true), (4, 5, false)] {
             assert!(
-                hwm_reaches_waiter(hwm, need_offset) == want,
+                hwm_reaches_waiter(Offset(hwm), Offset(need_offset)) == want,
                 "hwm {hwm}, need_offset {need_offset}"
             );
         }
@@ -2757,12 +2793,13 @@ mod tests {
         for (fetch_offset, hwm, want) in [(0, 1, true), (4, 5, true), (-1, 5, false), (5, 5, false)]
         {
             assert!(
-                metadata_fetch_offset_in_committed_window(fetch_offset, hwm) == want,
+                metadata_fetch_offset_in_committed_window(Offset(fetch_offset), Offset(hwm))
+                    == want,
                 "fetch_offset {fetch_offset}, hwm {hwm}"
             );
         }
-        assert!(fetch_batch_committed_before_hwm(4, 5));
-        assert!(!fetch_batch_committed_before_hwm(5, 5));
+        assert!(fetch_batch_committed_before_hwm(4, Offset(5)));
+        assert!(!fetch_batch_committed_before_hwm(5, Offset(5)));
     }
 
     #[test]
@@ -2771,7 +2808,7 @@ mod tests {
             [(0, 1, true), (4, 5, true), (-1, 5, false), (5, 5, false)]
         {
             assert!(
-                fetch_offset_has_records(fetch_offset, log_end) == want,
+                fetch_offset_has_records(Offset(fetch_offset), Offset(log_end)) == want,
                 "fetch_offset {fetch_offset}, log_end {log_end}"
             );
         }
@@ -2785,7 +2822,8 @@ mod tests {
             (None, 10, 10, 3, 3),
         ] {
             assert!(
-                fetch_epoch_for_request(installed, log_start, log_end, last_epoch) == want,
+                fetch_epoch_for_request(installed, Offset(log_start), Offset(log_end), last_epoch)
+                    == want,
                 "installed {installed:?}, log {log_start}..{log_end}"
             );
         }
@@ -2799,7 +2837,7 @@ mod tests {
             (6, 5, FetchBatchDisposition::Gap),
         ] {
             assert!(
-                classify_fetch_batch(base_offset, log_end) == want,
+                classify_fetch_batch(Offset(base_offset), Offset(log_end)) == want,
                 "base_offset {base_offset}, log_end {log_end}"
             );
         }
@@ -2814,7 +2852,7 @@ mod tests {
             ((12, 2), 10, Some((11, 2)), true),
         ] {
             assert!(
-                should_start_snapshot_fetch(snapshot_id, log_end, in_flight) == want,
+                should_start_snapshot_fetch(snapshot_id, Offset(log_end), in_flight) == want,
                 "snapshot_id {snapshot_id:?}, log_end {log_end}, in_flight {in_flight:?}"
             );
         }
@@ -2864,7 +2902,7 @@ mod tests {
             .expect("read appended leader-change");
         assert!(batches.len() == 1);
         let batch = &batches[0];
-        check!(batch.base_offset == start);
+        check!(batch.base_offset == start.0);
         check!(batch.partition_leader_epoch == 4);
         check!(batch.attributes.is_control_batch());
         check!(batch.records.len() == 1);
@@ -2965,7 +3003,7 @@ mod tests {
         engine.on_submit_change(vec![reg], reply);
 
         assert!(matches!(rx.try_recv(), Ok(Ok(()))));
-        assert!(engine.image.broker_epoch(7) == Some(base));
+        assert!(engine.image.broker_epoch(7) == Some(base.0));
     }
 
     #[test]
@@ -2977,7 +3015,7 @@ mod tests {
         assert!(matches!(rx.try_recv(), Ok(Ok(()))));
 
         let mut recovered = MetadataImage::new(uuid::Uuid::nil());
-        replay_committed(&engine.log, &mut recovered, 0);
+        replay_committed(&engine.log, &mut recovered, Offset(0));
 
         assert!(recovered.topic("replayed").is_some());
     }
@@ -2989,19 +3027,19 @@ mod tests {
             let mut batch = one_offset_batch(offset, 1, b"x");
             engine.log.append(&mut batch).expect("append");
         }
-        engine.log.advance_hwm(5);
+        engine.log.advance_hwm(Offset(5));
 
         let (ready_tx, mut ready_rx) = oneshot::channel();
         let (future_tx, mut future_rx) = oneshot::channel();
         engine.commit_waiters.push(CommitWaiter {
-            base_offset: 4,
-            need_offset: 5,
+            base_offset: Offset(4),
+            need_offset: Offset(5),
             rejection: None,
             reply: ready_tx,
         });
         engine.commit_waiters.push(CommitWaiter {
-            base_offset: 5,
-            need_offset: 6,
+            base_offset: Offset(5),
+            need_offset: Offset(6),
             rejection: None,
             reply: future_tx,
         });
@@ -3014,7 +3052,7 @@ mod tests {
             Err(oneshot::error::TryRecvError::Empty)
         ));
         assert!(engine.commit_waiters.len() == 1);
-        check!(engine.commit_waiters[0].need_offset == 6);
+        check!(engine.commit_waiters[0].need_offset == Offset(6));
     }
 
     #[test]
@@ -3023,19 +3061,19 @@ mod tests {
         let (ready_tx, mut ready_rx) = oneshot::channel();
         let (future_tx, mut future_rx) = oneshot::channel();
         engine.commit_waiters.push(CommitWaiter {
-            base_offset: 4,
-            need_offset: 5,
+            base_offset: Offset(4),
+            need_offset: Offset(5),
             rejection: None,
             reply: ready_tx,
         });
         engine.commit_waiters.push(CommitWaiter {
-            base_offset: 5,
-            need_offset: 6,
+            base_offset: Offset(5),
+            need_offset: Offset(6),
             rejection: None,
             reply: future_tx,
         });
 
-        engine.fail_waiters_reached_by(5, "test hwm stall");
+        engine.fail_waiters_reached_by(Offset(5), "test hwm stall");
 
         assert!(matches!(
             ready_rx.try_recv(),
@@ -3046,7 +3084,7 @@ mod tests {
             Err(oneshot::error::TryRecvError::Empty)
         ));
         assert!(engine.commit_waiters.len() == 1);
-        check!(engine.commit_waiters[0].need_offset == 6);
+        check!(engine.commit_waiters[0].need_offset == Offset(6));
     }
 
     #[test]
@@ -3059,7 +3097,7 @@ mod tests {
 
         check!(*leader_rx.borrow_and_update() == Some(1));
         check!(quorum_rx.borrow().leader_id == Some(1));
-        check!(quorum_rx.borrow().log_end_offset == engine.log.log_end_offset());
+        check!(quorum_rx.borrow().log_end_offset == engine.log.log_end_offset().0);
     }
 
     #[tokio::test]
@@ -3097,7 +3135,7 @@ mod tests {
         let mut second = one_offset_batch(1, 1, b"b");
         engine.log.append(&mut first).expect("append first");
         engine.log.append(&mut second).expect("append second");
-        engine.log.advance_hwm(1);
+        engine.log.advance_hwm(Offset(1));
 
         assert!(
             engine
@@ -3122,7 +3160,10 @@ mod tests {
     #[tokio::test]
     async fn send_fetch_uses_snapshot_epoch_only_until_log_extends_past_boundary() {
         let (mut engine, _dir) = build_engine_only(1, &[1, 2]);
-        engine.log.install_snapshot(10).expect("install snapshot");
+        engine
+            .log
+            .install_snapshot(Offset(10))
+            .expect("install snapshot");
         engine.installed_snapshot_epoch = Some(7);
         let fetch_response = wire::PeerResponse::Fetch {
             leader_id: 2,
@@ -3152,7 +3193,7 @@ mod tests {
         let mut batch = one_offset_batch(10, 9, b"after-snapshot");
         engine
             .log
-            .append_at(&mut batch, 10)
+            .append_at(&mut batch, Offset(10))
             .expect("append after snapshot");
         engine.send_fetch(2);
         let send = recv_peer_send(&mut sends).await;
@@ -3175,9 +3216,9 @@ mod tests {
         let mut batch = one_offset_batch(0, 1, b"a");
         engine.log.append(&mut batch).expect("append");
 
-        assert!(engine.serve_fetch_records(-1).is_empty());
-        assert!(engine.serve_fetch_records(1).is_empty());
-        let records = engine.serve_fetch_records(0);
+        assert!(engine.serve_fetch_records(Offset(-1)).is_empty());
+        assert!(engine.serve_fetch_records(Offset(1)).is_empty());
+        let records = engine.serve_fetch_records(Offset(0));
         let decoded = decode_batches(&records).expect("decode served records");
         assert!(decoded.len() == 1);
         assert!(decoded[0].base_offset == 0);
@@ -3239,7 +3280,10 @@ mod tests {
             .is_err()
         );
 
-        engine.log.install_snapshot(11).expect("install snapshot");
+        engine
+            .log
+            .install_snapshot(Offset(11))
+            .expect("install snapshot");
         engine.snapshot_fetch = None;
         engine.on_fetch_response(2, &body);
         assert!(engine.snapshot_fetch.is_none());

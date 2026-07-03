@@ -19,7 +19,13 @@ The shared-type foundation is landed:
 
 The full protocol **differential suite passes against the JVM oracle** (675 tests, 0 failures, 0 ignored) with everything above in place — so the shared-type work so far has preserved Kafka wire byte-exactness. That oracle (`tools/oracle` built with a JDK 17; set `JAVA_HOME`) plus Docker/testcontainers is the gate the wire-facing core rollout below must run under.
 
-**What remains — and the verification constraint.** The bulk of `Offset`/`PartitionIndex` lives in the wire-facing core: `log` (~328 sites), `broker` (~297), `raft` (~145), and the storage/records crates they hub through. Threading the shared types there is a large *coordinated* change (broker consumes all of them), and — critically — its Kafka byte-exactness is verified by the **JVM differential oracle** (`cargo test -- --include-ignored` against a live `cp-kafka`, needing JDK + gradle + Docker), which does **not** run in a plain `cargo test` gate. Rolling those ~900 wire-critical sites without the differential suite in the loop would risk exactly the byte-exactness this project can't lose. So the core rollout is deliberately left for a focused effort **run with the differential oracle**, one crate-group at a time in dependency order (protocol record domain → log → raft → broker → storage/records → clients).
+**Wire-facing core — in progress**, dependency-ordered, each crate verified in isolation before the next:
+
+- **`log`** ✅ — fully converted (~300 sites). On-disk index/segment/txn-index/leader-epoch-checkpoint bytes and the v2 wire format held byte-identical (raw `i64` at every disk/`RecordBatch` boundary); proven by 149 unit + proptest round-trips. Re-exports `crabka_log::Offset` for consumers.
+- **`raft`** ✅ — fully converted at the `KraftLog` facade + controller (~150 sites). The pure consensus core `crabka-kraft-core` stays `i64` (model-checked, WASM-buildable); raft wraps at that boundary and at the KIP-595 wire/snapshot boundaries. Proven by 153 unit + 28 integration/**stateright model-check** tests.
+- **`broker`** ✅ — adopted `Offset` at the log/raft boundary (~45 seam sites: partition writer, fetch, remote-log-manager, list-offsets, …). Broker keeps offsets `i64` internally for now; wire response fields stay `i64`. Proven by 1277 unit tests.
+
+The remaining pieces — broker's *internal* offset conversion (~250 sites), the storage/records consumers, and broker-side `PartitionIndex` — continue the same dependency-ordered, byte-exact process. `crabka-kraft-core` and `crabka-protocol`'s `RecordBatch` stay raw as the model-check / wire boundary. Byte-exactness is checked by each crate's own on-disk/consensus tests plus the **JVM differential oracle** (`tools/oracle`, JDK 17, `JAVA_HOME`) and Docker/testcontainers — noting that a differential run rewrites the tracked corpus fixtures (`crates/protocol/tests/corpus/`), which must be restored, not committed.
 
 ---
 

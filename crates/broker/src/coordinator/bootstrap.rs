@@ -296,7 +296,10 @@ fn replay_records(
                     }
                 }
             }
-            advanced_to = batch.base_offset + i64::from(batch.last_offset_delta) + 1;
+            // The loop threads the log's `Offset` cursor (`next`/`end` feed
+            // `Log::read`); wrap the batch-derived next offset back into `Offset`.
+            advanced_to =
+                crabka_log::Offset(batch.base_offset + i64::from(batch.last_offset_delta) + 1);
         }
         if advanced_to <= next {
             break;

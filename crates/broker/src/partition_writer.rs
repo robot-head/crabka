@@ -12,7 +12,7 @@ use std::{
 };
 
 use arc_swap::ArcSwap;
-use crabka_log::Log;
+use crabka_log::{Log, Offset};
 use tokio::{
     runtime::{Handle, RuntimeFlavor},
     sync::{Notify, mpsc},
@@ -120,11 +120,12 @@ fn append_produce_batch(
                     .map_err(crate::error::BrokerError::from)
             }
         };
-        results.push(r);
+        // Unwrap the log-layer `Offset` back into broker's `i64` world at the seam.
+        results.push(r.map(|o| o.0));
     }
     // Read the post-append LEO once under the same lock so the HW recompute
     // reflects the whole group.
-    let leo = guard.log_end_offset();
+    let leo = guard.log_end_offset().0;
     (results, leo)
 }
 
@@ -273,7 +274,7 @@ pub async fn run(
                 let log_for_blocking = log.clone();
                 let join = tokio::task::spawn_blocking(move || {
                     lock_log(&log_for_blocking)
-                        .append_at(&mut batch, offset)
+                        .append_at(&mut batch, Offset(offset))
                         .map_err(crate::error::BrokerError::from)
                 });
                 let result = match join.await {
@@ -300,7 +301,7 @@ pub async fn run(
                 let log_for_blocking = log.clone();
                 let join = tokio::task::spawn_blocking(move || {
                     lock_log(&log_for_blocking)
-                        .truncate_to(offset)
+                        .truncate_to(Offset(offset))
                         .map_err(crate::error::BrokerError::from)
                 });
                 let result = match join.await {
@@ -323,7 +324,7 @@ pub async fn run(
                 // can be satisfied by a stale HW pointing past the truncated end
                 // of the log (and a consumer told to read vanished offsets).
                 if ok {
-                    let new_leo = lock_log(&log).log_end_offset();
+                    let new_leo = lock_log(&log).log_end_offset().0;
                     replica_state
                         .lock()
                         .await
@@ -334,7 +335,7 @@ pub async fn run(
                 let log_for_blocking = log.clone();
                 let join = tokio::task::spawn_blocking(move || {
                     lock_log(&log_for_blocking)
-                        .reset_to(new_base)
+                        .reset_to(Offset(new_base))
                         .map_err(crate::error::BrokerError::from)
                 });
                 let result = match join.await {
@@ -356,7 +357,7 @@ pub async fn run(
                 // so a stale HW can't satisfy an acks=all gate for a vanished
                 // offset (see the Truncate handler).
                 if ok {
-                    let new_leo = lock_log(&log).log_end_offset();
+                    let new_leo = lock_log(&log).log_end_offset().0;
                     replica_state
                         .lock()
                         .await
@@ -367,7 +368,9 @@ pub async fn run(
                 let log_for_blocking = log.clone();
                 let join = tokio::task::spawn_blocking(move || {
                     lock_log(&log_for_blocking)
-                        .trim_to_offset(new_start)
+                        // Unwrap the trimmed `Offset` back to broker's `i64` ack.
+                        .trim_to_offset(Offset(new_start))
+                        .map(|o| o.0)
                         .map_err(crate::error::BrokerError::from)
                 });
                 let result = match join.await {
@@ -407,7 +410,11 @@ pub async fn run(
                     .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
                 let active_producers = producer_state
                     .active_snapshot(&topic, partition, now_ms, PRODUCER_ID_EXPIRATION_MS)
-                    .await;
+                    .await
+                    // Wrap the broker-side `i64` last-offsets into log-layer `Offset`s at the seam.
+                    .into_iter()
+                    .map(|(pid, off)| (pid, Offset(off)))
+                    .collect();
                 let ctx = crabka_log::CompactionContext {
                     now,
                     active_producers,
@@ -438,7 +445,7 @@ pub async fn run(
             #[cfg(any(test, feature = "test-helpers"))]
             WriterMessage::TestSetLogStart { new_start, ack } => {
                 let result = lock_log(&log)
-                    .set_log_start_offset(new_start)
+                    .set_log_start_offset(Offset(new_start))
                     .map_err(crate::error::BrokerError::from);
                 let _ = ack.send(result);
             }
@@ -704,7 +711,10 @@ mod tests {
                 .expect("append ok");
             assert!(assigned == i64::try_from(idx + 1).unwrap());
         }
-        assert!(log.lock().unwrap().log_end_offset() == i64::try_from(MAX_PRODUCE_GROUP).unwrap());
+        assert!(
+            log.lock().unwrap().log_end_offset()
+                == Offset(i64::try_from(MAX_PRODUCE_GROUP).unwrap())
+        );
 
         drop(tx);
         writer.await.expect("writer join");
@@ -804,7 +814,7 @@ mod tests {
         let r = log
             .lock()
             .unwrap()
-            .read_raw(0, 1, 10 * 1024 * 1024)
+            .read_raw(Offset(0), Offset(1), 10 * 1024 * 1024)
             .unwrap();
         assert!(&r.bytes[21..] == &wire[21..], "CRC-covered region verbatim");
         assert!(&r.bytes[17..21] == &wire[17..21], "CRC unchanged");
@@ -841,7 +851,11 @@ mod tests {
         assert!(assigned == 0);
         assert!(leo == 2);
 
-        let read = log.lock().unwrap().read(0, 10 * 1024 * 1024).unwrap();
+        let read = log
+            .lock()
+            .unwrap()
+            .read(Offset(0), 10 * 1024 * 1024)
+            .unwrap();
         assert!(read.batches.len() == 1);
         check!(read.batches[0].attributes.compression() == CompressionType::Lz4);
         check!(read.batches[0].records.len() == 2);
@@ -923,7 +937,7 @@ mod tests {
             .await
             .expect("send replicate");
         ack_rx.await.expect("ack recv").expect("replicate ok");
-        assert!(log.lock().unwrap().log_end_offset() == 3);
+        assert!(log.lock().unwrap().log_end_offset().0 == 3);
 
         drop(tx);
         writer.await.expect("writer join");
@@ -965,7 +979,7 @@ mod tests {
             .expect_err("expected offset mismatch");
         assert!(matches!(err, crate::error::BrokerError::Log(_)));
         // Local log must not have advanced.
-        assert!(log.lock().unwrap().log_end_offset() == 0);
+        assert!(log.lock().unwrap().log_end_offset().0 == 0);
 
         drop(tx);
         writer.await.expect("writer join");
@@ -1005,14 +1019,14 @@ mod tests {
             .expect("send produce");
             ack_rx.await.expect("ack").expect("ok");
         }
-        assert!(log.lock().unwrap().log_end_offset() == 4);
+        assert!(log.lock().unwrap().log_end_offset().0 == 4);
 
         let (ack, ack_rx) = oneshot::channel();
         tx.send(WriterMessage::Truncate { offset: 0, ack })
             .await
             .expect("send truncate");
         ack_rx.await.expect("ack").expect("truncate ok");
-        assert!(log.lock().unwrap().log_end_offset() == 0);
+        assert!(log.lock().unwrap().log_end_offset().0 == 0);
 
         drop(tx);
         writer.await.expect("writer join");
@@ -1206,7 +1220,7 @@ mod tests {
             .expect("send");
         let new_start = ack_rx.await.expect("ack").expect("trim ok");
         assert!(new_start >= 3);
-        assert!(log.lock().expect("lock").log_start_offset() == new_start);
+        assert!(log.lock().expect("lock").log_start_offset().0 == new_start);
 
         drop(tx);
         writer.await.expect("writer join");
@@ -1286,7 +1300,7 @@ mod tests {
             (guard.log_end_offset(), guard.dir().to_path_buf())
         };
         check!(result == SwapOutcome::Swapped);
-        check!(leo == 2);
+        check!(leo == Offset(2));
         check!(log_dir_now == target_partition_path.clone());
         check!(log_dir.load().as_ref().clone() == target_dir);
         check!(!source_partition.exists());
@@ -1323,7 +1337,7 @@ mod tests {
             (guard.log_end_offset(), guard.dir().to_path_buf())
         };
         check!(result == SwapOutcome::NotCaughtUp);
-        check!(leo == 2);
+        check!(leo == Offset(2));
         check!(log_dir_now == source_partition.clone());
         check!(log_dir.load().as_ref().clone() == source_dir);
         check!(source_partition.exists());

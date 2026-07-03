@@ -123,9 +123,10 @@ pub(crate) async fn handle(
                 let (local_start, local_end, local_log_start, remote_storage_enable) = {
                     let log = p.log.lock().expect("log mutex poisoned");
                     (
-                        log.log_start_offset(),
-                        log.log_end_offset(),
-                        log.local_log_start_offset(),
+                        // Unwrap the log-layer `Offset`s into broker's `i64` world at the seam.
+                        log.log_start_offset().0,
+                        log.log_end_offset().0,
+                        log.local_log_start_offset().0,
                         log.config_snapshot().remote_storage_enable,
                     )
                 };
@@ -167,9 +168,10 @@ pub(crate) async fn handle(
                     EARLIEST_LOCAL_TIMESTAMP => (local_log_start, UNKNOWN_TIMESTAMP),
                     MAX_TIMESTAMP => {
                         let log = p.log.lock().expect("log mutex poisoned");
+                        // Unwrap the log-layer `Offset`s into broker's `i64` world at the seam.
                         match log.max_timestamp_offset_and_ts() {
-                            Some((offset, ts)) => (offset, ts),
-                            None => (log.offset_of_max_timestamp(), UNKNOWN_TIMESTAMP),
+                            Some((offset, ts)) => (offset.0, ts),
+                            None => (log.offset_of_max_timestamp().0, UNKNOWN_TIMESTAMP),
                         }
                     }
                     ts if ts > 0 => {
@@ -206,8 +208,9 @@ pub(crate) async fn handle(
                                 let log = p.log.lock().expect("log mutex poisoned");
                                 log.offset_for_timestamp(ts)
                             };
+                            // Unwrap the log-layer `Offset` into broker's `i64` world at the seam.
                             local.map_or((UNKNOWN_OFFSET, UNKNOWN_TIMESTAMP), |(o, matched_ts)| {
-                                (o, matched_ts)
+                                (o.0, matched_ts)
                             })
                         }
                     }

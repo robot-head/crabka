@@ -21,7 +21,7 @@ use std::{
     time::Duration,
 };
 
-use crabka_log::{Log, LogConfig};
+use crabka_log::{Log, LogConfig, Offset};
 use dashmap::DashMap;
 use tokio::{sync::oneshot, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
@@ -365,10 +365,12 @@ fn catch_up(
     let current_leo = part.log_end_offset();
     // Recover the guard if a panic elsewhere poisoned the mutex rather
     // than killing this (discarded-JoinHandle) replicator task.
+    // Unwrap the log-layer `Offset` into broker's `i64` world at the seam.
     let future_leo = future_log
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .log_end_offset();
+        .log_end_offset()
+        .0;
     if future_leo >= current_leo {
         return Ok(CatchUpProgress { caught_up: true });
     }
@@ -379,7 +381,7 @@ fn catch_up(
             .log
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        log.read(future_leo, MOVE_READ_CHUNK_BYTES)?
+        log.read(Offset(future_leo), MOVE_READ_CHUNK_BYTES)?
     };
     if read.batches.is_empty() {
         // Source advanced its log_start past `future_leo` (retention
@@ -397,7 +399,7 @@ fn catch_up(
     for mut batch in read.batches {
         let base = batch.base_offset;
         future
-            .append_at(&mut batch, base)
+            .append_at(&mut batch, Offset(base))
             .map_err(BrokerError::from)?;
     }
     Ok(CatchUpProgress { caught_up: false })

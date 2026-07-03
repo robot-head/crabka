@@ -12,6 +12,7 @@ mod sim_harness;
 
 use std::cell::RefCell;
 
+use crabka_ids::Offset;
 use crabka_protocol::records::{Attributes, Record, RecordBatch};
 use crabka_raft::kraft::{
     KraftLog,
@@ -42,10 +43,12 @@ impl KraftBackedLog {
     /// simulation, so one batch per offset).
     fn decoded(&self) -> Vec<RecordBatch> {
         let end = self.log.log_end_offset();
-        if end <= 0 {
+        if end <= Offset(0) {
             return Vec::new();
         }
-        self.log.read_decoded(0, usize::MAX).expect("read_decoded")
+        self.log
+            .read_decoded(Offset(0), usize::MAX)
+            .expect("read_decoded")
     }
 }
 
@@ -107,6 +110,9 @@ impl SimNodeLog for KraftBackedLog {
     }
 
     fn truncate_to(&mut self, offset: i64) {
+        // The `SimNodeLog` seam speaks raw `i64`; wrap into the `KraftLog`
+        // offset domain.
+        let offset = Offset(offset);
         if offset < self.log.log_end_offset() {
             self.log.truncate_to(offset).expect("truncate_to");
         }
@@ -114,8 +120,8 @@ impl SimNodeLog for KraftBackedLog {
 
     fn advance_hwm(&mut self, hwm: i64) {
         // Gate committed reads on the consensus HWM (monotonic, clamped to the
-        // local log end by `KraftLog`).
-        self.log.advance_hwm(hwm);
+        // local log end by `KraftLog`). The seam is raw `i64`; wrap it.
+        self.log.advance_hwm(Offset(hwm));
     }
 
     fn replicate_from(&mut self, leader: &Self) {
@@ -140,24 +146,26 @@ impl SimNodeLog for KraftBackedLog {
         // epoch tail, or a longer stale follower). Real on-disk truncation.
         if common < follower_batches.len() {
             let truncate_at = i64::try_from(common).expect("offset fits in i64");
-            self.log.truncate_to(truncate_at).expect("truncate_to");
+            self.log
+                .truncate_to(Offset(truncate_at))
+                .expect("truncate_to");
             follower_batches.truncate(common);
         }
 
         // Append the suffix the follower is missing, preserving the leader's
         // exact bytes + epoch at the leader-assigned offset.
         for (next_offset, lb) in
-            (self.log.log_end_offset()..).zip(leader_batches.iter().skip(follower_batches.len()))
+            (self.log.log_end_offset().0..).zip(leader_batches.iter().skip(follower_batches.len()))
         {
             let mut batch = lb.clone();
             self.log
-                .append_at(&mut batch, next_offset)
+                .append_at(&mut batch, Offset(next_offset))
                 .expect("append_at");
         }
     }
 
     fn record_count(&self) -> usize {
-        usize::try_from(self.log.log_end_offset()).expect("log end fits in usize")
+        usize::try_from(self.log.log_end_offset().0).expect("log end fits in usize")
     }
 }
 
@@ -180,14 +188,16 @@ fn new_with_kraft_log(voter_ids: &[u64]) -> Sim<KraftBackedLog> {
 /// is the byte-exact convergence target.
 fn committed_bytes(sim: &Sim<KraftBackedLog>, node: u64) -> bytes::Bytes {
     let log = &sim.node_log(node).log;
-    let raw = log.read_committed(0, usize::MAX).expect("read_committed");
+    let raw = log
+        .read_committed(Offset(0), usize::MAX)
+        .expect("read_committed");
     raw.bytes
 }
 
 /// Decoded committed batches of `node`'s log up to the consensus HWM.
 fn committed_batches(sim: &Sim<KraftBackedLog>, node: u64, hwm: i64) -> Vec<RecordBatch> {
     let log = &sim.node_log(node).log;
-    log.read_decoded(0, usize::MAX)
+    log.read_decoded(Offset(0), usize::MAX)
         .expect("read_decoded")
         .into_iter()
         .filter(|b| b.base_offset < hwm)

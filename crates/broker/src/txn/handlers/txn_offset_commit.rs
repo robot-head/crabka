@@ -505,7 +505,9 @@ mod tests {
             .get(OFFSETS_TOPIC, OFFSETS_PARTITION)
             .expect("offsets partition");
         let log = part.log.lock().expect("lock offsets log");
-        let read = log.read(0, 1024 * 1024).expect("read offsets log");
+        let read = log
+            .read(crabka_log::Offset(0), 1024 * 1024)
+            .expect("read offsets log");
         assert!(read.batches.len() == 1);
         let batch = &read.batches[0];
         check!(batch.attributes.is_transactional());
@@ -545,7 +547,9 @@ mod tests {
             .get(OFFSETS_TOPIC, OFFSETS_PARTITION)
             .expect("offsets partition");
         let log = part.log.lock().expect("lock offsets log");
-        let read = log.read(0, 1024 * 1024).expect("read offsets log");
+        let read = log
+            .read(crabka_log::Offset(0), 1024 * 1024)
+            .expect("read offsets log");
         assert!(read.batches.is_empty());
     }
 

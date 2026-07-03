@@ -20,7 +20,7 @@ use std::{
 };
 
 use arc_swap::ArcSwap;
-use crabka_log::{AbortedTxn, Log, ReadOutput, VerbatimBatch};
+use crabka_log::{AbortedTxn, Log, Offset, ReadOutput, VerbatimBatch};
 use crabka_protocol::records::RecordBatch;
 use tokio::{
     sync::{Notify, mpsc, oneshot},
@@ -216,7 +216,7 @@ impl Partition {
     #[must_use]
     pub fn log_end_offset(&self) -> LogOffset {
         match self.log.lock() {
-            Ok(g) => g.log_end_offset(),
+            Ok(g) => g.log_end_offset().0,
             Err(_) => 0,
         }
     }
@@ -231,7 +231,7 @@ impl Partition {
     #[must_use]
     pub fn lso(&self) -> LogOffset {
         match self.log.lock() {
-            Ok(g) => g.lso(),
+            Ok(g) => g.lso().0,
             Err(_) => 0,
         }
     }
@@ -361,7 +361,7 @@ impl Partition {
     #[must_use]
     pub(crate) fn log_start_offset(&self) -> LogOffset {
         match self.log.lock() {
-            Ok(g) => g.log_start_offset(),
+            Ok(g) => g.log_start_offset().0,
             Err(_) => 0,
         }
     }
@@ -374,7 +374,7 @@ impl Partition {
     #[must_use]
     pub fn aborted_in_range(&self, start: LogOffset, end: LogOffset) -> Vec<AbortedTxn> {
         match self.log.lock() {
-            Ok(g) => g.aborted_in_range(start, end),
+            Ok(g) => g.aborted_in_range(Offset(start), Offset(end)),
             Err(_) => Vec::new(),
         }
     }
@@ -397,7 +397,7 @@ impl Partition {
         self.log
             .lock()
             .map_err(|_| BrokerError::Txn("log mutex poisoned".into()))?
-            .read(offset, max_bytes)
+            .read(Offset(offset), max_bytes)
             .map_err(BrokerError::from)
     }
 

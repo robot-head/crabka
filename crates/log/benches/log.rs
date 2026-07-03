@@ -17,6 +17,7 @@ use std::{
 };
 
 use bytes::Bytes;
+use crabka_ids::Offset;
 use crabka_log::{Log, LogConfig, VerbatimBatch};
 use crabka_protocol::records::{Record, RecordBatch};
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
@@ -269,20 +270,20 @@ fn bench_read(c: &mut Criterion) {
 
     group.bench_function("from_start_1MiB", |b| {
         b.iter(|| {
-            let out = log.read(black_box(0), 1024 * 1024).unwrap();
+            let out = log.read(black_box(Offset(0)), 1024 * 1024).unwrap();
             black_box(out);
         });
     });
 
     group.bench_function("from_start_unbounded", |b| {
         b.iter(|| {
-            let out = log.read(black_box(0), usize::MAX).unwrap();
+            let out = log.read(black_box(Offset(0)), usize::MAX).unwrap();
             black_box(out);
         });
     });
 
     group.bench_function("from_middle_1MiB", |b| {
-        let mid = end / 2;
+        let mid = Offset(end.0 / 2);
         b.iter(|| {
             let out = log.read(black_box(mid), 1024 * 1024).unwrap();
             black_box(out);
@@ -290,7 +291,7 @@ fn bench_read(c: &mut Criterion) {
     });
 
     group.bench_function("from_end_minus_100_1MiB", |b| {
-        let near_end = (end - 100).max(0);
+        let near_end = (end - 100).max(Offset(0));
         b.iter(|| {
             let out = log.read(black_box(near_end), 1024 * 1024).unwrap();
             black_box(out);

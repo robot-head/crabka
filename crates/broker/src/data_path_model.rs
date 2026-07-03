@@ -27,7 +27,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crabka_log::{EpochEntry, epoch_and_offset_for_entries};
+use crabka_log::{EpochEntry, Offset, epoch_and_offset_for_entries};
 use crabka_metadata::PartitionRecord;
 use stateright::{Checker, Model, Property};
 
@@ -142,7 +142,7 @@ fn epoch_entries(log: &[u8]) -> Vec<EpochEntry> {
         if last != Some(e) {
             out.push(EpochEntry {
                 epoch: i32::from(e),
-                start_offset: off as i64,
+                start_offset: Offset(off as i64),
             });
             last = Some(e);
         }
@@ -155,9 +155,13 @@ fn epoch_entries(log: &[u8]) -> Vec<EpochEntry> {
 fn real_truncation_offset(follower_log: &[u8], leader_log: &[u8]) -> i64 {
     let leader_entries = epoch_entries(leader_log);
     let follower_latest = follower_log.last().map_or(-1, |&e| i32::from(e));
-    let (_, end) =
-        epoch_and_offset_for_entries(&leader_entries, follower_latest, leader_log.len() as i64);
-    end.min(follower_log.len() as i64)
+    let (_, end) = epoch_and_offset_for_entries(
+        &leader_entries,
+        follower_latest,
+        Offset(leader_log.len() as i64),
+    );
+    // Unwrap the log-layer `Offset` into this model's `i64` world at the seam.
+    end.0.min(follower_log.len() as i64)
 }
 
 /// Whether follower `b` is genuinely in-sync and may be (re)admitted to the

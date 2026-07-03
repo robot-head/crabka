@@ -130,7 +130,8 @@ pub(crate) async fn handle(
                         .end_offset_for_epoch(part.leader_epoch, leo);
                     drop(log);
                     out.error_code = codes::NONE;
-                    out.end_offset = end_offset;
+                    // Unwrap the log-layer `Offset` into the wire `i64` field.
+                    out.end_offset = end_offset.0;
                     // Report the leader's view of the epoch (same as
                     // requested unless our checkpoint doesn't know the
                     // exact epoch, in which case end_offset == -1).
