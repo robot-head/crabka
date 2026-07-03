@@ -847,12 +847,12 @@ impl BrokerConfig {
         let listeners = self.effective_listeners();
 
         // Bind-address collisions.
-        for i in 0..listeners.len() {
-            for j in (i + 1)..listeners.len() {
-                if listeners[i].bind_addr == listeners[j].bind_addr {
+        for (i, listener) in listeners.iter().enumerate() {
+            for other in listeners.iter().skip(i + 1) {
+                if listener.bind_addr == other.bind_addr {
                     return Err(BrokerError::ListenerConflict {
-                        a: listeners[i].name.clone(),
-                        b: listeners[j].name.clone(),
+                        a: listener.name.clone(),
+                        b: other.name.clone(),
                     });
                 }
             }
