@@ -182,8 +182,8 @@ pub fn replay_ruler_state_records<S: MetricStore>(
         replayed_records += 1;
         committed_offsets
             .entry(record.partition)
-            .and_modify(|offset| *offset = (*offset).max(record.offset.next()))
-            .or_insert(record.offset.next());
+            .and_modify(|offset| *offset = (*offset).max(record.offset + 1))
+            .or_insert(record.offset + 1);
     }
 
     Ok(WalHeadReplayResult {
@@ -258,18 +258,14 @@ pub fn replay_wal_head_records(
             newest_timestamp_ms =
                 Some(newest_timestamp_ms.map_or(timestamp_ms, |current| current.max(timestamp_ms)));
         }
-        // Bridge this crate's `ids::{PartitionIndex, Offset}` to promql's own
-        // newtypes via the raw primitive (`.0`), the wire-boundary conversion.
-        head.apply_wal_record_at(
-            &wal_record,
-            record.partition.0.into(),
-            record.offset.0.into(),
-        );
+        // partition/offset are now the shared crabka_ids types promql also uses,
+        // so they pass straight through with no conversion at the seam.
+        head.apply_wal_record_at(&wal_record, record.partition, record.offset);
         replayed_records += 1;
         committed_offsets
             .entry(record.partition)
-            .and_modify(|offset| *offset = (*offset).max(record.offset.next()))
-            .or_insert(record.offset.next());
+            .and_modify(|offset| *offset = (*offset).max(record.offset + 1))
+            .or_insert(record.offset + 1);
     }
     if let Some(timestamp_ms) = newest_timestamp_ms {
         head.prune(timestamp_ms);

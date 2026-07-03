@@ -20,46 +20,11 @@
 //! the encoded JSON is exactly the inner primitive, never a wrapping object,
 //! keeping the byte shape identical.
 
+/// The canonical cross-crate Kafka `(partition, offset)` coordinate. `Timestamp`
+/// stays gateway-local (it is not one of the shared core identifiers).
+pub use crabka_ids::{Offset, PartitionIndex};
 use derive_more::{Display, From, Into};
 use serde::{Deserialize, Serialize};
-
-/// A Kafka partition index (`i32` on the wire).
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    Display,
-    From,
-    Into,
-    Serialize,
-    Deserialize,
-)]
-#[serde(transparent)]
-pub struct PartitionIndex(pub i32);
-
-/// A record's log offset within its partition (`i64` on the wire).
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    Display,
-    From,
-    Into,
-    Serialize,
-    Deserialize,
-)]
-#[serde(transparent)]
-pub struct Offset(pub i64);
 
 /// A record's timestamp in epoch milliseconds (`i64` on the wire).
 #[derive(

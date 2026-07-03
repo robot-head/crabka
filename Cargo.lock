@@ -2444,6 +2444,7 @@ dependencies = [
  "crabka-client-consumer",
  "crabka-client-core",
  "crabka-client-producer",
+ "crabka-ids",
  "crabka-metadata",
  "crabka-protocol",
  "crabka-security",
@@ -2481,6 +2482,16 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "crabka-ids"
+version = "0.3.8"
+dependencies = [
+ "assert2",
+ "derive_more",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -2673,10 +2684,10 @@ dependencies = [
  "crabka-blockstore",
  "crabka-client-consumer",
  "crabka-client-producer",
+ "crabka-ids",
  "crabka-metrics",
  "crabka-promql",
  "crabka-telemetry",
- "derive_more",
  "futures",
  "object_store",
  "prost 0.14.4",
@@ -2897,10 +2908,10 @@ dependencies = [
  "async-trait",
  "axum",
  "crabka-blockstore",
+ "crabka-ids",
  "crabka-metrics",
  "datafusion",
  "datatest-stable",
- "derive_more",
  "futures",
  "object_store",
  "prometheus-client",
@@ -3090,6 +3101,7 @@ dependencies = [
  "crabka-client-core",
  "crabka-client-producer",
  "crabka-connect",
+ "crabka-ids",
  "crabka-logfmt",
  "crabka-security",
  "derive_more",

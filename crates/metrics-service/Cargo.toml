@@ -25,12 +25,12 @@ axum = { workspace = true, features = ["json"] }
 bytes = { workspace = true }
 clap = { workspace = true }
 crabka-blockstore = { path = "../blockstore", version = "0.3.7" }
+crabka-ids = { path = "../ids", version = "0.3.8" }
 crabka-client-consumer = { path = "../client-consumer", version = "0.3.8" }
 crabka-client-producer = { path = "../client-producer", version = "0.3.8" }
 crabka-metrics = { path = "../metrics", version = "0.3.8" }
 crabka-promql = { path = "../promql", version = "0.3.8" }
 crabka-telemetry = { path = "../telemetry", version = "0.3.8" }
-derive_more = { workspace = true }
 futures = { workspace = true }
 object_store = { workspace = true }
 reqwest = { workspace = true, features = ["json"] }

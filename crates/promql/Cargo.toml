@@ -23,10 +23,10 @@ experimental-functions = []
 
 [dependencies]
 crabka-blockstore = { path = "../blockstore", version = "0.3.7" }
+crabka-ids = { path = "../ids", version = "0.3.8" }
 crabka-metrics = { path = "../metrics", version = "0.3.8" }
 arrow = { workspace = true }
 datafusion = { workspace = true }
-derive_more = { workspace = true }
 promql-parser = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }

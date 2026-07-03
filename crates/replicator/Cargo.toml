@@ -25,6 +25,7 @@ async-trait = { workspace = true }
 bytes = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
 crabka-connect = { version = "0.3.8", path = "../connect" }
+crabka-ids = { version = "0.3.8", path = "../ids" }
 crabka-client-core = { version = "0.3.8", path = "../client-core" }
 crabka-client-consumer = { version = "0.3.8", path = "../client-consumer" }
 crabka-client-producer = { version = "0.3.8", path = "../client-producer" }

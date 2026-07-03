@@ -24,12 +24,12 @@
 //!
 //! [newtype guidance]: ../../../docs/style_guides/code_style_guide.md
 
+/// The canonical cross-crate `PartitionIndex`, as carried in offset-syncs,
+/// checkpoints, and replicated records. The MM2 offset newtypes below stay
+/// crate-local — they encode source-vs-target-cluster distinctions specific to
+/// MirrorMaker-2 that have no meaning outside this crate.
+pub use crabka_ids::{Offset, PartitionIndex};
 use derive_more::{Display, From, Into};
-
-/// A partition index (`i32`), as carried in offset-syncs, checkpoints, and
-/// replicated records.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Display, From, Into)]
-pub struct PartitionIndex(pub i32);
 
 /// An offset on the **source** cluster, as recorded in an offset-sync or
 /// checkpoint (`upstream` in the JVM MM2 codecs).
@@ -47,10 +47,6 @@ pub struct DownstreamOffset(pub i64);
 /// site, so it gets its own type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Display, From, Into)]
 pub struct CommittedOffset(pub i64);
-
-/// The source-cluster offset of a single replicated record (0-based).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Display, From, Into)]
-pub struct Offset(pub i64);
 
 /// A record timestamp in epoch milliseconds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Display, From, Into)]
