@@ -240,13 +240,11 @@ mod tests {
         }
     }
 
-    fn encode_request(req: &StreamsGroupDescribeRequest) -> Bytes {
-        crate::test_support::encode_request(req, response_mod::MAX_VERSION)
-    }
-
-    fn decode_response(bytes: &Bytes) -> StreamsGroupDescribeResponse {
-        crate::test_support::decode_response(bytes, response_mod::MAX_VERSION)
-    }
+    crate::test_support::codec_helpers!(
+        StreamsGroupDescribeRequest,
+        StreamsGroupDescribeResponse,
+        version = response_mod::MAX_VERSION
+    );
 
     async fn start_broker(
         streams_enabled: bool,

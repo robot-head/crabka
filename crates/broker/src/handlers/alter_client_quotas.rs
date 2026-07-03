@@ -257,7 +257,6 @@ mod tests {
     use std::net::SocketAddr;
     use std::sync::Arc;
 
-    use crate::authorizer::Authorizer;
     use crate::broker::BrokerHandle;
     use crate::test_support::DenyAll;
 
@@ -292,23 +291,9 @@ mod tests {
         }
     }
 
-    fn decode_response(version: i16, bytes: &Bytes) -> AlterClientQuotasResponse {
-        crate::test_support::decode_response(bytes, version)
-    }
+    crate::test_support::response_helpers!(AlterClientQuotasResponse, client_id = "admin-client");
 
-    fn test_context<'a>(
-        principal: &'a Principal,
-        peer: &'a SocketAddr,
-    ) -> crate::handlers::RequestContext<'a> {
-        crate::test_support::request_context(principal, peer, "admin-client")
-    }
-
-    async fn start_broker(authorizer: Arc<dyn Authorizer>) -> (BrokerHandle, tempfile::TempDir) {
-        crate::test_support::start_broker_with(|cfg| {
-            cfg.authorizer = authorizer;
-        })
-        .await
-    }
+    use crate::test_support::start_broker_with_authorizer as start_broker;
 
     fn quota_value(handle: &BrokerHandle, user: &str, quota_key: &str) -> Option<f64> {
         let key: crabka_metadata::EntityKey = vec![("user".into(), Some(user.into()))];
@@ -560,7 +545,7 @@ mod tests {
         let bytes =
             encode_whole_request_error(&req, CLUSTER_AUTHORIZATION_FAILED, "denied", version)
                 .expect("encode");
-        let resp = decode_response(version, &bytes);
+        let resp = decode_response(&bytes, version);
 
         let expected = AlterClientQuotasResponse {
             throttle_time_ms: 0,
@@ -609,7 +594,7 @@ mod tests {
         };
 
         let bytes = encode_response(&resp, version).expect("encode");
-        let decoded = decode_response(version, &bytes);
+        let decoded = decode_response(&bytes, version);
 
         let expected = AlterClientQuotasResponse {
             throttle_time_ms: 123,
@@ -649,7 +634,7 @@ mod tests {
         );
 
         let resp = handle(&broker, req, &ctx, version).await.expect("handle");
-        let resp = decode_response(version, &resp);
+        let resp = decode_response(&resp, version);
 
         let expected = AlterClientQuotasResponse {
             throttle_time_ms: 0,
@@ -698,7 +683,7 @@ mod tests {
         );
 
         let resp = handle(&broker, req, &ctx, version).await.expect("handle");
-        let resp = decode_response(version, &resp);
+        let resp = decode_response(&resp, version);
 
         let expected = AlterClientQuotasResponse {
             throttle_time_ms: 0,
@@ -761,7 +746,7 @@ mod tests {
         );
 
         let resp = handle(&broker, req, &ctx, version).await.expect("handle");
-        let resp = decode_response(version, &resp);
+        let resp = decode_response(&resp, version);
 
         let expected = AlterClientQuotasResponse {
             throttle_time_ms: 0,

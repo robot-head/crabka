@@ -308,11 +308,18 @@ mod tests {
     use std::net::SocketAddr;
     use std::sync::Arc;
 
-    use crate::authorizer::Authorizer;
-    use crate::broker::BrokerHandle;
     use crate::test_support::{DenyAll, peer, principal};
 
     const VERSION: i16 = 6;
+
+    crate::test_support::wire_helpers!(
+        DeleteTopicsRequest,
+        DeleteTopicsResponse,
+        version = VERSION,
+        client_id = "admin-client"
+    );
+
+    use crate::test_support::start_broker_with_authorizer_no_audit as start_broker;
 
     fn named_state(name: &str) -> DeleteTopicState {
         DeleteTopicState {
@@ -335,29 +342,6 @@ mod tests {
             timeout_ms: 5_000,
             ..Default::default()
         }
-    }
-
-    fn encode_request(req: &DeleteTopicsRequest) -> Bytes {
-        crate::test_support::encode_request(req, VERSION)
-    }
-
-    fn decode_response(bytes: &Bytes) -> DeleteTopicsResponse {
-        crate::test_support::decode_response(bytes, VERSION)
-    }
-
-    fn test_context<'a>(
-        principal: &'a Principal,
-        peer: &'a SocketAddr,
-    ) -> crate::handlers::RequestContext<'a> {
-        crate::test_support::request_context(principal, peer, "admin-client")
-    }
-
-    async fn start_broker(authorizer: Arc<dyn Authorizer>) -> (BrokerHandle, tempfile::TempDir) {
-        crate::test_support::start_broker_with(|cfg| {
-            cfg.audit_enabled = false;
-            cfg.authorizer = authorizer;
-        })
-        .await
     }
 
     async fn drive(

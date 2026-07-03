@@ -404,10 +404,6 @@ mod tests {
         Arc::new(l)
     }
 
-    fn decode_response(version: i16, bytes: &Bytes) -> BrokerHeartbeatResponse {
-        crate::test_support::decode_response(bytes, version)
-    }
-
     fn request(offline_log_dirs: Vec<uuid::Uuid>) -> Bytes {
         let req = BrokerHeartbeatRequest {
             broker_id: 1,
@@ -433,21 +429,12 @@ mod tests {
         buf.freeze()
     }
 
-    fn test_context<'a>(
-        principal: &'a crabka_security::Principal,
-        peer: &'a SocketAddr,
-    ) -> crate::handlers::RequestContext<'a> {
-        crate::test_support::request_context(principal, peer, "broker-heartbeat-test")
-    }
+    crate::test_support::response_helpers!(
+        BrokerHeartbeatResponse,
+        client_id = "broker-heartbeat-test"
+    );
 
-    async fn start_broker(
-        authorizer: Arc<dyn crate::authorizer::Authorizer>,
-    ) -> (crate::broker::BrokerHandle, tempfile::TempDir) {
-        crate::test_support::start_broker_with(|cfg| {
-            cfg.authorizer = authorizer;
-        })
-        .await
-    }
+    use crate::test_support::start_broker_with_authorizer as start_broker;
 
     async fn wait_for_leader(broker: &Broker) {
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -692,7 +679,7 @@ mod tests {
         let bytes = handle(&broker, version, 11, &req, &ctx)
             .await
             .expect("BrokerHeartbeat handler");
-        let resp = decode_response(version, &bytes);
+        let resp = decode_response(&bytes, version);
 
         let expected = BrokerHeartbeatResponse {
             throttle_time_ms: 0,

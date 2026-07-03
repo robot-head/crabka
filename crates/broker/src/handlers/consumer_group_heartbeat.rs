@@ -154,25 +154,13 @@ mod tests {
         buf.freeze()
     }
 
-    fn decode_response(bytes: &Bytes) -> ConsumerGroupHeartbeatResponse {
-        crate::test_support::decode_response(bytes, VERSION)
-    }
+    crate::test_support::response_helpers!(
+        ConsumerGroupHeartbeatResponse,
+        version = VERSION,
+        client_id = "consumer-group-heartbeat-test"
+    );
 
-    fn test_context<'a>(
-        principal: &'a crabka_security::Principal,
-        peer: &'a std::net::SocketAddr,
-    ) -> crate::handlers::RequestContext<'a> {
-        crate::test_support::request_context(principal, peer, "consumer-group-heartbeat-test")
-    }
-
-    async fn start_broker(
-        authorizer: Arc<dyn crate::authorizer::Authorizer>,
-    ) -> (crate::broker::BrokerHandle, tempfile::TempDir) {
-        crate::test_support::start_broker_with(|cfg| {
-            cfg.authorizer = authorizer;
-        })
-        .await
-    }
+    use crate::test_support::start_broker_with_authorizer as start_broker;
 
     fn image_with_group_version(level: i16) -> MetadataImage {
         let mut image = MetadataImage::new(uuid::Uuid::nil());

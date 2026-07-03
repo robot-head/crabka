@@ -150,12 +150,9 @@ pub(crate) async fn handle(
 mod tests {
     use super::*;
     use assert2::assert;
-    use crabka_security::Principal;
-    use std::net::SocketAddr;
     use std::sync::Arc;
 
-    use crate::authorizer::Authorizer;
-    use crate::broker::BrokerHandle;
+    use crate::test_support::start_broker_with_authorizer_no_audit as start_broker;
     use crate::test_support::{peer, principal};
 
     #[test]
@@ -174,28 +171,11 @@ mod tests {
         }
     }
 
-    fn encode_request(req: &ListTransactionsRequest, version: i16) -> Bytes {
-        crate::test_support::encode_request(req, version)
-    }
-
-    fn decode_response(bytes: &Bytes, version: i16) -> ListTransactionsResponse {
-        crate::test_support::decode_response(bytes, version)
-    }
-
-    fn test_context<'a>(
-        principal: &'a Principal,
-        peer: &'a SocketAddr,
-    ) -> crate::handlers::RequestContext<'a> {
-        crate::test_support::request_context(principal, peer, "admin-client")
-    }
-
-    async fn start_broker(authorizer: Arc<dyn Authorizer>) -> (BrokerHandle, tempfile::TempDir) {
-        crate::test_support::start_broker_with(|cfg| {
-            cfg.audit_enabled = false;
-            cfg.authorizer = authorizer;
-        })
-        .await
-    }
+    crate::test_support::wire_helpers!(
+        ListTransactionsRequest,
+        ListTransactionsResponse,
+        client_id = "admin-client"
+    );
 
     #[tokio::test]
     async fn handler_reports_unknown_state_filters_and_top_level_fields() {

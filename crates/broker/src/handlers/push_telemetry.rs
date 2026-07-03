@@ -212,13 +212,11 @@ mod tests {
         }
     }
 
-    fn encode_request(req: &PushTelemetryRequest) -> Bytes {
-        crate::test_support::encode_request(req, push_telemetry_response::MAX_VERSION)
-    }
-
-    fn decode_response(bytes: &Bytes) -> PushTelemetryResponse {
-        crate::test_support::decode_response(bytes, push_telemetry_response::MAX_VERSION)
-    }
+    crate::test_support::codec_helpers!(
+        PushTelemetryRequest,
+        PushTelemetryResponse,
+        version = push_telemetry_response::MAX_VERSION
+    );
 
     async fn start_broker() -> (crate::broker::BrokerHandle, tempfile::TempDir) {
         crate::test_support::start_broker_with(|_cfg| {}).await

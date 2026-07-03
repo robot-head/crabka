@@ -196,23 +196,12 @@ mod tests {
         }
     }
 
-    fn encode_request(req: &DeleteShareGroupOffsetsRequest) -> Bytes {
-        crate::test_support::encode_request(req, delete_share_group_offsets_response::MAX_VERSION)
-    }
-
-    fn decode_response(bytes: &Bytes) -> DeleteShareGroupOffsetsResponse {
-        crate::test_support::decode_response(
-            bytes,
-            delete_share_group_offsets_response::MAX_VERSION,
-        )
-    }
-
-    fn test_context<'a>(
-        principal: &'a Principal,
-        peer: &'a SocketAddr,
-    ) -> crate::handlers::RequestContext<'a> {
-        crate::test_support::request_context(principal, peer, "admin-client")
-    }
+    crate::test_support::wire_helpers!(
+        DeleteShareGroupOffsetsRequest,
+        DeleteShareGroupOffsetsResponse,
+        version = delete_share_group_offsets_response::MAX_VERSION,
+        client_id = "admin-client"
+    );
 
     async fn start_broker(
         authorizer: Arc<dyn Authorizer>,

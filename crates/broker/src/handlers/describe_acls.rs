@@ -179,11 +179,8 @@ mod tests {
         AclOperation, MetadataRecord, PatternType, PermissionType, ResourceType,
     };
     use crabka_protocol::UnknownTaggedFields;
-    use crabka_security::Principal;
-    use std::net::SocketAddr;
     use std::sync::Arc;
 
-    use crate::authorizer::Authorizer;
     use crate::broker::BrokerHandle;
     use crate::test_support::{DenyAll, peer, principal};
 
@@ -226,24 +223,13 @@ mod tests {
         }
     }
 
-    fn decode_response(bytes: &Bytes) -> DescribeAclsResponse {
-        crate::test_support::decode_response(bytes, VERSION)
-    }
+    crate::test_support::response_helpers!(
+        DescribeAclsResponse,
+        version = VERSION,
+        client_id = "admin-client"
+    );
 
-    fn test_context<'a>(
-        principal: &'a Principal,
-        peer: &'a SocketAddr,
-    ) -> crate::handlers::RequestContext<'a> {
-        crate::test_support::request_context(principal, peer, "admin-client")
-    }
-
-    async fn start_broker(authorizer: Arc<dyn Authorizer>) -> (BrokerHandle, tempfile::TempDir) {
-        crate::test_support::start_broker_with(|cfg| {
-            cfg.audit_enabled = false;
-            cfg.authorizer = authorizer;
-        })
-        .await
-    }
+    use crate::test_support::start_broker_with_authorizer_no_audit as start_broker;
 
     async fn seed_acls(handle: &BrokerHandle, entries: Vec<AclEntry>) {
         handle

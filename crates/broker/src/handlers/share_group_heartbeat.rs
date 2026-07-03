@@ -177,20 +177,12 @@ mod tests {
         assert!(cur.is_empty(), "response decoder consumed all bytes");
     }
 
-    fn encode_request(req: &ShareGroupHeartbeatRequest) -> Bytes {
-        crate::test_support::encode_request(req, share_group_heartbeat_response::MAX_VERSION)
-    }
-
-    fn decode_response(bytes: &Bytes) -> ShareGroupHeartbeatResponse {
-        crate::test_support::decode_response(bytes, share_group_heartbeat_response::MAX_VERSION)
-    }
-
-    fn test_context<'a>(
-        principal: &'a Principal,
-        peer: &'a SocketAddr,
-    ) -> crate::handlers::RequestContext<'a> {
-        crate::test_support::request_context(principal, peer, "client-a")
-    }
+    crate::test_support::wire_helpers!(
+        ShareGroupHeartbeatRequest,
+        ShareGroupHeartbeatResponse,
+        version = share_group_heartbeat_response::MAX_VERSION,
+        client_id = "client-a"
+    );
 
     #[tokio::test]
     async fn handle_disabled_feature_returns_unsupported_version() {

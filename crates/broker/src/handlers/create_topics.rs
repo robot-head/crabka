@@ -502,7 +502,6 @@ mod handler_tests {
     use std::net::SocketAddr;
     use std::sync::Arc;
 
-    use crate::authorizer::Authorizer;
     use crate::broker::BrokerHandle;
     use crate::test_support::{DenyAll, peer, principal};
 
@@ -536,28 +535,14 @@ mod handler_tests {
         }
     }
 
-    fn encode_request(req: &CreateTopicsRequest) -> Bytes {
-        crate::test_support::encode_request(req, VERSION)
-    }
+    crate::test_support::wire_helpers!(
+        CreateTopicsRequest,
+        CreateTopicsResponse,
+        version = VERSION,
+        client_id = "admin-client"
+    );
 
-    fn decode_response(bytes: &Bytes) -> CreateTopicsResponse {
-        crate::test_support::decode_response(bytes, VERSION)
-    }
-
-    fn test_context<'a>(
-        principal: &'a Principal,
-        peer: &'a SocketAddr,
-    ) -> crate::handlers::RequestContext<'a> {
-        crate::test_support::request_context(principal, peer, "admin-client")
-    }
-
-    async fn start_broker(authorizer: Arc<dyn Authorizer>) -> (BrokerHandle, tempfile::TempDir) {
-        crate::test_support::start_broker_with(|cfg| {
-            cfg.audit_enabled = false;
-            cfg.authorizer = authorizer;
-        })
-        .await
-    }
+    use crate::test_support::start_broker_with_authorizer_no_audit as start_broker;
 
     async fn drive(
         broker: &Broker,

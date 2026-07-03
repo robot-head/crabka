@@ -351,7 +351,6 @@ mod tests {
     use std::time::Duration;
     use uuid::Uuid;
 
-    use crate::authorizer::Authorizer;
     use crate::test_support::DenyAll;
 
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
@@ -432,25 +431,12 @@ mod tests {
         }
     }
 
-    fn decode_response(version: i16, bytes: &Bytes) -> AlterPartitionReassignmentsResponse {
-        crate::test_support::decode_response(bytes, version)
-    }
+    crate::test_support::response_helpers!(
+        AlterPartitionReassignmentsResponse,
+        client_id = "admin-client"
+    );
 
-    fn test_context<'a>(
-        principal: &'a Principal,
-        peer: &'a SocketAddr,
-    ) -> crate::handlers::RequestContext<'a> {
-        crate::test_support::request_context(principal, peer, "admin-client")
-    }
-
-    async fn start_broker(
-        authorizer: Arc<dyn Authorizer>,
-    ) -> (crate::broker::BrokerHandle, tempfile::TempDir) {
-        crate::test_support::start_broker_with(|cfg| {
-            cfg.authorizer = authorizer;
-        })
-        .await
-    }
+    use crate::test_support::start_broker_with_authorizer as start_broker;
 
     async fn wait_for_leader(broker: &Broker) {
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -573,7 +559,7 @@ mod tests {
         let bytes =
             encode_whole_request_error(&req, CLUSTER_AUTHORIZATION_FAILED, "denied", version)
                 .expect("encode whole request error");
-        let resp = decode_response(version, &bytes);
+        let resp = decode_response(&bytes, version);
 
         let expected = AlterPartitionReassignmentsResponse {
             throttle_time_ms: 0,
@@ -647,7 +633,7 @@ mod tests {
         )
         .await
         .expect("handle");
-        let resp = decode_response(version, &bytes);
+        let resp = decode_response(&bytes, version);
 
         let expected = AlterPartitionReassignmentsResponse {
             throttle_time_ms: 0,
@@ -691,7 +677,7 @@ mod tests {
         )
         .await
         .expect("handle");
-        let resp = decode_response(version, &bytes);
+        let resp = decode_response(&bytes, version);
 
         let expected = AlterPartitionReassignmentsResponse {
             throttle_time_ms: 0,
@@ -738,7 +724,7 @@ mod tests {
         )
         .await
         .expect("handle");
-        let resp = decode_response(version, &bytes);
+        let resp = decode_response(&bytes, version);
 
         let expected = AlterPartitionReassignmentsResponse {
             throttle_time_ms: 0,

@@ -257,36 +257,17 @@ mod tests {
     use super::*;
     use assert2::assert;
     use crabka_protocol::owned::list_offsets_request::{ListOffsetsPartition, ListOffsetsTopic};
-    use crabka_security::Principal;
-    use std::net::SocketAddr;
     use std::sync::Arc;
 
-    use crate::authorizer::Authorizer;
-    use crate::broker::BrokerHandle;
     use crate::test_support::{DenyAll, peer, principal};
 
-    fn encode_request(req: &ListOffsetsRequest, version: i16) -> Bytes {
-        crate::test_support::encode_request(req, version)
-    }
+    crate::test_support::wire_helpers!(
+        ListOffsetsRequest,
+        ListOffsetsResponse,
+        client_id = "admin-client"
+    );
 
-    fn decode_response(bytes: &Bytes, version: i16) -> ListOffsetsResponse {
-        crate::test_support::decode_response(bytes, version)
-    }
-
-    fn test_context<'a>(
-        principal: &'a Principal,
-        peer: &'a SocketAddr,
-    ) -> crate::handlers::RequestContext<'a> {
-        crate::test_support::request_context(principal, peer, "admin-client")
-    }
-
-    async fn start_broker(authorizer: Arc<dyn Authorizer>) -> (BrokerHandle, tempfile::TempDir) {
-        crate::test_support::start_broker_with(|cfg| {
-            cfg.audit_enabled = false;
-            cfg.authorizer = authorizer;
-        })
-        .await
-    }
+    use crate::test_support::start_broker_with_authorizer_no_audit as start_broker;
 
     #[test]
     fn sentinel_constants_match_kafka_wire_values() {
