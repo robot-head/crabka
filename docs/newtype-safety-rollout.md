@@ -67,9 +67,11 @@ All six live in **`crabka-ids`** (the canonical home), owned there rather than i
 | 3 | `NodeId(u64)` | ✅ **done** — unified the 3 colliding `type NodeId = u64` aliases into one newtype across 11 crates | Large (rename+merge) |
 | 5 | `ProducerId(i64)` | ✅ **done** — log + broker (idempotent/txn paths) | Medium |
 | 4 | `LeaderEpoch(i32)` | ✅ **done** — log/metadata/raft/broker/client-consumer/remote-storage(+topic); `kraft-core`'s consensus epoch renamed to `Epoch(u32)`, converted at the raft boundary. Wire/on-disk byte-exact (JVM golden + stateright) | Medium-large |
-| 6 | `ApiKey(i16)` / `ApiVersion(i16)` | ⏳ **pending** — small, client-core/kafka-tap header-local; lower value (protocol already has a typed `ApiKey` enum) | Small |
+| 6 | `ApiKey(i16)` / `ApiVersion(i16)` | ✅ **done** — the two adjacent `int16`s of a request header threaded through kafka-tap / client-core (internal + SASL header helpers) / raft (KIP-595 RPC header) / client-admin; deliberately distinct from the typed `crabka_protocol::ApiKey` enum. client-core's public API stays `i16` so its 16 reverse-deps don't ripple. Wire header bytes unchanged | Small |
 
-Recommended order: `Offset` → `PartitionIndex` → `NodeId`/`BrokerId` collision cleanup → `LeaderEpoch`/`OffsetEpoch` → `ProducerId` → `ApiKey`/`ApiVersion`. The generated codec stays raw throughout; conversions live in the hand-written `owned.rs`/`borrowed.rs` and per-request domain types.
+**All six cross-crate core identifiers are now landed** — the `(partition, offset)` coordinate plus `NodeId`, `ProducerId`, `LeaderEpoch`, and the `ApiKey`/`ApiVersion` header pair all resolve to a single shared type in `crabka-ids`, verified byte-exact against the JVM differential oracle (675 tests) and each crate's on-disk / consensus tests.
+
+Order taken: `Offset` → `PartitionIndex` → `NodeId`/`BrokerId` collision cleanup → `ProducerId` → `LeaderEpoch`/`OffsetEpoch` → `ApiKey`/`ApiVersion`. The generated codec stays raw throughout; conversions live in the hand-written `owned.rs`/`borrowed.rs` and per-request domain types.
 
 ## Explicitly dropped (Low value / not swappable)
 
