@@ -43,6 +43,10 @@ promql-parser = { version = "0.10", features = ["ser"] }
 columnar = "0.13"
 bytes = "1"
 thiserror = "2"
+# Derive boilerplate for domain newtypes (Display/From/Into/Deref/AsRef/
+# Constructor/FromStr and numeric ops) so wrappers over wire/domain primitives
+# stay one-liners. See docs/style_guides/code_style_guide.md#newtypes-for-domain-values.
+derive_more = { version = "2", features = ["display", "from", "into", "deref", "as_ref", "constructor", "from_str", "add", "add_assign", "mul", "sum"] }
 jsonpath-rust = "1.0"
 jfrs = "0.2.5"
 proptest = "1"

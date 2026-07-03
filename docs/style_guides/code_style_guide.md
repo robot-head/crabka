@@ -23,7 +23,7 @@ Clippy is the practical enforcer of most of these idioms; under `-D warnings` wi
 - Express flow with iterators and `Option`/`Result` combinators (`map`, `and_then`, `ok_or`, `?`) rather than manual index loops or nested matches, where it reads more clearly.
 - Implement the standard conversion and formatting traits — `From` / `TryFrom`, `Display`, `FromStr`, `Default`, `Iterator` — instead of bespoke `to_x` / `from_x` methods, so types compose with the ecosystem. Wire messages implement `Encode` / `Decode`; error types convert via `#[from]`; resources release on `Drop`.
 - Accept borrowed types in function signatures (`&str`, `&[u8]`, `impl AsRef<…>`) and return owned values; do not take `String` / `Vec<T>` by value just to read from it. On the decode hot path prefer the borrowed message flavour (`crate::borrowed::*`) that references the input buffer rather than copying it.
-- Use the newtype pattern to give wire and domain values distinct types rather than threading raw integers around (`ApiKey`, `NodeId`, offsets, epochs) — the compiler then stops you crossing them.
+- Use the newtype pattern to give wire and domain values distinct types rather than threading raw integers around (`ApiKey`, `NodeId`, offsets, epochs) — the compiler then stops you crossing them. See [Newtypes for Domain Values](#newtypes-for-domain-values).
 - Avoid needless `clone()` and intermediate allocations on hot paths — borrow, or move, instead. Producing/fetching runs per record batch; an extra allocation there is a throughput regression.
 
 ## Toolchain and Edition
@@ -181,6 +181,53 @@ let count = usize::try_from(count).map_err(|_| ProtocolError::ArrayTooLong(count
 ```
 
 A silent `as usize` truncation, or an unbounded `with_capacity`, on client-controlled input is a parsing bug and a potential vulnerability. Decoders return errors on such input; they do not panic and do not allocate on the attacker's say-so.
+
+## Newtypes for Domain Values
+
+A raw `i32` or `i64` carries no meaning, and Kafka's domain is full of same-typed identifiers that are catastrophic to mix up. A broker id, a partition index, a leader epoch, a producer epoch, and a correlation id are all `i32`; an offset, a producer id, and a log-start offset are all `i64`. A function that takes two or three of these as bare integers can be called with the arguments transposed and it still compiles — the bug only surfaces at run time, as data routed to the wrong partition or an offset compared against an epoch.
+
+**Wrap a domain value in a newtype when confusing it with another value of the same primitive type would be a real bug.** The compiler then rejects the transposition at the call site instead of letting it become a production incident. This follows the [newtype-safety guidance](https://github.com/leonardomso/rust-skills/blob/master/rules/api-newtype-safety.md) and the [Rust API Guidelines](https://rust-lang.github.io/api-guidelines/); Crabka already does it for `NodeId`, `ApiKey`, and topic ids (`Uuid`), and this section makes it the default for new domain identifiers.
+
+```rust
+use derive_more::{Add, Display, From, Into, Sub};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Display, From, Into)]
+pub struct BrokerId(pub i32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Display, From, Into, Add, Sub)]
+pub struct Offset(pub i64);
+
+// Signature that no longer accepts a transposed call:
+fn assign_replica(partition: PartitionIndex, broker: BrokerId) { /* … */ }
+```
+
+Guidance:
+
+- **Where the confusion risk is real, prefer a newtype over a bare primitive** — most acutely for functions and constructors that take **two or more parameters of the same primitive type** with different meanings. That is the swap-bug shape the newtype exists to prevent.
+- **Split the derives by origin.** The identity/ordering traits come from the standard library — `Copy, Clone, PartialEq, Eq, Hash` for anything used as a `HashMap` key, plus `PartialOrd, Ord` for ordered values like offsets and epochs. Keep id newtypes `Copy` (see [own-copy-small](https://github.com/leonardomso/rust-skills/blob/master/rules/own-copy-small.md)).
+- **Use [`derive_more`](https://lib.rs/crates/derive_more) for the wrapper boilerplate** — do not hand-write these impls. It is a workspace dependency (`derive_more.workspace = true`); reach for:
+  - `Display` — so the value logs as the bare inner primitive without an explicit `.0` at every `tracing` call. Write a manual `impl Display` only when the value needs formatting (e.g. `ORD-{:08}`).
+  - `From` / `Into` — the explicit, visible conversions to and from the inner primitive, used at the [wire boundary](#newtypes-for-domain-values) (`BrokerId::from(raw)`, `let raw: i32 = id.into()`).
+  - `FromStr` — for ids parsed from config or CLI args.
+  - `Deref` / `AsRef` — sparingly, only where transparent access to the inner value genuinely reads better; a broad `Deref` can undermine the type distinction the newtype exists for, so prefer an explicit accessor or `Into` in most cases.
+  - `Add` / `Sub` / `AddAssign` / `Sum` — for values with real arithmetic (advancing an `Offset`, summing byte counts). Don't derive arithmetic on ids where `id + id` is meaningless.
+  - `Constructor` — a `Foo::new(inner)` when you want a named constructor but no validation.
+
+  ```rust
+  use derive_more::{Add, Display, From, FromStr, Into, Sub};
+
+  #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Display, From, Into, FromStr)]
+  pub struct ProducerId(pub i64);
+  ```
+- **Use `#[serde(transparent)]`** on newtypes that are serialised, so the wire/JSON encoding is exactly the inner primitive — never a wrapping object.
+- **Validate in the constructor** for newtypes over `String` or other unconstrained inputs (`ClientId`, a validated principal): expose `fn new(..) -> Result<Self, _>` and an `as_str`/accessor — and do **not** also derive `From`, since an infallible `From` would bypass the validation. An instance should be proof the value is well-formed. This is [parse, don't validate](https://github.com/leonardomso/rust-skills/blob/master/rules/api-parse-dont-validate.md).
+- **The newtype is zero-cost** — same size and layout as the primitive — so there is no runtime reason to avoid one.
+
+`derive_more` is also the right tool elsewhere it removes hand-written boilerplate — a `Display`/`From`/`Constructor` on a small domain struct, `From` conversions between related types — but it is not a licence to derive `Deref` broadly or to replace the `thiserror`-based error enums (those stay on `thiserror`; see [Error Handling](#error-handling)).
+
+**The wire boundary is the exception.** The generated protocol codec (`crates/protocol/generated`) is produced from the Kafka schemas and must stay byte-exact — do **not** newtype generated message fields, and do not hand-edit generated code. Newtypes belong in the **hand-written domain layer** (broker, raft, metadata, coordination, storage). Convert at the boundary: read the raw integer out of a decoded request, wrap it in the domain newtype, and unwrap back to the primitive when encoding a response. A `From`/`Into` or an `as_wire()` accessor keeps that conversion explicit and in one place.
+
+**Don't newtype for its own sake.** A value used in a single place, where no other same-typed value is in scope to confuse it with, does not need a wrapper — `struct X(i32)` around a lone loop counter is noise. The test is whether a *mix-up is possible and would be a bug*, not whether a primitive appears.
 
 ## Feature Flags
 
