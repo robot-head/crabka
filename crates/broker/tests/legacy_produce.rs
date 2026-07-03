@@ -8,6 +8,7 @@ use assert2::assert;
 mod support;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use crabka_ids::Offset;
 use crabka_protocol::{
     Decode, Encode,
     kafka_3_6_2::owned::{
@@ -40,7 +41,7 @@ fn build_v0_messageset(pairs: &[(&str, &str)]) -> Bytes {
         .iter()
         .enumerate()
         .map(|(i, (k, v))| ParsedRecord {
-            offset: i64::try_from(i).expect("index fits in i64"),
+            offset: Offset(i64::try_from(i).expect("index fits in i64")),
             timestamp: None, // v0 has no timestamps
             key: Some(Bytes::copy_from_slice(k.as_bytes())),
             value: Some(Bytes::copy_from_slice(v.as_bytes())),

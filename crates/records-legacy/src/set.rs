@@ -12,6 +12,7 @@
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use crabka_compression::CompressionType;
+use crabka_ids::Offset;
 
 use crate::{
     error::LegacyRecordsError,
@@ -22,7 +23,7 @@ use crate::{
 /// logical record after compression unwrapping.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedRecord {
-    pub offset: i64,
+    pub offset: Offset,
     /// Always `Some` when source magic is v1; `None` when v0.
     pub timestamp: Option<i64>,
     pub key: Option<Bytes>,
@@ -80,7 +81,7 @@ fn decode_into(
         let codec = compression_from_attrs(msg.attributes)?;
         if codec == CompressionType::None {
             out.push(ParsedRecord {
-                offset,
+                offset: Offset(offset),
                 timestamp: msg.timestamp,
                 key: msg.key,
                 value: msg.value,
@@ -115,7 +116,7 @@ fn decode_into(
                     let last_abs = offset;
                     let base_abs = last_abs - (count as i64 - 1);
                     for (i, rec) in out[start_len..].iter_mut().enumerate() {
-                        rec.offset = base_abs + i as i64;
+                        rec.offset = Offset(base_abs + i as i64);
                     }
                 }
             }
@@ -143,7 +144,7 @@ pub fn encode_flat_message_set<B: BufMut, I: IntoIterator<Item = ParsedRecord>>(
             value: r.value,
         };
         let msg_len = msg.encoded_len();
-        buf.put_i64(r.offset);
+        buf.put_i64(r.offset.0);
         // Safe: legacy messages are well-bounded; capping at i32::MAX is
         // sufficient for any realistic batch.
         buf.put_i32(i32::try_from(msg_len).unwrap_or(i32::MAX));
@@ -181,7 +182,7 @@ pub fn encode_compressed_message_set<B: BufMut>(
     let count = records.len() as i64;
     for (i, r) in records.iter().enumerate() {
         let inner_offset = match magic {
-            Magic::V0 => r.offset,
+            Magic::V0 => r.offset.0,
             // v1: relative 0..count-1
             Magic::V1 => i as i64,
         };
@@ -229,7 +230,7 @@ pub fn encode_compressed_message_set<B: BufMut>(
     // v1 = absolute offset of last inner record.
     let wrapper_offset = match magic {
         Magic::V0 => 0,
-        Magic::V1 => records[records.len() - 1].offset,
+        Magic::V1 => records[records.len() - 1].offset.0,
     };
     buf.put_i64(wrapper_offset);
     buf.put_i32(i32::try_from(wrapper_len).unwrap_or(i32::MAX));
@@ -247,19 +248,19 @@ mod tests {
     fn sample_records_v1() -> Vec<ParsedRecord> {
         vec![
             ParsedRecord {
-                offset: 100,
+                offset: Offset(100),
                 timestamp: Some(1_700_000_000),
                 key: Some(Bytes::from_static(b"a")),
                 value: Some(Bytes::from_static(b"1")),
             },
             ParsedRecord {
-                offset: 101,
+                offset: Offset(101),
                 timestamp: Some(1_700_000_010),
                 key: Some(Bytes::from_static(b"b")),
                 value: Some(Bytes::from_static(b"2")),
             },
             ParsedRecord {
-                offset: 102,
+                offset: Offset(102),
                 timestamp: Some(1_700_000_020),
                 key: None,
                 value: Some(Bytes::from_static(b"3")),
@@ -438,7 +439,7 @@ mod tests {
     #[test]
     fn flat_v1_missing_timestamp_encodes_minus_one() {
         let recs = vec![ParsedRecord {
-            offset: 7,
+            offset: Offset(7),
             timestamp: None,
             key: None,
             value: Some(Bytes::from_static(b"v")),
@@ -455,7 +456,7 @@ mod tests {
         // Records with no timestamps: inner messages encode ts = -1, and the
         // wrapper's own timestamp (max over records, none present) is -1.
         let recs = vec![ParsedRecord {
-            offset: 9,
+            offset: Offset(9),
             timestamp: None,
             key: None,
             value: Some(Bytes::from_static(b"v")),
@@ -483,7 +484,7 @@ mod tests {
         // flip in `16 * 1024 * 1024`) would reject this round-trip as TooLarge.
         let big = vec![0x7Eu8; 2 * 1024 * 1024];
         let recs = vec![ParsedRecord {
-            offset: 0,
+            offset: Offset(0),
             timestamp: Some(5),
             key: None,
             value: Some(Bytes::from(big.clone())),
@@ -505,7 +506,7 @@ mod tests {
         let mut buf = BytesMut::new();
         encode_flat_message_set(
             vec![ParsedRecord {
-                offset: 50,
+                offset: Offset(50),
                 timestamp: Some(1),
                 key: None,
                 value: Some(Bytes::from_static(b"flat")),
@@ -515,13 +516,13 @@ mod tests {
         );
         let inner = vec![
             ParsedRecord {
-                offset: 100,
+                offset: Offset(100),
                 timestamp: Some(2),
                 key: None,
                 value: Some(Bytes::from_static(b"x")),
             },
             ParsedRecord {
-                offset: 101,
+                offset: Offset(101),
                 timestamp: Some(3),
                 key: None,
                 value: Some(Bytes::from_static(b"y")),
@@ -531,7 +532,7 @@ mod tests {
 
         let mut cur: &[u8] = &buf[..];
         let decoded = decode_message_set(&mut cur, buf.len()).unwrap();
-        let offsets: Vec<i64> = decoded.iter().map(|r| r.offset).collect();
+        let offsets: Vec<i64> = decoded.iter().map(|r| r.offset.0).collect();
         assert!(offsets == vec![50, 100, 101]);
     }
 }

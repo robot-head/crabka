@@ -141,6 +141,7 @@ crabka-client-producer = { version = "0.3", path = "../client-producer" }
 # Host-side raw `Client::send(DescribeGroupsRequest)` against the
 # real-Kafka Docker capture (`describe_groups_jvm.rs`).
 crabka-client-core = { version = "0.3", path = "../client-core", features = ["mock"] }
+crabka-ids = { version = "0.3", path = "../ids" }
 crabka-records-legacy = { version = "0.3", path = "../records-legacy" }
 crabka-protocol = { version = "0.3", path = "../protocol", default-features = false }
 # Serialize the captured real-Kafka DescribeGroups fixture as JSON.

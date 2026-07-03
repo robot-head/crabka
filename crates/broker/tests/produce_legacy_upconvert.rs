@@ -13,6 +13,7 @@ use assert2::assert;
 mod support;
 
 use bytes::{Bytes, BytesMut};
+use crabka_ids::Offset;
 use crabka_protocol::{
     owned::{
         create_topics_request::{CreatableTopic, CreateTopicsRequest},
@@ -69,7 +70,7 @@ fn build_v1_message_set(values: &[&[u8]]) -> Bytes {
         .iter()
         .enumerate()
         .map(|(i, v)| ParsedRecord {
-            offset: i64::try_from(i).expect("offset fits in i64"),
+            offset: Offset(i64::try_from(i).expect("offset fits in i64")),
             timestamp: Some(1_700_000_000 + i64::try_from(i).expect("ts offset fits in i64")),
             key: None,
             value: Some(Bytes::copy_from_slice(v)),
