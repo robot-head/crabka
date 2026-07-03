@@ -43,9 +43,12 @@ fn sasl_broker_config(
     cfg.broker_id = i32::try_from(i + 1).unwrap();
     cfg.listen_addr = data_addr;
     cfg.advertised_listener = data_addr.to_string();
-    cfg.node_id = u64::try_from(i + 1).unwrap();
+    cfg.node_id = crabka_broker::NodeId(u64::try_from(i + 1).unwrap());
     cfg.controller_listen_addr = ctrl_addr;
-    cfg.controller_quorum_voters = voters.iter().map(|(id, a)| (*id, a.to_string())).collect();
+    cfg.controller_quorum_voters = voters
+        .iter()
+        .map(|(id, a)| (crabka_broker::NodeId(*id), a.to_string()))
+        .collect();
     cfg.bootstrap_mode = mode;
     cfg.listeners = vec![ListenerSpec {
         name: "SASL_PLAINTEXT".to_string(),
@@ -330,21 +333,27 @@ async fn controller_listener_plaintext_legacy_path_unchanged() {
     // want zero auth on either listener (legacy path).
     let mut c1 = BrokerConfig::for_tests(dir1.path().to_path_buf());
     c1.broker_id = 1;
-    c1.node_id = 1;
+    c1.node_id = crabka_broker::NodeId(1);
     c1.listen_addr = data_listen_addr();
     c1.advertised_listener = data_listen_addr().to_string();
     c1.controller_listen_addr = ctrl_addrs[0];
-    c1.controller_quorum_voters = voters.iter().map(|(id, a)| (*id, a.to_string())).collect();
+    c1.controller_quorum_voters = voters
+        .iter()
+        .map(|(id, a)| (crabka_broker::NodeId(*id), a.to_string()))
+        .collect();
     c1.bootstrap_mode = BootstrapMode::Bootstrap;
     c1.controller_listener_protocol = ListenerProtocol::Plaintext;
 
     let mut c2 = BrokerConfig::for_tests(dir2.path().to_path_buf());
     c2.broker_id = 2;
-    c2.node_id = 2;
+    c2.node_id = crabka_broker::NodeId(2);
     c2.listen_addr = data_listen_addr();
     c2.advertised_listener = data_listen_addr().to_string();
     c2.controller_listen_addr = ctrl_addrs[1];
-    c2.controller_quorum_voters = voters.iter().map(|(id, a)| (*id, a.to_string())).collect();
+    c2.controller_quorum_voters = voters
+        .iter()
+        .map(|(id, a)| (crabka_broker::NodeId(*id), a.to_string()))
+        .collect();
     c2.bootstrap_mode = BootstrapMode::Bootstrap;
     c2.controller_listener_protocol = ListenerProtocol::Plaintext;
 

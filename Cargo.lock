@@ -1999,6 +1999,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "clap",
+ "crabka-ids",
  "crabka-log",
  "crabka-protocol",
  "derive_more",
@@ -3352,6 +3353,7 @@ name = "crabka-voters"
 version = "0.3.8"
 dependencies = [
  "assert2",
+ "crabka-ids",
  "serde",
  "uuid",
 ]

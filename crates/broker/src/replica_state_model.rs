@@ -49,7 +49,11 @@ impl IsrModel {
     fn safety(max_offset: i64) -> Self {
         Self {
             t0: Instant::now(),
-            replicas: vec![1, 2, 3],
+            replicas: vec![
+                crabka_audit::NodeId(1),
+                crabka_audit::NodeId(2),
+                crabka_audit::NodeId(3),
+            ],
             max_offset,
             test_overshoot: false,
         }
@@ -58,7 +62,11 @@ impl IsrModel {
     fn overshoot(max_offset: i64) -> Self {
         Self {
             t0: Instant::now(),
-            replicas: vec![1, 2, 3],
+            replicas: vec![
+                crabka_audit::NodeId(1),
+                crabka_audit::NodeId(2),
+                crabka_audit::NodeId(3),
+            ],
             max_offset,
             test_overshoot: true,
         }

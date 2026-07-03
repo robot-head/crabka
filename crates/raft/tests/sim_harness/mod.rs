@@ -769,7 +769,7 @@ const HEARTBEAT_MS: u64 = 300;
 /// `id`. Staggered by node id so timer ties break deterministically and the
 /// lowest live id tends to win the election race — elections always converge.
 fn election_timeout_ms_of(id: NodeId) -> u64 {
-    1000 + id * 50
+    1000 + id.0 * 50
 }
 
 /// Update `best` to the earliest `(deadline, id, kind)` seen so far. Earlier

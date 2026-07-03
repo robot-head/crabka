@@ -265,7 +265,10 @@ async fn metadata_response_carries_listener_endpoints() {
     // own registration record in the committed image carries both endpoints.
     let node_id = handle.node_id();
     handle
-        .wait_for_image(|img| img.broker(node_id).is_some_and(|b| b.endpoints.len() >= 2))
+        .wait_for_image(|img| {
+            img.broker(crabka_broker::NodeId(node_id))
+                .is_some_and(|b| b.endpoints.len() >= 2)
+        })
         .await;
     let endpoints = handle.self_registration_endpoints().await;
     assert!(
@@ -2624,9 +2627,12 @@ mod two_broker_sasl {
         cfg.broker_id = i32::try_from(i + 1).unwrap();
         cfg.listen_addr = listen;
         cfg.advertised_listener = listen.to_string();
-        cfg.node_id = u64::try_from(i + 1).unwrap();
+        cfg.node_id = crabka_broker::NodeId(u64::try_from(i + 1).unwrap());
         cfg.controller_listen_addr = controller_addrs[i];
-        cfg.controller_quorum_voters = voters.iter().map(|(id, a)| (*id, a.to_string())).collect();
+        cfg.controller_quorum_voters = voters
+            .iter()
+            .map(|(id, a)| (crabka_broker::NodeId(*id), a.to_string()))
+            .collect();
         cfg.bootstrap_mode = mode;
         cfg.listeners = vec![
             ListenerSpec {

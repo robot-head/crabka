@@ -3,10 +3,9 @@
 //! controller. These are the plain Crabka types the engine and reconfig
 //! coordinator use.
 
+pub use crabka_ids::NodeId;
 use crabka_metadata::MetadataRecord;
 use serde::{Deserialize, Serialize};
-
-pub type NodeId = u64;
 
 /// KIP-853 voter node identity used by controller membership.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

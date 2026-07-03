@@ -623,7 +623,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let controller = Arc::new(
             crabka_raft::Controller::start(crabka_raft::ControllerConfig::for_tests(
-                1,
+                crabka_raft::NodeId(1),
                 dir.path().to_path_buf(),
             ))
             .await

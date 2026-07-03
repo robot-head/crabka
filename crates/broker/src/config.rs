@@ -697,9 +697,9 @@ impl BrokerConfig {
             log_dir,
             extra_log_dirs: Vec::new(),
             log_config: LogConfig::default(),
-            node_id: 1,
+            node_id: NodeId(1),
             controller_listen_addr: controller_addr,
-            controller_quorum_voters: vec![(1, controller_addr.to_string())],
+            controller_quorum_voters: vec![(NodeId(1), controller_addr.to_string())],
             controller_server_name: None,
             bootstrap_servers: vec![],
             directory_id: uuid::Uuid::from_u128(1),
@@ -983,9 +983,9 @@ impl Default for BrokerConfig {
             log_dir: PathBuf::from("./crabka-data"),
             extra_log_dirs: Vec::new(),
             log_config: LogConfig::default(),
-            node_id: 1,
+            node_id: NodeId(1),
             controller_listen_addr: controller_addr,
-            controller_quorum_voters: vec![(1, controller_addr.to_string())],
+            controller_quorum_voters: vec![(NodeId(1), controller_addr.to_string())],
             controller_server_name: None,
             bootstrap_servers: vec![],
             directory_id: uuid::Uuid::from_u128(1),
@@ -1331,13 +1331,15 @@ mod tests {
         // node must not be a voter of itself.
         let c = BrokerConfig {
             roles: vec![NodeRole::Broker],
-            node_id: 1,
-            controller_quorum_voters: vec![(1, "127.0.0.1:9093".to_string())],
+            node_id: NodeId(1),
+            controller_quorum_voters: vec![(NodeId(1), "127.0.0.1:9093".to_string())],
             ..BrokerConfig::default()
         };
         assert!(matches!(
             c.validate(),
-            Err(BrokerError::NonControllerIsVoter { node_id: 1 })
+            Err(BrokerError::NonControllerIsVoter {
+                node_id: crabka_raft::NodeId(1)
+            })
         ));
     }
 

@@ -2,10 +2,9 @@
 //! readers can skip unknown ones because we encode each variant
 //! length-prefixed inside the `bincode` payload.
 
+pub use crabka_voters::NodeId;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-
-pub type NodeId = u64;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TopicRecord {
@@ -333,9 +332,9 @@ mod tests {
         let r = MetadataRecord::V1Partition(PartitionRecord {
             topic: "t".into(),
             partition: 0,
-            leader: 1,
-            replicas: vec![1, 2, 3],
-            isr: vec![1, 2],
+            leader: NodeId(1),
+            replicas: vec![NodeId(1), NodeId(2), NodeId(3)],
+            isr: vec![NodeId(1), NodeId(2)],
             leader_epoch: 0,
             adding_replicas: vec![],
             removing_replicas: vec![],
@@ -350,7 +349,7 @@ mod tests {
         let r = MetadataRecord::V1PartitionDirAssignment(PartitionDirAssignmentRecord {
             topic: "t".into(),
             partition: 2,
-            replica: 3,
+            replica: NodeId(3),
             directory: Uuid::from_u128(0xAB),
         });
         assert!(round_trip(&r) == r);
@@ -359,7 +358,7 @@ mod tests {
     #[test]
     fn broker_registration_round_trip() {
         let r = MetadataRecord::V1BrokerRegistration(BrokerRegistrationRecord {
-            node_id: 7,
+            node_id: NodeId(7),
             broker_epoch: 0,
             incarnation_id: Uuid::from_u128(0xdeadbeef_cafe_babe_0123_456789abcdef),
             host: "192.168.1.10".into(),
@@ -373,7 +372,7 @@ mod tests {
     #[test]
     fn broker_registration_with_endpoints_round_trip() {
         let r = MetadataRecord::V1BrokerRegistration(BrokerRegistrationRecord {
-            node_id: 1,
+            node_id: NodeId(1),
             broker_epoch: 0,
             incarnation_id: Uuid::from_u128(0xfeedface_0000_0000_0000_000000000001),
             host: "h".into(),
@@ -399,7 +398,9 @@ mod tests {
 
     #[test]
     fn unregister_broker_round_trip() {
-        let r = MetadataRecord::V1UnregisterBroker(UnregisterBrokerRecord { node_id: 42 });
+        let r = MetadataRecord::V1UnregisterBroker(UnregisterBrokerRecord {
+            node_id: NodeId(42),
+        });
         assert!(round_trip(&r) == r);
     }
 
@@ -470,7 +471,7 @@ mod tests {
     #[test]
     fn broker_config_record_round_trip() {
         let r = MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
-            node_id: 7,
+            node_id: NodeId(7),
             config_name: "leader.replication.throttled.rate".into(),
             config_value: Some("2048".into()),
         });
@@ -528,7 +529,7 @@ mod tests {
     fn voters_record_round_trips() {
         let rec = MetadataRecord::V1Voters(VotersRecord {
             voters: crate::voters::VoterSet::from_voters([crate::voters::Voter {
-                id: 7,
+                id: NodeId(7),
                 directory_id: uuid::Uuid::from_u128(7),
                 endpoints: vec![crate::voters::VoterEndpoint {
                     name: "CONTROLLER".into(),

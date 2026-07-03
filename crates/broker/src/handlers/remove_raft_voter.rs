@@ -85,7 +85,7 @@ pub(crate) async fn handle(
         broker
             .controller
             .remove_voter(RemoveVoter {
-                id,
+                id: crabka_raft::NodeId(id),
                 directory_id: uuid::Uuid::from_bytes(req.voter_directory_id.0),
             })
             .await,

@@ -21,6 +21,7 @@ workspace = true
 # (which embeds a `VoterSet` in its `QuorumState`) can compile to WebAssembly
 # for the in-browser playground without dragging in the rest of the stack.
 [dependencies]
+crabka-ids = { version = "0.3.8", path = "../ids" }
 serde = { workspace = true, features = ["derive"] }
 uuid = { workspace = true }
 

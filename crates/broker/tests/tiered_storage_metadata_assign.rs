@@ -44,7 +44,8 @@ async fn start_bare_broker() -> (BrokerHandle, TempDir) {
     cfg.listen_addr = listen;
     cfg.advertised_listener = listen.to_string();
     cfg.controller_listen_addr = controller_addrs[0];
-    cfg.controller_quorum_voters = vec![(1, controller_addrs[0].to_string())];
+    cfg.controller_quorum_voters =
+        vec![(crabka_broker::NodeId(1), controller_addrs[0].to_string())];
 
     let data_listener = client_listeners.into_iter().next().unwrap();
     let controller_listener = controller_listeners.into_iter().next().unwrap();

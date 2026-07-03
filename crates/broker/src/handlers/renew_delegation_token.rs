@@ -140,7 +140,7 @@ mod tests {
             election_timeout: Duration::from_millis(200),
             heartbeat_interval: Duration::from_millis(50),
             client_id: "test".into(),
-            ..crabka_raft::ControllerConfig::for_tests(1, log_dir)
+            ..crabka_raft::ControllerConfig::for_tests(crabka_raft::NodeId(1), log_dir)
         };
         let handle = Arc::new(crabka_raft::Controller::start(cfg).await.unwrap());
         let mut rx = handle.watch_leader();

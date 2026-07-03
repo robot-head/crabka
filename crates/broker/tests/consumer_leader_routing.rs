@@ -169,7 +169,10 @@ async fn consumer_fetches_from_non_bootstrap_leaders() {
     for p in 0..n_partitions {
         cluster[0]
             .0
-            .wait_for_image(|img| img.partition(topic, p).is_some_and(|part| part.leader != 0))
+            .wait_for_image(|img| {
+                img.partition(topic, p)
+                    .is_some_and(|part| part.leader.get() != 0)
+            })
             .await;
     }
 

@@ -54,7 +54,11 @@ enum FailoverAction {
 impl FailoverModel {
     fn config(strategy: RecoveryStrategy, unclean_enabled: bool) -> Self {
         Self {
-            replicas: vec![1, 2, 3],
+            replicas: vec![
+                crabka_audit::NodeId(1),
+                crabka_audit::NodeId(2),
+                crabka_audit::NodeId(3),
+            ],
             strategy,
             unclean_enabled,
             max_epoch: 6,
@@ -319,7 +323,11 @@ enum RecoveryAction {
 impl RecoveryModel {
     fn offset_recovery() -> Self {
         Self {
-            replicas: vec![1, 2, 3],
+            replicas: vec![
+                crabka_audit::NodeId(1),
+                crabka_audit::NodeId(2),
+                crabka_audit::NodeId(3),
+            ],
             max_epoch: 2,
             max_leo: 2,
             known_leader_epoch: 1,

@@ -139,11 +139,14 @@ async fn start_two_sasl() -> Result<Vec<(BrokerHandle, BrokerConfig, TempDir)>, 
     let dir0 = TempDir::new().unwrap();
     let mut cfg0 = BrokerConfig::for_tests(dir0.path().to_path_buf());
     cfg0.broker_id = 1;
-    cfg0.node_id = 1;
+    cfg0.node_id = crabka_broker::NodeId(1);
     cfg0.directory_id = uuid::Uuid::from_u128(1);
     cfg0.bootstrap_mode = BootstrapMode::Bootstrap;
     cfg0.controller_listen_addr = controller_addrs[0];
-    cfg0.controller_quorum_voters = voters.iter().map(|(id, a)| (*id, a.to_string())).collect();
+    cfg0.controller_quorum_voters = voters
+        .iter()
+        .map(|(id, a)| (crabka_broker::NodeId(*id), a.to_string()))
+        .collect();
     cfg0.auto_join = false;
     cfg0.bootstrap_servers = vec![];
     apply_sasl(&mut cfg0, client_addrs[0]);
@@ -151,11 +154,14 @@ async fn start_two_sasl() -> Result<Vec<(BrokerHandle, BrokerConfig, TempDir)>, 
     let dir1 = TempDir::new().unwrap();
     let mut cfg1 = BrokerConfig::for_tests(dir1.path().to_path_buf());
     cfg1.broker_id = 2;
-    cfg1.node_id = 2;
+    cfg1.node_id = crabka_broker::NodeId(2);
     cfg1.directory_id = uuid::Uuid::from_u128(2);
     cfg1.bootstrap_mode = BootstrapMode::Bootstrap;
     cfg1.controller_listen_addr = controller_addrs[1];
-    cfg1.controller_quorum_voters = voters.iter().map(|(id, a)| (*id, a.to_string())).collect();
+    cfg1.controller_quorum_voters = voters
+        .iter()
+        .map(|(id, a)| (crabka_broker::NodeId(*id), a.to_string()))
+        .collect();
     cfg1.auto_join = false;
     cfg1.bootstrap_servers = vec![];
     apply_sasl(&mut cfg1, client_addrs[1]);
@@ -234,7 +240,10 @@ async fn partition_leaders(client: &Client, handle: &BrokerHandle) -> Vec<(i32, 
     // event-driven via the image watch channel, then take one Metadata snapshot.
     handle
         .wait_for_image(|img| {
-            (0..2).all(|p| img.partition(TOPIC, p).is_some_and(|pr| pr.leader != 0))
+            (0..2).all(|p| {
+                img.partition(TOPIC, p)
+                    .is_some_and(|pr| pr.leader.get() != 0)
+            })
         })
         .await;
     let resp = client

@@ -208,7 +208,7 @@ pub(crate) async fn handle(
                         });
                         continue;
                     };
-                    let node_id_i32 = i32::try_from(leader).unwrap_or(-1);
+                    let node_id_i32 = i32::try_from(leader.0).unwrap_or(-1);
                     // Resolve the coordinator's address for the listener this
                     // request arrived on. For the local broker prefer our own
                     // connection-listener advertised address (the metadata
@@ -307,7 +307,7 @@ pub(crate) async fn handle(
                         });
                         continue;
                     };
-                    let node_id_i32 = i32::try_from(leader).unwrap_or(-1);
+                    let node_id_i32 = i32::try_from(leader.0).unwrap_or(-1);
                     // Resolve the coordinator's address for the connection
                     // listener (see the TXN branch). Local broker → our own
                     // connection-listener advertised address (test setups may

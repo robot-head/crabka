@@ -142,9 +142,17 @@ async fn force_leadership_for_test(
         let record = MetadataRecord::V1Partition(PartitionRecord {
             topic: topic.to_string(),
             partition: p,
-            leader: target,
-            replicas: replicas.to_vec(),
-            isr: replicas.to_vec(),
+            leader: crabka_metadata::NodeId(target),
+            replicas: replicas
+                .iter()
+                .copied()
+                .map(crabka_metadata::NodeId)
+                .collect(),
+            isr: replicas
+                .iter()
+                .copied()
+                .map(crabka_metadata::NodeId)
+                .collect(),
             leader_epoch: pr.leader_epoch + 1,
             adding_replicas: vec![],
             removing_replicas: vec![],
@@ -162,7 +170,7 @@ async fn force_leadership_for_test(
         .wait_for_image(|img| {
             (0..partitions).all(|p| {
                 img.partition(topic, p)
-                    .is_some_and(|pr| pr.leader == target)
+                    .is_some_and(|pr| pr.leader.0 == target)
             })
         })
         .await;
@@ -229,12 +237,12 @@ async fn controlled_shutdown_drains_leadership_and_returns_ok() {
     // exhaustive, so concentrate every leader onto the target first.
     let mut replicas: Vec<u64> = (1..=3).collect();
     // Put target first so its `replicas[0]` is itself (preferred).
-    replicas.sort_by_key(|n| if *n == target_node_id { 0 } else { 1 });
+    replicas.sort_by_key(|n| if *n == target_node_id.0 { 0 } else { 1 });
     force_leadership_for_test(
         &cluster[raft_leader_idx].0,
         TOPIC,
         PARTITIONS,
-        target_node_id,
+        target_node_id.0,
         &replicas,
     )
     .await;
@@ -246,7 +254,7 @@ async fn controlled_shutdown_drains_leadership_and_returns_ok() {
             &cluster[raft_leader_idx].0,
             TOPIC,
             PARTITIONS,
-            target_node_id
+            target_node_id.0
         ) == PARTITIONS as usize,
         "target should lead all partitions before shutdown"
     );

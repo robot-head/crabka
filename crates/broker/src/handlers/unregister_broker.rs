@@ -83,7 +83,7 @@ pub(crate) async fn handle(
         return encode_resp(version, &resp);
     }
 
-    let node_id = u64::try_from(req.broker_id).expect("non-negative");
+    let node_id = crabka_metadata::NodeId(u64::try_from(req.broker_id).expect("non-negative"));
 
     // Existence check. Unknown id → INVALID_REQUEST with a clear message,
     // matching JVM's `BrokerIdNotRegisteredException → INVALID_REQUEST`

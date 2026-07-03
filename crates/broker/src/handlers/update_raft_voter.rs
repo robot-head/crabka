@@ -79,7 +79,7 @@ pub(crate) async fn handle(
     };
 
     let voter = Voter {
-        id,
+        id: crabka_raft::NodeId(id),
         directory_id: uuid::Uuid::from_bytes(req.voter_directory_id.0),
         endpoints: req
             .listeners

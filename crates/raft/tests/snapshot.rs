@@ -13,7 +13,7 @@
 use std::time::Duration;
 
 use assert2::{assert, check};
-use crabka_metadata::{FeatureLevelRecord, MetadataRecord, TopicRecord};
+use crabka_metadata::{FeatureLevelRecord, MetadataRecord, NodeId, TopicRecord};
 use crabka_raft::{BootstrapMode, Controller, ControllerConfig};
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -33,7 +33,7 @@ async fn snapshot_then_restart_recovers_image() {
 
     // First boot: bootstrap a fresh single voter, commit a topic, then snapshot.
     {
-        let mut cfg = ControllerConfig::for_tests(1, dir.path().to_path_buf());
+        let mut cfg = ControllerConfig::for_tests(NodeId(1), dir.path().to_path_buf());
         cfg.election_timeout = Duration::from_millis(200);
         cfg.cluster_id = Some(cid);
         cfg.bootstrap_mode = BootstrapMode::Bootstrap;
@@ -69,7 +69,7 @@ async fn snapshot_then_restart_recovers_image() {
             .expect("submit records");
         check!(controller.current_image().topic("t").is_some());
         check!(controller.current_image().finalized_metadata_version() == Some(25));
-        check!(controller.current_image().voters().contains(1));
+        check!(controller.current_image().voters().contains(NodeId(1)));
 
         controller
             .trigger_snapshot()
@@ -89,7 +89,7 @@ async fn snapshot_then_restart_recovers_image() {
     // Restart from the SAME dir in Rejoin mode. The engine must rebuild the
     // image from the on-disk checkpoint + log.
     {
-        let mut cfg = ControllerConfig::for_tests(1, dir.path().to_path_buf());
+        let mut cfg = ControllerConfig::for_tests(NodeId(1), dir.path().to_path_buf());
         cfg.election_timeout = Duration::from_millis(200);
         cfg.cluster_id = Some(cid);
         cfg.bootstrap_mode = BootstrapMode::Rejoin;
@@ -115,7 +115,7 @@ async fn snapshot_then_restart_recovers_image() {
         // The voter set is re-derived from config (`QuorumState`) on every boot
         // and mirrored into the image — it must be present after restart.
         check!(
-            recovered.voters().contains(1),
+            recovered.voters().contains(NodeId(1)),
             "voter set must survive snapshot + restart"
         );
 

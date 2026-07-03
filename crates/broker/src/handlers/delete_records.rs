@@ -156,7 +156,7 @@ pub(crate) async fn handle(
             let cur_leader = part
                 .current_leader
                 .load(std::sync::atomic::Ordering::Acquire);
-            if cur_leader != node_id {
+            if cur_leader != node_id.0 {
                 part_results.push(error_partition_result(
                     fp.partition_index,
                     codes::NOT_LEADER_OR_FOLLOWER,

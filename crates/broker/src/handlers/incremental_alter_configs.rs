@@ -275,8 +275,8 @@ fn handle_broker_scoped(
         out.error_message = Some("cluster-wide broker config not supported".into());
         return;
     }
-    let node_id: NodeId = if let Ok(n) = resource.resource_name.parse() {
-        n
+    let node_id: NodeId = if let Ok(n) = resource.resource_name.parse::<u64>() {
+        NodeId(n)
     } else {
         out.error_code = codes::INVALID_REQUEST;
         out.error_message = Some(format!("invalid broker id {:?}", resource.resource_name));
@@ -483,7 +483,7 @@ mod tests {
 
     #[test]
     fn broker_scoped_empty_name_returns_invalid_request() {
-        let img = make_image_with_broker(1);
+        let img = make_image_with_broker(crabka_audit::NodeId(1));
         let resource = make_resource("", vec![]);
         let mut out = AlterConfigsResourceResponse::default();
         let mut to_submit = Vec::new();
@@ -494,7 +494,7 @@ mod tests {
 
     #[test]
     fn broker_scoped_unknown_broker_returns_invalid_request() {
-        let img = make_image_with_broker(1);
+        let img = make_image_with_broker(crabka_audit::NodeId(1));
         let resource = make_resource("99", vec![]);
         let mut out = AlterConfigsResourceResponse::default();
         let mut to_submit = Vec::new();
@@ -504,7 +504,7 @@ mod tests {
 
     #[test]
     fn broker_scoped_unknown_config_key_returns_invalid_config() {
-        let img = make_image_with_broker(1);
+        let img = make_image_with_broker(crabka_audit::NodeId(1));
         let resource = make_resource("1", vec![make_set_cfg("some.unknown.key", "123")]);
         let mut out = AlterConfigsResourceResponse::default();
         let mut to_submit = Vec::new();
@@ -515,7 +515,7 @@ mod tests {
 
     #[test]
     fn broker_scoped_set_produces_broker_config_record() {
-        let img = make_image_with_broker(1);
+        let img = make_image_with_broker(crabka_audit::NodeId(1));
         let resource = make_resource(
             "1",
             vec![make_set_cfg(
@@ -528,7 +528,7 @@ mod tests {
         handle_broker_scoped(&resource, &img, &mut out, &mut to_submit);
         assert!(out.error_code == codes::NONE);
         let expected = vec![MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
-            node_id: 1,
+            node_id: crabka_audit::NodeId(1),
             config_name: crate::throttle::LEADER_THROTTLED_RATE_KEY.to_string(),
             config_value: Some("2048".to_string()),
         })];
@@ -537,7 +537,7 @@ mod tests {
 
     #[test]
     fn broker_scoped_delete_produces_broker_config_record_none_value() {
-        let img = make_image_with_broker(1);
+        let img = make_image_with_broker(crabka_audit::NodeId(1));
         let resource = make_resource(
             "1",
             vec![make_del_cfg(crate::throttle::FOLLOWER_THROTTLED_RATE_KEY)],
@@ -547,7 +547,7 @@ mod tests {
         handle_broker_scoped(&resource, &img, &mut out, &mut to_submit);
         assert!(out.error_code == codes::NONE);
         let expected = vec![MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
-            node_id: 1,
+            node_id: crabka_audit::NodeId(1),
             config_name: crate::throttle::FOLLOWER_THROTTLED_RATE_KEY.to_string(),
             config_value: None,
         })];
@@ -556,7 +556,7 @@ mod tests {
 
     #[test]
     fn broker_scoped_invalid_rate_value_returns_invalid_config() {
-        let img = make_image_with_broker(1);
+        let img = make_image_with_broker(crabka_audit::NodeId(1));
         let resource = make_resource(
             "1",
             vec![make_set_cfg(

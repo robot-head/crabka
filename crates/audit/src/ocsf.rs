@@ -1,10 +1,11 @@
 //! OCSF (Open Cybersecurity Schema Framework) serialization for audit events.
 
+use crabka_ids::NodeId;
 use serde_json::json;
 
 use crate::{
     event::{AuditEvent, AuditOutcome, LifecycleKind},
-    ids::{EpochMs, NodeId},
+    ids::EpochMs,
 };
 
 /// Product identity stamped into every OCSF record's `metadata`.
@@ -199,7 +200,15 @@ pub fn to_ocsf(event: &AuditEvent, product: &ProductInfo) -> serde_json::Value {
             kind,
             node_id,
             time_ms,
-        } => ocsf_lifecycle(*kind, NodeId(*node_id), EpochMs(*time_ms), product),
+        } => ocsf_lifecycle(
+            *kind,
+            // `node_id` is the Kafka `broker.id` (an `int32` widened to `i64`
+            // at the broker boundary), always non-negative; wrap it into the
+            // canonical `u64` `NodeId`.
+            NodeId(u64::try_from(*node_id).unwrap_or(0)),
+            EpochMs(*time_ms),
+            product,
+        ),
     }
 }
 

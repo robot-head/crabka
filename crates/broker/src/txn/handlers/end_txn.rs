@@ -866,8 +866,8 @@ mod tests {
     async fn errors_when_leader_node_missing_from_image() {
         let image = MetadataImage::default();
         let err = send_write_txn_markers(
-            1,
-            99,
+            crabka_audit::NodeId(1),
+            crabka_audit::NodeId(99),
             &marker_entry(),
             MarkerType::Commit,
             &tps(),
@@ -892,7 +892,7 @@ mod tests {
         let mut image = MetadataImage::default();
         image.apply(&MetadataRecord::V1BrokerRegistration(
             BrokerRegistrationRecord {
-                node_id: 2,
+                node_id: NodeId(2),
                 broker_epoch: 0,
                 incarnation_id: uuid::Uuid::nil(),
                 host: "127.0.0.1".to_string(),
@@ -908,8 +908,8 @@ mod tests {
             },
         ));
         let err = send_write_txn_markers(
-            1,
-            2,
+            crabka_audit::NodeId(1),
+            crabka_audit::NodeId(2),
             &marker_entry(),
             MarkerType::Commit,
             &tps(),
@@ -934,7 +934,7 @@ mod tests {
         let mut image = MetadataImage::default();
         image.apply(&MetadataRecord::V1BrokerRegistration(
             BrokerRegistrationRecord {
-                node_id: 2,
+                node_id: NodeId(2),
                 broker_epoch: 0,
                 incarnation_id: uuid::Uuid::nil(),
                 host: "127.0.0.1".to_string(),
@@ -951,8 +951,8 @@ mod tests {
             },
         ));
         let err = send_write_txn_markers(
-            1,
-            2,
+            crabka_audit::NodeId(1),
+            crabka_audit::NodeId(2),
             &marker_entry(),
             MarkerType::Commit,
             &tps(),

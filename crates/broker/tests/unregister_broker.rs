@@ -40,7 +40,9 @@ async fn unregister_known_broker_drops_it_from_metadata() {
 
     // The Raft commit may race the Metadata response; await the controller
     // image dropping broker 1 instead of polling the wire.
-    p.broker.wait_for_image(|img| img.broker(1).is_none()).await;
+    p.broker
+        .wait_for_image(|img| img.broker(crabka_broker::NodeId(1)).is_none())
+        .await;
 
     p.broker.shutdown().await;
 }
@@ -108,7 +110,9 @@ async fn unregister_is_idempotent_on_repeat_call() {
 
     // Wait for the unregister to commit: await the controller image
     // dropping broker 1 rather than polling the wire.
-    p.broker.wait_for_image(|img| img.broker(1).is_none()).await;
+    p.broker
+        .wait_for_image(|img| img.broker(crabka_broker::NodeId(1)).is_none())
+        .await;
 
     // Second call against the now-removed broker: surfaces
     // INVALID_REQUEST (existence check fails). The image apply itself

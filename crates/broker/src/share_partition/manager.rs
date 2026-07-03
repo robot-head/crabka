@@ -100,7 +100,7 @@ impl SharePartitionLeaderManager {
         image
             .partition(&topic.name, partition)
             .map_or((-1, -1), |p| {
-                (i32::try_from(p.leader).unwrap_or(-1), p.leader_epoch)
+                (i32::try_from(p.leader.0).unwrap_or(-1), p.leader_epoch)
             })
     }
 
@@ -337,7 +337,7 @@ mod tests {
 
     impl MockSource {
         fn new() -> Self {
-            let (tx, rx) = watch::channel(Some(1));
+            let (tx, rx) = watch::channel(Some(crabka_metadata::NodeId(1)));
             Self {
                 image: Arc::new(MetadataImage::new(uuid::Uuid::nil())),
                 leader_rx: rx,
@@ -394,13 +394,13 @@ mod tests {
         let reg = Arc::new(PartitionRegistry::new());
         let controller: Arc<dyn MetadataSource> = Arc::new(MockSource::new());
         let coord = Arc::new(ShareCoordinator::new(
-            1,
+            crabka_audit::NodeId(1),
             reg.clone(),
             ShareCoordinatorConfig::default(),
         ));
         let client = Arc::new(InterBrokerClient::new(None, None));
         let persister = Arc::new(SharePersister::new(
-            1,
+            crabka_audit::NodeId(1),
             coord,
             controller.clone(),
             client,
@@ -408,7 +408,7 @@ mod tests {
             "INTERNAL".to_string(),
         ));
         Arc::new(SharePartitionLeaderManager::new(
-            1,
+            crabka_audit::NodeId(1),
             reg,
             controller,
             persister,

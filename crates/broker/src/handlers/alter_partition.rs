@@ -164,11 +164,11 @@ fn handle_partition(
         );
     };
 
-    let leader_i32 = i32::try_from(part_rec.leader).unwrap_or(0);
+    let leader_i32 = i32::try_from(part_rec.leader.0).unwrap_or(0);
     let current_isr_i32: Vec<i32> = part_rec
         .isr
         .iter()
-        .map(|n| i32::try_from(*n).unwrap_or(0))
+        .map(|n| i32::try_from(n.0).unwrap_or(0))
         .collect();
 
     // Leader-epoch fencing.
@@ -196,11 +196,12 @@ fn handle_partition(
     }
 
     // Validate proposed ISR: non-empty + subset of replicas.
-    let proposed_isr: Vec<u64> = effective_isr_i32
+    let proposed_isr: Vec<crabka_metadata::NodeId> = effective_isr_i32
         .iter()
-        .map(|&n| u64::try_from(n).unwrap_or(0))
+        .map(|&n| crabka_metadata::NodeId(u64::try_from(n).unwrap_or(0)))
         .collect();
-    let replicas_set: std::collections::HashSet<u64> = part_rec.replicas.iter().copied().collect();
+    let replicas_set: std::collections::HashSet<crabka_metadata::NodeId> =
+        part_rec.replicas.iter().copied().collect();
     let valid = !proposed_isr.is_empty() && proposed_isr.iter().all(|n| replicas_set.contains(n));
     if !valid {
         return error_part(
@@ -217,7 +218,7 @@ fn handle_partition(
     // epoch is non-sentinel (-1) and disagrees with the controller's
     // registration epoch. Any ineligible replica fails the whole partition.
     for bstate in new_isr_with_epochs {
-        let node = u64::try_from(bstate.broker_id).unwrap_or(u64::MAX);
+        let node = crabka_metadata::NodeId(u64::try_from(bstate.broker_id).unwrap_or(u64::MAX));
         let registered = image.broker_epoch(node);
         let ineligible = registered.is_none()
             || (bstate.broker_epoch != -1 && registered != Some(bstate.broker_epoch));
@@ -343,7 +344,7 @@ mod tests {
 
     fn reg(node_id: u64, epoch: i64) -> MetadataRecord {
         MetadataRecord::V1BrokerRegistration(BrokerRegistrationRecord {
-            node_id,
+            node_id: crabka_metadata::NodeId(node_id),
             broker_epoch: epoch,
             incarnation_id: uuid::Uuid::nil(),
             host: "h".into(),
@@ -377,9 +378,17 @@ mod tests {
         image.apply(&MetadataRecord::V1Partition(PartitionRecord {
             topic: "t".into(),
             partition: fixture.partition,
-            leader: fixture.leader,
-            replicas: fixture.replicas.to_vec(),
-            isr: fixture.isr.to_vec(),
+            leader: crabka_metadata::NodeId(fixture.leader),
+            replicas: fixture
+                .replicas
+                .iter()
+                .map(|&n| crabka_metadata::NodeId(n))
+                .collect(),
+            isr: fixture
+                .isr
+                .iter()
+                .map(|&n| crabka_metadata::NodeId(n))
+                .collect(),
             leader_epoch: fixture.leader_epoch,
             adding_replicas: vec![],
             removing_replicas: vec![],
@@ -464,9 +473,9 @@ mod tests {
                 MetadataRecord::V1Partition(PartitionRecord {
                     topic: "t".into(),
                     partition: 0,
-                    leader: 1,
-                    replicas: vec![1],
-                    isr: vec![1],
+                    leader: crabka_metadata::NodeId(1),
+                    replicas: vec![crabka_metadata::NodeId(1)],
+                    isr: vec![crabka_metadata::NodeId(1)],
                     leader_epoch: 5,
                     adding_replicas: vec![],
                     removing_replicas: vec![],
@@ -749,7 +758,7 @@ mod tests {
         let MetadataRecord::V1Partition(record) = &changes[0] else {
             panic!("wrong change variant");
         };
-        assert!(record.isr == vec![1, 2]);
+        assert!(record.isr == vec![crabka_metadata::NodeId(1), crabka_metadata::NodeId(2)]);
     }
 
     #[test]

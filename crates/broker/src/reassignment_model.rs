@@ -59,33 +59,51 @@ enum ReassignAction {
 impl ReassignModel {
     fn basic() -> Self {
         Self {
-            replicas: vec![1, 2, 3],
-            adding: vec![3],
-            removing: vec![2],
-            initial_isr: vec![1, 2],
-            leader: 1, // not removed → no handoff
+            replicas: vec![
+                crabka_audit::NodeId(1),
+                crabka_audit::NodeId(2),
+                crabka_audit::NodeId(3),
+            ],
+            adding: vec![crabka_audit::NodeId(3)],
+            removing: vec![crabka_audit::NodeId(2)],
+            initial_isr: vec![crabka_audit::NodeId(1), crabka_audit::NodeId(2)],
+            leader: crabka_audit::NodeId(1), // not removed → no handoff
             max_epoch: 10,
         }
     }
 
     fn leader_handoff() -> Self {
         Self {
-            replicas: vec![1, 2, 3],
-            adding: vec![3],
-            removing: vec![2],
-            initial_isr: vec![1, 2],
-            leader: 2, // in `removing` → handoff required before completion
+            replicas: vec![
+                crabka_audit::NodeId(1),
+                crabka_audit::NodeId(2),
+                crabka_audit::NodeId(3),
+            ],
+            adding: vec![crabka_audit::NodeId(3)],
+            removing: vec![crabka_audit::NodeId(2)],
+            initial_isr: vec![crabka_audit::NodeId(1), crabka_audit::NodeId(2)],
+            leader: crabka_audit::NodeId(2), // in `removing` → handoff required before completion
             max_epoch: 10,
         }
     }
 
     fn wide() -> Self {
         Self {
-            replicas: vec![1, 2, 3, 4, 5],
-            adding: vec![4, 5],
-            removing: vec![1, 2],
-            initial_isr: vec![1, 2, 3],
-            leader: 1, // in `removing` → handoff required
+            replicas: vec![
+                crabka_audit::NodeId(1),
+                crabka_audit::NodeId(2),
+                crabka_audit::NodeId(3),
+                crabka_audit::NodeId(4),
+                crabka_audit::NodeId(5),
+            ],
+            adding: vec![crabka_audit::NodeId(4), crabka_audit::NodeId(5)],
+            removing: vec![crabka_audit::NodeId(1), crabka_audit::NodeId(2)],
+            initial_isr: vec![
+                crabka_audit::NodeId(1),
+                crabka_audit::NodeId(2),
+                crabka_audit::NodeId(3),
+            ],
+            leader: crabka_audit::NodeId(1), // in `removing` → handoff required
             max_epoch: 10,
         }
     }

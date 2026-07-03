@@ -14,7 +14,7 @@
 //! the clock (it calls [`Playground::step`] when it wants time to advance) and
 //! the rendering; it reads cluster state back as JSON after each action.
 
-use crabka_kraft_core::sim::Sim;
+use crabka_kraft_core::{sim::Sim, types::NodeId};
 use wasm_bindgen::prelude::*;
 
 /// An interactive, in-browser `KRaft` consensus simulation.
@@ -65,12 +65,12 @@ impl Playground {
     /// Network-partition `node` away from the rest of the cluster: its in-flight
     /// messages are dropped and it can neither send nor receive until healed.
     pub fn partition(&mut self, node: u32) {
-        self.sim.partition(u64::from(node));
+        self.sim.partition(NodeId(u64::from(node)));
     }
 
     /// Heal a previously [`partition`](Self::partition)ed `node`.
     pub fn heal(&mut self, node: u32) {
-        self.sim.heal(u64::from(node));
+        self.sim.heal(NodeId(u64::from(node)));
     }
 
     /// Append `n` records on whichever node is currently leader (the "produce"
@@ -128,9 +128,9 @@ impl Playground {
 
 /// Build the voter id list `[1, 2, ..., n]`, clamping `n` to a sane 1..=7 so a
 /// stray UI value can never allocate an absurd cluster.
-fn voter_ids(voters: u32) -> Vec<u64> {
+fn voter_ids(voters: u32) -> Vec<NodeId> {
     let n = u64::from(voters.clamp(1, 7));
-    (1..=n).collect()
+    (1..=n).map(NodeId).collect()
 }
 
 #[cfg(test)]
@@ -168,9 +168,9 @@ mod tests {
 
     #[test]
     fn clamps_voter_count() {
-        assert_eq!(voter_ids(0), vec![1]);
-        assert_eq!(voter_ids(3), vec![1, 2, 3]);
-        assert_eq!(voter_ids(99), vec![1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(voter_ids(0), vec![NodeId(1)]);
+        assert_eq!(voter_ids(3), vec![NodeId(1), NodeId(2), NodeId(3)]);
+        assert_eq!(voter_ids(99), (1..=7).map(NodeId).collect::<Vec<_>>());
     }
 
     #[test]

@@ -348,7 +348,7 @@ impl ReplicatorSupervisor {
             // Always sync the partition's cached leader + epoch.
             // `Partition::install_leader_change` is idempotent (atomic stores
             // no-op on equal writes).
-            part.install_leader_change(part_record.leader, part_record.leader_epoch)
+            part.install_leader_change(part_record.leader.0, part_record.leader_epoch)
                 .await;
             if part_record.leader == self.node_id {
                 // Install the *current* ISR from the metadata image (not the
@@ -410,7 +410,7 @@ impl ReplicatorSupervisor {
             let leader = part.leader;
             let Some(broker) = image.broker(leader).cloned() else {
                 warn!(
-                    topic = %k.0, partition = k.1, leader,
+                    topic = %k.0, partition = k.1, leader = leader.0,
                     "leader broker not yet registered in MetadataImage; deferring"
                 );
                 continue;
@@ -762,7 +762,7 @@ mod tests {
         let partitions = Arc::new(PartitionRegistry::new());
         let reporter = Arc::new(CountingAssignDirsReporter::default());
         let mut supervisor = ReplicatorSupervisor::new(
-            2,
+            NodeId(2),
             2,
             Arc::new(StaticMetadataSource::new(image)),
             partitions.clone(),
@@ -803,6 +803,17 @@ mod tests {
     }
 
     #[test]
+    fn includes_partition_where_self_is_follower() {
+        let img = image_with(&[
+            topic_record("t", 1),
+            partition_record("t", 0, NodeId(1), vec![NodeId(1), NodeId(2), NodeId(3)], 0),
+        ]);
+        let d = desired_follower_set(NodeId(2), &img);
+        assert!(d.contains(&("t".into(), 0)));
+        assert!(d.len() == 1);
+    }
+
+    #[test]
     fn desired_follower_set_includes_followers_excludes_leader_and_non_replicas() {
         let img = image_with(&[
             MetadataRecord::V1Topic(TopicRecord {
@@ -814,9 +825,17 @@ mod tests {
             MetadataRecord::V1Partition(PartitionRecord {
                 topic: "t".into(),
                 partition: 0,
-                leader: 1,
-                replicas: vec![1, 2, 3],
-                isr: vec![1, 2, 3],
+                leader: crabka_audit::NodeId(1),
+                replicas: vec![
+                    crabka_audit::NodeId(1),
+                    crabka_audit::NodeId(2),
+                    crabka_audit::NodeId(3),
+                ],
+                isr: vec![
+                    crabka_audit::NodeId(1),
+                    crabka_audit::NodeId(2),
+                    crabka_audit::NodeId(3),
+                ],
                 leader_epoch: 0,
                 adding_replicas: vec![],
                 removing_replicas: vec![],
@@ -826,16 +845,17 @@ mod tests {
         ]);
         let cases = [
             // Self is a follower replica → included.
-            (2, HashSet::from_iter([("t".to_string(), 0)])),
+            (NodeId(2), HashSet::from_iter([("t".to_string(), 0)])),
             // Self is the leader → excluded.
-            (1, HashSet::new()),
+            (NodeId(1), HashSet::new()),
             // Self is not a replica at all → excluded.
-            (99, HashSet::new()),
+            (NodeId(99), HashSet::new()),
         ];
         for (node_id, want) in cases {
             assert!(
                 desired_follower_set(node_id, &img) == want,
-                "node {node_id}"
+                "node {}",
+                node_id.0
             );
         }
     }
@@ -844,15 +864,15 @@ mod tests {
     fn desired_local_set_exactly_includes_all_local_replicas() {
         let img = image_with(&[
             topic_record("a", 2),
-            partition_record("a", 0, 1, vec![1, 2, 3], 0),
-            partition_record("a", 1, 2, vec![1, 2, 3], 0),
+            partition_record("a", 0, NodeId(1), vec![NodeId(1), NodeId(2), NodeId(3)], 0),
+            partition_record("a", 1, NodeId(2), vec![NodeId(1), NodeId(2), NodeId(3)], 0),
             topic_record("b", 1),
-            partition_record("b", 0, 3, vec![1, 3], 0),
+            partition_record("b", 0, NodeId(3), vec![NodeId(1), NodeId(3)], 0),
             topic_record("c", 1),
-            partition_record("c", -1, 1, vec![2, 4], 0),
+            partition_record("c", -1, NodeId(1), vec![NodeId(2), NodeId(4)], 0),
         ]);
 
-        let local = desired_local_set(2, &img);
+        let local = desired_local_set(NodeId(2), &img);
 
         assert!(
             local
@@ -883,7 +903,20 @@ mod tests {
         .expect("materialize");
         let part = partitions.get("t", PartitionIndex(0)).expect("part");
         // Mirror what reconcile does for leader partitions.
-        part.install_isr(&[1, 2, 3], &[1, 2, 3], 1).await;
+        part.install_isr(
+            &[
+                crabka_audit::NodeId(1),
+                crabka_audit::NodeId(2),
+                crabka_audit::NodeId(3),
+            ],
+            &[
+                crabka_audit::NodeId(1),
+                crabka_audit::NodeId(2),
+                crabka_audit::NodeId(3),
+            ],
+            crabka_audit::NodeId(1),
+        )
+        .await;
         let st = part.replica_state.lock().await;
         assert!(st.isr.len() == 3);
     }
@@ -900,9 +933,17 @@ mod tests {
             MetadataRecord::V1Partition(PartitionRecord {
                 topic: "a".into(),
                 partition: 0,
-                leader: 1,
-                replicas: vec![1, 2, 3],
-                isr: vec![1, 2, 3],
+                leader: crabka_audit::NodeId(1),
+                replicas: vec![
+                    crabka_audit::NodeId(1),
+                    crabka_audit::NodeId(2),
+                    crabka_audit::NodeId(3),
+                ],
+                isr: vec![
+                    crabka_audit::NodeId(1),
+                    crabka_audit::NodeId(2),
+                    crabka_audit::NodeId(3),
+                ],
                 leader_epoch: 0,
                 adding_replicas: vec![],
                 removing_replicas: vec![],
@@ -918,9 +959,17 @@ mod tests {
             MetadataRecord::V1Partition(PartitionRecord {
                 topic: "b".into(),
                 partition: 0,
-                leader: 3,
-                replicas: vec![1, 2, 3],
-                isr: vec![1, 2, 3],
+                leader: crabka_audit::NodeId(3),
+                replicas: vec![
+                    crabka_audit::NodeId(1),
+                    crabka_audit::NodeId(2),
+                    crabka_audit::NodeId(3),
+                ],
+                isr: vec![
+                    crabka_audit::NodeId(1),
+                    crabka_audit::NodeId(2),
+                    crabka_audit::NodeId(3),
+                ],
                 leader_epoch: 0,
                 adding_replicas: vec![],
                 removing_replicas: vec![],
@@ -930,9 +979,17 @@ mod tests {
             MetadataRecord::V1Partition(PartitionRecord {
                 topic: "b".into(),
                 partition: 1,
-                leader: 2,
-                replicas: vec![1, 2, 3],
-                isr: vec![1, 2, 3],
+                leader: crabka_audit::NodeId(2),
+                replicas: vec![
+                    crabka_audit::NodeId(1),
+                    crabka_audit::NodeId(2),
+                    crabka_audit::NodeId(3),
+                ],
+                isr: vec![
+                    crabka_audit::NodeId(1),
+                    crabka_audit::NodeId(2),
+                    crabka_audit::NodeId(3),
+                ],
                 leader_epoch: 0,
                 adding_replicas: vec![],
                 removing_replicas: vec![],
@@ -940,14 +997,18 @@ mod tests {
                 partition_epoch: 0,
             }),
         ]);
-        let d = desired_follower_set(2, &img);
+        let d = desired_follower_set(NodeId(2), &img);
         // b/1 is excluded: self is leader for it.
         assert!(d == HashSet::from_iter([("a".to_string(), 0), ("b".to_string(), 0)]));
+        assert!(d.contains(&("a".into(), 0)));
+        assert!(d.contains(&("b".into(), 0)));
+        assert!(!d.contains(&("b".into(), 1))); // self is leader for b/1
+        assert!(d.len() == 2);
     }
 
     #[test]
     fn resolve_leader_endpoint_prefers_matching_listener() {
-        let broker = broker_record(1);
+        let broker = broker_record(NodeId(1));
         assert!(resolve_leader_endpoint(&broker, "INTERNAL") == ("internal-host".into(), 19092));
         assert!(resolve_leader_endpoint(&broker, "EXTERNAL") == ("legacy-host".into(), 9092));
     }
@@ -956,7 +1017,7 @@ mod tests {
     async fn reconcile_materializes_leader_partition_and_installs_isr() {
         let img = image_with(&[
             topic_record("t", 1),
-            partition_record("t", 0, 2, vec![1, 2, 3], 7),
+            partition_record("t", 0, NodeId(2), vec![NodeId(1), NodeId(2), NodeId(3)], 7),
         ]);
         let (supervisor, partitions, _reporter, _dir) = supervisor_fixture(img.clone());
 
@@ -978,14 +1039,14 @@ mod tests {
             "leader epoch cache updated"
         );
         let state = part.replica_state.lock().await;
-        assert!(state.isr == [1, 2, 3].into_iter().collect());
+        assert!(state.isr == [NodeId(1), NodeId(2), NodeId(3)].into_iter().collect());
     }
 
     #[tokio::test]
     async fn reconcile_materializes_follower_but_does_not_install_isr() {
         let img = image_with(&[
             topic_record("t", 1),
-            partition_record("t", 0, 1, vec![1, 2, 3], 7),
+            partition_record("t", 0, NodeId(1), vec![NodeId(1), NodeId(2), NodeId(3)], 7),
         ]);
         let (supervisor, partitions, _reporter, _dir) = supervisor_fixture(img.clone());
 
@@ -1004,7 +1065,9 @@ mod tests {
         let (supervisor, _partitions, _reporter, _dir) = supervisor_fixture(img.clone());
         let token = CancellationToken::new();
         supervisor.tasks.insert(("stale".into(), 0), token.clone());
-        supervisor.task_targets.insert(("stale".into(), 0), (1, 0));
+        supervisor
+            .task_targets
+            .insert(("stale".into(), 0), (NodeId(1), 0));
 
         supervisor.reconcile(&img).await;
 
@@ -1017,12 +1080,14 @@ mod tests {
     async fn reconcile_cancels_task_when_target_leader_or_epoch_changes() {
         let img = image_with(&[
             topic_record("t", 1),
-            partition_record("t", 0, 1, vec![1, 2], 8),
+            partition_record("t", 0, NodeId(1), vec![NodeId(1), NodeId(2)], 8),
         ]);
         let (supervisor, _partitions, _reporter, _dir) = supervisor_fixture(img.clone());
         let token = CancellationToken::new();
         supervisor.tasks.insert(("t".into(), 0), token.clone());
-        supervisor.task_targets.insert(("t".into(), 0), (9, 7));
+        supervisor
+            .task_targets
+            .insert(("t".into(), 0), (NodeId(9), 7));
 
         supervisor.reconcile(&img).await;
 
@@ -1041,7 +1106,7 @@ mod tests {
                 partitions: 1,
                 replication_factor: 1,
             }),
-            partition_record("t", 0, 2, vec![2], 0),
+            partition_record("t", 0, NodeId(2), vec![NodeId(2)], 0),
         ]);
         let (supervisor, partitions, reporter, _dir) = supervisor_fixture(img.clone());
         supervisor.materialize_local_partition("t", 0).unwrap();
@@ -1081,7 +1146,7 @@ mod tests {
     async fn run_reconciles_initial_image_before_shutdown() {
         let img = image_with(&[
             topic_record("t", 1),
-            partition_record("t", 0, 2, vec![2], 0),
+            partition_record("t", 0, NodeId(2), vec![NodeId(2)], 0),
         ]);
         let (supervisor, partitions, _reporter, _dir) = supervisor_fixture(img);
         supervisor.shutdown.cancel();
@@ -1113,9 +1178,9 @@ mod tests {
         img.apply(&MetadataRecord::V1Partition(PartitionRecord {
             topic: "t".into(),
             partition: 0,
-            leader: 1,
-            replicas: vec![1],
-            isr: vec![1],
+            leader: crabka_audit::NodeId(1),
+            replicas: vec![crabka_audit::NodeId(1)],
+            isr: vec![crabka_audit::NodeId(1)],
             leader_epoch: 0,
             adding_replicas: vec![],
             removing_replicas: vec![],
@@ -1183,9 +1248,9 @@ mod tests {
         img.apply(&MetadataRecord::V1Partition(PartitionRecord {
             topic: "t".into(),
             partition: 0,
-            leader: 1,
-            replicas: vec![1],
-            isr: vec![1],
+            leader: crabka_audit::NodeId(1),
+            replicas: vec![crabka_audit::NodeId(1)],
+            isr: vec![crabka_audit::NodeId(1)],
             leader_epoch: 0,
             adding_replicas: vec![],
             removing_replicas: vec![],
@@ -1246,9 +1311,9 @@ mod tests {
         img.apply(&MetadataRecord::V1Partition(PartitionRecord {
             topic: "t".into(),
             partition: 0,
-            leader: 1,
-            replicas: vec![1],
-            isr: vec![1],
+            leader: crabka_audit::NodeId(1),
+            replicas: vec![crabka_audit::NodeId(1)],
+            isr: vec![crabka_audit::NodeId(1)],
             leader_epoch: 0,
             adding_replicas: vec![],
             removing_replicas: vec![],

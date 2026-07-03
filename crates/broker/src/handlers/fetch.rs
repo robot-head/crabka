@@ -312,7 +312,7 @@ pub(crate) async fn handle(
                     // only at Fetch v12+ (codegen gates the tagged field).
                     let leader_id = image
                         .partition(&topic_name, idx)
-                        .map_or(-1, |pr| i32::try_from(pr.leader).unwrap_or(-1));
+                        .map_or(-1, |pr| i32::try_from(pr.leader.0).unwrap_or(-1));
                     out.current_leader = LeaderIdAndEpoch {
                         leader_id,
                         leader_epoch: our_epoch,
@@ -403,7 +403,7 @@ pub(crate) async fn handle(
                     let mut st = part.replica_state.lock().await;
                     let prev = st.hw;
                     let new = st.update_follower_leo(
-                        u64::try_from(effective_replica_id).unwrap_or(0),
+                        crabka_metadata::NodeId(u64::try_from(effective_replica_id).unwrap_or(0)),
                         // Wrap the decoded-request wire offset into `Offset`.
                         Offset(fetch_offset),
                         leader_leo,
@@ -449,12 +449,12 @@ pub(crate) async fn handle(
                     .replicas
                     .iter()
                     .map(|&nid| crate::replica_selector::ReplicaView {
-                        node_id: i32::try_from(nid).unwrap_or(-1),
+                        node_id: i32::try_from(nid.0).unwrap_or(-1),
                         rack: image.broker(nid).and_then(|b| b.rack.clone()),
                         in_isr: isr.contains(&nid),
                     })
                     .collect();
-                let leader_id = i32::try_from(pr.leader).unwrap_or(-1);
+                let leader_id = i32::try_from(pr.leader.0).unwrap_or(-1);
                 out.preferred_read_replica = broker.config.replica_selector.select(
                     Some(req.rack_id.as_str()),
                     leader_id,
@@ -572,9 +572,9 @@ pub(crate) async fn handle(
         use crate::throttle::TopicThrottle;
         // `leader.replication.throttled.replicas` stores (partition, follower_id) pairs.
         // The leader throttles a follower fetch when (partition, effective_replica_id) is
-        // in that set. We cast to u64 because NodeId is u64 and replica_id is i32; a
+        // in that set. We cast the i32 replica_id to the u64 `NodeId` inner; a
         // valid follower id is always positive so the cast is safe.
-        let follower_id = u64::try_from(effective_replica_id).unwrap_or(0);
+        let follower_id = crabka_metadata::NodeId(u64::try_from(effective_replica_id).unwrap_or(0));
         let mut throttled_byte_count: u64 = 0;
         // (topic_idx, partition_idx) pairs for throttled chunks.
         let mut throttled_idxs: Vec<(usize, usize)> = Vec::new();

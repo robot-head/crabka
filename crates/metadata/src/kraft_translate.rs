@@ -78,8 +78,8 @@ use crate::{
     records::{
         BrokerConfigRecord, BrokerEndpoint, BrokerRegistrationRecord, ClientQuotaRecord,
         DelegationTokenRecord, DeleteScramCredentialRecord, DeleteTopicRecord, FeatureLevelRecord,
-        MetadataRecord, PartitionRecord, QuotaEntity, ScramCredentialRecord, TopicConfigRecord,
-        TopicRecord, UnregisterBrokerRecord,
+        MetadataRecord, NodeId, PartitionRecord, QuotaEntity, ScramCredentialRecord,
+        TopicConfigRecord, TopicRecord, UnregisterBrokerRecord,
     },
 };
 
@@ -468,7 +468,7 @@ fn to_kraft_iter(
         MetadataRecord::V1UnregisterBroker(u) => {
             vec![KraftMetadataRecord::UnregisterBroker(
                 KUnregisterBrokerRecord {
-                    broker_id: i32::try_from(u.node_id).map_err(|_| TranslateError::Invalid {
+                    broker_id: i32::try_from(u.node_id.0).map_err(|_| TranslateError::Invalid {
                         field: "broker_id",
                         detail: format!("node_id {} exceeds i32", u.node_id),
                     })?,
@@ -701,7 +701,7 @@ fn register_broker_to_kraft(
         });
     }
     Ok(RegisterBrokerRecord {
-        broker_id: i32::try_from(b.node_id).map_err(|_| TranslateError::Invalid {
+        broker_id: i32::try_from(b.node_id.0).map_err(|_| TranslateError::Invalid {
             field: "broker_id",
             detail: format!("node_id {} exceeds i32", b.node_id),
         })?,
@@ -721,10 +721,10 @@ fn partition_to_kraft(
     p: &PartitionRecord,
     topic_id: uuid::Uuid,
 ) -> Result<KPartitionRecord, TranslateError> {
-    let cast = |v: &[u64], field: &'static str| -> Result<Vec<i32>, TranslateError> {
+    let cast = |v: &[NodeId], field: &'static str| -> Result<Vec<i32>, TranslateError> {
         v.iter()
             .map(|n| {
-                i32::try_from(*n).map_err(|_| TranslateError::Invalid {
+                i32::try_from(n.0).map_err(|_| TranslateError::Invalid {
                     field,
                     detail: format!("node id {n} exceeds i32"),
                 })
@@ -738,7 +738,7 @@ fn partition_to_kraft(
         isr: cast(&p.isr, "partition isr")?,
         removing_replicas: cast(&p.removing_replicas, "partition removing_replicas")?,
         adding_replicas: cast(&p.adding_replicas, "partition adding_replicas")?,
-        leader: i32::try_from(p.leader).map_err(|_| TranslateError::Invalid {
+        leader: i32::try_from(p.leader.0).map_err(|_| TranslateError::Invalid {
             field: "partition leader",
             detail: format!("leader {} exceeds i32", p.leader),
         })?,
@@ -820,7 +820,7 @@ pub fn from_kraft(
             Ok(MetadataRecord::V1UnregisterBroker(UnregisterBrokerRecord {
                 // Kafka broker ids are non-negative by contract.
                 #[allow(clippy::cast_sign_loss)]
-                node_id: u.broker_id as u64,
+                node_id: NodeId(u.broker_id as u64),
             }))
         }
         KraftMetadataRecord::UserScramCredential(s) => {
@@ -939,7 +939,7 @@ fn register_broker_from_kraft(
         })
         .collect::<Result<Vec<_>, TranslateError>>()?;
     Ok(BrokerRegistrationRecord {
-        node_id: b.broker_id as u64,
+        node_id: NodeId(b.broker_id as u64),
         broker_epoch: b.broker_epoch,
         incarnation_id: from_kuuid(b.incarnation_id),
         host,
@@ -977,11 +977,11 @@ fn partition_from_kraft(
 ) -> Result<PartitionRecord, TranslateError> {
     let id = from_kuuid(p.topic_id);
     let topic = topic_name_for_id(image, id).ok_or(TranslateError::UnknownTopicId(id))?;
-    let cast = |v: &[i32]| -> Vec<u64> { v.iter().map(|n| *n as u64).collect() };
+    let cast = |v: &[i32]| -> Vec<NodeId> { v.iter().map(|n| NodeId(*n as u64)).collect() };
     Ok(PartitionRecord {
         topic,
         partition: p.partition_id,
-        leader: p.leader as u64,
+        leader: NodeId(p.leader as u64),
         replicas: cast(&p.replicas),
         isr: cast(&p.isr),
         leader_epoch: p.leader_epoch,
@@ -1058,7 +1058,7 @@ fn config_from_kraft(
                     detail: e.to_string(),
                 })?;
             Ok(MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
-                node_id,
+                node_id: NodeId(node_id),
                 config_name: c.name.clone(),
                 config_value: c.value.clone(),
             }))
@@ -1142,7 +1142,7 @@ mod tests {
         // so the field is dropped iff this fails (it would decode back as 0).
         round_trip(
             &MetadataRecord::V1BrokerRegistration(BrokerRegistrationRecord {
-                node_id: 7,
+                node_id: NodeId(7),
                 broker_epoch: 42,
                 incarnation_id: uuid::Uuid::from_u128(0xdeadbeef_cafe_babe_0123_456789abcdef),
                 host: "192.168.1.10".into(),
@@ -1160,7 +1160,7 @@ mod tests {
         // `round_trip`'s full-equality assert covers the field.
         round_trip(
             &MetadataRecord::V1BrokerRegistration(BrokerRegistrationRecord {
-                node_id: 1,
+                node_id: NodeId(1),
                 broker_epoch: 7,
                 incarnation_id: uuid::Uuid::from_u128(0xfeedface_0000_0000_0000_000000000001),
                 host: "h".into(),
@@ -1188,7 +1188,7 @@ mod tests {
     #[test]
     fn register_broker_to_kraft_preserves_endpoint_details_and_unfenced_state() {
         let rec = MetadataRecord::V1BrokerRegistration(BrokerRegistrationRecord {
-            node_id: 1,
+            node_id: NodeId(1),
             broker_epoch: 7,
             incarnation_id: uuid::Uuid::from_u128(0xfeedface_0000_0000_0000_000000000001),
             host: "broker.local".into(),
@@ -1225,7 +1225,7 @@ mod tests {
         let id = uuid::Uuid::from_u128(0x0102_0304_0506_0708_090a_0b0c_0d0e_0f10);
         round_trip(
             &MetadataRecord::V1BrokerRegistration(BrokerRegistrationRecord {
-                node_id: 3,
+                node_id: NodeId(3),
                 broker_epoch: 5,
                 incarnation_id: id,
                 host: "127.0.0.1".into(),
@@ -1250,9 +1250,9 @@ mod tests {
         let rec = MetadataRecord::V1Partition(PartitionRecord {
             topic: "epoch-test".into(),
             partition: 0,
-            leader: 1,
-            replicas: vec![1],
-            isr: vec![1],
+            leader: NodeId(1),
+            replicas: vec![NodeId(1)],
+            isr: vec![NodeId(1)],
             leader_epoch: 7,
             adding_replicas: vec![],
             removing_replicas: vec![],
@@ -1265,7 +1265,9 @@ mod tests {
 
     #[test]
     fn unregister_broker_round_trips() {
-        let rec = MetadataRecord::V1UnregisterBroker(UnregisterBrokerRecord { node_id: 42 });
+        let rec = MetadataRecord::V1UnregisterBroker(UnregisterBrokerRecord {
+            node_id: NodeId(42),
+        });
         round_trip(&rec, &img());
     }
 
@@ -1464,7 +1466,7 @@ mod tests {
     #[test]
     fn broker_config_round_trips() {
         let rec = MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
-            node_id: 7,
+            node_id: NodeId(7),
             config_name: "leader.replication.throttled.rate".into(),
             config_value: Some("2048".into()),
         });
@@ -1474,7 +1476,7 @@ mod tests {
     #[test]
     fn broker_config_delete_round_trips() {
         let rec = MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
-            node_id: 7,
+            node_id: NodeId(7),
             config_name: "leader.replication.throttled.rate".into(),
             config_value: None,
         });
@@ -1531,7 +1533,7 @@ mod tests {
         let rec = MetadataRecord::V1PartitionDirAssignment(PartitionDirAssignmentRecord {
             topic: "t".into(),
             partition: 0,
-            replica: 2,
+            replica: NodeId(2),
             directory: uuid::Uuid::from_u128(0xAB),
         });
         let k = to_kraft(&rec, &img()).unwrap();
@@ -1569,9 +1571,9 @@ mod tests {
         let part = MetadataRecord::V1Partition(PartitionRecord {
             topic: "t".into(),
             partition: 0,
-            leader: 1,
-            replicas: vec![1],
-            isr: vec![1],
+            leader: NodeId(1),
+            replicas: vec![NodeId(1)],
+            isr: vec![NodeId(1)],
             leader_epoch: 0,
             adding_replicas: vec![],
             removing_replicas: vec![],
@@ -1749,9 +1751,9 @@ mod tests {
         let rec = MetadataRecord::V1Partition(PartitionRecord {
             topic: "t".into(),
             partition: 0,
-            leader: 1,
-            replicas: vec![1, 2],
-            isr: vec![1, 2],
+            leader: NodeId(1),
+            replicas: vec![NodeId(1), NodeId(2)],
+            isr: vec![NodeId(1), NodeId(2)],
             leader_epoch: 4,
             adding_replicas: vec![],
             removing_replicas: vec![],
@@ -1780,12 +1782,12 @@ mod tests {
         let rec = MetadataRecord::V1Partition(PartitionRecord {
             topic: "t".into(),
             partition: 0,
-            leader: 1,
-            replicas: vec![1, 2, 3],
-            isr: vec![1, 2],
+            leader: NodeId(1),
+            replicas: vec![NodeId(1), NodeId(2), NodeId(3)],
+            isr: vec![NodeId(1), NodeId(2)],
             leader_epoch: 4,
-            adding_replicas: vec![3],
-            removing_replicas: vec![2],
+            adding_replicas: vec![NodeId(3)],
+            removing_replicas: vec![NodeId(2)],
             directories: vec![],
             partition_epoch: 9,
         });
@@ -1900,9 +1902,9 @@ mod tests {
             image.apply(&MetadataRecord::V1Partition(PartitionRecord {
                 topic: "t".into(),
                 partition: p,
-                leader: 1,
-                replicas: vec![1],
-                isr: vec![1],
+                leader: NodeId(1),
+                replicas: vec![NodeId(1)],
+                isr: vec![NodeId(1)],
                 leader_epoch: 0,
                 adding_replicas: vec![],
                 removing_replicas: vec![],

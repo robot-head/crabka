@@ -63,9 +63,9 @@ mod tests {
     #[test]
     fn display_not_leader_with_id() {
         let e = RaftError::NotLeader {
-            current_leader: Some(7),
+            current_leader: Some(NodeId(7)),
         };
-        assert!(e.to_string().contains("Some(7)"));
+        assert!(e.to_string().contains("Some(NodeId(7))"));
     }
 
     #[test]

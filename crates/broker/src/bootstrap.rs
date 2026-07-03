@@ -145,7 +145,7 @@ mod tests {
         use crabka_metadata::{Voter, VoterEndpoint, VoterSet, VotersRecord};
         let dir = tempfile::tempdir().unwrap();
         let seeded = VoterSet::from_voters([Voter {
-            id: 7,
+            id: crabka_audit::NodeId(7),
             directory_id: uuid::Uuid::from_u128(7),
             endpoints: vec![VoterEndpoint {
                 name: "CONTROLLER".into(),

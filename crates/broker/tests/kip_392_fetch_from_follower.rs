@@ -101,7 +101,8 @@ async fn wait_leader_and_isr(
     handle
         .wait_for_image(|img| {
             img.partition(topic, partition).is_some_and(|p| {
-                p.leader == leader && p.isr.iter().copied().collect::<BTreeSet<u64>>() == want
+                p.leader.get() == leader
+                    && p.isr.iter().map(|n| n.get()).collect::<BTreeSet<u64>>() == want
             })
         })
         .await;

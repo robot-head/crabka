@@ -337,7 +337,7 @@ fn api_versions_response_body(req_version: ApiVersion) -> Bytes {
 /// which decodes the body, runs the core, and replies on a oneshot with the
 /// encoded response body. The Crabka-private 1003/1004 keep their bespoke
 /// request/response wire types.
-#[tracing::instrument(level = "debug", skip_all, fields(node = engine.node_id(), api_key = api_key_n), err)]
+#[tracing::instrument(level = "debug", skip_all, fields(node = engine.node_id().0, api_key = api_key_n), err)]
 async fn dispatch(
     api_key_n: ApiKey,
     body: Bytes,
@@ -415,7 +415,7 @@ async fn dispatch_submit_change(body: &[u8], engine: &KraftController) -> Result
         Err(RaftError::NotLeader { current_leader }) => CrabkaSubmitChangeResponse {
             error_code: SUBMIT_CHANGE_NOT_LEADER,
             leader_hint: current_leader
-                .and_then(|l| i64::try_from(l).ok())
+                .and_then(|l| i64::try_from(l.0).ok())
                 .unwrap_or(LEADER_HINT_UNKNOWN),
         },
         Err(e) => {
@@ -447,7 +447,7 @@ async fn dispatch_metadata_fetch(
         .await
         .ok()
         .and_then(|qs| qs.leader_id)
-        .and_then(|l| i64::try_from(l).ok())
+        .and_then(|l| i64::try_from(l.0).ok())
         .unwrap_or(LEADER_HINT_UNKNOWN);
 
     let resp = CrabkaMetadataFetchResponse {
@@ -491,7 +491,7 @@ async fn describe_cluster_response_body(
                 .find(|e| e.name.eq_ignore_ascii_case("CONTROLLER"))
                 .or_else(|| v.endpoints.first());
             (
-                i32::try_from(v.id).unwrap_or(-1),
+                i32::try_from(v.id.0).unwrap_or(-1),
                 ep.map(|e| e.host.clone()).unwrap_or_default(),
                 ep.map_or(-1, |e| i32::from(e.port)),
             )
@@ -502,7 +502,7 @@ async fn describe_cluster_response_body(
         .brokers()
         .map(|b| {
             (
-                i32::try_from(b.node_id).unwrap_or(-1),
+                i32::try_from(b.node_id.0).unwrap_or(-1),
                 b.host.clone(),
                 i32::from(b.port),
                 b.rack.clone(),
@@ -515,7 +515,7 @@ async fn describe_cluster_response_body(
         .await
         .ok()
         .and_then(|qs| qs.leader_id)
-        .and_then(|l| i32::try_from(l).ok())
+        .and_then(|l| i32::try_from(l.0).ok())
         .unwrap_or(-1);
 
     Ok(build_describe_cluster_body(
@@ -587,7 +587,7 @@ fn build_describe_cluster_body(
 mod tests {
     use assert2::{assert, check};
     use bytes::{BufMut, Bytes};
-    use crabka_metadata::{MetadataRecord, TopicRecord};
+    use crabka_metadata::{MetadataRecord, NodeId, TopicRecord};
     use crabka_protocol::Decode;
     use tokio::io::AsyncWriteExt;
     use uuid::Uuid;
@@ -639,7 +639,7 @@ mod tests {
 
     fn voter(id: u64, endpoints: Vec<crabka_metadata::VoterEndpoint>) -> crabka_metadata::Voter {
         crabka_metadata::Voter {
-            id,
+            id: NodeId(id),
             directory_id: Uuid::from_u128(u128::from(id)),
             endpoints,
             kraft_version: crabka_metadata::KRaftVersionRange::default(),
@@ -661,7 +661,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let ctrl = KraftController::open(
             dir.path().to_path_buf(),
-            me,
+            NodeId(me),
             Uuid::nil(),
             crabka_metadata::VoterSet::from_voters(voters),
             50,
@@ -873,9 +873,9 @@ mod tests {
         wait_for_leader(&engine).await;
 
         let vote = PeerRequest::Vote {
-            voter_id: 1,
+            voter_id: NodeId(1),
             candidate_epoch: 1,
-            candidate: 2,
+            candidate: NodeId(2),
             last_epoch: 0,
             last_offset: 0,
             pre_vote: false,
@@ -887,7 +887,7 @@ mod tests {
         assert!(PeerResponse::decode_vote(&vote_resp).is_some());
 
         let fetch = PeerRequest::Fetch {
-            from: 2,
+            from: NodeId(2),
             fetch_epoch: 1,
             fetch_offset: 0,
         }
@@ -898,7 +898,7 @@ mod tests {
         assert!(PeerResponse::decode_fetch(&fetch_resp).is_some());
 
         let snapshot = PeerRequest::FetchSnapshot {
-            from: 2,
+            from: NodeId(2),
             snapshot_id: (10, 1),
             position: 0,
             max_bytes: 32,
@@ -913,7 +913,7 @@ mod tests {
         ));
 
         let begin = PeerRequest::BeginQuorumEpoch {
-            leader_id: 1,
+            leader_id: NodeId(1),
             leader_epoch: 1,
         }
         .encode();
@@ -923,7 +923,7 @@ mod tests {
         assert!(!begin_resp.is_empty());
 
         let end = PeerRequest::EndQuorumEpoch {
-            leader_id: 1,
+            leader_id: NodeId(1),
             leader_epoch: 1,
         }
         .encode();

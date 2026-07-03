@@ -819,10 +819,32 @@ mod tests {
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
             _writer_handle: Arc::new(writer),
         };
-        p.install_isr(&[1, 2, 3], &[1, 2, 3], 1).await;
+        p.install_isr(
+            &[
+                crabka_audit::NodeId(1),
+                crabka_audit::NodeId(2),
+                crabka_audit::NodeId(3),
+            ],
+            &[
+                crabka_audit::NodeId(1),
+                crabka_audit::NodeId(2),
+                crabka_audit::NodeId(3),
+            ],
+            crabka_audit::NodeId(1),
+        )
+        .await;
         let st = p.replica_state.lock().await;
-        check!(st.isr == [1, 2, 3].into_iter().collect());
-        check!(st.per_follower.get(&2).map(|f| f.leo) == Some(Offset(0)));
+        check!(
+            st.isr
+                == [
+                    crabka_audit::NodeId(1),
+                    crabka_audit::NodeId(2),
+                    crabka_audit::NodeId(3)
+                ]
+                .into_iter()
+                .collect()
+        );
+        check!(st.per_follower.get(&crabka_audit::NodeId(2)).map(|f| f.leo) == Some(Offset(0)));
     }
 
     #[tokio::test]
@@ -839,7 +861,12 @@ mod tests {
             "waiter registers on first poll"
         );
 
-        p.install_isr(&[1], &[1], 1).await;
+        p.install_isr(
+            &[crabka_audit::NodeId(1)],
+            &[crabka_audit::NodeId(1)],
+            crabka_audit::NodeId(1),
+        )
+        .await;
 
         assert!(p.high_watermark().await == Offset(3));
         assert!(
@@ -853,7 +880,12 @@ mod tests {
         let hw_advance_notify = Arc::new(Notify::new());
         let (p, _td) = test_partition(hw_advance_notify.clone());
         append_records(&p, 2);
-        p.install_isr(&[1], &[1], 1).await;
+        p.install_isr(
+            &[crabka_audit::NodeId(1)],
+            &[crabka_audit::NodeId(1)],
+            crabka_audit::NodeId(1),
+        )
+        .await;
         assert!(p.high_watermark().await == Offset(2));
 
         let waiter = hw_advance_notify.notified();
@@ -863,7 +895,12 @@ mod tests {
             "waiter registers on first poll"
         );
 
-        p.install_isr(&[1], &[1], 1).await;
+        p.install_isr(
+            &[crabka_audit::NodeId(1)],
+            &[crabka_audit::NodeId(1)],
+            crabka_audit::NodeId(1),
+        )
+        .await;
 
         assert!(p.high_watermark().await == Offset(2));
         assert!(
@@ -880,10 +917,18 @@ mod tests {
         let cases = [(2u64, 0i32, 11i64), (0, 9, 17)];
         for (leader, epoch, seeded_leo) in cases {
             let (p, _td) = test_partition(Arc::new(Notify::new()));
-            p.install_isr(&[1, 2], &[1, 2], 1).await;
+            p.install_isr(
+                &[crabka_audit::NodeId(1), crabka_audit::NodeId(2)],
+                &[crabka_audit::NodeId(1), crabka_audit::NodeId(2)],
+                crabka_audit::NodeId(1),
+            )
+            .await;
             {
                 let mut st = p.replica_state.lock().await;
-                st.per_follower.get_mut(&2).expect("follower").leo = Offset(seeded_leo);
+                st.per_follower
+                    .get_mut(&crabka_audit::NodeId(2))
+                    .expect("follower")
+                    .leo = Offset(seeded_leo);
             }
 
             p.install_leader_change(leader, epoch).await;

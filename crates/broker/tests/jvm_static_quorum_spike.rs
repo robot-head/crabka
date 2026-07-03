@@ -58,13 +58,16 @@ fn crabka_controller_config(
 ) -> BrokerConfig {
     let mut cfg = BrokerConfig::for_tests(log_dir.to_path_buf());
     cfg.broker_id = i32::try_from(i + 1).unwrap();
-    cfg.node_id = u64::try_from(i + 1).unwrap();
+    cfg.node_id = crabka_broker::NodeId(u64::try_from(i + 1).unwrap());
     cfg.listen_addr = own_client_addr;
     cfg.advertised_listener = own_client_addr.to_string();
     cfg.controller_listen_addr = own_controller_addr;
-    cfg.directory_id = Uuid::from_u128(u128::from(cfg.node_id));
+    cfg.directory_id = Uuid::from_u128(u128::from(cfg.node_id.0));
     cfg.bootstrap_mode = BootstrapMode::Bootstrap;
-    cfg.controller_quorum_voters = voters.iter().map(|(id, a)| (*id, a.to_string())).collect();
+    cfg.controller_quorum_voters = voters
+        .iter()
+        .map(|(id, a)| (crabka_broker::NodeId(*id), a.to_string()))
+        .collect();
     cfg.auto_join = false;
     cfg.bootstrap_servers = vec![];
     cfg.cluster_id = Some(cluster_id);
@@ -421,8 +424,8 @@ async fn contested_election_crabka_counts_jvm_prevote() {
     while std::time::Instant::now() < deadline {
         let l1 = c1.controller_leader_id().await;
         let l2 = c2.controller_leader_id().await;
-        if l1.is_some() && l1 == l2 && matches!(l1, Some(1 | 2)) {
-            leader0 = l1;
+        if l1.is_some() && l1 == l2 && matches!(l1, Some(crabka_broker::NodeId(1 | 2))) {
+            leader0 = l1.map(|n| n.0);
             break;
         }
         // intentional: cross-checks BOTH in-process voters' leader watches for
@@ -544,7 +547,8 @@ async fn contested_election_crabka_counts_jvm_prevote() {
                 qs.current_term,
             );
         }
-        if qs.current_leader == Some(survivor_id) && qs.current_term > epoch0 {
+        if qs.current_leader == Some(crabka_broker::NodeId(survivor_id)) && qs.current_term > epoch0
+        {
             recovered = true;
             break;
         }

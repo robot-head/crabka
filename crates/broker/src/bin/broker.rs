@@ -198,9 +198,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         log_dir: args.log_dir,
         extra_log_dirs: args.extra_log_dirs,
         log_config: LogConfig::default(),
-        node_id,
+        node_id: crabka_broker::NodeId(node_id),
         controller_listen_addr: controller_addr,
-        controller_quorum_voters: vec![(node_id, controller_addr.to_string())],
+        controller_quorum_voters: vec![(
+            crabka_broker::NodeId(node_id),
+            controller_addr.to_string(),
+        )],
         bootstrap_servers: args.controller_bootstrap_servers,
         // Placeholder — replaced from `meta.properties.json` (written by
         // `crabka format`) once `log_dir` is resolved against the TOML.

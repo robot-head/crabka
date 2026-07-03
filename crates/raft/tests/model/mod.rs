@@ -241,7 +241,7 @@ impl ConsensusModel {
     }
 
     fn election_timeout_ms_of(id: NodeId) -> u64 {
-        1000 + id * 50
+        1000 + id.0 * 50
     }
 
     fn voter_set(&self) -> crabka_metadata::voters::VoterSet {

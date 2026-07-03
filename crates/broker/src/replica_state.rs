@@ -173,7 +173,12 @@ mod tests {
     fn install_isr_seeds_non_leader_followers_at_zero() {
         let mut s = fresh();
         let t = now();
-        s.install_isr(&[1, 2, 3], &[1, 2, 3], 1, t);
+        s.install_isr(
+            &[NodeId(1), NodeId(2), NodeId(3)],
+            &[NodeId(1), NodeId(2), NodeId(3)],
+            NodeId(1),
+            t,
+        );
         let seeded = FollowerStats {
             leo: Offset(0),
             last_fetch: t,
@@ -182,8 +187,10 @@ mod tests {
         // Only the non-leader followers (2 and 3) are seeded; the leader (1)
         // gets no per_follower entry.
         let expected = ReplicaState {
-            isr: [1, 2, 3].into_iter().collect(),
-            per_follower: [(2, seeded), (3, seeded)].into_iter().collect(),
+            isr: [NodeId(1), NodeId(2), NodeId(3)].into_iter().collect(),
+            per_follower: [(NodeId(2), seeded), (NodeId(3), seeded)]
+                .into_iter()
+                .collect(),
             hw: Offset(0),
             current_leader_epoch: 0,
         };
@@ -193,12 +200,22 @@ mod tests {
     #[test]
     fn install_isr_idempotent_preserves_follower_progress() {
         let mut s = fresh();
-        s.install_isr(&[1, 2, 3], &[1, 2, 3], 1, now());
-        s.update_follower_leo(2, o(50), o(100), now());
-        s.update_follower_leo(3, o(75), o(100), now());
-        s.install_isr(&[1, 2, 3], &[1, 2, 3], 1, now());
-        assert!(s.per_follower.get(&2).map(|f| f.leo) == Some(o(50)));
-        assert!(s.per_follower.get(&3).map(|f| f.leo) == Some(o(75)));
+        s.install_isr(
+            &[NodeId(1), NodeId(2), NodeId(3)],
+            &[NodeId(1), NodeId(2), NodeId(3)],
+            NodeId(1),
+            now(),
+        );
+        s.update_follower_leo(NodeId(2), o(50), o(100), now());
+        s.update_follower_leo(NodeId(3), o(75), o(100), now());
+        s.install_isr(
+            &[NodeId(1), NodeId(2), NodeId(3)],
+            &[NodeId(1), NodeId(2), NodeId(3)],
+            NodeId(1),
+            now(),
+        );
+        assert!(s.per_follower.get(&NodeId(2)).map(|f| f.leo) == Some(o(50)));
+        assert!(s.per_follower.get(&NodeId(3)).map(|f| f.leo) == Some(o(75)));
     }
 
     #[test]
@@ -206,10 +223,20 @@ mod tests {
         // Node 3 leaves the *replica set* entirely (e.g. reassignment) →
         // its progress entry is dropped.
         let mut s = fresh();
-        s.install_isr(&[1, 2, 3], &[1, 2, 3], 1, now());
-        s.update_follower_leo(3, o(75), o(100), now());
-        s.install_isr(&[1, 2], &[1, 2], 1, now());
-        assert!(!s.per_follower.contains_key(&3));
+        s.install_isr(
+            &[NodeId(1), NodeId(2), NodeId(3)],
+            &[NodeId(1), NodeId(2), NodeId(3)],
+            NodeId(1),
+            now(),
+        );
+        s.update_follower_leo(NodeId(3), o(75), o(100), now());
+        s.install_isr(
+            &[NodeId(1), NodeId(2)],
+            &[NodeId(1), NodeId(2)],
+            NodeId(1),
+            now(),
+        );
+        assert!(!s.per_follower.contains_key(&NodeId(3)));
     }
 
     #[test]
@@ -218,25 +245,40 @@ mod tests {
         // catching back up). Its fetch-driven progress must survive an
         // ISR reinstall so isr_maintenance can later expand it back in.
         let mut s = fresh();
-        s.install_isr(&[1, 2, 3], &[1, 2, 3], 1, now());
-        s.update_follower_leo(3, o(75), o(100), now());
+        s.install_isr(
+            &[NodeId(1), NodeId(2), NodeId(3)],
+            &[NodeId(1), NodeId(2), NodeId(3)],
+            NodeId(1),
+            now(),
+        );
+        s.update_follower_leo(NodeId(3), o(75), o(100), now());
         // Committed ISR shrinks to {1,2}; replica set is still {1,2,3}.
-        s.install_isr(&[1, 2], &[1, 2, 3], 1, now());
+        s.install_isr(
+            &[NodeId(1), NodeId(2)],
+            &[NodeId(1), NodeId(2), NodeId(3)],
+            NodeId(1),
+            now(),
+        );
         assert!(
-            s.per_follower.contains_key(&3),
+            s.per_follower.contains_key(&NodeId(3)),
             "a replica catching up toward ISR re-admission must keep its progress"
         );
-        assert!(s.per_follower.get(&3).map(|f| f.leo) == Some(o(75)));
+        assert!(s.per_follower.get(&NodeId(3)).map(|f| f.leo) == Some(o(75)));
     }
 
     #[test]
     fn hw_advances_when_trailing_follower_catches_up() {
         let mut s = fresh();
-        s.install_isr(&[1, 2, 3], &[1, 2, 3], 1, now());
+        s.install_isr(
+            &[NodeId(1), NodeId(2), NodeId(3)],
+            &[NodeId(1), NodeId(2), NodeId(3)],
+            NodeId(1),
+            now(),
+        );
         // Ordered steps over shared state: (follower, follower_leo, expected_hw).
         let steps = [(2, 50, 0), (3, 75, 50), (2, 80, 75)];
         for (follower, leo, expected_hw) in steps {
-            let hw = s.update_follower_leo(follower, o(leo), o(100), now());
+            let hw = s.update_follower_leo(NodeId(follower), o(leo), o(100), now());
             assert!(hw == o(expected_hw), "step: follower {follower} leo {leo}");
         }
     }
@@ -244,20 +286,30 @@ mod tests {
     #[test]
     fn hw_pins_at_slowest_isr_follower() {
         let mut s = fresh();
-        s.install_isr(&[1, 2, 3], &[1, 2, 3], 1, now());
-        s.update_follower_leo(2, o(100), o(100), now());
-        s.update_follower_leo(3, o(30), o(100), now());
+        s.install_isr(
+            &[NodeId(1), NodeId(2), NodeId(3)],
+            &[NodeId(1), NodeId(2), NodeId(3)],
+            NodeId(1),
+            now(),
+        );
+        s.update_follower_leo(NodeId(2), o(100), o(100), now());
+        s.update_follower_leo(NodeId(3), o(30), o(100), now());
         assert!(s.hw == o(30));
     }
 
     #[test]
     fn non_isr_follower_leo_update_uses_leader_path() {
         let mut s = fresh();
-        s.install_isr(&[1, 2], &[1, 2], 1, now());
+        s.install_isr(
+            &[NodeId(1), NodeId(2)],
+            &[NodeId(1), NodeId(2)],
+            NodeId(1),
+            now(),
+        );
         // Node 3 is not in ISR. Its progress is tracked for possible
         // re-admission, but it is excluded from HW; per_follower[2] = 0 from
         // install, so HW = min(100, 0) = 0.
-        let hw = s.update_follower_leo(3, o(999), o(100), now());
+        let hw = s.update_follower_leo(NodeId(3), o(999), o(100), now());
         assert!(hw == o(0));
         assert!(s.hw == o(0));
     }
@@ -265,7 +317,7 @@ mod tests {
     #[test]
     fn single_replica_isr_hw_equals_leader_leo() {
         let mut s = fresh();
-        s.install_isr(&[1], &[1], 1, now());
+        s.install_isr(&[NodeId(1)], &[NodeId(1)], NodeId(1), now());
         let hw = s.recompute_hw_for_leader_append(o(42));
         assert!(hw == o(42));
     }
@@ -273,10 +325,15 @@ mod tests {
     #[test]
     fn follower_overshoot_clamps_to_leader_leo() {
         let mut s = fresh();
-        s.install_isr(&[1, 2], &[1, 2], 1, now());
-        let hw = s.update_follower_leo(2, o(200), o(100), now());
+        s.install_isr(
+            &[NodeId(1), NodeId(2)],
+            &[NodeId(1), NodeId(2)],
+            NodeId(1),
+            now(),
+        );
+        let hw = s.update_follower_leo(NodeId(2), o(200), o(100), now());
         assert!(hw == o(100));
-        assert!(s.per_follower.get(&2).map(|f| f.leo) == Some(o(100)));
+        assert!(s.per_follower.get(&NodeId(2)).map(|f| f.leo) == Some(o(100)));
     }
 
     #[test]
@@ -291,11 +348,16 @@ mod tests {
         // Deterministic: pass explicit ordered instants instead of sleeping.
         let mut s = fresh();
         let t0 = Instant::now();
-        s.install_isr(&[1, 2], &[1, 2], 1, t0);
-        let t_install = s.per_follower.get(&2).unwrap().last_fetch;
+        s.install_isr(
+            &[NodeId(1), NodeId(2)],
+            &[NodeId(1), NodeId(2)],
+            NodeId(1),
+            t0,
+        );
+        let t_install = s.per_follower.get(&NodeId(2)).unwrap().last_fetch;
         let t1 = t0 + Duration::from_millis(10);
-        s.update_follower_leo(2, o(5), o(10), t1);
-        let t_after = s.per_follower.get(&2).unwrap().last_fetch;
+        s.update_follower_leo(NodeId(2), o(5), o(10), t1);
+        let t_after = s.per_follower.get(&NodeId(2)).unwrap().last_fetch;
         assert!(t_after > t_install);
     }
 
@@ -304,17 +366,26 @@ mod tests {
         // Deterministic: pass explicit ordered instants instead of sleeping.
         let mut s = fresh();
         let t0 = Instant::now();
-        s.install_isr(&[1, 2], &[1, 2], 1, t0);
+        s.install_isr(
+            &[NodeId(1), NodeId(2)],
+            &[NodeId(1), NodeId(2)],
+            NodeId(1),
+            t0,
+        );
         let t1 = t0 + Duration::from_millis(10);
-        s.update_follower_leo(2, o(5), o(10), t1);
-        let lag = s.per_follower.get(&2).unwrap().last_caught_up;
-        let lag_fetch = s.per_follower.get(&2).map(|f| f.last_fetch).unwrap();
+        s.update_follower_leo(NodeId(2), o(5), o(10), t1);
+        let lag = s.per_follower.get(&NodeId(2)).unwrap().last_caught_up;
+        let lag_fetch = s
+            .per_follower
+            .get(&NodeId(2))
+            .map(|f| f.last_fetch)
+            .unwrap();
         // Not yet caught up — last_caught_up is the install time (t0), which is
         // strictly before the most recent fetch time (t1).
         assert!(lag <= lag_fetch);
         let t2 = t1 + Duration::from_millis(10);
-        s.update_follower_leo(2, o(10), o(10), t2);
-        let lag2 = s.per_follower.get(&2).unwrap().last_caught_up;
+        s.update_follower_leo(NodeId(2), o(10), o(10), t2);
+        let lag2 = s.per_follower.get(&NodeId(2)).unwrap().last_caught_up;
         assert!(lag2 > lag);
     }
 
@@ -322,22 +393,32 @@ mod tests {
     fn non_isr_follower_refreshes_last_caught_up_only_when_caught_up() {
         let mut s = fresh();
         let t0 = Instant::now();
-        s.install_isr(&[1, 2, 3], &[1, 2, 3], 1, t0);
+        s.install_isr(
+            &[NodeId(1), NodeId(2), NodeId(3)],
+            &[NodeId(1), NodeId(2), NodeId(3)],
+            NodeId(1),
+            t0,
+        );
 
         let t_caught_in_isr = t0 + Duration::from_millis(10);
-        s.update_follower_leo(3, o(10), o(10), t_caught_in_isr);
-        assert!(s.per_follower.get(&3).unwrap().last_caught_up == t_caught_in_isr);
+        s.update_follower_leo(NodeId(3), o(10), o(10), t_caught_in_isr);
+        assert!(s.per_follower.get(&NodeId(3)).unwrap().last_caught_up == t_caught_in_isr);
 
-        s.install_isr(&[1, 2], &[1, 2, 3], 1, t_caught_in_isr);
+        s.install_isr(
+            &[NodeId(1), NodeId(2)],
+            &[NodeId(1), NodeId(2), NodeId(3)],
+            NodeId(1),
+            t_caught_in_isr,
+        );
         let t_lagging = t_caught_in_isr + Duration::from_millis(10);
-        s.update_follower_leo(3, o(9), o(10), t_lagging);
-        let lagging = s.per_follower.get(&3).unwrap();
+        s.update_follower_leo(NodeId(3), o(9), o(10), t_lagging);
+        let lagging = s.per_follower.get(&NodeId(3)).unwrap();
         assert!(lagging.last_fetch == t_lagging);
         assert!(lagging.last_caught_up == t_caught_in_isr);
 
         let t_caught_out_of_isr = t_lagging + Duration::from_millis(10);
-        s.update_follower_leo(3, o(10), o(10), t_caught_out_of_isr);
-        assert!(s.per_follower.get(&3).unwrap().last_caught_up == t_caught_out_of_isr);
+        s.update_follower_leo(NodeId(3), o(10), o(10), t_caught_out_of_isr);
+        assert!(s.per_follower.get(&NodeId(3)).unwrap().last_caught_up == t_caught_out_of_isr);
     }
 }
 

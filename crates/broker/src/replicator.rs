@@ -120,7 +120,7 @@ pub(crate) async fn run(cfg: Config) {
     info!(
         topic = %cfg.topic,
         partition = cfg.partition.get(),
-        leader_node_id = cfg.leader_node_id,
+        leader_node_id = cfg.leader_node_id.0,
         "replicator.started"
     );
 
@@ -304,7 +304,7 @@ fn build_fetch_request(
     // it into a tagged `replica_state` struct on v15+; the codegen serializes
     // whichever the negotiated version requires. Populate BOTH so the request
     // is correct regardless of which version the leader negotiates.
-    let rid = i32::try_from(cfg.node_id).unwrap_or(-1);
+    let rid = i32::try_from(cfg.node_id.0).unwrap_or(-1);
     FetchRequest {
         replica_id: rid,
         replica_state: ReplicaState {
@@ -689,7 +689,7 @@ fn build_offset_for_leader_epoch_request(
     our_epoch: i32,
 ) -> OffsetForLeaderEpochRequest {
     OffsetForLeaderEpochRequest {
-        replica_id: i32::try_from(cfg.node_id).unwrap_or(-1),
+        replica_id: i32::try_from(cfg.node_id.0).unwrap_or(-1),
         topics: vec![OffsetForLeaderTopic {
             topic: cfg.topic.clone(),
             partitions: vec![OffsetForLeaderPartition {
@@ -772,8 +772,8 @@ mod tests {
 
     const TOPIC: &str = "orders";
     const PARTITION: i32 = 0;
-    const NODE_ID: NodeId = 2;
-    const LEADER_ID: NodeId = 1;
+    const NODE_ID: NodeId = NodeId(2);
+    const LEADER_ID: NodeId = NodeId(1);
     const WIRE_TOPIC_ID: WireUuid = WireUuid([7; 16]);
 
     struct StaticMetadataSource {
@@ -955,7 +955,7 @@ mod tests {
 
         let req = build_fetch_request(&cfg, Offset(123), 456);
 
-        let rid = i32::try_from(NODE_ID).unwrap();
+        let rid = i32::try_from(NODE_ID.0).unwrap();
         let expected = FetchRequest {
             replica_id: rid,
             max_wait_ms: FETCH_MAX_WAIT_MS,
@@ -996,7 +996,7 @@ mod tests {
     #[test]
     fn build_fetch_request_uses_negative_replica_sentinel_when_node_id_overflows() {
         let (mut cfg, _log_dir) = test_config(image_with_leader(LEADER_ID));
-        cfg.node_id = NodeId::from(i32::MAX as u32) + 1;
+        cfg.node_id = NodeId(i32::MAX as u64 + 1);
 
         let req = build_fetch_request(&cfg, Offset(0), FETCH_MAX_BYTES);
 
@@ -1012,7 +1012,7 @@ mod tests {
 
         let req = build_offset_for_leader_epoch_request(&cfg, 7);
         let expected = OffsetForLeaderEpochRequest {
-            replica_id: i32::try_from(NODE_ID).unwrap(),
+            replica_id: i32::try_from(NODE_ID.0).unwrap(),
             topics: vec![OffsetForLeaderTopic {
                 topic: TOPIC.into(),
                 partitions: vec![OffsetForLeaderPartition {
@@ -1031,7 +1031,7 @@ mod tests {
     #[test]
     fn offset_epoch_request_uses_negative_replica_sentinel_when_node_id_overflows() {
         let (mut cfg, _log_dir) = test_config(image_with_leader(LEADER_ID));
-        cfg.node_id = NodeId::from(i32::MAX as u32) + 1;
+        cfg.node_id = NodeId(i32::MAX as u64 + 1);
 
         let req = build_offset_for_leader_epoch_request(&cfg, 7);
 

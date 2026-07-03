@@ -26,7 +26,7 @@ impl ReconfigOps for Mock {
         self.0.lock().unwrap().voters.clone()
     }
     fn leader(&self) -> Option<NodeId> {
-        Some(1)
+        Some(NodeId(1))
     }
     fn is_leader(&self) -> bool {
         self.0.lock().unwrap().is_leader
@@ -57,7 +57,7 @@ impl ReconfigOps for Mock {
 fn voter(id: NodeId) -> Voter {
     Voter {
         id,
-        directory_id: uuid::Uuid::from_u128(u128::from(id)),
+        directory_id: uuid::Uuid::from_u128(u128::from(id.0)),
         endpoints: vec![VoterEndpoint {
             name: "CONTROLLER".into(),
             host: "127.0.0.1".into(),
@@ -70,7 +70,7 @@ fn voter(id: NodeId) -> Voter {
 #[tokio::test]
 async fn add_voter_rejects_lagging_observer() {
     let mock = Mock(StdMutex::new(MockState {
-        voters: VoterSet::from_voters([voter(1)]),
+        voters: VoterSet::from_voters([voter(NodeId(1))]),
         leader_index: 1000,
         is_leader: true,
         ..Default::default()
@@ -78,18 +78,23 @@ async fn add_voter_rejects_lagging_observer() {
     let lock = tokio::sync::Mutex::new(());
     let coord = Coordinator::new(&mock, &lock, 10);
     let err = coord
-        .add_voter(AddVoter { voter: voter(2) })
+        .add_voter(AddVoter {
+            voter: voter(NodeId(2)),
+        })
         .await
         .unwrap_err();
-    assert!(matches!(err, RaftError::VoterNotCaughtUp { id: 2, .. }));
+    assert!(matches!(
+        err,
+        RaftError::VoterNotCaughtUp { id: NodeId(2), .. }
+    ));
 }
 
 #[tokio::test]
 async fn add_voter_succeeds_when_caught_up() {
     let mut observer_index = std::collections::HashMap::new();
-    observer_index.insert(2u64, 1000u64);
+    observer_index.insert(NodeId(2), 1000u64);
     let mock = Mock(StdMutex::new(MockState {
-        voters: VoterSet::from_voters([voter(1)]),
+        voters: VoterSet::from_voters([voter(NodeId(1))]),
         leader_index: 1000,
         is_leader: true,
         observer_index,
@@ -97,19 +102,24 @@ async fn add_voter_succeeds_when_caught_up() {
     }));
     let lock = tokio::sync::Mutex::new(());
     let coord = Coordinator::new(&mock, &lock, 10);
-    let out = coord.add_voter(AddVoter { voter: voter(2) }).await.unwrap();
+    let out = coord
+        .add_voter(AddVoter {
+            voter: voter(NodeId(2)),
+        })
+        .await
+        .unwrap();
     assert!(out == ReconfigOutcome::Committed);
     let st = mock.0.lock().unwrap();
-    assert!(st.membership.as_ref().unwrap() == &BTreeSet::from([1, 2]));
+    assert!(st.membership.as_ref().unwrap() == &BTreeSet::from([NodeId(1), NodeId(2)]));
     assert!(st.submitted.len() == 1); // one V1Voters record
 }
 
 #[tokio::test]
 async fn add_voter_accepts_observer_at_lag_bound() {
     let mut observer_index = std::collections::HashMap::new();
-    observer_index.insert(2u64, 990u64);
+    observer_index.insert(NodeId(2), 990u64);
     let mock = Mock(StdMutex::new(MockState {
-        voters: VoterSet::from_voters([voter(1)]),
+        voters: VoterSet::from_voters([voter(NodeId(1))]),
         leader_index: 1000,
         is_leader: true,
         observer_index,
@@ -118,18 +128,23 @@ async fn add_voter_accepts_observer_at_lag_bound() {
     let lock = tokio::sync::Mutex::new(());
     let coord = Coordinator::new(&mock, &lock, 10);
 
-    let out = coord.add_voter(AddVoter { voter: voter(2) }).await.unwrap();
+    let out = coord
+        .add_voter(AddVoter {
+            voter: voter(NodeId(2)),
+        })
+        .await
+        .unwrap();
 
     assert!(out == ReconfigOutcome::Committed);
     let st = mock.0.lock().unwrap();
-    assert!(st.membership.as_ref().unwrap() == &BTreeSet::from([1, 2]));
+    assert!(st.membership.as_ref().unwrap() == &BTreeSet::from([NodeId(1), NodeId(2)]));
     assert!(st.submitted.len() == 1);
 }
 
 #[tokio::test]
 async fn remove_last_voter_is_rejected() {
     let mock = Mock(StdMutex::new(MockState {
-        voters: VoterSet::from_voters([voter(1)]),
+        voters: VoterSet::from_voters([voter(NodeId(1))]),
         is_leader: true,
         ..Default::default()
     }));
@@ -137,7 +152,7 @@ async fn remove_last_voter_is_rejected() {
     let coord = Coordinator::new(&mock, &lock, 10);
     let err = coord
         .remove_voter(RemoveVoter {
-            id: 1,
+            id: NodeId(1),
             directory_id: uuid::Uuid::from_u128(1),
         })
         .await
@@ -153,14 +168,19 @@ async fn add_voter_on_follower_reports_not_leader() {
     }));
     let lock = tokio::sync::Mutex::new(());
     let coord = Coordinator::new(&mock, &lock, 10);
-    let out = coord.add_voter(AddVoter { voter: voter(2) }).await.unwrap();
+    let out = coord
+        .add_voter(AddVoter {
+            voter: voter(NodeId(2)),
+        })
+        .await
+        .unwrap();
     assert!(matches!(out, ReconfigOutcome::NotLeader { .. }));
 }
 
 #[tokio::test]
 async fn second_reconfig_reports_in_progress_when_lock_held() {
     let mock = Mock(StdMutex::new(MockState {
-        voters: VoterSet::from_voters([voter(1), voter(2)]),
+        voters: VoterSet::from_voters([voter(NodeId(1)), voter(NodeId(2))]),
         is_leader: true,
         ..Default::default()
     }));
@@ -170,7 +190,7 @@ async fn second_reconfig_reports_in_progress_when_lock_held() {
     let coord = Coordinator::new(&mock, &lock, 10);
     let err = coord
         .remove_voter(RemoveVoter {
-            id: 2,
+            id: NodeId(2),
             directory_id: uuid::Uuid::from_u128(2),
         })
         .await
@@ -181,13 +201,13 @@ async fn second_reconfig_reports_in_progress_when_lock_held() {
 #[tokio::test]
 async fn update_voter_submits_record_without_membership_change() {
     let mock = Mock(StdMutex::new(MockState {
-        voters: VoterSet::from_voters([voter(1), voter(2)]),
+        voters: VoterSet::from_voters([voter(NodeId(1)), voter(NodeId(2))]),
         is_leader: true,
         ..Default::default()
     }));
     let lock = tokio::sync::Mutex::new(());
     let coord = Coordinator::new(&mock, &lock, 10);
-    let mut updated = voter(2);
+    let mut updated = voter(NodeId(2));
     updated.endpoints = vec![VoterEndpoint {
         name: "CONTROLLER".into(),
         host: "10.0.0.2".into(),
@@ -206,7 +226,7 @@ async fn update_voter_submits_record_without_membership_change() {
 #[tokio::test]
 async fn remove_non_last_voter_succeeds() {
     let mock = Mock(StdMutex::new(MockState {
-        voters: VoterSet::from_voters([voter(1), voter(2)]),
+        voters: VoterSet::from_voters([voter(NodeId(1)), voter(NodeId(2))]),
         is_leader: true,
         ..Default::default()
     }));
@@ -214,21 +234,21 @@ async fn remove_non_last_voter_succeeds() {
     let coord = Coordinator::new(&mock, &lock, 10);
     let out = coord
         .remove_voter(RemoveVoter {
-            id: 2,
+            id: NodeId(2),
             directory_id: uuid::Uuid::from_u128(2),
         })
         .await
         .unwrap();
     assert!(out == ReconfigOutcome::Committed);
     let st = mock.0.lock().unwrap();
-    assert!(st.membership.as_ref().unwrap() == &BTreeSet::from([1]));
+    assert!(st.membership.as_ref().unwrap() == &BTreeSet::from([NodeId(1)]));
     assert!(st.submitted.len() == 1); // one V1Voters record
 }
 
 #[tokio::test]
 async fn remove_voter_with_mismatched_directory_id_is_noop() {
     let mock = Mock(StdMutex::new(MockState {
-        voters: VoterSet::from_voters([voter(1), voter(2)]),
+        voters: VoterSet::from_voters([voter(NodeId(1)), voter(NodeId(2))]),
         is_leader: true,
         ..Default::default()
     }));
@@ -237,7 +257,7 @@ async fn remove_voter_with_mismatched_directory_id_is_noop() {
     // Stale request targeting an old incarnation of node 2 (wrong directory_id).
     let out = coord
         .remove_voter(RemoveVoter {
-            id: 2,
+            id: NodeId(2),
             directory_id: uuid::Uuid::from_u128(999),
         })
         .await

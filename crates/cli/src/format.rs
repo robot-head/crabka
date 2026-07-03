@@ -79,7 +79,7 @@ pub struct FormatArgs {
     add_acl: Vec<AclEntry>,
     /// This node's raft id. Required with `--standalone` (KIP-853 needs
     /// to know which voter this node *is* when seeding the singleton set).
-    #[arg(long)]
+    #[arg(long, value_parser = parse_node_id)]
     node_id: Option<crabka_metadata::NodeId>,
     /// Format this node as the sole initial controller voter.
     #[arg(long, conflicts_with = "initial_controllers")]
@@ -113,6 +113,12 @@ fn resolve_release_level(s: &str) -> Result<i16, String> {
         ));
     }
     Ok(level)
+}
+
+/// Parse a node id: a bare `u64` wrapped in the `NodeId` newtype.
+fn parse_node_id(s: &str) -> Result<crabka_metadata::NodeId, String> {
+    let id: u64 = s.trim().parse().map_err(|e| format!("node id: {e}"))?;
+    Ok(crabka_metadata::NodeId(id))
 }
 
 /// Parse one `--feature NAME=LEVEL` spec into `(name, level)`.
@@ -323,7 +329,7 @@ fn parse_acl_spec(spec: &str) -> Result<AclEntry, String> {
 /// it off the right first, then peel `host:port` off the remainder.
 fn parse_initial_controller(spec: &str) -> Result<Voter, String> {
     let (id_part, rest) = spec.split_once('@').ok_or("missing '@'")?;
-    let id: crabka_metadata::NodeId = id_part.parse().map_err(|_| "bad id")?;
+    let id = crabka_metadata::NodeId(id_part.parse::<u64>().map_err(|_| "bad id")?);
     let (host_port, dir_part) = rest.rsplit_once(':').ok_or("missing directory uuid")?;
     let dir: Uuid = dir_part.parse().map_err(|_| "bad directory uuid")?;
     let (host, port) = host_port.rsplit_once(':').ok_or("missing host:port")?;
@@ -889,7 +895,7 @@ mod tests {
             parse_initial_controller("3@host:9093:00000000-0000-0000-0000-000000000003").unwrap();
         assert!(
             v == Voter {
-                id: 3,
+                id: crabka_metadata::NodeId(3),
                 directory_id: Uuid::from_u128(3),
                 endpoints: vec![VoterEndpoint {
                     name: "CONTROLLER".to_string(),

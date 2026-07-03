@@ -121,15 +121,30 @@ fn real_hwm(s: &DpState, base: Instant) -> i64 {
     let leader = s.leader;
     let leader_leo = s.leader_leo();
     let leader_log = &s.log[leader as usize];
-    let isr_nodes: Vec<u64> = (0..NB as u8).filter(|&b| has(s.isr, b)).map(node).collect();
-    let replica_nodes: Vec<u64> = (0..NB as u8).map(node).collect();
+    let isr_nodes: Vec<crabka_audit::NodeId> = (0..NB as u8)
+        .filter(|&b| has(s.isr, b))
+        .map(|b| crabka_audit::NodeId(node(b)))
+        .collect();
+    let replica_nodes: Vec<crabka_audit::NodeId> = (0..NB as u8)
+        .map(|b| crabka_audit::NodeId(node(b)))
+        .collect();
     let mut rs = ReplicaState::new();
-    rs.install_isr(&isr_nodes, &replica_nodes, node(leader), base);
+    rs.install_isr(
+        &isr_nodes,
+        &replica_nodes,
+        crabka_audit::NodeId(node(leader)),
+        base,
+    );
     for b in 0..NB as u8 {
         if b != leader && has(s.isr, b) {
             let leo = consistent_leo(&s.log[b as usize], leader_log);
             // Wrap this model's `i64` LEOs into `Offset` for the real HWM core.
-            rs.update_follower_leo(node(b), Offset(leo), Offset(leader_leo), base);
+            rs.update_follower_leo(
+                crabka_audit::NodeId(node(b)),
+                Offset(leo),
+                Offset(leader_leo),
+                base,
+            );
         }
     }
     // Unwrap the recomputed `Offset` HWM back into this model's `i64` world.
@@ -208,18 +223,23 @@ fn apply_elect(s: &mut DpState, new_leader: u8, isr_mask: u8, unclean: bool) {
 /// in the unclean config — driving the real KIP-966 `select_best_replica` for
 /// the empty-ISR `Recover` path.
 fn do_failover(s: &mut DpState, dead: u8, unclean: bool) {
-    let isr_nodes: Vec<u64> = (0..NB as u8).filter(|&b| has(s.isr, b)).map(node).collect();
-    let replica_nodes: Vec<u64> = (0..NB as u8).map(node).collect();
+    let isr_nodes: Vec<crabka_audit::NodeId> = (0..NB as u8)
+        .filter(|&b| has(s.isr, b))
+        .map(|b| crabka_audit::NodeId(node(b)))
+        .collect();
+    let replica_nodes: Vec<crabka_audit::NodeId> = (0..NB as u8)
+        .map(|b| crabka_audit::NodeId(node(b)))
+        .collect();
     let pr = PartitionRecord {
-        leader: node(s.leader),
+        leader: crabka_audit::NodeId(node(s.leader)),
         replicas: replica_nodes,
         isr: isr_nodes,
         leader_epoch: i32::from(s.leader_epoch),
         ..Default::default()
     };
-    let alive: HashSet<u64> = (0..NB as u8)
+    let alive: HashSet<crabka_audit::NodeId> = (0..NB as u8)
         .filter(|&b| has(s.live, b))
-        .map(node)
+        .map(|b| crabka_audit::NodeId(node(b)))
         .collect();
     // Clean config: strategy None + unclean disabled → only ISR elections (else
     // Unavailable). Unclean config: Balanced strategy defers an empty-ISR
@@ -229,14 +249,20 @@ fn do_failover(s: &mut DpState, dead: u8, unclean: bool) {
     } else {
         RecoveryStrategy::None
     };
-    match failover_one(&pr, node(dead), &alive, strategy, unclean) {
+    match failover_one(
+        &pr,
+        crabka_audit::NodeId(node(dead)),
+        &alive,
+        strategy,
+        unclean,
+    ) {
         FailoverDecision::Elect {
             leader,
             isr,
             unclean,
         } => {
-            let isr_mask = isr.iter().fold(0u8, |m, &n| m | (1u8 << (n as u8)));
-            apply_elect(s, leader as u8, isr_mask, unclean);
+            let isr_mask = isr.iter().fold(0u8, |m, &n| m | (1u8 << (n.0 as u8)));
+            apply_elect(s, leader.0 as u8, isr_mask, unclean);
         }
         FailoverDecision::Recover(_) => {
             // KIP-966 unclean recovery: drive the REAL select_best_replica over
@@ -245,7 +271,7 @@ fn do_failover(s: &mut DpState, dead: u8, unclean: bool) {
             let infos: Vec<ReplicaLogInfo> = (0..NB as u8)
                 .filter(|&b| has(s.live, b))
                 .map(|b| ReplicaLogInfo {
-                    broker_id: node(b),
+                    broker_id: crabka_audit::NodeId(node(b)),
                     last_written_leader_epoch: s.log[b as usize]
                         .last()
                         .map_or(0, |&e| i32::from(e)),
@@ -254,11 +280,11 @@ fn do_failover(s: &mut DpState, dead: u8, unclean: bool) {
                 })
                 .collect();
             if let Some(winner) = select_best_replica(&infos) {
-                apply_elect(s, winner as u8, 1u8 << (winner as u8), true);
+                apply_elect(s, winner.0 as u8, 1u8 << (winner.0 as u8), true);
             }
         }
         FailoverDecision::ShrinkIsr { isr } => {
-            s.isr = isr.iter().fold(0u8, |m, &n| m | (1u8 << (n as u8)));
+            s.isr = isr.iter().fold(0u8, |m, &n| m | (1u8 << (n.0 as u8)));
         }
         FailoverDecision::Unavailable | FailoverDecision::NoChange => {}
     }

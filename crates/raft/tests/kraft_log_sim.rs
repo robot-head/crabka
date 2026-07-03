@@ -12,7 +12,7 @@ mod sim_harness;
 
 use std::cell::RefCell;
 
-use crabka_ids::Offset;
+use crabka_ids::{NodeId, Offset};
 use crabka_protocol::records::{Attributes, Record, RecordBatch};
 use crabka_raft::kraft::{
     KraftLog,
@@ -177,7 +177,7 @@ thread_local! {
 }
 
 /// A cluster whose nodes use real on-disk `KraftLog` instances.
-fn new_with_kraft_log(voter_ids: &[u64]) -> Sim<KraftBackedLog> {
+fn new_with_kraft_log(voter_ids: &[NodeId]) -> Sim<KraftBackedLog> {
     Sim::new_with(voter_ids, |_id| KraftBackedLog::new())
 }
 
@@ -186,7 +186,7 @@ fn new_with_kraft_log(voter_ids: &[u64]) -> Sim<KraftBackedLog> {
 /// `read_committed` path. Each node's HWM is advanced to the consensus HWM by
 /// the harness (leaders via `AdvanceHighWatermark`, followers on fetch), so this
 /// is the byte-exact convergence target.
-fn committed_bytes(sim: &Sim<KraftBackedLog>, node: u64) -> bytes::Bytes {
+fn committed_bytes(sim: &Sim<KraftBackedLog>, node: NodeId) -> bytes::Bytes {
     let log = &sim.node_log(node).log;
     let raw = log
         .read_committed(Offset(0), usize::MAX)
@@ -195,7 +195,7 @@ fn committed_bytes(sim: &Sim<KraftBackedLog>, node: u64) -> bytes::Bytes {
 }
 
 /// Decoded committed batches of `node`'s log up to the consensus HWM.
-fn committed_batches(sim: &Sim<KraftBackedLog>, node: u64, hwm: i64) -> Vec<RecordBatch> {
+fn committed_batches(sim: &Sim<KraftBackedLog>, node: NodeId, hwm: i64) -> Vec<RecordBatch> {
     let log = &sim.node_log(node).log;
     log.read_decoded(Offset(0), usize::MAX)
         .expect("read_decoded")
@@ -208,7 +208,7 @@ use assert2::{assert, check};
 
 #[test]
 fn voters_logs_byte_identical_up_to_hwm_over_real_log() {
-    let mut sim = new_with_kraft_log(&[1, 2, 3]);
+    let mut sim = new_with_kraft_log(&[NodeId(1), NodeId(2), NodeId(3)]);
     sim.run_until_stable(10_000);
     assert!(sim.leaders().len() == 1, "no leader: {:?}", sim.leaders());
     let leader = sim.leaders()[0];
@@ -244,7 +244,7 @@ fn voters_logs_byte_identical_up_to_hwm_over_real_log() {
 
 #[test]
 fn follower_truncates_real_log_on_divergence_then_reconverges() {
-    let mut sim = new_with_kraft_log(&[1, 2, 3]);
+    let mut sim = new_with_kraft_log(&[NodeId(1), NodeId(2), NodeId(3)]);
     sim.run_until_stable(10_000);
     assert!(sim.leaders().len() == 1, "no leader: {:?}", sim.leaders());
     let leader = sim.leaders()[0];
@@ -320,7 +320,7 @@ fn follower_truncates_real_log_on_divergence_then_reconverges() {
 
 #[test]
 fn hwm_agrees_and_never_exceeds_any_voter_log_end() {
-    let mut sim = new_with_kraft_log(&[1, 2, 3]);
+    let mut sim = new_with_kraft_log(&[NodeId(1), NodeId(2), NodeId(3)]);
     sim.run_until_stable(10_000);
     assert!(sim.leaders().len() == 1, "no leader: {:?}", sim.leaders());
     let leader = sim.leaders()[0];

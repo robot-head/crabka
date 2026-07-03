@@ -87,7 +87,7 @@ async fn tick_all(
     let snapshot: Vec<Arc<Partition>> = partitions.arcs();
     let image = controller.current_image();
     for partition in snapshot {
-        if partition.current_leader.load(Ordering::Relaxed) != node_id {
+        if partition.current_leader.load(Ordering::Relaxed) != node_id.0 {
             continue;
         }
         // Read config + sealed-segment list under the log lock, then drop it.
@@ -753,7 +753,7 @@ mod tests {
 
     impl FixedMetadataSource {
         fn new(image: MetadataImage) -> Self {
-            let (leader_tx, _) = tokio::sync::watch::channel(Some(1));
+            let (leader_tx, _) = tokio::sync::watch::channel(Some(NodeId(1)));
             Self {
                 image: Arc::new(image),
                 leader_tx,
@@ -975,7 +975,7 @@ mod tests {
             controller,
             rsm,
             rlmm.clone(),
-            1,
+            NodeId(1),
             1,
             RemoteLogManagerConfig {
                 interval: Duration::from_millis(10),
@@ -1017,7 +1017,7 @@ mod tests {
         let rlmm: Arc<dyn RemoteLogMetadataManager> =
             Arc::new(InmemoryRemoteLogMetadataManager::new());
 
-        tick_all(&partitions, &controller, &rsm, &rlmm, 1, 1).await;
+        tick_all(&partitions, &controller, &rsm, &rlmm, NodeId(1), 1).await;
 
         let listed = rlmm.list_remote_log_segments(&tp()).unwrap();
         assert!(listed.len() == export_count);
@@ -1043,7 +1043,7 @@ mod tests {
         let rlmm: Arc<dyn RemoteLogMetadataManager> =
             Arc::new(InmemoryRemoteLogMetadataManager::new());
 
-        tick_all(&partitions, &controller, &rsm, &rlmm, 1, 1).await;
+        tick_all(&partitions, &controller, &rsm, &rlmm, NodeId(1), 1).await;
 
         assert!(rlmm.list_remote_log_segments(&tp()).unwrap().is_empty());
     }
@@ -1071,7 +1071,7 @@ mod tests {
         let rlmm: Arc<dyn RemoteLogMetadataManager> =
             Arc::new(InmemoryRemoteLogMetadataManager::new());
 
-        tick_all(&partitions, &controller, &rsm, &rlmm, 1, 1).await;
+        tick_all(&partitions, &controller, &rsm, &rlmm, NodeId(1), 1).await;
 
         assert!(rlmm.list_remote_log_segments(&tp()).unwrap().is_empty());
     }

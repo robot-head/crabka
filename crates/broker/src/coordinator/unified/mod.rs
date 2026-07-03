@@ -1292,7 +1292,7 @@ mod tests {
 
     impl FixedMetadataSource {
         fn new(image: crabka_metadata::MetadataImage) -> Self {
-            let (leader_tx, _) = tokio::sync::watch::channel(Some(1));
+            let (leader_tx, _) = tokio::sync::watch::channel(Some(crabka_raft::NodeId(1)));
             Self {
                 image: Arc::new(image),
                 leader_tx,
@@ -1403,14 +1403,14 @@ mod tests {
     ) -> Arc<crate::share_coordinator::persister_client::SharePersister> {
         let share_coordinator = Arc::new(
             crate::share_coordinator::coordinator::ShareCoordinator::new(
-                1,
+                crabka_metadata::NodeId(1),
                 Arc::new(crate::partition_registry::PartitionRegistry::new()),
                 crate::share_coordinator::config::ShareCoordinatorConfig::default(),
             ),
         );
         Arc::new(
             crate::share_coordinator::persister_client::SharePersister::new(
-                1,
+                crabka_metadata::NodeId(1),
                 share_coordinator,
                 source,
                 Arc::new(crate::network::client::InterBrokerClient::new(None, None)),
@@ -1910,7 +1910,7 @@ mod tests {
         ] {
             image.apply(&crabka_metadata::MetadataRecord::V1BrokerRegistration(
                 crabka_metadata::BrokerRegistrationRecord {
-                    node_id,
+                    node_id: crabka_metadata::NodeId(node_id),
                     broker_epoch: i64::try_from(node_id).unwrap(),
                     incarnation_id: real_uuid(u8::try_from(node_id).unwrap()),
                     host: format!("broker-{node_id}"),
@@ -1924,9 +1924,9 @@ mod tests {
             crabka_metadata::PartitionRecord {
                 topic: "input".into(),
                 partition: 0,
-                leader: 1,
-                replicas: vec![1, 2],
-                isr: vec![1, 2],
+                leader: crabka_metadata::NodeId(1),
+                replicas: vec![crabka_metadata::NodeId(1), crabka_metadata::NodeId(2)],
+                isr: vec![crabka_metadata::NodeId(1), crabka_metadata::NodeId(2)],
                 directories: vec![real_uuid(1), real_uuid(2)],
                 ..Default::default()
             },
@@ -1935,9 +1935,9 @@ mod tests {
             crabka_metadata::PartitionRecord {
                 topic: "input".into(),
                 partition: 1,
-                leader: 3,
-                replicas: vec![3],
-                isr: vec![3],
+                leader: crabka_metadata::NodeId(3),
+                replicas: vec![crabka_metadata::NodeId(3)],
+                isr: vec![crabka_metadata::NodeId(3)],
                 directories: vec![real_uuid(3)],
                 ..Default::default()
             },

@@ -468,7 +468,7 @@ async fn process_partition(
     if leader != this_node_id {
         out.error_code = codes::NOT_LEADER_OR_FOLLOWER;
         out.current_leader = LeaderIdAndEpoch {
-            leader_id: i32::try_from(leader).unwrap_or(NO_LEADER_ID),
+            leader_id: i32::try_from(leader.0).unwrap_or(NO_LEADER_ID),
             leader_epoch,
             ..Default::default()
         };
@@ -483,7 +483,7 @@ async fn process_partition(
     let Some(part) = partitions.get(topic_name, crabka_ids::PartitionIndex(idx)) else {
         out.error_code = codes::NOT_LEADER_OR_FOLLOWER;
         out.current_leader = LeaderIdAndEpoch {
-            leader_id: i32::try_from(leader).unwrap_or(NO_LEADER_ID),
+            leader_id: i32::try_from(leader.0).unwrap_or(NO_LEADER_ID),
             leader_epoch,
             ..Default::default()
         };
@@ -1279,9 +1279,9 @@ mod tests {
         img.apply(&MetadataRecord::V1Partition(PartitionRecord {
             topic: topic.into(),
             partition: 0,
-            leader: *isr.first().unwrap_or(&1),
-            replicas: isr.to_vec(),
-            isr: isr.to_vec(),
+            leader: crabka_audit::NodeId(*isr.first().unwrap_or(&1)),
+            replicas: isr.iter().copied().map(crabka_audit::NodeId).collect(),
+            isr: isr.iter().copied().map(crabka_audit::NodeId).collect(),
             leader_epoch: 0,
             adding_replicas: vec![],
             removing_replicas: vec![],
@@ -1537,9 +1537,9 @@ mod tests {
         img.apply(&MetadataRecord::V1Partition(PartitionRecord {
             topic: "orders".into(),
             partition: 0,
-            leader: 2,
-            replicas: vec![2, 3],
-            isr: vec![2, 3],
+            leader: crabka_audit::NodeId(2),
+            replicas: vec![crabka_audit::NodeId(2), crabka_audit::NodeId(3)],
+            isr: vec![crabka_audit::NodeId(2), crabka_audit::NodeId(3)],
             leader_epoch: 17,
             adding_replicas: vec![],
             removing_replicas: vec![],
@@ -1549,7 +1549,7 @@ mod tests {
         let image = Arc::new(img);
         let partitions = Arc::new(crate::partition_registry::PartitionRegistry::new());
         let txn_coordinator = Arc::new(crate::txn::coordinator::TxnCoordinator::new(
-            1,
+            crabka_audit::NodeId(1),
             Arc::clone(&partitions),
             Arc::new(crate::producer_id_manager::ProducerIdManager::new()),
         ));
@@ -1580,7 +1580,7 @@ mod tests {
             &producer_state,
             &log_dir_status,
             &image,
-            1,
+            crabka_audit::NodeId(1),
             &metrics,
         )
         .await

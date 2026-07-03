@@ -196,7 +196,7 @@ mod tests {
         for &id in broker_ids {
             img.apply(&MetadataRecord::V1BrokerRegistration(
                 BrokerRegistrationRecord {
-                    node_id: id,
+                    node_id: crabka_audit::NodeId(id),
                     broker_epoch: 0,
                     incarnation_id: uuid::Uuid::nil(),
                     host: "127.0.0.1".into(),

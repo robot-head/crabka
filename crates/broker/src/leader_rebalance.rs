@@ -164,9 +164,17 @@ mod tests {
             img.apply(&MetadataRecord::V1Partition(PartitionRecord {
                 topic: "foo".into(),
                 partition: p,
-                leader: 2,
-                replicas: vec![1, 2, 3],
-                isr: vec![1, 2, 3],
+                leader: crabka_audit::NodeId(2),
+                replicas: vec![
+                    crabka_audit::NodeId(1),
+                    crabka_audit::NodeId(2),
+                    crabka_audit::NodeId(3),
+                ],
+                isr: vec![
+                    crabka_audit::NodeId(1),
+                    crabka_audit::NodeId(2),
+                    crabka_audit::NodeId(3),
+                ],
                 leader_epoch: 5,
                 adding_replicas: vec![],
                 removing_replicas: vec![],
@@ -180,9 +188,17 @@ mod tests {
             img.apply(&MetadataRecord::V1Partition(PartitionRecord {
                 topic: "foo".into(),
                 partition: p,
-                leader: 1,
-                replicas: vec![1, 2, 3],
-                isr: vec![1, 2, 3],
+                leader: crabka_audit::NodeId(1),
+                replicas: vec![
+                    crabka_audit::NodeId(1),
+                    crabka_audit::NodeId(2),
+                    crabka_audit::NodeId(3),
+                ],
+                isr: vec![
+                    crabka_audit::NodeId(1),
+                    crabka_audit::NodeId(2),
+                    crabka_audit::NodeId(3),
+                ],
                 leader_epoch: 5,
                 adding_replicas: vec![],
                 removing_replicas: vec![],
@@ -263,7 +279,7 @@ mod tests {
         // Every submitted record must promote preferred (replicas[0] = 1).
         for record in submitted.iter() {
             match record {
-                MetadataRecord::V1Partition(p) => assert!(p.leader == 1),
+                MetadataRecord::V1Partition(p) => assert!(p.leader == crabka_audit::NodeId(1)),
                 _ => panic!("unexpected record type"),
             }
         }

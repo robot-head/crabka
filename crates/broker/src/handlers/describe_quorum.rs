@@ -132,7 +132,7 @@ fn build_topic_responses(
 ) -> Vec<TopicData> {
     let leader_id = quorum
         .current_leader
-        .map_or(-1, |n| i32::try_from(n).unwrap_or(-1));
+        .map_or(-1, |n| i32::try_from(n.0).unwrap_or(-1));
     let leader_epoch = i32::try_from(quorum.current_term).unwrap_or(i32::MAX);
     let high_watermark = i64::try_from(quorum.last_applied_index).unwrap_or(i64::MAX);
 
@@ -171,7 +171,7 @@ fn build_topic_responses(
                                         .get(&id)
                                         .map_or(Uuid::ZERO, |n| Uuid(*n.directory_id.as_bytes()));
                                     ReplicaState {
-                                        replica_id: i32::try_from(id).unwrap_or(-1),
+                                        replica_id: i32::try_from(id.0).unwrap_or(-1),
                                         replica_directory_id,
                                         log_end_offset: matched,
                                         last_fetch_timestamp: -1,
@@ -219,7 +219,7 @@ fn build_nodes(quorum: &QuorumState) -> Vec<Node> {
         .voter_nodes
         .iter()
         .map(|(&id, node)| Node {
-            node_id: i32::try_from(id).unwrap_or(-1),
+            node_id: i32::try_from(id.0).unwrap_or(-1),
             listeners: node
                 .endpoints
                 .iter()
@@ -283,10 +283,13 @@ mod tests {
         QuorumState {
             current_term: term,
             last_applied_index: applied,
-            current_leader: leader,
-            voters: voters.to_vec(),
+            current_leader: leader.map(crabka_raft::NodeId),
+            voters: voters.iter().copied().map(crabka_raft::NodeId).collect(),
             voter_nodes: BTreeMap::new(),
-            per_voter_matched_index: matched.iter().copied().collect::<BTreeMap<_, _>>(),
+            per_voter_matched_index: matched
+                .iter()
+                .map(|&(v, m)| (crabka_raft::NodeId(v), m))
+                .collect::<BTreeMap<_, _>>(),
         }
     }
 
@@ -471,7 +474,7 @@ mod tests {
         let dir2 = uuid::Uuid::from_u128(2);
         let mut voter_nodes = BTreeMap::new();
         voter_nodes.insert(
-            1u64,
+            crabka_audit::NodeId(1u64),
             Node {
                 directory_id: dir1,
                 endpoints: vec![VoterEndpoint {
@@ -483,7 +486,7 @@ mod tests {
             },
         );
         voter_nodes.insert(
-            2u64,
+            crabka_audit::NodeId(2u64),
             Node {
                 directory_id: dir2,
                 endpoints: vec![VoterEndpoint {
@@ -497,8 +500,8 @@ mod tests {
         let q = QuorumState {
             current_term: 1,
             last_applied_index: 5,
-            current_leader: Some(1),
-            voters: vec![1, 2],
+            current_leader: Some(crabka_audit::NodeId(1)),
+            voters: vec![crabka_audit::NodeId(1), crabka_audit::NodeId(2)],
             voter_nodes,
             per_voter_matched_index: BTreeMap::new(),
         };

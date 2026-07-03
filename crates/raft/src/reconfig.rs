@@ -76,7 +76,7 @@ impl<'a, O: ReconfigOps> Coordinator<'a, O> {
     /// - [`RaftError::ReconfigInProgress`] if another reconfiguration holds the lock.
     /// - [`RaftError::VoterNotCaughtUp`] if the candidate observer lags too far.
     /// - Any error surfaced by the underlying raft operations.
-    #[tracing::instrument(level = "info", skip_all, fields(voter = req.voter.id), err)]
+    #[tracing::instrument(level = "info", skip_all, fields(voter = req.voter.id.0), err)]
     pub async fn add_voter(&self, req: AddVoter) -> Result<ReconfigOutcome, RaftError> {
         if !self.ops.is_leader() {
             return Ok(ReconfigOutcome::NotLeader {
@@ -124,7 +124,7 @@ impl<'a, O: ReconfigOps> Coordinator<'a, O> {
     /// - [`RaftError::ReconfigInProgress`] if another reconfiguration holds the lock.
     /// - [`RaftError::ReconfigRejected`] if the removal would leave no voters.
     /// - Any error surfaced by the underlying raft operations.
-    #[tracing::instrument(level = "info", skip_all, fields(voter = req.id), err)]
+    #[tracing::instrument(level = "info", skip_all, fields(voter = req.id.0), err)]
     pub async fn remove_voter(&self, req: RemoveVoter) -> Result<ReconfigOutcome, RaftError> {
         if !self.ops.is_leader() {
             return Ok(ReconfigOutcome::NotLeader {
@@ -169,7 +169,7 @@ impl<'a, O: ReconfigOps> Coordinator<'a, O> {
     /// - [`RaftError::ReconfigInProgress`] if another reconfiguration holds the lock.
     /// - [`RaftError::ReconfigRejected`] if the voter id is unknown.
     /// - Any error surfaced by the underlying raft operations.
-    #[tracing::instrument(level = "info", skip_all, fields(voter = req.voter.id), err)]
+    #[tracing::instrument(level = "info", skip_all, fields(voter = req.voter.id.0), err)]
     pub async fn update_voter(&self, req: UpdateVoter) -> Result<ReconfigOutcome, RaftError> {
         if !self.ops.is_leader() {
             return Ok(ReconfigOutcome::NotLeader {

@@ -297,7 +297,7 @@ mod tests {
             // No controller leader elected at all.
             (None, "no controller leader"),
             // Leader elected but its broker record is missing from the image.
-            (Some(42), "controller leader not in image"),
+            (Some(NodeId(42)), "controller leader not in image"),
         ];
         for (leader, expected) in cases {
             let source: Arc<dyn crate::metadata_source::MetadataSource> = Arc::new(MockSource {

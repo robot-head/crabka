@@ -111,3 +111,36 @@ impl PartitionIndex {
         self.0
     }
 }
+
+/// A broker / node / replica / controller identifier.
+///
+/// Crabka carries this as a `u64` internally (consensus peer id, KIP-853 voter
+/// id, partition replica/leader/ISR id); on the Kafka wire the same value is an
+/// `int32` (`broker.id`, `node.id`, replica ids), converted at the protocol
+/// boundary. It is an identifier, not a quantity, so no arithmetic is provided.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Display,
+    From,
+    Into,
+    Serialize,
+    Deserialize,
+)]
+#[serde(transparent)]
+pub struct NodeId(pub u64);
+
+impl NodeId {
+    /// The inner `u64` — use at the wire/generated boundary.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}

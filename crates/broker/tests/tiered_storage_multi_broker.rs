@@ -112,13 +112,15 @@ async fn start_three_tiered_brokers() -> (
         .map(|i| {
             let mut cfg = BrokerConfig::for_tests(log_dirs[i].path().to_path_buf());
             cfg.broker_id = i32::try_from(i + 1).unwrap();
-            cfg.node_id = u64::try_from(i + 1).unwrap();
+            cfg.node_id = crabka_broker::NodeId(u64::try_from(i + 1).unwrap());
             cfg.directory_id = uuid::Uuid::from_u128(u128::try_from(i + 1).unwrap());
             cfg.listen_addr = client_addrs[i];
             cfg.advertised_listener = format!("127.0.0.1:{}", client_addrs[i].port());
             cfg.controller_listen_addr = controller_addrs[i];
-            cfg.controller_quorum_voters =
-                voters.iter().map(|(id, a)| (*id, a.to_string())).collect();
+            cfg.controller_quorum_voters = voters
+                .iter()
+                .map(|(id, a)| (crabka_broker::NodeId(*id), a.to_string()))
+                .collect();
             cfg.bootstrap_mode = BootstrapMode::Bootstrap;
             cfg.auto_join = false;
             cfg.bootstrap_servers = vec![];
@@ -456,7 +458,7 @@ async fn tiered_storage_metadata_sharing_via_survivor() {
     let b2_id = b2.node_id();
     b1.wait_for_image(|img| {
         img.partition(TOPIC, 0)
-            .is_some_and(|p| p.leader == b1_id || p.leader == b2_id)
+            .is_some_and(|p| p.leader.get() == b1_id || p.leader.get() == b2_id)
     })
     .await;
     let (leader_node_id, follower_node_id, follower_addr) =
@@ -577,7 +579,7 @@ async fn tiered_storage_metadata_sharing_via_survivor() {
     // rf=2 the only surviving replica is the follower, so the new leader can
     // only be `follower_node_id`.
     survivor
-        .wait_until_partition_leader_changed(TOPIC, 0, leader_node_id)
+        .wait_until_partition_leader_changed(TOPIC, 0, crabka_broker::NodeId(leader_node_id))
         .await;
     eprintln!("ITEST: survivor (broker{follower_node_id}) is now partition leader");
 

@@ -196,14 +196,14 @@ mod tests {
     #[tokio::test]
     async fn null_peer_sender_reports_target_as_current_leader() {
         let err = NullPeerSender
-            .send(7, api_key::FETCH, Bytes::new())
+            .send(NodeId(7), api_key::FETCH, Bytes::new())
             .await
             .expect_err("null sender should reject peer sends");
 
         assert!(matches!(
             err,
             RaftError::NotLeader {
-                current_leader: Some(7)
+                current_leader: Some(NodeId(7))
             }
         ));
     }
@@ -349,11 +349,11 @@ pub mod wire {
     }
     /// `NodeId` (u64) <-> wire `i32` replica id.
     fn node_to_wire(n: NodeId) -> i32 {
-        i32::try_from(n).unwrap_or(i32::MAX)
+        i32::try_from(n.0).unwrap_or(i32::MAX)
     }
     #[allow(clippy::cast_sign_loss)]
     fn node_from_wire(n: i32) -> NodeId {
-        u64::try_from(n).unwrap_or(0)
+        NodeId(u64::try_from(n).unwrap_or(0))
     }
 
     fn encode_body<T: Encode>(msg: &T, version: i16) -> Bytes {
@@ -832,9 +832,9 @@ pub mod wire {
         #[test]
         fn vote_request_round_trips() {
             let req = PeerRequest::Vote {
-                voter_id: 9,
+                voter_id: NodeId(9),
                 candidate_epoch: 3,
-                candidate: 7,
+                candidate: NodeId(7),
                 last_epoch: 2,
                 last_offset: 42,
                 pre_vote: true,
@@ -845,9 +845,9 @@ pub mod wire {
         #[test]
         fn generic_request_decode_accepts_vote_request() {
             let req = PeerRequest::Vote {
-                voter_id: 9,
+                voter_id: NodeId(9),
                 candidate_epoch: 3,
-                candidate: 7,
+                candidate: NodeId(7),
                 last_epoch: 2,
                 last_offset: 42,
                 pre_vote: true,
@@ -860,9 +860,9 @@ pub mod wire {
             use crabka_protocol::Decode;
 
             let req = PeerRequest::Vote {
-                voter_id: 9,
+                voter_id: NodeId(9),
                 candidate_epoch: 3,
-                candidate: 7,
+                candidate: NodeId(7),
                 last_epoch: 2,
                 last_offset: 42,
                 pre_vote: true,
@@ -882,12 +882,12 @@ pub mod wire {
         #[test]
         fn begin_end_round_trip() {
             let begin = PeerRequest::BeginQuorumEpoch {
-                leader_id: 5,
+                leader_id: NodeId(5),
                 leader_epoch: 9,
             };
             assert!(decode_begin(&begin.encode()) == Some(begin));
             let end = PeerRequest::EndQuorumEpoch {
-                leader_id: 1,
+                leader_id: NodeId(1),
                 leader_epoch: 4,
             };
             assert!(decode_end(&end.encode()) == Some(end));
@@ -898,7 +898,7 @@ pub mod wire {
             use crabka_protocol::Decode;
 
             let begin = PeerRequest::BeginQuorumEpoch {
-                leader_id: 5,
+                leader_id: NodeId(5),
                 leader_epoch: 9,
             };
             let mut begin_cur = &begin.encode()[..];
@@ -911,7 +911,7 @@ pub mod wire {
             assert!(begin_partition.leader_epoch == 9);
 
             let end = PeerRequest::EndQuorumEpoch {
-                leader_id: 1,
+                leader_id: NodeId(1),
                 leader_epoch: 4,
             };
             let mut end_cur = &end.encode()[..];
@@ -926,7 +926,7 @@ pub mod wire {
         #[test]
         fn fetch_request_round_trips() {
             let req = PeerRequest::Fetch {
-                from: 2,
+                from: NodeId(2),
                 fetch_epoch: 1,
                 fetch_offset: 11,
             };
@@ -938,7 +938,7 @@ pub mod wire {
             use crabka_protocol::{Decode, owned::fetch_request::FetchRequest};
 
             let req = PeerRequest::Fetch {
-                from: 2,
+                from: NodeId(2),
                 fetch_epoch: 1,
                 fetch_offset: 11,
             };
@@ -1038,7 +1038,7 @@ pub mod wire {
         #[test]
         fn fetch_response_carries_snapshot_id() {
             let resp = PeerResponse::Fetch {
-                leader_id: 1,
+                leader_id: NodeId(1),
                 leader_epoch: 4,
                 diverging: None,
                 snapshot_id: Some((42, 3)),
@@ -1051,7 +1051,7 @@ pub mod wire {
         #[test]
         fn fetch_snapshot_request_round_trips() {
             let req = PeerRequest::FetchSnapshot {
-                from: 2,
+                from: NodeId(2),
                 snapshot_id: (42, 3),
                 position: 128,
                 max_bytes: 4096,
@@ -1064,7 +1064,7 @@ pub mod wire {
             use crabka_protocol::Decode;
 
             let req = PeerRequest::FetchSnapshot {
-                from: 2,
+                from: NodeId(2),
                 snapshot_id: (42, 3),
                 position: 128,
                 max_bytes: 4096,
@@ -1097,7 +1097,7 @@ pub mod wire {
         #[test]
         fn fetch_response_round_trips() {
             let with_records = PeerResponse::Fetch {
-                leader_id: 2,
+                leader_id: NodeId(2),
                 leader_epoch: 5,
                 diverging: None,
                 snapshot_id: None,
@@ -1107,7 +1107,7 @@ pub mod wire {
             assert!(PeerResponse::decode_fetch(&with_records.encode()) == Some(with_records));
 
             let diverged = PeerResponse::Fetch {
-                leader_id: 2,
+                leader_id: NodeId(2),
                 leader_epoch: 5,
                 diverging: Some(LogOffsetMetadata {
                     offset: 5,
@@ -1125,7 +1125,7 @@ pub mod wire {
             use crabka_protocol::{Decode, owned::fetch_response::FetchResponse};
 
             let resp = PeerResponse::Fetch {
-                leader_id: 2,
+                leader_id: NodeId(2),
                 leader_epoch: 5,
                 diverging: None,
                 snapshot_id: None,
@@ -1150,7 +1150,7 @@ pub mod wire {
                 owned::{fetch_request::FetchRequest, fetch_response::FetchResponse},
             };
             let req = PeerRequest::Fetch {
-                from: 2,
+                from: NodeId(2),
                 fetch_epoch: 1,
                 fetch_offset: 5,
             };
@@ -1159,7 +1159,7 @@ pub mod wire {
             assert!(dreq.topics[0].topic_id == METADATA_TOPIC_ID);
 
             let resp = PeerResponse::Fetch {
-                leader_id: 1,
+                leader_id: NodeId(1),
                 leader_epoch: 4,
                 diverging: None,
                 snapshot_id: None,

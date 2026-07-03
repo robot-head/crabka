@@ -94,7 +94,7 @@ pub(crate) async fn handle(
     };
 
     let voter = Voter {
-        id,
+        id: crabka_raft::NodeId(id),
         directory_id: uuid::Uuid::from_bytes(req.voter_directory_id.0),
         endpoints: req
             .listeners
@@ -202,14 +202,19 @@ mod tests {
 
     #[test]
     fn not_leader_maps_to_not_leader_or_follower() {
-        let (code, msg) = outcome_to_code(Ok(ReconfigOutcome::NotLeader { leader: Some(3) }));
+        let (code, msg) = outcome_to_code(Ok(ReconfigOutcome::NotLeader {
+            leader: Some(crabka_audit::NodeId(3)),
+        }));
         assert!(code == codes::NOT_LEADER_OR_FOLLOWER);
         assert!(msg.unwrap().contains('3'));
     }
 
     #[test]
     fn not_caught_up_maps_to_invalid_request() {
-        let (code, _) = outcome_to_code(Err(RaftError::VoterNotCaughtUp { id: 7, lag: 99 }));
+        let (code, _) = outcome_to_code(Err(RaftError::VoterNotCaughtUp {
+            id: crabka_audit::NodeId(7),
+            lag: 99,
+        }));
         assert!(code == codes::INVALID_REQUEST);
     }
 

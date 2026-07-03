@@ -184,10 +184,10 @@ async fn controller_leader_addr(handles: &[&BrokerHandle]) -> SocketAddr {
     // We identify the leader by the node_id — it is the raft node id (u64)
     // which equals (broker_index + 1). The handles slice is ordered
     // [broker1, broker2, broker3], so handle[i] has node_id = i+1.
-    let idx = usize::try_from(leader_id).unwrap().saturating_sub(1);
+    let idx = usize::try_from(leader_id.0).unwrap().saturating_sub(1);
     assert!(
         idx < handles.len(),
-        "raft leader id {leader_id} out of range for {} handles",
+        "raft leader id {leader_id:?} out of range for {} handles",
         handles.len()
     );
     handles[idx].listen_addr()
@@ -346,10 +346,10 @@ async fn alter_then_complete_via_isr_catchup() {
     assert!(initial_replicas.len() == 2);
     // Pick the third broker (not in initial_replicas) as the new replica.
     let new_replica: i32 = (1..=3)
-        .find(|n| !initial_replicas.contains(&(*n as u64)))
+        .find(|n| !initial_replicas.contains(&crabka_metadata::NodeId(*n as u64)))
         .expect("free broker");
-    let removing: i32 = *initial_replicas.last().unwrap() as i32;
-    let staying: i32 = *initial_replicas.first().unwrap() as i32;
+    let removing: i32 = initial_replicas.last().unwrap().0 as i32;
+    let staying: i32 = initial_replicas.first().unwrap().0 as i32;
     let target = vec![staying, new_replica];
 
     // Send alter to controller leader (whichever broker leads raft).
@@ -371,19 +371,23 @@ async fn alter_then_complete_via_isr_catchup() {
     assert!(
         pr_after_alter
             .adding_replicas
-            .contains(&(new_replica as u64)),
+            .contains(&crabka_metadata::NodeId(new_replica as u64)),
         "adding_replicas should contain new_replica; pr={pr_after_alter:?}"
     );
     assert!(
         pr_after_alter
             .removing_replicas
-            .contains(&(removing as u64)),
+            .contains(&crabka_metadata::NodeId(removing as u64)),
         "removing_replicas should contain removing; pr={pr_after_alter:?}"
     );
 
     // Inject ISR including the new replica so the background task completes the reassignment.
     let injected = crabka_metadata::PartitionRecord {
-        isr: vec![staying as u64, new_replica as u64, removing as u64],
+        isr: vec![
+            crabka_metadata::NodeId(staying as u64),
+            crabka_metadata::NodeId(new_replica as u64),
+            crabka_metadata::NodeId(removing as u64),
+        ],
         ..pr_after_alter.clone()
     };
     h1.submit_metadata_record_for_test(crabka_metadata::MetadataRecord::V1Partition(injected))
@@ -398,7 +402,7 @@ async fn alter_then_complete_via_isr_catchup() {
     })
     .await;
     let pr = h1.partition_record_for_test("foo", 0).expect("partition");
-    let actual: std::collections::HashSet<u64> = pr.replicas.iter().copied().collect();
+    let actual: std::collections::HashSet<u64> = pr.replicas.iter().map(|n| n.0).collect();
     let expected: std::collections::HashSet<u64> = target.iter().map(|n| *n as u64).collect();
     assert!(
         actual == expected,
@@ -424,9 +428,9 @@ async fn list_in_flight_returns_pending_rows() {
 
     let pr = h1.partition_record_for_test("foo", 0).expect("partition");
     let new_replica: i32 = (1..=3)
-        .find(|n| !pr.replicas.contains(&(*n as u64)))
+        .find(|n| !pr.replicas.contains(&crabka_metadata::NodeId(*n as u64)))
         .expect("free");
-    let staying: i32 = *pr.replicas.first().unwrap() as i32;
+    let staying: i32 = pr.replicas.first().unwrap().0 as i32;
     let target = vec![staying, new_replica];
 
     let raft_addr = controller_leader_addr(&[&h1, &h2, &h3]).await;
@@ -773,9 +777,9 @@ async fn cancel_via_null_replicas_reverts() {
     let pr = h1.partition_record_for_test("foo", 0).expect("partition");
     let original_replicas = pr.replicas.clone();
     let new_replica: i32 = (1..=3)
-        .find(|n| !original_replicas.contains(&(*n as u64)))
+        .find(|n| !original_replicas.contains(&crabka_metadata::NodeId(*n as u64)))
         .expect("free");
-    let staying: i32 = *original_replicas.first().unwrap() as i32;
+    let staying: i32 = original_replicas.first().unwrap().0 as i32;
     let target = vec![staying, new_replica];
 
     let raft_addr = controller_leader_addr(&[&h1, &h2, &h3]).await;

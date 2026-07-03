@@ -34,9 +34,3 @@ pub struct SpoolBytes(pub u64);
 /// Configured upper bound on spool size in bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Display, From, Into)]
 pub struct MaxSpoolBytes(pub u64);
-
-/// Broker/device identifier stamped into OCSF lifecycle records.
-///
-/// Crate-local: the shared cross-crate `NodeId` is a separate staged rollout.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Display, From, Into)]
-pub struct NodeId(pub i64);

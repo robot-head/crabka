@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use assert2::assert;
-use crabka_metadata::{MetadataRecord, TopicRecord};
+use crabka_metadata::{MetadataRecord, NodeId, TopicRecord};
 use crabka_raft::{Controller, ControllerConfig};
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -12,7 +12,7 @@ use uuid::Uuid;
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn single_voter_create_topic_round_trip() {
     let dir = TempDir::new().unwrap();
-    let mut cfg = ControllerConfig::for_tests(1, dir.path().to_path_buf());
+    let mut cfg = ControllerConfig::for_tests(NodeId(1), dir.path().to_path_buf());
     // Single-voter elections should be instant; lower the election timeout
     // so we comfortably make the 5-second deadline below.
     cfg.election_timeout = Duration::from_millis(200);
@@ -45,7 +45,7 @@ async fn single_voter_create_topic_round_trip() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn single_voter_duplicate_topic_rejected() {
     let dir = TempDir::new().unwrap();
-    let mut cfg = ControllerConfig::for_tests(1, dir.path().to_path_buf());
+    let mut cfg = ControllerConfig::for_tests(NodeId(1), dir.path().to_path_buf());
     cfg.election_timeout = Duration::from_millis(200);
     cfg.controller_listen_addr = "127.0.0.1:0".parse().unwrap();
     let controller = Controller::start(cfg).await.unwrap();

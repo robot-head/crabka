@@ -112,7 +112,11 @@ async fn broker_only_node_observes_and_forwards() {
     );
 
     // Assertion 3: the broker-only node is NOT in the controller's voter set.
-    let quorum_voters: BTreeSet<u64> = controller.quorum_voters_for_test().into_iter().collect();
+    let quorum_voters: BTreeSet<u64> = controller
+        .quorum_voters_for_test()
+        .into_iter()
+        .map(|n| n.0)
+        .collect();
     assert!(quorum_voters.contains(&1), "the controller is a voter");
     assert!(
         !quorum_voters.contains(&broker_only_id),

@@ -1046,7 +1046,12 @@ mod tests {
         ));
         {
             let mut st = replica_state.lock().await;
-            st.install_isr(&[1], &[1], 1, std::time::Instant::now());
+            st.install_isr(
+                &[crabka_audit::NodeId(1)],
+                &[crabka_audit::NodeId(1)],
+                crabka_audit::NodeId(1),
+                std::time::Instant::now(),
+            );
         }
         let hw_advance_notify = Arc::new(Notify::new());
         let writer = tokio::spawn(run(
@@ -1096,7 +1101,12 @@ mod tests {
         ));
         {
             let mut st = replica_state.lock().await;
-            st.install_isr(&[1, 2], &[1, 2], 1, std::time::Instant::now());
+            st.install_isr(
+                &[crabka_audit::NodeId(1), crabka_audit::NodeId(2)],
+                &[crabka_audit::NodeId(1), crabka_audit::NodeId(2)],
+                crabka_audit::NodeId(1),
+                std::time::Instant::now(),
+            );
         }
         let hw_advance_notify = Arc::new(Notify::new());
         let writer = tokio::spawn(run(
@@ -1243,7 +1253,20 @@ mod tests {
         ));
         {
             let mut st = replica_state.lock().await;
-            st.install_isr(&[1, 2, 3], &[1, 2, 3], 1, std::time::Instant::now());
+            st.install_isr(
+                &[
+                    crabka_audit::NodeId(1),
+                    crabka_audit::NodeId(2),
+                    crabka_audit::NodeId(3),
+                ],
+                &[
+                    crabka_audit::NodeId(1),
+                    crabka_audit::NodeId(2),
+                    crabka_audit::NodeId(3),
+                ],
+                crabka_audit::NodeId(1),
+                std::time::Instant::now(),
+            );
         }
         let hw_advance_notify = Arc::new(Notify::new());
         let writer = tokio::spawn(run(

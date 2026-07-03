@@ -221,7 +221,7 @@ async fn wait_partition_leader(handle: &BrokerHandle, topic: &str, partition: i3
     handle
         .wait_for_image(|img| {
             img.partition(topic, partition)
-                .is_some_and(|p| p.leader == leader)
+                .is_some_and(|p| p.leader.get() == leader)
         })
         .await;
 }
@@ -241,7 +241,7 @@ async fn wait_partition_isr_only(
             img.partition(topic, partition).is_some_and(|p| {
                 p.isr
                     .iter()
-                    .copied()
+                    .map(|n| n.get())
                     .collect::<std::collections::HashSet<u64>>()
                     == expected_set
             })
@@ -287,7 +287,12 @@ async fn unclean_recovery_elects_longest_log_replica() {
         .expect("partition record present after wait_until_partition_present");
     eprintln!("partition before divergence: {pr_before:?}");
     assert!(
-        pr_before.replicas == vec![1, 2, 3],
+        pr_before.replicas
+            == vec![
+                crabka_broker::NodeId(1),
+                crabka_broker::NodeId(2),
+                crabka_broker::NodeId(3)
+            ],
         "expected RF=3 replicas [1,2,3]; got {:?}",
         pr_before.replicas
     );
@@ -316,9 +321,13 @@ async fn unclean_recovery_elects_longest_log_replica() {
     let forged = MetadataRecord::V1Partition(PartitionRecord {
         topic: topic.to_string(),
         partition: 0,
-        leader: 99,
-        replicas: vec![1, 2, 3],
-        isr: vec![99],
+        leader: crabka_broker::NodeId(99),
+        replicas: vec![
+            crabka_broker::NodeId(1),
+            crabka_broker::NodeId(2),
+            crabka_broker::NodeId(3),
+        ],
+        isr: vec![crabka_broker::NodeId(99)],
         leader_epoch: pr_before.leader_epoch + 1,
         adding_replicas: vec![],
         removing_replicas: vec![],

@@ -55,7 +55,7 @@ pub struct PlaintextDialer;
 
 #[async_trait]
 impl OutboundDialer for PlaintextDialer {
-    #[tracing::instrument(level = "debug", skip_all, fields(target = _target, addr), err)]
+    #[tracing::instrument(level = "debug", skip_all, fields(target = _target.0, addr), err)]
     async fn dial(
         &self,
         _target: NodeId,
@@ -273,7 +273,7 @@ mod tests {
     #[test]
     fn controller_addr_prefers_controller_endpoint_and_reports_unknown_voter() {
         let voters = VoterSet::from_voters([crabka_metadata::Voter {
-            id: 7,
+            id: NodeId(7),
             directory_id: uuid::Uuid::nil(),
             endpoints: vec![
                 crabka_metadata::VoterEndpoint {
@@ -290,14 +290,14 @@ mod tests {
             kraft_version: crabka_metadata::KRaftVersionRange::default(),
         }]);
 
-        assert!(controller_addr(&voters, 7) == Some("controller-host:9093".to_string()));
-        assert!(controller_addr(&voters, 8).is_none());
+        assert!(controller_addr(&voters, NodeId(7)) == Some("controller-host:9093".to_string()));
+        assert!(controller_addr(&voters, NodeId(8)).is_none());
     }
 
     #[test]
     fn controller_addr_falls_back_to_first_endpoint() {
         let voters = VoterSet::from_voters([crabka_metadata::Voter {
-            id: 7,
+            id: NodeId(7),
             directory_id: uuid::Uuid::nil(),
             endpoints: vec![crabka_metadata::VoterEndpoint {
                 name: "PLAINTEXT".into(),
@@ -307,7 +307,7 @@ mod tests {
             kraft_version: crabka_metadata::KRaftVersionRange::default(),
         }]);
 
-        assert!(controller_addr(&voters, 7) == Some("only-host:9094".to_string()));
+        assert!(controller_addr(&voters, NodeId(7)) == Some("only-host:9094".to_string()));
     }
 
     #[test]
@@ -348,10 +348,10 @@ mod tests {
             write_response_frame(&mut stream, corr, true, b"raft-response").await;
         });
 
-        let voters = voter_set_with_controller(2, &addr.ip().to_string(), addr.port());
+        let voters = voter_set_with_controller(NodeId(2), &addr.ip().to_string(), addr.port());
         let sender = RealPeerSender::new(voters, "raft-client".into(), Arc::new(PlaintextDialer));
         let response = sender
-            .send(2, api_key::VOTE, Bytes::from_static(b"vote-body"))
+            .send(NodeId(2), api_key::VOTE, Bytes::from_static(b"vote-body"))
             .await
             .expect("send");
 

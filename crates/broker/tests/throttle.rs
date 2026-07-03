@@ -622,7 +622,10 @@ async fn broker_scoped_alter_persists_in_image() {
     // Await until the config is visible (absorb raft commit latency).
     handle
         .wait_for_image(|img| {
-            img.broker_throttle_rate(node_id, crabka_metadata::ThrottleKind::Leader) == Some(2048)
+            img.broker_throttle_rate(
+                crabka_metadata::NodeId(node_id),
+                crabka_metadata::ThrottleKind::Leader,
+            ) == Some(2048)
         })
         .await;
     handle.shutdown().await;
@@ -660,7 +663,8 @@ async fn topic_throttle_config_propagates() {
     handle
         .wait_for_image(|img| {
             let throttle = crabka_broker::throttle::TopicThrottle::for_topic(img, "foo");
-            throttle.leader.contains(0, 1) && throttle.leader.contains(0, 2)
+            throttle.leader.contains(0, crabka_broker::NodeId(1))
+                && throttle.leader.contains(0, crabka_broker::NodeId(2))
         })
         .await;
     handle.shutdown().await;
@@ -718,9 +722,12 @@ async fn throttle_rate_caps_fetch_response_size() {
     // throttle enforcement is armed when the Fetch arrives).
     handle
         .wait_for_image(|img| {
-            let rate = img.broker_throttle_rate(node_id, crabka_metadata::ThrottleKind::Leader);
+            let rate = img.broker_throttle_rate(
+                crabka_metadata::NodeId(node_id),
+                crabka_metadata::ThrottleKind::Leader,
+            );
             let throttle = crabka_broker::throttle::TopicThrottle::for_topic(img, "bar");
-            rate == Some(512) && throttle.leader.contains(0, 2)
+            rate == Some(512) && throttle.leader.contains(0, crabka_broker::NodeId(2))
         })
         .await;
 

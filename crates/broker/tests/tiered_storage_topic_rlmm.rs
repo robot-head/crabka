@@ -62,7 +62,8 @@ async fn start_broker_with_topic_rlmm() -> (BrokerHandle, TempDir, TempDir) {
     cfg.listen_addr = listen;
     cfg.advertised_listener = listen.to_string();
     cfg.controller_listen_addr = controller_addrs[0];
-    cfg.controller_quorum_voters = vec![(1, controller_addrs[0].to_string())];
+    cfg.controller_quorum_voters =
+        vec![(crabka_broker::NodeId(1), controller_addrs[0].to_string())];
     cfg.remote_storage_backend = Some(RemoteStorageBackend::Local {
         dir: remote_dir.path().to_path_buf(),
     });
@@ -373,7 +374,8 @@ async fn start_sasl_broker_with_topic_rlmm() -> (BrokerHandle, TempDir, TempDir)
     cfg.listen_addr = listen;
     cfg.advertised_listener = listen.to_string();
     cfg.controller_listen_addr = controller_addrs[0];
-    cfg.controller_quorum_voters = vec![(1, controller_addrs[0].to_string())];
+    cfg.controller_quorum_voters =
+        vec![(crabka_broker::NodeId(1), controller_addrs[0].to_string())];
     cfg.listeners = vec![ListenerSpec {
         name: "SASL_PLAINTEXT".to_string(),
         bind_addr: listen,
@@ -444,7 +446,8 @@ async fn copy_task_skips_tiering_while_rlmm_not_ready() {
     cfg.listen_addr = listen;
     cfg.advertised_listener = listen.to_string();
     cfg.controller_listen_addr = controller_addrs[0];
-    cfg.controller_quorum_voters = vec![(1, controller_addrs[0].to_string())];
+    cfg.controller_quorum_voters =
+        vec![(crabka_broker::NodeId(1), controller_addrs[0].to_string())];
     cfg.remote_storage_backend = Some(RemoteStorageBackend::Local {
         dir: remote_dir.path().to_path_buf(),
     });

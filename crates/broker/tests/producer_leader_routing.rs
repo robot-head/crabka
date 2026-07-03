@@ -110,7 +110,10 @@ async fn producer_routes_to_non_bootstrap_leaders() {
     cluster[0]
         .0
         .wait_for_image(|img| {
-            (0..n_partitions).all(|p| img.partition(topic, p).is_some_and(|part| part.leader != 0))
+            (0..n_partitions).all(|p| {
+                img.partition(topic, p)
+                    .is_some_and(|part| part.leader.get() != 0)
+            })
         })
         .await;
 

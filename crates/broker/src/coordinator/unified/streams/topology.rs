@@ -25,7 +25,7 @@ use std::{
 };
 
 use crabka_metadata::{
-    MetadataImage, MetadataRecord, PartitionRecord, TopicConfigRecord, TopicRecord,
+    MetadataImage, MetadataRecord, NodeId, PartitionRecord, TopicConfigRecord, TopicRecord,
 };
 // Alias the request wire module for readability.
 use crabka_protocol::owned::streams_group_heartbeat_request as wire;
@@ -416,7 +416,7 @@ pub async fn ensure_internal_topics(
     let image = controller.current_image();
 
     // Round-robin replica assignment needs the registered broker set.
-    let mut brokers: Vec<u64> = image.brokers().map(|b| b.node_id).collect();
+    let mut brokers: Vec<NodeId> = image.brokers().map(|b| b.node_id).collect();
     brokers.sort_unstable();
 
     for spec in specs {
@@ -526,9 +526,9 @@ mod tests {
                 image.apply(&MetadataRecord::V1Partition(PartitionRecord {
                     topic: name.to_string(),
                     partition: p,
-                    leader: 1,
-                    replicas: vec![1],
-                    isr: vec![1],
+                    leader: crabka_audit::NodeId(1),
+                    replicas: vec![crabka_audit::NodeId(1)],
+                    isr: vec![crabka_audit::NodeId(1)],
                     leader_epoch: 0,
                     adding_replicas: vec![],
                     removing_replicas: vec![],

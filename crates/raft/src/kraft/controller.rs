@@ -503,7 +503,7 @@ impl KraftController {
     #[tracing::instrument(
         level = "info",
         skip_all,
-        fields(node = me, %cluster_id, election_timeout_ms),
+        fields(node = me.0, %cluster_id, election_timeout_ms),
         err
     )]
     pub fn open(
@@ -795,7 +795,7 @@ impl Engine {
     #[tracing::instrument(
         level = "debug",
         skip_all,
-        fields(node = self.me, epoch = self.core.quorum_state().leader_epoch, role = self.core.role().name())
+        fields(node = self.me.0, epoch = self.core.quorum_state().leader_epoch, role = self.core.role().name())
     )]
     fn on_event(&mut self, event: Event) {
         let now = self.now();
@@ -858,7 +858,7 @@ impl Engine {
     #[tracing::instrument(
         level = "debug",
         skip_all,
-        fields(node = self.me, epoch = self.core.quorum_state().leader_epoch, role = self.core.role().name())
+        fields(node = self.me.0, epoch = self.core.quorum_state().leader_epoch, role = self.core.role().name())
     )]
     fn on_inbound(&mut self, inbound: Inbound) {
         // Decode the request body, run it through the core, and encode the
@@ -1207,7 +1207,7 @@ impl Engine {
     }
 
     /// Append the leader's `LeaderChange` control marker for `epoch`.
-    #[tracing::instrument(level = "info", skip_all, fields(node = self.me, epoch), err)]
+    #[tracing::instrument(level = "info", skip_all, fields(node = self.me.0, epoch), err)]
     fn append_leader_change(&mut self, epoch: LeaderEpoch) -> Result<Offset, RaftError> {
         let voter_ids: Vec<NodeId> = self.core.quorum_state().voters.ids().into_iter().collect();
         let mut batch = leader_change_batch(epoch, self.me, &voter_ids);
@@ -1230,7 +1230,7 @@ impl Engine {
         level = "debug",
         skip_all,
         fields(
-            node = self.me,
+            node = self.me.0,
             epoch = self.core.quorum_state().leader_epoch,
             is_leader = self.core.role().is_leader(),
             records = records.len()
@@ -1398,7 +1398,7 @@ impl Engine {
     #[tracing::instrument(
         level = "debug",
         skip_all,
-        fields(node = self.me, new_hwm = new_hwm.0, prev_hwm = tracing::field::Empty)
+        fields(node = self.me.0, new_hwm = new_hwm.0, prev_hwm = tracing::field::Empty)
     )]
     fn advance_and_apply(&mut self, new_hwm: Offset) {
         let prev_hwm = self.log.hwm();
@@ -1482,7 +1482,7 @@ impl Engine {
     #[tracing::instrument(
         level = "info",
         skip_all,
-        fields(node = self.me, epoch = self.core.quorum_state().leader_epoch, hwm = tracing::field::Empty)
+        fields(node = self.me.0, epoch = self.core.quorum_state().leader_epoch, hwm = tracing::field::Empty)
     )]
     fn maybe_snapshot_and_prune(&mut self) {
         if self.snapshot_interval_records == 0 || !self.core.role().is_leader() {
@@ -1569,7 +1569,7 @@ impl Engine {
     #[tracing::instrument(
         level = "info",
         skip_all,
-        fields(node = self.me, epoch = self.core.quorum_state().leader_epoch, end_offset = self.log.hwm().0),
+        fields(node = self.me.0, epoch = self.core.quorum_state().leader_epoch, end_offset = self.log.hwm().0),
         err
     )]
     fn do_trigger_snapshot(&self) -> Result<(), RaftError> {
@@ -1661,7 +1661,7 @@ impl Engine {
             .collect()
     }
 
-    #[tracing::instrument(level = "debug", skip_all, fields(node = self.me, epoch, pre_vote))]
+    #[tracing::instrument(level = "debug", skip_all, fields(node = self.me.0, epoch, pre_vote))]
     fn broadcast_vote(&self, epoch: LeaderEpoch, pre_vote: bool) {
         let last_epoch = self.log.last_epoch();
         let last_offset = self.log.end_offset();
@@ -1683,7 +1683,7 @@ impl Engine {
         }
     }
 
-    #[tracing::instrument(level = "debug", skip_all, fields(node = self.me, epoch))]
+    #[tracing::instrument(level = "debug", skip_all, fields(node = self.me.0, epoch))]
     fn broadcast_begin_quorum_epoch(&self, epoch: LeaderEpoch) {
         let body = wire::PeerRequest::BeginQuorumEpoch {
             leader_id: self.me,
@@ -1695,7 +1695,7 @@ impl Engine {
         }
     }
 
-    #[tracing::instrument(level = "debug", skip_all, fields(node = self.me, epoch))]
+    #[tracing::instrument(level = "debug", skip_all, fields(node = self.me.0, epoch))]
     fn broadcast_end_quorum_epoch(&self, epoch: LeaderEpoch) {
         let body = wire::PeerRequest::EndQuorumEpoch {
             leader_id: self.me,
@@ -1707,7 +1707,7 @@ impl Engine {
         }
     }
 
-    #[tracing::instrument(level = "debug", skip_all, fields(node = self.me, leader_id, fetch_offset = self.log.end_offset()))]
+    #[tracing::instrument(level = "debug", skip_all, fields(node = self.me.0, leader_id = leader_id.0, fetch_offset = self.log.end_offset()))]
     fn send_fetch(&self, leader_id: NodeId) {
         if leader_id == self.me {
             return;
@@ -1779,7 +1779,7 @@ impl Engine {
     #[tracing::instrument(
         level = "debug",
         skip_all,
-        fields(node = self.me, from, log_end = self.log.log_end_offset().0)
+        fields(node = self.me.0, from = from.0, log_end = self.log.log_end_offset().0)
     )]
     fn on_fetch_response(&mut self, from: NodeId, body: &[u8]) {
         let Some(wire::PeerResponse::Fetch {
@@ -1881,7 +1881,7 @@ impl Engine {
     /// the [`SnapshotFetchState`], requesting the next range until complete, then
     /// install the assembled snapshot and resume normal fetching. Any error /
     /// abort falls back to a plain Fetch against the same peer.
-    #[tracing::instrument(level = "debug", skip_all, fields(node = self.me, from))]
+    #[tracing::instrument(level = "debug", skip_all, fields(node = self.me.0, from = from.0))]
     fn on_fetch_snapshot_response(&mut self, from: NodeId, body: &[u8]) {
         let Some(wire::PeerResponse::FetchSnapshot {
             snapshot_id,
@@ -1927,7 +1927,7 @@ impl Engine {
     #[tracing::instrument(
         level = "info",
         skip_all,
-        fields(node = self.me, end_offset = id.0, snapshot_epoch = id.1, bytes = bytes.len()),
+        fields(node = self.me.0, end_offset = id.0, snapshot_epoch = id.1, bytes = bytes.len()),
         err
     )]
     fn install_fetched_snapshot(&mut self, id: (i64, i32), bytes: &[u8]) -> Result<(), RaftError> {
@@ -1996,7 +1996,7 @@ impl Engine {
                         let _ = cmd_tx.send(Command::Event(event)).await;
                     }
                 }
-                Err(e) => tracing::debug!(peer, ?e, "kraft: peer send failed"),
+                Err(e) => tracing::debug!(peer = peer.0, ?e, "kraft: peer send failed"),
             }
         });
     }
@@ -2107,13 +2107,13 @@ fn leader_change_batch(epoch: LeaderEpoch, leader_id: NodeId, voter_ids: &[NodeI
     let voters: Vec<Voter> = voter_ids
         .iter()
         .map(|&id| Voter {
-            voter_id: i32::try_from(id).unwrap_or(i32::MAX),
+            voter_id: i32::try_from(id.0).unwrap_or(i32::MAX),
             ..Default::default()
         })
         .collect();
     let msg = LeaderChangeMessage {
         version: 0,
-        leader_id: i32::try_from(leader_id).unwrap_or(i32::MAX),
+        leader_id: i32::try_from(leader_id.0).unwrap_or(i32::MAX),
         voters: voters.clone(),
         granting_voters: voters,
         ..Default::default()
@@ -2175,14 +2175,14 @@ fn save_quorum_state(dir: &std::path::Path, state: &QuorumState) -> Result<(), R
     buf.put_u32(state.leader_epoch);
     if let Some(id) = state.leader_id {
         buf.put_u8(1);
-        buf.put_u64(id);
+        buf.put_u64(id.0);
     } else {
         buf.put_u8(0);
         buf.put_u64(0);
     }
     if let Some(k) = state.voted_key {
         buf.put_u8(1);
-        buf.put_u64(k.id);
+        buf.put_u64(k.id.0);
         buf.extend_from_slice(k.directory_id.as_bytes());
     } else {
         buf.put_u8(0);
@@ -2226,7 +2226,7 @@ fn load_quorum_state(
     let mut dir_bytes = [0u8; 16];
     cur.copy_to_slice(&mut dir_bytes);
     let voted_key = voted_present.then(|| ReplicaKey {
-        id: voted_id,
+        id: NodeId(voted_id),
         directory_id: Uuid::from_bytes(dir_bytes),
     });
     // Leadership is VOLATILE, not durable: Raft persists only currentTerm
@@ -2542,41 +2542,53 @@ mod tests {
     fn initial_election_deadline_matches_startup_role() {
         let base = Instant::now();
         let single = QuorumStateMachine::new(
-            1,
-            QuorumState::bootstrap(uuid::Uuid::nil(), voter_set(&[1])),
+            NodeId(1),
+            QuorumState::bootstrap(uuid::Uuid::nil(), voter_set(&[NodeId(1)])),
             400,
         );
-        assert!(initial_election_at(&single, None, base, 1, 0, 400) == Some(base));
+        assert!(initial_election_at(&single, None, base, NodeId(1), 0, 400) == Some(base));
 
         let known_leader = QuorumStateMachine::new(
-            1,
-            QuorumState::bootstrap(uuid::Uuid::nil(), voter_set(&[1, 2, 3])),
+            NodeId(1),
+            QuorumState::bootstrap(
+                uuid::Uuid::nil(),
+                voter_set(&[NodeId(1), NodeId(2), NodeId(3)]),
+            ),
             400,
         );
-        assert!(initial_election_at(&known_leader, Some(2), base, 1, 0, 400).is_none());
+        assert!(
+            initial_election_at(&known_leader, Some(NodeId(2)), base, NodeId(1), 0, 400).is_none()
+        );
 
         let non_voter = QuorumStateMachine::new(
-            4,
-            QuorumState::bootstrap(uuid::Uuid::nil(), voter_set(&[1, 2, 3])),
+            NodeId(4),
+            QuorumState::bootstrap(
+                uuid::Uuid::nil(),
+                voter_set(&[NodeId(1), NodeId(2), NodeId(3)]),
+            ),
             400,
         );
-        assert!(initial_election_at(&non_voter, None, base, 4, 0, 400).is_none());
+        assert!(initial_election_at(&non_voter, None, base, NodeId(4), 0, 400).is_none());
 
         let multi = QuorumStateMachine::new(
-            1,
-            QuorumState::bootstrap(uuid::Uuid::nil(), voter_set(&[1, 2, 3])),
+            NodeId(1),
+            QuorumState::bootstrap(
+                uuid::Uuid::nil(),
+                voter_set(&[NodeId(1), NodeId(2), NodeId(3)]),
+            ),
             400,
         );
-        let jitter = crate::kraft::core::election_jitter_ms(1, 0, 400);
-        let at = initial_election_at(&multi, None, base, 1, 0, 400).expect("multi voter timer");
+        let jitter = crate::kraft::core::election_jitter_ms(NodeId(1), 0, 400);
+        let at =
+            initial_election_at(&multi, None, base, NodeId(1), 0, 400).expect("multi voter timer");
         assert!(at.duration_since(base) == Duration::from_millis(400 + jitter));
     }
 
     #[test]
     fn initial_state_voters_preserves_configured_quorum_ids() {
-        let (engine, _dir) = build_engine_only(2, &[1, 2, 3]);
-        assert!(initial_state_voters(&engine.core) == vec![1, 2, 3]);
-        assert!(engine.quorum_tx.borrow().voters == vec![1, 2, 3]);
+        let (engine, _dir) = build_engine_only(NodeId(2), &[NodeId(1), NodeId(2), NodeId(3)]);
+        assert!(initial_state_voters(&engine.core) == vec![NodeId(1), NodeId(2), NodeId(3)]);
+        assert!(engine.quorum_tx.borrow().voters == vec![NodeId(1), NodeId(2), NodeId(3)]);
     }
 
     #[test]
@@ -2609,17 +2621,17 @@ mod tests {
         for (role, want) in [
             (
                 Role::Follower {
-                    leader_id: 7,
+                    leader_id: NodeId(7),
                     fetch_deadline: SimInstant(10),
                 },
-                Some(7),
+                Some(NodeId(7)),
             ),
             (
                 Role::Observer {
-                    leader_id: Some(9),
+                    leader_id: Some(NodeId(9)),
                     fetch_deadline: SimInstant(10),
                 },
-                Some(9),
+                Some(NodeId(9)),
             ),
             (
                 Role::Observer {
@@ -2867,7 +2879,11 @@ mod tests {
             (1, 3, 2, true),
         ] {
             assert!(
-                snapshot_fetch_response_invalid(error_code, response_epoch, current_epoch) == want,
+                snapshot_fetch_response_invalid(
+                    error_code,
+                    NodeId(response_epoch),
+                    NodeId(current_epoch)
+                ) == want,
                 "error_code {error_code}, response_epoch {response_epoch}, current_epoch {current_epoch}"
             );
         }
@@ -2890,7 +2906,7 @@ mod tests {
 
     #[test]
     fn execute_local_only_appends_leader_change_batch_to_log() {
-        let (mut engine, _dir) = build_engine_only(1, &[1, 2, 3]);
+        let (mut engine, _dir) = build_engine_only(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)]);
         let start = engine.log.log_end_offset();
 
         engine.execute_local_only(vec![Action::AppendLeaderChange { epoch: 4 }]);
@@ -2916,7 +2932,7 @@ mod tests {
             records::metadata::control::{ControlRecordType, control_record_key},
         };
 
-        let batch = leader_change_batch(7, 2, &[1, 2, 3]);
+        let batch = leader_change_batch(7, NodeId(2), &[NodeId(1), NodeId(2), NodeId(3)]);
 
         check!(batch.partition_leader_epoch == 7);
         check!(batch.attributes.is_control_batch());
@@ -2949,23 +2965,23 @@ mod tests {
 
     #[tokio::test]
     async fn engine_following_leader_reflects_current_role() {
-        let (mut follower, _dir) = build_engine_only(1, &[1, 2, 3]);
+        let (mut follower, _dir) = build_engine_only(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)]);
         assert!(follower.following_leader().is_none());
 
         follower.on_event(Event::ReceiveBeginQuorumEpoch {
-            leader_id: 2,
+            leader_id: NodeId(2),
             leader_epoch: 1,
         });
-        assert!(follower.following_leader() == Some(2));
+        assert!(follower.following_leader() == Some(NodeId(2)));
 
-        let (mut leader, _leader_dir) = build_engine_only(1, &[1]);
+        let (mut leader, _leader_dir) = build_engine_only(NodeId(1), &[NodeId(1)]);
         elect_single_voter_engine(&mut leader);
         assert!(leader.following_leader().is_none());
     }
 
     #[test]
     fn direct_single_voter_submit_applies_image_and_resolves_waiter() {
-        let (mut engine, _dir) = build_engine_only(1, &[1]);
+        let (mut engine, _dir) = build_engine_only(NodeId(1), &[NodeId(1)]);
         elect_single_voter_engine(&mut engine);
         assert!(engine.image.topic("direct").is_none());
 
@@ -2982,7 +2998,7 @@ mod tests {
     fn broker_registration_epoch_is_assigned_from_appended_offset() {
         use crabka_metadata::{BrokerRegistrationRecord, MetadataRecord};
 
-        let (mut engine, _dir) = build_engine_only(1, &[1]);
+        let (mut engine, _dir) = build_engine_only(NodeId(1), &[NodeId(1)]);
         elect_single_voter_engine(&mut engine);
 
         let (reply, mut rx) = oneshot::channel();
@@ -2991,7 +3007,7 @@ mod tests {
 
         let base = engine.log.log_end_offset();
         let reg = MetadataRecord::V1BrokerRegistration(BrokerRegistrationRecord {
-            node_id: 7,
+            node_id: NodeId(7),
             broker_epoch: 0,
             incarnation_id: uuid::Uuid::from_u128(7),
             host: "broker-7".into(),
@@ -3003,12 +3019,12 @@ mod tests {
         engine.on_submit_change(vec![reg], reply);
 
         assert!(matches!(rx.try_recv(), Ok(Ok(()))));
-        assert!(engine.image.broker_epoch(7) == Some(base.0));
+        assert!(engine.image.broker_epoch(NodeId(7)) == Some(base.0));
     }
 
     #[test]
     fn replay_committed_rebuilds_image_from_log_records() {
-        let (mut engine, _dir) = build_engine_only(1, &[1]);
+        let (mut engine, _dir) = build_engine_only(NodeId(1), &[NodeId(1)]);
         elect_single_voter_engine(&mut engine);
         let (reply, mut rx) = oneshot::channel();
         engine.on_submit_change(topic_record("replayed"), reply);
@@ -3022,7 +3038,7 @@ mod tests {
 
     #[test]
     fn try_resolve_waiters_resolves_at_exact_hwm_and_keeps_future_waiter() {
-        let (mut engine, _dir) = build_engine_only(1, &[1]);
+        let (mut engine, _dir) = build_engine_only(NodeId(1), &[NodeId(1)]);
         for offset in 0..5 {
             let mut batch = one_offset_batch(offset, 1, b"x");
             engine.log.append(&mut batch).expect("append");
@@ -3057,7 +3073,7 @@ mod tests {
 
     #[test]
     fn fail_waiters_reached_by_fails_only_waiters_at_or_below_target_hwm() {
-        let (mut engine, _dir) = build_engine_only(1, &[1]);
+        let (mut engine, _dir) = build_engine_only(NodeId(1), &[NodeId(1)]);
         let (ready_tx, mut ready_rx) = oneshot::channel();
         let (future_tx, mut future_rx) = oneshot::channel();
         engine.commit_waiters.push(CommitWaiter {
@@ -3089,20 +3105,20 @@ mod tests {
 
     #[test]
     fn publish_leader_updates_leader_and_quorum_watchers() {
-        let (mut engine, _dir) = build_engine_only(1, &[1]);
+        let (mut engine, _dir) = build_engine_only(NodeId(1), &[NodeId(1)]);
         let mut leader_rx = engine.leader_tx.subscribe();
         let quorum_rx = engine.quorum_tx.subscribe();
 
         engine.on_event(Event::ElectionTimeout);
 
-        check!(*leader_rx.borrow_and_update() == Some(1));
-        check!(quorum_rx.borrow().leader_id == Some(1));
+        check!(*leader_rx.borrow_and_update() == Some(NodeId(1)));
+        check!(quorum_rx.borrow().leader_id == Some(NodeId(1)));
         check!(quorum_rx.borrow().log_end_offset == engine.log.log_end_offset().0);
     }
 
     #[tokio::test]
     async fn broadcast_end_quorum_epoch_sends_to_every_other_voter() {
-        let (mut engine, _dir) = build_engine_only(1, &[1, 2, 3]);
+        let (mut engine, _dir) = build_engine_only(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)]);
         let mut sends =
             record_peer_sends(&mut engine, wire::PeerResponse::Ack { epoch: 4 }.encode());
 
@@ -3117,7 +3133,7 @@ mod tests {
                     leader_id,
                     leader_epoch,
                 }) => {
-                    assert!(leader_id == 1);
+                    assert!(leader_id == NodeId(1));
                     assert!(leader_epoch == 4);
                 }
                 other => panic!("unexpected end quorum request: {other:?}"),
@@ -3125,12 +3141,12 @@ mod tests {
             peers.push(send.peer);
         }
         peers.sort_unstable();
-        assert!(peers == vec![2, 3]);
+        assert!(peers == vec![NodeId(2), NodeId(3)]);
     }
 
     #[test]
     fn metadata_fetch_slice_excludes_negative_hwm_and_uncommitted_batches() {
-        let (mut engine, _dir) = build_engine_only(1, &[1]);
+        let (mut engine, _dir) = build_engine_only(NodeId(1), &[NodeId(1)]);
         let mut first = one_offset_batch(0, 1, b"a");
         let mut second = one_offset_batch(1, 1, b"b");
         engine.log.append(&mut first).expect("append first");
@@ -3159,14 +3175,14 @@ mod tests {
 
     #[tokio::test]
     async fn send_fetch_uses_snapshot_epoch_only_until_log_extends_past_boundary() {
-        let (mut engine, _dir) = build_engine_only(1, &[1, 2]);
+        let (mut engine, _dir) = build_engine_only(NodeId(1), &[NodeId(1), NodeId(2)]);
         engine
             .log
             .install_snapshot(Offset(10))
             .expect("install snapshot");
         engine.installed_snapshot_epoch = Some(7);
         let fetch_response = wire::PeerResponse::Fetch {
-            leader_id: 2,
+            leader_id: NodeId(2),
             leader_epoch: 7,
             diverging: None,
             snapshot_id: None,
@@ -3176,7 +3192,7 @@ mod tests {
         .encode();
         let mut sends = record_peer_sends(&mut engine, fetch_response.clone());
 
-        engine.send_fetch(2);
+        engine.send_fetch(NodeId(2));
         let send = recv_peer_send(&mut sends).await;
         match wire::decode_fetch(&send.body) {
             Some(wire::PeerRequest::Fetch {
@@ -3195,7 +3211,7 @@ mod tests {
             .log
             .append_at(&mut batch, Offset(10))
             .expect("append after snapshot");
-        engine.send_fetch(2);
+        engine.send_fetch(NodeId(2));
         let send = recv_peer_send(&mut sends).await;
         match wire::decode_fetch(&send.body) {
             Some(wire::PeerRequest::Fetch {
@@ -3212,7 +3228,7 @@ mod tests {
 
     #[test]
     fn serve_fetch_records_returns_batches_only_for_offsets_inside_log() {
-        let (mut engine, _dir) = build_engine_only(1, &[1]);
+        let (mut engine, _dir) = build_engine_only(NodeId(1), &[NodeId(1)]);
         let mut batch = one_offset_batch(0, 1, b"a");
         engine.log.append(&mut batch).expect("append");
 
@@ -3226,7 +3242,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_response_snapshot_hint_starts_once_and_ignores_stale_hint() {
-        let (mut engine, _dir) = build_engine_only(1, &[1, 2]);
+        let (mut engine, _dir) = build_engine_only(NodeId(1), &[NodeId(1), NodeId(2)]);
         let fetch_snapshot_response = wire::PeerResponse::FetchSnapshot {
             snapshot_id: (11, 3),
             size: 0,
@@ -3238,7 +3254,7 @@ mod tests {
         let mut sends = record_peer_sends(&mut engine, fetch_snapshot_response);
 
         let body = wire::PeerResponse::Fetch {
-            leader_id: 2,
+            leader_id: NodeId(2),
             leader_epoch: 3,
             diverging: None,
             snapshot_id: Some((11, 3)),
@@ -3246,7 +3262,7 @@ mod tests {
             records: bytes::Bytes::new(),
         }
         .encode();
-        engine.on_fetch_response(2, &body);
+        engine.on_fetch_response(NodeId(2), &body);
         let send = recv_peer_send_with_api(&mut sends, api_key::FETCH_SNAPSHOT).await;
         match wire::decode_fetch_snapshot(&send.body) {
             Some(wire::PeerRequest::FetchSnapshot {
@@ -3266,7 +3282,7 @@ mod tests {
                 .is_some_and(|s| s.snapshot_id == (11, 3))
         );
 
-        engine.on_fetch_response(2, &body);
+        engine.on_fetch_response(NodeId(2), &body);
         assert!(
             tokio::time::timeout(StdDuration::from_millis(20), async {
                 loop {
@@ -3285,15 +3301,15 @@ mod tests {
             .install_snapshot(Offset(11))
             .expect("install snapshot");
         engine.snapshot_fetch = None;
-        engine.on_fetch_response(2, &body);
+        engine.on_fetch_response(NodeId(2), &body);
         assert!(engine.snapshot_fetch.is_none());
     }
 
     #[tokio::test]
     async fn fetch_snapshot_response_error_or_wrong_leader_aborts_transfer() {
-        let (mut engine, _dir) = build_engine_only(1, &[1, 2]);
+        let (mut engine, _dir) = build_engine_only(NodeId(1), &[NodeId(1), NodeId(2)]);
         let fetch_response = wire::PeerResponse::Fetch {
-            leader_id: 2,
+            leader_id: NodeId(2),
             leader_epoch: 3,
             diverging: None,
             snapshot_id: None,
@@ -3303,7 +3319,7 @@ mod tests {
         .encode();
         let mut sends = record_peer_sends(&mut engine, fetch_response);
 
-        engine.snapshot_fetch = Some(SnapshotFetchState::new((12, 3), 2));
+        engine.snapshot_fetch = Some(SnapshotFetchState::new((12, 3), NodeId(2)));
         let error_body = wire::PeerResponse::FetchSnapshot {
             snapshot_id: (12, 3),
             size: 0,
@@ -3312,12 +3328,12 @@ mod tests {
             error_code: 99,
         }
         .encode();
-        engine.on_fetch_snapshot_response(2, &error_body);
+        engine.on_fetch_snapshot_response(NodeId(2), &error_body);
         assert!(engine.snapshot_fetch.is_none());
         let send = recv_peer_send_with_api(&mut sends, api_key::FETCH).await;
-        assert!(send.peer == 2);
+        assert!(send.peer == NodeId(2));
 
-        engine.snapshot_fetch = Some(SnapshotFetchState::new((12, 3), 2));
+        engine.snapshot_fetch = Some(SnapshotFetchState::new((12, 3), NodeId(2)));
         let ok_body = wire::PeerResponse::FetchSnapshot {
             snapshot_id: (12, 3),
             size: 0,
@@ -3326,10 +3342,10 @@ mod tests {
             error_code: 0,
         }
         .encode();
-        engine.on_fetch_snapshot_response(3, &ok_body);
+        engine.on_fetch_snapshot_response(NodeId(3), &ok_body);
         assert!(engine.snapshot_fetch.is_none());
         let send = recv_peer_send_with_api(&mut sends, api_key::FETCH).await;
-        assert!(send.peer == 3);
+        assert!(send.peer == NodeId(3));
     }
 
     #[tokio::test(start_paused = true)]
@@ -3420,7 +3436,7 @@ mod tests {
 
     #[tokio::test]
     async fn single_voter_engine_starts_with_no_initial_leader() {
-        let (ctrl, _dir) = build(1, &[1]);
+        let (ctrl, _dir) = build(NodeId(1), &[NodeId(1)]);
         let initial = *ctrl.watch_leader().borrow();
         assert!(initial.is_none());
         ctrl.shutdown().await;
@@ -3428,42 +3444,43 @@ mod tests {
 
     #[tokio::test]
     async fn node_id_reports_configured_node() {
-        let (ctrl, _dir) = build(7, &[7]);
-        assert!(ctrl.node_id() == 7);
+        let (ctrl, _dir) = build(NodeId(7), &[NodeId(7)]);
+        assert!(ctrl.node_id() == NodeId(7));
         ctrl.shutdown().await;
     }
 
     #[tokio::test]
     async fn injected_election_makes_single_voter_leader() {
-        let (ctrl, _dir) = build(1, &[1]);
+        let (ctrl, _dir) = build(NodeId(1), &[NodeId(1)]);
         ctrl.inject_event(Event::ElectionTimeout).await.unwrap();
-        await_leader(&ctrl, Some(1)).await;
+        await_leader(&ctrl, Some(NodeId(1))).await;
         ctrl.shutdown().await;
     }
 
     #[tokio::test]
     async fn injected_vote_sequence_makes_multi_voter_leader_before_timer() {
-        let (ctrl, _dir) = build_with_timeout(1, &[1, 2, 3], 60_000);
-        elect_leader_with_helper(&ctrl, 1, 2).await;
+        let (ctrl, _dir) =
+            build_with_timeout(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)], 60_000);
+        elect_leader_with_helper(&ctrl, NodeId(1), NodeId(2)).await;
         ctrl.shutdown().await;
     }
 
     #[tokio::test]
     async fn injected_election_timer_makes_single_voter_leader() {
-        let (ctrl, _dir) = build(1, &[1]);
+        let (ctrl, _dir) = build(NodeId(1), &[NodeId(1)]);
         ctrl.cmd_tx
             .send(Command::Timer(TimerTick::Election))
             .await
             .unwrap();
-        await_leader(&ctrl, Some(1)).await;
+        await_leader(&ctrl, Some(NodeId(1))).await;
         ctrl.shutdown().await;
     }
 
     #[tokio::test]
     async fn committed_batch_applies_to_image() {
-        let (ctrl, _dir) = build(1, &[1]);
+        let (ctrl, _dir) = build(NodeId(1), &[NodeId(1)]);
         ctrl.inject_event(Event::ElectionTimeout).await.unwrap();
-        await_leader(&ctrl, Some(1)).await;
+        await_leader(&ctrl, Some(NodeId(1))).await;
 
         assert!(ctrl.current_image().topic("t").is_none());
 
@@ -3481,9 +3498,9 @@ mod tests {
 
     #[tokio::test]
     async fn duplicate_committed_record_rejected_on_apply() {
-        let (ctrl, _dir) = build(1, &[1]);
+        let (ctrl, _dir) = build(NodeId(1), &[NodeId(1)]);
         ctrl.inject_event(Event::ElectionTimeout).await.unwrap();
-        await_leader(&ctrl, Some(1)).await;
+        await_leader(&ctrl, Some(NodeId(1))).await;
 
         ctrl.test_append_and_commit(topic_record("t"))
             .await
@@ -3503,11 +3520,14 @@ mod tests {
     /// election timeout — no injected event.
     #[tokio::test]
     async fn single_voter_auto_elects_on_election_timeout() {
-        let (ctrl, _dir) = build_with_timeout(1, &[1], 80);
+        let (ctrl, _dir) = build_with_timeout(NodeId(1), &[NodeId(1)], 80);
         // The election timer is armed at construction; wait for it to fire.
-        tokio::time::timeout(StdDuration::from_secs(5), await_leader(&ctrl, Some(1)))
-            .await
-            .expect("auto-elected within timeout");
+        tokio::time::timeout(
+            StdDuration::from_secs(5),
+            await_leader(&ctrl, Some(NodeId(1))),
+        )
+        .await
+        .expect("auto-elected within timeout");
         ctrl.shutdown().await;
     }
 
@@ -3518,22 +3538,22 @@ mod tests {
         // Node 1 is a follower in a 3-voter cluster; the NullPeerSender means
         // its fetches fail, but a steady stream of BeginQuorumEpoch heartbeats
         // (which we inject) must keep it attached without electing.
-        let (ctrl, _dir) = build_with_timeout(1, &[1, 2, 3], 120);
+        let (ctrl, _dir) = build_with_timeout(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)], 120);
         // Attach to leader 2.
         ctrl.inject_event(Event::ReceiveBeginQuorumEpoch {
-            leader_id: 2,
+            leader_id: NodeId(2),
             leader_epoch: 1,
         })
         .await
         .unwrap();
-        await_leader(&ctrl, Some(2)).await;
+        await_leader(&ctrl, Some(NodeId(2))).await;
 
         // Keep re-announcing leader 2 faster than the fetch watchdog would
         // accumulate FETCH_MISS_LIMIT misses; the leader must remain 2.
         for _ in 0..6 {
             tokio::time::sleep(StdDuration::from_millis(40)).await;
             ctrl.inject_event(Event::ReceiveBeginQuorumEpoch {
-                leader_id: 2,
+                leader_id: NodeId(2),
                 leader_epoch: 1,
             })
             .await
@@ -3541,7 +3561,7 @@ mod tests {
         }
         let leader = *ctrl.watch_leader().borrow();
         assert!(
-            leader == Some(2),
+            leader == Some(NodeId(2)),
             "follower spuriously left leader 2: {leader:?}"
         );
         ctrl.shutdown().await;
@@ -3551,9 +3571,9 @@ mod tests {
 
     #[tokio::test]
     async fn submit_change_commits_on_single_voter_leader() {
-        let (ctrl, _dir) = build(1, &[1]);
+        let (ctrl, _dir) = build(NodeId(1), &[NodeId(1)]);
         ctrl.inject_event(Event::ElectionTimeout).await.unwrap();
-        await_leader(&ctrl, Some(1)).await;
+        await_leader(&ctrl, Some(NodeId(1))).await;
 
         tokio::time::timeout(
             StdDuration::from_secs(5),
@@ -3565,16 +3585,16 @@ mod tests {
         assert!(ctrl.current_image().topic("orders").is_some());
 
         let qs = ctrl.quorum_state().await.unwrap();
-        assert!(qs.leader_id == Some(1));
+        assert!(qs.leader_id == Some(NodeId(1)));
         assert!(qs.high_watermark > 0);
         ctrl.shutdown().await;
     }
 
     #[tokio::test]
     async fn submit_change_duplicate_rejected() {
-        let (ctrl, _dir) = build(1, &[1]);
+        let (ctrl, _dir) = build(NodeId(1), &[NodeId(1)]);
         ctrl.inject_event(Event::ElectionTimeout).await.unwrap();
-        await_leader(&ctrl, Some(1)).await;
+        await_leader(&ctrl, Some(NodeId(1))).await;
 
         submit_change_with_timeout(&ctrl, topic_record("t"), "first duplicate-test submit")
             .await
@@ -3593,8 +3613,8 @@ mod tests {
     /// waiter resolves is the leadership-loss drain.
     #[tokio::test]
     async fn submit_waiter_fails_on_leadership_loss() {
-        let (ctrl, _dir) = build(1, &[1, 2, 3]);
-        elect_leader_with_helper(&ctrl, 1, 2).await;
+        let (ctrl, _dir) = build(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)]);
+        elect_leader_with_helper(&ctrl, NodeId(1), NodeId(2)).await;
 
         // Park a submit on a separate task: it appends but cannot commit (no
         // peer fetches under NullPeerSender), so it stays parked.
@@ -3607,7 +3627,7 @@ mod tests {
         // A strictly-higher-epoch BeginQuorumEpoch from node 2 forces node 1 to
         // step down from Leader to Follower.
         ctrl.inject_event(Event::ReceiveBeginQuorumEpoch {
-            leader_id: 2,
+            leader_id: NodeId(2),
             leader_epoch: 9,
         })
         .await
@@ -3622,7 +3642,7 @@ mod tests {
             matches!(
                 result,
                 Err(RaftError::NotLeader {
-                    current_leader: Some(2)
+                    current_leader: Some(NodeId(2))
                 })
             ),
             "got {result:?}"
@@ -3632,7 +3652,7 @@ mod tests {
 
     #[tokio::test]
     async fn submit_change_on_non_leader_rejects() {
-        let (ctrl, _dir) = build(1, &[1, 2, 3]);
+        let (ctrl, _dir) = build(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)]);
         // Never elected; node 1 is Unattached → not leader.
         let r = ctrl.submit_change(topic_record("t")).await;
         assert!(matches!(r, Err(RaftError::NotLeader { .. })), "got {r:?}");
@@ -3650,9 +3670,9 @@ mod tests {
             crabka_metadata::MetadataRecord::V1Partition(crabka_metadata::PartitionRecord {
                 topic: name.to_string(),
                 partition: 0,
-                leader: 1,
-                replicas: vec![1],
-                isr: vec![1],
+                leader: NodeId(1),
+                replicas: vec![NodeId(1)],
+                isr: vec![NodeId(1)],
                 leader_epoch: 0,
                 adding_replicas: vec![],
                 removing_replicas: vec![],
@@ -3671,8 +3691,8 @@ mod tests {
     /// `Ok` (not bled the rejection from B's earlier offset).
     #[tokio::test]
     async fn rejection_scoped_to_owning_waiter_range() {
-        let (ctrl, _dir) = build(1, &[1, 2, 3]);
-        elect_leader_with_helper(&ctrl, 1, 2).await;
+        let (ctrl, _dir) = build(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)]);
+        elect_leader_with_helper(&ctrl, NodeId(1), NodeId(2)).await;
 
         let ca = ctrl.clone();
         let cb = ctrl.clone();
@@ -3691,7 +3711,7 @@ mod tests {
         // leader's own log end plus node 2's fetch offset commits everything.
         let qs = ctrl.quorum_state().await.unwrap();
         ctrl.inject_event(Event::ReceiveFetch {
-            from: 2,
+            from: NodeId(2),
             fetch_epoch: qs.leader_epoch,
             fetch_offset: qs.log_end_offset,
         })
@@ -3730,13 +3750,13 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let data_dir = dir.path().to_path_buf();
         let cluster_id = uuid::Uuid::from_u128(7);
-        let voters = voter_set(&[1]);
+        let voters = voter_set(&[NodeId(1)]);
 
         {
             let log = KraftLog::open(&data_dir).expect("open log");
             let ctrl = KraftController::spawn(
                 KraftConfig {
-                    me: 1,
+                    me: NodeId(1),
                     cluster_id,
                     initial_state: QuorumState::bootstrap(cluster_id, voters.clone()),
                     election_timeout_ms: 1000,
@@ -3747,7 +3767,7 @@ mod tests {
                 data_dir.clone(),
             );
             ctrl.inject_event(Event::ElectionTimeout).await.unwrap();
-            await_leader(&ctrl, Some(1)).await;
+            await_leader(&ctrl, Some(NodeId(1))).await;
             submit_change_with_timeout(&ctrl, topic_record("recovered"), "recovery seed")
                 .await
                 .unwrap();
@@ -3761,7 +3781,7 @@ mod tests {
         // Reopen over the same dir: the image is rebuilt from checkpoint+log.
         let ctrl2 = KraftController::open(
             data_dir.clone(),
-            1,
+            NodeId(1),
             cluster_id,
             voters,
             1000,
@@ -3777,24 +3797,28 @@ mod tests {
     async fn quorum_state_file_round_trips() {
         let dir = tempfile::tempdir().expect("tempdir");
         let cid = uuid::Uuid::from_u128(9);
-        let mut state = QuorumState::bootstrap(cid, voter_set(&[1, 2, 3]));
+        let mut state = QuorumState::bootstrap(cid, voter_set(&[NodeId(1), NodeId(2), NodeId(3)]));
         state.leader_epoch = 5;
-        state.leader_id = Some(2);
+        state.leader_id = Some(NodeId(2));
         state.voted_key = Some(ReplicaKey {
-            id: 3,
+            id: NodeId(3),
             directory_id: uuid::Uuid::from_u128(3),
         });
         save_quorum_state(dir.path(), &state).unwrap();
 
-        let loaded = load_quorum_state(dir.path(), cid, &voter_set(&[1, 2, 3]))
-            .unwrap()
-            .expect("present");
+        let loaded = load_quorum_state(
+            dir.path(),
+            cid,
+            &voter_set(&[NodeId(1), NodeId(2), NodeId(3)]),
+        )
+        .unwrap()
+        .expect("present");
         check!(loaded.leader_epoch == 5);
         // Leadership is volatile (Raft persists only currentTerm + votedFor):
         // `leader_id` is deliberately cleared on load so a restarted ex-leader
         // re-discovers the current leader instead of trusting stale state.
         check!(loaded.leader_id.is_none());
-        check!(loaded.voted_key.map(|k| k.id) == Some(3));
+        check!(loaded.voted_key.map(|k| k.id) == Some(NodeId(3)));
         check!(loaded.cluster_id == cid);
     }
 
@@ -3803,7 +3827,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::create_dir(dir.path().join(QUORUM_STATE_FILE)).expect("mkdir quorum-state path");
 
-        let loaded = load_quorum_state(dir.path(), uuid::Uuid::nil(), &voter_set(&[1]));
+        let loaded = load_quorum_state(dir.path(), uuid::Uuid::nil(), &voter_set(&[NodeId(1)]));
 
         assert!(matches!(loaded, Err(RaftError::Storage(_))));
     }
@@ -3813,7 +3837,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(dir.path().join(QUORUM_STATE_FILE), [0u8; 53]).expect("write short state");
 
-        let loaded = load_quorum_state(dir.path(), uuid::Uuid::nil(), &voter_set(&[1]))
+        let loaded = load_quorum_state(dir.path(), uuid::Uuid::nil(), &voter_set(&[NodeId(1)]))
             .expect("short file is ignored");
 
         assert!(loaded.is_none());
@@ -3827,9 +3851,9 @@ mod tests {
     /// has been pruned (its log-start offset rose above 0).
     #[tokio::test]
     async fn leader_snapshots_and_prunes_at_threshold() {
-        let (ctrl, dir) = build_with_snapshot_interval(1, &[1], 3);
+        let (ctrl, dir) = build_with_snapshot_interval(NodeId(1), &[NodeId(1)], 3);
         ctrl.inject_event(Event::ElectionTimeout).await.unwrap();
-        await_leader(&ctrl, Some(1)).await;
+        await_leader(&ctrl, Some(NodeId(1))).await;
 
         // Four distinct topics, each committed immediately (single voter). Each
         // commit advances the HWM well past the 3-record interval, so a
@@ -3897,14 +3921,14 @@ mod tests {
     #[tokio::test]
     async fn broker_registration_epoch_equals_commit_offset() {
         use crabka_metadata::{BrokerRegistrationRecord, MetadataRecord};
-        let (ctrl, _dir) = build(1, &[1]);
+        let (ctrl, _dir) = build(NodeId(1), &[NodeId(1)]);
         ctrl.inject_event(Event::ElectionTimeout).await.unwrap();
-        await_leader(&ctrl, Some(1)).await;
+        await_leader(&ctrl, Some(NodeId(1))).await;
 
         let reg = |id: u64| {
             vec![MetadataRecord::V1BrokerRegistration(
                 BrokerRegistrationRecord {
-                    node_id: id,
+                    node_id: NodeId(id),
                     broker_epoch: 0, // overwritten by the leader at append
                     incarnation_id: uuid::Uuid::from_u128(u128::from(id)),
                     host: "h".into(),
@@ -3919,14 +3943,14 @@ mod tests {
         submit_change_with_timeout(&ctrl, reg(7), "first broker registration")
             .await
             .expect("first registration");
-        let e1 = ctrl.current_image().broker_epoch(7);
+        let e1 = ctrl.current_image().broker_epoch(NodeId(7));
         assert!(e1 == Some(base1), "epoch {e1:?} != commit offset {base1}");
 
         let base2 = ctrl.quorum_state().await.unwrap().log_end_offset;
         submit_change_with_timeout(&ctrl, reg(7), "broker re-registration")
             .await
             .expect("re-registration");
-        let e2 = ctrl.current_image().broker_epoch(7);
+        let e2 = ctrl.current_image().broker_epoch(NodeId(7));
         assert!(e2 == Some(base2), "re-reg epoch {e2:?} != offset {base2}");
         assert!(base2 > base1 && e2 > e1, "epoch must strictly increase");
 

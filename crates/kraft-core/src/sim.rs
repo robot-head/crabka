@@ -230,7 +230,7 @@ enum SimTimer {
 const HEARTBEAT_MS: u64 = 300;
 
 fn election_timeout_ms_of(id: NodeId) -> u64 {
-    1000 + id * 50
+    1000 + id.0 * 50
 }
 
 fn consider(
@@ -353,7 +353,7 @@ impl Sim {
                     _ => n.high_watermark,
                 };
                 NodeRole {
-                    id: n.id,
+                    id: n.id.0,
                     role: n.machine.role().name().to_string(),
                     epoch: u64::from(n.machine.quorum_state().leader_epoch),
                     log_len: n.log.record_count(),
@@ -390,7 +390,7 @@ impl Sim {
             self.elected_seen.insert((id, epoch));
             self.record(
                 TraceAction::Elected {
-                    node: id,
+                    node: id.0,
                     epoch: u64::from(epoch),
                 },
                 format!("N{id} won the election for epoch {epoch}"),
@@ -453,7 +453,7 @@ impl Sim {
         self.partitioned.insert(node);
         self.queue.retain(|m| m.src != node && m.dst != node);
         self.record(
-            TraceAction::Partition { node },
+            TraceAction::Partition { node: node.0 },
             format!("N{node} is isolated from the cluster"),
         );
     }
@@ -461,7 +461,7 @@ impl Sim {
     pub fn heal(&mut self, node: NodeId) {
         self.partitioned.remove(&node);
         self.record(
-            TraceAction::Heal { node },
+            TraceAction::Heal { node: node.0 },
             format!("N{node} rejoins the cluster"),
         );
     }
@@ -472,7 +472,7 @@ impl Sim {
         node.log.append_in_epoch(epoch, n);
         self.record(
             TraceAction::Append {
-                node: leader,
+                node: leader.0,
                 count: n,
             },
             format!("Leader N{leader} appends {n} record(s) in epoch {epoch}"),
@@ -521,8 +521,8 @@ impl Sim {
         let label = event_label(&msg.event);
         self.record(
             TraceAction::Drop {
-                src: msg.src,
-                dst: msg.dst,
+                src: msg.src.0,
+                dst: msg.dst.0,
                 event: label.clone(),
             },
             format!("N{} → N{}: {label} dropped in flight", msg.src, msg.dst),
@@ -567,8 +567,8 @@ impl Sim {
         self.queue
             .iter()
             .map(|m| InFlight {
-                src: m.src,
-                dst: m.dst,
+                src: m.src.0,
+                dst: m.dst.0,
                 event: event_label(&m.event),
             })
             .collect()
@@ -583,7 +583,7 @@ impl Sim {
             clock_ms: self.now.0,
             nodes: self.snapshot_roles(),
             in_flight: self.in_flight(),
-            leaders: self.leaders(),
+            leaders: self.leaders().iter().map(|id| id.0).collect(),
             step_count: self.steps.len(),
         }
     }
@@ -644,7 +644,7 @@ impl Sim {
                 }
                 self.record(
                     TraceAction::Timeout {
-                        node: id,
+                        node: id.0,
                         kind: "fetch".to_string(),
                     },
                     format!("N{id} lost contact with its leader and starts an election"),
@@ -655,7 +655,7 @@ impl Sim {
             SimTimer::Election => {
                 self.record(
                     TraceAction::Timeout {
-                        node: id,
+                        node: id.0,
                         kind: "election".to_string(),
                     },
                     format!("N{id}'s election timer fires"),
@@ -688,8 +688,8 @@ impl Sim {
         self.step(dst, msg.event);
         self.record(
             TraceAction::Deliver {
-                src,
-                dst,
+                src: src.0,
+                dst: dst.0,
                 event: label.clone(),
             },
             format!("N{src} → N{dst}: {label}"),
@@ -954,10 +954,10 @@ pub fn scenarios() -> Vec<ScenarioTrace> {
 /// at a higher epoch while the isolated old leader cannot, then heal it and see
 /// it step down. The cluster ends with exactly one leader.
 fn split_brain_prevented() -> ScenarioTrace {
-    let nodes = [1u64, 2, 3];
+    let nodes = [NodeId(1), NodeId(2), NodeId(3)];
     let mut sim = Sim::new(&nodes);
     sim.run_until_stable(10_000);
-    let old_leader = sim.leaders().first().copied().unwrap_or(1);
+    let old_leader = sim.leaders().first().copied().unwrap_or(NodeId(1));
 
     sim.partition(old_leader);
     sim.run_until_stable(10_000);
@@ -991,7 +991,7 @@ fn split_brain_prevented() -> ScenarioTrace {
                   heals, the stale leader learns the newer epoch and steps down."
             .to_string(),
         invariant: "At most one leader per epoch (election safety)".to_string(),
-        nodes: nodes.to_vec(),
+        nodes: nodes.iter().map(|n| n.0).collect(),
         steps: sim.steps,
         outcome,
     }
@@ -1001,10 +1001,10 @@ fn split_brain_prevented() -> ScenarioTrace {
 /// non-FIFO order, demonstrating the log stays consistent because appends carry
 /// monotonic offsets + leader epochs so stale/late messages are detected.
 fn out_of_order_delivery() -> ScenarioTrace {
-    let nodes = [1u64, 2, 3];
+    let nodes = [NodeId(1), NodeId(2), NodeId(3)];
     let mut sim = Sim::new(&nodes);
     sim.run_until_stable(10_000);
-    let leader = sim.leaders().first().copied().unwrap_or(1);
+    let leader = sim.leaders().first().copied().unwrap_or(NodeId(1));
 
     // Produce some records, then let the fetch/replication traffic queue up and
     // deliver it back-to-front before settling.
@@ -1038,7 +1038,7 @@ fn out_of_order_delivery() -> ScenarioTrace {
                   logs still converge to the same contents."
             .to_string(),
         invariant: "Log matching under reordered delivery".to_string(),
-        nodes: nodes.to_vec(),
+        nodes: nodes.iter().map(|n| n.0).collect(),
         steps: sim.steps,
         outcome,
     }
@@ -1047,7 +1047,7 @@ fn out_of_order_delivery() -> ScenarioTrace {
 /// Deliver one message twice and show idempotent handling: no double
 /// application, no extra leader.
 fn message_duplication() -> ScenarioTrace {
-    let nodes = [1u64, 2, 3];
+    let nodes = [NodeId(1), NodeId(2), NodeId(3)];
     let mut sim = Sim::new(&nodes);
     // Run a few ticks so there is real in-flight election traffic to duplicate,
     // then deliver the front message twice.
@@ -1081,7 +1081,7 @@ fn message_duplication() -> ScenarioTrace {
                   leader emerges."
             .to_string(),
         invariant: "Idempotent handling of duplicate messages".to_string(),
-        nodes: nodes.to_vec(),
+        nodes: nodes.iter().map(|n| n.0).collect(),
         steps: sim.steps,
         outcome,
     }
@@ -1142,7 +1142,7 @@ mod tests {
 
     #[test]
     fn interactive_bootstrap_elects_one_leader() {
-        let mut sim = Sim::new(&[1, 2, 3]);
+        let mut sim = Sim::new(&[NodeId(1), NodeId(2), NodeId(3)]);
         // Fresh cluster: no leader, election timers armed, bus empty.
         assert!(sim.leaders().is_empty());
         assert!(sim.snapshot().nodes.len() == 3);
@@ -1162,7 +1162,7 @@ mod tests {
 
     #[test]
     fn interactive_partition_then_heal_keeps_one_leader() {
-        let mut sim = Sim::new(&[1, 2, 3]);
+        let mut sim = Sim::new(&[NodeId(1), NodeId(2), NodeId(3)]);
         step_until(&mut sim, 10_000, |s| !s.leaders().is_empty());
         sim.run_until_stable(10_000);
         let old = sim.leaders()[0];
@@ -1182,7 +1182,7 @@ mod tests {
 
     #[test]
     fn drop_next_removes_a_message_and_records_it() {
-        let mut sim = Sim::new(&[1, 2, 3]);
+        let mut sim = Sim::new(&[NodeId(1), NodeId(2), NodeId(3)]);
         // Fire the first timer so there is election traffic on the bus.
         while sim.in_flight().is_empty() && sim.step_once() {}
         let before = sim.in_flight().len();
@@ -1199,8 +1199,8 @@ mod tests {
 
     #[test]
     fn accessors_and_bus_faults_report_consistently() {
-        let mut sim = Sim::new(&[1, 2, 3]);
-        assert!(sim.voter_ids() == vec![1, 2, 3]);
+        let mut sim = Sim::new(&[NodeId(1), NodeId(2), NodeId(3)]);
+        assert!(sim.voter_ids() == vec![NodeId(1), NodeId(2), NodeId(3)]);
         assert!(sim.clock_ms() == 0);
 
         // Pump until there is election traffic, then exercise the bus-replay faults.
@@ -1221,7 +1221,7 @@ mod tests {
 
     #[test]
     fn append_targets_the_current_leader() {
-        let mut sim = Sim::new(&[1, 2, 3]);
+        let mut sim = Sim::new(&[NodeId(1), NodeId(2), NodeId(3)]);
         // No leader yet -> append is a no-op.
         assert!(!sim.append(2));
 
@@ -1232,7 +1232,7 @@ mod tests {
             .snapshot()
             .nodes
             .iter()
-            .find(|n| n.id == leader)
+            .find(|n| n.id == leader.0)
             .map_or(0, |n| n.log_len);
 
         assert!(sim.append(2));
@@ -1240,7 +1240,7 @@ mod tests {
             .snapshot()
             .nodes
             .iter()
-            .find(|n| n.id == leader)
+            .find(|n| n.id == leader.0)
             .map_or(0, |n| n.log_len);
         assert!(after == before + 2, "append added 2 records to the leader");
     }

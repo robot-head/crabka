@@ -194,7 +194,7 @@ async fn wait_partition_exists(handle: &BrokerHandle, topic: &str, partition: i3
 /// Await until `handle` reports `leader` as the leader for `(topic, partition)`.
 async fn wait_partition_leader(handle: &BrokerHandle, topic: &str, partition: i32, leader: u64) {
     handle
-        .wait_for_image(|img| img.partition(topic, partition).map(|p| p.leader) == Some(leader))
+        .wait_for_image(|img| img.partition(topic, partition).map(|p| p.leader.0) == Some(leader))
         .await;
 }
 
@@ -203,7 +203,7 @@ async fn wait_isr_contains(handle: &BrokerHandle, topic: &str, partition: i32, n
     handle
         .wait_for_image(|img| {
             img.partition(topic, partition)
-                .map(|p| p.isr.contains(&node))
+                .map(|p| p.isr.contains(&crabka_broker::NodeId(node)))
                 .unwrap_or(false)
         })
         .await;
@@ -222,7 +222,7 @@ async fn wait_partition_isr_only(
             img.partition(topic, partition)
                 .map(|p| {
                     let actual_set: std::collections::HashSet<u64> =
-                        p.isr.iter().copied().collect();
+                        p.isr.iter().map(|n| n.0).collect();
                     actual_set == expected_set
                 })
                 .unwrap_or(false)
@@ -242,7 +242,7 @@ async fn wait_partition_isr_contains(
     handle
         .wait_for_image(|img| {
             img.partition(topic, partition)
-                .map(|p| p.isr.contains(&member))
+                .map(|p| p.isr.contains(&crabka_broker::NodeId(member)))
                 .unwrap_or(false)
         })
         .await;
@@ -293,7 +293,7 @@ async fn preferred_election_via_wire_returns_success() {
     // (i.e., not broker 1).
     cluster[0]
         .0
-        .wait_until_partition_leader_changed("foo-preferred", 0, 1)
+        .wait_until_partition_leader_changed("foo-preferred", 0, crabka_broker::NodeId(1))
         .await;
     let new_leader = cluster[0]
         .0
@@ -413,9 +413,9 @@ async fn unclean_election_via_wire_picks_alive_replica() {
     let forged = MetadataRecord::V1Partition(PartitionRecord {
         topic: "foo-unclean".to_string(),
         partition: 0,
-        leader: 99,
+        leader: crabka_broker::NodeId(99),
         replicas: pr_before.replicas.clone(),
-        isr: vec![99],
+        isr: vec![crabka_broker::NodeId(99)],
         leader_epoch: pr_before.leader_epoch + 1,
         adding_replicas: vec![],
         removing_replicas: vec![],
@@ -516,14 +516,14 @@ async fn wait_partition_record_known(
     PartitionRecord {
         topic: topic.to_string(),
         partition,
-        leader,
+        leader: crabka_broker::NodeId(leader),
         // We don't have a direct `replicas` accessor, but the
         // ISR is enough for our purposes (replicas=[1,2] is
         // well-known from the CreateTopics call with rf=2 on a
         // 3-broker cluster where the first two brokers are the
         // natural assignment).
-        replicas: vec![1, 2],
-        isr,
+        replicas: vec![crabka_broker::NodeId(1), crabka_broker::NodeId(2)],
+        isr: isr.into_iter().map(crabka_broker::NodeId).collect(),
         leader_epoch: 0, // bumped by the forged record, not critical
         adding_replicas: vec![],
         removing_replicas: vec![],
@@ -761,7 +761,8 @@ async fn auto_rebalance_restores_preferred_leader() {
     eprintln!("broker 1 shut down; waiting for failover");
 
     // Wait for broker 2 or 3 to report a new leader (not broker 1).
-    h1.wait_until_partition_leader_changed(topic, 0, 1).await;
+    h1.wait_until_partition_leader_changed(topic, 0, crabka_broker::NodeId(1))
+        .await;
     eprintln!(
         "new leader after broker 1 death: {:?}",
         h1.partition_leader_for_test(topic, 0)

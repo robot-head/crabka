@@ -614,7 +614,11 @@ mod tests {
         for p in 0..bootstrap::NUM_PARTITIONS {
             open_state_partition(&reg, dir, p);
         }
-        let coord = ShareCoordinator::new(1, reg.clone(), ShareCoordinatorConfig::default());
+        let coord = ShareCoordinator::new(
+            crabka_audit::NodeId(1),
+            reg.clone(),
+            ShareCoordinatorConfig::default(),
+        );
         (coord, reg)
     }
 
@@ -740,7 +744,7 @@ mod tests {
             snapshot_update_records_per_snapshot: 3,
             ..ShareCoordinatorConfig::default()
         };
-        let coord = ShareCoordinator::new(1, reg.clone(), cfg);
+        let coord = ShareCoordinator::new(crabka_audit::NodeId(1), reg.clone(), cfg);
         lead_all(&coord).await;
         let tid = uuid::Uuid::from_bytes([9; 16]);
 
@@ -769,7 +773,11 @@ mod tests {
         }
         let tid = uuid::Uuid::from_bytes([10; 16]);
         {
-            let coord = ShareCoordinator::new(1, reg.clone(), ShareCoordinatorConfig::default());
+            let coord = ShareCoordinator::new(
+                crabka_audit::NodeId(1),
+                reg.clone(),
+                ShareCoordinatorConfig::default(),
+            );
             lead_all(&coord).await;
             coord.initialize("g", tid, 0, 2, Offset(0)).await.unwrap();
             coord
@@ -780,7 +788,11 @@ mod tests {
 
         // New coordinator over the SAME registry (same open logs); recover
         // replays the records written above.
-        let recovered = ShareCoordinator::new(1, reg.clone(), ShareCoordinatorConfig::default());
+        let recovered = ShareCoordinator::new(
+            crabka_audit::NodeId(1),
+            reg.clone(),
+            ShareCoordinatorConfig::default(),
+        );
         lead_all(&recovered).await;
         // `recover` re-derives leadership from a MetadataImage; here we seed
         // the leadership set directly (lead_all) and replay the open logs.

@@ -90,7 +90,7 @@ pub(crate) async fn handle(
             .await;
 
         let should_shut_down = if req.want_shut_down {
-            drain_leaderships_for_shutdown(&controller, &liveness, broker_id_u64).await?
+            drain_leaderships_for_shutdown(&controller, &liveness, NodeId(broker_id_u64)).await?
         } else {
             false
         };
@@ -113,9 +113,14 @@ pub(crate) async fn handle(
                 .iter()
                 .map(|u| uuid::Uuid::from_bytes(u.0))
                 .collect();
-            let recoveries =
-                failover_offline_dirs(&controller, reporting_broker, &offline, &liveness, &metrics)
-                    .await;
+            let recoveries = failover_offline_dirs(
+                &controller,
+                NodeId(reporting_broker),
+                &offline,
+                &liveness,
+                &metrics,
+            )
+            .await;
             // Fire-and-forget: enqueue logs internally if the recovery manager is gone.
             for (topic, partition, strategy) in recoveries {
                 recovery
@@ -318,7 +323,7 @@ mod tests {
 
     impl MockSource {
         fn new(image: MetadataImage) -> (Self, Arc<Mutex<Vec<MetadataRecord>>>) {
-            let (tx, rx) = watch::channel(Some(1u64));
+            let (tx, rx) = watch::channel(Some(NodeId(1)));
             let captured = Arc::new(Mutex::new(Vec::new()));
             let source = Self {
                 leader_rx: rx,
@@ -408,7 +413,7 @@ mod tests {
     async fn liveness_with(alive: &[NodeId]) -> Arc<ControllerLivenessState> {
         let l = ControllerLivenessState::new(Duration::from_secs(10));
         for &n in alive {
-            l.record_heartbeat(n).await;
+            l.record_heartbeat(n.0).await;
         }
         Arc::new(l)
     }
@@ -466,9 +471,16 @@ mod tests {
 
     #[test]
     fn leader_predicate_matches_current_node_only() {
-        let cases = [(Some(1), true), (Some(2), false), (None, false)];
+        let cases = [
+            (Some(NodeId(1)), true),
+            (Some(NodeId(2)), false),
+            (None, false),
+        ];
         for (leader, want) in cases {
-            assert!(is_controller_leader(leader, 1) == want, "leader {leader:?}");
+            assert!(
+                is_controller_leader(leader, NodeId(1)) == want,
+                "leader {leader:?}"
+            );
         }
     }
 
@@ -525,14 +537,26 @@ mod tests {
         let bad = Uuid::from_u128(0xBAD);
         let good = Uuid::from_u128(0x600D);
         // leader=1, replicas=[1,2], isr=[1,2]; broker 1's dir is `bad`.
-        let img = image_with_dir_partition(1, &[1, 2], &[1, 2], &[bad, good]);
+        let img = image_with_dir_partition(
+            crabka_audit::NodeId(1),
+            &[crabka_audit::NodeId(1), crabka_audit::NodeId(2)],
+            &[crabka_audit::NodeId(1), crabka_audit::NodeId(2)],
+            &[bad, good],
+        );
         let (source, captured) = MockSource::new(img);
         let controller: Arc<dyn crate::metadata_source::MetadataSource> = Arc::new(source);
-        let liveness = liveness_with(&[1, 2]).await;
+        let liveness = liveness_with(&[crabka_audit::NodeId(1), crabka_audit::NodeId(2)]).await;
         let metrics = crate::metrics::BrokerMetrics::new();
         let offline: std::collections::HashSet<Uuid> = [bad].into_iter().collect();
 
-        let recoveries = failover_offline_dirs(&controller, 1, &offline, &liveness, &metrics).await;
+        let recoveries = failover_offline_dirs(
+            &controller,
+            crabka_audit::NodeId(1),
+            &offline,
+            &liveness,
+            &metrics,
+        )
+        .await;
 
         // Exactly one change must have been submitted (the new leader record):
         // broker 2 is elected (broker 1's dir is offline), the offline replica
@@ -541,9 +565,9 @@ mod tests {
         let expected_changes = vec![MetadataRecord::V1Partition(PartitionRecord {
             topic: "t".into(),
             partition: 0,
-            leader: 2,
-            replicas: vec![1, 2],
-            isr: vec![2],
+            leader: crabka_audit::NodeId(2),
+            replicas: vec![crabka_audit::NodeId(1), crabka_audit::NodeId(2)],
+            isr: vec![crabka_audit::NodeId(2)],
             leader_epoch: 6,
             adding_replicas: vec![],
             removing_replicas: vec![],
@@ -560,14 +584,26 @@ mod tests {
         let bad = Uuid::from_u128(0xBAD);
         let good = Uuid::from_u128(0x600D);
         // Both replicas are on `good` dir; reporting `bad` as offline is a no-op.
-        let img = image_with_dir_partition(1, &[1, 2], &[1, 2], &[good, good]);
+        let img = image_with_dir_partition(
+            crabka_audit::NodeId(1),
+            &[crabka_audit::NodeId(1), crabka_audit::NodeId(2)],
+            &[crabka_audit::NodeId(1), crabka_audit::NodeId(2)],
+            &[good, good],
+        );
         let (source, captured) = MockSource::new(img);
         let controller: Arc<dyn crate::metadata_source::MetadataSource> = Arc::new(source);
-        let liveness = liveness_with(&[1, 2]).await;
+        let liveness = liveness_with(&[crabka_audit::NodeId(1), crabka_audit::NodeId(2)]).await;
         let metrics = crate::metrics::BrokerMetrics::new();
         let offline: std::collections::HashSet<Uuid> = [bad].into_iter().collect();
 
-        let recoveries = failover_offline_dirs(&controller, 1, &offline, &liveness, &metrics).await;
+        let recoveries = failover_offline_dirs(
+            &controller,
+            crabka_audit::NodeId(1),
+            &offline,
+            &liveness,
+            &metrics,
+        )
+        .await;
 
         // No change submitted and no recovery needed.
         let changes = captured.lock().unwrap();
@@ -583,14 +619,20 @@ mod tests {
         // drain gate must still report "safe to shut down" (regression: this
         // used to count the partition forever and time out controlled
         // shutdown at 30s).
-        let img = image_with_dir_partition(1, &[1], &[1], &[Uuid::nil()]);
+        let img = image_with_dir_partition(
+            crabka_audit::NodeId(1),
+            &[crabka_audit::NodeId(1)],
+            &[crabka_audit::NodeId(1)],
+            &[Uuid::nil()],
+        );
         let (source, captured) = MockSource::new(img);
         let controller: Arc<dyn crate::metadata_source::MetadataSource> = Arc::new(source);
-        let liveness = liveness_with(&[1]).await;
+        let liveness = liveness_with(&[crabka_audit::NodeId(1)]).await;
 
-        let drained = drain_leaderships_for_shutdown(&controller, &liveness, 1)
-            .await
-            .unwrap();
+        let drained =
+            drain_leaderships_for_shutdown(&controller, &liveness, crabka_audit::NodeId(1))
+                .await
+                .unwrap();
 
         assert!(drained); // untransferable partition is not counted
         assert!(captured.lock().unwrap().is_empty()); // nothing to transfer
@@ -600,14 +642,20 @@ mod tests {
     async fn transferable_partition_blocks_until_leadership_moves() {
         // Broker 1 leads an RF=2 partition with broker 2 alive in ISR: it can
         // and must transfer, so the broker is not yet safe to shut down.
-        let img = image_with_dir_partition(1, &[1, 2], &[1, 2], &[Uuid::nil(), Uuid::nil()]);
+        let img = image_with_dir_partition(
+            crabka_audit::NodeId(1),
+            &[crabka_audit::NodeId(1), crabka_audit::NodeId(2)],
+            &[crabka_audit::NodeId(1), crabka_audit::NodeId(2)],
+            &[Uuid::nil(), Uuid::nil()],
+        );
         let (source, captured) = MockSource::new(img);
         let controller: Arc<dyn crate::metadata_source::MetadataSource> = Arc::new(source);
-        let liveness = liveness_with(&[1, 2]).await;
+        let liveness = liveness_with(&[crabka_audit::NodeId(1), crabka_audit::NodeId(2)]).await;
 
-        let drained = drain_leaderships_for_shutdown(&controller, &liveness, 1)
-            .await
-            .unwrap();
+        let drained =
+            drain_leaderships_for_shutdown(&controller, &liveness, crabka_audit::NodeId(1))
+                .await
+                .unwrap();
 
         assert!(!drained); // still leading a transferable partition pre-submit
         let changes = captured.lock().unwrap();
@@ -615,7 +663,7 @@ mod tests {
         let MetadataRecord::V1Partition(pr) = &changes[0] else {
             panic!("expected V1Partition change")
         };
-        assert!(pr.leader == 2); // leadership handed to the live ISR replica
+        assert!(pr.leader == crabka_audit::NodeId(2)); // leadership handed to the live ISR replica
     }
 
     /// Empty ACLs + no super-users → every principal is denied

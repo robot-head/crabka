@@ -110,7 +110,10 @@ fn describe_one(
                 ..Default::default()
             };
         };
-        let map = image.broker_config(node_id).cloned().unwrap_or_default();
+        let map = image
+            .broker_config(crabka_metadata::NodeId(node_id))
+            .cloned()
+            .unwrap_or_default();
         let key_filter: Option<&[String]> = r.configuration_keys.as_deref();
         let configs: Vec<DescribeConfigsResourceResult> = map
             .iter()
@@ -283,7 +286,7 @@ mod tests {
     fn image_with_broker_config(node_id: u64, key: &str, value: &str) -> MetadataImage {
         let mut img = MetadataImage::new(Uuid::nil());
         img.apply(&MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
-            node_id,
+            node_id: crabka_metadata::NodeId(node_id),
             config_name: key.to_string(),
             config_value: Some(value.to_string()),
         }));
@@ -301,7 +304,10 @@ mod tests {
     #[test]
     fn broker_resource_all_keys_returned_when_no_filter() {
         let img = image_with_broker_config(1, "leader.replication.throttled.rate", "1024");
-        let map = img.broker_config(1).cloned().unwrap_or_default();
+        let map = img
+            .broker_config(crabka_metadata::NodeId(1))
+            .cloned()
+            .unwrap_or_default();
         assert!(
             map.get("leader.replication.throttled.rate")
                 .map(String::as_str)
@@ -404,17 +410,20 @@ mod tests {
     fn broker_resource_key_filter_applied() {
         let mut img = MetadataImage::new(Uuid::nil());
         img.apply(&MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
-            node_id: 2,
+            node_id: crabka_metadata::NodeId(2),
             config_name: "leader.replication.throttled.rate".to_string(),
             config_value: Some("512".to_string()),
         }));
         img.apply(&MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
-            node_id: 2,
+            node_id: crabka_metadata::NodeId(2),
             config_name: "follower.replication.throttled.rate".to_string(),
             config_value: Some("256".to_string()),
         }));
 
-        let map = img.broker_config(2).cloned().unwrap_or_default();
+        let map = img
+            .broker_config(crabka_metadata::NodeId(2))
+            .cloned()
+            .unwrap_or_default();
         let key_filter = ["leader.replication.throttled.rate".to_string()];
         let filtered: BTreeMap<_, _> = map
             .into_iter()
@@ -434,7 +443,10 @@ mod tests {
     fn broker_resource_missing_node_returns_empty_configs() {
         let img = MetadataImage::new(Uuid::nil());
         // Node 99 has no broker configs in the image.
-        let map = img.broker_config(99).cloned().unwrap_or_default();
+        let map = img
+            .broker_config(crabka_metadata::NodeId(99))
+            .cloned()
+            .unwrap_or_default();
         assert!(map.is_empty());
     }
 

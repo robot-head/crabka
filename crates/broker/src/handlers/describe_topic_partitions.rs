@@ -196,17 +196,17 @@ pub(crate) async fn handle(
             row_partitions.push(DescribeTopicPartitionsResponsePartition {
                 error_code: codes::NONE,
                 partition_index: p.partition,
-                leader_id: i32::try_from(p.leader).unwrap_or(i32::MAX),
+                leader_id: i32::try_from(p.leader.0).unwrap_or(i32::MAX),
                 leader_epoch: p.leader_epoch,
                 replica_nodes: p
                     .replicas
                     .iter()
-                    .map(|&r| i32::try_from(r).unwrap_or(i32::MAX))
+                    .map(|&r| i32::try_from(r.0).unwrap_or(i32::MAX))
                     .collect(),
                 isr_nodes: p
                     .isr
                     .iter()
-                    .map(|&r| i32::try_from(r).unwrap_or(i32::MAX))
+                    .map(|&r| i32::try_from(r.0).unwrap_or(i32::MAX))
                     .collect(),
                 // ELR / last-known-ELR: the schema marks both
                 // `nullableVersions: 0+` and `default: null`, but the

@@ -71,7 +71,7 @@ async fn three_node_cluster_elects_leader() {
         }
     }
     assert!(
-        leaders.len() == 1 && !leaders.contains(&0),
+        leaders.len() == 1 && !leaders.contains(&crabka_broker::NodeId(0)),
         "leader not converged: {leaders:?}"
     );
     for (h, _, _) in cluster {
@@ -153,7 +153,7 @@ async fn leader_kill_recovers() {
         let mut rx = h.watch_leader_for_test();
         tokio::time::timeout(
             Duration::from_secs(30),
-            rx.wait_for(|l| matches!(l, Some(id) if *id != 0 && *id != killed_node_id)),
+            rx.wait_for(|l| matches!(l, Some(id) if *id != crabka_broker::NodeId(0) && *id != killed_node_id)),
         )
         .await
         .expect("no new leader within 30s after kill")
@@ -166,7 +166,9 @@ async fn leader_kill_recovers() {
         }
     }
     assert!(
-        leaders.len() == 1 && !leaders.contains(&0) && !leaders.contains(&killed_node_id),
+        leaders.len() == 1
+            && !leaders.contains(&crabka_broker::NodeId(0))
+            && !leaders.contains(&killed_node_id),
         "no single new leader: {leaders:?}"
     );
 

@@ -156,7 +156,12 @@ pub(crate) async fn compute_reassignment_progress(
     let mut updates = Vec::new();
     // Snapshot the alive set once (single lock) instead of taking the
     // liveness lock per target replica in the leader-handoff branch.
-    let alive = liveness.alive_snapshot().await;
+    let alive: std::collections::HashSet<NodeId> = liveness
+        .alive_snapshot()
+        .await
+        .into_iter()
+        .map(NodeId)
+        .collect();
     for pr in image.reassignments_in_flight() {
         if let Some(next) = reassign_one(pr, &alive) {
             updates.push(MetadataRecord::V1Partition(next));
@@ -261,17 +266,17 @@ mod tests {
     }
 
     fn img(
-        replicas: &[NodeId],
-        isr: &[NodeId],
-        adding: &[NodeId],
-        removing: &[NodeId],
-        leader: NodeId,
+        replicas: &[u64],
+        isr: &[u64],
+        adding: &[u64],
+        removing: &[u64],
+        leader: u64,
     ) -> Arc<MetadataImage> {
         let mut img = MetadataImage::new(Uuid::nil());
-        for n in 1..=6 {
+        for n in 1..=6u64 {
             img.apply(&MetadataRecord::V1BrokerRegistration(
                 BrokerRegistrationRecord {
-                    node_id: n,
+                    node_id: NodeId(n),
                     broker_epoch: 0,
                     incarnation_id: Uuid::nil(),
                     host: String::new(),
@@ -290,19 +295,19 @@ mod tests {
         img.apply(&MetadataRecord::V1Partition(PartitionRecord {
             topic: "foo".into(),
             partition: 0,
-            leader,
-            replicas: replicas.to_vec(),
-            isr: isr.to_vec(),
+            leader: NodeId(leader),
+            replicas: replicas.iter().copied().map(NodeId).collect(),
+            isr: isr.iter().copied().map(NodeId).collect(),
             leader_epoch: 5,
-            adding_replicas: adding.to_vec(),
-            removing_replicas: removing.to_vec(),
+            adding_replicas: adding.iter().copied().map(NodeId).collect(),
+            removing_replicas: removing.iter().copied().map(NodeId).collect(),
             directories: vec![],
             partition_epoch: 0,
         }));
         Arc::new(img)
     }
 
-    async fn liveness(alive: &[NodeId]) -> ControllerLivenessState {
+    async fn liveness(alive: &[u64]) -> ControllerLivenessState {
         let l = ControllerLivenessState::new(Duration::from_secs(10));
         for n in alive {
             l.record_heartbeat(*n).await;
@@ -323,7 +328,11 @@ mod tests {
         let db = uuid::Uuid::from_u128(0xB);
         let dc = uuid::Uuid::from_u128(0xC);
         // replicas [1,2,3] dirs [dA,dB,dC]; reassignment removes broker 2.
-        let new = remap_directories(&[1, 2, 3], &[da, db, dc], &[1, 3]);
+        let new = remap_directories(
+            &[NodeId(1), NodeId(2), NodeId(3)],
+            &[da, db, dc],
+            &[NodeId(1), NodeId(3)],
+        );
         // broker 1 keeps dA at slot 0; broker 3 keeps dC at slot 1 (NOT dB).
         assert!(new == vec![da, dc]);
     }
@@ -332,7 +341,7 @@ mod tests {
     fn remap_directories_assigns_nil_to_new_replica() {
         let da = uuid::Uuid::from_u128(0xA);
         // replicas [1] dirs [dA]; add broker 2 (no dir yet).
-        let new = remap_directories(&[1], &[da], &[1, 2]);
+        let new = remap_directories(&[NodeId(1)], &[da], &[NodeId(1), NodeId(2)]);
         assert!(new == vec![da, uuid::Uuid::nil()]);
     }
 
@@ -340,18 +349,18 @@ mod tests {
     /// `compute_reassignment_progress` keeps directories aligned after
     /// completion removes a replica from the set.
     fn img_with_dirs(
-        replicas: &[NodeId],
-        isr: &[NodeId],
-        adding: &[NodeId],
-        removing: &[NodeId],
-        leader: NodeId,
+        replicas: &[u64],
+        isr: &[u64],
+        adding: &[u64],
+        removing: &[u64],
+        leader: u64,
         directories: &[Uuid],
     ) -> Arc<MetadataImage> {
         let mut image = MetadataImage::new(Uuid::nil());
-        for n in 1..=6 {
+        for n in 1..=6u64 {
             image.apply(&MetadataRecord::V1BrokerRegistration(
                 BrokerRegistrationRecord {
-                    node_id: n,
+                    node_id: NodeId(n),
                     broker_epoch: 0,
                     incarnation_id: Uuid::nil(),
                     host: String::new(),
@@ -370,12 +379,12 @@ mod tests {
         image.apply(&MetadataRecord::V1Partition(PartitionRecord {
             topic: "foo".into(),
             partition: 0,
-            leader,
-            replicas: replicas.to_vec(),
-            isr: isr.to_vec(),
+            leader: NodeId(leader),
+            replicas: replicas.iter().copied().map(NodeId).collect(),
+            isr: isr.iter().copied().map(NodeId).collect(),
             leader_epoch: 5,
-            adding_replicas: adding.to_vec(),
-            removing_replicas: removing.to_vec(),
+            adding_replicas: adding.iter().copied().map(NodeId).collect(),
+            removing_replicas: removing.iter().copied().map(NodeId).collect(),
             directories: directories.to_vec(),
             partition_epoch: 0,
         }));
@@ -396,7 +405,7 @@ mod tests {
         assert!(updates.len() == 1);
         let pr = first_partition(&updates[0]);
         // Slot 0 → broker 1 → dA; slot 1 → broker 3 → dC (NOT dB).
-        check!(pr.replicas == vec![1, 3]);
+        check!(pr.replicas == vec![NodeId(1), NodeId(3)]);
         check!(pr.directories == vec![da, dc]);
         check!(pr.partition_epoch == 1);
     }
@@ -409,11 +418,11 @@ mod tests {
         assert!(updates.len() == 1);
         let pr = first_partition(&updates[0]);
         // leader and leader_epoch are unchanged (leader didn't change).
-        check!(pr.replicas == vec![1, 3]);
+        check!(pr.replicas == vec![NodeId(1), NodeId(3)]);
         check!(pr.adding_replicas == Vec::<NodeId>::new());
         check!(pr.removing_replicas == Vec::<NodeId>::new());
-        check!(pr.isr == vec![1, 3]);
-        check!(pr.leader == 1);
+        check!(pr.isr == vec![NodeId(1), NodeId(3)]);
+        check!(pr.leader == NodeId(1));
         check!(pr.leader_epoch == 5);
         check!(pr.partition_epoch == 1);
     }
@@ -474,13 +483,17 @@ mod tests {
         let updates = compute_reassignment_progress(&img, &l).await;
         assert!(updates.len() == 1);
         let pr = first_partition(&updates[0]);
-        assert!(pr.leader == 1 || pr.leader == 3, "leader was {}", pr.leader);
+        assert!(
+            pr.leader == NodeId(1) || pr.leader == NodeId(3),
+            "leader was {}",
+            pr.leader.0
+        );
         // leader_epoch bumped; replica set unchanged — completion happens
         // next tick.
         check!(pr.leader_epoch == 6);
         check!(pr.partition_epoch == 1);
-        check!(pr.adding_replicas == vec![3]);
-        check!(pr.removing_replicas == vec![2]);
+        check!(pr.adding_replicas == vec![NodeId(3)]);
+        check!(pr.removing_replicas == vec![NodeId(2)]);
     }
 
     #[tokio::test]
@@ -502,7 +515,7 @@ mod tests {
         assert!(submissions.len() == 1);
         assert!(submissions[0].len() == 1);
         let pr = first_partition(&submissions[0][0]);
-        assert!(pr.replicas == vec![1, 3]);
+        assert!(pr.replicas == vec![NodeId(1), NodeId(3)]);
         assert!(pr.partition_epoch == 1);
     }
 
@@ -532,10 +545,10 @@ mod tests {
     #[tokio::test]
     async fn multiple_partitions_handled_independently() {
         let mut img_inner = MetadataImage::new(Uuid::nil());
-        for n in 1..=6 {
+        for n in 1..=6u64 {
             img_inner.apply(&MetadataRecord::V1BrokerRegistration(
                 BrokerRegistrationRecord {
-                    node_id: n,
+                    node_id: NodeId(n),
                     broker_epoch: 0,
                     incarnation_id: Uuid::nil(),
                     host: String::new(),
@@ -555,12 +568,12 @@ mod tests {
             img_inner.apply(&MetadataRecord::V1Partition(PartitionRecord {
                 topic: name.into(),
                 partition: 0,
-                leader: 1,
-                replicas: vec![1, 2, 3],
-                isr: vec![1, 2, 3],
+                leader: NodeId(1),
+                replicas: vec![NodeId(1), NodeId(2), NodeId(3)],
+                isr: vec![NodeId(1), NodeId(2), NodeId(3)],
                 leader_epoch: 5,
-                adding_replicas: vec![3],
-                removing_replicas: vec![2],
+                adding_replicas: vec![NodeId(3)],
+                removing_replicas: vec![NodeId(2)],
                 directories: vec![],
                 partition_epoch: 0,
             }));
@@ -580,8 +593,8 @@ mod tests {
         let updates = compute_reassignment_progress(&img, &l).await;
         assert!(updates.len() == 1);
         let pr = first_partition(&updates[0]);
-        assert!(pr.replicas == vec![3, 4, 5]);
-        assert!(pr.isr == vec![3, 4, 5]);
+        assert!(pr.replicas == vec![NodeId(3), NodeId(4), NodeId(5)]);
+        assert!(pr.isr == vec![NodeId(3), NodeId(4), NodeId(5)]);
     }
 
     #[tokio::test]
@@ -593,7 +606,7 @@ mod tests {
         let updates = compute_reassignment_progress(&img, &l).await;
         assert!(updates.len() == 1);
         let pr = first_partition(&updates[0]);
-        assert!(pr.isr == vec![1, 3, 4]);
+        assert!(pr.isr == vec![NodeId(1), NodeId(3), NodeId(4)]);
     }
 }
 

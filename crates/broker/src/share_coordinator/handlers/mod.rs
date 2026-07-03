@@ -19,7 +19,7 @@ pub(crate) mod write;
 pub(crate) mod test_support {
     use std::{path::Path, sync::Arc};
 
-    use crabka_ids::PartitionIndex;
+    use crabka_ids::{NodeId, PartitionIndex};
     use crabka_log::{Log, LogConfig, Offset};
 
     use crate::{
@@ -72,7 +72,7 @@ pub(crate) mod test_support {
         let registry = Arc::new(PartitionRegistry::new());
         open_all_state_partitions(&registry, log_dir);
         Arc::new(ShareCoordinator::new(
-            1,
+            NodeId(1),
             registry,
             ShareCoordinatorConfig::default(),
         ))

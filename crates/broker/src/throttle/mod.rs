@@ -34,8 +34,8 @@ impl ThrottledReplicas {
                 .trim()
                 .parse()
                 .map_err(|e| format!("partition: {e}"))?;
-            let n: NodeId = n_str.trim().parse().map_err(|e| format!("broker: {e}"))?;
-            out.push((p, n));
+            let n: u64 = n_str.trim().parse().map_err(|e| format!("broker: {e}"))?;
+            out.push((p, NodeId(n)));
         }
         Ok(Self::List(out))
     }
@@ -100,7 +100,7 @@ mod tests {
         let r = ThrottledReplicas::parse("0:1").unwrap();
         for (partition, broker, want) in [(0, 1, true), (0, 2, false), (1, 1, false)] {
             assert!(
-                r.contains(partition, broker) == want,
+                r.contains(partition, NodeId(broker)) == want,
                 "{partition}:{broker}"
             );
         }
@@ -111,7 +111,7 @@ mod tests {
         let r = ThrottledReplicas::parse("0:1,0:2,1:3").unwrap();
         for (partition, broker, want) in [(0, 1, true), (0, 2, true), (1, 3, true), (1, 1, false)] {
             assert!(
-                r.contains(partition, broker) == want,
+                r.contains(partition, NodeId(broker)) == want,
                 "{partition}:{broker}"
             );
         }
@@ -127,7 +127,7 @@ mod tests {
     #[test]
     fn whitespace_tolerated() {
         let r = ThrottledReplicas::parse(" 0 : 1 , 2:3 ").unwrap();
-        assert!(r.contains(0, 1));
-        assert!(r.contains(2, 3));
+        assert!(r.contains(0, NodeId(1)));
+        assert!(r.contains(2, NodeId(3)));
     }
 }

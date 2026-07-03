@@ -81,7 +81,7 @@ pub(crate) async fn handle(
         .controller
         .watch_leader()
         .borrow()
-        .map_or(-1, |n| i32::try_from(n).unwrap_or(-1));
+        .map_or(-1, |n| i32::try_from(n.0).unwrap_or(-1));
 
     // KIP-919: the request's `endpoint_type` selects which node set to
     // advertise — `1` (BROKERS, the default) or `2` (CONTROLLERS). For
@@ -102,7 +102,7 @@ pub(crate) async fn handle(
                     .find(|e| e.name.eq_ignore_ascii_case("CONTROLLER"))
                     .or_else(|| v.endpoints.first());
                 DescribeClusterBroker {
-                    broker_id: i32::try_from(v.id).unwrap_or(-1),
+                    broker_id: i32::try_from(v.id.0).unwrap_or(-1),
                     host: ep.map(|e| e.host.clone()).unwrap_or_default(),
                     port: ep.map_or(-1, |e| i32::from(e.port)),
                     rack: None,
@@ -125,7 +125,7 @@ pub(crate) async fn handle(
                     inter_broker_name,
                 );
                 DescribeClusterBroker {
-                    broker_id: i32::try_from(b.node_id).unwrap_or(-1),
+                    broker_id: i32::try_from(b.node_id.0).unwrap_or(-1),
                     host,
                     port,
                     rack: b.rack.clone(),
@@ -173,7 +173,7 @@ mod tests {
     use std::sync::Arc;
 
     use assert2::assert;
-    use crabka_metadata::{BrokerEndpoint, BrokerRegistrationRecord, MetadataRecord};
+    use crabka_metadata::{BrokerEndpoint, BrokerRegistrationRecord, MetadataRecord, NodeId};
     use crabka_security::ListenerProtocol;
 
     use super::*;
@@ -207,7 +207,7 @@ mod tests {
             .controller
             .submit_change(vec![MetadataRecord::V1BrokerRegistration(
                 BrokerRegistrationRecord {
-                    node_id: 42,
+                    node_id: NodeId(42),
                     broker_epoch: 7,
                     incarnation_id: uuid::Uuid::nil(),
                     host: "legacy-host".into(),
