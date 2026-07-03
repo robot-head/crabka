@@ -303,8 +303,14 @@ mod tests {
             ServerStep::Done { .. } => panic!("expected challenge"),
         };
         let rendered = format!("{ex:?}");
-        for part in ["GssapiServerExchange::AwaitingChoice", "AwaitingChoice"] {
-            assert!(rendered.contains(part), "missing {part:?} in {rendered}");
-        }
+        // `AwaitingChoice` has no fields, so its own `Debug` impl only ever
+        // contributes the `finish_non_exhaustive()` marker (`{ .. }`) — assert
+        // on that exact text rather than the bare name, which the *enclosing*
+        // `GssapiServerExchange::AwaitingChoice(...)` wrapper would already
+        // contain even if the inner impl wrote nothing at all.
+        assert!(
+            rendered.contains("AwaitingChoice { .. }"),
+            "missing \"AwaitingChoice {{ .. }}\" in {rendered}"
+        );
     }
 }
