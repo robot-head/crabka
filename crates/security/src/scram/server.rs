@@ -51,6 +51,7 @@ impl std::fmt::Debug for ScramServerExchange {
 }
 
 #[derive(Debug)]
+#[must_use]
 pub enum StepResult {
     Continue(Vec<u8>, ScramServerExchange),
     Done(Principal, Vec<u8>),
