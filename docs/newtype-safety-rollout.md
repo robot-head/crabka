@@ -6,7 +6,17 @@ Tracking document for applying the [Newtypes for Domain Values](style_guides/cod
 
 Crate-local fixes are being applied in verified batches — each brought to a green `cargo clippy --workspace --all-targets -- -D warnings` and passing tests before the next. **Done so far:** throttle, audit, bench-driver, connect, logql (batch 1, + downstream adaptations in connect-postgres, replicator, observability); cli, grpc-gateway, metrics-service, profiles, traces (batch 2); schema-registry, operator, traceql, promql (batch 3, + a metrics-service bridge); connect-postgres, replicator (batch 4). The cross-crate core identifiers below remain a staged program.
 
-**Observed at the batch boundary:** promql and metrics-service each grew their own crate-local `Offset`/`PartitionIndex`, and they meet at `apply_wal_record_at`, forcing a `.0.into()` bridge through the raw primitive. That friction is the concrete argument for treating `Offset`/`PartitionIndex` (and the other core ids) as a *single* shared type owned by one crate rather than duplicating them — i.e. the staged program, not more crate-local copies.
+**Observed at the batch boundary:** promql and metrics-service each grew their own crate-local `Offset`/`PartitionIndex`, and they meet at `apply_wal_record_at`, forcing a `.0.into()` bridge through the raw primitive. That friction is the concrete argument for treating `Offset`/`PartitionIndex` (and the other core ids) as a *single* shared type owned by one crate rather than duplicating them.
+
+### Cross-crate program — progress
+
+The shared-type foundation is landed:
+
+- **`crabka-ids`** now defines the canonical `Offset(i64)` and `PartitionIndex(i32)` — a zero-IO, WASM-buildable leaf crate depending only on `derive_more` + `serde`, so even the observability stack (which does not depend on `crabka-protocol`) can name a Kafka offset without a raw integer.
+- The four scattered crate-local copies (grpc-gateway, metrics-service, promql, replicator) were **unified** onto it, removing the `.0.into()` bridge.
+- Adopted directly in the Kafka-WAL offset consumers whose formats are verified by their own `cargo test` (observability, metrics).
+
+**What remains — and the verification constraint.** The bulk of `Offset`/`PartitionIndex` lives in the wire-facing core: `log` (~328 sites), `broker` (~297), `raft` (~145), and the storage/records crates they hub through. Threading the shared types there is a large *coordinated* change (broker consumes all of them), and — critically — its Kafka byte-exactness is verified by the **JVM differential oracle** (`cargo test -- --include-ignored` against a live `cp-kafka`, needing JDK + gradle + Docker), which does **not** run in a plain `cargo test` gate. Rolling those ~900 wire-critical sites without the differential suite in the loop would risk exactly the byte-exactness this project can't lose. So the core rollout is deliberately left for a focused effort **run with the differential oracle**, one crate-group at a time in dependency order (protocol record domain → log → raft → broker → storage/records → clients).
 
 ---
 
@@ -41,8 +51,8 @@ High-value but wire-crossing. Each is a staged rollout: **define the canonical n
 
 | Rank | Newtype | Owner | Recurrence | Blast radius |
 | :--- | :--- | :--- | :--- | :--- |
-| 1 | `Offset(i64)` (+`Add`/`Sub`) | `protocol`, re-exported via `log` | offset-family in **18 crates** | Very large |
-| 2 | `PartitionIndex(i32)` | `protocol` | **14 crates** | Very large (travels with `Offset` as the `(partition, offset)` pair) |
+| 1 | `Offset(i64)` (+`+ i64`) | **`crabka-ids`** ✅ landed; adopted in observability, metrics, and the 4 unified crates | offset-family in **18 crates** | Very large (wire-facing core pending, needs the differential oracle) |
+| 2 | `PartitionIndex(i32)` | **`crabka-ids`** ✅ landed | **14 crates** | Very large (travels with `Offset`; wire-facing core pending) |
 | 3 | `BrokerId` / unify `NodeId` | `metadata` / `voters` | 5 crates; **two colliding `NodeId=u64` aliases** | Large — this is a rename+merge, not just a wrap |
 | 4 | `LeaderEpoch(i32)` (+ distinct `OffsetEpoch`) | `protocol`/`metadata` | ~7 crates | Medium-large |
 | 5 | `ProducerId(i64)` | `protocol` | 4 crates | Medium (ships with record-batch field newtypes) |

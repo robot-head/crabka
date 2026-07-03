@@ -29,6 +29,7 @@ clap = { workspace = true }
 crabka-blockstore = { path = "../blockstore", version = "0.3.7" }
 crabka-client-consumer = { path = "../client-consumer", version = "0.3.8" }
 crabka-client-producer = { path = "../client-producer", version = "0.3.8" }
+crabka-ids = { version = "0.3.8", path = "../ids" }
 crabka-telemetry = { path = "../telemetry", version = "0.3.8" }
 crabka-throttle = { path = "../throttle", version = "0.3.8" }
 dashmap = { workspace = true }

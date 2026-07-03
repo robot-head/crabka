@@ -14,9 +14,9 @@ use crabka_blockstore::{
 };
 use crabka_logql::{parse_metric_query, parse_query, plan_stream_query};
 use crabka_observability::{
-    BufferedLogHotTail, CompactionFrontier, KafkaWalHeader, KafkaWalRecord, LogWalConsumer,
-    WalConsumerError, WalLogRecord, WalPosition, build_kafka_wal_record, execute_metric_query,
-    execute_metric_query_from_object_store, execute_metric_query_range,
+    BufferedLogHotTail, CompactionFrontier, KafkaWalHeader, KafkaWalRecord, LogWalConsumer, Offset,
+    PartitionIndex, WalConsumerError, WalLogRecord, WalPosition, build_kafka_wal_record,
+    execute_metric_query, execute_metric_query_from_object_store, execute_metric_query_range,
     execute_metric_query_range_with_hot_tail, execute_stream_query,
     execute_stream_query_from_object_store, execute_stream_query_with_hot_tail,
     execute_stream_query_with_hot_tail_frontier, execute_tail_query,
@@ -349,8 +349,8 @@ async fn executes_stream_query_filters_hot_tail_by_partition_offset_frontier() {
             line: "already compacted error".to_string(),
             structured_metadata: BTreeMap::new(),
             position: Some(WalPosition {
-                partition: 0,
-                offset: 42,
+                partition: PartitionIndex(0),
+                offset: Offset(42),
             }),
         },
         WalLogRecord {
@@ -360,12 +360,12 @@ async fn executes_stream_query_filters_hot_tail_by_partition_offset_frontier() {
             line: "new hot error".to_string(),
             structured_metadata: BTreeMap::new(),
             position: Some(WalPosition {
-                partition: 0,
-                offset: 43,
+                partition: PartitionIndex(0),
+                offset: Offset(43),
             }),
         },
     ];
-    let frontier = CompactionFrontier::new(19).with_partition_offset(0, 42);
+    let frontier = CompactionFrontier::new(19).with_partition_offset(PartitionIndex(0), Offset(42));
 
     let response = execute_stream_query_with_hot_tail_frontier(
         dir.path(),
@@ -414,8 +414,8 @@ async fn hot_tail_buffer_polls_and_decodes_kafka_wal_records() {
     let mut consumer = RecordingWalConsumer::new(vec![vec![
         KafkaWalRecord {
             value: produced.value.unwrap().to_vec(),
-            partition: 2,
-            offset: 42,
+            partition: PartitionIndex(2),
+            offset: Offset(42),
             timestamp_ms: produced.timestamp_ms,
             headers: produced
                 .headers
@@ -428,8 +428,8 @@ async fn hot_tail_buffer_polls_and_decodes_kafka_wal_records() {
         },
         KafkaWalRecord {
             value: b"worker error".to_vec(),
-            partition: 3,
-            offset: 7,
+            partition: PartitionIndex(3),
+            offset: Offset(7),
             timestamp_ms: Some(2),
             headers: vec![
                 kafka_header("crabka-wal-record-type", "log-line"),
@@ -450,8 +450,8 @@ async fn hot_tail_buffer_polls_and_decodes_kafka_wal_records() {
             == vec![
                 WalLogRecord {
                     position: Some(WalPosition {
-                        partition: 2,
-                        offset: 42,
+                        partition: PartitionIndex(2),
+                        offset: Offset(42),
                     }),
                     ..record
                 },
@@ -462,8 +462,8 @@ async fn hot_tail_buffer_polls_and_decodes_kafka_wal_records() {
                     line: "worker error".to_string(),
                     structured_metadata: BTreeMap::new(),
                     position: Some(WalPosition {
-                        partition: 3,
-                        offset: 7,
+                        partition: PartitionIndex(3),
+                        offset: Offset(7),
                     }),
                 },
             ]
@@ -558,8 +558,8 @@ fn executes_tail_query_filters_hot_tail_by_partition_offset_frontier() {
             line: "already compacted error".to_string(),
             structured_metadata: BTreeMap::new(),
             position: Some(WalPosition {
-                partition: 0,
-                offset: 42,
+                partition: PartitionIndex(0),
+                offset: Offset(42),
             }),
         },
         WalLogRecord {
@@ -569,12 +569,12 @@ fn executes_tail_query_filters_hot_tail_by_partition_offset_frontier() {
             line: "new hot error".to_string(),
             structured_metadata: BTreeMap::new(),
             position: Some(WalPosition {
-                partition: 0,
-                offset: 43,
+                partition: PartitionIndex(0),
+                offset: Offset(43),
             }),
         },
     ];
-    let frontier = CompactionFrontier::new(19).with_partition_offset(0, 42);
+    let frontier = CompactionFrontier::new(19).with_partition_offset(PartitionIndex(0), Offset(42));
 
     let response = execute_tail_query_with_frontier(&plan, &hot_tail, &frontier);
 

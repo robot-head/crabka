@@ -17,6 +17,7 @@ use crabka_broker::{Broker, BrokerConfig};
 use crabka_client_admin::{AdminClient, CreateTopicSpec};
 use crabka_client_consumer::{AutoOffsetReset, Consumer};
 use crabka_client_producer::Producer;
+use crabka_ids::{Offset, PartitionIndex};
 use crabka_metrics::{
     CompactionPartitionOffset, MetricBlockKind, MetricsCompactorConfig, SamplePayload, WAL_TOPIC,
     WalRecord, compaction_partition_object_key,
@@ -103,12 +104,18 @@ async fn remote_write_v1_lands_as_block() {
     check!(
         result.committed_offsets
             == vec![CompactionPartitionOffset {
-                partition: 0,
-                offset: 1,
+                partition: PartitionIndex(0),
+                offset: Offset(1),
             }]
     );
 
-    let block_key = compaction_partition_object_key("tenant-a", MetricBlockKind::Float, 0, 0, 0);
+    let block_key = compaction_partition_object_key(
+        "tenant-a",
+        MetricBlockKind::Float,
+        PartitionIndex(0),
+        0,
+        0,
+    );
     let batches = read_block(object_store, &block_key)
         .await
         .expect("read compacted block");

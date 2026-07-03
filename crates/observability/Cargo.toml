@@ -28,6 +28,7 @@ crabka-blockstore = { version = "0.3.7", path = "../blockstore" }
 crabka-client-admin = { version = "0.3.8", path = "../client-admin" }
 crabka-client-consumer = { version = "0.3.8", path = "../client-consumer" }
 crabka-client-producer = { version = "0.3.8", path = "../client-producer" }
+crabka-ids = { version = "0.3.8", path = "../ids" }
 crabka-logql = { version = "0.3.8", path = "../logql" }
 crabka-telemetry = { version = "0.3.8", path = "../telemetry" }
 datafusion.workspace = true

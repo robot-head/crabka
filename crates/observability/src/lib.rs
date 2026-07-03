@@ -1,5 +1,6 @@
 //! Role-selectable service skeleton for Crabka observability.
 
+pub mod ids;
 pub mod metrics;
 
 use std::{
@@ -85,6 +86,7 @@ use datafusion::{
 };
 use flate2::read::{DeflateDecoder, GzDecoder};
 use futures_util::{StreamExt as _, TryStreamExt as _};
+pub use ids::{Offset, PartitionIndex};
 use object_store::{
     ObjectStore, ObjectStoreExt, local::LocalFileSystem, parse_url_opts, path::Path as ObjectPath,
 };
@@ -992,8 +994,8 @@ async fn advance_and_persist_compaction_frontier(
     descriptor: &BlockDescriptor,
 ) -> Result<(), CompactorRunError> {
     frontier.advance_partition_offset(WalPosition {
-        partition: descriptor.key.partition,
-        offset: descriptor.key.last_offset,
+        partition: PartitionIndex(descriptor.key.partition),
+        offset: Offset(descriptor.key.last_offset),
     });
     write_compaction_frontier_to_object_store(store, prefix, &frontier.snapshot()).await?;
     Ok(())
@@ -1112,7 +1114,7 @@ async fn compact_polled_kafka_wal_records_inner(
         .map(decode_kafka_wal_record_envelope)
         .collect::<Result<Vec<_>, _>>()?;
     let mut descriptors = Vec::new();
-    let mut commit_positions: BTreeMap<i32, i64> = BTreeMap::new();
+    let mut commit_positions: BTreeMap<PartitionIndex, Offset> = BTreeMap::new();
 
     for chunk in wal_compaction_chunks(decoded) {
         let tenant = chunk
@@ -1793,8 +1795,8 @@ async fn compact_wal_records_to_object_store_with_delete_filters_and_index_outpu
         })?;
         if position.partition != partition {
             return Err(CompactionError::MixedPartition {
-                expected: partition,
-                actual: position.partition,
+                expected: partition.get(),
+                actual: position.partition.get(),
             });
         }
 
@@ -1830,9 +1832,9 @@ async fn compact_wal_records_to_object_store_with_delete_filters_and_index_outpu
 
     let key = BlockKey::new(
         tenant,
-        partition,
-        first_offset,
-        last_offset,
+        partition.get(),
+        first_offset.get(),
+        last_offset.get(),
         TimeRange::new(start_ns, end_ns)?,
     );
     let mut staged_block_index = block_index.clone();
@@ -1859,8 +1861,8 @@ async fn compact_wal_records_to_object_store_with_delete_filters_and_index_outpu
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct WalPosition {
-    pub partition: i32,
-    pub offset: i64,
+    pub partition: PartitionIndex,
+    pub offset: Offset,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -1876,8 +1878,8 @@ pub struct WalLogRecord {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct KafkaWalRecord {
     pub value: Vec<u8>,
-    pub partition: i32,
-    pub offset: i64,
+    pub partition: PartitionIndex,
+    pub offset: Offset,
     pub timestamp_ms: Option<i64>,
     pub headers: Vec<KafkaWalHeader>,
 }
@@ -1891,7 +1893,7 @@ pub struct KafkaWalHeader {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompactionFrontier {
     pub compacted_through_ns: i64,
-    partition_offsets: BTreeMap<i32, i64>,
+    partition_offsets: BTreeMap<PartitionIndex, Offset>,
 }
 
 impl CompactionFrontier {
@@ -1904,7 +1906,7 @@ impl CompactionFrontier {
     }
 
     #[must_use]
-    pub fn with_partition_offset(mut self, partition: i32, offset: i64) -> Self {
+    pub fn with_partition_offset(mut self, partition: PartitionIndex, offset: Offset) -> Self {
         self.partition_offsets.insert(partition, offset);
         self
     }
@@ -1976,7 +1978,7 @@ const COMPACTION_FRONTIER_MANIFEST_RELATIVE_PATH: &str = "index/logs/compaction-
 struct CompactionFrontierManifest {
     version: u32,
     compacted_through_ns: i64,
-    partition_offsets: BTreeMap<i32, i64>,
+    partition_offsets: BTreeMap<PartitionIndex, Offset>,
 }
 
 impl From<&CompactionFrontier> for CompactionFrontierManifest {
@@ -2781,8 +2783,8 @@ impl LogWalConsumer for KafkaLogWalConsumer {
                     .to_vec();
                 Ok(KafkaWalRecord {
                     value,
-                    partition: record.partition,
-                    offset: record.offset,
+                    partition: PartitionIndex(record.partition),
+                    offset: Offset(record.offset),
                     timestamp_ms: Some(record.timestamp),
                     headers: record
                         .headers
@@ -2841,8 +2843,8 @@ pub fn build_kafka_wal_record(
 
 pub fn decode_kafka_wal_record(
     value: &[u8],
-    partition: i32,
-    offset: i64,
+    partition: PartitionIndex,
+    offset: Offset,
 ) -> Result<WalLogRecord, WalRecordDecodeError> {
     let mut record: WalLogRecord = serde_json::from_slice(value)?;
     record.position = Some(WalPosition { partition, offset });
@@ -20634,13 +20636,13 @@ mod tests {
 
         let mut compacted_by_offset = hot_tail_test_record(4 * BUCKET, "offset-old");
         compacted_by_offset.position = Some(WalPosition {
-            partition: 0,
-            offset: 7,
+            partition: PartitionIndex(0),
+            offset: Offset(7),
         });
         let mut kept_by_offset = hot_tail_test_record(3 * BUCKET, "offset-new");
         kept_by_offset.position = Some(WalPosition {
-            partition: 0,
-            offset: 8,
+            partition: PartitionIndex(0),
+            offset: Offset(8),
         });
         let compacted_by_time = hot_tail_test_record(2 * BUCKET, "time-old");
         let kept_by_time = hot_tail_test_record(5 * BUCKET, "time-new");
@@ -20653,7 +20655,8 @@ mod tests {
             kept_by_time,
         ]);
 
-        let frontier = CompactionFrontier::new(2 * BUCKET).with_partition_offset(0, 7);
+        let frontier =
+            CompactionFrontier::new(2 * BUCKET).with_partition_offset(PartitionIndex(0), Offset(7));
 
         assert_eq!(hot_tail.prune_compacted(&frontier), 2);
         assert_eq!(hot_tail.records(), expected);

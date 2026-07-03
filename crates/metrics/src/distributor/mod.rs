@@ -22,6 +22,7 @@ use bytes::Bytes;
 use crabka_blockstore::SeriesFingerprint;
 use crabka_client_consumer::{Consumer, ConsumerRecord};
 use crabka_client_producer::{Header as ProducerHeader, Producer, ProducerRecord};
+use crabka_ids::{Offset, PartitionIndex};
 use crabka_telemetry::propagation::current_trace_headers;
 pub use ha::{
     HA_TRACKER_TOPIC, HaDecision, HaElection, HaElectionRecord, HaTracker, ha_decision,
@@ -91,7 +92,10 @@ pub enum ProduceError {
 #[derive(Debug, thiserror::Error)]
 pub enum HaElectionReplayError {
     #[error("HA election record at partition {partition} offset {offset} has no value")]
-    MissingValue { partition: i32, offset: i64 },
+    MissingValue {
+        partition: PartitionIndex,
+        offset: Offset,
+    },
 
     #[error("HA election record decode failed: {0}")]
     Decode(String),
@@ -217,16 +221,16 @@ impl HaElectionSink for KafkaHaElectionSink {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HaElectionConsumerRecord {
     pub topic: String,
-    pub partition: i32,
-    pub offset: i64,
+    pub partition: PartitionIndex,
+    pub offset: Offset,
     pub value: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HaElectionPartitionOffset {
-    pub partition: i32,
+    pub partition: PartitionIndex,
     /// Kafka commit offset: the next offset after the last replayed record.
-    pub offset: i64,
+    pub offset: Offset,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -249,7 +253,7 @@ pub fn replay_ha_election_records(
     ha_topic: &str,
     records: &[HaElectionConsumerRecord],
 ) -> Result<HaElectionReplayResult, HaElectionReplayError> {
-    let mut committed_offsets = BTreeMap::<i32, i64>::new();
+    let mut committed_offsets = BTreeMap::<PartitionIndex, Offset>::new();
     let mut replayed_records = 0;
     for record in records {
         if record.topic != ha_topic {
@@ -330,8 +334,8 @@ where
         .into_iter()
         .map(|record| HaElectionConsumerRecord {
             topic: record.topic,
-            partition: record.partition,
-            offset: record.offset,
+            partition: PartitionIndex(record.partition),
+            offset: Offset(record.offset),
             value: record.value.map(|value| value.to_vec()),
         })
         .collect::<Vec<_>>();
@@ -2952,14 +2956,14 @@ overrides:
         let records = vec![
             HaElectionConsumerRecord {
                 topic: "ignored".to_string(),
-                partition: 0,
-                offset: 10,
+                partition: PartitionIndex(0),
+                offset: Offset(10),
                 value: Some(record.encode().unwrap()),
             },
             HaElectionConsumerRecord {
                 topic: HA_TRACKER_TOPIC.to_string(),
-                partition: 2,
-                offset: 20,
+                partition: PartitionIndex(2),
+                offset: Offset(20),
                 value: Some(record.encode().unwrap()),
             },
         ];
@@ -2972,8 +2976,8 @@ overrides:
                     polled_records: 2,
                     replayed_records: 1,
                     committed_offsets: vec![HaElectionPartitionOffset {
-                        partition: 2,
-                        offset: 21,
+                        partition: PartitionIndex(2),
+                        offset: Offset(21),
                     }],
                 }
         );
@@ -3014,8 +3018,8 @@ overrides:
                     polled_records: 1,
                     replayed_records: 1,
                     committed_offsets: vec![HaElectionPartitionOffset {
-                        partition: 1,
-                        offset: 8,
+                        partition: PartitionIndex(1),
+                        offset: Offset(8),
                     }],
                 }
         );

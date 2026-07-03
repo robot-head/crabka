@@ -24,13 +24,13 @@ use crabka_blockstore::{
 use crabka_client_consumer::ConsumerError;
 use crabka_observability::{
     CompactionFrontier, CompactionOffsetCommitter, KafkaWalHeader, KafkaWalRecord, LogWalConsumer,
-    QuerierIndexSource, Role, ServiceConfig, ServiceDependencies, SharedCompactionFrontier,
-    WalConsumerError, WalLogRecord, WalPosition, build_kafka_wal_record, build_service_router,
-    compact_kafka_wal_records_to_object_store, compact_log_block_to_object_store,
-    compact_next_kafka_wal_batch_to_object_store, compact_wal_records_to_object_store,
-    read_compaction_frontier_from_object_store, run_compactor_once, run_compactor_until_idle,
-    run_compactor_until_shutdown, serve_service, serve_service_listener,
-    write_compaction_frontier_to_object_store,
+    Offset, PartitionIndex, QuerierIndexSource, Role, ServiceConfig, ServiceDependencies,
+    SharedCompactionFrontier, WalConsumerError, WalLogRecord, WalPosition, build_kafka_wal_record,
+    build_service_router, compact_kafka_wal_records_to_object_store,
+    compact_log_block_to_object_store, compact_next_kafka_wal_batch_to_object_store,
+    compact_wal_records_to_object_store, read_compaction_frontier_from_object_store,
+    run_compactor_once, run_compactor_until_idle, run_compactor_until_shutdown, serve_service,
+    serve_service_listener, write_compaction_frontier_to_object_store,
 };
 use futures_util::stream::BoxStream;
 use object_store::{
@@ -238,8 +238,8 @@ async fn compactor_commits_partition_offset_after_writing_block_and_index() {
     check!(
         committer.committed
             == vec![WalPosition {
-                partition: 0,
-                offset: 43
+                partition: PartitionIndex(0),
+                offset: Offset(43)
             }]
     );
     check!(
@@ -294,8 +294,8 @@ async fn compactor_decodes_kafka_wal_records_before_writing_block() {
     check!(
         committer.committed
             == vec![WalPosition {
-                partition: 2,
-                offset: 43
+                partition: PartitionIndex(2),
+                offset: Offset(43)
             }]
     );
     check!(
@@ -328,8 +328,8 @@ async fn compactor_decodes_native_kafka_log_records_from_headers() {
         &mut committer,
         vec![KafkaWalRecord {
             value: b"api error".to_vec(),
-            partition: 2,
-            offset: 44,
+            partition: PartitionIndex(2),
+            offset: Offset(44),
             timestamp_ms: Some(1),
             headers: vec![
                 kafka_header("crabka-wal-record-type", "log-line"),
@@ -356,8 +356,8 @@ async fn compactor_decodes_native_kafka_log_records_from_headers() {
     assert!(
         committer.committed
             == vec![WalPosition {
-                partition: 2,
-                offset: 44
+                partition: PartitionIndex(2),
+                offset: Offset(44)
             }]
     );
     let rows = read_log_block_from_object_store(&store, &prefix, &key)
@@ -436,8 +436,8 @@ async fn compactor_does_not_commit_offset_for_invalid_kafka_wal_payload() {
         &mut committer,
         vec![KafkaWalRecord {
             value: b"not json".to_vec(),
-            partition: 2,
-            offset: 42,
+            partition: PartitionIndex(2),
+            offset: Offset(42),
             timestamp_ms: None,
             headers: Vec::new(),
         }],
@@ -489,8 +489,8 @@ async fn compactor_polls_kafka_wal_batch_then_commits_after_object_store_write()
     assert!(
         consumer.committed
             == vec![WalPosition {
-                partition: 3,
-                offset: 43
+                partition: PartitionIndex(3),
+                offset: Offset(43)
             }]
     );
     let rows = read_log_block_from_object_store(&store, &prefix, &key)
@@ -510,8 +510,8 @@ async fn compactor_does_not_commit_polled_batch_when_decode_fails() {
     let mut block_index = BlockIndex::default();
     let mut consumer = RecordingWalConsumer::new(vec![vec![KafkaWalRecord {
         value: b"not json".to_vec(),
-        partition: 3,
-        offset: 42,
+        partition: PartitionIndex(3),
+        offset: Offset(42),
         timestamp_ms: None,
         headers: Vec::new(),
     }]]);
@@ -1453,7 +1453,11 @@ async fn compactor_runtime_retries_compaction_frontier_write_errors_after_commit
         read_compaction_frontier_from_object_store(&store, &ObjectPath::from("observability/logs"))
             .await
             .unwrap();
-    assert!(persisted_frontier == CompactionFrontier::new(i64::MIN).with_partition_offset(6, 42));
+    assert!(
+        persisted_frontier
+            == CompactionFrontier::new(i64::MIN)
+                .with_partition_offset(PartitionIndex(6), Offset(42))
+    );
 }
 
 #[tokio::test]
@@ -1480,7 +1484,8 @@ async fn compactor_runtime_advances_shared_compaction_frontier_after_commit() {
     assert!(descriptors.len() == 1);
     assert!(
         frontier.snapshot()
-            == crabka_observability::CompactionFrontier::new(i64::MIN).with_partition_offset(8, 43)
+            == crabka_observability::CompactionFrontier::new(i64::MIN)
+                .with_partition_offset(PartitionIndex(8), Offset(43))
     );
 }
 
@@ -1490,8 +1495,8 @@ async fn compaction_frontier_round_trips_through_object_store() {
     let store = LocalFileSystem::new_with_prefix(dir.path()).unwrap();
     let prefix = ObjectPath::from("observability/logs");
     let frontier = CompactionFrontier::new(0)
-        .with_partition_offset(8, 43)
-        .with_partition_offset(9, 55);
+        .with_partition_offset(PartitionIndex(8), Offset(43))
+        .with_partition_offset(PartitionIndex(9), Offset(55));
 
     write_compaction_frontier_to_object_store(&store, &prefix, &frontier)
         .await
@@ -1533,7 +1538,8 @@ async fn compactor_runtime_reloads_shared_frontier_after_restart() {
 
     assert!(
         restarted_frontier.snapshot()
-            == CompactionFrontier::new(i64::MIN).with_partition_offset(8, 43)
+            == CompactionFrontier::new(i64::MIN)
+                .with_partition_offset(PartitionIndex(8), Offset(43))
     );
 }
 
@@ -1995,8 +2001,8 @@ fn wal_record(timestamp_ns: i64, offset: i64, line: &str) -> WalLogRecord {
         line: line.to_string(),
         structured_metadata: BTreeMap::new(),
         position: Some(WalPosition {
-            partition: 0,
-            offset,
+            partition: PartitionIndex(0),
+            offset: Offset(offset),
         }),
     }
 }
@@ -2039,8 +2045,8 @@ fn kafka_wal_record(record: &WalLogRecord, partition: i32, offset: i64) -> Kafka
         build_kafka_wal_record("__crabka_observability_logs_wal", record).expect("producer record");
     KafkaWalRecord {
         value: producer_record.value.expect("producer value").to_vec(),
-        partition,
-        offset,
+        partition: PartitionIndex(partition),
+        offset: Offset(offset),
         timestamp_ms: producer_record.timestamp_ms,
         headers: producer_record
             .headers

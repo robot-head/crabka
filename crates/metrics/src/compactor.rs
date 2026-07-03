@@ -14,6 +14,7 @@ use arrow::{
 use async_trait::async_trait;
 use crabka_blockstore::{BlockMeta, BlockStoreError, BlockWriter};
 use crabka_client_consumer::{AutoOffsetReset, Consumer, ConsumerError, ConsumerRecord};
+use crabka_ids::{Offset, PartitionIndex};
 use crabka_telemetry::propagation::{TRACEPARENT, set_remote_parent};
 use futures::TryStreamExt;
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload, path::Path};
@@ -131,17 +132,17 @@ pub struct CompactedBlockWrite {
 /// One encoded WAL record fetched by the compactor for a single topic partition.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompactionWalRecord {
-    pub partition: i32,
-    pub offset: i64,
+    pub partition: PartitionIndex,
+    pub offset: Offset,
     pub value: Vec<u8>,
 }
 
 /// Offset to commit for one compacted WAL partition.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompactionPartitionOffset {
-    pub partition: i32,
+    pub partition: PartitionIndex,
     /// Kafka commit offset: the next offset after the last durable record.
-    pub offset: i64,
+    pub offset: Offset,
 }
 
 /// Result of processing one partition's compaction window.
@@ -305,7 +306,10 @@ pub enum CompactionCommitError {
 #[derive(Debug, thiserror::Error)]
 pub enum CompactionConsumerRecordError {
     #[error("metrics WAL record at partition {partition} offset {offset} has no value")]
-    MissingValue { partition: i32, offset: i64 },
+    MissingValue {
+        partition: PartitionIndex,
+        offset: Offset,
+    },
 }
 
 /// Errors raised by a consumer offset commit.
@@ -326,7 +330,10 @@ pub enum CompactionConsumerPollError {
 #[derive(Debug, thiserror::Error)]
 pub enum CompactionWindowError {
     #[error("compaction window spans multiple partitions: {first} and {second}")]
-    MultiplePartitions { first: i32, second: i32 },
+    MultiplePartitions {
+        first: PartitionIndex,
+        second: PartitionIndex,
+    },
 
     #[error(transparent)]
     Wal(#[from] WalError),
@@ -744,7 +751,7 @@ pub fn compaction_object_key(
 pub fn compaction_partition_object_key(
     tenant: &str,
     kind: MetricBlockKind,
-    partition: i32,
+    partition: PartitionIndex,
     first_offset: i64,
     last_offset: i64,
 ) -> String {
@@ -752,7 +759,7 @@ pub fn compaction_partition_object_key(
         "metrics/{}/{}/partition={:010}/{:020}-{:020}.parquet",
         escape_object_path_segment(tenant),
         kind.object_path(),
-        partition,
+        partition.get(),
         first_offset,
         last_offset
     )
@@ -785,7 +792,7 @@ pub fn compaction_object_plan(
 pub fn compaction_partition_object_plan(
     tenant: &str,
     kind: MetricBlockKind,
-    partition: i32,
+    partition: PartitionIndex,
     first_offset: i64,
     last_offset: i64,
 ) -> CompactionObjectPlan {
@@ -818,12 +825,12 @@ pub fn compaction_wal_records_from_consumer_records(
             .value
             .as_ref()
             .ok_or(CompactionConsumerRecordError::MissingValue {
-                partition: record.partition,
-                offset: record.offset,
+                partition: PartitionIndex(record.partition),
+                offset: Offset(record.offset),
             })?;
         out.push(CompactionWalRecord {
-            partition: record.partition,
-            offset: record.offset,
+            partition: PartitionIndex(record.partition),
+            offset: Offset(record.offset),
             value: value.to_vec(),
         });
     }
@@ -879,7 +886,7 @@ pub async fn write_compacted_tenant_partition_blocks<S>(
     block_writer: &BlockWriter,
     index_sink: &S,
     rows: &TenantCompactionRows,
-    partition: i32,
+    partition: PartitionIndex,
     first_offset: i64,
     last_offset: i64,
 ) -> Result<Vec<CompactedBlockWrite>, CompactionWriteError>
@@ -901,7 +908,7 @@ async fn write_compacted_tenant_blocks_with_partition<S>(
     block_writer: &BlockWriter,
     index_sink: &S,
     rows: &TenantCompactionRows,
-    partition: Option<i32>,
+    partition: Option<PartitionIndex>,
     first_offset: i64,
     last_offset: i64,
 ) -> Result<Vec<CompactedBlockWrite>, CompactionWriteError>
@@ -998,7 +1005,7 @@ where
     S: CompactionIndexSink + ?Sized,
     C: CompactionOffsetCommitter + ?Sized,
 {
-    let mut by_partition = BTreeMap::<i32, Vec<CompactionWalRecord>>::new();
+    let mut by_partition = BTreeMap::<PartitionIndex, Vec<CompactionWalRecord>>::new();
     for record in records {
         by_partition
             .entry(record.partition)
@@ -1498,7 +1505,7 @@ where
     S: CompactionIndexSink + ?Sized,
     C: CompactionConsumerCommitMut + ?Sized,
 {
-    let mut by_partition = BTreeMap::<i32, Vec<CompactionWalRecord>>::new();
+    let mut by_partition = BTreeMap::<PartitionIndex, Vec<CompactionWalRecord>>::new();
     for record in records {
         by_partition
             .entry(record.partition)
@@ -1580,8 +1587,8 @@ where
                 index_sink,
                 &rows,
                 partition,
-                first_offset,
-                last_offset,
+                first_offset.0,
+                last_offset.0,
             )
             .await?,
         );
@@ -1589,7 +1596,7 @@ where
 
     let committed_offset = CompactionPartitionOffset {
         partition,
-        offset: last_offset.saturating_add(1),
+        offset: last_offset + 1,
     };
 
     Ok(CompactionWindowResult {
@@ -1601,7 +1608,7 @@ where
 struct CompactedBlockRequest<'a> {
     tenant: &'a str,
     kind: MetricBlockKind,
-    partition: Option<i32>,
+    partition: Option<PartitionIndex>,
     first_offset: i64,
     last_offset: i64,
     batch: RecordBatch,
@@ -2219,7 +2226,7 @@ mod tests {
         let old_plan = super::compaction_partition_object_plan(
             "tenant-a",
             super::MetricBlockKind::Float,
-            0,
+            super::PartitionIndex(0),
             1,
             2,
         );
@@ -2248,7 +2255,7 @@ mod tests {
         let fresh_plan = super::compaction_partition_object_plan(
             "tenant-a",
             super::MetricBlockKind::Float,
-            0,
+            super::PartitionIndex(0),
             3,
             4,
         );
@@ -2422,7 +2429,7 @@ mod tests {
             &super::compaction_partition_object_plan(
                 "tenant-a",
                 super::MetricBlockKind::Float,
-                0,
+                super::PartitionIndex(0),
                 10,
                 10,
             ),
@@ -2577,13 +2584,13 @@ mod tests {
         let second = float_record("tenant-a", "up", "api", 200);
         let records = vec![
             super::CompactionWalRecord {
-                partition: 3,
-                offset: 42,
+                partition: super::PartitionIndex(3),
+                offset: super::Offset(42),
                 value: first.encode().expect("encode first"),
             },
             super::CompactionWalRecord {
-                partition: 3,
-                offset: 43,
+                partition: super::PartitionIndex(3),
+                offset: super::Offset(43),
                 value: second.encode().expect("encode second"),
             },
         ];
@@ -2596,8 +2603,8 @@ mod tests {
         check!(
             result.committed_offset
                 == Some(super::CompactionPartitionOffset {
-                    partition: 3,
-                    offset: 44,
+                    partition: super::PartitionIndex(3),
+                    offset: super::Offset(44),
                 })
         );
         check!(result.writes.len() == 1);
@@ -2605,8 +2612,8 @@ mod tests {
         check!(
             committer.commits.lock().expect("commit lock").as_slice()
                 == [super::CompactionPartitionOffset {
-                    partition: 3,
-                    offset: 44,
+                    partition: super::PartitionIndex(3),
+                    offset: super::Offset(44),
                 }]
         );
     }
@@ -2663,15 +2670,15 @@ mod tests {
         let committer = RecordingOffsetCommitter::default();
         let records = vec![
             super::CompactionWalRecord {
-                partition: 0,
-                offset: 42,
+                partition: super::PartitionIndex(0),
+                offset: super::Offset(42),
                 value: float_record("tenant-a", "up", "api", 100)
                     .encode()
                     .expect("encode p0"),
             },
             super::CompactionWalRecord {
-                partition: 1,
-                offset: 42,
+                partition: super::PartitionIndex(1),
+                offset: super::Offset(42),
                 value: float_record("tenant-a", "up", "api", 200)
                     .encode()
                     .expect("encode p1"),
@@ -2694,15 +2701,15 @@ mod tests {
         let committer = RecordingOffsetCommitter::default();
         let records = vec![
             super::CompactionWalRecord {
-                partition: 0,
-                offset: 42,
+                partition: super::PartitionIndex(0),
+                offset: super::Offset(42),
                 value: float_record("tenant-a", "up", "api", 100)
                     .encode()
                     .expect("encode p0"),
             },
             super::CompactionWalRecord {
-                partition: 1,
-                offset: 42,
+                partition: super::PartitionIndex(1),
+                offset: super::Offset(42),
                 value: float_record("tenant-a", "up", "api", 200)
                     .encode()
                     .expect("encode p1"),
@@ -2721,12 +2728,12 @@ mod tests {
             result.committed_offsets
                 == vec![
                     super::CompactionPartitionOffset {
-                        partition: 0,
-                        offset: 43,
+                        partition: super::PartitionIndex(0),
+                        offset: super::Offset(43),
                     },
                     super::CompactionPartitionOffset {
-                        partition: 1,
-                        offset: 43,
+                        partition: super::PartitionIndex(1),
+                        offset: super::Offset(43),
                     },
                 ]
         );
@@ -2769,8 +2776,8 @@ mod tests {
         assert!(
             converted
                 == vec![super::CompactionWalRecord {
-                    partition: 2,
-                    offset: 10,
+                    partition: super::PartitionIndex(2),
+                    offset: super::Offset(10),
                     value: wal_record.encode().expect("encode expected"),
                 }]
         );
@@ -2791,8 +2798,8 @@ mod tests {
         assert!(matches!(
             err,
             super::CompactionConsumerRecordError::MissingValue {
-                partition: 3,
-                offset: 12
+                partition: super::PartitionIndex(3),
+                offset: super::Offset(12)
             }
         ));
     }
@@ -2818,8 +2825,8 @@ mod tests {
         super::CompactionOffsetCommitter::commit_offsets(
             &committer,
             &[super::CompactionPartitionOffset {
-                partition: 2,
-                offset: 11,
+                partition: super::PartitionIndex(2),
+                offset: super::Offset(11),
             }],
         )
         .await
@@ -2881,8 +2888,8 @@ mod tests {
         check!(
             result.batch.committed_offsets
                 == vec![super::CompactionPartitionOffset {
-                    partition: 4,
-                    offset: 22,
+                    partition: super::PartitionIndex(4),
+                    offset: super::Offset(22),
                 }]
         );
         check!(*commit.calls.lock().expect("commit calls lock") == 1);
@@ -2965,8 +2972,8 @@ mod tests {
                     compacted_records: 2,
                     writes: 1,
                     committed_offsets: vec![super::CompactionPartitionOffset {
-                        partition: 0,
-                        offset: 12,
+                        partition: super::PartitionIndex(0),
+                        offset: super::Offset(12),
                     }],
                 }
         );
@@ -3031,8 +3038,8 @@ mod tests {
         check!(
             result.committed_offsets
                 == vec![super::CompactionPartitionOffset {
-                    partition: 0,
-                    offset: 12,
+                    partition: super::PartitionIndex(0),
+                    offset: super::Offset(12),
                 }]
         );
         check!(*commit.calls.lock().expect("commit calls lock") == 1);
@@ -3122,8 +3129,8 @@ mod tests {
         check!(
             result.committed_offsets
                 == vec![super::CompactionPartitionOffset {
-                    partition: 0,
-                    offset: 12,
+                    partition: super::PartitionIndex(0),
+                    offset: super::Offset(12),
                 }]
         );
         check!(*commit.calls.lock().expect("commit calls lock") == 1);
@@ -3300,7 +3307,7 @@ mod tests {
         let block_key = super::compaction_partition_object_key(
             "tenant-a",
             super::MetricBlockKind::Float,
-            0,
+            super::PartitionIndex(0),
             10,
             11,
         );
