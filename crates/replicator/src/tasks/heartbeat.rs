@@ -22,6 +22,11 @@ pub struct HeartbeatParams {
     pub interval: Duration,
     /// Injectable clock: returns the current time in milliseconds since epoch.
     pub now_ms: fn() -> i64,
+    /// Injectable async sleeper that paces the heartbeat interval. Production
+    /// uses [`qubit_clock::sleep::SystemSleeper`] (real tokio time); tests
+    /// inject a [`qubit_clock::sleep::MockSleeper`] so the interval fires on a
+    /// mock timeline instead of wall-clock time.
+    pub sleeper: std::sync::Arc<dyn qubit_clock::sleep::AsyncSleeper>,
     /// Optional TLS/SASL security for the target cluster.
     pub security: Option<crabka_client_core::security::ClientSecurity>,
 }
@@ -70,16 +75,21 @@ impl HeartbeatTask {
         let target = p.target_alias;
         let interval = p.interval;
         let now_ms = p.now_ms;
+        let sleeper = p.sleeper;
 
         let handle = tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(interval);
-            // The first tick fires immediately; skip it so we don't emit a
-            // heartbeat before the caller has a chance to observe the task.
-            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // Pace the heartbeat cadence through the injected `AsyncSleeper`
+            // (production: real tokio time via `SystemSleeper`; tests: a
+            // `MockSleeper` on a mock timeline). The interval is a single sleep
+            // future re-armed only after it fires — equivalent to
+            // `tokio::time::interval` with `MissedTickBehavior::Delay`. Unlike
+            // `interval` it has no immediate zeroth tick, so the first heartbeat
+            // lands one interval in (which is what we want anyway).
+            let mut tick = sleeper.sleep_for_async(interval);
 
             loop {
                 tokio::select! {
-                    _ = ticker.tick() => {
+                    () = &mut tick => {
                         let hb = Heartbeat {
                             source: source.clone(),
                             target: target.clone(),
@@ -109,6 +119,9 @@ impl HeartbeatTask {
                         if let Err(e) = producer.flush().await {
                             warn!("heartbeat flush error: {e}");
                         }
+
+                        // Re-arm the interval for the next tick.
+                        tick = sleeper.sleep_for_async(interval);
                     }
                     Ok(()) = shutdown_rx.changed() => {
                         if *shutdown_rx.borrow() {
@@ -152,9 +165,15 @@ async fn build_producer(
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+    use std::sync::Arc;
+
+    use assert2::{assert, check};
+    use qubit_clock::{MockTime, MockWaiterKind};
 
     use super::*;
+
+    /// Number of heartbeat intervals to fire on the mock timeline.
+    const TICKS: usize = 3;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn emits_heartbeat() {
@@ -165,18 +184,65 @@ mod tests {
         .await
         .unwrap();
         let target = broker.listen_addr().to_string();
+
+        // Pace the heartbeat interval off a mock timeline instead of wall-clock
+        // time: advancing the timeline — not a real `sleep` — is what fires each
+        // tick, so the test is deterministic and doesn't depend on real time.
+        let mock = MockTime::unix_epoch();
+
         let h = HeartbeatTask::start(HeartbeatParams {
             target_bootstrap: target.clone(),
             source_alias: "us-east".into(),
             target_alias: "eu-west".into(),
-            interval: std::time::Duration::from_millis(100),
+            interval: Duration::from_millis(100),
             now_ms: || 123,
+            sleeper: Arc::new(mock.sleeper()),
             security: None,
         })
         .await
         .unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+
+        // Fire the interval `TICKS` times. Each pass:
+        //   1. wait until the task has really parked on its interval sleep
+        //      (registered a mock `Sleep` waiter) so the advance can't race
+        //      ahead of the sleep's creation and skip a tick;
+        //   2. advance the mock timeline by one interval to wake it;
+        //   3. wait until that heartbeat is durably written before firing the
+        //      next tick.
+        // A completed sleep future drops its waiter registration *before* the
+        // tick body writes the record, so once the Nth heartbeat is visible the
+        // only registered waiter is the freshly re-armed (N+1)th — there is no
+        // stale count to trip the next `wait_for_blocked_waiters`.
+        for n in 1..=TICKS {
+            let timeline = mock.timeline();
+            let parked = tokio::task::spawn_blocking(move || {
+                timeline.wait_for_blocked_waiters(MockWaiterKind::Sleep, 1, Duration::from_secs(5))
+            })
+            .await
+            .unwrap();
+            assert!(parked, "heartbeat task never parked on interval sleep #{n}");
+
+            mock.advance(Duration::from_millis(100));
+
+            crate::test_util::await_topic_count(
+                &target,
+                Heartbeat::TOPIC,
+                n,
+                Duration::from_secs(10),
+            )
+            .await;
+        }
+
         h.shutdown().await;
+
+        // Exactly one heartbeat per advance — no more (no advance fired after
+        // the loop) and no fewer (each advance was gated on its write landing).
+        let count = crate::test_util::topic_record_count(&target, Heartbeat::TOPIC).await;
+        check!(
+            count == TICKS,
+            "expected exactly {TICKS} heartbeats, got {count}"
+        );
+
         let raw = crate::admin_util::read_last_value_for_key(
             &target,
             crate::mm2::Heartbeat::TOPIC,
