@@ -236,22 +236,22 @@ mod tests {
             4096,
             (0..16).collect::<Vec<u8>>(),
         );
-        let mut server = ScramServerExchange::new("alice".to_string(), cred);
-        let mut client = ScramClientExchange::new(
+        let server = ScramServerExchange::new("alice".to_string(), cred);
+        let client = ScramClientExchange::new(
             "alice".to_string(),
             password.to_vec(),
             SaslMechanism::ScramSha512,
         );
 
         // Client first
-        let c1 = client.client_first().expect("client first");
+        let (c1, client) = client.client_first().expect("client first");
         // Server step 1 -> server-first
-        let s1 = match server.step(&c1) {
-            StepResult::Continue(b) => b,
+        let (s1, server) = match server.step(&c1) {
+            StepResult::Continue(b, next) => (b, next),
             other => panic!("server step 1 must continue, got {other:?}"),
         };
         // Client final
-        let c2 = client.step(&s1).expect("client final");
+        let (c2, client) = client.step(&s1).expect("client final");
         // Server step 2 -> done
         let (principal, s2) = match server.step(&c2) {
             StepResult::Done(p, b) => (p, b),
@@ -259,15 +259,13 @@ mod tests {
         };
         assert!(principal.name == "alice");
         assert!(principal.auth_method == crate::AuthMethod::SaslScramSha512);
-        // Client verifies server signature
+        // Client verifies server signature. `verify_server_final` consumes
+        // `client`, so a second verification attempt (the old "server final
+        // must only verify once" regression test) is now a compile-time
+        // move error rather than a runtime `MalformedMessage` — the
+        // scenario it guarded against is no longer expressible.
         let final_check = client.verify_server_final(&s2);
         assert!(final_check.is_ok(), "server signature must verify");
-
-        let replay_check = client.verify_server_final(&s2);
-        assert!(
-            replay_check == Err(AuthError::MalformedMessage),
-            "server final must only verify once"
-        );
     }
 
     /// Mirror of the SHA-512 round-trip with SHA-256 — proves the
@@ -282,19 +280,19 @@ mod tests {
             4096,
             (0..16).collect::<Vec<u8>>(),
         );
-        let mut server = ScramServerExchange::new("alice".to_string(), cred);
-        let mut client = ScramClientExchange::new(
+        let server = ScramServerExchange::new("alice".to_string(), cred);
+        let client = ScramClientExchange::new(
             "alice".to_string(),
             password.to_vec(),
             SaslMechanism::ScramSha256,
         );
 
-        let c1 = client.client_first().expect("client first");
-        let s1 = match server.step(&c1) {
-            StepResult::Continue(b) => b,
+        let (c1, client) = client.client_first().expect("client first");
+        let (s1, server) = match server.step(&c1) {
+            StepResult::Continue(b, next) => (b, next),
             other => panic!("server step 1 must continue, got {other:?}"),
         };
-        let c2 = client.step(&s1).expect("client final");
+        let (c2, client) = client.step(&s1).expect("client final");
         let (principal, s2) = match server.step(&c2) {
             StepResult::Done(p, b) => (p, b),
             other => panic!("server step 2 must Done, got {other:?}"),
@@ -314,19 +312,19 @@ mod tests {
             4096,
             (0..16).collect::<Vec<u8>>(),
         );
-        let mut server = ScramServerExchange::new("alice".to_string(), cred);
-        let mut client = ScramClientExchange::new(
+        let server = ScramServerExchange::new("alice".to_string(), cred);
+        let client = ScramClientExchange::new(
             "alice".to_string(),
             password.to_vec(),
             SaslMechanism::ScramSha256,
         );
 
-        let c1 = client.client_first().expect("client first");
-        let s1 = match server.step(&c1) {
-            StepResult::Continue(b) => b,
+        let (c1, client) = client.client_first().expect("client first");
+        let (s1, server) = match server.step(&c1) {
+            StepResult::Continue(b, next) => (b, next),
             other => panic!("server step 1 must continue, got {other:?}"),
         };
-        let c2 = client.step(&s1).expect("client final");
+        let (c2, client) = client.step(&s1).expect("client final");
         match server.step(&c2) {
             StepResult::Done(_, _) => {}
             other => panic!("server step 2 must Done, got {other:?}"),
@@ -344,19 +342,20 @@ mod tests {
             4096,
             (0..16).collect::<Vec<u8>>(),
         );
-        let mut server = ScramServerExchange::new("alice".to_string(), cred);
-        let mut client = ScramClientExchange::new(
+        let server = ScramServerExchange::new("alice".to_string(), cred);
+        let client = ScramClientExchange::new(
             "alice".to_string(),
             password.to_vec(),
             SaslMechanism::ScramSha256,
         );
 
-        let c1 = client.client_first().expect("client first");
-        let s1 = match server.step(&c1) {
-            StepResult::Continue(b) => b,
+        let (c1, client) = client.client_first().expect("client first");
+        let (s1, server) = match server.step(&c1) {
+            StepResult::Continue(b, next) => (b, next),
             other => panic!("server step 1 must continue, got {other:?}"),
         };
-        let mut c2 = String::from_utf8(client.step(&s1).expect("client final")).unwrap();
+        let (c2_bytes, _client) = client.step(&s1).expect("client final");
+        let mut c2 = String::from_utf8(c2_bytes).unwrap();
         let proof_start = c2.find("p=").expect("proof attribute") + 2;
         c2.truncate(proof_start);
         c2.push_str("AAAA");
@@ -448,23 +447,23 @@ mod tests {
         };
         // SCRAM username (the wire "n=..." attribute) is "tok-uuid";
         // the override principal is "alice" (the token's owner).
-        let mut server = ScramServerExchange::new_with_principal(
+        let server = ScramServerExchange::new_with_principal(
             "tok-uuid".to_string(),
             cred,
             override_principal.clone(),
         );
-        let mut client = ScramClientExchange::new(
+        let client = ScramClientExchange::new(
             "tok-uuid".to_string(),
             password.to_vec(),
             SaslMechanism::ScramSha256,
         );
 
-        let c1 = client.client_first().expect("client first");
-        let s1 = match server.step(&c1) {
-            StepResult::Continue(b) => b,
+        let (c1, client) = client.client_first().expect("client first");
+        let (s1, server) = match server.step(&c1) {
+            StepResult::Continue(b, next) => (b, next),
             other => panic!("server step 1 must continue, got {other:?}"),
         };
-        let c2 = client.step(&s1).expect("client final");
+        let (c2, _client) = client.step(&s1).expect("client final");
         let (principal, _s2) = match server.step(&c2) {
             StepResult::Done(p, b) => (p, b),
             other => panic!("server step 2 must Done, got {other:?}"),
@@ -482,17 +481,17 @@ mod tests {
             4096,
             vec![0u8; 16],
         );
-        let mut server = ScramServerExchange::new("alice".to_string(), cred);
-        let mut client = ScramClientExchange::new(
+        let server = ScramServerExchange::new("alice".to_string(), cred);
+        let client = ScramClientExchange::new(
             "alice".to_string(),
             b"wrong".to_vec(),
             SaslMechanism::ScramSha512,
         );
-        let c1 = client.client_first().unwrap();
-        let StepResult::Continue(s1) = server.step(&c1) else {
+        let (c1, client) = client.client_first().unwrap();
+        let StepResult::Continue(s1, server) = server.step(&c1) else {
             panic!();
         };
-        let c2 = client.step(&s1).unwrap();
+        let (c2, _client) = client.step(&s1).unwrap();
         match server.step(&c2) {
             StepResult::Failed(crate::AuthError::BadProof) => {}
             other => panic!("expected BadProof, got {other:?}"),
@@ -514,17 +513,17 @@ mod tests {
             4096,
             (0..16).collect::<Vec<u8>>(),
         );
-        let mut server = ScramServerExchange::new("alice".to_string(), cred);
-        let mut client = ScramClientExchange::new(
+        let server = ScramServerExchange::new("alice".to_string(), cred);
+        let client = ScramClientExchange::new(
             "alice".to_string(),
             password.clone(),
             SaslMechanism::ScramSha256,
         );
-        let c1 = client.client_first().unwrap();
-        let StepResult::Continue(s1) = server.step(&c1) else {
+        let (c1, client) = client.client_first().unwrap();
+        let StepResult::Continue(s1, server) = server.step(&c1) else {
             panic!("server step 1 must continue");
         };
-        let c2 = client.step(&s1).unwrap();
+        let (c2, _client) = client.step(&s1).unwrap();
         let c2_str = String::from_utf8(c2).unwrap();
         // Flip the combined nonce: replace `r=<nonce>` with a different
         // value while leaving `c=` and `p=` intact.
@@ -558,17 +557,17 @@ mod tests {
             4096,
             (0..16).collect::<Vec<u8>>(),
         );
-        let mut server = ScramServerExchange::new("alice".to_string(), cred);
-        let mut client = ScramClientExchange::new(
+        let server = ScramServerExchange::new("alice".to_string(), cred);
+        let client = ScramClientExchange::new(
             "alice".to_string(),
             password.clone(),
             SaslMechanism::ScramSha256,
         );
-        let c1 = client.client_first().unwrap();
-        let StepResult::Continue(s1) = server.step(&c1) else {
+        let (c1, client) = client.client_first().unwrap();
+        let StepResult::Continue(s1, server) = server.step(&c1) else {
             panic!("server step 1 must continue");
         };
-        let c2 = client.step(&s1).unwrap();
+        let (c2, _client) = client.step(&s1).unwrap();
         let c2_str = String::from_utf8(c2).unwrap();
         // The client always emits `c=biws`; rewrite it to a different
         // (still-valid-base64) channel binding.

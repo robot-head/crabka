@@ -442,17 +442,17 @@ pub fn handle_authenticate_scram(
                 return fail_authenticate("unknown user");
             };
 
-        let mut server = match principal_override {
+        let server = match principal_override {
             Some(p) => ScramServerExchange::new_with_principal(username, cred, p),
             None => ScramServerExchange::new(username, cred),
         };
         // Feed the same client-first bytes; on success the exchange emits
-        // the server-first message and advances its own internal state.
+        // the server-first message and yields the next phase.
         match server.step(&req.auth_bytes) {
-            crabka_security::StepResult::Continue(bytes) => {
+            crabka_security::StepResult::Continue(bytes, next) => {
                 *auth = ConnectionAuth::Negotiating {
                     mechanism: mech,
-                    exchange: SaslExchange::Scram(Box::new(server)),
+                    exchange: SaslExchange::Scram(Box::new(next)),
                     // Side-channel — `Some` here is the
                     // unambiguous "this is a token-authed session"
                     // signal that the round-2 success arm consumes
@@ -476,18 +476,25 @@ pub fn handle_authenticate_scram(
             crabka_security::StepResult::Failed(_) => fail_authenticate("SCRAM step failed"),
         }
     } else if let ConnectionAuth::Negotiating {
-        exchange: SaslExchange::Scram(server),
-        mechanism,
-        pending_token_expiry_ms,
+        exchange: SaslExchange::Scram(_),
+        ..
     } = auth
     {
-        let mech = *mechanism;
-        let pending_token_expiry_ms = *pending_token_expiry_ms;
-        // Round 2: exchange already exists. Step it with the client-final
-        // bytes; on success extract the principal + server-final bytes and
-        // transition to `Authenticated`.
+        // Round 2: exchange already exists. `step` consumes the exchange, so
+        // extract it by value (mirroring `handle_handshake`'s re-auth
+        // snapshot swap) before stepping it with the client-final bytes; on
+        // success extract the principal + server-final bytes and transition
+        // to `Authenticated`.
+        let ConnectionAuth::Negotiating {
+            mechanism,
+            exchange: SaslExchange::Scram(server),
+            pending_token_expiry_ms,
+        } = std::mem::replace(auth, ConnectionAuth::Anonymous)
+        else {
+            unreachable!("matched Negotiating{{Scram}} above");
+        };
         match server.step(&req.auth_bytes) {
-            crabka_security::StepResult::Continue(_) => {
+            crabka_security::StepResult::Continue(_, _) => {
                 // Two-round SCRAM-SHA-512: an extra `Continue` here is a bug.
                 fail_authenticate("SCRAM second round expected Done")
             }
@@ -503,7 +510,7 @@ pub fn handle_authenticate_scram(
                     pending_token_expiry_ms.map_or(0, |e| (e - crate::time_util::now_ms()).max(0));
                 *auth = ConnectionAuth::Authenticated {
                     principal,
-                    mechanism: mech,
+                    mechanism,
                     expires_at_ms: pending_token_expiry_ms,
                     authenticated_via_token: pending_token_expiry_ms.is_some(),
                 };
@@ -603,16 +610,16 @@ pub fn handle_authenticate_gssapi(
             Ok(a) => a,
             Err(e) => return fail_authenticate(&format!("GSSAPI acceptor init failed: {e}")),
         };
-        let mut exchange = GssapiServerExchange::new(Box::new(acceptor), GSSAPI_MAX_RECV_SIZE);
+        let exchange = GssapiServerExchange::new(Box::new(acceptor), GSSAPI_MAX_RECV_SIZE);
         let step = match exchange.step(&req.auth_bytes) {
             Ok(s) => s,
             Err(e) => return fail_authenticate(&format!("GSSAPI accept failed: {e}")),
         };
         return match step {
-            ServerStep::Challenge(token) => {
+            ServerStep::Challenge(token, next) => {
                 *auth = ConnectionAuth::Negotiating {
                     mechanism: mech,
-                    exchange: SaslExchange::Gssapi(Box::new(exchange)),
+                    exchange: SaslExchange::Gssapi(Box::new(next)),
                     pending_token_expiry_ms: None,
                 };
                 gssapi_challenge_response(token)
@@ -623,21 +630,36 @@ pub fn handle_authenticate_gssapi(
         };
     }
 
-    // Subsequent rounds: the exchange already exists.
+    // Subsequent rounds: the exchange already exists. `step` consumes it, so
+    // extract it by value (mirroring `handle_handshake`'s re-auth snapshot
+    // swap) before stepping it with the client's token.
     if let ConnectionAuth::Negotiating {
-        exchange: SaslExchange::Gssapi(exchange),
-        mechanism,
-        pending_token_expiry_ms: _,
+        exchange: SaslExchange::Gssapi(_),
+        ..
     } = auth
     {
-        let mech = *mechanism;
+        let ConnectionAuth::Negotiating {
+            mechanism,
+            exchange: SaslExchange::Gssapi(exchange),
+            pending_token_expiry_ms: _,
+        } = std::mem::replace(auth, ConnectionAuth::Anonymous)
+        else {
+            unreachable!("matched Negotiating{{Gssapi}} above");
+        };
         let step = match exchange.step(&req.auth_bytes) {
             Ok(s) => s,
             Err(e) => return fail_authenticate(&format!("GSSAPI step failed: {e}")),
         };
         return match step {
-            ServerStep::Challenge(token) => gssapi_challenge_response(token),
-            ServerStep::Done { principal } => finish_gssapi(&principal, mech, config, auth),
+            ServerStep::Challenge(token, next) => {
+                *auth = ConnectionAuth::Negotiating {
+                    mechanism,
+                    exchange: SaslExchange::Gssapi(Box::new(next)),
+                    pending_token_expiry_ms: None,
+                };
+                gssapi_challenge_response(token)
+            }
+            ServerStep::Done { principal } => finish_gssapi(&principal, mechanism, config, auth),
         };
     }
 
@@ -1642,11 +1664,11 @@ mod tests {
                 exchange: SaslExchange::ScramPending,
                 pending_token_expiry_ms: None,
             };
-            let mut client =
+            let client =
                 ScramClientExchange::new(scram_username.into(), password.to_vec(), mechanism);
 
             // Round 1: client-first
-            let c1 = client.client_first().expect("client first");
+            let (c1, client) = client.client_first().expect("client first");
             let resp1 = handle_authenticate_scram(
                 &SaslAuthenticateRequest {
                     auth_bytes: bytes::Bytes::from(c1),
@@ -1658,7 +1680,7 @@ mod tests {
             assert!(resp1.error_code == 0, "round 1 must succeed for happy path");
 
             // Round 2: client-final
-            let c2 = client.step(&resp1.auth_bytes).expect("client final");
+            let (c2, _client) = client.step(&resp1.auth_bytes).expect("client final");
             let resp2 = handle_authenticate_scram(
                 &SaslAuthenticateRequest {
                     auth_bytes: bytes::Bytes::from(c2),
@@ -1691,12 +1713,12 @@ mod tests {
                 exchange: SaslExchange::ScramPending,
                 pending_token_expiry_ms: None,
             };
-            let mut client = ScramClientExchange::new(
+            let client = ScramClientExchange::new(
                 "tok-uuid".into(),
                 password.as_bytes().to_vec(),
                 SaslMechanism::ScramSha256,
             );
-            let c1 = client.client_first().unwrap();
+            let (c1, _client) = client.client_first().unwrap();
             let resp1 = handle_authenticate_scram(
                 &SaslAuthenticateRequest {
                     auth_bytes: bytes::Bytes::from(c1),
@@ -1797,12 +1819,12 @@ mod tests {
                 exchange: SaslExchange::ScramPending,
                 pending_token_expiry_ms: None,
             };
-            let mut client = ScramClientExchange::new(
+            let client = ScramClientExchange::new(
                 "no-such-token".into(),
                 b"whatever".to_vec(),
                 SaslMechanism::ScramSha256,
             );
-            let c1 = client.client_first().unwrap();
+            let (c1, _client) = client.client_first().unwrap();
             let resp = handle_authenticate_scram(
                 &SaslAuthenticateRequest {
                     auth_bytes: bytes::Bytes::from(c1),
@@ -1837,12 +1859,12 @@ mod tests {
                 exchange: SaslExchange::ScramPending,
                 pending_token_expiry_ms: None,
             };
-            let mut client = ScramClientExchange::new(
+            let client = ScramClientExchange::new(
                 "tok-xyz".into(),
                 b"whatever".to_vec(),
                 SaslMechanism::ScramSha512,
             );
-            let c1 = client.client_first().unwrap();
+            let (c1, _client) = client.client_first().unwrap();
             let resp = handle_authenticate_scram(
                 &SaslAuthenticateRequest {
                     auth_bytes: bytes::Bytes::from(c1),
