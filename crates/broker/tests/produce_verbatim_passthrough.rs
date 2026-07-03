@@ -192,7 +192,7 @@ async fn fetch_first_batch(
             Instant::now() < deadline,
             "records present; last partition: {last_partition}"
         );
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        tokio::task::yield_now().await;
     }
 }
 

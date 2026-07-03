@@ -156,7 +156,7 @@ async fn wait_all_partitions(handle: &BrokerHandle, topic: &str, n: i32) {
             return;
         }
         assert!(Instant::now() <= deadline, "partitions never materialized");
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
 }
 
@@ -218,7 +218,7 @@ async fn wait_for_move_complete(
             Instant::now() <= deadline,
             "move never completed: in_target={current_in_target:?} any_future={any_future}"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
 }
 

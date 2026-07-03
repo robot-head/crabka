@@ -211,7 +211,7 @@ async fn wait_partition_hosted(handle: &BrokerHandle, topic: &str, partition: i3
             Instant::now() <= deadline,
             "partition {topic}-{partition} never hosted within 15s"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
 }
 
@@ -227,7 +227,7 @@ async fn wait_partition_leader(handle: &BrokerHandle, topic: &str, partition: i3
             "partition {topic}-{partition} didn't elect leader={leader} within 30s; current={:?}",
             handle.partition_leader_for_test(topic, partition)
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
 }
 
@@ -252,7 +252,7 @@ async fn wait_partition_isr_only(
             "ISR for {topic}-{partition} didn't converge to {expected:?} within 15s; current={:?}",
             handle.partition_isr_for_test(topic, partition)
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
 }
 
@@ -296,7 +296,7 @@ async fn unclean_recovery_elects_longest_log_replica() {
                 Instant::now() <= deadline,
                 "partition record never appeared within 15s"
             );
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::task::yield_now().await;
         }
     };
     eprintln!("partition before divergence: {pr_before:?}");
@@ -345,6 +345,7 @@ async fn unclean_recovery_elects_longest_log_replica() {
     wait_partition_isr_only(h1, topic, 0, &[99]).await;
     // Give the supervisors a beat to observe the leader change and tear down
     // any in-flight replication fetchers before we diverge the logs.
+    // real-time wait (not a progress poll): bare settle for async supervisor fetcher teardown, no synchronous observable to poll before the direct-append divergence
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // ── Force the surviving replicas' local logs to DIVERGE deterministically.
@@ -388,7 +389,7 @@ async fn unclean_recovery_elects_longest_log_replica() {
                 Instant::now() <= deadline,
                 "raft leader not stable within 15s"
             );
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio::task::yield_now().await;
         }
     };
     eprintln!("sending ElectLeaders UNCLEAN to raft leader at {elect_addr}");

@@ -272,7 +272,7 @@ async fn wait_partition_exists(handle: &BrokerHandle, topic: &str, partition: i3
             Instant::now() <= deadline,
             "partition {topic}-{partition} never appeared within 15s"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
 }
 
@@ -529,6 +529,7 @@ async fn seed_compat_shim_disable_acl(handle: &BrokerHandle) {
         .await
         .expect("seed dummy ACL to disable compat shim");
     // Small pause to absorb raft commit-then-apply gap.
+    // real-time wait (not a progress poll): raft commit-then-apply settle, no local condition to poll
     tokio::time::sleep(Duration::from_millis(50)).await;
 }
 
@@ -546,6 +547,7 @@ async fn seed_alice_write_acl(handle: &BrokerHandle, topic: &str) {
         }))
         .await
         .expect("seed alice Write ACL");
+    // real-time wait (not a progress poll): raft commit-then-apply settle, no local condition to poll
     tokio::time::sleep(Duration::from_millis(50)).await;
 }
 
@@ -563,6 +565,7 @@ async fn seed_alice_read_acl(handle: &BrokerHandle, topic: &str) {
         }))
         .await
         .expect("seed alice Read ACL");
+    // real-time wait (not a progress poll): raft commit-then-apply settle, no local condition to poll
     tokio::time::sleep(Duration::from_millis(50)).await;
 }
 
@@ -613,7 +616,7 @@ async fn alter_then_describe_round_trip() {
             Instant::now() <= deadline,
             "quota not visible in image within 5s"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
 
     // Describe: fetch back the quota.
@@ -698,7 +701,7 @@ async fn producer_byte_rate_throttles_produce() {
             Instant::now() <= deadline,
             "quota not visible in image within 5s"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
 
     // Alice produces 8 KB (8 records of 1 KB each). Rate = 128 bytes/sec.
@@ -722,6 +725,7 @@ async fn producer_byte_rate_throttles_produce() {
             Instant::now() <= deadline,
             "ACL still not applied after 15s; error_code=29"
         );
+        // real-time wait (not a progress poll): retry cadence between network produce attempts (ACL propagation), deadline-guarded
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
 
@@ -791,7 +795,7 @@ async fn request_percentage_throttles_produce() {
             Instant::now() <= deadline,
             "request_percentage quota not visible in image within 5s"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
 
     // Alice produces a single small record. Retry past TOPIC_AUTHORIZATION_FAILED
@@ -812,6 +816,7 @@ async fn request_percentage_throttles_produce() {
             Instant::now() <= deadline,
             "ACL still not applied after 15s; error_code=29"
         );
+        // real-time wait (not a progress poll): retry cadence between network produce attempts (ACL propagation), deadline-guarded
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
 
@@ -878,7 +883,7 @@ async fn consumer_byte_rate_throttles_fetch() {
             Instant::now() <= deadline,
             "consumer_byte_rate quota not visible in image within 5s"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
 
     // Produce 8 KB as admin (not subject to quota yet).
@@ -906,6 +911,7 @@ async fn consumer_byte_rate_throttles_fetch() {
             "fetch error after 15s; error_code={}",
             r.error_code
         );
+        // real-time wait (not a progress poll): retry cadence between network fetch attempts, deadline-guarded
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
 
@@ -992,7 +998,7 @@ async fn user_specific_overrides_user_default() {
             Instant::now() <= deadline,
             "quotas not visible in image within 5s; alice={alice_rate:?} default={default_rate:?}"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
 
     // Alice produces 8 KB. The alice-specific rate (128 bytes/sec) should
@@ -1015,6 +1021,7 @@ async fn user_specific_overrides_user_default() {
             Instant::now() <= deadline,
             "ACL still not applied after 15s; error_code=29"
         );
+        // real-time wait (not a progress poll): retry cadence between network produce attempts (ACL propagation), deadline-guarded
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
 
@@ -1076,6 +1083,7 @@ async fn non_super_user_denied() {
             Instant::now() <= deadline,
             "compat shim still active after 5s; got {r:?}"
         );
+        // real-time wait (not a progress poll): retry cadence between network AlterClientQuotas attempts (shim disable), deadline-guarded
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
 

@@ -731,7 +731,7 @@ async fn wait_for_token(handle: &BrokerHandle, token_id: &str) -> crabka_metadat
         if std::time::Instant::now() > deadline {
             panic!("token {token_id} not visible in image after 5s");
         }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        tokio::task::yield_now().await;
     }
 }
 
@@ -745,7 +745,7 @@ async fn wait_for_token_gone(handle: &BrokerHandle, token_id: &str) {
         if std::time::Instant::now() > deadline {
             panic!("token {token_id} still visible in image after 5s (expected tombstone)");
         }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        tokio::task::yield_now().await;
     }
 }
 

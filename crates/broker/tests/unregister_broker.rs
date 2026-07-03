@@ -51,7 +51,7 @@ async fn unregister_known_broker_drops_it_from_metadata() {
         if std::time::Instant::now() > deadline {
             panic!("broker 1 still in Metadata: {resp:?}");
         }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        tokio::task::yield_now().await;
     }
 
     p.broker.shutdown().await;
@@ -132,7 +132,7 @@ async fn unregister_is_idempotent_on_repeat_call() {
         if std::time::Instant::now() > deadline {
             panic!("first unregister never landed");
         }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        tokio::task::yield_now().await;
     }
 
     // Second call against the now-removed broker: surfaces

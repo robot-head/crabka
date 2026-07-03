@@ -115,7 +115,7 @@ async fn wait_partition_exists(handle: &BrokerHandle, topic: &str, partition: i3
             Instant::now() <= deadline,
             "partition {topic}-{partition} never appeared within 15s"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
 }
 
@@ -373,7 +373,7 @@ async fn compaction_dedupes_via_native_client() {
             Instant::now() <= cfg_deadline,
             "cleanup.policy/segment.bytes never propagated to partition LogConfig within 10s"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
 
     // Get the topic_id (needed for Fetch).
@@ -398,6 +398,7 @@ async fn compaction_dedupes_via_native_client() {
     // Wait for 2+ cleaner ticks. The 256-byte segment limit causes many
     // segment rolls during the produce loop, so the cleaner will find
     // sealed segments ready for compaction.
+    // real-time wait (not a progress poll): waits for the broker's 1s cleaner-interval ticks
     tokio::time::sleep(Duration::from_secs(3)).await;
 
     // Force-roll the active segment by writing one more record per key.
@@ -431,6 +432,7 @@ async fn compaction_dedupes_via_native_client() {
     }
 
     // Wait again so the newly-sealed segments get compacted.
+    // real-time wait (not a progress poll): waits for the broker's 1s cleaner-interval ticks
     tokio::time::sleep(Duration::from_secs(3)).await;
 
     // Fetch all records from offset 0.

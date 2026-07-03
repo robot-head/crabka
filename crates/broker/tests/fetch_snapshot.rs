@@ -85,7 +85,7 @@ async fn fetch_snapshot_serves_metadata_snapshot() {
             "snapshot not served within 30s; last partition error_code={}",
             part.error_code
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::task::yield_now().await;
     }
 
     env.broker.shutdown().await;

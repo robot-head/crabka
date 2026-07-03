@@ -386,6 +386,7 @@ async fn controller_mutation_rate_throttles_create_topics() {
     assert!(alter[0].1 == 0, "alter should succeed");
 
     // Wait for refresh task to pick up the rate.
+    // real-time wait (not a progress poll): settle for periodic quota refresh task, no local condition to poll
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
     // Create topic with 10 partitions (mutations=10, burst=2, overage=8 → delay capped at 1s).
@@ -447,6 +448,7 @@ async fn controller_mutation_rate_throttles_delete_topics() {
         .submit_metadata_record_for_test(shim_disable)
         .await
         .expect("seed compat shim disable ACL");
+    // real-time wait (not a progress poll): raft commit-then-apply settle, no local condition to poll
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     // Pre-create topic as admin (no quota for admin) with 10 partitions.
@@ -467,6 +469,7 @@ async fn controller_mutation_rate_throttles_delete_topics() {
         .submit_metadata_record_for_test(alice_delete_acl)
         .await
         .expect("seed alice Delete ACL");
+    // real-time wait (not a progress poll): raft commit-then-apply settle, no local condition to poll
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     // Now set the quota for alice and delete.
@@ -482,6 +485,7 @@ async fn controller_mutation_rate_throttles_delete_topics() {
     )
     .await;
     assert!(alter[0].1 == 0);
+    // real-time wait (not a progress poll): settle for periodic quota refresh task, no local condition to poll
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
     let (throttle_ms, err_code) =

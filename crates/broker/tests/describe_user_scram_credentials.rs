@@ -289,7 +289,7 @@ async fn describe_all_users_round_trip() {
         if std::time::Instant::now() > deadline {
             panic!("alice's SCRAM credential not visible in image after 5s");
         }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
 
     let (top_err, per_user) =

@@ -288,7 +288,7 @@ async fn wait_partition_exists(handle: &BrokerHandle, topic: &str, partition: i3
             Instant::now() <= deadline,
             "partition {topic}-{partition} never appeared within 15s"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
 }
 
@@ -627,7 +627,7 @@ async fn broker_scoped_alter_persists_in_image() {
             let rate = img.broker_throttle_rate(node_id, crabka_metadata::ThrottleKind::Leader);
             panic!("config not visible in image within 5s; got {rate:?}");
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
 }
 
@@ -671,7 +671,7 @@ async fn topic_throttle_config_propagates() {
         if Instant::now() > deadline {
             panic!("topic throttle config not visible in image within 5s");
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
 }
 
@@ -737,7 +737,7 @@ async fn throttle_rate_caps_fetch_response_size() {
             Instant::now() <= deadline,
             "throttle configs not visible in image within 5s; rate={rate:?}"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
 
     // Produce 8 KB of data (8 records of 1 KB each).

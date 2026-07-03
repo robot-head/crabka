@@ -114,7 +114,7 @@ async fn await_activation(broker: &BrokerHandle) {
             Instant::now() <= deadline,
             "topic-backed RLMM never activated within 30s"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
 }
 
@@ -234,7 +234,7 @@ async fn copy_then_fetch_round_trip(
             "tiered-storage topic config never propagated within 10s; saw {:?}",
             broker.partition_log_config_for_test(topic, 0)
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
 
     // Single-record batches (~85 bytes each) roll the 1 KiB segment every
@@ -257,7 +257,7 @@ async fn copy_then_fetch_round_trip(
             Instant::now() <= copy_deadline,
             "no segment tiered to remote storage within 30s"
         );
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::task::yield_now().await;
     }
 
     // Read offset 0 back. Whether it is served from a still-local segment
@@ -300,7 +300,7 @@ async fn copy_then_fetch_round_trip(
             Instant::now() <= fetch_deadline,
             "offset 0 never returned records within 30s"
         );
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::task::yield_now().await;
     };
 
     assert!(
@@ -527,7 +527,7 @@ async fn copy_task_skips_tiering_while_rlmm_not_ready() {
             "tiered-storage topic config never propagated within 10s; saw {:?}",
             broker.partition_log_config_for_test(TOPIC, 0)
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
 
     // Same 80 records as the loopback round-trip — enough to seal several
@@ -538,6 +538,7 @@ async fn copy_task_skips_tiering_while_rlmm_not_ready() {
         .expect("produce records");
 
     // Several copy-task ticks (200 ms interval × ~10 ticks).
+    // real-time wait (not a progress poll): settle then assert ZERO tiered objects — proving absence while the RLMM stays NotReady, so there is no positive condition to poll.
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     // The RLMM is still NotReady, so add_remote_log_segment_metadata returns

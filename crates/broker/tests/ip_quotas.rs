@@ -363,7 +363,7 @@ async fn ip_quota_alter_then_describe_round_trip() {
         if std::time::Instant::now() > deadline {
             panic!("ip quota not visible in image");
         }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
 
     let desc = drive_describe_client_quotas_sasl(
@@ -432,7 +432,7 @@ async fn connection_creation_rate_throttles_accept() {
         if std::time::Instant::now() > deadline {
             panic!("quota not visible after submit");
         }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        tokio::task::yield_now().await;
     }
 
     // Open 5 connections in sequence. For each connection, send ApiVersions
@@ -558,6 +558,7 @@ async fn max_connections_per_ip_refuses_excess_and_frees_on_close() {
             std::time::Instant::now() < deadline,
             "per-IP slot was not freed after c1 closed"
         );
+        // real-time wait (not a progress poll): retry cadence between network connect attempts (slot free), deadline-guarded
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 }

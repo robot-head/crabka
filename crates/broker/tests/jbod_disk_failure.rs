@@ -121,7 +121,7 @@ async fn wait_all_partitions(handle: &BrokerHandle, topic: &str, n: i32) {
             return;
         }
         assert!(Instant::now() <= deadline, "partitions never materialized");
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
 }
 
@@ -389,7 +389,7 @@ async fn heartbeat_with_offline_log_dirs_is_accepted() {
             break;
         }
         assert!(Instant::now() <= deadline, "raft leader never elected");
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::task::yield_now().await;
     }
 
     // Send a heartbeat with a made-up offline dir UUID. The broker is the

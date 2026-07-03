@@ -47,6 +47,7 @@ async fn broker_started_event_is_written_to_audit_topic() {
     let p = support::start().await;
 
     // Let bootstrap + the BrokerStarted emit settle.
+    // real-time wait (not a progress poll): settle for async audit emit; next observable is an .await Fetch
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
     let topic_id = support::topic_id_for(&p.client, AUDIT_TOPIC).await;
@@ -118,6 +119,7 @@ async fn successful_create_topics_is_audited() {
         .unwrap();
     assert2::check!(cr.topics[0].error_code == 0);
 
+    // real-time wait (not a progress poll): settle before consume_audit_records reads via .await
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
     let recs = support::consume_audit_records(&p.client).await;
@@ -165,6 +167,7 @@ async fn signed_checkpoints_appear_on_audit_topic() {
         .await
         .unwrap();
 
+    // real-time wait (not a progress poll): settle for checkpoint record before consume_audit_records reads via .await
     tokio::time::sleep(std::time::Duration::from_millis(400)).await;
 
     let recs = support::consume_audit_records(&p.client).await;
@@ -278,6 +281,7 @@ async fn audit_chain_continues_across_restart() {
             })
             .await
             .unwrap();
+        // real-time wait (not a progress poll): let audit events flush before clean shutdown
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         broker.shutdown().await;
     }
@@ -297,6 +301,7 @@ async fn audit_chain_continues_across_restart() {
         })
         .await
         .unwrap();
+    // real-time wait (not a progress poll): settle before audit_record_seqs reads via .await
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
     // Consume the audit topic and assert seqs are a contiguous, duplicate-free
