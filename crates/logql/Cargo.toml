@@ -22,6 +22,7 @@ pedantic = { level = "warn", priority = -1 }
 module_name_repetitions = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
+clone_on_copy = "warn"
 # Accumulated pedantic/style lint debt in this WIP crate. `codex/loki-support` is
 # pushed to directly (CI only gates PRs), so this was never caught. Scoped here
 # rather than workspace-wide, which would also change protocol codegen

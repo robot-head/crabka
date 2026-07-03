@@ -153,7 +153,7 @@ fn start_path(pr: &PartitionRecord, target: &[i32]) -> Option<PartitionRecord> {
         return None; // already at target — no-op
     }
     // replicas = current_target ∪ target (current_target first, then new).
-    let mut new_replicas = current_target.clone();
+    let mut new_replicas = current_target;
     for n in &new {
         new_replicas.push(*n);
     }

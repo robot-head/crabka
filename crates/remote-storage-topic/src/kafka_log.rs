@@ -207,7 +207,7 @@ impl ConsumerState {
         let cancel = CancellationToken::new();
         tasks.insert(start.partition, cancel.clone());
         tokio::spawn(partition_fetch_loop(
-            self.clone(),
+            Arc::clone(self),
             start.partition,
             start.start_offset,
             cancel,
@@ -311,7 +311,7 @@ impl MetadataEventLog for KafkaMetadataEventLog {
             state.spawn_partition(ps);
         }
         if let Ok(mut subs) = self.subscriptions.try_lock() {
-            subs.push(state.clone());
+            subs.push(Arc::clone(&state));
         } else {
             warn!("KafkaMetadataEventLog: could not track subscription state");
         }
