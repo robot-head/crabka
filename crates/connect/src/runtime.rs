@@ -659,7 +659,7 @@ mod tests {
             let mut position = OffsetMap::new();
             #[allow(clippy::cast_possible_wrap)]
             position.insert("index".into(), OffsetValue::Long(self.pos as i64));
-            Some(SourceOffset::new(OffsetMap::new(), position))
+            Some(SourceOffset::new(OffsetMap::new().into(), position.into()))
         }
 
         async fn seek(&mut self, offset: SourceOffset) -> Result<(), ConnectError> {
@@ -1029,7 +1029,7 @@ mod tests {
             self.emitted.then(|| {
                 let mut position = OffsetMap::new();
                 position.insert("index".into(), OffsetValue::Long(1));
-                SourceOffset::new(OffsetMap::new(), position)
+                SourceOffset::new(OffsetMap::new().into(), position.into())
             })
         }
 

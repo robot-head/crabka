@@ -29,7 +29,9 @@
 
 use std::time::Duration;
 
-use crabka_throttle::plan_consume;
+use crabka_throttle::{
+    AvailableTokens, BurstCapacity, RefillTokens, RequestedTokens, plan_consume,
+};
 use stateright::{Checker, Model, Property};
 
 const TARGET_STATE_COUNT: usize = 4_000_000;
@@ -167,12 +169,12 @@ impl Model for BucketModel {
                             // Atomic read-compute-write (net effect of the CAS loop),
                             // driving the real production arithmetic.
                             let (_grant, new) = plan_consume(
-                                s.available.max(0) as u64,
-                                refill as u64,
-                                s.rate as u64,
-                                req as u64,
+                                AvailableTokens(s.available.max(0) as u64),
+                                RefillTokens(refill as u64),
+                                BurstCapacity(s.rate as u64),
+                                RequestedTokens(req as u64),
                             );
-                            s.available = new as i64;
+                            s.available = new.0 as i64;
                             s.pcs[t] = Pc::Idle;
                         } else {
                             // Re-claim refill from the current pending and resample

@@ -64,6 +64,7 @@ pub mod aggregate;
 pub mod failover;
 pub mod graph;
 pub mod hist;
+pub mod ids;
 pub mod payload;
 pub mod prom;
 pub mod rate;

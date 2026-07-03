@@ -21,6 +21,7 @@ use std::{
 use crate::{
     chain::{chain_hash, from_hex32},
     event::AuditEventClass,
+    ids::{MaxSpoolBytes, RecordCount, Seq, SpoolBytes},
     sink::{AuditError, AuditRecord, HEADER_PREV_HASH, HEADER_SEQ},
 };
 
@@ -35,9 +36,9 @@ fn io<E: std::fmt::Display>(e: E) -> AuditError {
 pub struct Spool {
     path: PathBuf,
     file: File,
-    max_bytes: u64,
-    bytes: u64,
-    count: u64,
+    max_bytes: MaxSpoolBytes,
+    bytes: SpoolBytes,
+    count: RecordCount,
 }
 
 impl Spool {
@@ -61,40 +62,40 @@ impl Spool {
         let mut s = Self {
             path,
             file,
-            max_bytes,
-            bytes: 0,
-            count: 0,
+            max_bytes: MaxSpoolBytes(max_bytes),
+            bytes: SpoolBytes(0),
+            count: RecordCount(0),
         };
         let (records, valid_bytes) = s.scan()?;
         let physical = s.file.metadata().map_err(io)?.len();
-        if valid_bytes < physical {
-            s.file.set_len(valid_bytes).map_err(io)?;
+        if valid_bytes.0 < physical {
+            s.file.set_len(valid_bytes.0).map_err(io)?;
             tracing::warn!(
                 physical,
-                valid_bytes,
+                valid_bytes = valid_bytes.0,
                 "audit spool: truncated torn tail frame on open"
             );
         }
-        s.count = u64::try_from(records.len()).unwrap_or(u64::MAX);
+        s.count = RecordCount(u64::try_from(records.len()).unwrap_or(u64::MAX));
         s.bytes = valid_bytes;
         let span = tracing::Span::current();
-        span.record("count", s.count);
-        span.record("bytes", s.bytes);
+        span.record("count", s.count.0);
+        span.record("bytes", s.bytes.0);
         Ok(s)
     }
 
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.count == 0
+        self.count.0 == 0
     }
 
     #[must_use]
-    pub fn count(&self) -> u64 {
+    pub fn count(&self) -> RecordCount {
         self.count
     }
 
     #[must_use]
-    pub fn bytes(&self) -> u64 {
+    pub fn bytes(&self) -> SpoolBytes {
         self.bytes
     }
 
@@ -102,20 +103,20 @@ impl Spool {
     #[tracing::instrument(
         level = "debug",
         skip_all,
-        fields(class = ?record.class, value_bytes = record.value.len(), count = self.count),
+        fields(class = ?record.class, value_bytes = record.value.len(), count = self.count.0),
         err
     )]
     pub fn append(&mut self, record: &AuditRecord) -> Result<bool, AuditError> {
         let frame = encode_frame(record);
-        let frame_len = u64::try_from(frame.len()).unwrap_or(u64::MAX);
-        if self.bytes + frame_len > self.max_bytes {
+        let frame_len = SpoolBytes(u64::try_from(frame.len()).unwrap_or(u64::MAX));
+        if (self.bytes + frame_len).0 > self.max_bytes.0 {
             return Ok(false);
         }
         self.file.seek(SeekFrom::End(0)).map_err(io)?;
         self.file.write_all(&frame).map_err(io)?;
         self.file.flush().map_err(io)?;
         self.bytes += frame_len;
-        self.count += 1;
+        self.count.0 += 1;
         Ok(true)
     }
 
@@ -129,7 +130,7 @@ impl Spool {
         fields(records = tracing::field::Empty, valid_bytes = tracing::field::Empty),
         err
     )]
-    fn scan(&self) -> Result<(Vec<AuditRecord>, u64), AuditError> {
+    fn scan(&self) -> Result<(Vec<AuditRecord>, SpoolBytes), AuditError> {
         let mut buf = Vec::new();
         {
             let mut f = File::open(&self.path).map_err(io)?;
@@ -137,7 +138,7 @@ impl Spool {
         }
         let mut out = Vec::new();
         let mut cur: &[u8] = &buf;
-        let mut valid_bytes: u64 = 0;
+        let mut valid_bytes = SpoolBytes(0);
         while cur.len() >= 4 {
             let len =
                 usize::try_from(u32::from_be_bytes([cur[0], cur[1], cur[2], cur[3]])).unwrap_or(0);
@@ -147,7 +148,7 @@ impl Spool {
             match decode_record(&cur[4..4 + len]) {
                 Some(rec) => {
                     out.push(rec);
-                    valid_bytes += u64::try_from(4 + len).unwrap_or(0);
+                    valid_bytes += SpoolBytes(u64::try_from(4 + len).unwrap_or(0));
                 }
                 None => break, // corrupt frame: stop (visible)
             }
@@ -155,7 +156,7 @@ impl Spool {
         }
         let span = tracing::Span::current();
         span.record("records", out.len());
-        span.record("valid_bytes", valid_bytes);
+        span.record("valid_bytes", valid_bytes.0);
         Ok((out, valid_bytes))
     }
 
@@ -175,11 +176,11 @@ impl Spool {
                 .truncate(true)
                 .open(&tmp)
                 .map_err(io)?;
-            let mut bytes = 0u64;
+            let mut bytes = SpoolBytes(0);
             for rec in remaining {
                 let frame = encode_frame(rec);
                 f.write_all(&frame).map_err(io)?;
-                bytes += u64::try_from(frame.len()).unwrap_or(u64::MAX);
+                bytes += SpoolBytes(u64::try_from(frame.len()).unwrap_or(u64::MAX));
             }
             f.flush().map_err(io)?;
             self.bytes = bytes;
@@ -190,33 +191,37 @@ impl Spool {
             .write(true)
             .open(&self.path)
             .map_err(io)?;
-        self.count = u64::try_from(remaining.len()).unwrap_or(u64::MAX);
+        self.count = RecordCount(u64::try_from(remaining.len()).unwrap_or(u64::MAX));
         Ok(())
     }
 
     /// Clear the spool.
-    #[tracing::instrument(level = "debug", skip_all, fields(count = self.count, bytes = self.bytes), err)]
+    #[tracing::instrument(level = "debug", skip_all, fields(count = self.count.0, bytes = self.bytes.0), err)]
     pub fn truncate(&mut self) -> Result<(), AuditError> {
         self.file.set_len(0).map_err(io)?;
         self.file.seek(SeekFrom::Start(0)).map_err(io)?;
         self.file.flush().map_err(io)?;
-        self.bytes = 0;
-        self.count = 0;
+        self.bytes = SpoolBytes(0);
+        self.count = RecordCount(0);
         Ok(())
     }
 
     /// `(next_seq, head)` implied by the last chained (non-checkpoint) record,
     /// or `None` if the spool has no chained records.
-    #[tracing::instrument(level = "debug", skip_all, fields(count = self.count), err)]
+    #[tracing::instrument(level = "debug", skip_all, fields(count = self.count.0), err)]
     pub fn resume_point(&self) -> Result<Option<(u64, [u8; 32])>, AuditError> {
         let records = self.read_all()?;
-        Ok(records.iter().rev().find_map(resume_from_record))
+        Ok(records
+            .iter()
+            .rev()
+            .find_map(resume_from_record)
+            .map(|(seq, head)| (seq.0, head)))
     }
 }
 
 /// Compute `(next_seq, head_after)` from a single chained record's headers +
 /// value. Returns `None` for checkpoints or records missing chain headers.
-fn resume_from_record(rec: &AuditRecord) -> Option<(u64, [u8; 32])> {
+fn resume_from_record(rec: &AuditRecord) -> Option<(Seq, [u8; 32])> {
     if rec.class == AuditEventClass::Checkpoint {
         return None;
     }
@@ -231,7 +236,7 @@ fn resume_from_record(rec: &AuditRecord) -> Option<(u64, [u8; 32])> {
     }
     let (seq, prev) = (seq?, prev?);
     let head = chain_hash(&prev, seq, &rec.value);
-    Some((seq + 1, head))
+    Some((Seq(seq + 1), head))
 }
 
 fn encode_frame(record: &AuditRecord) -> Vec<u8> {
@@ -329,7 +334,7 @@ mod tests {
         let r1 = chained_record(1, &chain_hash(&GENESIS_HEAD, 0, b"{\"i\":0}"), b"{\"i\":1}");
         check!(s.append(&r0).unwrap());
         check!(s.append(&r1).unwrap());
-        check!(s.count() == 2);
+        check!(s.count() == RecordCount(2));
         check!(!s.is_empty());
         let read = s.read_all().unwrap();
         check!(read == vec![r0.clone(), r1.clone()]);
@@ -346,10 +351,10 @@ mod tests {
             s.bytes()
         };
         let dir2 = tempfile::tempdir().unwrap();
-        let mut s = Spool::open(dir2.path(), one).unwrap(); // exactly one record fits
+        let mut s = Spool::open(dir2.path(), one.0).unwrap(); // exactly one record fits
         check!(s.append(&r).unwrap()); // accepted
         check!(!s.append(&r).unwrap()); // rejected (would exceed max_bytes)
-        check!(s.count() == 1);
+        check!(s.count() == RecordCount(1));
         check!(s.read_all().unwrap().len() == 1); // not corrupted
     }
 
@@ -364,8 +369,8 @@ mod tests {
         s.append(&r1).unwrap();
         s.append(&r2).unwrap();
         s.rewrite(&[r1.clone(), r2.clone()]).unwrap(); // drop r0 (replayed)
-        check!(s.bytes() > 0); // `*=` mutant would leave bytes at 0
-        check!(s.count() == 2);
+        check!(s.bytes() > SpoolBytes(0)); // `*=` mutant would leave bytes at 0
+        check!(s.count() == RecordCount(2));
         check!(s.read_all().unwrap() == vec![r1.clone(), r2.clone()]);
         s.truncate().unwrap();
         check!(s.is_empty());
@@ -385,10 +390,10 @@ mod tests {
         // accepted (bytes + frame == max, not >). The `+ -> *` mutant computes
         // bytes * frame, which exceeds max and would wrongly reject.
         let dir = tempfile::tempdir().unwrap();
-        let mut s = Spool::open(dir.path(), one * 2).unwrap();
+        let mut s = Spool::open(dir.path(), one.0 * 2).unwrap();
         check!(s.append(&r).unwrap());
         check!(s.append(&r).unwrap());
-        check!(s.count() == 2);
+        check!(s.count() == RecordCount(2));
     }
 
     #[test]
@@ -437,7 +442,7 @@ mod tests {
         }
         // Reopen heals the torn tail; the good record survives and appends continue contiguously.
         let mut s = Spool::open(dir.path(), 1 << 20).unwrap();
-        assert2::check!(s.count() == 1);
+        assert2::check!(s.count() == RecordCount(1));
         assert2::check!(s.read_all().unwrap() == vec![r0.clone()]);
         let r1 = chained_record(1, &GENESIS_HEAD, b"more");
         assert2::check!(s.append(&r1).unwrap());
@@ -453,7 +458,7 @@ mod tests {
             s.append(&r0).unwrap();
         }
         let s2 = Spool::open(dir.path(), 1 << 20).unwrap();
-        check!(s2.count() == 1);
+        check!(s2.count() == RecordCount(1));
         check!(s2.read_all().unwrap() == vec![r0]);
     }
 }

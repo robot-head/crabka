@@ -14422,12 +14422,12 @@ fn format_metric_range_aggregation_query(query: &MetricQuery) -> Option<String> 
 }
 
 fn format_metric_range_selector(query: &MetricQuery) -> Option<String> {
-    let range = format_loki_duration_ns(query.range_ns)?;
-    let offset = if query.offset_ns == 0 {
+    let range = format_loki_duration_ns(query.range_ns.0)?;
+    let offset = if query.offset_ns.0 == 0 {
         String::new()
     } else {
-        let sign = if query.offset_ns < 0 { "-" } else { "" };
-        let duration = format_loki_offset_duration_ns(query.offset_ns.checked_abs()?)?;
+        let sign = if query.offset_ns.0 < 0 { "-" } else { "" };
+        let duration = format_loki_offset_duration_ns(query.offset_ns.0.checked_abs()?)?;
         format!(" offset {sign}{duration}")
     };
     Some(format!(
@@ -14571,8 +14571,8 @@ fn format_loki_decimal_unit(duration_ns: i64, unit_ns: i64, width: usize, suffix
 
 fn format_quantile(quantile: Quantile) -> String {
     ScalarSample::new(
-        i128::from(quantile.numerator),
-        u128::from(quantile.denominator),
+        i128::from(quantile.numerator.0),
+        u128::from(quantile.denominator.0),
     )
     .format()
 }
@@ -16659,11 +16659,11 @@ pub fn metric_plan_scan_sql(
 }
 
 fn metric_scan_range(query: &MetricQuery, eval_range: TimeRange) -> Result<TimeRange, QueryError> {
-    let scan_end_ns = eval_range.end_ns.saturating_sub(query.offset_ns);
+    let scan_end_ns = eval_range.end_ns.saturating_sub(query.offset_ns.0);
     let scan_start_ns = eval_range
         .start_ns
-        .saturating_sub(query.offset_ns)
-        .saturating_sub(query.range_ns);
+        .saturating_sub(query.offset_ns.0)
+        .saturating_sub(query.range_ns.0);
     Ok(TimeRange::new(scan_start_ns, scan_end_ns)?)
 }
 
@@ -17302,7 +17302,7 @@ async fn execute_metric_query_range_with_hot_tail_frontier_and_deletes(
             record,
             frontier,
             &eval_times,
-            query.range_ns,
+            query.range_ns.0,
             delete_filters,
         )?;
     }
@@ -17394,7 +17394,7 @@ async fn execute_metric_query_range_from_object_store_with_hot_tail_frontier_and
             record,
             frontier,
             &eval_times,
-            query.range_ns,
+            query.range_ns.0,
             delete_filters,
         )?;
     }
@@ -17510,7 +17510,7 @@ fn metric_samples_from_batches(
                     structured_metadata: &structured_metadata,
                 },
                 eval_times,
-                query.range_ns,
+                query.range_ns.0,
                 delete_filters,
             )?;
         }
@@ -17794,10 +17794,10 @@ fn range_sample_value(value: MetricSampleState, query: &MetricQuery) -> MetricVa
         | RangeAggregation::SumOverTime => value.sum,
         RangeAggregation::PresentOverTime => MetricValue::integer(1),
         RangeAggregation::Rate | RangeAggregation::BytesRate => {
-            rate_metric_value(value.sum, query.range_ns)
+            rate_metric_value(value.sum, query.range_ns.0)
         }
         RangeAggregation::RateCounter => {
-            rate_metric_value(value.counter_increase(), query.range_ns)
+            rate_metric_value(value.counter_increase(), query.range_ns.0)
         }
         RangeAggregation::AvgOverTime => value.average(),
         RangeAggregation::StdvarOverTime => value.stdvar(),
@@ -18110,8 +18110,8 @@ impl MetricSampleState {
         }
 
         let scaled_rank =
-            u128::from(quantile.numerator) * u128::try_from(self.values.len() - 1).unwrap();
-        let denominator = u128::from(quantile.denominator);
+            u128::from(quantile.numerator.0) * u128::try_from(self.values.len() - 1).unwrap();
+        let denominator = u128::from(quantile.denominator.0);
         let lower_index = usize::try_from(scaled_rank / denominator).unwrap();
         let rank_remainder = scaled_rank % denominator;
         if rank_remainder == 0 {
@@ -18612,7 +18612,7 @@ fn append_matching_metric_row(
             | RangeAggregation::LastOverTime => unwrap_sample.unwrap_or_default(),
         };
         for eval_time_ns in eval_times {
-            let window_end_ns = eval_time_ns.saturating_sub(query.offset_ns);
+            let window_end_ns = eval_time_ns.saturating_sub(query.offset_ns.0);
             if row.timestamp_ns > window_end_ns.saturating_sub(range_ns)
                 && row.timestamp_ns <= window_end_ns
             {
@@ -18679,7 +18679,7 @@ fn append_matching_hot_metric_record(
             | RangeAggregation::LastOverTime => unwrap_sample.unwrap_or_default(),
         };
         for eval_time_ns in eval_times {
-            let window_end_ns = eval_time_ns.saturating_sub(query.offset_ns);
+            let window_end_ns = eval_time_ns.saturating_sub(query.offset_ns.0);
             if record.timestamp_ns > window_end_ns.saturating_sub(range_ns)
                 && record.timestamp_ns <= window_end_ns
             {
@@ -19574,7 +19574,7 @@ fn count_loki_metric_result_hot_tail_samples(
             record,
             frontier,
             &eval_times,
-            query.range_ns,
+            query.range_ns.0,
             delete_filters,
         )
         .ok();

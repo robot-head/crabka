@@ -4,6 +4,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::ids::{MessageCount, TimeOffsetMs, WallclockMs};
+
 /// Which Kafka stack the scenario is running against. Pure metadata; the
 /// driver's client behaviour is identical for both — Crabka's
 /// wire-compatible client speaks to either broker.
@@ -196,8 +198,8 @@ pub struct LatencyPercentiles {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Throughput {
-    pub msgs_produced: u64,
-    pub msgs_consumed: u64,
+    pub msgs_produced: MessageCount,
+    pub msgs_consumed: MessageCount,
     pub mb_in: f64,
     pub mb_out: f64,
     pub producer_msgs_per_sec: f64,
@@ -223,9 +225,9 @@ pub struct Resource {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Disturbance {
-    pub kill_at_ms: u64,
-    pub recovery_at_ms: u64,
-    pub dropped: u64,
+    pub kill_at_ms: TimeOffsetMs,
+    pub recovery_at_ms: TimeOffsetMs,
+    pub dropped: MessageCount,
     pub latency_spike_max_ms: f64,
 }
 
@@ -244,7 +246,7 @@ pub struct Topology {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Sample {
     /// Milliseconds since the measurement window started.
-    pub t_offset_ms: u64,
+    pub t_offset_ms: TimeOffsetMs,
     pub producer_msgs_per_sec: f64,
     pub consumer_msgs_per_sec: f64,
     /// Interval producer-ack latency (this window only), milliseconds.
@@ -260,7 +262,7 @@ pub struct Sample {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BrokerSample {
     /// Milliseconds since `wallclock_start_unix_ms`.
-    pub t_offset_ms: u64,
+    pub t_offset_ms: TimeOffsetMs,
     /// Summed CPU usage across broker pods, in cores.
     pub cpu_cores: f64,
     /// Summed working-set memory across broker pods, in bytes.
@@ -274,8 +276,8 @@ pub struct RunOutput {
     pub scenario: Scenario,
     pub stack: Stack,
     pub topology: Topology,
-    pub wallclock_start_unix_ms: i64,
-    pub wallclock_end_unix_ms: i64,
+    pub wallclock_start_unix_ms: WallclockMs,
+    pub wallclock_end_unix_ms: WallclockMs,
     pub throughput: Throughput,
     pub producer_latency_ms: LatencyPercentiles,
     pub consumer_e2e_latency_ms: LatencyPercentiles,
@@ -420,8 +422,8 @@ mode:
                 replication_factor: 1,
                 broker_count: 1,
             },
-            wallclock_start_unix_ms: 0,
-            wallclock_end_unix_ms: 1000,
+            wallclock_start_unix_ms: WallclockMs(0),
+            wallclock_end_unix_ms: WallclockMs(1000),
             throughput: Throughput::default(),
             producer_latency_ms: LatencyPercentiles::default(),
             consumer_e2e_latency_ms: LatencyPercentiles::default(),

@@ -5,6 +5,7 @@
 pub mod chain;
 pub mod checkpoint;
 pub mod event;
+pub mod ids;
 pub mod log;
 pub mod ocsf;
 pub mod signing;
@@ -19,6 +20,7 @@ pub use event::{
     AuditEndpoint, AuditEvent, AuditEventClass, AuditOutcome, AuditPrincipal, AuditResource,
     LifecycleKind,
 };
+pub use ids::{CheckpointCount, EpochMs, MaxSpoolBytes, NodeId, RecordCount, Seq, SpoolBytes};
 pub use log::{AuditLog, AuditWriter, AuditWriterParams};
 pub use ocsf::{ProductInfo, to_ocsf};
 pub use signing::{

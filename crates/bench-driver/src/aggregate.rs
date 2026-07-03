@@ -9,7 +9,10 @@
 
 use std::collections::BTreeMap;
 
-use crate::scenario::{BrokerSample, RunOutput, Sample, Stack};
+use crate::{
+    ids::TimeOffsetMs,
+    scenario::{BrokerSample, RunOutput, Sample, Stack},
+};
 
 /// Mean / spread of a single scalar metric over the runs of one `(cell, stack)`.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -184,7 +187,7 @@ pub fn aggregate_cells(runs: &[RunOutput]) -> Vec<CellAgg> {
 /// fixed offset into the run, plus how many runs contributed that offset.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TsPoint {
-    pub t_offset_ms: u64,
+    pub t_offset_ms: TimeOffsetMs,
     pub mean: f64,
     pub n: usize,
 }
@@ -250,7 +253,7 @@ pub fn averaged_timeseries(runs: &[RunOutput]) -> Vec<TsSeries> {
             }
 
             for &(key, extract) in &client_metrics {
-                let mut buckets: BTreeMap<u64, Vec<f64>> = BTreeMap::new();
+                let mut buckets: BTreeMap<TimeOffsetMs, Vec<f64>> = BTreeMap::new();
                 for r in &stack_runs {
                     for s in &r.samples {
                         buckets.entry(s.t_offset_ms).or_default().push(extract(s));
@@ -264,7 +267,7 @@ pub fn averaged_timeseries(runs: &[RunOutput]) -> Vec<TsSeries> {
             }
 
             for &(key, extract) in &broker_metrics {
-                let mut buckets: BTreeMap<u64, Vec<f64>> = BTreeMap::new();
+                let mut buckets: BTreeMap<TimeOffsetMs, Vec<f64>> = BTreeMap::new();
                 for r in &stack_runs {
                     for b in &r.broker_samples {
                         buckets.entry(b.t_offset_ms).or_default().push(extract(b));
@@ -288,7 +291,7 @@ fn series_from_buckets(
     broker_count: u32,
     stack: Stack,
     metric: &'static str,
-    buckets: BTreeMap<u64, Vec<f64>>,
+    buckets: BTreeMap<TimeOffsetMs, Vec<f64>>,
 ) -> Option<TsSeries> {
     if buckets.is_empty() {
         return None;
@@ -318,9 +321,12 @@ mod tests {
     use assert2::{assert, check};
 
     use super::*;
-    use crate::scenario::{
-        Acks, Compression, LatencyPercentiles, LoadMode, ModeTag, Resource, Scenario, Throughput,
-        Topology,
+    use crate::{
+        ids::WallclockMs,
+        scenario::{
+            Acks, Compression, LatencyPercentiles, LoadMode, ModeTag, Resource, Scenario,
+            Throughput, Topology,
+        },
     };
 
     fn run(
@@ -356,8 +362,8 @@ mod tests {
                 replication_factor: 3,
                 broker_count,
             },
-            wallclock_start_unix_ms: 0,
-            wallclock_end_unix_ms: 60_000,
+            wallclock_start_unix_ms: WallclockMs(0),
+            wallclock_end_unix_ms: WallclockMs(60_000),
             throughput: Throughput {
                 producer_msgs_per_sec: prod_mps,
                 ..Throughput::default()
@@ -377,7 +383,7 @@ mod tests {
 
     fn sample(t: u64, prod_mps: f64) -> Sample {
         Sample {
-            t_offset_ms: t,
+            t_offset_ms: TimeOffsetMs(t),
             producer_msgs_per_sec: prod_mps,
             consumer_msgs_per_sec: 0.0,
             producer_p50_ms: 0.0,
@@ -456,7 +462,7 @@ mod tests {
                 0.0,
                 vec![sample(0, 1000.0), sample(2000, 2000.0)],
                 vec![BrokerSample {
-                    t_offset_ms: 0,
+                    t_offset_ms: TimeOffsetMs(0),
                     cpu_cores: 2.0,
                     mem_working_set_bytes: 1_048_576,
                 }],
@@ -468,7 +474,7 @@ mod tests {
                 0.0,
                 vec![sample(0, 3000.0), sample(2000, 4000.0)],
                 vec![BrokerSample {
-                    t_offset_ms: 0,
+                    t_offset_ms: TimeOffsetMs(0),
                     cpu_cores: 4.0,
                     mem_working_set_bytes: 3_145_728,
                 }],
@@ -483,12 +489,12 @@ mod tests {
             prod.points
                 == vec![
                     TsPoint {
-                        t_offset_ms: 0,
+                        t_offset_ms: TimeOffsetMs(0),
                         mean: 2000.0,
                         n: 2
                     },
                     TsPoint {
-                        t_offset_ms: 2000,
+                        t_offset_ms: TimeOffsetMs(2000),
                         mean: 3000.0,
                         n: 2
                     },
@@ -501,7 +507,7 @@ mod tests {
         assert!(
             cpu.points[0]
                 == TsPoint {
-                    t_offset_ms: 0,
+                    t_offset_ms: TimeOffsetMs(0),
                     mean: 3.0,
                     n: 2
                 }
@@ -535,7 +541,7 @@ mod tests {
         assert!(
             prod.points[0]
                 == TsPoint {
-                    t_offset_ms: 0,
+                    t_offset_ms: TimeOffsetMs(0),
                     mean: 20.0,
                     n: 2
                 }
@@ -544,7 +550,7 @@ mod tests {
         assert!(
             prod.points[1]
                 == TsPoint {
-                    t_offset_ms: 2000,
+                    t_offset_ms: TimeOffsetMs(2000),
                     mean: 20.0,
                     n: 1
                 }

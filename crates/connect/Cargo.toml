@@ -28,6 +28,7 @@ crabka-schema-serde = { version = "0.3.8", path = "../schema-serde" }
 crabka-connect-derive = { version = "0.3.8", path = "../connect-derive", optional = true }
 async-trait = { workspace = true }
 bytes = { workspace = true }
+derive_more = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

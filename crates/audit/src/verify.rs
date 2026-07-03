@@ -11,6 +11,7 @@ use crabka_protocol::records::{Record, RecordBatch};
 use crate::{
     chain::{GENESIS_HEAD, chain_hash, from_hex32},
     checkpoint::{Checkpoint, EVENT_CLASS_CHECKPOINT},
+    ids::{CheckpointCount, RecordCount, Seq},
     sink::{AuditError, HEADER_PREV_HASH, HEADER_SEQ},
 };
 
@@ -38,7 +39,7 @@ impl TrustedKeys {
 #[derive(Debug, Clone)]
 pub struct VerifyBreak {
     pub offset: i64,
-    pub seq: Option<u64>,
+    pub seq: Option<Seq>,
     pub reason: String,
 }
 
@@ -50,14 +51,14 @@ pub struct VerifyBreak {
 /// at the break before a reliable count could be established).
 #[derive(Debug, Clone)]
 pub struct VerifyReport {
-    pub records: u64,
-    pub checkpoints: u64,
+    pub records: RecordCount,
+    pub checkpoints: CheckpointCount,
     pub ok: bool,
     pub first_break: Option<VerifyBreak>,
     /// Number of records that are NOT covered by a signed checkpoint (i.e. the
     /// unsigned tail). Zero means the chain is fully attested. Only meaningful
     /// when `ok` is `true`.
-    pub unanchored_records: u64,
+    pub unanchored_records: RecordCount,
 }
 
 fn header<'a>(record: &'a Record, key: &str) -> Option<&'a [u8]> {
@@ -69,10 +70,10 @@ fn header<'a>(record: &'a Record, key: &str) -> Option<&'a [u8]> {
 }
 
 fn broke(
-    records: u64,
-    checkpoints: u64,
+    records: RecordCount,
+    checkpoints: CheckpointCount,
     offset: i64,
-    seq: Option<u64>,
+    seq: Option<Seq>,
     reason: &str,
 ) -> VerifyReport {
     VerifyReport {
@@ -86,27 +87,27 @@ fn broke(
         }),
         // unanchored_records is 0 when ok=false; the count is not meaningful
         // after a break since the walk stopped early.
-        unanchored_records: 0,
+        unanchored_records: RecordCount(0),
     }
 }
 
 /// Mutable per-record walk state threaded through helpers.
 struct WalkState {
     head: [u8; 32],
-    expected_seq: u64,
-    records: u64,
-    checkpoints: u64,
+    expected_seq: Seq,
+    records: RecordCount,
+    checkpoints: CheckpointCount,
     /// The `seq_high` of the most-recently validated checkpoint, if any.
-    last_checkpoint_seq_high: Option<u64>,
+    last_checkpoint_seq_high: Option<Seq>,
 }
 
 impl WalkState {
     fn new() -> Self {
         Self {
             head: GENESIS_HEAD,
-            expected_seq: 0,
-            records: 0,
-            checkpoints: 0,
+            expected_seq: Seq(0),
+            records: RecordCount(0),
+            checkpoints: CheckpointCount(0),
             last_checkpoint_seq_high: None,
         }
     }
@@ -120,7 +121,7 @@ fn check_checkpoint(
     state: &mut WalkState,
     trusted: &TrustedKeys,
 ) -> Result<(), VerifyReport> {
-    state.checkpoints += 1;
+    state.checkpoints.0 += 1;
     let value = rec.value.as_deref().unwrap_or_default();
     let Ok(json) = serde_json::from_slice::<serde_json::Value>(value) else {
         return Err(broke(
@@ -167,7 +168,7 @@ fn check_checkpoint(
             "checkpoint chain_head does not match recomputed chain",
         ));
     }
-    if cp.seq_high != state.expected_seq.saturating_sub(1) {
+    if cp.seq_high != Seq(state.expected_seq.0.saturating_sub(1)) {
         return Err(broke(
             state.records,
             state.checkpoints,
@@ -186,7 +187,8 @@ fn check_chained(rec: &Record, offset: i64, state: &mut WalkState) -> Result<(),
     let value = rec.value.as_deref().unwrap_or_default();
     let seq = header(rec, HEADER_SEQ)
         .and_then(|b| std::str::from_utf8(b).ok())
-        .and_then(|s| s.parse::<u64>().ok());
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(Seq);
     let prev = header(rec, HEADER_PREV_HASH)
         .and_then(|b| std::str::from_utf8(b).ok())
         .and_then(from_hex32);
@@ -217,9 +219,9 @@ fn check_chained(rec: &Record, offset: i64, state: &mut WalkState) -> Result<(),
             "prev_hash does not match recomputed chain head",
         ));
     }
-    state.head = chain_hash(&state.head, seq, value);
-    state.expected_seq += 1;
-    state.records += 1;
+    state.head = chain_hash(&state.head, seq.0, value);
+    state.expected_seq.0 += 1;
+    state.records.0 += 1;
     Ok(())
 }
 
@@ -264,8 +266,8 @@ pub fn verify_partition_dir(dir: &Path, trusted: &TrustedKeys) -> Result<VerifyR
                 };
                 if let Err(report) = result {
                     let span = tracing::Span::current();
-                    span.record("records", report.records);
-                    span.record("checkpoints", report.checkpoints);
+                    span.record("records", report.records.0);
+                    span.record("checkpoints", report.checkpoints.0);
                     span.record("ok", report.ok);
                     return Ok(report);
                 }
@@ -274,13 +276,13 @@ pub fn verify_partition_dir(dir: &Path, trusted: &TrustedKeys) -> Result<VerifyR
     }
 
     let unanchored_records = match state.last_checkpoint_seq_high {
-        Some(seq_high) => state.records.saturating_sub(seq_high + 1),
+        Some(seq_high) => RecordCount(state.records.0.saturating_sub(seq_high.0 + 1)),
         None => state.records,
     };
 
     let span = tracing::Span::current();
-    span.record("records", state.records);
-    span.record("checkpoints", state.checkpoints);
+    span.record("records", state.records.0);
+    span.record("checkpoints", state.checkpoints.0);
     span.record("ok", true);
     Ok(VerifyReport {
         records: state.records,
@@ -302,7 +304,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        chain::ChainState, checkpoint::Checkpoint, signing::FileEd25519Signer, sink::AuditRecord,
+        chain::ChainState, checkpoint::Checkpoint, ids::EpochMs, signing::FileEd25519Signer,
+        sink::AuditRecord,
     };
 
     fn signer() -> (Arc<FileEd25519Signer>, Vec<u8>) {
@@ -359,7 +362,12 @@ mod tests {
             offset += 1;
         }
         // checkpoint over the chain head
-        let cp = Checkpoint::signed(s.as_ref(), chain.next_seq() - 1, &chain.head(), 123);
+        let cp = Checkpoint::signed(
+            s.as_ref(),
+            Seq(chain.next_seq() - 1),
+            &chain.head(),
+            EpochMs(123),
+        );
         let mut b = audit_record_to_batch(&cp.to_record(), offset);
         log.append(&mut b).unwrap();
         pubkey
@@ -372,12 +380,12 @@ mod tests {
         let trusted = TrustedKeys::single("k1".into(), pubkey);
         let report = verify_partition_dir(tmp.path(), &trusted).unwrap();
         check!(report.ok);
-        check!(report.records == 3);
-        check!(report.checkpoints == 1);
+        check!(report.records == RecordCount(3));
+        check!(report.checkpoints == CheckpointCount(1));
         check!(report.first_break.is_none());
         // build_partition writes 3 records (seq 0..2) + 1 checkpoint (seq_high=2)
         // → all records are covered → 0 unanchored
-        check!(report.unanchored_records == 0);
+        check!(report.unanchored_records == RecordCount(0));
     }
 
     #[test]
@@ -416,7 +424,12 @@ mod tests {
             log.append(&mut b).unwrap();
             offset += 1;
         }
-        let cp = Checkpoint::signed(s.as_ref(), chain.next_seq() - 1, &chain.head(), 100);
+        let cp = Checkpoint::signed(
+            s.as_ref(),
+            Seq(chain.next_seq() - 1),
+            &chain.head(),
+            EpochMs(100),
+        );
         let mut b = audit_record_to_batch(&cp.to_record(), offset);
         log.append(&mut b).unwrap();
         offset += 1;
@@ -438,9 +451,9 @@ mod tests {
         let trusted = TrustedKeys::single("k1".into(), pubkey);
         let report = verify_partition_dir(tmp.path(), &trusted).unwrap();
         check!(report.ok);
-        check!(report.checkpoints == 1);
-        check!(report.records == 5);
-        check!(report.unanchored_records == 2);
+        check!(report.checkpoints == CheckpointCount(1));
+        check!(report.records == RecordCount(5));
+        check!(report.unanchored_records == RecordCount(2));
     }
 
     /// Chain-only partition (no signing key, no checkpoints) — all records are unanchored.
@@ -466,9 +479,9 @@ mod tests {
         let trusted = TrustedKeys::default();
         let report = verify_partition_dir(tmp.path(), &trusted).unwrap();
         check!(report.ok);
-        check!(report.checkpoints == 0);
-        check!(report.records == 3);
-        check!(report.unanchored_records == 3);
+        check!(report.checkpoints == CheckpointCount(0));
+        check!(report.records == RecordCount(3));
+        check!(report.unanchored_records == RecordCount(3));
     }
 
     // ── Fix 2 tests: direct tamper-detection (chain-inconsistent fixtures) ────
@@ -574,9 +587,9 @@ mod tests {
         }
         let orig_cp = Checkpoint::signed(
             s.as_ref(),
-            orig_chain.next_seq() - 1,
+            Seq(orig_chain.next_seq() - 1),
             &orig_chain.head(),
-            42,
+            EpochMs(42),
         );
 
         // Build tampered partition: same structure but different values → different chain head

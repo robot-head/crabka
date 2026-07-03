@@ -16,6 +16,7 @@ use crate::{
     chain::ChainState,
     checkpoint::Checkpoint,
     event::AuditEvent,
+    ids::{EpochMs, Seq},
     ocsf::ProductInfo,
     signing::SigningKeyProvider,
     sink::{AuditRecord, AuditSink},
@@ -213,10 +214,10 @@ impl AuditWriter {
             self.since_checkpoint = 0;
             return;
         };
-        let seq_high = self.chain.next_seq().saturating_sub(1);
-        tracing::Span::current().record("seq_high", seq_high);
+        let seq_high = Seq(self.chain.next_seq().saturating_sub(1));
+        tracing::Span::current().record("seq_high", seq_high.0);
         let head = self.chain.head();
-        let cp = Checkpoint::signed(signer.as_ref(), seq_high, &head, now_ms());
+        let cp = Checkpoint::signed(signer.as_ref(), seq_high, &head, EpochMs(now_ms()));
         self.write_or_spool(cp.to_record()).await;
         self.since_checkpoint = 0;
     }
@@ -632,7 +633,7 @@ mod tests {
                 let cp = Checkpoint::from_value(&v).expect("cp");
                 check!(cp.verify(&pubkey));
                 check!(cp.chain_head == head);
-                check!(cp.seq_high == seq - 1);
+                check!(cp.seq_high == Seq(seq - 1));
             } else {
                 head = crate::chain::chain_hash(&head, seq, &r.value);
                 seq += 1;
@@ -679,7 +680,7 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&cps[0].value).unwrap();
         let cp = Checkpoint::from_value(&v).unwrap();
         check!(cp.verify(&pubkey));
-        check!(cp.seq_high == 2); // last chained seq (records 0,1,2)
+        check!(cp.seq_high == Seq(2)); // last chained seq (records 0,1,2)
     }
 
     #[tokio::test]
@@ -800,7 +801,7 @@ mod tests {
         sink.set_fail(true); // stay in spool mode (no replay), so drops accumulate
         let stats = Arc::new(AuditStats::new());
         let (log, rx) = AuditLog::new(64);
-        let spool = Spool::open(dir.path(), one).unwrap();
+        let spool = Spool::open(dir.path(), one.0).unwrap();
         let writer = AuditWriter::new(rx, params(sink.clone(), spool, stats.clone()));
         let h = tokio::spawn(writer.run());
         for i in 0..6 {

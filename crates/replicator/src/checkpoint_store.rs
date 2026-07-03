@@ -142,7 +142,7 @@ mod tests {
 
         let mut pos = BTreeMap::new();
         pos.insert("orders-0".to_string(), OffsetValue::Long(42));
-        let off = SourceOffset::new(BTreeMap::new(), pos);
+        let off = SourceOffset::new(BTreeMap::new().into(), pos.into());
 
         store.save(&off).await.unwrap();
 

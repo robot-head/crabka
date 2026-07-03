@@ -132,7 +132,7 @@ fn web_metrics() -> Vec<WebMetric> {
             per_run: |r| {
                 r.samples
                     .iter()
-                    .map(|s| (s.t_offset_ms, s.producer_msgs_per_sec))
+                    .map(|s| (u64::from(s.t_offset_ms), s.producer_msgs_per_sec))
                     .collect()
             },
         },
@@ -142,7 +142,7 @@ fn web_metrics() -> Vec<WebMetric> {
             per_run: |r| {
                 r.broker_samples
                     .iter()
-                    .map(|b| (b.t_offset_ms, b.cpu_cores))
+                    .map(|b| (u64::from(b.t_offset_ms), b.cpu_cores))
                     .collect()
             },
         },
@@ -152,7 +152,12 @@ fn web_metrics() -> Vec<WebMetric> {
             per_run: |r| {
                 r.broker_samples
                     .iter()
-                    .map(|b| (b.t_offset_ms, b.mem_working_set_bytes as f64 / 1_048_576.0))
+                    .map(|b| {
+                        (
+                            u64::from(b.t_offset_ms),
+                            b.mem_working_set_bytes as f64 / 1_048_576.0,
+                        )
+                    })
                     .collect()
             },
         },
@@ -206,7 +211,7 @@ fn per_run_chart(
             let x: Vec<f64> = series
                 .points
                 .iter()
-                .map(|p| p.t_offset_ms as f64 / 1000.0)
+                .map(|p| u64::from(p.t_offset_ms) as f64 / 1000.0)
                 .collect();
             let y: Vec<f64> = series.points.iter().map(|p| p.mean).collect();
             let n = series.points.iter().map(|p| p.n).max().unwrap_or(0);
@@ -287,7 +292,7 @@ fn timeseries_charts(ts: &[TsSeries]) -> String {
             let x: Vec<f64> = s
                 .points
                 .iter()
-                .map(|p| p.t_offset_ms as f64 / 1000.0)
+                .map(|p| u64::from(p.t_offset_ms) as f64 / 1000.0)
                 .collect();
             let y: Vec<f64> = s.points.iter().map(|p| p.mean).collect();
             plot.add_trace(
@@ -362,9 +367,12 @@ mod tests {
     use assert2::assert;
 
     use super::*;
-    use crate::scenario::{
-        Acks, Compression, LatencyPercentiles, LoadMode, ModeTag, Resource, Sample, Scenario,
-        Throughput, Topology,
+    use crate::{
+        ids::{TimeOffsetMs, WallclockMs},
+        scenario::{
+            Acks, Compression, LatencyPercentiles, LoadMode, ModeTag, Resource, Sample, Scenario,
+            Throughput, Topology,
+        },
     };
 
     fn run(
@@ -399,8 +407,8 @@ mod tests {
                 replication_factor: 3,
                 broker_count: 6,
             },
-            wallclock_start_unix_ms: 0,
-            wallclock_end_unix_ms: 60_000,
+            wallclock_start_unix_ms: WallclockMs(0),
+            wallclock_end_unix_ms: WallclockMs(60_000),
             throughput: Throughput {
                 producer_msgs_per_sec: prod_mps,
                 ..Throughput::default()
@@ -423,7 +431,7 @@ mod tests {
 
     fn sample(t: u64, prod_mps: f64) -> Sample {
         Sample {
-            t_offset_ms: t,
+            t_offset_ms: TimeOffsetMs(t),
             producer_msgs_per_sec: prod_mps,
             consumer_msgs_per_sec: prod_mps * 0.9,
             producer_p50_ms: 1.0,
@@ -493,12 +501,12 @@ mod tests {
             );
             r.broker_samples = vec![
                 BrokerSample {
-                    t_offset_ms: 0,
+                    t_offset_ms: TimeOffsetMs(0),
                     cpu_cores: cpu,
                     mem_working_set_bytes: mem,
                 },
                 BrokerSample {
-                    t_offset_ms: 2000,
+                    t_offset_ms: TimeOffsetMs(2000),
                     cpu_cores: cpu,
                     mem_working_set_bytes: mem,
                 },

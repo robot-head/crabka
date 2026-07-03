@@ -10,6 +10,7 @@ use serde_json::json;
 use crate::{
     chain::{from_hex32, to_hex},
     event::AuditEventClass,
+    ids::{EpochMs, Seq},
     signing::{SigningKeyProvider, checkpoint_signing_bytes, verify_signature},
     sink::AuditRecord,
 };
@@ -21,9 +22,9 @@ pub const EVENT_CLASS_CHECKPOINT: &str = "checkpoint";
 #[derive(Debug, Clone)]
 pub struct Checkpoint {
     pub key_id: String,
-    pub seq_high: u64,
+    pub seq_high: Seq,
     pub chain_head: [u8; 32],
-    pub time_ms: i64,
+    pub time_ms: EpochMs,
     pub signature: Vec<u8>,
     pub public_key: Vec<u8>,
 }
@@ -38,9 +39,9 @@ impl Checkpoint {
     )]
     pub fn signed(
         signer: &dyn SigningKeyProvider,
-        seq_high: u64,
+        seq_high: Seq,
         chain_head: &[u8; 32],
-        time_ms: i64,
+        time_ms: EpochMs,
     ) -> Self {
         let msg = checkpoint_signing_bytes(signer.key_id(), seq_high, chain_head, time_ms);
         Self {
@@ -58,7 +59,7 @@ impl Checkpoint {
     #[tracing::instrument(
         level = "debug",
         skip_all,
-        fields(key_id = %self.key_id, seq_high = self.seq_high)
+        fields(key_id = %self.key_id, seq_high = self.seq_high.0)
     )]
     pub fn verify(&self, public_key: &[u8]) -> bool {
         let msg =
@@ -72,9 +73,9 @@ impl Checkpoint {
         let value = serde_json::to_vec(&json!({
             "type": "checkpoint",
             "key_id": self.key_id,
-            "seq_high": self.seq_high,
+            "seq_high": self.seq_high.0,
             "chain_head": to_hex(&self.chain_head),
-            "time": self.time_ms,
+            "time": self.time_ms.0,
             "signature": to_hex(&self.signature),
             "public_key": to_hex(&self.public_key),
         }))
@@ -94,9 +95,9 @@ impl Checkpoint {
     #[must_use]
     pub fn from_value(v: &serde_json::Value) -> Option<Self> {
         let key_id = v.get("key_id")?.as_str()?.to_string();
-        let seq_high = v.get("seq_high")?.as_u64()?;
+        let seq_high = Seq(v.get("seq_high")?.as_u64()?);
         let chain_head = from_hex32(v.get("chain_head")?.as_str()?)?;
-        let time_ms = v.get("time")?.as_i64()?;
+        let time_ms = EpochMs(v.get("time")?.as_i64()?);
         let signature = hex_vec(v.get("signature")?.as_str()?)?;
         let public_key = hex_vec(v.get("public_key")?.as_str()?)?;
         Some(Self {
@@ -146,7 +147,7 @@ mod tests {
     fn signed_checkpoint_round_trips_through_record_and_verifies() {
         let (s, pubkey) = signer();
         let head = [3u8; 32];
-        let cp = Checkpoint::signed(&s, 41, &head, 1_700_000_000_000);
+        let cp = Checkpoint::signed(&s, Seq(41), &head, EpochMs(1_700_000_000_000));
         check!(cp.verify(&pubkey));
 
         // serialize to a record, parse back from its value, still verifies
@@ -159,7 +160,7 @@ mod tests {
         );
         let value: serde_json::Value = serde_json::from_slice(&rec.value).unwrap();
         let parsed = Checkpoint::from_value(&value).expect("parse");
-        check!(parsed.seq_high == 41);
+        check!(parsed.seq_high == Seq(41));
         check!(parsed.chain_head == head);
         check!(parsed.verify(&pubkey));
     }
@@ -167,7 +168,7 @@ mod tests {
     #[test]
     fn tampered_checkpoint_fails_verification() {
         let (s, pubkey) = signer();
-        let mut cp = Checkpoint::signed(&s, 41, &[3u8; 32], 10);
+        let mut cp = Checkpoint::signed(&s, Seq(41), &[3u8; 32], EpochMs(10));
         // flip the head the signature was computed over
         cp.chain_head = [4u8; 32];
         check!(!cp.verify(&pubkey));

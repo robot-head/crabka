@@ -8,7 +8,7 @@ use std::{
 
 use async_trait::async_trait;
 use crabka_client_consumer::{AutoOffsetReset, Consumer};
-use crabka_connect::{ConnectError, ConnectRecord, OffsetValue, Source, SourceOffset};
+use crabka_connect::{ConnectError, ConnectRecord, OffsetMap, OffsetValue, Source, SourceOffset};
 
 use crate::record::ReplicatedRecord;
 
@@ -143,12 +143,12 @@ impl Source<(), ReplicatedRecord> for SourceConsumer {
         if self.positions.is_empty() {
             return None;
         }
-        let position = self
+        let position: OffsetMap = self
             .positions
             .iter()
             .map(|(k, v)| (k.clone(), OffsetValue::Long(*v)))
             .collect();
-        Some(SourceOffset::new(BTreeMap::new(), position))
+        Some(SourceOffset::new(BTreeMap::new().into(), position.into()))
     }
 
     /// Restore the read position from a previously-checkpointed [`SourceOffset`].
@@ -190,7 +190,7 @@ impl Source<(), ReplicatedRecord> for SourceConsumer {
             .as_ref()
             .ok_or_else(|| ConnectError::Backend("source consumer is closed".into()))?;
 
-        for (key, value) in &offset.position {
+        for (key, value) in offset.position.iter() {
             let OffsetValue::Long(next) = value else {
                 tracing::warn!(key, "checkpoint position value is not a Long; skipping");
                 continue;

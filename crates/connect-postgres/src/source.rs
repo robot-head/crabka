@@ -965,6 +965,7 @@ mod tests {
         let mut non_string = crabka_connect::SourceOffset::default();
         non_string
             .partition
+            .0
             .insert("database".to_owned(), crabka_connect::OffsetValue::Long(7));
 
         check!(matches!(
