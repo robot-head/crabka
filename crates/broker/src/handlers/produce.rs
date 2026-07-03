@@ -469,7 +469,7 @@ async fn process_partition(
         out.error_code = codes::NOT_LEADER_OR_FOLLOWER;
         out.current_leader = LeaderIdAndEpoch {
             leader_id: i32::try_from(leader.0).unwrap_or(NO_LEADER_ID),
-            leader_epoch,
+            leader_epoch: leader_epoch.0,
             ..Default::default()
         };
         return Ok(out);
@@ -484,7 +484,7 @@ async fn process_partition(
         out.error_code = codes::NOT_LEADER_OR_FOLLOWER;
         out.current_leader = LeaderIdAndEpoch {
             leader_id: i32::try_from(leader.0).unwrap_or(NO_LEADER_ID),
-            leader_epoch,
+            leader_epoch: leader_epoch.0,
             ..Default::default()
         };
         return Ok(out);
@@ -1236,7 +1236,8 @@ fn build_produce_data(prepared: PreparedBatch, leader_epoch: i32) -> ProduceData
         PreparedSource::Verbatim(bytes) => ProduceData::Verbatim(VerbatimBatch {
             last_offset_delta: prepared.last_offset_delta,
             max_timestamp: prepared.max_timestamp,
-            leader_epoch,
+            // Wrap the atomic-loaded raw epoch into the log seam's `LeaderEpoch`.
+            leader_epoch: crabka_log::LeaderEpoch(leader_epoch),
             // Wrap the produce path's decode-side `i64` into the log seam's `ProducerId`.
             producer_id: crabka_log::ProducerId(prepared.producer_id),
             is_transactional,
@@ -1284,7 +1285,7 @@ mod tests {
             leader: crabka_audit::NodeId(*isr.first().unwrap_or(&1)),
             replicas: isr.iter().copied().map(crabka_audit::NodeId).collect(),
             isr: isr.iter().copied().map(crabka_audit::NodeId).collect(),
-            leader_epoch: 0,
+            leader_epoch: crabka_metadata::LeaderEpoch(0),
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![],
@@ -1542,7 +1543,7 @@ mod tests {
             leader: crabka_audit::NodeId(2),
             replicas: vec![crabka_audit::NodeId(2), crabka_audit::NodeId(3)],
             isr: vec![crabka_audit::NodeId(2), crabka_audit::NodeId(3)],
-            leader_epoch: 17,
+            leader_epoch: crabka_metadata::LeaderEpoch(17),
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![],
@@ -1738,7 +1739,7 @@ mod tests {
             match data {
                 ProduceData::Verbatim(v) => {
                     check!(&v.bytes[..] == &wire[..]);
-                    check!(v.leader_epoch == 7);
+                    check!(v.leader_epoch.0 == 7);
                     check!(v.max_timestamp == 42);
                     check!(v.last_offset_delta == 0);
                 }
@@ -1879,7 +1880,7 @@ mod tests {
                     check!(v.bytes.len() < big.len());
                     check!(v.max_timestamp == 7_777);
                     check!(v.last_offset_delta == 0);
-                    check!(v.leader_epoch == 3);
+                    check!(v.leader_epoch.0 == 3);
                 }
                 ProduceData::Owned(_) => {
                     panic!("lz4 producer batch must pass through verbatim (no decompress)")

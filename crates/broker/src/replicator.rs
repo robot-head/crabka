@@ -299,7 +299,8 @@ fn build_fetch_request(
             let log = entry.log.lock().expect("log mutex poisoned");
             log.epoch_checkpoint().latest_epoch()
         })
-        .unwrap_or(-1);
+        // Unwrap the log-layer `LeaderEpoch` into the raw wire `last_fetched_epoch`.
+        .map_or(-1, |e| e.0);
     // `replica_id` is the wire field on Fetch v0-14. KIP-903 (Kafka 3.5) moved
     // it into a tagged `replica_state` struct on v15+; the codegen serializes
     // whichever the negotiated version requires. Populate BOTH so the request
@@ -873,7 +874,7 @@ mod tests {
             leader,
             replicas: vec![LEADER_ID, NODE_ID],
             isr: vec![LEADER_ID, NODE_ID],
-            leader_epoch: 4,
+            leader_epoch: crabka_metadata::LeaderEpoch(4),
             adding_replicas: Vec::new(),
             removing_replicas: Vec::new(),
             directories: Vec::new(),

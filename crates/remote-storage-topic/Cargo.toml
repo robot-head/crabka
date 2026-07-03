@@ -22,6 +22,7 @@ crabka-client-admin = { version = "0.3.8", path = "../client-admin" }
 crabka-client-core = { version = "0.3.8", path = "../client-core" }
 crabka-client-producer = { version = "0.3.8", path = "../client-producer" }
 crabka-protocol = { version = "0.3.8", path = "../protocol" }
+crabka-ids = { version = "0.3.8", path = "../ids" }
 async-trait = { workspace = true }
 bytes = { workspace = true }
 futures-util = { workspace = true }

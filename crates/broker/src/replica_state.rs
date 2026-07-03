@@ -13,6 +13,7 @@ use std::{
     time::Instant,
 };
 
+use crabka_ids::LeaderEpoch;
 use crabka_log::Offset;
 use crabka_raft::NodeId;
 
@@ -28,7 +29,7 @@ pub(crate) struct ReplicaState {
     pub(crate) isr: HashSet<NodeId>,
     pub(crate) per_follower: HashMap<NodeId, FollowerStats>,
     pub(crate) hw: Offset,
-    pub(crate) current_leader_epoch: i32,
+    pub(crate) current_leader_epoch: LeaderEpoch,
 }
 
 impl ReplicaState {
@@ -37,7 +38,7 @@ impl ReplicaState {
             isr: HashSet::new(),
             per_follower: HashMap::new(),
             hw: Offset(0),
-            current_leader_epoch: 0,
+            current_leader_epoch: LeaderEpoch(0),
         }
     }
 
@@ -164,7 +165,7 @@ mod tests {
             isr: HashSet::new(),
             per_follower: HashMap::new(),
             hw: Offset(0),
-            current_leader_epoch: 0,
+            current_leader_epoch: LeaderEpoch(0),
         };
         assert!(s == expected);
     }
@@ -192,7 +193,7 @@ mod tests {
                 .into_iter()
                 .collect(),
             hw: Offset(0),
-            current_leader_epoch: 0,
+            current_leader_epoch: LeaderEpoch(0),
         };
         assert!(s == expected);
     }

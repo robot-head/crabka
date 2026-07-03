@@ -6,7 +6,7 @@ use crate::{
     action::{Action, TimerKind},
     event::{Event, LogEnd},
     role::{ReplicaProgress, Role},
-    types::{LeaderEpoch, LogOffsetMetadata, LogView, NodeId, QuorumState, ReplicaKey, SimInstant},
+    types::{Epoch, LogOffsetMetadata, LogView, NodeId, QuorumState, ReplicaKey, SimInstant},
 };
 
 /// Deterministic per-`(node, epoch)` election-timeout jitter in
@@ -17,7 +17,7 @@ use crate::{
 /// pure core and the async engine's initial timer arm so production self-staggers
 /// without per-node config.
 #[must_use]
-pub fn election_jitter_ms(me: NodeId, epoch: LeaderEpoch, base_ms: u64) -> u64 {
+pub fn election_jitter_ms(me: NodeId, epoch: Epoch, base_ms: u64) -> u64 {
     if base_ms == 0 {
         return 0;
     }
@@ -81,7 +81,7 @@ impl QuorumStateMachine {
     }
 
     #[cfg(test)]
-    pub(crate) fn force_epoch(&mut self, e: LeaderEpoch) {
+    pub(crate) fn force_epoch(&mut self, e: Epoch) {
         self.state.leader_epoch = e;
     }
 
@@ -176,7 +176,7 @@ impl QuorumStateMachine {
         &mut self,
         log: &dyn LogView,
         from: NodeId,
-        fetch_epoch: LeaderEpoch,
+        fetch_epoch: Epoch,
         fetch_offset: i64,
     ) -> Vec<Action> {
         // Only a leader tracks follower progress / serves divergence hints.
@@ -269,7 +269,7 @@ impl QuorumStateMachine {
     fn handle_fetch_response(
         &mut self,
         leader_id: NodeId,
-        _leader_epoch: LeaderEpoch,
+        _leader_epoch: Epoch,
         diverging: Option<LogOffsetMetadata>,
         now: SimInstant,
     ) -> Vec<Action> {
@@ -312,7 +312,7 @@ impl QuorumStateMachine {
     fn handle_begin_quorum_epoch(
         &mut self,
         leader_id: NodeId,
-        leader_epoch: LeaderEpoch,
+        leader_epoch: Epoch,
         now: SimInstant,
     ) -> Vec<Action> {
         // KIP-595 / leadership-hijack defense: only adopt a leader that belongs
@@ -376,7 +376,7 @@ impl QuorumStateMachine {
         &mut self,
         log: &dyn LogView,
         _leader_id: NodeId,
-        leader_epoch: LeaderEpoch,
+        leader_epoch: Epoch,
         now: SimInstant,
     ) -> Vec<Action> {
         if leader_epoch < self.state.leader_epoch {
@@ -460,7 +460,7 @@ impl QuorumStateMachine {
         &mut self,
         log: &dyn LogView,
         from: NodeId,
-        epoch: LeaderEpoch,
+        epoch: Epoch,
         vote_granted: bool,
         now: SimInstant,
     ) -> Vec<Action> {
@@ -600,7 +600,7 @@ impl QuorumStateMachine {
         log: &dyn LogView,
         from: NodeId,
         voter_id: NodeId,
-        candidate_epoch: LeaderEpoch,
+        candidate_epoch: Epoch,
         candidate: NodeId,
         cand_log: LogEnd,
         pre_vote: bool,
@@ -695,7 +695,7 @@ impl QuorumStateMachine {
     )]
     fn transition_to_unattached(
         &mut self,
-        epoch: LeaderEpoch,
+        epoch: Epoch,
         deadline: SimInstant,
         actions: &mut Vec<Action>,
     ) {
@@ -728,16 +728,16 @@ mod tests {
 
     struct FakeLog {
         end: i64,
-        last_epoch: LeaderEpoch,
+        last_epoch: Epoch,
     }
     impl LogView for FakeLog {
         fn end_offset(&self) -> i64 {
             self.end
         }
-        fn last_epoch(&self) -> LeaderEpoch {
+        fn last_epoch(&self) -> Epoch {
             self.last_epoch
         }
-        fn end_offset_for_epoch(&self, epoch: LeaderEpoch) -> Option<i64> {
+        fn end_offset_for_epoch(&self, epoch: Epoch) -> Option<i64> {
             if epoch <= self.last_epoch {
                 Some(self.end)
             } else {
@@ -750,16 +750,16 @@ mod tests {
     /// and then growing before followers fetch.
     struct CellLog {
         end: std::cell::Cell<i64>,
-        last_epoch: LeaderEpoch,
+        last_epoch: Epoch,
     }
     impl LogView for CellLog {
         fn end_offset(&self) -> i64 {
             self.end.get()
         }
-        fn last_epoch(&self) -> LeaderEpoch {
+        fn last_epoch(&self) -> Epoch {
             self.last_epoch
         }
-        fn end_offset_for_epoch(&self, epoch: LeaderEpoch) -> Option<i64> {
+        fn end_offset_for_epoch(&self, epoch: Epoch) -> Option<i64> {
             if epoch <= self.last_epoch {
                 Some(self.end.get())
             } else {
@@ -1350,10 +1350,10 @@ mod tests {
             fn end_offset(&self) -> i64 {
                 10
             }
-            fn last_epoch(&self) -> LeaderEpoch {
+            fn last_epoch(&self) -> Epoch {
                 2
             }
-            fn end_offset_for_epoch(&self, e: LeaderEpoch) -> Option<i64> {
+            fn end_offset_for_epoch(&self, e: Epoch) -> Option<i64> {
                 match e {
                     0 => Some(0),
                     1 => Some(5),

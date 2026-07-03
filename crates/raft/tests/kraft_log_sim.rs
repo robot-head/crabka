@@ -16,7 +16,7 @@ use crabka_ids::{NodeId, Offset};
 use crabka_protocol::records::{Attributes, Record, RecordBatch};
 use crabka_raft::kraft::{
     KraftLog,
-    types::{LeaderEpoch, LogView},
+    types::{Epoch, LogView},
 };
 use sim_harness::{Sim, SimNodeLog};
 
@@ -55,7 +55,7 @@ impl KraftBackedLog {
 /// Build a single-record batch stamped with `epoch`. `base_offset` is assigned
 /// by the log on `append` (leader path) or pinned by `append_at` (follower
 /// path), so the value here is just a placeholder.
-fn make_batch(epoch: LeaderEpoch, value: &[u8]) -> RecordBatch {
+fn make_batch(epoch: Epoch, value: &[u8]) -> RecordBatch {
     let epoch_i32 = i32::try_from(epoch).expect("epoch fits in i32");
     RecordBatch {
         base_offset: 0,
@@ -82,16 +82,16 @@ impl LogView for KraftBackedLog {
     fn end_offset(&self) -> i64 {
         LogView::end_offset(&self.log)
     }
-    fn last_epoch(&self) -> LeaderEpoch {
+    fn last_epoch(&self) -> Epoch {
         LogView::last_epoch(&self.log)
     }
-    fn end_offset_for_epoch(&self, epoch: LeaderEpoch) -> Option<i64> {
+    fn end_offset_for_epoch(&self, epoch: Epoch) -> Option<i64> {
         LogView::end_offset_for_epoch(&self.log, epoch)
     }
 }
 
 impl SimNodeLog for KraftBackedLog {
-    fn append_in_epoch(&mut self, epoch: LeaderEpoch, count: usize) {
+    fn append_in_epoch(&mut self, epoch: Epoch, count: usize) {
         // Leader path: one real single-record batch per record, each stamped
         // with the leader's current epoch. The log assigns sequential offsets.
         // A per-node monotonic counter keeps record values distinct so the

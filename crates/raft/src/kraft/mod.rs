@@ -27,6 +27,4 @@ pub use transport::{
     Command, Inbound, MetadataFetchSlice, NullPeerSender, PeerSender, QuorumStateSnapshot,
     TimerTick,
 };
-pub use types::{
-    LeaderEpoch, LogOffsetMetadata, LogView, NodeId, QuorumState, ReplicaKey, SimInstant,
-};
+pub use types::{Epoch, LogOffsetMetadata, LogView, NodeId, QuorumState, ReplicaKey, SimInstant};

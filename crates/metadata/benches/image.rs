@@ -7,7 +7,7 @@
 //! - `MetadataRecord` serialize/deserialize via wincode.
 
 use crabka_metadata::{
-    AclEntry, AclOperation, BrokerEndpoint, BrokerRegistrationRecord, MetadataImage,
+    AclEntry, AclOperation, BrokerEndpoint, BrokerRegistrationRecord, LeaderEpoch, MetadataImage,
     MetadataRecord, NodeId, PartitionRecord, PatternType, PermissionType, ResourceType,
     TopicRecord,
 };
@@ -37,7 +37,7 @@ fn partition_record(topic: &str, p: i32) -> MetadataRecord {
         leader: NodeId(1),
         replicas: vec![NodeId(1), NodeId(2), NodeId(3)],
         isr: vec![NodeId(1), NodeId(2), NodeId(3)],
-        leader_epoch: 0,
+        leader_epoch: LeaderEpoch(0),
         adding_replicas: vec![],
         removing_replicas: vec![],
         directories: vec![],

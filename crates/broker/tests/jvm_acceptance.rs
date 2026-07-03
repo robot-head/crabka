@@ -5526,7 +5526,7 @@ async fn jvm_kafka_leader_election_preferred() {
             leader: crabka_broker::NodeId(2),
             replicas: vec![crabka_broker::NodeId(1), crabka_broker::NodeId(2)],
             isr: vec![crabka_broker::NodeId(2), crabka_broker::NodeId(1)],
-            leader_epoch: 1,
+            leader_epoch: crabka_metadata::LeaderEpoch(1),
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![],

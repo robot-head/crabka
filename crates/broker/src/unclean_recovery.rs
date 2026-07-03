@@ -247,7 +247,7 @@ impl UncleanRecoveryManager {
         };
         let collected: Vec<ReplicaLogInfo> = gather_responses(futs, deadline).await;
 
-        if has_newer_leader(&collected, known_epoch) {
+        if has_newer_leader(&collected, known_epoch.0) {
             return RecoveryOutcome::Stale;
         }
         let Some(winner) = select_best_replica(&collected) else {
@@ -282,7 +282,7 @@ impl UncleanRecoveryManager {
             leader: winner,
             replicas: pr.replicas.clone(),
             isr: vec![winner],
-            leader_epoch: pr.leader_epoch + 1,
+            leader_epoch: pr.leader_epoch.next(),
             adding_replicas: pr.adding_replicas.clone(),
             removing_replicas: pr.removing_replicas.clone(),
             directories: pr.directories.clone(),
@@ -593,7 +593,7 @@ mod run_recovery_tests {
             leader: NodeId(leader),
             replicas: replicas.iter().copied().map(NodeId).collect(),
             isr: replicas.iter().copied().map(NodeId).collect(),
-            leader_epoch: 5,
+            leader_epoch: crabka_metadata::LeaderEpoch(5),
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![],

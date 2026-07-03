@@ -4,8 +4,8 @@
 //! that contract by asserting v1 ↔ v1 round-trips here.
 
 use crabka_metadata::{
-    BrokerRegistrationRecord, DeleteTopicRecord, MetadataRecord, NodeId, PartitionRecord,
-    TopicRecord,
+    BrokerRegistrationRecord, DeleteTopicRecord, LeaderEpoch, MetadataRecord, NodeId,
+    PartitionRecord, TopicRecord,
 };
 use proptest::prelude::*;
 use serde_wincode::SerdeCompat;
@@ -37,7 +37,7 @@ prop_compose! {
         let replicas: Vec<NodeId> = replicas.into_iter().map(NodeId).collect();
         let leader = replicas[0];
         let isr = replicas.clone();
-        PartitionRecord { topic, partition, leader, replicas, isr, leader_epoch, adding_replicas: vec![], removing_replicas: vec![], directories: vec![], partition_epoch: 0 }
+        PartitionRecord { topic, partition, leader, replicas, isr, leader_epoch: LeaderEpoch(leader_epoch), adding_replicas: vec![], removing_replicas: vec![], directories: vec![], partition_epoch: 0 }
     }
 }
 

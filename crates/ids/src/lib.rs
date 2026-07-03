@@ -177,3 +177,47 @@ impl ProducerId {
         self.0
     }
 }
+
+/// A partition leader epoch (KIP-320 wire type: `int32`).
+///
+/// Monotonic per-partition counter bumped on every leader change; used to fence
+/// stale leaders and to bound follower log truncation. `-1`
+/// (`UNKNOWN_LEADER_EPOCH`) is a valid wire sentinel and round-trips as the inner
+/// `i32`. Ordered so epochs compare directly; advance to the next epoch with
+/// [`LeaderEpoch::next`].
+///
+/// Note: the deterministic consensus core (`crabka-kraft-core`) tracks its own
+/// always-non-negative epoch as a `u32` (`crabka_kraft_core::types::Epoch`);
+/// `crabka-raft` converts to and from this wire type at the controller boundary.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Display,
+    From,
+    Into,
+    Serialize,
+    Deserialize,
+)]
+#[serde(transparent)]
+pub struct LeaderEpoch(pub i32);
+
+impl LeaderEpoch {
+    /// The inner `i32` — use at the wire/generated boundary.
+    #[must_use]
+    pub const fn get(self) -> i32 {
+        self.0
+    }
+
+    /// The next epoch after this one (a leader change bumps the epoch by one).
+    #[must_use]
+    pub const fn next(self) -> Self {
+        LeaderEpoch(self.0 + 1)
+    }
+}

@@ -106,7 +106,7 @@ impl IsrState {
             isr,
             pf,
             self.rs.hw,
-            self.rs.current_leader_epoch,
+            self.rs.current_leader_epoch.0,
             self.leader_leo,
         )
     }

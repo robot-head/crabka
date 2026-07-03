@@ -12,6 +12,7 @@ use std::{
     hash::{Hash, Hasher},
 };
 
+use crabka_ids::LeaderEpoch;
 use uuid::Uuid;
 
 use crate::error::RemoteStorageError;
@@ -142,7 +143,7 @@ pub struct RemoteLogSegmentMetadata {
     segment_size_in_bytes: i32,
     custom_metadata: Option<CustomMetadata>,
     state: RemoteLogSegmentState,
-    segment_leader_epochs: BTreeMap<i32, i64>,
+    segment_leader_epochs: BTreeMap<LeaderEpoch, i64>,
     /// KIP-405 `txnIndexEmpty`: `true` when the segment carries no transaction
     /// index. Serialized as tagged field (tag 0) in the JVM record format.
     /// Defaults to `false`.
@@ -167,7 +168,7 @@ impl RemoteLogSegmentMetadata {
         event_timestamp_ms: i64,
         segment_size_in_bytes: i32,
         state: RemoteLogSegmentState,
-        segment_leader_epochs: BTreeMap<i32, i64>,
+        segment_leader_epochs: BTreeMap<LeaderEpoch, i64>,
     ) -> Result<Self, RemoteStorageError> {
         if segment_leader_epochs.is_empty() {
             return Err(RemoteStorageError::InvalidArgument(
@@ -294,7 +295,7 @@ impl RemoteLogSegmentMetadata {
     /// Map of leader epoch → first offset that epoch contributed to this
     /// segment.
     #[must_use]
-    pub fn segment_leader_epochs(&self) -> &BTreeMap<i32, i64> {
+    pub fn segment_leader_epochs(&self) -> &BTreeMap<LeaderEpoch, i64> {
         &self.segment_leader_epochs
     }
 
@@ -398,8 +399,8 @@ mod tests {
         RemoteLogSegmentId::new(tp(), Uuid::from_u128(99))
     }
 
-    fn epochs() -> BTreeMap<i32, i64> {
-        BTreeMap::from([(0, 0)])
+    fn epochs() -> BTreeMap<LeaderEpoch, i64> {
+        BTreeMap::from([(LeaderEpoch(0), 0)])
     }
 
     #[test]
@@ -630,7 +631,7 @@ mod tests {
             100,
             1024,
             RemoteLogSegmentState::CopySegmentStarted,
-            BTreeMap::from([(0, 0)]),
+            BTreeMap::from([(LeaderEpoch(0), 0)]),
         )
         .unwrap();
         assert!(!md.txn_index_empty());

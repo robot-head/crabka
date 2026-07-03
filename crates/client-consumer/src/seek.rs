@@ -131,7 +131,7 @@ impl Consumer {
             // awaiting_validation partitions, validate_positions skips
             // offset_epoch < 0).
             let p = positions.entry(key.clone()).or_default();
-            p.offset_epoch = -1;
+            p.offset_epoch = crabka_ids::LeaderEpoch(-1);
             p.awaiting_validation = false;
             false
         });

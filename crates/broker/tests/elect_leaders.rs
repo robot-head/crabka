@@ -45,8 +45,8 @@ use assert2::assert;
 use bytes::{Buf, BufMut, BytesMut};
 use crabka_broker::{Broker, BrokerHandle, authorizer::SimpleAclAuthorizer, config::ListenerSpec};
 use crabka_metadata::{
-    AclEntry, AclOperation, MetadataRecord, PartitionRecord, PatternType, PermissionType,
-    ResourceType,
+    AclEntry, AclOperation, LeaderEpoch, MetadataRecord, PartitionRecord, PatternType,
+    PermissionType, ResourceType,
 };
 use crabka_protocol::{
     Decode, Encode,
@@ -416,7 +416,7 @@ async fn unclean_election_via_wire_picks_alive_replica() {
         leader: crabka_broker::NodeId(99),
         replicas: pr_before.replicas.clone(),
         isr: vec![crabka_broker::NodeId(99)],
-        leader_epoch: pr_before.leader_epoch + 1,
+        leader_epoch: pr_before.leader_epoch.next(),
         adding_replicas: vec![],
         removing_replicas: vec![],
         directories: vec![],
@@ -524,7 +524,7 @@ async fn wait_partition_record_known(
         // natural assignment).
         replicas: vec![crabka_broker::NodeId(1), crabka_broker::NodeId(2)],
         isr: isr.into_iter().map(crabka_broker::NodeId).collect(),
-        leader_epoch: 0, // bumped by the forged record, not critical
+        leader_epoch: crabka_metadata::LeaderEpoch(0), // bumped by the forged record, not critical
         adding_replicas: vec![],
         removing_replicas: vec![],
         directories: vec![],

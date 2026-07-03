@@ -798,7 +798,7 @@ mod tests {
                 bytes: wire.clone(),
                 last_offset_delta: 0,
                 max_timestamp: 1_234,
-                leader_epoch: 5,
+                leader_epoch: crabka_log::LeaderEpoch(5),
                 producer_id: crabka_log::ProducerId(-1),
                 is_transactional: false,
             }),

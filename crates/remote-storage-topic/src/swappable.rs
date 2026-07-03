@@ -23,6 +23,7 @@
 
 use std::sync::{Arc, RwLock};
 
+use crabka_ids::LeaderEpoch;
 use crabka_remote_storage::{
     RemoteLogMetadataManager, RemoteLogSegmentMetadata, RemoteLogSegmentMetadataUpdate,
     RemotePartitionDeleteMetadata, RemoteStorageError, TopicIdPartition,
@@ -80,7 +81,7 @@ impl RemoteLogMetadataManager for SwappableRlmm {
     fn remote_log_segment_metadata(
         &self,
         topic_id_partition: &TopicIdPartition,
-        leader_epoch: i32,
+        leader_epoch: LeaderEpoch,
         offset: i64,
     ) -> Result<Option<RemoteLogSegmentMetadata>, RemoteStorageError> {
         self.current()
@@ -90,7 +91,7 @@ impl RemoteLogMetadataManager for SwappableRlmm {
     fn highest_offset_for_epoch(
         &self,
         topic_id_partition: &TopicIdPartition,
-        leader_epoch: i32,
+        leader_epoch: LeaderEpoch,
     ) -> Result<Option<i64>, RemoteStorageError> {
         self.current()
             .highest_offset_for_epoch(topic_id_partition, leader_epoch)
@@ -106,7 +107,7 @@ impl RemoteLogMetadataManager for SwappableRlmm {
     fn list_remote_log_segments_by_epoch(
         &self,
         topic_id_partition: &TopicIdPartition,
-        leader_epoch: i32,
+        leader_epoch: LeaderEpoch,
     ) -> Result<Vec<RemoteLogSegmentMetadata>, RemoteStorageError> {
         self.current()
             .list_remote_log_segments_by_epoch(topic_id_partition, leader_epoch)
@@ -147,7 +148,7 @@ mod tests {
             100,
             2048,
             RemoteLogSegmentState::CopySegmentStarted,
-            BTreeMap::from([(0, start)]),
+            BTreeMap::from([(LeaderEpoch(0), start)]),
         )
         .unwrap()
     }

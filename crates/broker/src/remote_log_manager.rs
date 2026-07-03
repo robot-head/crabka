@@ -106,7 +106,9 @@ async fn tick_all(
             // Topic vanished from the metadata image between snapshots; skip.
             continue;
         };
-        let leader_epoch = partition.current_leader_epoch.load(Ordering::Acquire);
+        // Atomic stores the raw epoch; wrap for the remote-storage metadata seam.
+        let leader_epoch =
+            crabka_ids::LeaderEpoch(partition.current_leader_epoch.load(Ordering::Acquire));
         let tp = TopicIdPartition::new(
             topic_id,
             partition.topic.clone(),
@@ -125,7 +127,7 @@ async fn tick_all(
 pub(crate) async fn copy_eligible(
     tp: &TopicIdPartition,
     broker_id: i32,
-    leader_epoch: i32,
+    leader_epoch: crabka_ids::LeaderEpoch,
     exports: Vec<SegmentExport>,
     rsm: &Arc<dyn RemoteStorageManager>,
     rlmm: &Arc<dyn RemoteLogMetadataManager>,
@@ -545,16 +547,20 @@ async fn delete_one_segment(
 async fn copy_one(
     tp: &TopicIdPartition,
     broker_id: i32,
-    leader_epoch: i32,
+    leader_epoch: crabka_ids::LeaderEpoch,
     ex: &SegmentExport,
     rsm: &Arc<dyn RemoteStorageManager>,
     rlmm: &Arc<dyn RemoteLogMetadataManager>,
 ) -> bool {
     let id = RemoteLogSegmentId::new(tp.clone(), Uuid::new_v4());
     // Unwrap the log-layer `Offset`s into the remote-storage metadata's `i64`
-    // world at the seam (`RemoteLogSegmentMetadata` stays raw `i64`).
-    let epochs: BTreeMap<i32, i64> = if ex.leader_epochs.is_empty() {
-        BTreeMap::from([(leader_epoch.max(0), ex.base_offset.0)])
+    // world at the seam; the epoch map keeps its `LeaderEpoch` keys, which
+    // `RemoteLogSegmentMetadata` carries verbatim.
+    let epochs: BTreeMap<crabka_ids::LeaderEpoch, i64> = if ex.leader_epochs.is_empty() {
+        BTreeMap::from([(
+            crabka_ids::LeaderEpoch(leader_epoch.0.max(0)),
+            ex.base_offset.0,
+        )])
     } else {
         ex.leader_epochs
             .iter()
@@ -675,12 +681,14 @@ async fn rollback(
 /// Serialize a segment's leader-epoch map into Kafka's
 /// `leader-epoch-checkpoint` text format (the bytes carried as
 /// `LogSegmentData.leader_epoch_index`).
-fn leader_epoch_index_bytes(epochs: &BTreeMap<i32, i64>) -> Bytes {
+fn leader_epoch_index_bytes(epochs: &BTreeMap<crabka_ids::LeaderEpoch, i64>) -> Bytes {
     use std::fmt::Write as _;
     let mut s = String::from("0\n");
     let _ = writeln!(s, "{}", epochs.len());
     for (epoch, start) in epochs {
-        let _ = writeln!(s, "{epoch} {start}");
+        // On-disk `leader-epoch-checkpoint` text format: unwrap to the raw
+        // `i32` so the serialized bytes stay byte-identical.
+        let _ = writeln!(s, "{} {start}", epoch.0);
     }
     Bytes::from(s.into_bytes())
 }
@@ -696,7 +704,7 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use assert2::{assert, check};
-    use crabka_ids::PartitionIndex;
+    use crabka_ids::{LeaderEpoch, PartitionIndex};
     use crabka_log::{Log, LogConfig};
     use crabka_metadata::{MetadataImage, MetadataRecord, TopicRecord};
     use crabka_protocol::records::{Record, RecordBatch};
@@ -1089,7 +1097,7 @@ mod tests {
         let rlmm: Arc<dyn RemoteLogMetadataManager> =
             Arc::new(InmemoryRemoteLogMetadataManager::new());
 
-        let copied = copy_eligible(&tp(), 1, 0, exports.clone(), &rsm, &rlmm).await;
+        let copied = copy_eligible(&tp(), 1, LeaderEpoch(0), exports.clone(), &rsm, &rlmm).await;
         assert!(copied == exports.len());
 
         let listed = rlmm.list_remote_log_segments(&tp()).unwrap();
@@ -1120,10 +1128,10 @@ mod tests {
         let rlmm: Arc<dyn RemoteLogMetadataManager> =
             Arc::new(InmemoryRemoteLogMetadataManager::new());
 
-        let first = copy_eligible(&tp(), 1, 0, exports.clone(), &rsm, &rlmm).await;
+        let first = copy_eligible(&tp(), 1, LeaderEpoch(0), exports.clone(), &rsm, &rlmm).await;
         assert!(first == exports.len());
         // Second pass: everything is already known → nothing re-copied.
-        let second = copy_eligible(&tp(), 1, 0, exports.clone(), &rsm, &rlmm).await;
+        let second = copy_eligible(&tp(), 1, LeaderEpoch(0), exports.clone(), &rsm, &rlmm).await;
         assert!(second == 0);
         assert!(rlmm.list_remote_log_segments(&tp()).unwrap().len() == exports.len());
     }
@@ -1135,7 +1143,7 @@ mod tests {
             Arc::new(LocalTieredStorage::new(remote_dir.path()));
         let rlmm: Arc<dyn RemoteLogMetadataManager> =
             Arc::new(InmemoryRemoteLogMetadataManager::new());
-        let copied = copy_eligible(&tp(), 1, 0, Vec::new(), &rsm, &rlmm).await;
+        let copied = copy_eligible(&tp(), 1, LeaderEpoch(0), Vec::new(), &rsm, &rlmm).await;
         assert!(copied == 0);
         assert!(rlmm.list_remote_log_segments(&tp()).unwrap().is_empty());
     }
@@ -1151,7 +1159,7 @@ mod tests {
         let rlmm: Arc<dyn RemoteLogMetadataManager> =
             Arc::new(InmemoryRemoteLogMetadataManager::new());
 
-        let copied = copy_eligible(&tp(), 1, 0, exports.clone(), &rsm, &rlmm).await;
+        let copied = copy_eligible(&tp(), 1, LeaderEpoch(0), exports.clone(), &rsm, &rlmm).await;
         assert!(copied == 0, "every copy failed");
         // Rollback (delete + DeleteSegmentStarted -> DeleteSegmentFinished)
         // drops the started metadata, so nothing is left behind and a later
@@ -1189,11 +1197,11 @@ mod tests {
             leader_epochs: Vec::new(),
         };
 
-        let copied = copy_eligible(&tp(), 7, 3, vec![export], &rsm, &rlmm).await;
+        let copied = copy_eligible(&tp(), 7, LeaderEpoch(3), vec![export], &rsm, &rlmm).await;
         assert!(copied == 1);
         let md = &rlmm.list_remote_log_segments(&tp()).unwrap()[0];
         // The fallback recorded the partition's current leader epoch (3).
-        assert!(md.segment_leader_epochs().get(&3) == Some(&0));
+        assert!(md.segment_leader_epochs().get(&LeaderEpoch(3)) == Some(&0));
     }
 
     fn synth_export(base: i64, last: i64, max_ts: i64, size: u64) -> SegmentExport {
@@ -1351,7 +1359,7 @@ mod tests {
             Arc::new(LocalTieredStorage::new(remote_dir.path()));
         let rlmm: Arc<dyn RemoteLogMetadataManager> =
             Arc::new(InmemoryRemoteLogMetadataManager::new());
-        let copied = copy_eligible(&tp(), 1, 0, exports.clone(), &rsm, &rlmm).await;
+        let copied = copy_eligible(&tp(), 1, LeaderEpoch(0), exports.clone(), &rsm, &rlmm).await;
         assert!(copied == exports.len());
 
         // Gather finished bases the same way `local_retention_pass` would.
@@ -1408,7 +1416,7 @@ mod tests {
             Arc::new(LocalTieredStorage::new(remote_dir.path()));
         let rlmm: Arc<dyn RemoteLogMetadataManager> =
             Arc::new(InmemoryRemoteLogMetadataManager::new());
-        let copied = copy_eligible(&tp(), 1, 0, exports.clone(), &rsm, &rlmm).await;
+        let copied = copy_eligible(&tp(), 1, LeaderEpoch(0), exports.clone(), &rsm, &rlmm).await;
         assert!(copied == exports.len());
 
         let removed = local_retention_pass(
@@ -1445,7 +1453,7 @@ mod tests {
             max_ts,
             size,
             RemoteLogSegmentState::CopySegmentStarted,
-            BTreeMap::from([(0, start)]),
+            BTreeMap::from([(LeaderEpoch(0), start)]),
         )
         .unwrap()
         .with_update(&RemoteLogSegmentMetadataUpdate {
@@ -1550,7 +1558,7 @@ mod tests {
             Arc::new(LocalTieredStorage::new(remote_dir.path()));
         let rlmm: Arc<dyn RemoteLogMetadataManager> =
             Arc::new(InmemoryRemoteLogMetadataManager::new());
-        let copied = copy_eligible(&tp(), 1, 0, exports.clone(), &rsm, &rlmm).await;
+        let copied = copy_eligible(&tp(), 1, LeaderEpoch(0), exports.clone(), &rsm, &rlmm).await;
         assert!(copied == exports.len());
         let pre = rlmm.list_remote_log_segments(&tp()).unwrap();
         assert!(!pre.is_empty());
@@ -1587,7 +1595,7 @@ mod tests {
             Arc::new(LocalTieredStorage::new(remote_dir.path()));
         let rlmm: Arc<dyn RemoteLogMetadataManager> =
             Arc::new(InmemoryRemoteLogMetadataManager::new());
-        copy_eligible(&tp(), 1, 0, exports.clone(), &rsm, &rlmm).await;
+        copy_eligible(&tp(), 1, LeaderEpoch(0), exports.clone(), &rsm, &rlmm).await;
 
         let cfg = LogConfig {
             // Long retention; nothing is past the window.
@@ -1631,7 +1639,7 @@ mod tests {
             Arc::new(LocalTieredStorage::new(remote_dir.path()));
         let rlmm_impl = Arc::new(InmemoryRemoteLogMetadataManager::new());
         let rlmm: Arc<dyn RemoteLogMetadataManager> = rlmm_impl.clone();
-        let copied = copy_eligible(&tp(), 1, 0, exports.clone(), &rsm, &rlmm).await;
+        let copied = copy_eligible(&tp(), 1, LeaderEpoch(0), exports.clone(), &rsm, &rlmm).await;
         assert!(copied == exports.len());
 
         cascade_remote_partition_delete(tp(), 1, rsm.clone(), rlmm.clone()).await;

@@ -215,7 +215,7 @@ async fn consumer_proactively_validates_and_surfaces_truncation() {
         .partition_record_for_test(topic, 0)
         .expect("partition record must be present after wait_until_partition_present");
     assert!(
-        pr0.leader_epoch == 0,
+        pr0.leader_epoch.0 == 0,
         "fresh topic should start at leader_epoch 0, got {}",
         pr0.leader_epoch
     );
@@ -286,7 +286,7 @@ async fn consumer_proactively_validates_and_surfaces_truncation() {
         leader: pr0.leader,
         replicas: pr0.replicas.clone(),
         isr: pr0.isr.clone(),
-        leader_epoch: pr0.leader_epoch + 1,
+        leader_epoch: pr0.leader_epoch.next(),
         adding_replicas: vec![],
         removing_replicas: vec![],
         directories: vec![],
@@ -297,7 +297,10 @@ async fn consumer_proactively_validates_and_surfaces_truncation() {
         .await
         .expect("advance metadata leader epoch");
     broker
-        .wait_for_image(|img| img.partition(topic, 0).is_some_and(|p| p.leader_epoch >= 1))
+        .wait_for_image(|img| {
+            img.partition(topic, 0)
+                .is_some_and(|p| p.leader_epoch.0 >= 1)
+        })
         .await;
 
     // The `None`-policy consumer under test. It inherits the group's committed

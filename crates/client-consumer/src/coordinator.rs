@@ -866,7 +866,9 @@ async fn commit_revoked(state: &CoordinatorState, revoked: &[(String, i32)]) {
             // widens the mid-rebalance generation-race window.
             .filter(|(k, v)| should_commit_revoked_offset(revoked_set.contains(k), **v))
             .map(|(k, v)| {
-                let epoch = pos.get(k).map_or(UNKNOWN_EPOCH, |p| p.offset_epoch);
+                // Unwrap the position's leader epoch to raw wire `int32` for the
+                // revoke-time OffsetCommit `committed_leader_epoch` field.
+                let epoch = pos.get(k).map_or(UNKNOWN_EPOCH, |p| p.offset_epoch.get());
                 (k.clone(), (*v, epoch))
             })
             .collect()
@@ -1271,7 +1273,9 @@ async fn prime_offsets(
         let key = (name, partition_index);
         seen.insert(key.clone());
         offsets.insert(key.clone(), starting);
-        positions.entry(key).or_default().offset_epoch = committed_epoch;
+        // Wrap the committed leader epoch (raw wire `int32` from OffsetFetch) at
+        // the decode boundary.
+        positions.entry(key).or_default().offset_epoch = crabka_ids::LeaderEpoch(committed_epoch);
     }
     // The broker may omit partitions that have no commit record at all;
     // ensure every requested partition has an entry so poll() can find it.

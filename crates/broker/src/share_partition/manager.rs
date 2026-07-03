@@ -100,7 +100,7 @@ impl SharePartitionLeaderManager {
         image
             .partition(&topic.name, partition)
             .map_or((-1, -1), |p| {
-                (i32::try_from(p.leader.0).unwrap_or(-1), p.leader_epoch)
+                (i32::try_from(p.leader.0).unwrap_or(-1), p.leader_epoch.0)
             })
     }
 

@@ -13,7 +13,7 @@
 use std::{sync::Arc, time::Duration};
 
 use bytes::BytesMut;
-use crabka_log::Offset;
+use crabka_log::{LeaderEpoch, Offset};
 use crabka_metadata::AclOperation;
 use crabka_protocol::{
     Decode, Encode,
@@ -345,13 +345,16 @@ pub(crate) async fn handle(
                 let (found_epoch, end_offset) = {
                     let log = part.log.lock().expect("log mutex poisoned");
                     let leo = log.log_end_offset();
+                    // Wrap the raw wire `last_fetched_epoch` into a `LeaderEpoch`
+                    // for the log-crate seam; unwrap `found_epoch.0` below when it
+                    // flows back to the wire `diverging_epoch` field.
                     log.epoch_checkpoint()
-                        .epoch_and_offset_for(req_last_fetched_epoch, leo)
+                        .epoch_and_offset_for(LeaderEpoch(req_last_fetched_epoch), leo)
                 };
-                if found_epoch < req_last_fetched_epoch || end_offset.0 < fetch_offset {
+                if found_epoch.0 < req_last_fetched_epoch || end_offset.0 < fetch_offset {
                     out.error_code = codes::NONE;
                     out.diverging_epoch = EpochEndOffset {
-                        epoch: found_epoch,
+                        epoch: found_epoch.0,
                         end_offset: end_offset.0,
                         ..Default::default()
                     };
@@ -1290,9 +1293,12 @@ async fn try_remote_read(broker: &Broker, p: &mut PendingRead, part: &Partition)
         p.topic_name.clone(),
         p.partition_index,
     );
-    let current_leader_epoch = part
-        .current_leader_epoch
-        .load(std::sync::atomic::Ordering::Acquire);
+    // Atomic stores the raw epoch; wrap into `LeaderEpoch` for the
+    // remote-reader / RLMM seam that follows.
+    let current_leader_epoch = LeaderEpoch(
+        part.current_leader_epoch
+            .load(std::sync::atomic::Ordering::Acquire),
+    );
     // Resolve the leader epoch that *owned* the requested fetch offset from
     // the local leader-epoch checkpoint (Kafka's `epochForOffset`).  The
     // checkpoint is only appended-to / truncated-from-end (never pruned from

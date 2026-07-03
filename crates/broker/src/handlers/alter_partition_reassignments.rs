@@ -122,7 +122,7 @@ fn cancel_path(pr: &PartitionRecord) -> Result<Option<PartitionRecord>, RowError
         leader,
         replicas: reverted_replicas,
         isr: reverted_isr,
-        leader_epoch: pr.leader_epoch + epoch_bump,
+        leader_epoch: crabka_metadata::LeaderEpoch(pr.leader_epoch.0 + epoch_bump),
         adding_replicas: vec![],
         removing_replicas: vec![],
         directories: new_directories,
@@ -348,7 +348,9 @@ mod tests {
     use std::{net::SocketAddr, sync::Arc, time::Duration};
 
     use assert2::assert;
-    use crabka_metadata::{BrokerRegistrationRecord, MetadataRecord, PartitionRecord, TopicRecord};
+    use crabka_metadata::{
+        BrokerRegistrationRecord, LeaderEpoch, MetadataRecord, PartitionRecord, TopicRecord,
+    };
     use crabka_protocol::{
         UnknownTaggedFields,
         owned::alter_partition_reassignments_request::{
@@ -408,7 +410,7 @@ mod tests {
             leader: NodeId(leader),
             replicas: replicas.iter().copied().map(NodeId).collect(),
             isr: isr.iter().copied().map(NodeId).collect(),
-            leader_epoch: 5,
+            leader_epoch: crabka_metadata::LeaderEpoch(5),
             adding_replicas: adding.iter().copied().map(NodeId).collect(),
             removing_replicas: removing.iter().copied().map(NodeId).collect(),
             directories: vec![],
@@ -499,7 +501,7 @@ mod tests {
                     leader: NodeId(1),
                     replicas: vec![NodeId(1)],
                     isr: vec![NodeId(1)],
-                    leader_epoch: 3,
+                    leader_epoch: LeaderEpoch(3),
                     adding_replicas: vec![],
                     removing_replicas: vec![],
                     directories: vec![],
@@ -529,7 +531,7 @@ mod tests {
             leader: NodeId(1),
             replicas: vec![NodeId(1), NodeId(2), NodeId(3), NodeId(4)],
             isr: vec![NodeId(1), NodeId(2), NodeId(3)],
-            leader_epoch: 5, // unchanged on start
+            leader_epoch: LeaderEpoch(5), // unchanged on start
             adding_replicas: vec![NodeId(4)],
             removing_replicas: vec![NodeId(2), NodeId(3)],
             directories: vec![Uuid::nil(); 4],
@@ -775,7 +777,7 @@ mod tests {
             leader: NodeId(1),
             replicas: vec![NodeId(1), NodeId(4), NodeId(5), NodeId(6)],
             isr: vec![NodeId(1), NodeId(2), NodeId(3)],
-            leader_epoch: 5,
+            leader_epoch: LeaderEpoch(5),
             adding_replicas: vec![NodeId(5), NodeId(6)],
             removing_replicas: vec![NodeId(1), NodeId(4)],
             directories: vec![Uuid::nil(); 4],
@@ -823,7 +825,7 @@ mod tests {
             leader: NodeId(1), // reverted replicas ∩ isr = [1]
             replicas: vec![NodeId(1), NodeId(2), NodeId(3)],
             isr: vec![NodeId(1)],
-            leader_epoch: 6, // bumped
+            leader_epoch: LeaderEpoch(6), // bumped
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![Uuid::nil(); 3],
@@ -845,7 +847,7 @@ mod tests {
             leader: NodeId(1),
             replicas: vec![NodeId(1), NodeId(2), NodeId(3)],
             isr: vec![NodeId(1), NodeId(2), NodeId(3)],
-            leader_epoch: 5,
+            leader_epoch: LeaderEpoch(5),
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![Uuid::nil(); 3],

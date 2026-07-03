@@ -5,13 +5,13 @@
 
 use std::path::Path;
 
-use crabka_ids::Offset;
+use crabka_ids::{LeaderEpoch, Offset};
 use crabka_log::{Log, LogConfig, RawRead};
 use crabka_protocol::records::RecordBatch;
 
 use crate::{
     error::RaftError,
-    kraft::types::{LeaderEpoch, LogView},
+    kraft::types::{Epoch, LogView},
 };
 
 pub struct KraftLog {
@@ -140,17 +140,25 @@ impl LogView for KraftLog {
     fn end_offset(&self) -> i64 {
         self.log.log_end_offset().0
     }
-    fn last_epoch(&self) -> LeaderEpoch {
-        // crabka-log epochs are i32 and non-negative; 0 for an empty log.
-        u32::try_from(self.log.epoch_checkpoint().latest_epoch().unwrap_or(0)).unwrap_or(0)
+    fn last_epoch(&self) -> Epoch {
+        // The log seam speaks `crabka_ids::LeaderEpoch(i32)`; the core's
+        // consensus `Epoch` is a `u32`. crabka-log epochs are non-negative
+        // (0 for an empty log), so unwrap the newtype and convert to `u32`.
+        let latest: LeaderEpoch = self
+            .log
+            .epoch_checkpoint()
+            .latest_epoch()
+            .unwrap_or(LeaderEpoch(0));
+        u32::try_from(latest.0).unwrap_or(0)
     }
-    fn end_offset_for_epoch(&self, epoch: LeaderEpoch) -> Option<i64> {
+    fn end_offset_for_epoch(&self, epoch: Epoch) -> Option<i64> {
         let log_end = self.log.log_end_offset();
-        let epoch_i32 = i32::try_from(epoch).ok()?;
+        // Wrap the consensus `Epoch` into the log seam's `LeaderEpoch(i32)`.
+        let epoch = LeaderEpoch(i32::try_from(epoch).ok()?);
         match self
             .log
             .epoch_checkpoint()
-            .end_offset_for_epoch(epoch_i32, log_end)
+            .end_offset_for_epoch(epoch, log_end)
             .0
         {
             -1 => None,

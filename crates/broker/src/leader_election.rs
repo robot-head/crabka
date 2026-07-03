@@ -170,7 +170,7 @@ pub(crate) async fn compute_failover_changes(
                 // log line and the emitted record, so the failover tests that
                 // assert the incremented `leader_epoch` also pin the logged
                 // value (no un-killable log-only arithmetic).
-                let new_leader_epoch = pr.leader_epoch + 1;
+                let new_leader_epoch = pr.leader_epoch.next();
                 tracing::info!(
                     topic = %pr.topic,
                     partition = pr.partition,
@@ -179,7 +179,7 @@ pub(crate) async fn compute_failover_changes(
                     new_leader = leader.0,
                     old_isr = ?pr.isr,
                     new_isr = ?isr,
-                    new_leader_epoch,
+                    new_leader_epoch = new_leader_epoch.0,
                     unclean,
                     "failover: re-electing partition leader (triggered by dead broker)"
                 );
@@ -291,7 +291,7 @@ pub(crate) async fn compute_offline_dir_failover_changes(
                     leader,
                     replicas: pr.replicas.clone(),
                     isr,
-                    leader_epoch: pr.leader_epoch + 1,
+                    leader_epoch: pr.leader_epoch.next(),
                     adding_replicas: pr.adding_replicas.clone(),
                     removing_replicas: pr.removing_replicas.clone(),
                     directories: pr.directories.clone(),
@@ -465,7 +465,7 @@ pub(crate) async fn select_replacement_leader_for_shutdown(
         leader: new_leader,
         replicas: pr.replicas.clone(),
         isr: pr.isr.clone(),
-        leader_epoch: pr.leader_epoch + 1,
+        leader_epoch: pr.leader_epoch.next(),
         adding_replicas: pr.adding_replicas.clone(),
         removing_replicas: pr.removing_replicas.clone(),
         directories: pr.directories.clone(),
@@ -509,7 +509,7 @@ pub(crate) async fn select_new_leader_for_partition(
                 leader: preferred,
                 replicas: pr.replicas.clone(),
                 isr: pr.isr.clone(),
-                leader_epoch: pr.leader_epoch + 1,
+                leader_epoch: pr.leader_epoch.next(),
                 adding_replicas: pr.adding_replicas.clone(),
                 removing_replicas: pr.removing_replicas.clone(),
                 directories: pr.directories.clone(),
@@ -533,7 +533,7 @@ pub(crate) async fn select_new_leader_for_partition(
                         leader: n,
                         replicas: pr.replicas.clone(),
                         isr: vec![n],
-                        leader_epoch: pr.leader_epoch + 1,
+                        leader_epoch: pr.leader_epoch.next(),
                         adding_replicas: pr.adding_replicas.clone(),
                         removing_replicas: pr.removing_replicas.clone(),
                         directories: pr.directories.clone(),
@@ -551,7 +551,9 @@ mod tests {
     use std::{collections::BTreeSet, net::SocketAddr, sync::Arc, time::Duration};
 
     use assert2::{assert, check};
-    use crabka_metadata::{MetadataImage, MetadataRecord, PartitionRecord, TopicRecord};
+    use crabka_metadata::{
+        LeaderEpoch, MetadataImage, MetadataRecord, PartitionRecord, TopicRecord,
+    };
     use crabka_raft::{
         AddVoter, Node, NodeId, QuorumState, RaftError, ReconfigOutcome, RemoveVoter,
         SnapshotRange, UpdateVoter,
@@ -584,7 +586,7 @@ mod tests {
             leader: NodeId(leader),
             replicas: replicas.iter().copied().map(NodeId).collect(),
             isr: isr.iter().copied().map(NodeId).collect(),
-            leader_epoch: 5,
+            leader_epoch: LeaderEpoch(5),
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![],
@@ -706,7 +708,7 @@ mod tests {
             leader: NodeId(1),
             replicas: vec![NodeId(1), NodeId(2), NodeId(3)],
             isr: vec![NodeId(1), NodeId(2), NodeId(3)],
-            leader_epoch: 6,
+            leader_epoch: LeaderEpoch(6),
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![],
@@ -759,7 +761,7 @@ mod tests {
             leader: NodeId(2),
             replicas: vec![NodeId(1), NodeId(2), NodeId(3)],
             isr: vec![NodeId(2)],
-            leader_epoch: 6,
+            leader_epoch: LeaderEpoch(6),
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![],
@@ -809,7 +811,7 @@ mod tests {
             leader: NodeId(2),
             replicas: vec![NodeId(1), NodeId(2), NodeId(3)],
             isr: vec![NodeId(1), NodeId(2), NodeId(3)],
-            leader_epoch: 6,
+            leader_epoch: LeaderEpoch(6),
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![],
@@ -828,7 +830,7 @@ mod tests {
             .await
             .expect("should pick replacement");
         assert!(new_pr.leader == NodeId(3));
-        assert!(new_pr.leader_epoch == 6);
+        assert!(new_pr.leader_epoch == LeaderEpoch(6));
     }
 
     #[tokio::test]
@@ -938,7 +940,7 @@ mod tests {
             leader: NodeId(2),
             replicas: vec![NodeId(1), NodeId(2), NodeId(3)],
             isr: vec![NodeId(2), NodeId(3)],
-            leader_epoch: 6,
+            leader_epoch: LeaderEpoch(6),
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![],
@@ -968,6 +970,10 @@ mod tests {
         let pr = one_partition_change(&plan.changes);
         assert!(pr.leader == NodeId(2));
         assert!(pr.isr == vec![NodeId(2), NodeId(3)]);
+        assert!(
+            pr.leader_epoch == LeaderEpoch(6),
+            "leader_epoch must bump on election"
+        );
     }
 
     #[tokio::test]
@@ -1040,7 +1046,7 @@ mod tests {
             leader: NodeId(2),
             replicas: vec![NodeId(1), NodeId(2), NodeId(3)],
             isr: vec![NodeId(2)],
-            leader_epoch: 6,
+            leader_epoch: LeaderEpoch(6),
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![],
@@ -1187,7 +1193,7 @@ mod tests {
             leader: NodeId(1),
             replicas: vec![NodeId(1), NodeId(2), NodeId(3)],
             isr: vec![NodeId(1), NodeId(3)],
-            leader_epoch: 5,
+            leader_epoch: LeaderEpoch(5),
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![],
@@ -1244,7 +1250,7 @@ mod tests {
             leader: NodeId(leader),
             replicas: replicas.iter().copied().map(NodeId).collect(),
             isr: isr.iter().copied().map(NodeId).collect(),
-            leader_epoch: 5,
+            leader_epoch: LeaderEpoch(5),
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: dirs.to_vec(),
@@ -1280,7 +1286,7 @@ mod tests {
             leader: NodeId(2),
             replicas: vec![NodeId(1), NodeId(2), NodeId(3)],
             isr: vec![NodeId(2), NodeId(3)],
-            leader_epoch: 6,
+            leader_epoch: LeaderEpoch(6),
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![bad, good, good],
@@ -1337,7 +1343,7 @@ mod tests {
             leader: NodeId(1),
             replicas: vec![NodeId(1), NodeId(2), NodeId(3)],
             isr: vec![NodeId(1), NodeId(3)],
-            leader_epoch: 5,
+            leader_epoch: LeaderEpoch(5),
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![good, bad, good],
@@ -1461,7 +1467,7 @@ mod tests {
             leader: NodeId(3),
             replicas: vec![NodeId(1), NodeId(2), NodeId(3)],
             isr: vec![NodeId(3)],
-            leader_epoch: 6,
+            leader_epoch: LeaderEpoch(6),
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![bad, good, good],

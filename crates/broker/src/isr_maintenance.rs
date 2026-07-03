@@ -9,6 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crabka_ids::LeaderEpoch;
 use crabka_protocol::owned::alter_partition_request::AlterPartitionRequest;
 use crabka_raft::NodeId;
 use tokio_util::sync::CancellationToken;
@@ -85,7 +86,7 @@ pub(crate) async fn run(cfg: Config) {
                 &part.topic,
                 part.partition_id.get(),
                 proposal.new_isr,
-                proposal.leader_epoch,
+                proposal.leader_epoch.0,
             )
             .await
             {
@@ -108,7 +109,7 @@ struct Proposal {
     /// The proposed new ISR (sorted). Guaranteed `!= prev_isr`.
     new_isr: Vec<NodeId>,
     /// Leader epoch to stamp on the `AlterPartition` request.
-    leader_epoch: i32,
+    leader_epoch: LeaderEpoch,
 }
 
 /// Returns `Some(Proposal)` if the ISR should change, else `None`.
@@ -410,7 +411,7 @@ mod tests {
         let now = Instant::now();
         let mut st = part.replica_state.lock().await;
         st.install_isr(isr, replicas, leader, now);
-        st.current_leader_epoch = leader_epoch;
+        st.current_leader_epoch = LeaderEpoch(leader_epoch);
         for &(follower, last_fetch_age, last_caught_up_age) in follower_ages {
             st.per_follower.insert(
                 follower,
@@ -547,7 +548,7 @@ mod tests {
         let expected = Proposal {
             prev_isr: vec![NodeId(1), NodeId(2), NodeId(3)],
             new_isr: vec![NodeId(1), NodeId(2)],
-            leader_epoch: 7,
+            leader_epoch: LeaderEpoch(7),
         };
         assert_eq!(proposal, expected);
     }
@@ -576,7 +577,7 @@ mod tests {
         let expected = Proposal {
             prev_isr: vec![NodeId(1), NodeId(2)],
             new_isr: vec![NodeId(1), NodeId(2), NodeId(3)],
-            leader_epoch: 8,
+            leader_epoch: LeaderEpoch(8),
         };
         assert_eq!(proposal, expected);
     }

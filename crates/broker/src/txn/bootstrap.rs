@@ -61,7 +61,7 @@ pub(crate) async fn ensure_topic(
             leader: replicas[0],
             replicas: replicas.clone(),
             isr: replicas,
-            leader_epoch: 0,
+            leader_epoch: crabka_metadata::LeaderEpoch(0),
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![],

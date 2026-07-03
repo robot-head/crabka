@@ -98,7 +98,7 @@ mod segment;
 mod txn_index;
 
 pub use config::{CleanupPolicy, LogConfig};
-pub use crabka_ids::{Offset, ProducerId};
+pub use crabka_ids::{LeaderEpoch, Offset, ProducerId};
 pub use error::LogError;
 pub use leader_epoch_checkpoint::{
     EpochEntry, LeaderEpochCheckpoint, epoch_and_offset_for_entries,

@@ -69,7 +69,7 @@ use std::{
 use base64::Engine as _;
 use crabka_broker::{BootstrapMode, Broker, BrokerConfig, BrokerHandle};
 use crabka_log::LogConfig;
-use crabka_metadata::{MetadataRecord, PartitionRecord};
+use crabka_metadata::{LeaderEpoch, MetadataRecord, PartitionRecord};
 use tempfile::TempDir;
 use uuid::Uuid;
 
@@ -749,7 +749,7 @@ async fn kip320_jvm_follower_truncates_from_crabka_leader() {
         leader: crabka_broker::NodeId(99),
         replicas: pr.replicas.clone(),
         isr: vec![crabka_broker::NodeId(99)],
-        leader_epoch: pr.leader_epoch + 1,
+        leader_epoch: pr.leader_epoch.next(),
         adding_replicas: vec![],
         removing_replicas: vec![],
         directories: vec![],
@@ -784,7 +784,7 @@ async fn kip320_jvm_follower_truncates_from_crabka_leader() {
         leader: crabka_broker::NodeId(1),
         replicas: pr.replicas.clone(),
         isr: vec![crabka_broker::NodeId(1)],
-        leader_epoch: pr.leader_epoch + 2,
+        leader_epoch: LeaderEpoch(pr.leader_epoch.0 + 2),
         adding_replicas: vec![],
         removing_replicas: vec![],
         directories: vec![],

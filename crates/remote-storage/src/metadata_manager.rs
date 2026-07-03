@@ -1,6 +1,8 @@
 //! The [`RemoteLogMetadataManager`] SPI: persistence and querying of
 //! remote-segment metadata.
 
+use crabka_ids::LeaderEpoch;
+
 use crate::{
     error::RemoteStorageError,
     metadata::{
@@ -65,7 +67,7 @@ pub trait RemoteLogMetadataManager: Send + Sync {
     fn remote_log_segment_metadata(
         &self,
         topic_id_partition: &TopicIdPartition,
-        leader_epoch: i32,
+        leader_epoch: LeaderEpoch,
         offset: i64,
     ) -> Result<Option<RemoteLogSegmentMetadata>, RemoteStorageError>;
 
@@ -78,7 +80,7 @@ pub trait RemoteLogMetadataManager: Send + Sync {
     fn highest_offset_for_epoch(
         &self,
         topic_id_partition: &TopicIdPartition,
-        leader_epoch: i32,
+        leader_epoch: LeaderEpoch,
     ) -> Result<Option<i64>, RemoteStorageError>;
 
     /// All segments known for a partition, ordered by `start_offset`
@@ -101,7 +103,7 @@ pub trait RemoteLogMetadataManager: Send + Sync {
     fn list_remote_log_segments_by_epoch(
         &self,
         topic_id_partition: &TopicIdPartition,
-        leader_epoch: i32,
+        leader_epoch: LeaderEpoch,
     ) -> Result<Vec<RemoteLogSegmentMetadata>, RemoteStorageError>;
 
     /// Record a partition-delete lifecycle event.

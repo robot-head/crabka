@@ -127,9 +127,10 @@ pub(crate) async fn handle(
                     // is the truncation point) for older epochs.
                     let log = p.log.lock().expect("log mutex poisoned");
                     let leo = log.log_end_offset();
+                    // Wrap the raw wire `requested_epoch` for the log-crate seam.
                     let end_offset = log
                         .epoch_checkpoint()
-                        .end_offset_for_epoch(part.leader_epoch, leo);
+                        .end_offset_for_epoch(crabka_log::LeaderEpoch(part.leader_epoch), leo);
                     drop(log);
                     out.error_code = codes::NONE;
                     // Unwrap the log-layer `Offset` into the wire `i64` field.

@@ -1329,7 +1329,9 @@ impl BrokerHandle {
     ) {
         self.wait_for_image(|img| {
             img.partition(topic, partition).is_some_and(|p| {
-                p.leader != crabka_raft::NodeId(0) && p.leader != exclude && p.leader_epoch > 0
+                p.leader != crabka_raft::NodeId(0)
+                    && p.leader != exclude
+                    && p.leader_epoch > crabka_metadata::LeaderEpoch(0)
             })
         })
         .await;
@@ -4577,7 +4579,7 @@ mod tests {
             leader: crabka_audit::NodeId(leader),
             replicas: replicas.iter().copied().map(crabka_audit::NodeId).collect(),
             isr: isr.iter().copied().map(crabka_audit::NodeId).collect(),
-            leader_epoch,
+            leader_epoch: crabka_metadata::LeaderEpoch(leader_epoch),
             adding_replicas: Vec::new(),
             removing_replicas: Vec::new(),
             directories: vec![uuid::Uuid::nil(); replicas.len()],
@@ -5152,7 +5154,7 @@ mod tests {
                 .copied()
                 .map(crabka_audit::NodeId)
                 .collect(),
-            leader_epoch: 3,
+            leader_epoch: crabka_metadata::LeaderEpoch(3),
             adding_replicas: Vec::new(),
             removing_replicas: Vec::new(),
             directories: vec![uuid::Uuid::nil(); partition_isr.len()],
@@ -5851,7 +5853,7 @@ mod tests {
                 leader: crabka_audit::NodeId(leader),
                 replicas: replicas.iter().copied().map(crabka_audit::NodeId).collect(),
                 isr: replicas.iter().copied().map(crabka_audit::NodeId).collect(),
-                leader_epoch: 0,
+                leader_epoch: crabka_metadata::LeaderEpoch(0),
                 adding_replicas: vec![],
                 removing_replicas: vec![],
                 directories: vec![],

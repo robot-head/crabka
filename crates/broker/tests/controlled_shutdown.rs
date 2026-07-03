@@ -153,7 +153,7 @@ async fn force_leadership_for_test(
                 .copied()
                 .map(crabka_metadata::NodeId)
                 .collect(),
-            leader_epoch: pr.leader_epoch + 1,
+            leader_epoch: pr.leader_epoch.next(),
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![],

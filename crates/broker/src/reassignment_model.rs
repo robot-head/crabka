@@ -131,7 +131,7 @@ fn pr_of(s: &ReassignState) -> PartitionRecord {
         leader: s.leader,
         replicas: s.replicas.clone(),
         isr: s.isr.clone(),
-        leader_epoch: s.leader_epoch,
+        leader_epoch: crabka_metadata::LeaderEpoch(s.leader_epoch),
         adding_replicas: s.adding.clone(),
         removing_replicas: s.removing.clone(),
         directories: vec![],
@@ -143,7 +143,7 @@ fn pr_of(s: &ReassignState) -> PartitionRecord {
 /// safety-critical invariants; they hold per-decision under any ordering.
 fn assert_step(pre: &ReassignState, next: &PartitionRecord) {
     assert!(
-        next.leader_epoch >= pre.leader_epoch,
+        next.leader_epoch.0 >= pre.leader_epoch,
         "leader_epoch regressed: {} -> {}",
         pre.leader_epoch,
         next.leader_epoch
@@ -187,7 +187,7 @@ fn assert_step(pre: &ReassignState, next: &PartitionRecord) {
             "handoff changed removing"
         );
         assert!(
-            next.leader_epoch == pre.leader_epoch + 1,
+            next.leader_epoch.0 == pre.leader_epoch + 1,
             "handoff did not bump leader_epoch by exactly 1"
         );
     } else if next.adding_replicas.is_empty() && next.removing_replicas.is_empty() {
@@ -209,7 +209,7 @@ fn assert_step(pre: &ReassignState, next: &PartitionRecord) {
             "completion ISR not a subset of replicas"
         );
         assert!(
-            next.leader_epoch == pre.leader_epoch,
+            next.leader_epoch.0 == pre.leader_epoch,
             "completion bumped leader_epoch"
         );
     } else {
@@ -298,7 +298,7 @@ impl Model for ReassignModel {
                         state.adding = next.adding_replicas;
                         state.removing = next.removing_replicas;
                         state.replicas = next.replicas;
-                        state.leader_epoch = next.leader_epoch;
+                        state.leader_epoch = next.leader_epoch.0;
                     }
                     None => return None,
                 }

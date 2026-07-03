@@ -171,13 +171,14 @@ fn handle_partition(
         .map(|n| i32::try_from(n.0).unwrap_or(0))
         .collect();
 
-    // Leader-epoch fencing.
-    if req_leader_epoch != part_rec.leader_epoch {
+    // Leader-epoch fencing. `req_leader_epoch` is the raw wire epoch; compare
+    // against the metadata `LeaderEpoch`'s inner value.
+    if req_leader_epoch != part_rec.leader_epoch.0 {
         return error_part(
             partition_index,
             codes::FENCED_LEADER_EPOCH,
             leader_i32,
-            part_rec.leader_epoch,
+            part_rec.leader_epoch.0,
             &current_isr_i32,
         );
     }
@@ -208,7 +209,7 @@ fn handle_partition(
             partition_index,
             codes::INVALID_REQUEST,
             leader_i32,
-            part_rec.leader_epoch,
+            part_rec.leader_epoch.0,
             &current_isr_i32,
         );
     }
@@ -227,7 +228,7 @@ fn handle_partition(
                 partition_index,
                 codes::INELIGIBLE_REPLICA,
                 leader_i32,
-                part_rec.leader_epoch,
+                part_rec.leader_epoch.0,
                 &current_isr_i32,
             );
         }
@@ -252,7 +253,7 @@ fn handle_partition(
         partition_index,
         error_code: codes::NONE,
         leader_id: leader_i32,
-        leader_epoch: part_rec.leader_epoch,
+        leader_epoch: part_rec.leader_epoch.0,
         isr: effective_isr_i32.to_vec(),
         leader_recovery_state: 0,
         partition_epoch: new_partition_epoch,
@@ -389,7 +390,7 @@ mod tests {
                 .iter()
                 .map(|&n| crabka_metadata::NodeId(n))
                 .collect(),
-            leader_epoch: fixture.leader_epoch,
+            leader_epoch: crabka_metadata::LeaderEpoch(fixture.leader_epoch),
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![],
@@ -476,7 +477,7 @@ mod tests {
                     leader: crabka_metadata::NodeId(1),
                     replicas: vec![crabka_metadata::NodeId(1)],
                     isr: vec![crabka_metadata::NodeId(1)],
-                    leader_epoch: 5,
+                    leader_epoch: crabka_metadata::LeaderEpoch(5),
                     adding_replicas: vec![],
                     removing_replicas: vec![],
                     directories: vec![],

@@ -259,6 +259,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use assert2::assert;
+    use crabka_ids::LeaderEpoch;
     use crabka_remote_storage::{
         RemoteLogSegmentId, RemoteLogSegmentMetadata, RemoteLogSegmentState,
         RemotePartitionDeleteState, TopicIdPartition,
@@ -281,7 +282,7 @@ mod tests {
             100,
             2048,
             RemoteLogSegmentState::CopySegmentStarted,
-            BTreeMap::from([(0, start)]),
+            BTreeMap::from([(LeaderEpoch(0), start)]),
         )
         .unwrap()
     }

@@ -56,7 +56,7 @@ use crate::{
             Command, Inbound, MetadataFetchSlice, PeerSender, QuorumStateSnapshot, TimerTick,
             api_key, wire,
         },
-        types::{LeaderEpoch, LogView, NodeId, QuorumState, ReplicaKey, SimInstant},
+        types::{Epoch, LogView, NodeId, QuorumState, ReplicaKey, SimInstant},
     },
 };
 
@@ -126,7 +126,7 @@ struct Engine {
     /// leader-epoch bump while still nominally leading) so we can fail parked
     /// `submit_change` waiters instead of leaving them hung (FIX 1).
     was_leader: bool,
-    held_epoch: LeaderEpoch,
+    held_epoch: Epoch,
     /// Snapshot every this many committed records past the last snapshot, then
     /// prune the log below that point. `0` disables snapshotting (KIP-630).
     snapshot_interval_records: u64,
@@ -138,7 +138,7 @@ struct Engine {
     /// Set when a snapshot was just installed; the next follower Fetch carries
     /// this epoch (the log is empty at the snapshot boundary so it has no epoch
     /// of its own). Cleared once a normal fetch advances the log.
-    installed_snapshot_epoch: Option<LeaderEpoch>,
+    installed_snapshot_epoch: Option<Epoch>,
 }
 
 /// A parked `submit_change`: it completes once the HWM reaches `need_offset`
@@ -182,7 +182,7 @@ fn initial_election_at(
     initial_leader: Option<NodeId>,
     clock_base: Instant,
     me: NodeId,
-    initial_epoch: LeaderEpoch,
+    initial_epoch: Epoch,
     election_timeout_ms: u64,
 ) -> Option<Instant> {
     match (
@@ -239,8 +239,8 @@ fn should_serve_fetch_records(has_snapshot: bool, has_divergence: bool, is_leade
 fn should_fail_waiters_on_leadership_change(
     was_leader: bool,
     is_leader: bool,
-    held_epoch: LeaderEpoch,
-    current_epoch: LeaderEpoch,
+    held_epoch: Epoch,
+    current_epoch: Epoch,
 ) -> bool {
     matches!(
         (was_leader, is_leader, held_epoch == current_epoch),
@@ -337,11 +337,11 @@ fn fetch_offset_has_records(fetch_offset: Offset, log_end: Offset) -> bool {
 }
 
 fn fetch_epoch_for_request(
-    installed_snapshot_epoch: Option<LeaderEpoch>,
+    installed_snapshot_epoch: Option<Epoch>,
     log_start: Offset,
     log_end: Offset,
-    last_epoch: LeaderEpoch,
-) -> LeaderEpoch {
+    last_epoch: Epoch,
+) -> Epoch {
     match installed_snapshot_epoch {
         Some(epoch) if log_end.cmp(&log_start).is_eq() => epoch,
         _ => last_epoch,
@@ -1208,7 +1208,7 @@ impl Engine {
 
     /// Append the leader's `LeaderChange` control marker for `epoch`.
     #[tracing::instrument(level = "info", skip_all, fields(node = self.me.0, epoch), err)]
-    fn append_leader_change(&mut self, epoch: LeaderEpoch) -> Result<Offset, RaftError> {
+    fn append_leader_change(&mut self, epoch: Epoch) -> Result<Offset, RaftError> {
         let voter_ids: Vec<NodeId> = self.core.quorum_state().voters.ids().into_iter().collect();
         let mut batch = leader_change_batch(epoch, self.me, &voter_ids);
         let expected_base = self.log.log_end_offset();
@@ -1662,7 +1662,7 @@ impl Engine {
     }
 
     #[tracing::instrument(level = "debug", skip_all, fields(node = self.me.0, epoch, pre_vote))]
-    fn broadcast_vote(&self, epoch: LeaderEpoch, pre_vote: bool) {
+    fn broadcast_vote(&self, epoch: Epoch, pre_vote: bool) {
         let last_epoch = self.log.last_epoch();
         let last_offset = self.log.end_offset();
         // The wire top-level `voterId` must name the recipient voter; the JVM
@@ -1684,7 +1684,7 @@ impl Engine {
     }
 
     #[tracing::instrument(level = "debug", skip_all, fields(node = self.me.0, epoch))]
-    fn broadcast_begin_quorum_epoch(&self, epoch: LeaderEpoch) {
+    fn broadcast_begin_quorum_epoch(&self, epoch: Epoch) {
         let body = wire::PeerRequest::BeginQuorumEpoch {
             leader_id: self.me,
             leader_epoch: epoch,
@@ -1696,7 +1696,7 @@ impl Engine {
     }
 
     #[tracing::instrument(level = "debug", skip_all, fields(node = self.me.0, epoch))]
-    fn broadcast_end_quorum_epoch(&self, epoch: LeaderEpoch) {
+    fn broadcast_end_quorum_epoch(&self, epoch: Epoch) {
         let body = wire::PeerRequest::EndQuorumEpoch {
             leader_id: self.me,
             leader_epoch: epoch,
@@ -2092,7 +2092,7 @@ fn initial_state_voters(core: &QuorumStateMachine) -> Vec<NodeId> {
 /// `LeaderChangeMessage` rather than zero records. Crabka readers skip it via
 /// `is_control_batch()`; it occupies exactly one log offset
 /// (`last_offset_delta = 0`), unchanged from the prior empty batch.
-fn leader_change_batch(epoch: LeaderEpoch, leader_id: NodeId, voter_ids: &[NodeId]) -> RecordBatch {
+fn leader_change_batch(epoch: Epoch, leader_id: NodeId, voter_ids: &[NodeId]) -> RecordBatch {
     use crabka_protocol::{
         Encode,
         owned::{
@@ -3673,7 +3673,7 @@ mod tests {
                 leader: NodeId(1),
                 replicas: vec![NodeId(1)],
                 isr: vec![NodeId(1)],
-                leader_epoch: 0,
+                leader_epoch: crabka_metadata::LeaderEpoch(0),
                 adding_replicas: vec![],
                 removing_replicas: vec![],
                 directories: vec![],

@@ -24,7 +24,7 @@ use crate::{
     error::RaftError,
     kraft::{
         event::Event,
-        types::{LeaderEpoch, LogOffsetMetadata, NodeId},
+        types::{Epoch, LogOffsetMetadata, NodeId},
     },
 };
 
@@ -145,7 +145,7 @@ pub enum TimerTick {
 #[derive(Debug, Clone)]
 pub struct QuorumStateSnapshot {
     pub leader_id: Option<NodeId>,
-    pub leader_epoch: LeaderEpoch,
+    pub leader_epoch: Epoch,
     pub high_watermark: i64,
     pub log_end_offset: i64,
     /// Log-start offset (rises past 0 once the log has been pruned below a
@@ -251,7 +251,7 @@ pub mod wire {
         records::RecordsPayload,
     };
 
-    use super::{LeaderEpoch, LogOffsetMetadata, NodeId};
+    use super::{Epoch, LogOffsetMetadata, NodeId};
 
     /// `KRaft` metadata log topic name.
     const METADATA_TOPIC: &str = "__cluster_metadata";
@@ -278,23 +278,23 @@ pub mod wire {
             /// `voterId` is silently rejected. Built per-recipient in
             /// `broadcast_vote`.
             voter_id: NodeId,
-            candidate_epoch: LeaderEpoch,
+            candidate_epoch: Epoch,
             candidate: NodeId,
-            last_epoch: LeaderEpoch,
+            last_epoch: Epoch,
             last_offset: i64,
             pre_vote: bool,
         },
         BeginQuorumEpoch {
             leader_id: NodeId,
-            leader_epoch: LeaderEpoch,
+            leader_epoch: Epoch,
         },
         EndQuorumEpoch {
             leader_id: NodeId,
-            leader_epoch: LeaderEpoch,
+            leader_epoch: Epoch,
         },
         Fetch {
             from: NodeId,
-            fetch_epoch: LeaderEpoch,
+            fetch_epoch: Epoch,
             fetch_offset: i64,
         },
         FetchSnapshot {
@@ -310,16 +310,16 @@ pub mod wire {
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum PeerResponse {
         Vote {
-            epoch: LeaderEpoch,
+            epoch: Epoch,
             granted: bool,
         },
         /// Begin/End acks carry the responder's epoch; no core event is produced.
         Ack {
-            epoch: LeaderEpoch,
+            epoch: Epoch,
         },
         Fetch {
             leader_id: NodeId,
-            leader_epoch: LeaderEpoch,
+            leader_epoch: Epoch,
             diverging: Option<LogOffsetMetadata>,
             /// When set, the follower's fetch offset is below the leader's pruned
             /// log-start; it must `FetchSnapshot` this snapshot instead. `(end_offset, epoch)`.
@@ -338,13 +338,15 @@ pub mod wire {
         },
     }
 
-    /// `LeaderEpoch` (u32) <-> wire `i32` (`KRaft` uses an i32 `leaderEpoch`).
+    /// Consensus `Epoch` (u32) <-> wire `i32` (`KRaft` uses an i32 `leaderEpoch`).
+    /// The KIP-595 wire carries the leader epoch as a raw `int32` and stays raw
+    /// here; the consensus epoch is always non-negative.
     #[allow(clippy::cast_possible_wrap)]
-    fn epoch_to_wire(e: LeaderEpoch) -> i32 {
+    fn epoch_to_wire(e: Epoch) -> i32 {
         i32::try_from(e).unwrap_or(i32::MAX)
     }
     #[allow(clippy::cast_sign_loss)]
-    fn epoch_from_wire(e: i32) -> LeaderEpoch {
+    fn epoch_from_wire(e: i32) -> Epoch {
         u32::try_from(e).unwrap_or(0)
     }
     /// `NodeId` (u64) <-> wire `i32` replica id.

@@ -8,7 +8,7 @@ use std::{
 };
 
 use bytes::{Bytes, BytesMut};
-use crabka_ids::{Offset, ProducerId};
+use crabka_ids::{LeaderEpoch, Offset, ProducerId};
 use crabka_protocol::records::{HEADER_LEN, RecordBatch};
 use tracing::instrument;
 
@@ -157,7 +157,7 @@ pub struct VerbatimBatch {
     /// `max_timestamp` from the header (for `max_timestamp` + time index).
     pub max_timestamp: i64,
     /// Leader epoch to stamp into the batch (`partition_leader_epoch`).
-    pub leader_epoch: i32,
+    pub leader_epoch: LeaderEpoch,
     /// `producer_id` from the header (for LSO/transaction tracking).
     pub producer_id: ProducerId,
     /// `true` when the batch's attributes mark it transactional.
@@ -190,7 +190,7 @@ pub struct SegmentExport {
     /// Leader epochs whose coverage overlaps `[base_offset, last_offset]`,
     /// as `(epoch, start_offset)` clamped to `base_offset`, ordered by
     /// offset. May be empty when no epochs were recorded for this log.
-    pub leader_epochs: Vec<(i32, Offset)>,
+    pub leader_epochs: Vec<(LeaderEpoch, Offset)>,
 }
 
 impl Log {
@@ -472,14 +472,16 @@ impl Log {
         err,
     )]
     pub fn append(&mut self, batch: &mut RecordBatch) -> Result<Offset, LogError> {
-        let leader_epoch = batch.partition_leader_epoch;
+        // `partition_leader_epoch` is the raw KIP-320 wire `int32`; wrap it into
+        // the domain newtype at this boundary.
+        let leader_epoch = LeaderEpoch(batch.partition_leader_epoch);
         let assigned_base = self.log_end_offset();
         tracing::Span::current().record("assigned_base", assigned_base.0);
         batch.base_offset = assigned_base.0;
         self.append_preserving_offset(batch)?;
         // Record epoch transition when the epoch is valid and exceeds the
         // previously recorded epoch (or no epoch has been recorded yet).
-        if leader_epoch >= 0
+        if leader_epoch.0 >= 0
             && self
                 .epoch_checkpoint
                 .latest_epoch()
@@ -507,7 +509,7 @@ impl Log {
         skip_all,
         fields(
             assigned_base = tracing::field::Empty,
-            leader_epoch = batch.leader_epoch,
+            leader_epoch = batch.leader_epoch.0,
             bytes = batch.bytes.len(),
         ),
         err,
@@ -517,7 +519,7 @@ impl Log {
         let assigned_base = self.log_end_offset();
         tracing::Span::current().record("assigned_base", assigned_base.0);
         self.append_verbatim_preserving_offset(batch, assigned_base)?;
-        if leader_epoch >= 0
+        if leader_epoch.0 >= 0
             && self
                 .epoch_checkpoint
                 .latest_epoch()
@@ -619,13 +621,14 @@ impl Log {
                 actual: offset,
             });
         }
-        let leader_epoch = batch.partition_leader_epoch;
+        // `partition_leader_epoch` is the raw KIP-320 wire `int32`; wrap it here.
+        let leader_epoch = LeaderEpoch(batch.partition_leader_epoch);
         batch.base_offset = offset.0;
         self.append_preserving_offset(batch)?;
         // Mirror the leader-side epoch bookkeeping in [`Log::append`]: record the
         // batch's leader epoch when it advances past the latest recorded epoch,
         // so a follower's leader-epoch checkpoint tracks replicated epochs.
-        if leader_epoch >= 0
+        if leader_epoch.0 >= 0
             && self
                 .epoch_checkpoint
                 .latest_epoch()
@@ -1444,7 +1447,7 @@ fn epochs_for_range(
     sorted: &[crate::leader_epoch_checkpoint::EpochEntry],
     base: Offset,
     last: Offset,
-) -> Vec<(i32, Offset)> {
+) -> Vec<(LeaderEpoch, Offset)> {
     let mut out = Vec::new();
     for (i, e) in sorted.iter().enumerate() {
         // Coverage of this epoch is [start_offset, next.start_offset).
@@ -1652,7 +1655,7 @@ mod tests {
 
     /// Encode a "producer" batch (with a producer-chosen `base_offset` and
     /// leader epoch) and return both the wire bytes and a `VerbatimBatch`.
-    fn verbatim_from(producer: &RecordBatch, leader_epoch: i32) -> (Bytes, VerbatimBatch) {
+    fn verbatim_from(producer: &RecordBatch, leader_epoch: LeaderEpoch) -> (Bytes, VerbatimBatch) {
         let mut wire = bytes::BytesMut::new();
         producer.encode(&mut wire).unwrap();
         let wire = wire.freeze();
@@ -1678,7 +1681,7 @@ mod tests {
             let mut producer = test_batch_at(0);
             producer.base_offset = 999;
             producer.partition_leader_epoch = -1;
-            let (_wire, vb) = verbatim_from(&producer, 4);
+            let (_wire, vb) = verbatim_from(&producer, LeaderEpoch(4));
             log.append_verbatim(&vb).unwrap();
             // Re-encode the expectation with the assigned offset + epoch.
             let mut stamped = producer.clone();
@@ -1725,7 +1728,7 @@ mod tests {
         log_owned.append(&mut owned).unwrap();
 
         // Verbatim path: same epoch via the meta.
-        let (_wire, vb) = verbatim_from(&producer, 9);
+        let (_wire, vb) = verbatim_from(&producer, LeaderEpoch(9));
         log_verb.append_verbatim(&vb).unwrap();
 
         let end_owned = log_owned.log_end_offset();
@@ -1755,7 +1758,7 @@ mod tests {
         producer.producer_id = 77;
         producer.producer_epoch = 0;
         producer.attributes = producer.attributes.with_transactional(true);
-        let (_wire, vb) = verbatim_from(&producer, 0);
+        let (_wire, vb) = verbatim_from(&producer, LeaderEpoch(0));
         log.append_verbatim(&vb).unwrap();
         assert!(log.log_end_offset() == Offset(2));
         // LSO stays at 0 (the open txn's first offset), not log_end (2).
@@ -2143,11 +2146,11 @@ mod tests {
             log.epoch_checkpoint().entries()
                 == &[
                     EpochEntry {
-                        epoch: 0,
+                        epoch: LeaderEpoch(0),
                         start_offset: Offset(0)
                     },
                     EpochEntry {
-                        epoch: 1,
+                        epoch: LeaderEpoch(1),
                         start_offset: Offset(3)
                     }
                 ]
@@ -2165,15 +2168,23 @@ mod tests {
         let epoch7_start = log.log_end_offset();
         let mut b2 = sample_batch_with_epoch(2, 7);
         log.append(&mut b2).unwrap();
-        assert!(log.epoch_checkpoint().latest_epoch() == Some(7));
+        assert!(log.epoch_checkpoint().latest_epoch() == Some(LeaderEpoch(7)));
 
         // Truncate away the entire epoch-7 tail.
         log.truncate_to(epoch7_start).unwrap();
 
-        assert!(log.epoch_checkpoint().latest_epoch() == Some(1));
+        assert!(log.epoch_checkpoint().latest_epoch() == Some(LeaderEpoch(1)));
         let leo = log.log_end_offset();
-        assert!(log.epoch_checkpoint().end_offset_for_epoch(7, leo) == Offset(-1));
-        assert!(log.epoch_checkpoint().end_offset_for_epoch(1, leo) == leo);
+        assert!(
+            log.epoch_checkpoint()
+                .end_offset_for_epoch(LeaderEpoch(7), leo)
+                == Offset(-1)
+        );
+        assert!(
+            log.epoch_checkpoint()
+                .end_offset_for_epoch(LeaderEpoch(1), leo)
+                == leo
+        );
     }
 
     #[test]
@@ -2185,7 +2196,7 @@ mod tests {
         log.append(&mut sample_batch_with_epoch(3, 1)).unwrap(); // epoch 1 @ 0
         log.append(&mut sample_batch_with_epoch(2, 2)).unwrap(); // epoch 2 @ 3
         log.append(&mut sample_batch_with_epoch(1, 5)).unwrap(); // epoch 5 @ 5
-        assert!(log.epoch_checkpoint().latest_epoch() == Some(5));
+        assert!(log.epoch_checkpoint().latest_epoch() == Some(LeaderEpoch(5)));
 
         // Hard reset to an empty log — the replicator's OFFSET_OUT_OF_RANGE
         // recovery path (Kafka's `truncateFullyAndStartAt`). The log now has
@@ -2252,7 +2263,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
         log.append(&mut sample_batch_with_epoch(3, 1)).unwrap(); // epoch 1 @ 0
-        assert!(log.epoch_checkpoint().latest_epoch() == Some(1));
+        assert!(log.epoch_checkpoint().latest_epoch() == Some(LeaderEpoch(1)));
         log.reset_to(Offset(1000)).unwrap(); // empty log starting at 1000
         assert!(
             log.epoch_checkpoint().entries().is_empty(),
@@ -2536,32 +2547,36 @@ mod tests {
         use crate::leader_epoch_checkpoint::EpochEntry;
         let entries = vec![
             EpochEntry {
-                epoch: 0,
+                epoch: LeaderEpoch(0),
                 start_offset: Offset(0),
             },
             EpochEntry {
-                epoch: 1,
+                epoch: LeaderEpoch(1),
                 start_offset: Offset(50),
             },
             EpochEntry {
-                epoch: 2,
+                epoch: LeaderEpoch(2),
                 start_offset: Offset(100),
             },
         ];
         for (start, end, want) in [
             // Segment [60, 90] sits entirely in epoch 1.
-            (Offset(60), Offset(90), vec![(1, Offset(60))]),
+            (Offset(60), Offset(90), vec![(LeaderEpoch(1), Offset(60))]),
             // Segment [40, 60] straddles epoch 0 (->clamped to 40) and epoch 1.
             (
                 Offset(40),
                 Offset(60),
-                vec![(0, Offset(40)), (1, Offset(50))],
+                vec![(LeaderEpoch(0), Offset(40)), (LeaderEpoch(1), Offset(50))],
             ),
             // Segment [0, 200] covers all three.
             (
                 Offset(0),
                 Offset(200),
-                vec![(0, Offset(0)), (1, Offset(50)), (2, Offset(100))],
+                vec![
+                    (LeaderEpoch(0), Offset(0)),
+                    (LeaderEpoch(1), Offset(50)),
+                    (LeaderEpoch(2), Offset(100)),
+                ],
             ),
         ] {
             check!(

@@ -15,6 +15,7 @@
 use std::collections::BTreeMap;
 
 use bytes::{BufMut, Bytes, BytesMut};
+use crabka_ids::LeaderEpoch;
 use crabka_protocol::{
     RemoteLogMetadataRecord,
     owned::{
@@ -193,21 +194,24 @@ fn proto_seg_id_add_to_domain(id: SegIdEntry) -> RemoteLogSegmentId {
     )
 }
 
-fn epochs_to_proto(epochs: &BTreeMap<i32, i64>) -> Vec<SegmentLeaderEpochEntry> {
+fn epochs_to_proto(epochs: &BTreeMap<LeaderEpoch, i64>) -> Vec<SegmentLeaderEpochEntry> {
     epochs
         .iter()
         .map(|(&epoch, &offset)| SegmentLeaderEpochEntry {
-            leader_epoch: epoch,
+            // Wire boundary: unwrap `LeaderEpoch` to the raw `int32` the
+            // JVM `RemoteLogMetadataSerde` writes.
+            leader_epoch: epoch.0,
             offset,
             ..Default::default()
         })
         .collect()
 }
 
-fn proto_epochs_to_domain(entries: Vec<SegmentLeaderEpochEntry>) -> BTreeMap<i32, i64> {
+fn proto_epochs_to_domain(entries: Vec<SegmentLeaderEpochEntry>) -> BTreeMap<LeaderEpoch, i64> {
     entries
         .into_iter()
-        .map(|e| (e.leader_epoch, e.offset))
+        // Wire boundary: wrap the raw `int32` back into `LeaderEpoch`.
+        .map(|e| (LeaderEpoch(e.leader_epoch), e.offset))
         .collect()
 }
 
@@ -457,7 +461,11 @@ mod tests {
             123,
             4096,
             RemoteLogSegmentState::CopySegmentStarted,
-            BTreeMap::from([(0, start), (1, start + 10), (2, start + 20)]),
+            BTreeMap::from([
+                (LeaderEpoch(0), start),
+                (LeaderEpoch(1), start + 10),
+                (LeaderEpoch(2), start + 20),
+            ]),
         )
         .unwrap();
         if let Some(c) = custom {

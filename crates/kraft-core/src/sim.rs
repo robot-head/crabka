@@ -22,7 +22,7 @@ use crate::{
     core::QuorumStateMachine,
     event::{Event, LogEnd},
     role::Role,
-    types::{LeaderEpoch, LogView, NodeId, QuorumState, SimInstant},
+    types::{Epoch, LogView, NodeId, QuorumState, SimInstant},
 };
 
 // --------------------------------------------------------------------------
@@ -136,7 +136,7 @@ pub struct SimSnapshot {
 #[derive(Debug, Clone, Default)]
 struct SimLog {
     /// `epochs[i]` is the leader epoch of the record at offset `i`.
-    epochs: Vec<LeaderEpoch>,
+    epochs: Vec<Epoch>,
 }
 
 impl LogView for SimLog {
@@ -144,11 +144,11 @@ impl LogView for SimLog {
         i64::try_from(self.epochs.len()).expect("log length fits in i64")
     }
 
-    fn last_epoch(&self) -> LeaderEpoch {
+    fn last_epoch(&self) -> Epoch {
         self.epochs.last().copied().unwrap_or(0)
     }
 
-    fn end_offset_for_epoch(&self, epoch: LeaderEpoch) -> Option<i64> {
+    fn end_offset_for_epoch(&self, epoch: Epoch) -> Option<i64> {
         if epoch > self.last_epoch() {
             return None;
         }
@@ -162,7 +162,7 @@ impl LogView for SimLog {
 }
 
 impl SimLog {
-    fn append_in_epoch(&mut self, epoch: LeaderEpoch, count: usize) {
+    fn append_in_epoch(&mut self, epoch: Epoch, count: usize) {
         for _ in 0..count {
             self.epochs.push(epoch);
         }
@@ -302,7 +302,7 @@ pub struct Sim {
     steps: Vec<TraceStep>,
     /// Leader epochs already recorded with an `Elected` step, so we record each
     /// promotion exactly once.
-    elected_seen: BTreeSet<(NodeId, LeaderEpoch)>,
+    elected_seen: BTreeSet<(NodeId, Epoch)>,
 }
 
 impl Sim {
@@ -379,7 +379,7 @@ impl Sim {
 
     /// After running the machine, record any newly-promoted leaders.
     fn record_new_leaders(&mut self) {
-        let promotions: Vec<(NodeId, LeaderEpoch)> = self
+        let promotions: Vec<(NodeId, Epoch)> = self
             .nodes
             .values()
             .filter(|n| n.machine.role().is_leader())
@@ -400,7 +400,7 @@ impl Sim {
 
     // ---- fingerprint / stability ---------------------------------------------
 
-    fn fingerprint(&self) -> Vec<(NodeId, &'static str, LeaderEpoch, usize, i64)> {
+    fn fingerprint(&self) -> Vec<(NodeId, &'static str, Epoch, usize, i64)> {
         self.nodes
             .values()
             .map(|n| {
@@ -765,7 +765,7 @@ impl Sim {
         }
     }
 
-    fn broadcast_vote_request(&mut self, id: NodeId, epoch: LeaderEpoch, pre_vote: bool) {
+    fn broadcast_vote_request(&mut self, id: NodeId, epoch: Epoch, pre_vote: bool) {
         let cand_log = self.nodes[&id].log.log_end();
         for peer in self.voter_ids.clone() {
             if peer != id {

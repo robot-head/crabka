@@ -41,7 +41,9 @@ fn commit_offsets(
     raw_offsets
         .into_iter()
         .map(|(k, v)| {
-            let epoch = positions.get(&k).map_or(-1, |p| p.offset_epoch);
+            // Unwrap the position's leader epoch to raw wire `int32` for the
+            // OffsetCommit `committed_leader_epoch` field.
+            let epoch = positions.get(&k).map_or(-1, |p| p.offset_epoch.get());
             (k, (v, epoch))
         })
         .collect()
@@ -303,7 +305,7 @@ mod tests {
         positions.insert(
             ("known".into(), 0),
             PartitionPosition {
-                offset_epoch: 7,
+                offset_epoch: crabka_ids::LeaderEpoch(7),
                 ..Default::default()
             },
         );

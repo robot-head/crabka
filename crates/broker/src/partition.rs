@@ -521,7 +521,7 @@ impl Partition {
             );
             st.per_follower.clear();
         }
-        st.current_leader_epoch = new_epoch;
+        st.current_leader_epoch = crabka_ids::LeaderEpoch(new_epoch);
         drop(st);
         self.hw_advance_notify.notify_waiters();
     }
@@ -569,7 +569,7 @@ impl Partition {
                         target_offset = target_offset.0,
                         hw = st.hw.0,
                         leader_leo = leader_leo.0,
-                        leader_epoch = st.current_leader_epoch,
+                        leader_epoch = st.current_leader_epoch.0,
                         ?isr,
                         ?followers,
                         "await_hw_at_least: acks=all produce timed out; HW below target offset"
@@ -943,7 +943,10 @@ mod tests {
             );
             let st = p.replica_state.lock().await;
             assert!(st.per_follower.is_empty(), "case ({leader}, {epoch})");
-            assert!(st.current_leader_epoch == epoch, "case ({leader}, {epoch})");
+            assert!(
+                st.current_leader_epoch == crabka_ids::LeaderEpoch(epoch),
+                "case ({leader}, {epoch})"
+            );
         }
     }
 

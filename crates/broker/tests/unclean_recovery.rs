@@ -328,7 +328,7 @@ async fn unclean_recovery_elects_longest_log_replica() {
             crabka_broker::NodeId(3),
         ],
         isr: vec![crabka_broker::NodeId(99)],
-        leader_epoch: pr_before.leader_epoch + 1,
+        leader_epoch: pr_before.leader_epoch.next(),
         adding_replicas: vec![],
         removing_replicas: vec![],
         directories: vec![],

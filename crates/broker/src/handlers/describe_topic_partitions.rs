@@ -197,7 +197,7 @@ pub(crate) async fn handle(
                 error_code: codes::NONE,
                 partition_index: p.partition,
                 leader_id: i32::try_from(p.leader.0).unwrap_or(i32::MAX),
-                leader_epoch: p.leader_epoch,
+                leader_epoch: p.leader_epoch.0,
                 replica_nodes: p
                     .replicas
                     .iter()

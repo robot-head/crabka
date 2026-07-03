@@ -75,7 +75,7 @@ fn pr_of(s: &FailoverState) -> PartitionRecord {
         leader: s.leader,
         replicas: s.replicas.clone(),
         isr: s.isr.clone(),
-        leader_epoch: s.leader_epoch,
+        leader_epoch: crabka_metadata::LeaderEpoch(s.leader_epoch),
         adding_replicas: vec![],
         removing_replicas: vec![],
         directories: vec![],

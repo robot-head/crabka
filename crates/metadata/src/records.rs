@@ -2,6 +2,7 @@
 //! readers can skip unknown ones because we encode each variant
 //! length-prefixed inside the `bincode` payload.
 
+pub use crabka_ids::LeaderEpoch;
 pub use crabka_voters::NodeId;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -25,9 +26,11 @@ pub struct PartitionRecord {
     pub leader: NodeId,
     pub replicas: Vec<NodeId>,
     pub isr: Vec<NodeId>,
-    /// Per-partition leader epoch. Bumped on every leader change.
-    /// Older on-disk metadata is not migrated.
-    pub leader_epoch: i32,
+    /// Per-partition leader epoch (KIP-320). Bumped on every leader change.
+    /// Older on-disk metadata is not migrated. `#[serde(transparent)]` on
+    /// [`LeaderEpoch`] keeps the on-disk bincode bytes identical to a bare
+    /// `i32`.
+    pub leader_epoch: LeaderEpoch,
     /// Replicas being added in an in-flight reassignment. Empty when no
     /// reassignment in flight. KIP-455.
     pub adding_replicas: Vec<NodeId>,
@@ -335,7 +338,7 @@ mod tests {
             leader: NodeId(1),
             replicas: vec![NodeId(1), NodeId(2), NodeId(3)],
             isr: vec![NodeId(1), NodeId(2)],
-            leader_epoch: 0,
+            leader_epoch: LeaderEpoch(0),
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![Uuid::from_u128(1), Uuid::from_u128(2), Uuid::nil()],

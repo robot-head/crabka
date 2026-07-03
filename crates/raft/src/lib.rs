@@ -15,12 +15,12 @@
 //! use std::time::Duration;
 //!
 //! use crabka_metadata::{MetadataRecord, TopicRecord};
-//! use crabka_raft::{Controller, ControllerConfig};
+//! use crabka_raft::{Controller, ControllerConfig, NodeId};
 //! use uuid::Uuid;
 //!
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let dir = tempfile::tempdir()?;
-//! let cfg = ControllerConfig::for_tests(1, dir.path().to_path_buf());
+//! let cfg = ControllerConfig::for_tests(NodeId(1), dir.path().to_path_buf());
 //! let controller = Controller::start(cfg).await?;
 //!
 //! controller

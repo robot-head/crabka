@@ -13,7 +13,7 @@ use crabka_raft::kraft::{
     action::{Action, TimerKind},
     event::{Event, LogEnd},
     role::Role,
-    types::{LeaderEpoch, LogView, NodeId, QuorumState, SimInstant},
+    types::{Epoch, LogView, NodeId, QuorumState, SimInstant},
 };
 use stateright::{
     Model, Property,
@@ -72,11 +72,11 @@ impl SequentialSpec for KraftLogSpec {
 /// can live in fingerprinted model state.)
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct ModelLog {
-    epochs: Vec<LeaderEpoch>,
+    epochs: Vec<Epoch>,
 }
 
 impl ModelLog {
-    fn append_in_epoch(&mut self, epoch: LeaderEpoch, count: usize) {
+    fn append_in_epoch(&mut self, epoch: Epoch, count: usize) {
         for _ in 0..count {
             self.epochs.push(epoch);
         }
@@ -104,10 +104,10 @@ impl LogView for ModelLog {
     fn end_offset(&self) -> i64 {
         i64::try_from(self.epochs.len()).expect("log length fits in i64")
     }
-    fn last_epoch(&self) -> LeaderEpoch {
+    fn last_epoch(&self) -> Epoch {
         self.epochs.last().copied().unwrap_or(0)
     }
-    fn end_offset_for_epoch(&self, epoch: LeaderEpoch) -> Option<i64> {
+    fn end_offset_for_epoch(&self, epoch: Epoch) -> Option<i64> {
         if epoch > self.last_epoch() {
             return None;
         }
@@ -189,7 +189,7 @@ pub struct ConsensusModel {
     /// Cap on in-flight messages (state-space bound).
     pub max_inflight: usize,
     /// Cap on leader epoch (state-space bound).
-    pub max_epoch: LeaderEpoch,
+    pub max_epoch: Epoch,
     /// Enable message loss + duplication faults.
     pub enable_loss_dup: bool,
     /// Max concurrently-crashed nodes (`0` = no crashes).
@@ -661,7 +661,7 @@ impl Model for ConsensusModel {
             }),
             // Safety: at most one leader per leader-epoch.
             Property::always("election_safety", |_, s: &ModelState| {
-                let mut by_epoch: BTreeMap<LeaderEpoch, NodeId> = BTreeMap::new();
+                let mut by_epoch: BTreeMap<Epoch, NodeId> = BTreeMap::new();
                 for (&id, n) in &s.nodes {
                     if is_leader(n) {
                         let epoch = n.machine.quorum_state().leader_epoch;
@@ -697,8 +697,7 @@ impl Model for ConsensusModel {
             // imply equal prefixes). Re-agreement after disagreement is a true
             // matching violation.
             Property::always("log_matching", |_, s: &ModelState| {
-                let logs: Vec<&Vec<LeaderEpoch>> =
-                    s.nodes.values().map(|n| &n.log.epochs).collect();
+                let logs: Vec<&Vec<Epoch>> = s.nodes.values().map(|n| &n.log.epochs).collect();
                 for i in 0..logs.len() {
                     for j in (i + 1)..logs.len() {
                         let (a, b) = (logs[i], logs[j]);

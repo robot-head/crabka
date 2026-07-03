@@ -236,7 +236,9 @@ fn starting_offset(committed: i64, auto_offset_reset: AutoOffsetReset) -> i64 {
 
 fn primed_position(committed_epoch: i32) -> crate::position::PartitionPosition {
     crate::position::PartitionPosition {
-        offset_epoch: committed_epoch,
+        // Wrap the committed leader epoch (raw wire `int32` from OffsetFetch) at
+        // the decode boundary.
+        offset_epoch: crabka_ids::LeaderEpoch(committed_epoch),
         ..Default::default()
     }
 }
@@ -1124,9 +1126,9 @@ mod security_arg_tests {
         assert!(
             position
                 == crate::position::PartitionPosition {
-                    offset_epoch: 9,
+                    offset_epoch: crabka_ids::LeaderEpoch(9),
                     leader_id: -1,
-                    leader_epoch: -1,
+                    leader_epoch: crabka_ids::LeaderEpoch(-1),
                     awaiting_validation: false,
                 }
         );

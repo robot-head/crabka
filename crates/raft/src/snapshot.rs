@@ -183,7 +183,8 @@ impl SnapshotReader {
 mod tests {
     use assert2::{assert, check};
     use crabka_metadata::{
-        FeatureLevelRecord, MetadataImage, MetadataRecord, NodeId, PartitionRecord, TopicRecord,
+        FeatureLevelRecord, LeaderEpoch, MetadataImage, MetadataRecord, NodeId, PartitionRecord,
+        TopicRecord,
     };
     use crabka_protocol::Decode;
     use uuid::Uuid;
@@ -212,7 +213,7 @@ mod tests {
                 leader: NodeId(1),
                 replicas: vec![NodeId(1), NodeId(2)],
                 isr: vec![NodeId(1), NodeId(2)],
-                leader_epoch: 0,
+                leader_epoch: LeaderEpoch(0),
                 adding_replicas: vec![],
                 removing_replicas: vec![],
                 directories: vec![],
@@ -242,7 +243,7 @@ mod tests {
                 leader: NodeId(1),
                 replicas: vec![NodeId(1)],
                 isr: vec![NodeId(1)],
-                leader_epoch: 0,
+                leader_epoch: LeaderEpoch(0),
                 adding_replicas: vec![],
                 removing_replicas: vec![],
                 directories: vec![],
@@ -439,7 +440,7 @@ mod tests {
                 leader: NodeId(1),
                 replicas: vec![NodeId(1)],
                 isr: vec![NodeId(1)],
-                leader_epoch: 0,
+                leader_epoch: LeaderEpoch(0),
                 adding_replicas: vec![],
                 removing_replicas: vec![],
                 directories: vec![],

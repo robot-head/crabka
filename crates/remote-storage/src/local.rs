@@ -220,6 +220,7 @@ mod tests {
 
     use assert2::{assert, check};
     use bytes::Bytes;
+    use crabka_ids::LeaderEpoch;
     use uuid::Uuid;
 
     use super::*;
@@ -238,7 +239,7 @@ mod tests {
             456,
             8,
             RemoteLogSegmentState::CopySegmentStarted,
-            BTreeMap::from([(0, 0)]),
+            BTreeMap::from([(LeaderEpoch(0), 0)]),
         )
         .unwrap()
     }

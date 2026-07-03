@@ -116,7 +116,7 @@ pub(crate) fn reassign_one(
             topic: pr.topic.clone(),
             partition: pr.partition,
             leader: new_leader,
-            leader_epoch: pr.leader_epoch + 1,
+            leader_epoch: pr.leader_epoch.next(),
             replicas: pr.replicas.clone(),
             isr: pr.isr.clone(),
             adding_replicas: pr.adding_replicas.clone(),
@@ -298,7 +298,7 @@ mod tests {
             leader: NodeId(leader),
             replicas: replicas.iter().copied().map(NodeId).collect(),
             isr: isr.iter().copied().map(NodeId).collect(),
-            leader_epoch: 5,
+            leader_epoch: crabka_metadata::LeaderEpoch(5),
             adding_replicas: adding.iter().copied().map(NodeId).collect(),
             removing_replicas: removing.iter().copied().map(NodeId).collect(),
             directories: vec![],
@@ -382,7 +382,7 @@ mod tests {
             leader: NodeId(leader),
             replicas: replicas.iter().copied().map(NodeId).collect(),
             isr: isr.iter().copied().map(NodeId).collect(),
-            leader_epoch: 5,
+            leader_epoch: crabka_metadata::LeaderEpoch(5),
             adding_replicas: adding.iter().copied().map(NodeId).collect(),
             removing_replicas: removing.iter().copied().map(NodeId).collect(),
             directories: directories.to_vec(),
@@ -423,7 +423,7 @@ mod tests {
         check!(pr.removing_replicas == Vec::<NodeId>::new());
         check!(pr.isr == vec![NodeId(1), NodeId(3)]);
         check!(pr.leader == NodeId(1));
-        check!(pr.leader_epoch == 5);
+        check!(pr.leader_epoch == crabka_metadata::LeaderEpoch(5));
         check!(pr.partition_epoch == 1);
     }
 
@@ -490,7 +490,7 @@ mod tests {
         );
         // leader_epoch bumped; replica set unchanged — completion happens
         // next tick.
-        check!(pr.leader_epoch == 6);
+        check!(pr.leader_epoch == crabka_metadata::LeaderEpoch(6));
         check!(pr.partition_epoch == 1);
         check!(pr.adding_replicas == vec![NodeId(3)]);
         check!(pr.removing_replicas == vec![NodeId(2)]);
@@ -571,7 +571,7 @@ mod tests {
                 leader: NodeId(1),
                 replicas: vec![NodeId(1), NodeId(2), NodeId(3)],
                 isr: vec![NodeId(1), NodeId(2), NodeId(3)],
-                leader_epoch: 5,
+                leader_epoch: crabka_metadata::LeaderEpoch(5),
                 adding_replicas: vec![NodeId(3)],
                 removing_replicas: vec![NodeId(2)],
                 directories: vec![],

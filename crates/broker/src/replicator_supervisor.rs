@@ -231,7 +231,7 @@ pub(crate) struct ReplicatorSupervisor {
     /// Per-follower-partition (leader, `leader_epoch`) tuple captured at
     /// spawn time. On reconcile, if the tuple changes, the task is
     /// cancelled and respawned pointed at the new leader.
-    task_targets: DashMap<TopicPartition, (NodeId, i32)>,
+    task_targets: DashMap<TopicPartition, (NodeId, crabka_metadata::LeaderEpoch)>,
     shutdown: CancellationToken,
     txn_coordinator: Option<Arc<TxnCoordinator>>,
     /// KIP-932 share coordinator. Its view of locally-led
@@ -348,7 +348,7 @@ impl ReplicatorSupervisor {
             // Always sync the partition's cached leader + epoch.
             // `Partition::install_leader_change` is idempotent (atomic stores
             // no-op on equal writes).
-            part.install_leader_change(part_record.leader.0, part_record.leader_epoch)
+            part.install_leader_change(part_record.leader.0, part_record.leader_epoch.0)
                 .await;
             if part_record.leader == self.node_id {
                 // Install the *current* ISR from the metadata image (not the
@@ -623,7 +623,7 @@ mod tests {
             leader,
             replicas: replicas.clone(),
             isr: replicas,
-            leader_epoch,
+            leader_epoch: crabka_metadata::LeaderEpoch(leader_epoch),
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![],
@@ -836,7 +836,7 @@ mod tests {
                     crabka_audit::NodeId(2),
                     crabka_audit::NodeId(3),
                 ],
-                leader_epoch: 0,
+                leader_epoch: crabka_metadata::LeaderEpoch(0),
                 adding_replicas: vec![],
                 removing_replicas: vec![],
                 directories: vec![],
@@ -944,7 +944,7 @@ mod tests {
                     crabka_audit::NodeId(2),
                     crabka_audit::NodeId(3),
                 ],
-                leader_epoch: 0,
+                leader_epoch: crabka_metadata::LeaderEpoch(0),
                 adding_replicas: vec![],
                 removing_replicas: vec![],
                 directories: vec![],
@@ -970,7 +970,7 @@ mod tests {
                     crabka_audit::NodeId(2),
                     crabka_audit::NodeId(3),
                 ],
-                leader_epoch: 0,
+                leader_epoch: crabka_metadata::LeaderEpoch(0),
                 adding_replicas: vec![],
                 removing_replicas: vec![],
                 directories: vec![],
@@ -990,7 +990,7 @@ mod tests {
                     crabka_audit::NodeId(2),
                     crabka_audit::NodeId(3),
                 ],
-                leader_epoch: 0,
+                leader_epoch: crabka_metadata::LeaderEpoch(0),
                 adding_replicas: vec![],
                 removing_replicas: vec![],
                 directories: vec![],
@@ -1065,9 +1065,10 @@ mod tests {
         let (supervisor, _partitions, _reporter, _dir) = supervisor_fixture(img.clone());
         let token = CancellationToken::new();
         supervisor.tasks.insert(("stale".into(), 0), token.clone());
-        supervisor
-            .task_targets
-            .insert(("stale".into(), 0), (NodeId(1), 0));
+        supervisor.task_targets.insert(
+            ("stale".into(), 0),
+            (NodeId(1), crabka_metadata::LeaderEpoch(0)),
+        );
 
         supervisor.reconcile(&img).await;
 
@@ -1085,9 +1086,10 @@ mod tests {
         let (supervisor, _partitions, _reporter, _dir) = supervisor_fixture(img.clone());
         let token = CancellationToken::new();
         supervisor.tasks.insert(("t".into(), 0), token.clone());
-        supervisor
-            .task_targets
-            .insert(("t".into(), 0), (NodeId(9), 7));
+        supervisor.task_targets.insert(
+            ("t".into(), 0),
+            (NodeId(9), crabka_metadata::LeaderEpoch(7)),
+        );
 
         supervisor.reconcile(&img).await;
 
@@ -1181,7 +1183,7 @@ mod tests {
             leader: crabka_audit::NodeId(1),
             replicas: vec![crabka_audit::NodeId(1)],
             isr: vec![crabka_audit::NodeId(1)],
-            leader_epoch: 0,
+            leader_epoch: crabka_metadata::LeaderEpoch(0),
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![],
@@ -1251,7 +1253,7 @@ mod tests {
             leader: crabka_audit::NodeId(1),
             replicas: vec![crabka_audit::NodeId(1)],
             isr: vec![crabka_audit::NodeId(1)],
-            leader_epoch: 0,
+            leader_epoch: crabka_metadata::LeaderEpoch(0),
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![],
@@ -1314,7 +1316,7 @@ mod tests {
             leader: crabka_audit::NodeId(1),
             replicas: vec![crabka_audit::NodeId(1)],
             isr: vec![crabka_audit::NodeId(1)],
-            leader_epoch: 0,
+            leader_epoch: crabka_metadata::LeaderEpoch(0),
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![],

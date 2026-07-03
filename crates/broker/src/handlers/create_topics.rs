@@ -266,7 +266,7 @@ pub(crate) async fn handle(
                     leader: replicas[0],
                     replicas: replicas.clone(),
                     isr: replicas.clone(),
-                    leader_epoch: INITIAL_LEADER_EPOCH,
+                    leader_epoch: crabka_metadata::LeaderEpoch(INITIAL_LEADER_EPOCH),
                     adding_replicas: vec![],
                     removing_replicas: vec![],
                     directories: vec![],

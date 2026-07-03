@@ -492,6 +492,7 @@ mod tests {
     use std::{collections::BTreeMap, io::Write, path::PathBuf};
 
     use assert2::{assert, check};
+    use crabka_ids::LeaderEpoch;
     use object_store::memory::InMemory;
     use tempfile::TempDir;
     use uuid::Uuid;
@@ -552,7 +553,7 @@ mod tests {
             456,
             8,
             RemoteLogSegmentState::CopySegmentStarted,
-            BTreeMap::from([(0, 0)]),
+            BTreeMap::from([(LeaderEpoch(0), 0)]),
         )
         .unwrap()
     }

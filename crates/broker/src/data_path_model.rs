@@ -158,7 +158,7 @@ fn epoch_entries(log: &[u8]) -> Vec<EpochEntry> {
     for (off, &e) in log.iter().enumerate() {
         if last != Some(e) {
             out.push(EpochEntry {
-                epoch: i32::from(e),
+                epoch: crabka_log::LeaderEpoch(i32::from(e)),
                 start_offset: Offset(off as i64),
             });
             last = Some(e);
@@ -174,7 +174,7 @@ fn real_truncation_offset(follower_log: &[u8], leader_log: &[u8]) -> i64 {
     let follower_latest = follower_log.last().map_or(-1, |&e| i32::from(e));
     let (_, end) = epoch_and_offset_for_entries(
         &leader_entries,
-        follower_latest,
+        crabka_log::LeaderEpoch(follower_latest),
         Offset(leader_log.len() as i64),
     );
     // Unwrap the log-layer `Offset` into this model's `i64` world at the seam.
@@ -234,7 +234,7 @@ fn do_failover(s: &mut DpState, dead: u8, unclean: bool) {
         leader: crabka_audit::NodeId(node(s.leader)),
         replicas: replica_nodes,
         isr: isr_nodes,
-        leader_epoch: i32::from(s.leader_epoch),
+        leader_epoch: crabka_metadata::LeaderEpoch(i32::from(s.leader_epoch)),
         ..Default::default()
     };
     let alive: HashSet<crabka_audit::NodeId> = (0..NB as u8)

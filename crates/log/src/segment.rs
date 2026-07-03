@@ -9,7 +9,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use crabka_ids::Offset;
+use crabka_ids::{LeaderEpoch, Offset};
 use crabka_protocol::records::{
     HEADER_LEN, RecordBatch, RecordBatchHeader, patch_base_offset_and_leader_epoch,
 };
@@ -831,7 +831,7 @@ impl Segment {
         base_offset: Offset,
         last_offset_delta: i32,
         max_timestamp: i64,
-        leader_epoch: i32,
+        leader_epoch: LeaderEpoch,
         index_interval_bytes: u32,
     ) -> Result<u64, LogError> {
         if self.sealed {
@@ -854,7 +854,8 @@ impl Segment {
         // body without an lseek or full-payload copy.
         let mut header = [0u8; HEADER_LEN];
         header.copy_from_slice(&bytes[..HEADER_LEN]);
-        patch_base_offset_and_leader_epoch(&mut header, base_offset.0, leader_epoch);
+        // The protocol patcher writes the raw KIP-320 wire `int32`; unwrap here.
+        patch_base_offset_and_leader_epoch(&mut header, base_offset.0, leader_epoch.0);
 
         let position = self.log_size;
         let mut bufs = [IoSlice::new(&header), IoSlice::new(&bytes[HEADER_LEN..])];
@@ -1391,8 +1392,15 @@ mod tests {
         // Append verbatim with an assigned base_offset and a stamped epoch.
         let assigned_base = Offset(0);
         let stamped_epoch = 7i32;
-        seg.append_verbatim(&wire, assigned_base, 0, 1_000, stamped_epoch, 0)
-            .unwrap();
+        seg.append_verbatim(
+            &wire,
+            assigned_base,
+            0,
+            1_000,
+            LeaderEpoch(stamped_epoch),
+            0,
+        )
+        .unwrap();
         assert!(seg.last_offset() == Offset(0));
 
         // Read back the raw .log bytes.
@@ -1433,7 +1441,7 @@ mod tests {
         producer.encode(&mut wire).unwrap();
         let wire = wire.freeze();
 
-        seg.append_verbatim(&wire, Offset(0), 2, 5_000, 0, 0)
+        seg.append_verbatim(&wire, Offset(0), 2, 5_000, LeaderEpoch(0), 0)
             .unwrap();
         assert!(seg.last_offset() == Offset(2));
         assert!(seg.max_timestamp() == 5_000);
@@ -1451,7 +1459,7 @@ mod tests {
         let mut wire = bytes::BytesMut::new();
         test_batch_at(0).encode(&mut wire).unwrap();
         let err = seg
-            .append_verbatim(&wire.freeze(), Offset(0), 0, 0, 0, 0)
+            .append_verbatim(&wire.freeze(), Offset(0), 0, 0, LeaderEpoch(0), 0)
             .unwrap_err();
         assert!(matches!(err, LogError::Io(_)));
         drop(dir);

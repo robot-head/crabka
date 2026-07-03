@@ -16,6 +16,7 @@
 //! [`crabka_remote_storage::InmemoryRemoteLogMetadataManager`], which silently
 //! accepts writes that are then lost when the real manager replaces it.
 
+use crabka_ids::LeaderEpoch;
 use crabka_remote_storage::{
     RemoteLogMetadataManager, RemoteLogSegmentMetadata, RemoteLogSegmentMetadataUpdate,
     RemotePartitionDeleteMetadata, RemoteStorageError, TopicIdPartition,
@@ -65,7 +66,7 @@ impl RemoteLogMetadataManager for NotReadyRlmm {
     fn remote_log_segment_metadata(
         &self,
         topic_id_partition: &TopicIdPartition,
-        _leader_epoch: i32,
+        _leader_epoch: LeaderEpoch,
         _offset: i64,
     ) -> Result<Option<RemoteLogSegmentMetadata>, RemoteStorageError> {
         Err(RemoteStorageError::NotReady {
@@ -76,7 +77,7 @@ impl RemoteLogMetadataManager for NotReadyRlmm {
     fn highest_offset_for_epoch(
         &self,
         topic_id_partition: &TopicIdPartition,
-        _leader_epoch: i32,
+        _leader_epoch: LeaderEpoch,
     ) -> Result<Option<i64>, RemoteStorageError> {
         Err(RemoteStorageError::NotReady {
             partition: topic_id_partition.partition,
@@ -95,7 +96,7 @@ impl RemoteLogMetadataManager for NotReadyRlmm {
     fn list_remote_log_segments_by_epoch(
         &self,
         topic_id_partition: &TopicIdPartition,
-        _leader_epoch: i32,
+        _leader_epoch: LeaderEpoch,
     ) -> Result<Vec<RemoteLogSegmentMetadata>, RemoteStorageError> {
         Err(RemoteStorageError::NotReady {
             partition: topic_id_partition.partition,
@@ -134,16 +135,22 @@ mod tests {
     #[test]
     fn reads_return_not_ready_with_partition() {
         let m = NotReadyRlmm::new();
-        let err = m.remote_log_segment_metadata(&tp(), 0, 0).unwrap_err();
+        let err = m
+            .remote_log_segment_metadata(&tp(), LeaderEpoch(0), 0)
+            .unwrap_err();
         assert!(matches!(err, RemoteStorageError::NotReady { partition: 3 }));
 
         let err = m.list_remote_log_segments(&tp()).unwrap_err();
         assert!(matches!(err, RemoteStorageError::NotReady { partition: 3 }));
 
-        let err = m.list_remote_log_segments_by_epoch(&tp(), 0).unwrap_err();
+        let err = m
+            .list_remote_log_segments_by_epoch(&tp(), LeaderEpoch(0))
+            .unwrap_err();
         assert!(matches!(err, RemoteStorageError::NotReady { partition: 3 }));
 
-        let err = m.highest_offset_for_epoch(&tp(), 0).unwrap_err();
+        let err = m
+            .highest_offset_for_epoch(&tp(), LeaderEpoch(0))
+            .unwrap_err();
         assert!(matches!(err, RemoteStorageError::NotReady { partition: 3 }));
     }
 
@@ -159,7 +166,7 @@ mod tests {
             100,
             2048,
             RemoteLogSegmentState::CopySegmentStarted,
-            BTreeMap::from([(0, 0)]),
+            BTreeMap::from([(LeaderEpoch(0), 0)]),
         )
         .unwrap();
         let err = m.add_remote_log_segment_metadata(md).unwrap_err();

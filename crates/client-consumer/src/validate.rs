@@ -6,13 +6,15 @@
 
 use std::collections::HashMap;
 
+use crabka_ids::LeaderEpoch;
+
 use crate::{
     consumer::Consumer,
     error::ConsumerError,
     position::{PartitionPosition, ValidationOutcome, classify},
 };
 
-fn update_leader_epoch(pos: &mut PartitionPosition, leader_epoch: i32) {
+fn update_leader_epoch(pos: &mut PartitionPosition, leader_epoch: LeaderEpoch) {
     if leader_epoch > pos.leader_epoch {
         pos.leader_epoch = leader_epoch;
         if should_await_validation(leader_epoch, pos.offset_epoch) {
@@ -21,29 +23,29 @@ fn update_leader_epoch(pos: &mut PartitionPosition, leader_epoch: i32) {
     }
 }
 
-fn should_await_validation(leader_epoch: i32, offset_epoch: i32) -> bool {
-    leader_epoch > offset_epoch && offset_epoch >= 0
+fn should_await_validation(leader_epoch: LeaderEpoch, offset_epoch: LeaderEpoch) -> bool {
+    leader_epoch > offset_epoch && offset_epoch.get() >= 0
 }
 
 fn clear_unvalidatable_position(pos: &mut PartitionPosition) {
-    if pos.awaiting_validation && pos.offset_epoch < 0 {
+    if pos.awaiting_validation && pos.offset_epoch.get() < 0 {
         pos.awaiting_validation = false;
     }
 }
 
 fn should_validate_position(pos: &PartitionPosition) -> bool {
-    pos.awaiting_validation && pos.offset_epoch >= 0
+    pos.awaiting_validation && pos.offset_epoch.get() >= 0
 }
 
 fn should_route_to_leader(leader_id: i32, knows_leader: bool) -> bool {
     leader_id >= 0 && knows_leader
 }
 
-fn response_still_current(pos: &PartitionPosition, leader_epoch: i32) -> bool {
+fn response_still_current(pos: &PartitionPosition, leader_epoch: LeaderEpoch) -> bool {
     pos.leader_epoch == leader_epoch
 }
 
-fn should_skip_stale_response(pos: &PartitionPosition, leader_epoch: i32) -> bool {
+fn should_skip_stale_response(pos: &PartitionPosition, leader_epoch: LeaderEpoch) -> bool {
     !response_still_current(pos, leader_epoch)
 }
 
@@ -52,7 +54,7 @@ fn response_has_error(error_code: i16) -> bool {
 }
 
 fn mark_validation_error(pos: &mut PartitionPosition) {
-    pos.leader_epoch = -1;
+    pos.leader_epoch = LeaderEpoch(-1);
     pos.awaiting_validation = true;
 }
 
@@ -82,7 +84,9 @@ impl Consumer {
                 let key = (name.clone(), p.partition_index);
                 let entry = positions.entry(key).or_default();
                 entry.leader_id = p.leader_id;
-                update_leader_epoch(entry, p.leader_epoch);
+                // Wrap the raw wire `int32` leader epoch at the Metadata decode
+                // boundary.
+                update_leader_epoch(entry, LeaderEpoch(p.leader_epoch));
             }
         }
         Ok(())
@@ -111,7 +115,7 @@ impl Consumer {
         // Lock order: next_offsets first, then positions — matching the
         // coordinator's established order, so we never deadlock against poll.
         // (topic, partition, offset, offset_epoch, leader_epoch, leader_id).
-        let to_validate: Vec<(String, i32, i64, i32, i32, i32)> = {
+        let to_validate: Vec<(String, i32, i64, LeaderEpoch, LeaderEpoch, i32)> = {
             let offsets = self.next_offsets.lock().await;
             let mut positions = self.positions.lock().await;
             // Defensive: clear awaiting_validation for any partition whose
@@ -150,19 +154,27 @@ impl Consumer {
             // `refresh_leader_epochs` → `refresh_metadata`); fall back to the
             // bootstrap connection otherwise (e.g. single-broker test brokers
             // advertising port 0, where bootstrap is the leader anyway).
+            // Unwrap the leader epochs to raw `int32` at the client-core /
+            // wire boundary (`current_leader_epoch` = `leader_epoch`,
+            // `leader_epoch` arg = `offset_epoch`).
             let answer = if should_route_to_leader(leader_id, self.client.knows_broker(leader_id)) {
                 self.client
                     .offset_for_leader_epoch_on(
                         leader_id,
                         &topic,
                         partition,
-                        leader_epoch,
-                        offset_epoch,
+                        leader_epoch.get(),
+                        offset_epoch.get(),
                     )
                     .await?
             } else {
                 self.client
-                    .offset_for_leader_epoch(&topic, partition, leader_epoch, offset_epoch)
+                    .offset_for_leader_epoch(
+                        &topic,
+                        partition,
+                        leader_epoch.get(),
+                        offset_epoch.get(),
+                    )
                     .await?
             };
 
@@ -190,7 +202,14 @@ impl Consumer {
                 continue;
             }
 
-            match classify(offset, offset_epoch, answer.leader_epoch, answer.end_offset) {
+            // Wrap the leader's answer epoch (raw wire `int32`) at the
+            // OffsetForLeaderEpoch decode boundary.
+            match classify(
+                offset,
+                offset_epoch,
+                LeaderEpoch(answer.leader_epoch),
+                answer.end_offset,
+            ) {
                 ValidationOutcome::Valid { leader_epoch: le } => {
                     pos.offset_epoch = le;
                     pos.awaiting_validation = false;
@@ -214,8 +233,8 @@ mod tests {
 
     fn pos(offset_epoch: i32, leader_epoch: i32, awaiting_validation: bool) -> PartitionPosition {
         PartitionPosition {
-            offset_epoch,
-            leader_epoch,
+            offset_epoch: LeaderEpoch(offset_epoch),
+            leader_epoch: LeaderEpoch(leader_epoch),
             awaiting_validation,
             ..Default::default()
         }
@@ -224,24 +243,24 @@ mod tests {
     #[test]
     fn leader_epoch_update_marks_only_real_advances_with_consumed_epoch() {
         let mut p = pos(2, 2, false);
-        update_leader_epoch(&mut p, 2);
-        assert!(p.leader_epoch == 2);
+        update_leader_epoch(&mut p, LeaderEpoch(2));
+        assert!(p.leader_epoch == LeaderEpoch(2));
         assert!(!p.awaiting_validation);
 
-        update_leader_epoch(&mut p, 3);
-        assert!(p.leader_epoch == 3);
+        update_leader_epoch(&mut p, LeaderEpoch(3));
+        assert!(p.leader_epoch == LeaderEpoch(3));
         assert!(p.awaiting_validation);
 
         let mut never_consumed = pos(-1, -1, false);
-        update_leader_epoch(&mut never_consumed, 0);
-        assert!(never_consumed.leader_epoch == 0);
+        update_leader_epoch(&mut never_consumed, LeaderEpoch(0));
+        assert!(never_consumed.leader_epoch == LeaderEpoch(0));
         assert!(!never_consumed.awaiting_validation);
 
         let mut equal_but_consumed = pos(2, 3, false);
-        update_leader_epoch(&mut equal_but_consumed, 3);
+        update_leader_epoch(&mut equal_but_consumed, LeaderEpoch(3));
         assert!(!equal_but_consumed.awaiting_validation);
 
-        assert!(!should_await_validation(2, 2));
+        assert!(!should_await_validation(LeaderEpoch(2), LeaderEpoch(2)));
     }
 
     #[test]
@@ -273,10 +292,10 @@ mod tests {
     #[test]
     fn response_epoch_must_still_match_position_epoch() {
         let p = pos(2, 7, true);
-        check!(response_still_current(&p, 7));
-        check!(!response_still_current(&p, 6));
-        check!(!should_skip_stale_response(&p, 7));
-        check!(should_skip_stale_response(&p, 6));
+        check!(response_still_current(&p, LeaderEpoch(7)));
+        check!(!response_still_current(&p, LeaderEpoch(6)));
+        check!(!should_skip_stale_response(&p, LeaderEpoch(7)));
+        check!(should_skip_stale_response(&p, LeaderEpoch(6)));
     }
 
     #[test]
@@ -289,7 +308,7 @@ mod tests {
     fn validation_error_resets_epoch_and_keeps_partition_flagged() {
         let mut p = pos(2, 7, false);
         mark_validation_error(&mut p);
-        assert!(p.leader_epoch == -1);
+        assert!(p.leader_epoch == LeaderEpoch(-1));
         assert!(p.awaiting_validation);
     }
 }
