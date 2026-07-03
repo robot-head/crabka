@@ -11,7 +11,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use qubit_clock::sleep::AsyncSleeper;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
@@ -2813,18 +2812,72 @@ mod tests {
 
     /// KIP-848 live migration: the tick must dispatch on the LIVE `group.kind`,
     /// not the captured spawn-time kind. Spawn a classic actor, flip it to a
-    /// consumer group in place, and let a tick fire — the actor must keep
-    /// running rather than panic on a kind-mismatched `expect(...)`.
+    /// consumer group in place, and fire a tick — the actor must keep running
+    /// rather than panic on a kind-mismatched `expect(...)`.
+    ///
+    /// The session-expiry tick is driven by an injected mock sleeper, so the
+    /// tick fires on a controlled timeline instead of a real ~1.2s wall-clock
+    /// sleep: deterministic and instant.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn actor_tick_does_not_panic_after_in_place_flip() {
-        let (coord, _log) = make_coordinator();
+        use qubit_clock::MockWaiterKind;
+        use qubit_clock::sleep::MockSleeper;
+
+        let sleeper = MockSleeper::new();
+        let timeline = sleeper.timeline();
+        let log = Arc::new(InMemoryOffsetsLog::default());
+        let coord = Arc::new(GroupCoordinator::new(
+            NextGenConfig {
+                sleeper: Arc::new(sleeper),
+                ..NextGenConfig::default()
+            },
+            crate::coordinator::unified::share::config::ShareGroupConfig::default(),
+            empty_metadata(),
+            log.clone(),
+            crate::coordinator::unified::streams::config::StreamsGroupConfig::default(),
+        ));
+
         let handle = coord.get_or_create_group("g", GroupKindTag::Classic);
+
+        // Flip the group to consumer in place, then round-trip a synchronous
+        // inspect. The mpsc is FIFO with a single consumer, so the inspect reply
+        // proves the flip message was already processed before we fire a tick.
         handle
             .tx
             .send(GroupActorMessage::TestForceConsumerKind)
             .await
             .unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::InspectAny { reply: tx })
+            .await
+            .unwrap();
+        let _ = rx.await;
+
+        // The actor is now parked on the re-armed session-expiry tick sleep.
+        // Confirm the waiter is registered (only advance the timeline once
+        // parked), fire exactly one tick, then confirm the loop re-parks — which
+        // proves the tick body ran to completion on the LIVE consumer kind
+        // without panicking. `wait_for_blocked_waiters` runs on a blocking thread
+        // so it never stalls the runtime driving the actor.
+        let tl = timeline.clone();
+        let parked = tokio::task::spawn_blocking(move || {
+            tl.wait_for_blocked_waiters(MockWaiterKind::Sleep, 1, Duration::from_secs(5))
+        })
+        .await
+        .unwrap();
+        assert!(parked, "actor should park on the session-expiry tick sleep");
+
+        timeline.advance(SESSION_EXPIRY_TICK_INTERVAL);
+
+        let tl = timeline.clone();
+        let reparked = tokio::task::spawn_blocking(move || {
+            tl.wait_for_blocked_waiters(MockWaiterKind::Sleep, 1, Duration::from_secs(5))
+        })
+        .await
+        .unwrap();
+        assert!(reparked, "actor should re-park after processing the tick");
         assert!(!handle.tx.is_closed());
     }
 
