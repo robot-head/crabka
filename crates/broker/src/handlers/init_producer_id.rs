@@ -106,7 +106,8 @@ pub(crate) async fn handle(
             InitProducerIdResponse {
                 throttle_time_ms: 0,
                 error_code: codes::NONE,
-                producer_id: pid,
+                // Unwrap the allocated `ProducerId` into the raw-`i64` wire field.
+                producer_id: pid.get(),
                 producer_epoch: epoch,
                 ..Default::default()
             }
@@ -228,7 +229,8 @@ async fn handle_transactional(
             coord.put(entry, txnv).await?;
             Ok(InitProducerIdResponse {
                 error_code: codes::NONE,
-                producer_id: pid,
+                // Unwrap the allocated `ProducerId` into the raw-`i64` wire field.
+                producer_id: pid.get(),
                 producer_epoch: epoch,
                 ..Default::default()
             })
@@ -273,7 +275,8 @@ async fn handle_transactional(
             coord.put(snap.clone(), txnv).await?;
             Ok(InitProducerIdResponse {
                 error_code: codes::NONE,
-                producer_id: snap.producer_id,
+                // Unwrap the entry's `ProducerId` into the raw-`i64` wire field.
+                producer_id: snap.producer_id.get(),
                 producer_epoch: snap.producer_epoch,
                 ..Default::default()
             })

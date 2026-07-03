@@ -131,7 +131,8 @@ pub(crate) async fn handle(
             transaction_state: txn_state_str(entry.state).to_string(),
             transaction_timeout_ms: entry.txn_timeout_ms,
             transaction_start_time_ms: entry.start_ms,
-            producer_id: entry.producer_id,
+            // Unwrap into the raw-`i64` wire field.
+            producer_id: entry.producer_id.get(),
             producer_epoch: entry.producer_epoch,
             topics: topics_for(&entry),
             ..Default::default()
@@ -158,7 +159,7 @@ mod tests {
     use crate::txn::state::TopicPartition;
 
     fn entry() -> TxnEntry {
-        let mut e = TxnEntry::new_empty("tx".into(), 100, 0, 60_000, 1_000);
+        let mut e = TxnEntry::new_empty("tx".into(), crabka_log::ProducerId(100), 0, 60_000, 1_000);
         e.partitions.insert(TopicPartition {
             topic: "b".into(),
             partition: crabka_ids::PartitionIndex(2),

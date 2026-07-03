@@ -109,8 +109,9 @@ pub(crate) async fn handle(
         if !state_filter.is_empty() && !state_filter.contains(state) {
             continue;
         }
-        // Producer-id filter: same semantics — empty means no filter.
-        if !pid_filter.is_empty() && !pid_filter.contains(&entry.producer_id) {
+        // Producer-id filter: same semantics — empty means no filter. The
+        // wire filter set is raw `i64`; unwrap the entry's `ProducerId` to match.
+        if !pid_filter.is_empty() && !pid_filter.contains(&entry.producer_id.get()) {
             continue;
         }
         // ACL: per-tid `Describe` on `TransactionalId`. Silent filter on
@@ -131,7 +132,8 @@ pub(crate) async fn handle(
 
         out.push(TransactionState {
             transactional_id: entry.transactional_id.clone(),
-            producer_id: entry.producer_id,
+            // Unwrap into the raw-`i64` wire field.
+            producer_id: entry.producer_id.get(),
             transaction_state: state.to_string(),
             ..Default::default()
         });

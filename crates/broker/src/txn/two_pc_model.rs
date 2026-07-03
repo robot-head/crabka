@@ -102,7 +102,7 @@ fn timeout_for(two_pc: bool) -> i32 {
 fn rebuild(s: &TwoPcProj) -> TxnEntry {
     let mut e = TxnEntry::new_empty(
         "tid".to_string(),
-        PID,
+        crabka_log::ProducerId(PID),
         s.epoch,
         timeout_for(s.two_pc),
         START_MS,

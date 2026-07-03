@@ -138,7 +138,7 @@ async fn handle_v4(
             process_one_txn(
                 coord,
                 txn.transactional_id.as_str(),
-                txn.producer_id,
+                crabka_log::ProducerId(txn.producer_id),
                 txn.producer_epoch,
                 &txn.topics,
                 &denied,
@@ -192,7 +192,7 @@ async fn handle_v3(
         process_one_txn(
             coord,
             req.v3_and_below_transactional_id.as_str(),
-            req.v3_and_below_producer_id,
+            crabka_log::ProducerId(req.v3_and_below_producer_id),
             req.v3_and_below_producer_epoch,
             &req.v3_and_below_topics,
             &denied,
@@ -252,7 +252,7 @@ fn denied_topics(
 async fn process_one_txn(
     coord: &crate::txn::coordinator::TxnCoordinator,
     tid: &str,
-    producer_id: i64,
+    producer_id: crabka_log::ProducerId,
     producer_epoch: i16,
     topics: &[AddPartitionsToTxnTopic],
     denied: &std::collections::HashSet<String>,
@@ -479,7 +479,7 @@ mod tests {
 
     #[test]
     fn verify_only_codes_present_vs_absent() {
-        let mut e = TxnEntry::new_empty("t".into(), 1, 0, 30_000, 0);
+        let mut e = TxnEntry::new_empty("t".into(), crabka_log::ProducerId(1), 0, 30_000, 0);
         let present = TopicPartition {
             topic: "a".into(),
             partition: PartitionIndex(0),
@@ -522,7 +522,7 @@ mod tests {
 
     #[test]
     fn verify_partitions_preserves_topic_and_partition_rows() {
-        let mut e = TxnEntry::new_empty("t".into(), 1, 0, 30_000, 0);
+        let mut e = TxnEntry::new_empty("t".into(), crabka_log::ProducerId(1), 0, 30_000, 0);
         e.partitions.insert(TopicPartition {
             topic: "alpha".into(),
             partition: PartitionIndex(1),

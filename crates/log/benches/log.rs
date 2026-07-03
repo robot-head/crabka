@@ -17,7 +17,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use crabka_ids::Offset;
+use crabka_ids::{Offset, ProducerId};
 use crabka_log::{Log, LogConfig, VerbatimBatch};
 use crabka_protocol::records::{Record, RecordBatch};
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
@@ -51,7 +51,7 @@ fn make_verbatim_from_batch(batch: &RecordBatch) -> VerbatimBatch {
         last_offset_delta: batch.last_offset_delta,
         max_timestamp: batch.max_timestamp,
         leader_epoch: batch.partition_leader_epoch,
-        producer_id: batch.producer_id,
+        producer_id: ProducerId(batch.producer_id),
         is_transactional: batch.attributes.is_transactional(),
     }
 }

@@ -38,7 +38,7 @@
 
 use std::time::Duration;
 
-use crabka_log::Offset;
+use crabka_log::{Offset, ProducerId};
 use stateright::{Checker, Model, Property};
 
 use super::{
@@ -103,7 +103,14 @@ fn tstate(id: i8) -> TxnState {
 /// Rebuild a real `TxnEntry` for producer `p` so the real decision cores behave
 /// exactly as in a live run (partitions/timestamps don't affect the decision).
 fn rebuild(p: usize, pr: Prod) -> TxnEntry {
-    let mut e = TxnEntry::new_empty("tid".to_string(), PID0 + p as i64, pr.epoch, 60_000, 1);
+    // Per-producer pid = PID0 + index; wrap into `ProducerId` at the seam.
+    let mut e = TxnEntry::new_empty(
+        "tid".to_string(),
+        ProducerId(PID0 + p as i64),
+        pr.epoch,
+        60_000,
+        1,
+    );
     e.state = tstate(pr.state);
     e
 }
@@ -261,7 +268,7 @@ impl Model for EosModel {
                 let ids = ProducerIdManager::new();
                 match decide_end_txn_completion(
                     &entry,
-                    PID0 + i64::from(p),
+                    ProducerId(PID0 + i64::from(p)),
                     pr.epoch,
                     prepare,
                     complete,

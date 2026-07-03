@@ -30,6 +30,7 @@ use std::collections::{BTreeMap, HashSet};
 
 use bytes::{Bytes, BytesMut};
 use crabka_ids::PartitionIndex;
+use crabka_log::ProducerId;
 use crabka_protocol::{
     ProtocolError,
     primitives::{
@@ -84,7 +85,7 @@ pub(crate) fn encode_value(entry: &TxnEntry, flexible: bool) -> Vec<u8> {
     let mut buf = BytesMut::new();
 
     put_i16(&mut buf, version);
-    put_i64(&mut buf, entry.producer_id);
+    put_i64(&mut buf, entry.producer_id.get());
     put_i16(&mut buf, entry.producer_epoch);
     put_i32(&mut buf, entry.txn_timeout_ms);
     put_i8(&mut buf, entry.state.to_kafka_status());
@@ -121,11 +122,17 @@ pub(crate) fn encode_value(entry: &TxnEntry, flexible: bool) -> Vec<u8> {
     // (TxnEntry has no such field) and so is always omitted.
     if flexible {
         let mut tagged = WriteTaggedFields::new();
-        if entry.prev_producer_id != PRODUCER_ID_NONE {
-            tagged.add(TAG_PREV_PRODUCER_ID, i64_to_bytes(entry.prev_producer_id));
+        if entry.prev_producer_id.get() != PRODUCER_ID_NONE {
+            tagged.add(
+                TAG_PREV_PRODUCER_ID,
+                i64_to_bytes(entry.prev_producer_id.get()),
+            );
         }
-        if entry.next_producer_id != PRODUCER_ID_NONE {
-            tagged.add(TAG_NEXT_PRODUCER_ID, i64_to_bytes(entry.next_producer_id));
+        if entry.next_producer_id.get() != PRODUCER_ID_NONE {
+            tagged.add(
+                TAG_NEXT_PRODUCER_ID,
+                i64_to_bytes(entry.next_producer_id.get()),
+            );
         }
         tagged.write(&mut buf, &UnknownTaggedFields::default());
     }
@@ -220,13 +227,14 @@ pub(crate) fn decode_value(
 
     Ok(TxnEntry {
         transactional_id,
-        producer_id,
+        // Wrap the decoded raw `i64`s into `ProducerId` at the codec boundary.
+        producer_id: ProducerId(producer_id),
         producer_epoch,
         state,
         txn_timeout_ms,
         partitions,
-        prev_producer_id,
-        next_producer_id,
+        prev_producer_id: ProducerId(prev_producer_id),
+        next_producer_id: ProducerId(next_producer_id),
         last_update_ms,
         start_ms,
     })
@@ -292,13 +300,13 @@ mod tests {
         });
         TxnEntry {
             transactional_id: "my-txn-id".into(),
-            producer_id: 0,
+            producer_id: ProducerId(0),
             producer_epoch: 0,
             state: TxnState::Ongoing,
             txn_timeout_ms: 60_000,
             partitions,
-            prev_producer_id: -1,
-            next_producer_id: -1,
+            prev_producer_id: ProducerId(-1),
+            next_producer_id: ProducerId(-1),
             last_update_ms: SAMPLE_TS,
             start_ms: SAMPLE_TS,
         }
@@ -307,12 +315,12 @@ mod tests {
     #[test]
     fn sample_bytes_decode() {
         let entry = decode_value(SAMPLE, "my-txn-id".into()).unwrap();
-        check!(entry.producer_id == 0);
+        check!(entry.producer_id == ProducerId(0));
         check!(entry.producer_epoch == 0);
         check!(entry.txn_timeout_ms == 60_000);
         check!(entry.state == TxnState::Ongoing);
-        check!(entry.prev_producer_id == -1);
-        check!(entry.next_producer_id == -1);
+        check!(entry.prev_producer_id == ProducerId(-1));
+        check!(entry.next_producer_id == ProducerId(-1));
         check!(entry.last_update_ms == SAMPLE_TS);
         check!(entry.start_ms == SAMPLE_TS);
         let expected: HashSet<TopicPartition> = [TopicPartition {
@@ -352,13 +360,13 @@ mod tests {
         });
         let entry = TxnEntry {
             transactional_id: "tid".into(),
-            producer_id: 42,
+            producer_id: ProducerId(42),
             producer_epoch: 7,
             state: TxnState::PrepareCommit,
             txn_timeout_ms: 30_000,
             partitions,
-            prev_producer_id: 100,
-            next_producer_id: 200,
+            prev_producer_id: ProducerId(100),
+            next_producer_id: ProducerId(200),
             last_update_ms: 1_234_567,
             start_ms: 1_000_000,
         };
@@ -366,12 +374,12 @@ mod tests {
         let first = encode_value(&entry, true);
         let decoded = decode_value(&first, "tid".into()).unwrap();
 
-        check!(decoded.producer_id == 42);
+        check!(decoded.producer_id == ProducerId(42));
         check!(decoded.producer_epoch == 7);
         check!(decoded.state == TxnState::PrepareCommit);
         check!(decoded.txn_timeout_ms == 30_000);
-        check!(decoded.prev_producer_id == 100);
-        check!(decoded.next_producer_id == 200);
+        check!(decoded.prev_producer_id == ProducerId(100));
+        check!(decoded.next_producer_id == ProducerId(200));
         check!(decoded.last_update_ms == 1_234_567);
         check!(decoded.start_ms == 1_000_000);
         check!(decoded.partitions == entry.partitions);
@@ -390,15 +398,15 @@ mod tests {
         });
         let entry = TxnEntry {
             transactional_id: "tid".into(),
-            producer_id: 9,
+            producer_id: ProducerId(9),
             producer_epoch: 2,
             state: TxnState::Ongoing,
             txn_timeout_ms: 60_000,
             partitions,
             // Even with non-default ids, v0 has no tagged section, so they are
             // dropped on encode and come back as the -1 default.
-            prev_producer_id: 5,
-            next_producer_id: 6,
+            prev_producer_id: ProducerId(5),
+            next_producer_id: ProducerId(6),
             last_update_ms: 111,
             start_ms: 222,
         };
@@ -408,14 +416,14 @@ mod tests {
         assert!(encoded[0] == 0x00 && encoded[1] == 0x00);
 
         let decoded = decode_value(&encoded, "tid".into()).unwrap();
-        check!(decoded.producer_id == 9);
+        check!(decoded.producer_id == ProducerId(9));
         check!(decoded.state == TxnState::Ongoing);
         check!(decoded.partitions == entry.partitions);
         check!(decoded.last_update_ms == 111);
         check!(decoded.start_ms == 222);
         // v0 carries no tagged fields; bookkeeping ids default to -1.
-        check!(decoded.prev_producer_id == -1);
-        check!(decoded.next_producer_id == -1);
+        check!(decoded.prev_producer_id == ProducerId(-1));
+        check!(decoded.next_producer_id == ProducerId(-1));
     }
 
     #[test]
@@ -438,13 +446,13 @@ mod tests {
             }
             TxnEntry {
                 transactional_id: "tid".into(),
-                producer_id: 1,
+                producer_id: ProducerId(1),
                 producer_epoch: 0,
                 state: TxnState::Ongoing,
                 txn_timeout_ms: 60_000,
                 partitions,
-                prev_producer_id: -1,
-                next_producer_id: -1,
+                prev_producer_id: ProducerId(-1),
+                next_producer_id: ProducerId(-1),
                 last_update_ms: 1,
                 start_ms: 1,
             }
@@ -495,12 +503,12 @@ mod tests {
     fn empty_partitions_round_trips_as_null_both_versions() {
         // An entry with no partitions encodes the array as null and decodes
         // back to an empty set, for both v0 and v1.
-        let e = TxnEntry::new_empty("tid".into(), 5, 0, 30_000, 100);
+        let e = TxnEntry::new_empty("tid".into(), ProducerId(5), 0, 30_000, 100);
         for flexible in [false, true] {
             let bytes = encode_value(&e, flexible);
             let decoded = decode_value(&bytes, "tid".into()).expect("decode");
             assert!(decoded.partitions.is_empty());
-            assert!(decoded.producer_id == 5);
+            assert!(decoded.producer_id == ProducerId(5));
         }
     }
 }

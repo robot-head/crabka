@@ -61,7 +61,11 @@ pub(crate) fn handle(
 
         let mut entry = entry_mutex.lock().await;
 
-        if entry.producer_id != req.producer_id || entry.producer_epoch != req.producer_epoch {
+        // `req.producer_id` is the raw wire `i64`; wrap to compare with the
+        // coordinator's `ProducerId`.
+        if entry.producer_id != crabka_log::ProducerId(req.producer_id)
+            || entry.producer_epoch != req.producer_epoch
+        {
             return encode_err(version, codes::INVALID_PRODUCER_EPOCH);
         }
 

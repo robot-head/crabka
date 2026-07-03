@@ -8,7 +8,7 @@ use std::{
 };
 
 use bytes::{Bytes, BytesMut};
-use crabka_ids::Offset;
+use crabka_ids::{Offset, ProducerId};
 use crabka_protocol::records::{HEADER_LEN, RecordBatch};
 use tracing::instrument;
 
@@ -54,7 +54,7 @@ pub struct Log {
     /// In-flight transactions: `producer_id` → first offset of this
     /// producer's currently-open txn. Cleared when a commit/abort
     /// marker for that `producer_id` is applied.
-    pending: HashMap<i64, Offset>,
+    pending: HashMap<ProducerId, Offset>,
 
     /// Active segment's `TxnIndex`. Reopened on segment roll.
     active_txn_index: TxnIndex,
@@ -159,7 +159,7 @@ pub struct VerbatimBatch {
     /// Leader epoch to stamp into the batch (`partition_leader_epoch`).
     pub leader_epoch: i32,
     /// `producer_id` from the header (for LSO/transaction tracking).
-    pub producer_id: i64,
+    pub producer_id: ProducerId,
     /// `true` when the batch's attributes mark it transactional.
     pub is_transactional: bool,
 }
@@ -575,7 +575,7 @@ impl Log {
 
         // --- LSO tracking (no control batches on this path) ---
         let pid = batch.producer_id;
-        if batch.is_transactional && pid >= 0 {
+        if batch.is_transactional && pid.0 >= 0 {
             // Record the first offset of this txn on this partition; LSO
             // stays put until a commit/abort marker (which arrives via the
             // owned control-batch path).
@@ -670,7 +670,7 @@ impl Log {
         }
 
         // --- LSO tracking + .txnindex writes ---
-        let pid = batch.producer_id;
+        let pid = ProducerId(batch.producer_id);
         if batch.attributes.is_control_batch() {
             // Parse the inner control record: key = (version: i16, type: i16) BE.
             // type=0 → ABORT; type=1 → COMMIT.
@@ -695,7 +695,7 @@ impl Log {
             if self.pending.is_empty() {
                 self.lso = self.log_end_offset();
             }
-        } else if batch.attributes.is_transactional() && pid >= 0 {
+        } else if batch.attributes.is_transactional() && pid.0 >= 0 {
             // Record the first offset of this txn on this partition.
             self.pending.entry(pid).or_insert(Offset(batch.base_offset));
             // LSO stays where it is until commit/abort.
@@ -1430,7 +1430,7 @@ pub struct CompactionContext {
     pub now: std::time::SystemTime,
     /// `producer_id` → last batch `base_offset` for currently-active
     /// producers.
-    pub active_producers: std::collections::HashMap<i64, Offset>,
+    pub active_producers: std::collections::HashMap<ProducerId, Offset>,
 }
 
 /// Leader epochs whose coverage `[start_e, start_{e+1})` overlaps the
@@ -1661,7 +1661,7 @@ mod tests {
             last_offset_delta: producer.last_offset_delta,
             max_timestamp: producer.max_timestamp,
             leader_epoch,
-            producer_id: producer.producer_id,
+            producer_id: ProducerId(producer.producer_id),
             is_transactional: producer.attributes.is_transactional(),
         };
         (wire, vb)
@@ -2085,6 +2085,8 @@ mod tests {
 
         let idx = TxnIndex::open(dir.path().join("00000000000000000000.txnindex")).unwrap();
         let entries = idx.entries();
+        assert!(entries.len() == 1);
+        assert!(entries[0].producer_id == ProducerId(1000));
         // Txn batch was the first append: start_offset = 0.
         // last_offset = abort marker's base_offset + last_offset_delta = 3 + 0 = 3.
         // (The 3-record txn batch occupies offsets 0-2; the marker lands at offset 3.)
@@ -2093,7 +2095,7 @@ mod tests {
                 == [AbortedTxn {
                     start_offset: Offset(0),
                     last_offset: Offset(3),
-                    producer_id: 1000,
+                    producer_id: ProducerId(1000),
                 }]
         );
     }

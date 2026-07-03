@@ -7,6 +7,8 @@
 //! drive. See `decision_model.rs` and the design:
 //! `docs/superpowers/specs/2026-06-14-crabka-txn-coordinator-model-design.md`.
 
+use crabka_log::ProducerId;
+
 use super::{
     handlers::end_txn::{ReacquireDecision, next_producer_identity, validate_complete_reacquire},
     state::{TxnEntry, TxnState},
@@ -45,13 +47,13 @@ pub(crate) enum CompletionDecision {
     /// identity to the producer.
     Proceed {
         next_state: TxnState,
-        response_pid: i64,
+        response_pid: ProducerId,
         response_epoch: i16,
     },
     /// The entry already reached the intended Complete state (idempotent retry /
     /// lost race) — report success without re-finalising.
     AlreadyComplete {
-        response_pid: i64,
+        response_pid: ProducerId,
         response_epoch: i16,
     },
     /// The producer was fenced (epoch bumped) or the state advanced underneath
@@ -65,7 +67,7 @@ pub(crate) enum CompletionDecision {
 /// the producer epoch at `TV_2` so a zombie holding the old epoch is fenced.
 pub(crate) fn decide_end_txn_completion(
     entry: &TxnEntry,
-    expected_pid: i64,
+    expected_pid: ProducerId,
     expected_epoch: i16,
     prepare: TxnState,
     complete: TxnState,

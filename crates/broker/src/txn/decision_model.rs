@@ -23,6 +23,7 @@
 
 use std::time::Duration;
 
+use crabka_log::ProducerId;
 use stateright::{Checker, Model, Property};
 
 use super::{
@@ -37,7 +38,7 @@ use crate::producer_id_manager::ProducerIdManager;
 const MAX_STATES: usize = 200_000;
 const MAX_DEPTH: usize = 60;
 const CHECK_TIMEOUT: Duration = Duration::from_mins(2);
-const PID: i64 = 1000; // fixed; epoch is the fencing dimension
+const PID: ProducerId = ProducerId(1000); // fixed; epoch is the fencing dimension
 
 struct TxnModel {
     max_epoch: i16,

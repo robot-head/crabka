@@ -55,7 +55,9 @@ pub(crate) fn handle(
             } else {
                 MarkerType::Abort
             };
-            let pid = marker_entry.producer_id;
+            // Wrap the wire `i64` into `ProducerId` for the marker builder;
+            // unwrapped again below for the raw-`i64` response field.
+            let pid = crabka_log::ProducerId(marker_entry.producer_id);
             let epoch = marker_entry.producer_epoch;
 
             let mut topic_results: Vec<WritableTxnMarkerTopicResult> = Vec::new();
@@ -106,7 +108,7 @@ pub(crate) fn handle(
             }
 
             marker_results.push(WritableTxnMarkerResult {
-                producer_id: pid,
+                producer_id: pid.get(),
                 topics: topic_results,
                 ..Default::default()
             });

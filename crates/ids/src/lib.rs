@@ -144,3 +144,36 @@ impl NodeId {
         self.0
     }
 }
+
+/// A Kafka idempotent/transactional producer id (KIP-98 wire type: `int64`).
+///
+/// Identifies a producer session across the broker's producer-state and
+/// transaction paths and the log's aborted-transaction index. `-1`
+/// (`NO_PRODUCER_ID`) is a valid sentinel and round-trips as the inner `i64`.
+/// It is an identifier, not a quantity, so no arithmetic is provided.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Display,
+    From,
+    Into,
+    Serialize,
+    Deserialize,
+)]
+#[serde(transparent)]
+pub struct ProducerId(pub i64);
+
+impl ProducerId {
+    /// The inner `i64` — use at the wire/generated boundary.
+    #[must_use]
+    pub const fn get(self) -> i64 {
+        self.0
+    }
+}

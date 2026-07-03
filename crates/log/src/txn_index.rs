@@ -10,7 +10,7 @@
 
 use std::{fs::OpenOptions, io::Write, path::PathBuf};
 
-use crabka_ids::Offset;
+use crabka_ids::{Offset, ProducerId};
 use tracing::instrument;
 use zerocopy::{
     BigEndian, FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned, byteorder::I64,
@@ -24,7 +24,7 @@ const ENTRY_BYTES: usize = 24;
 pub struct AbortedTxn {
     pub start_offset: Offset,
     pub last_offset: Offset,
-    pub producer_id: i64,
+    pub producer_id: ProducerId,
 }
 
 /// On-disk byte layout of one `AbortedTxn` entry. Reinterpreted in place
@@ -74,7 +74,7 @@ impl TxnIndex {
                     entries.push(AbortedTxn {
                         start_offset: Offset(raw.start_offset.get()),
                         last_offset: Offset(raw.last_offset.get()),
-                        producer_id: raw.producer_id.get(),
+                        producer_id: ProducerId(raw.producer_id.get()),
                     });
                 }
             }
@@ -89,7 +89,7 @@ impl TxnIndex {
     #[instrument(
         level = "debug",
         skip(self),
-        fields(producer_id = entry.producer_id),
+        fields(producer_id = entry.producer_id.0),
         err,
     )]
     pub fn append(&mut self, entry: AbortedTxn) -> Result<(), LogError> {
@@ -101,7 +101,7 @@ impl TxnIndex {
         let raw = AbortedTxnRaw {
             start_offset: I64::new(entry.start_offset.0),
             last_offset: I64::new(entry.last_offset.0),
-            producer_id: I64::new(entry.producer_id),
+            producer_id: I64::new(entry.producer_id.0),
         };
         f.write_all(raw.as_bytes()).map_err(LogError::Io)?;
         f.sync_data().map_err(LogError::Io)?;
@@ -150,13 +150,13 @@ mod tests {
         idx.append(AbortedTxn {
             start_offset: Offset(5),
             last_offset: Offset(7),
-            producer_id: 1000,
+            producer_id: ProducerId(1000),
         })
         .unwrap();
         idx.append(AbortedTxn {
             start_offset: Offset(10),
             last_offset: Offset(12),
-            producer_id: 1000,
+            producer_id: ProducerId(1000),
         })
         .unwrap();
 
@@ -167,12 +167,12 @@ mod tests {
                     AbortedTxn {
                         start_offset: Offset(5),
                         last_offset: Offset(7),
-                        producer_id: 1000
+                        producer_id: ProducerId(1000)
                     },
                     AbortedTxn {
                         start_offset: Offset(10),
                         last_offset: Offset(12),
-                        producer_id: 1000
+                        producer_id: ProducerId(1000)
                     },
                 ]
         );
@@ -186,13 +186,13 @@ mod tests {
         idx.append(AbortedTxn {
             start_offset: Offset(0),
             last_offset: Offset(4),
-            producer_id: 1,
+            producer_id: ProducerId(1),
         })
         .unwrap();
         idx.append(AbortedTxn {
             start_offset: Offset(10),
             last_offset: Offset(14),
-            producer_id: 2,
+            producer_id: ProducerId(2),
         })
         .unwrap();
 

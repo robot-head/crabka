@@ -1204,13 +1204,14 @@ async fn do_read(
                         .into_iter();
                     if let Some(first) = it.next() {
                         let mut v = vec![AbortedTransaction {
-                            producer_id: first.producer_id,
+                            // Unwrap the log-layer `ProducerId` into the wire `i64` field.
+                            producer_id: first.producer_id.get(),
                             // Unwrap the log-layer `Offset` into the wire `i64` field.
                             first_offset: first.start_offset.0,
                             ..Default::default()
                         }];
                         v.extend(it.map(|e| AbortedTransaction {
-                            producer_id: e.producer_id,
+                            producer_id: e.producer_id.get(),
                             first_offset: e.start_offset.0,
                             ..Default::default()
                         }));

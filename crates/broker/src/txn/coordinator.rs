@@ -13,7 +13,7 @@ use std::{collections::HashSet, sync::Arc};
 use async_trait::async_trait;
 use bytes::Bytes;
 use crabka_ids::PartitionIndex;
-use crabka_log::Offset;
+use crabka_log::{Offset, ProducerId};
 use crabka_metadata::MetadataImage;
 use crabka_protocol::records::{Record, RecordBatch};
 use dashmap::DashMap;
@@ -106,7 +106,7 @@ fn apply_prepare_abort(entry: &mut TxnEntry, now_ms: i64) {
 /// `(producer_id, producer_epoch)` from the KIP-890 identity bump. Records the
 /// prior id as `prev_producer_id` only when a roll actually happened (a fresh
 /// pid was allocated). Pure so the transition is unit-killable.
-fn apply_complete_abort(entry: &mut TxnEntry, new_pid: i64, new_epoch: i16, now_ms: i64) {
+fn apply_complete_abort(entry: &mut TxnEntry, new_pid: ProducerId, new_epoch: i16, now_ms: i64) {
     if new_pid != entry.producer_id {
         entry.prev_producer_id = entry.producer_id;
     }
@@ -179,7 +179,7 @@ pub(crate) struct TxnCoordinator {
     leader_partitions: RwLock<HashSet<PartitionIndex>>,
     /// Reverse lookup: `producer_id` → `transactional_id`. Used by the
     /// Produce handler to verify transactional batches (KIP-1319 v2).
-    pid_to_tid: DashMap<i64, String>,
+    pid_to_tid: DashMap<ProducerId, String>,
     /// KIP-447 transactional consumer offsets buffered per `producer_id`,
     /// pending the transaction's COMMIT/ABORT marker. `TxnOffsetCommit`
     /// appends the offset records to `__consumer_offsets` (held under the LSO)
@@ -190,7 +190,7 @@ pub(crate) struct TxnCoordinator {
     /// is dropped without applying. Keyed by `producer_id` because that is the
     /// identity `EndTxn` finalizes on; the value groups offsets by the
     /// `group_id` each `TxnOffsetCommit` named.
-    pending_txn_offsets: DashMap<i64, PendingTxnOffsets>,
+    pending_txn_offsets: DashMap<ProducerId, PendingTxnOffsets>,
 }
 
 impl TxnCoordinator {
@@ -219,7 +219,7 @@ impl TxnCoordinator {
     /// same as a non-transactional re-commit).
     pub(crate) fn buffer_txn_offsets(
         &self,
-        producer_id: i64,
+        producer_id: ProducerId,
         group_id: &str,
         entries: Vec<(OffsetKey, OffsetEntry)>,
     ) {
@@ -239,7 +239,7 @@ impl TxnCoordinator {
     /// are materialized into each group's `committed_offsets`; on ABORT this is
     /// still called so the buffer is dropped, and the result discarded. Returns
     /// an empty map if the producer buffered no transactional offsets.
-    pub(crate) fn take_txn_offsets(&self, producer_id: i64) -> PendingTxnOffsets {
+    pub(crate) fn take_txn_offsets(&self, producer_id: ProducerId) -> PendingTxnOffsets {
         self.pending_txn_offsets
             .remove(&producer_id)
             .map(|(_, v)| v)
@@ -281,7 +281,7 @@ impl TxnCoordinator {
 
     /// Reverse lookup: given a `producer_id`, return the `transactional_id`
     /// it was registered under, or `None` if the pid is unknown.
-    pub(crate) fn tid_for_pid(&self, pid: i64) -> Option<String> {
+    pub(crate) fn tid_for_pid(&self, pid: ProducerId) -> Option<String> {
         self.pid_to_tid.get(&pid).map(|e| e.value().clone())
     }
 
@@ -293,8 +293,8 @@ impl TxnCoordinator {
     /// once the old id is gone, and skipped for entries that never rolled
     /// (`prev == -1`). pids are globally unique, so the prior id only ever
     /// mapped to this tid — removing it can't affect another transaction.
-    fn evict_rolled_pid(pid_to_tid: &DashMap<i64, String>, entry: &TxnEntry) {
-        if entry.prev_producer_id >= 0 && entry.prev_producer_id != entry.producer_id {
+    fn evict_rolled_pid(pid_to_tid: &DashMap<ProducerId, String>, entry: &TxnEntry) {
+        if entry.prev_producer_id.get() >= 0 && entry.prev_producer_id != entry.producer_id {
             pid_to_tid.remove(&entry.prev_producer_id);
         }
     }
@@ -334,7 +334,7 @@ impl TxnCoordinator {
         name = "txn_coordinator_put",
         level = "debug",
         skip_all,
-        fields(tid = %entry.transactional_id, producer_id = entry.producer_id),
+        fields(tid = %entry.transactional_id, producer_id = entry.producer_id.0),
         err,
     )]
     pub(crate) async fn put(
@@ -607,49 +607,49 @@ mod tests {
     use super::*;
 
     fn entry(pid: i64, prev: i64) -> TxnEntry {
-        let mut e = TxnEntry::new_empty("tid-a".into(), pid, 0, 60_000, 0);
-        e.prev_producer_id = prev;
+        let mut e = TxnEntry::new_empty("tid-a".into(), ProducerId(pid), 0, 60_000, 0);
+        e.prev_producer_id = ProducerId(prev);
         e
     }
 
     #[test]
     fn evict_rolled_pid_drops_only_the_prior_id_on_a_roll() {
-        let map: DashMap<i64, String> = DashMap::new();
-        map.insert(1000, "tid-a".into()); // the pre-roll mapping
+        let map: DashMap<ProducerId, String> = DashMap::new();
+        map.insert(ProducerId(1000), "tid-a".into()); // the pre-roll mapping
 
         // A roll: new pid 2000, prev = 1000. The stale 1000 mapping is evicted;
         // put then inserts 2000 (mirrored here).
         TxnCoordinator::evict_rolled_pid(&map, &entry(2000, 1000));
-        map.insert(2000, "tid-a".into());
+        map.insert(ProducerId(2000), "tid-a".into());
 
         assert!(
-            map.get(&1000).is_none(),
+            map.get(&ProducerId(1000)).is_none(),
             "stale pre-roll pid must be evicted"
         );
-        assert!(map.get(&2000).map(|e| e.value().clone()) == Some("tid-a".into()));
+        assert!(map.get(&ProducerId(2000)).map(|e| e.value().clone()) == Some("tid-a".into()));
     }
 
     #[test]
     fn evict_rolled_pid_is_noop_without_a_roll() {
-        let map: DashMap<i64, String> = DashMap::new();
-        map.insert(1000, "tid-a".into());
+        let map: DashMap<ProducerId, String> = DashMap::new();
+        map.insert(ProducerId(1000), "tid-a".into());
         // Never rolled: prev == -1 → nothing evicted.
         TxnCoordinator::evict_rolled_pid(&map, &entry(1000, -1));
-        assert!(map.get(&1000).is_some());
+        assert!(map.get(&ProducerId(1000)).is_some());
         // prev == current (defensive): nothing evicted.
         TxnCoordinator::evict_rolled_pid(&map, &entry(1000, 1000));
-        assert!(map.get(&1000).is_some());
+        assert!(map.get(&ProducerId(1000)).is_some());
     }
 
     #[test]
     fn evict_rolled_pid_is_idempotent_after_the_id_is_gone() {
-        let map: DashMap<i64, String> = DashMap::new();
-        map.insert(2000, "tid-a".into());
+        let map: DashMap<ProducerId, String> = DashMap::new();
+        map.insert(ProducerId(2000), "tid-a".into());
         // prev=1000 already absent → repeated evictions are harmless no-ops.
         TxnCoordinator::evict_rolled_pid(&map, &entry(2000, 1000));
         TxnCoordinator::evict_rolled_pid(&map, &entry(2000, 1000));
-        assert!(map.get(&1000).is_none());
-        assert!(map.get(&2000).is_some());
+        assert!(map.get(&ProducerId(1000)).is_none());
+        assert!(map.get(&ProducerId(2000)).is_some());
     }
 
     // ── Pure transition / guard helpers ───────────────────────────────────
@@ -671,21 +671,24 @@ mod tests {
         let mut e = entry(1000, -1);
         e.state = TxnState::PrepareAbort;
         e.producer_epoch = 4;
-        apply_complete_abort(&mut e, 1000, 5, 42);
+        apply_complete_abort(&mut e, ProducerId(1000), 5, 42);
         check!(e.state == TxnState::CompleteAbort);
-        check!(e.producer_id == 1000);
+        check!(e.producer_id == ProducerId(1000));
         check!(e.producer_epoch == 5);
-        check!(e.prev_producer_id == -1, "no roll must not set prev");
+        check!(
+            e.prev_producer_id == ProducerId(-1),
+            "no roll must not set prev"
+        );
         check!(e.last_update_ms == 42);
 
         // Roll: fresh pid at epoch 0 → prior pid recorded as prev.
         let mut rolled = entry(1000, -1);
         rolled.state = TxnState::PrepareAbort;
-        apply_complete_abort(&mut rolled, 2000, 0, 43);
-        check!(rolled.producer_id == 2000);
+        apply_complete_abort(&mut rolled, ProducerId(2000), 0, 43);
+        check!(rolled.producer_id == ProducerId(2000));
         check!(rolled.producer_epoch == 0);
         check!(
-            rolled.prev_producer_id == 1000,
+            rolled.prev_producer_id == ProducerId(1000),
             "roll must record prior pid"
         );
     }
@@ -702,7 +705,7 @@ mod tests {
 
         // pid changed → reject.
         current = prepared.clone();
-        current.producer_id = 9999;
+        current.producer_id = ProducerId(9999);
         assert!(!complete_abort_guard_ok(&current, &prepared));
 
         // epoch changed → reject.
@@ -719,7 +722,7 @@ mod tests {
     // ── Orchestration loop, driven against a mock backend ─────────────────
 
     fn prepared_entry(tid: &str, pid: i64, epoch: i16) -> TxnEntry {
-        let mut e = TxnEntry::new_empty(tid.to_owned(), pid, epoch, 60_000, 0);
+        let mut e = TxnEntry::new_empty(tid.to_owned(), ProducerId(pid), epoch, 60_000, 0);
         e.state = TxnState::PrepareAbort;
         e
     }

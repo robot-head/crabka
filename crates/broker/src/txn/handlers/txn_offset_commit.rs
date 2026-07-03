@@ -194,9 +194,11 @@ pub(crate) async fn handle(
     //     ABORT. The records are already in `__consumer_offsets` (held under the
     //     LSO) from the append above; this buffer is the in-memory bridge to the
     //     group coordinator that the commit marker has no other way to drive.
-    broker
-        .txn_coordinator
-        .buffer_txn_offsets(req.producer_id, &req.group_id, buffered);
+    broker.txn_coordinator.buffer_txn_offsets(
+        crabka_log::ProducerId(req.producer_id),
+        &req.group_id,
+        buffered,
+    );
 
     // 4. Success — per-(topic, partition) error_code = NONE for allowed,
     //    TOPIC_AUTHORIZATION_FAILED for denied.

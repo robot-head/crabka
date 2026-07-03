@@ -21,7 +21,7 @@ use std::{
 };
 
 use bytes::{Bytes, BytesMut};
-use crabka_ids::Offset;
+use crabka_ids::{Offset, ProducerId};
 use crabka_protocol::records::RecordBatch;
 use tracing::instrument;
 
@@ -52,7 +52,7 @@ pub(crate) struct RecordMeta {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct BatchMeta {
     pub is_control: bool,
-    pub producer_id: i64,
+    pub producer_id: ProducerId,
     /// The batch's existing delete horizon (`base_timestamp` when bit 6 is
     /// set), `None` if the batch has never been stamped.
     pub existing_horizon: Option<i64>,
@@ -121,7 +121,10 @@ pub(crate) fn rewrite_batch_horizon(
 /// (which folds this in); this standalone form exists for `core_tests` and
 /// the upcoming stateright/proptest model.
 #[allow(dead_code)]
-pub(crate) fn txn_data_fully_gone(producer_id: i64, survivors: &HashSet<i64>) -> bool {
+pub(crate) fn txn_data_fully_gone(
+    producer_id: ProducerId,
+    survivors: &HashSet<ProducerId>,
+) -> bool {
     !survivors.contains(&producer_id)
 }
 
@@ -181,7 +184,7 @@ mod core_tests {
     fn batch(is_control: bool, producer_id: i64, existing_horizon: Option<i64>) -> BatchMeta {
         BatchMeta {
             is_control,
-            producer_id,
+            producer_id: ProducerId(producer_id),
             existing_horizon,
         }
     }
@@ -303,9 +306,9 @@ mod core_tests {
     #[test]
     fn txn_data_fully_gone_checks_survivor_set() {
         let mut survivors = HashSet::new();
-        survivors.insert(1000i64);
-        assert!(txn_data_fully_gone(2000, &survivors) == true);
-        assert!(txn_data_fully_gone(1000, &survivors) == false);
+        survivors.insert(ProducerId(1000));
+        assert!(txn_data_fully_gone(ProducerId(2000), &survivors) == true);
+        assert!(txn_data_fully_gone(ProducerId(1000), &survivors) == false);
     }
 }
 
@@ -379,7 +382,7 @@ pub fn build_offset_map(segments: &[&Segment]) -> Result<HashMap<Bytes, Offset>,
 /// whose data still partially survives.
 pub struct CleanedTransactionMetadata {
     /// Producers (`producer_id`) with at least one surviving data record.
-    survivors: HashSet<i64>,
+    survivors: HashSet<ProducerId>,
     /// Aborted-txn entries gathered from the consumed segments' `.txnindex`
     /// files, in input order.
     aborted: Vec<AbortedTxn>,
@@ -400,7 +403,7 @@ impl CleanedTransactionMetadata {
         segments: &[&Segment],
         offset_map: &HashMap<Bytes, Offset>,
     ) -> Result<Self, LogError> {
-        let mut survivors: HashSet<i64> = HashSet::new();
+        let mut survivors: HashSet<ProducerId> = HashSet::new();
         let mut aborted: Vec<AbortedTxn> = Vec::new();
         for seg in segments {
             // Seed aborted-txn entries from this segment's transaction index.
@@ -425,7 +428,7 @@ impl CleanedTransactionMetadata {
                     };
                     let absolute = Offset(batch.base_offset + i64::from(record.offset_delta));
                     if offset_map.get(key_bytes.as_ref()).copied() == Some(absolute) {
-                        survivors.insert(batch.producer_id);
+                        survivors.insert(ProducerId(batch.producer_id));
                         break;
                     }
                 }
@@ -437,8 +440,8 @@ impl CleanedTransactionMetadata {
 
     /// The transactional-data state for a given producer.
     #[must_use]
-    pub fn txn_state(&self, producer_id: i64) -> TxnDataState {
-        if producer_id < 0 {
+    pub fn txn_state(&self, producer_id: ProducerId) -> TxnDataState {
+        if producer_id.0 < 0 {
             return TxnDataState::NotTransactional;
         }
         if self.survivors.contains(&producer_id) {
@@ -684,7 +687,7 @@ pub fn rewrite_segments(
     txn_meta: &CleanedTransactionMetadata,
     now_ms: i64,
     delete_retention_ms: i64,
-    active_producers: &HashMap<i64, Offset>,
+    active_producers: &HashMap<ProducerId, Offset>,
     _index_interval_bytes: u32,
 ) -> Result<RewriteOutput, LogError> {
     let first = segments
@@ -726,10 +729,11 @@ pub fn rewrite_segments(
     }
     let last_batch_index = all_batches.len().saturating_sub(1);
     // The index of each active producer's last batch in `all_batches`.
-    let mut producer_last_batch: HashMap<i64, usize> = HashMap::new();
+    let mut producer_last_batch: HashMap<ProducerId, usize> = HashMap::new();
     for (i, batch) in all_batches.iter().enumerate() {
-        if active_producers.contains_key(&batch.producer_id) {
-            producer_last_batch.insert(batch.producer_id, i);
+        let pid = ProducerId(batch.producer_id);
+        if active_producers.contains_key(&pid) {
+            producer_last_batch.insert(pid, i);
         }
     }
 
@@ -737,10 +741,11 @@ pub fn rewrite_segments(
 
     for (batch_idx, batch) in all_batches.iter().enumerate() {
         let is_control = batch.attributes.is_control_batch();
-        let txn = txn_meta.txn_state(batch.producer_id);
+        let producer_id = ProducerId(batch.producer_id);
+        let txn = txn_meta.txn_state(producer_id);
         let batch_meta = BatchMeta {
             is_control,
-            producer_id: batch.producer_id,
+            producer_id,
             existing_horizon: batch.delete_horizon_ms(),
         };
 
@@ -782,7 +787,7 @@ pub fn rewrite_segments(
             // of the consolidated output, so producer sequence/epoch and the
             // log-end offset survive.
             let is_producer_last =
-                producer_last_batch.get(&batch.producer_id).copied() == Some(batch_idx);
+                producer_last_batch.get(&producer_id).copied() == Some(batch_idx);
             let is_output_last = batch_idx == last_batch_index;
             if !(is_producer_last || is_output_last) {
                 continue;
@@ -905,7 +910,7 @@ mod rewrite_tests {
     fn rewrite_simple(dir: &Path, segs: &[&Segment]) -> RewriteOutput {
         let map = build_offset_map(segs).unwrap();
         let txn = CleanedTransactionMetadata::build(segs, &map).unwrap();
-        let active: HashMap<i64, Offset> = HashMap::new();
+        let active: HashMap<ProducerId, Offset> = HashMap::new();
         rewrite_segments(
             dir,
             segs,
@@ -1173,7 +1178,7 @@ mod rewrite_tests {
         let map = build_offset_map(&segs).unwrap();
         let txn = CleanedTransactionMetadata::build(&segs, &map).unwrap();
         let mut active = HashMap::new();
-        active.insert(1000i64, Offset(0)); // pid 1000 active, last batch base 0
+        active.insert(ProducerId(1000), Offset(0)); // pid 1000 active, last batch base 0
         let out =
             rewrite_segments(dir.path(), &segs, &map, &txn, 0, RET_MS, &active, 4096).unwrap();
         let bytes = fs::read(&out.log_swap).unwrap();
@@ -1432,7 +1437,7 @@ mod retention_fuzz {
                     },
                     BatchMeta {
                         is_control: false,
-                        producer_id: -1,
+                        producer_id: ProducerId(-1),
                         existing_horizon: e.horizon,
                     },
                     e.key.is_some_and(|k| map.get(&k).copied() == Some(idx)),
@@ -1445,7 +1450,7 @@ mod retention_fuzz {
                     },
                     BatchMeta {
                         is_control: true,
-                        producer_id: i64::from(*producer_id),
+                        producer_id: ProducerId(i64::from(*producer_id)),
                         existing_horizon: e.horizon,
                     },
                     false,

@@ -409,9 +409,10 @@ pub async fn run(
                 let active_producers = producer_state
                     .active_snapshot(&topic, partition, now_ms, PRODUCER_ID_EXPIRATION_MS)
                     .await
-                    // Wrap the broker-side `i64` last-offsets into log-layer `Offset`s at the seam.
+                    // Wrap the broker-side `i64` pids/last-offsets into the log
+                    // layer's `ProducerId`/`Offset` at the compaction seam.
                     .into_iter()
-                    .map(|(pid, off)| (pid, Offset(off)))
+                    .map(|(pid, off)| (crabka_log::ProducerId(pid), Offset(off)))
                     .collect();
                 let ctx = crabka_log::CompactionContext {
                     now,
@@ -798,7 +799,7 @@ mod tests {
                 last_offset_delta: 0,
                 max_timestamp: 1_234,
                 leader_epoch: 5,
-                producer_id: -1,
+                producer_id: crabka_log::ProducerId(-1),
                 is_transactional: false,
             }),
             ack,

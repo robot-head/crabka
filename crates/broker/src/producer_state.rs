@@ -5,15 +5,11 @@
 use std::{collections::HashMap, sync::Arc};
 
 use crabka_ids::PartitionIndex;
+use crabka_log::ProducerId;
 use dashmap::DashMap;
 use tokio::sync::Mutex;
 
 use crate::partition::LogOffset;
-
-/// Kafka producer id (PID) assigned by `InitProducerId`. Alias only —
-/// distinguishes the id from the offset/timestamp `i64`s that travel
-/// alongside it in produce-path signatures.
-pub type ProducerId = i64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProducerEntry {
@@ -119,7 +115,7 @@ impl ProducerState {
         &self,
         topic: &str,
         partition: PartitionIndex,
-        producer_id: ProducerId,
+        producer_id: i64,
         producer_epoch: i16,
         base_sequence: i32,
         last_offset_delta: i32,
@@ -127,7 +123,11 @@ impl ProducerState {
         let handle = self.handle(topic, partition);
         let s = handle.lock().await;
         let _ = last_offset_delta; // used only by the caller to compute last_sequence on commit
-        check_pure(s.entries.get(&producer_id), producer_epoch, base_sequence)
+        check_pure(
+            s.entries.get(&ProducerId(producer_id)),
+            producer_epoch,
+            base_sequence,
+        )
     }
 
     /// Commit a successful append into the tracker.
@@ -136,7 +136,7 @@ impl ProducerState {
         &self,
         topic: &str,
         partition: PartitionIndex,
-        producer_id: ProducerId,
+        producer_id: i64,
         producer_epoch: i16,
         base_sequence: i32,
         last_offset_delta: i32,
@@ -148,7 +148,7 @@ impl ProducerState {
         let last_sequence = base_sequence + last_offset_delta;
         let last_offset = base_offset + i64::from(last_offset_delta);
         s.entries.insert(
-            producer_id,
+            ProducerId(producer_id),
             ProducerEntry {
                 epoch: producer_epoch,
                 last_sequence,
@@ -221,7 +221,7 @@ impl ProducerState {
         &self,
         topic: &str,
         partition: PartitionIndex,
-    ) -> Vec<(ProducerId, ProducerEntry)> {
+    ) -> Vec<(i64, ProducerEntry)> {
         // Cheaper to bypass `handle` (which inserts on miss): a snapshot
         // for an unknown partition should report "no producers", not
         // wire up an empty entry. The borrowed `&str` / `i32` lookups
@@ -237,7 +237,14 @@ impl ProducerState {
         let handle = part_ref.value().clone();
         drop(part_ref);
         let state = handle.lock().await;
-        state.entries.iter().map(|(pid, e)| (*pid, *e)).collect()
+        // Keep the public return `i64`: unwrap the map's `ProducerId` key at the
+        // snapshot boundary (the `DescribeProducers` handler writes it straight
+        // into the raw-`i64` wire field).
+        state
+            .entries
+            .iter()
+            .map(|(pid, e)| (pid.get(), *e))
+            .collect()
     }
 
     /// Snapshot of currently-active producers on `(topic, partition)`:
@@ -262,7 +269,7 @@ impl ProducerState {
         partition: PartitionIndex,
         now_ms: i64,
         expiration_ms: i64,
-    ) -> HashMap<ProducerId, LogOffset> {
+    ) -> HashMap<i64, LogOffset> {
         // Mirror `snapshot`: avoid inserting an empty entry for an unknown
         // partition (the borrowed lookups allocate nothing on a miss).
         let Some(topic_ref) = self.by_topic.get(topic) else {
@@ -276,11 +283,13 @@ impl ProducerState {
         let handle = part_ref.value().clone();
         drop(part_ref);
         let state = handle.lock().await;
+        // Public return stays `HashMap<i64, i64>`; unwrap the `ProducerId` key at
+        // the boundary (the caller re-wraps into the log seam's `ProducerId`).
         state
             .entries
             .iter()
             .filter(|(_pid, e)| now_ms.saturating_sub(e.last_activity_ms) <= expiration_ms)
-            .map(|(pid, e)| (*pid, e.base_offset))
+            .map(|(pid, e)| (pid.get(), e.base_offset))
             .collect()
     }
 
@@ -576,8 +585,8 @@ mod tests {
         {
             let h = s.handle("t", PartitionIndex(0));
             let mut st = h.lock().await;
-            st.entries.get_mut(&1).unwrap().last_activity_ms = 1_000; // old
-            st.entries.get_mut(&2).unwrap().last_activity_ms = 9_000; // recent
+            st.entries.get_mut(&ProducerId(1)).unwrap().last_activity_ms = 1_000; // old
+            st.entries.get_mut(&ProducerId(2)).unwrap().last_activity_ms = 9_000; // recent
         }
         // now = 10_000, ttl = 5_000 → pid 1 (age 9_000) expires, pid 2
         // (age 1_000) survives.
@@ -594,7 +603,12 @@ mod tests {
         s.commit("t", PartitionIndex(0), 1, 0, 0, 0, 0, 0).await;
         {
             let h = s.handle("t", PartitionIndex(0));
-            h.lock().await.entries.get_mut(&1).unwrap().last_activity_ms = 5_000;
+            h.lock()
+                .await
+                .entries
+                .get_mut(&ProducerId(1))
+                .unwrap()
+                .last_activity_ms = 5_000;
         }
 
         let evicted = s.expire_older_than(10_000, 5_000).await;
@@ -631,8 +645,8 @@ mod tests {
         {
             let h = s.handle("t", PartitionIndex(0));
             let mut st = h.lock().await;
-            st.entries.get_mut(&1).unwrap().last_activity_ms = 1_000; // old
-            st.entries.get_mut(&2).unwrap().last_activity_ms = 9_500; // recent
+            st.entries.get_mut(&ProducerId(1)).unwrap().last_activity_ms = 1_000; // old
+            st.entries.get_mut(&ProducerId(2)).unwrap().last_activity_ms = 9_500; // recent
         }
         // now = 10_000, expiration = 5_000 → pid 1 (age 9_000 > 5_000)
         // excluded; pid 2 (age 500 <= 5_000) included with its base_offset.
@@ -656,7 +670,12 @@ mod tests {
         s.commit("t", PartitionIndex(0), 1, 0, 0, 0, 0, 0).await;
         {
             let h = s.handle("t", PartitionIndex(0));
-            h.lock().await.entries.get_mut(&1).unwrap().last_activity_ms = 0;
+            h.lock()
+                .await
+                .entries
+                .get_mut(&ProducerId(1))
+                .unwrap()
+                .last_activity_ms = 0;
         }
         let evicted = s.expire_older_than(1_000_000, 1).await;
         // The empty partition and topic maps are pruned (the empty topic slot

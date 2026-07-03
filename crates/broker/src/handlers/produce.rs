@@ -539,7 +539,8 @@ async fn process_partition(
         let pid_txn = prepared.producer_id;
         let epoch_txn = prepared.producer_epoch;
         if is_transactional && pid_txn >= 0 {
-            let Some(tid) = txn_coordinator.tid_for_pid(pid_txn) else {
+            // Wrap the decode-side `i64` into `ProducerId` for the coordinator lookup.
+            let Some(tid) = txn_coordinator.tid_for_pid(crabka_log::ProducerId(pid_txn)) else {
                 // Unknown producer_id — reject.
                 out.error_code = codes::INVALID_PRODUCER_ID_MAPPING;
                 return Ok(out);
@@ -1236,7 +1237,8 @@ fn build_produce_data(prepared: PreparedBatch, leader_epoch: i32) -> ProduceData
             last_offset_delta: prepared.last_offset_delta,
             max_timestamp: prepared.max_timestamp,
             leader_epoch,
-            producer_id: prepared.producer_id,
+            // Wrap the produce path's decode-side `i64` into the log seam's `ProducerId`.
+            producer_id: crabka_log::ProducerId(prepared.producer_id),
             is_transactional,
             bytes,
         }),
@@ -1828,7 +1830,7 @@ mod tests {
             match data {
                 ProduceData::Verbatim(v) => {
                     assert!(v.is_transactional);
-                    assert!(v.producer_id == 100);
+                    assert!(v.producer_id == crabka_log::ProducerId(100));
                 }
                 ProduceData::Owned(_) => panic!("transactional data batch should pass through"),
             }
