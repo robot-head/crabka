@@ -6,9 +6,9 @@
 //! the same `RecordBatch` so the broker's dedup catches them.
 //!
 //! Also supports transactional (exactly-once) production —
-//! `init_transactions`, `begin_transaction`, `commit_transaction`,
-//! `abort_transaction`, and `send_offsets_to_transaction` for the
-//! consume-process-produce (KIP-447) pattern.
+//! `init_transactions`, `begin_transaction` (which returns a [`Transaction`]
+//! guard whose `commit`/`abort` finishes it), and `send_offsets_to_transaction`
+//! for the consume-process-produce (KIP-447) pattern.
 //!
 //! ## Quick start
 //!
@@ -71,3 +71,4 @@ pub use crabka_client_consumer::ConsumerGroupMetadata;
 pub use error::ProducerError;
 pub use producer::{Acks, Producer};
 pub use record::{Header, ProducerRecord, RecordMetadata};
+pub use transactional::{OwnedTransaction, Transaction};

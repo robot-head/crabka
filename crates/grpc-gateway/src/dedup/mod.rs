@@ -24,7 +24,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use tokio::sync::Mutex;
 
-use crabka_client_producer::{Acks, Producer, ProducerRecord};
+use crabka_client_producer::{Acks, Producer, ProducerRecord, RecordMetadata};
 
 use crate::error::GatewayError;
 use crate::produce::to_producer_record;
@@ -126,18 +126,16 @@ impl DedupEngine {
             });
         }
 
-        // Run the transactional write. On ANY error, best-effort abort the
-        // in-flight transaction and drop the producer so the next call
-        // re-initializes from `Ready`; otherwise a single transient error
-        // would strand this partition's producer mid-transaction and brick
-        // every key that hashes to it until the process restarts.
+        // Run the transactional write. On ANY error, `txn_write` has already
+        // best-effort aborted any transaction it opened (only the guard it
+        // holds internally can do that — a flat `abort_transaction` call from
+        // out here can no longer reach it); just drop the producer so the
+        // next call re-initializes from `Ready`. Otherwise a single transient
+        // error would strand this partition's producer mid-transaction and
+        // brick every key that hashes to it until the process restarts.
         match self.txn_write(&mut slot, rec, value, key, p).await {
             Ok(outcome) => Ok(outcome),
             Err(e) => {
-                if let Some(producer) = slot.as_ref() {
-                    let _ = producer.abort_transaction().await;
-                    crate::metrics::metrics().record_txn("abort");
-                }
                 *slot = None;
                 Err(e)
             }
@@ -145,9 +143,11 @@ impl DedupEngine {
     }
 
     /// The fallible begin→record→claim→commit sequence for one keyed record.
-    /// Factored out so `dedup_produce` can abort the transaction and reset the
-    /// producer slot on any error. The caller must hold `slot`'s lock and have
-    /// confirmed the key is not already claimed.
+    /// Factored out so `dedup_produce` can reset the producer slot on any
+    /// error. The abort-on-error logic lives in here (rather than in
+    /// `dedup_produce`) because only the holder of the `Transaction` guard
+    /// returned by `begin_transaction` can abort it. The caller must hold
+    /// `slot`'s lock and have confirmed the key is not already claimed.
     async fn txn_write(
         &self,
         slot: &mut Option<Producer>,
@@ -173,39 +173,53 @@ impl DedupEngine {
         }
         let producer = slot.as_ref().expect("just initialized");
 
-        producer.begin_transaction().await?;
+        let txn = producer.begin_transaction().await?;
 
-        // 1. data record → user topic
-        let data = to_producer_record(rec, value);
-        let meta = producer
-            .send(data)
-            .await
-            .await
-            .map_err(|_| GatewayError::ProducerCanceled)?
-            .map_err(GatewayError::Producer)?;
+        let sent: Result<(RecordMetadata, ClaimValue), GatewayError> = async {
+            // 1. data record → user topic
+            let data = to_producer_record(rec, value);
+            let meta = producer
+                .send(data)
+                .await
+                .await
+                .map_err(|_| GatewayError::ProducerCanceled)?
+                .map_err(GatewayError::Producer)?;
 
-        // 2. claim → dedup topic (partition p), key = idempotency key
-        let claim = ClaimValue {
-            topic: rec.topic.clone(),
-            partition: meta.partition,
-            offset: meta.offset,
+            // 2. claim → dedup topic (partition p), key = idempotency key
+            let claim = ClaimValue {
+                topic: rec.topic.clone(),
+                partition: meta.partition,
+                offset: meta.offset,
+            };
+            let claim_rec = ProducerRecord {
+                topic: self.dedup_topic.clone(),
+                partition: Some(i32::try_from(p).unwrap_or(0)),
+                key: Some(Bytes::from(key.as_bytes().to_vec())),
+                value: Some(Bytes::from(serde_json::to_vec(&claim)?)),
+                headers: vec![],
+                timestamp_ms: None,
+            };
+            producer
+                .send(claim_rec)
+                .await
+                .await
+                .map_err(|_| GatewayError::ProducerCanceled)?
+                .map_err(GatewayError::Producer)?;
+
+            Ok((meta, claim))
+        }
+        .await;
+
+        let (meta, claim) = match sent {
+            Ok(pair) => pair,
+            Err(e) => {
+                let _ = txn.abort().await;
+                crate::metrics::metrics().record_txn("abort");
+                return Err(e);
+            }
         };
-        let claim_rec = ProducerRecord {
-            topic: self.dedup_topic.clone(),
-            partition: Some(i32::try_from(p).unwrap_or(0)),
-            key: Some(Bytes::from(key.as_bytes().to_vec())),
-            value: Some(Bytes::from(serde_json::to_vec(&claim)?)),
-            headers: vec![],
-            timestamp_ms: None,
-        };
-        producer
-            .send(claim_rec)
-            .await
-            .await
-            .map_err(|_| GatewayError::ProducerCanceled)?
-            .map_err(GatewayError::Producer)?;
 
-        producer.commit_transaction().await?;
+        txn.commit().await?;
         crate::metrics::metrics().record_txn("commit");
 
         // Single-owner: update the local map directly.

@@ -259,14 +259,23 @@ impl RecordProducer for BrokerProducer {
 /// Unlike [`BrokerProducer`], this wrapper does NOT accumulate per-record ack
 /// receivers: the EOS commit path never calls `flush` — it goes
 /// `send` → `send_offsets_to_transaction` → `commit_transaction`, and the inner
-/// `Producer::commit_transaction` already flushes the batch buffer and blocks on
-/// every in-flight ack before sending the COMMIT marker. The dropped receiver
+/// `Transaction::commit` (via `end_transaction`) already flushes the batch
+/// buffer and blocks on every in-flight ack before sending the COMMIT marker.
+/// The dropped receiver
 /// does NOT cancel the send: the record's ack sender lives in the accumulator
 /// batch (see `Producer::send` / `Accumulator::try_append`), so the record is
 /// produced and durably committed regardless of whether the receiver is awaited.
 /// Accumulating receivers here would leak unboundedly for the app's lifetime.
 pub(crate) struct BrokerTransactionalProducer {
-    inner: Producer,
+    inner: Arc<Producer>,
+    /// The currently-open transaction, if any. Populated by `begin_transaction`
+    /// (via `Producer::begin_transaction_owned`, whose `OwnedTransaction` guard
+    /// must survive across the separate `commit_transaction`/`abort_transaction`
+    /// call that arrives on a later poll cycle — a borrowed `Transaction<'p>`
+    /// can't be stored in a struct field across that gap without either unsafe
+    /// self-reference or a lifetime parameter that would break the `'static`
+    /// `Arc<dyn TransactionalProducer>` storage this type is used behind).
+    txn: Mutex<Option<crabka_client_producer::OwnedTransaction>>,
 }
 
 #[async_trait::async_trait]
@@ -339,10 +348,12 @@ impl TransactionalProducer for BrokerTransactionalProducer {
     }
 
     async fn begin_transaction(&self) -> Result<(), StreamsClientError> {
-        self.inner
-            .begin_transaction()
+        let t = Arc::clone(&self.inner)
+            .begin_transaction_owned()
             .await
-            .map_err(|e| StreamsClientError::Runtime(e.to_string()))
+            .map_err(|e| StreamsClientError::Runtime(e.to_string()))?;
+        *self.txn.lock().await = Some(t);
+        Ok(())
     }
 
     async fn send_offsets_to_transaction(
@@ -364,15 +375,23 @@ impl TransactionalProducer for BrokerTransactionalProducer {
     }
 
     async fn commit_transaction(&self) -> Result<(), StreamsClientError> {
-        self.inner
-            .commit_transaction()
+        let t = self.txn.lock().await.take().ok_or_else(|| {
+            StreamsClientError::Runtime(
+                "commit_transaction called without an open transaction".into(),
+            )
+        })?;
+        t.commit()
             .await
             .map_err(|e| StreamsClientError::Runtime(e.to_string()))
     }
 
     async fn abort_transaction(&self) -> Result<(), StreamsClientError> {
-        self.inner
-            .abort_transaction()
+        let t = self.txn.lock().await.take().ok_or_else(|| {
+            StreamsClientError::Runtime(
+                "abort_transaction called without an open transaction".into(),
+            )
+        })?;
+        t.abort()
             .await
             .map_err(|e| StreamsClientError::Runtime(e.to_string()))
     }
@@ -809,7 +828,10 @@ pub(crate) async fn build_eos(
         max_wait_ms: 500,
         partition_max_bytes: 1 << 20,
     };
-    let txn_producer = Arc::new(BrokerTransactionalProducer { inner: producer });
+    let txn_producer = Arc::new(BrokerTransactionalProducer {
+        inner: Arc::new(producer),
+        txn: Mutex::new(None),
+    });
     let offset_store = Arc::new(BrokerOffsetStore::new(offset_client, group_id));
 
     Ok((fetcher, txn_producer, offset_store))
