@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
+use crabka_log::Offset;
 use crabka_protocol::{
     Decode, Encode,
     owned::{
@@ -57,7 +58,7 @@ async fn handle_request(
                         topic_id,
                         pd.partition,
                         pd.state_epoch,
-                        pd.start_offset,
+                        Offset(pd.start_offset),
                     )
                     .await
                 {
@@ -70,6 +71,7 @@ async fn handle_request(
             partitions.push(PartitionResult {
                 partition: pd.partition,
                 error_code,
+                error_message: None,
                 ..Default::default()
             });
         }

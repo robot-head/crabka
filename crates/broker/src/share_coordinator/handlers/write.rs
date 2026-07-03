@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
+use crabka_log::Offset;
 use crabka_protocol::{
     Decode, Encode,
     owned::{
@@ -46,8 +47,8 @@ pub(crate) fn handle(
                         .state_batches
                         .iter()
                         .map(|b| StateBatch {
-                            first_offset: b.first_offset,
-                            last_offset: b.last_offset,
+                            first_offset: Offset(b.first_offset),
+                            last_offset: Offset(b.last_offset),
                             delivery_state: b.delivery_state,
                             delivery_count: b.delivery_count,
                         })
@@ -59,7 +60,7 @@ pub(crate) fn handle(
                             pd.partition,
                             pd.state_epoch,
                             pd.leader_epoch,
-                            pd.start_offset,
+                            Offset(pd.start_offset),
                             pd.delivery_complete_count,
                             batches,
                         )
@@ -192,7 +193,7 @@ mod tests {
             .read_summary("share-group", topic_id, 4)
             .await
             .expect("written state is readable");
-        assert!(summary == (17, 3, 101, 9));
+        assert!(summary == (17, 3, Offset(101), 9));
         broker_handle.shutdown().await;
     }
 

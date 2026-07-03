@@ -426,7 +426,9 @@ impl BrokerHandle {
     #[allow(clippy::unused_async, clippy::used_underscore_binding)]
     pub async fn local_log_end_offset(&self, topic: &str, partition: i32) -> Option<i64> {
         let part = self._broker.partitions.get(topic, partition)?;
-        Some(part.log_end_offset())
+        // Unwrap `Offset` -> `i64` at this test-helper boundary: integration
+        // tests compare the result against raw offset literals.
+        Some(part.log_end_offset().0)
     }
 
     /// Test-only: truncate this broker's local partition log so no
@@ -455,7 +457,7 @@ impl BrokerHandle {
                     "partition {topic}-{partition} not local"
                 ))
             })?;
-        part.truncate_to(offset).await?;
+        part.truncate_to(crabka_log::Offset(offset)).await?;
         // Mirror the production truncation path (the replicator): a log
         // truncation also reverts idempotent-producer dedup entries for the
         // dropped offsets, so a retried batch from the truncated tail re-appends
@@ -493,7 +495,7 @@ impl BrokerHandle {
                     "partition {topic}-{partition} not local"
                 ))
             })?;
-        part.test_set_log_start(new_start).await
+        part.test_set_log_start(crabka_log::Offset(new_start)).await
     }
 
     /// Test-only: directly set `current_leader_epoch` on a locally-hosted
@@ -534,10 +536,15 @@ impl BrokerHandle {
         topic_id: uuid::Uuid,
         partition: i32,
     ) -> Option<(i32, i32, i64, i32)> {
+        // Unwrap the summary's `start_offset` -> `i64` at this test-helper
+        // boundary: integration tests compare it against raw offset literals.
         self._broker
             .share_coordinator
             .read_summary(group, topic_id, partition)
             .await
+            .map(|(state_epoch, leader_epoch, start_offset, count)| {
+                (state_epoch, leader_epoch, start_offset.0, count)
+            })
     }
 
     /// Test-only: await until the persisted share-state summary exists for
@@ -859,7 +866,8 @@ impl BrokerHandle {
     #[allow(clippy::used_underscore_binding)]
     pub fn partition_log_start_for_test(&self, topic: &str, partition: i32) -> Option<i64> {
         let part = self._broker.partitions.get(topic, partition)?;
-        Some(part.log_start_offset())
+        // Unwrap `Offset` -> `i64` at this test-helper boundary.
+        Some(part.log_start_offset().0)
     }
 
     /// Test-only: return the `retention.ms` override currently active in
@@ -934,7 +942,8 @@ impl BrokerHandle {
                 }],
                 ..Default::default()
             };
-            last_offset = part.produce_batch(batch).await?;
+            // Unwrap `Offset` -> `i64` at this test-helper boundary.
+            last_offset = part.produce_batch(batch).await?.0;
         }
         Ok(last_offset)
     }
@@ -1331,7 +1340,7 @@ impl BrokerHandle {
             loop {
                 if let Some(part) = self._broker.partitions.get(topic, partition) {
                     let notified = part.append_notify.notified();
-                    if part.log_end_offset() >= min {
+                    if part.log_end_offset() >= crabka_log::Offset(min) {
                         return;
                     }
                     notified.await;
@@ -1372,7 +1381,7 @@ impl BrokerHandle {
             loop {
                 if let Some(part) = self._broker.partitions.get(topic, partition) {
                     let notified = part.append_notify.notified();
-                    if part.log_end_offset() == target {
+                    if part.log_end_offset() == crabka_log::Offset(target) {
                         return;
                     }
                     // Truncation does not fire append_notify; fall back to a short
@@ -5272,7 +5281,13 @@ mod tests {
         );
         broker
             .share_coordinator
-            .initialize(share_group, share_topic_id, share_partition, 11, 90)
+            .initialize(
+                share_group,
+                share_topic_id,
+                share_partition,
+                11,
+                crabka_log::Offset(90),
+            )
             .await
             .expect("initialize share state");
         broker
@@ -5283,11 +5298,11 @@ mod tests {
                 share_partition,
                 12,
                 2,
-                95,
+                crabka_log::Offset(95),
                 7,
                 vec![crate::share_coordinator::persistence::StateBatch {
-                    first_offset: 95,
-                    last_offset: 99,
+                    first_offset: crabka_log::Offset(95),
+                    last_offset: crabka_log::Offset(99),
                     delivery_state: 0,
                     delivery_count: 1,
                 }],
@@ -5338,7 +5353,7 @@ mod tests {
         );
         {
             let mut state = acquired_cell.lock().await;
-            state.materialize(3, 10);
+            state.materialize(crabka_log::Offset(3), 10);
             let acquired = state.acquire(
                 "member-1",
                 3,

@@ -12,6 +12,7 @@ use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use crabka_log::Offset;
 use crabka_metadata::MetadataImage;
 use crabka_protocol::records::{Record, RecordBatch};
 use dashmap::DashMap;
@@ -491,7 +492,7 @@ impl TxnCoordinator {
                         self.state
                             .insert(entry.transactional_id.clone(), Arc::new(Mutex::new(entry)));
                     }
-                    offset = batch.base_offset + i64::from(batch.last_offset_delta) + 1;
+                    offset = Offset(batch.base_offset + i64::from(batch.last_offset_delta) + 1);
                 }
             }
         }

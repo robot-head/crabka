@@ -86,7 +86,8 @@ pub(crate) async fn handle(
                             partition: p,
                             last_written_leader_epoch: epoch,
                             current_leader_epoch: epoch,
-                            log_end_offset: part.log_end_offset(),
+                            // Unwrap the `Offset` into the wire `i64` field.
+                            log_end_offset: part.log_end_offset().0,
                             error_code: codes::NONE,
                             error_message: None,
                             ..Default::default()

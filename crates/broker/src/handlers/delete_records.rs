@@ -4,6 +4,7 @@
 //! Apache Kafka model.
 
 use bytes::{Bytes, BytesMut};
+use crabka_log::Offset;
 use crabka_metadata::AclOperation;
 use crabka_protocol::{
     Decode, Encode,
@@ -165,9 +166,12 @@ pub(crate) async fn handle(
             // Translate offset == -1 → high_watermark per Kafka semantics.
             let leo = part.log_end_offset();
             let hw = part.high_watermark().await;
-            let target = target_offset(fp.offset, hw);
+            // `hw`/`leo` are `Offset`; the boundary helpers work in raw
+            // `i64`, so unwrap at the seam and re-wrap `target` for the
+            // `Offset`-typed `trim_to_offset` call below.
+            let target = Offset(target_offset(fp.offset, hw.0));
 
-            if offset_out_of_range(target, leo) {
+            if offset_out_of_range(target.0, leo.0) {
                 part_results.push(error_partition_result(
                     fp.partition_index,
                     codes::OFFSET_OUT_OF_RANGE,
@@ -177,7 +181,12 @@ pub(crate) async fn handle(
 
             match part.trim_to_offset(target).await {
                 Ok(new_start) => {
-                    part_results.push(partition_result(fp.partition_index, new_start, codes::NONE));
+                    // Unwrap the `Offset` into the wire `i64` `low_watermark`.
+                    part_results.push(partition_result(
+                        fp.partition_index,
+                        new_start.0,
+                        codes::NONE,
+                    ));
                 }
                 Err(e) => {
                     tracing::warn!(

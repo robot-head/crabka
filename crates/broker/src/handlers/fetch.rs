@@ -404,7 +404,8 @@ pub(crate) async fn handle(
                     let prev = st.hw;
                     let new = st.update_follower_leo(
                         u64::try_from(effective_replica_id).unwrap_or(0),
-                        fetch_offset,
+                        // Wrap the decoded-request wire offset into `Offset`.
+                        Offset(fetch_offset),
                         leader_leo,
                         std::time::Instant::now(),
                     );
@@ -491,7 +492,8 @@ pub(crate) async fn handle(
         let read_start = std::time::Instant::now();
         total_bytes += do_read(
             &part,
-            p.fetch_offset,
+            // Wrap the decoded-request wire offset into `Offset` for the read.
+            Offset(p.fetch_offset),
             p.max_bytes,
             p.read_committed,
             p.is_follower_fetch,
@@ -978,16 +980,16 @@ pub(crate) struct VisibilityWindow {
     /// `fetch_offset >= upper_bound` — nothing to read (no bytes).
     pub empty: bool,
     /// Exclusive upper offset the raw read may expose: `[fetch_offset, limit_offset)`.
-    pub limit_offset: i64,
+    pub limit_offset: Offset,
     /// `read_committed` aborted-txn scan ceiling (`lso.min(hw)` for a
     /// `read_committed` consumer, else `lso`).
-    pub effective_lso: i64,
+    pub effective_lso: Offset,
     /// Whether to populate `aborted_transactions` (a `read_committed` consumer).
     pub read_committed_aborts: bool,
     /// `out.high_watermark` to report.
-    pub response_hw: i64,
+    pub response_hw: Offset,
     /// `out.last_stable_offset` to report.
-    pub response_lso: i64,
+    pub response_lso: Offset,
 }
 
 /// Kafka invariants the caller upholds: `0 <= log_start <= hw <= log_end` and
@@ -996,11 +998,11 @@ pub(crate) struct VisibilityWindow {
 pub(crate) fn compute_visibility_window(
     is_follower: bool,
     read_committed: bool,
-    log_start: i64,
-    hw: i64,
-    lso: i64,
-    log_end: i64,
-    fetch_offset: i64,
+    log_start: Offset,
+    hw: Offset,
+    lso: Offset,
+    log_end: Offset,
+    fetch_offset: Offset,
 ) -> VisibilityWindow {
     let upper_bound = if is_follower { log_end } else { hw };
     let effective_lso = if read_committed && !is_follower {
@@ -1060,7 +1062,7 @@ pub(crate) fn compute_visibility_window(
 #[allow(clippy::too_many_lines)]
 async fn do_read(
     part: &Partition,
-    fetch_offset: i64,
+    fetch_offset: Offset,
     max_bytes: i32,
     read_committed: bool,
     is_follower_fetch: bool,
@@ -1079,8 +1081,8 @@ async fn do_read(
         Empty,
         /// Read bytes in `[fetch_offset, limit_offset)`.
         Read {
-            limit_offset: i64,
-            effective_lso: i64,
+            limit_offset: Offset,
+            effective_lso: Offset,
             read_committed_aborts: bool,
         },
     }
@@ -1089,10 +1091,9 @@ async fn do_read(
 
     let (log_start, w, plan) = {
         let log = part.log.lock().expect("log mutex poisoned");
-        // Unwrap the log-layer `Offset`s into broker's `i64` world at the seam.
-        let log_start = log.log_start_offset().0;
-        let log_end = log.log_end_offset().0;
-        let lso = log.lso().0;
+        let log_start = log.log_start_offset();
+        let log_end = log.log_end_offset();
+        let lso = log.lso();
         let w = compute_visibility_window(
             is_follower_fetch,
             read_committed,
@@ -1105,9 +1106,10 @@ async fn do_read(
 
         let plan = if w.out_of_range {
             out.error_code = codes::OFFSET_OUT_OF_RANGE;
-            out.log_start_offset = log_start;
-            out.high_watermark = w.response_hw;
-            out.last_stable_offset = w.response_lso;
+            // Unwrap `Offset`s into the wire `i64` response fields.
+            out.log_start_offset = log_start.0;
+            out.high_watermark = w.response_hw.0;
+            out.last_stable_offset = w.response_lso.0;
             ReadPlan::OffsetOutOfRange
         } else if w.empty {
             ReadPlan::Empty
@@ -1161,11 +1163,7 @@ async fn do_read(
                 let records: RecordsPayload = {
                     let mut chosen: Option<RecordsPayload> = None;
                     if sendfile_capable {
-                        let desc = log.read_raw_desc(
-                            Offset(fetch_offset),
-                            Offset(limit_offset),
-                            read_max,
-                        )?;
+                        let desc = log.read_raw_desc(fetch_offset, limit_offset, read_max)?;
                         if desc.total >= crate::network::fetch_writer::SENDFILE_MIN_BYTES
                             && !desc.regions.is_empty()
                         {
@@ -1175,8 +1173,7 @@ async fn do_read(
                     match chosen {
                         Some(p) => p,
                         None => RecordsPayload::Raw(
-                            log.read_raw(Offset(fetch_offset), Offset(limit_offset), read_max)?
-                                .bytes,
+                            log.read_raw(fetch_offset, limit_offset, read_max)?.bytes,
                         ),
                     }
                 };
@@ -1193,10 +1190,7 @@ async fn do_read(
                 )))]
                 let records: RecordsPayload = {
                     let _ = sendfile_capable;
-                    RecordsPayload::Raw(
-                        log.read_raw(Offset(fetch_offset), Offset(limit_offset), read_max)?
-                            .bytes,
-                    )
+                    RecordsPayload::Raw(log.read_raw(fetch_offset, limit_offset, read_max)?.bytes)
                 };
 
                 // read_committed does NO server-side batch filtering: verbatim
@@ -1206,7 +1200,7 @@ async fn do_read(
                 // entirely when there are no aborted txns in range.
                 let aborted = if read_committed_aborts {
                     let mut it = log
-                        .aborted_in_range(Offset(fetch_offset), Offset(effective_lso))
+                        .aborted_in_range(fetch_offset, effective_lso)
                         .into_iter();
                     if let Some(first) = it.next() {
                         let mut v = vec![AbortedTransaction {
@@ -1252,9 +1246,10 @@ async fn do_read(
     };
 
     out.error_code = codes::NONE;
-    out.high_watermark = w.response_hw;
-    out.log_start_offset = log_start;
-    out.last_stable_offset = w.response_lso;
+    // Unwrap `Offset`s into the wire `i64` response fields.
+    out.high_watermark = w.response_hw.0;
+    out.log_start_offset = log_start.0;
+    out.last_stable_offset = w.response_lso.0;
 
     if read_committed && !is_follower_fetch {
         // Populate aborted_transactions: None means "no list" (same as not
@@ -1444,7 +1439,8 @@ async fn long_poll_then_reread(
         let read_start = std::time::Instant::now();
         do_read(
             &part,
-            p.fetch_offset,
+            // Wrap the decoded-request wire offset into `Offset` for the read.
+            Offset(p.fetch_offset),
             p.max_bytes,
             p.read_committed,
             p.is_follower_fetch,
@@ -1634,7 +1630,7 @@ mod fetch_visibility_model;
 mod visibility_fuzz {
     use proptest::prelude::*;
 
-    use super::compute_visibility_window;
+    use super::{Offset, compute_visibility_window};
 
     proptest! {
         /// The per-fetch visibility contract over large-N random valid watermark
@@ -1654,26 +1650,39 @@ mod visibility_fuzz {
             let (log_start, lso, hw, log_end) = (v[0], v[1], v[2], v[3]);
             let read_committed = rc_raw && !is_follower; // read_committed ⟹ !follower
             let w = compute_visibility_window(
-                is_follower, read_committed, log_start, hw, lso, log_end, fo,
+                is_follower,
+                read_committed,
+                Offset(log_start),
+                Offset(hw),
+                Offset(lso),
+                Offset(log_end),
+                Offset(fo),
             );
-            prop_assert!(w.limit_offset >= 0 && w.response_hw >= 0 && w.response_lso >= 0);
+            // Unwrap the `Offset` window fields into this proptest's `i64` world.
+            let (limit_offset, response_hw, response_lso, effective_lso) = (
+                w.limit_offset.0,
+                w.response_hw.0,
+                w.response_lso.0,
+                w.effective_lso.0,
+            );
+            prop_assert!(limit_offset >= 0 && response_hw >= 0 && response_lso >= 0);
             prop_assert_eq!(w.out_of_range, fo < log_start);
             let upper = if is_follower { log_end } else { hw };
             if !w.out_of_range {
                 prop_assert_eq!(w.empty, fo >= upper);
             }
             if is_follower {
-                prop_assert_eq!(w.limit_offset, log_end);
-                prop_assert!(w.limit_offset >= hw);
-                prop_assert_eq!(w.response_hw, log_end);
+                prop_assert_eq!(limit_offset, log_end);
+                prop_assert!(limit_offset >= hw);
+                prop_assert_eq!(response_hw, log_end);
             } else {
-                prop_assert!(w.limit_offset <= hw, "consumer fetch must not expose beyond HW");
-                prop_assert_eq!(w.response_hw, hw);
-                prop_assert!(w.response_lso <= w.response_hw);
+                prop_assert!(limit_offset <= hw, "consumer fetch must not expose beyond HW");
+                prop_assert_eq!(response_hw, hw);
+                prop_assert!(response_lso <= response_hw);
                 if read_committed {
-                    prop_assert_eq!(w.effective_lso, lso.min(hw));
-                    prop_assert!(w.limit_offset <= lso.min(hw));
-                    prop_assert_eq!(w.response_lso, lso.min(hw));
+                    prop_assert_eq!(effective_lso, lso.min(hw));
+                    prop_assert!(limit_offset <= lso.min(hw));
+                    prop_assert_eq!(response_lso, lso.min(hw));
                 }
             }
         }
@@ -1696,10 +1705,22 @@ mod visibility_fuzz {
             // Advance all of hw/lso/log_end (still valid: lso == hw).
             let (hw2, lso2, log_end2) = (hw + d_adv, lso + d_adv, log_end + d_adv + d_end2);
             let w1 = compute_visibility_window(
-                is_follower, read_committed, log_start, hw, lso, log_end, 0,
+                is_follower,
+                read_committed,
+                Offset(log_start),
+                Offset(hw),
+                Offset(lso),
+                Offset(log_end),
+                Offset(0),
             );
             let w2 = compute_visibility_window(
-                is_follower, read_committed, log_start, hw2, lso2, log_end2, 0,
+                is_follower,
+                read_committed,
+                Offset(log_start),
+                Offset(hw2),
+                Offset(lso2),
+                Offset(log_end2),
+                Offset(0),
             );
             prop_assert!(w2.response_hw >= w1.response_hw, "response_hw regressed");
             prop_assert!(w2.response_lso >= w1.response_lso, "response_lso regressed");

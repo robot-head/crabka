@@ -11,6 +11,7 @@
 
 use std::{sync::Arc, time::Duration};
 
+use crabka_log::Offset;
 use crabka_metadata::NodeId;
 use dashmap::DashMap;
 use tokio::sync::Mutex;
@@ -178,7 +179,7 @@ impl SharePartitionLeaderManager {
                 st
             }
             Ok(None) => {
-                let mut st = AcquisitionState::new(0);
+                let mut st = AcquisitionState::new(Offset(0));
                 st.leader_epoch = leader_epoch;
                 st
             }
@@ -188,7 +189,7 @@ impl SharePartitionLeaderManager {
                     %topic_id, partition, error = %e,
                     "share-partition state load failed; starting from empty window"
                 );
-                let mut st = AcquisitionState::new(0);
+                let mut st = AcquisitionState::new(Offset(0));
                 st.leader_epoch = leader_epoch;
                 st
             }
@@ -419,7 +420,7 @@ mod tests {
 
         let cell = mgr.get_or_load("g1", tid, 0).await;
         let st = cell.lock().await;
-        assert!(st.start_offset == 0);
+        assert!(st.start_offset == Offset(0));
         assert!(!st.dirty);
         drop(st);
         // A second call returns the same cached cell.
@@ -451,7 +452,7 @@ mod tests {
         let cell = mgr.get_or_load("g1", tid, 0).await;
         let mut st = cell.lock().await;
         // Make the state dirty with persistable content.
-        st.materialize(4, 100);
+        st.materialize(Offset(4), 100);
         let _ = st.acquire("m1", 10, i32::MAX, std::time::Instant::now(), LOCK, 5);
         assert!(st.dirty);
 

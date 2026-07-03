@@ -64,7 +64,7 @@ pub struct ProduceJob {
     pub data: ProduceData,
     /// Oneshot for the writer to report success (base offset assigned)
     /// or failure back to the handler.
-    pub ack: oneshot::Sender<Result<LogOffset, BrokerError>>,
+    pub ack: oneshot::Sender<Result<Offset, BrokerError>>,
 }
 
 /// All message kinds the partition's writer task accepts.
@@ -86,7 +86,7 @@ pub enum WriterMessage {
     /// Truncate the log so no records at offset `>= offset` remain. Used
     /// by the replicator's `OFFSET_OUT_OF_RANGE` recovery path.
     Truncate {
-        offset: LogOffset,
+        offset: Offset,
         ack: oneshot::Sender<Result<(), BrokerError>>,
     },
     /// Drop every segment and recreate the active segment at `new_base`.
@@ -95,7 +95,7 @@ pub enum WriterMessage {
     /// follower must move its own `log_start` *forward* past records it
     /// never saw, which `Truncate` can't do.
     ResetTo {
-        new_base: LogOffset,
+        new_base: Offset,
         ack: oneshot::Sender<Result<(), BrokerError>>,
     },
     /// Atomically swap the partition's `LogConfig`. The writer task
@@ -119,8 +119,8 @@ pub enum WriterMessage {
     /// `new_start` falls between segment boundaries — Kafka semantics).
     /// Used by the `DeleteRecords` handler.
     TrimToOffset {
-        new_start: LogOffset,
-        ack: tokio::sync::oneshot::Sender<Result<LogOffset, BrokerError>>,
+        new_start: Offset,
+        ack: tokio::sync::oneshot::Sender<Result<Offset, BrokerError>>,
     },
     /// Test-only: shift the in-memory `log_start_offset` without
     /// physically truncating segments. Simulates retention-driven
@@ -128,7 +128,7 @@ pub enum WriterMessage {
     /// replication integration test.
     #[cfg(any(test, feature = "test-helpers"))]
     TestSetLogStart {
-        new_start: LogOffset,
+        new_start: Offset,
         ack: oneshot::Sender<Result<(), BrokerError>>,
     },
     /// Atomically swap the partition's `Log` to a future log that has
@@ -214,10 +214,10 @@ impl Partition {
     /// panicked). The caller treats that as "not making progress" and the
     /// writer-died path eventually surfaces a clearer error.
     #[must_use]
-    pub fn log_end_offset(&self) -> LogOffset {
+    pub fn log_end_offset(&self) -> Offset {
         match self.log.lock() {
-            Ok(g) => g.log_end_offset().0,
-            Err(_) => 0,
+            Ok(g) => g.log_end_offset(),
+            Err(_) => Offset(0),
         }
     }
 
@@ -229,10 +229,10 @@ impl Partition {
     /// panicked). The caller treats that as "not making progress" and the
     /// writer-died path eventually surfaces a clearer error.
     #[must_use]
-    pub fn lso(&self) -> LogOffset {
+    pub fn lso(&self) -> Offset {
         match self.log.lock() {
-            Ok(g) => g.lso().0,
-            Err(_) => 0,
+            Ok(g) => g.lso(),
+            Err(_) => Offset(0),
         }
     }
 
@@ -288,7 +288,7 @@ impl Partition {
     /// `>= offset`. Used by the replicator's `OFFSET_OUT_OF_RANGE`
     /// recovery path and the KIP-320 in-band `diverging_epoch` truncation
     /// path (which passes the leader's epoch boundary, not just 0).
-    pub async fn truncate_to(&self, offset: LogOffset) -> Result<(), BrokerError> {
+    pub async fn truncate_to(&self, offset: Offset) -> Result<(), BrokerError> {
         let (ack_tx, ack_rx) = oneshot::channel();
         self.writer_tx
             .send(WriterMessage::Truncate {
@@ -304,7 +304,7 @@ impl Partition {
 
     /// Drop every segment and recreate the active segment at `new_base`.
     /// Goes through the writer task so it stays ordered with appends.
-    pub async fn reset_to(&self, new_base: LogOffset) -> Result<(), BrokerError> {
+    pub async fn reset_to(&self, new_base: Offset) -> Result<(), BrokerError> {
         let (ack_tx, ack_rx) = oneshot::channel();
         self.writer_tx
             .send(WriterMessage::ResetTo {
@@ -325,7 +325,7 @@ impl Partition {
     ///
     /// Returns `BrokerError` if the writer is dead, the ack is dropped,
     /// or the underlying `Log::trim_to_offset` fails (negative offset).
-    pub async fn trim_to_offset(&self, new_start: LogOffset) -> Result<LogOffset, BrokerError> {
+    pub async fn trim_to_offset(&self, new_start: Offset) -> Result<Offset, BrokerError> {
         let (ack_tx, ack_rx) = oneshot::channel();
         self.writer_tx
             .send(WriterMessage::TrimToOffset {
@@ -359,10 +359,10 @@ impl Partition {
     /// Returns 0 if the log mutex is poisoned (i.e. the writer task panicked).
     /// Used by `TxnCoordinator::recover` to seed the replay scan offset.
     #[must_use]
-    pub(crate) fn log_start_offset(&self) -> LogOffset {
+    pub(crate) fn log_start_offset(&self) -> Offset {
         match self.log.lock() {
-            Ok(g) => g.log_start_offset().0,
-            Err(_) => 0,
+            Ok(g) => g.log_start_offset(),
+            Err(_) => Offset(0),
         }
     }
 
@@ -372,9 +372,9 @@ impl Partition {
     /// Locks the `Arc<Mutex<Log>>` briefly. Returns an empty `Vec` if
     /// the mutex is poisoned.
     #[must_use]
-    pub fn aborted_in_range(&self, start: LogOffset, end: LogOffset) -> Vec<AbortedTxn> {
+    pub fn aborted_in_range(&self, start: Offset, end: Offset) -> Vec<AbortedTxn> {
         match self.log.lock() {
-            Ok(g) => g.aborted_in_range(Offset(start), Offset(end)),
+            Ok(g) => g.aborted_in_range(start, end),
             Err(_) => Vec::new(),
         }
     }
@@ -391,13 +391,13 @@ impl Partition {
     /// (e.g. `offset < log_start_offset()`).
     pub(crate) fn read_log(
         &self,
-        offset: LogOffset,
+        offset: Offset,
         max_bytes: usize,
     ) -> Result<ReadOutput, BrokerError> {
         self.log
             .lock()
             .map_err(|_| BrokerError::Txn("log mutex poisoned".into()))?
-            .read(Offset(offset), max_bytes)
+            .read(offset, max_bytes)
             .map_err(BrokerError::from)
     }
 
@@ -411,7 +411,7 @@ impl Partition {
     ///
     /// Returns [`BrokerError::Txn`] if the writer task is dead or the ack
     /// channel closes before the writer replies.
-    pub(crate) async fn produce_batch(&self, batch: RecordBatch) -> Result<LogOffset, BrokerError> {
+    pub(crate) async fn produce_batch(&self, batch: RecordBatch) -> Result<Offset, BrokerError> {
         let (ack_tx, ack_rx) = oneshot::channel();
         self.writer_tx
             .send(WriterMessage::Produce(ProduceJob {
@@ -428,7 +428,7 @@ impl Partition {
     /// Cached High Watermark. Awaits `replica_state` cooperatively so it
     /// doesn't block tokio worker threads.
     #[must_use]
-    pub async fn high_watermark(&self) -> LogOffset {
+    pub async fn high_watermark(&self) -> Offset {
         self.replica_state.lock().await.hw
     }
 
@@ -438,7 +438,7 @@ impl Partition {
     /// replicated yet) and only advances `hw` (HW is monotonic). Fires
     /// `hw_advance_notify` when it advances so a consumer parked at the old HW
     /// wakes.
-    pub async fn set_follower_hw(&self, reported_hw: LogOffset) {
+    pub async fn set_follower_hw(&self, reported_hw: Offset) {
         let log_end = self.log_end_offset();
         let new_hw = reported_hw.min(log_end);
         let advanced = {
@@ -536,7 +536,7 @@ impl Partition {
     /// the target.
     pub async fn await_hw_at_least(
         &self,
-        target_offset: LogOffset,
+        target_offset: Offset,
         deadline: std::time::Instant,
     ) -> Result<(), HwTimeout> {
         loop {
@@ -562,12 +562,12 @@ impl Partition {
                     let st = self.replica_state.lock().await;
                     let mut isr: Vec<crabka_raft::NodeId> = st.isr.iter().copied().collect();
                     isr.sort_unstable();
-                    let followers: Vec<(crabka_raft::NodeId, i64)> =
+                    let followers: Vec<(crabka_raft::NodeId, Offset)> =
                         st.per_follower.iter().map(|(k, v)| (*k, v.leo)).collect();
                     tracing::warn!(
-                        target_offset,
-                        hw = st.hw,
-                        leader_leo,
+                        target_offset = target_offset.0,
+                        hw = st.hw.0,
+                        leader_leo = leader_leo.0,
                         leader_epoch = st.current_leader_epoch,
                         ?isr,
                         ?followers,
@@ -593,7 +593,7 @@ impl Partition {
     /// `new_start`. Goes through the writer task to maintain the
     /// single-writer invariant on the underlying `Log`.
     #[cfg(any(test, feature = "test-helpers"))]
-    pub async fn test_set_log_start(&self, new_start: LogOffset) -> Result<(), BrokerError> {
+    pub async fn test_set_log_start(&self, new_start: Offset) -> Result<(), BrokerError> {
         let (ack_tx, ack_rx) = oneshot::channel();
         self.writer_tx
             .send(WriterMessage::TestSetLogStart {
@@ -779,7 +779,7 @@ mod tests {
         ));
         {
             let mut st = replica_state.lock().await;
-            st.hw = 42;
+            st.hw = Offset(42);
         }
         let p = Partition {
             topic: "t".into(),
@@ -794,7 +794,7 @@ mod tests {
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
             _writer_handle: Arc::new(writer),
         };
-        assert!(p.high_watermark().await == 42);
+        assert!(p.high_watermark().await == Offset(42));
     }
 
     #[tokio::test]
@@ -821,7 +821,7 @@ mod tests {
         p.install_isr(&[1, 2, 3], &[1, 2, 3], 1).await;
         let st = p.replica_state.lock().await;
         check!(st.isr == [1, 2, 3].into_iter().collect());
-        check!(st.per_follower.get(&2).map(|f| f.leo) == Some(0));
+        check!(st.per_follower.get(&2).map(|f| f.leo) == Some(Offset(0)));
     }
 
     #[tokio::test]
@@ -829,7 +829,7 @@ mod tests {
         let hw_advance_notify = Arc::new(Notify::new());
         let (p, _td) = test_partition(hw_advance_notify.clone());
         append_records(&p, 3);
-        assert!(p.high_watermark().await == 0);
+        assert!(p.high_watermark().await == Offset(0));
 
         let waiter = hw_advance_notify.notified();
         tokio::pin!(waiter);
@@ -840,7 +840,7 @@ mod tests {
 
         p.install_isr(&[1], &[1], 1).await;
 
-        assert!(p.high_watermark().await == 3);
+        assert!(p.high_watermark().await == Offset(3));
         assert!(
             futures_util::poll!(&mut waiter).is_ready(),
             "notify should fire when ISR install advances HW"
@@ -853,7 +853,7 @@ mod tests {
         let (p, _td) = test_partition(hw_advance_notify.clone());
         append_records(&p, 2);
         p.install_isr(&[1], &[1], 1).await;
-        assert!(p.high_watermark().await == 2);
+        assert!(p.high_watermark().await == Offset(2));
 
         let waiter = hw_advance_notify.notified();
         tokio::pin!(waiter);
@@ -864,7 +864,7 @@ mod tests {
 
         p.install_isr(&[1], &[1], 1).await;
 
-        assert!(p.high_watermark().await == 2);
+        assert!(p.high_watermark().await == Offset(2));
         assert!(
             futures_util::poll!(&mut waiter).is_pending(),
             "unchanged HW must not wake waiters"
@@ -882,7 +882,7 @@ mod tests {
             p.install_isr(&[1, 2], &[1, 2], 1).await;
             {
                 let mut st = p.replica_state.lock().await;
-                st.per_follower.get_mut(&2).expect("follower").leo = seeded_leo;
+                st.per_follower.get_mut(&2).expect("follower").leo = Offset(seeded_leo);
             }
 
             p.install_leader_change(leader, epoch).await;
@@ -914,9 +914,11 @@ mod tests {
     async fn test_set_log_start_updates_log_start_through_writer() {
         let (p, _td) = test_partition_with_writer();
 
-        p.test_set_log_start(5).await.expect("set log start");
+        p.test_set_log_start(Offset(5))
+            .await
+            .expect("set log start");
 
-        assert!(p.log_start_offset() == 5);
+        assert!(p.log_start_offset() == Offset(5));
     }
 
     #[tokio::test]
@@ -930,7 +932,7 @@ mod tests {
         ));
         {
             let mut st = replica_state.lock().await;
-            st.hw = 100;
+            st.hw = Offset(100);
         }
         let p = Partition {
             topic: "t".into(),
@@ -946,7 +948,9 @@ mod tests {
             _writer_handle: Arc::new(writer),
         };
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        p.await_hw_at_least(50, deadline).await.expect("immediate");
+        p.await_hw_at_least(Offset(50), deadline)
+            .await
+            .expect("immediate");
     }
 
     #[tokio::test]
@@ -971,7 +975,7 @@ mod tests {
             _writer_handle: Arc::new(writer),
         };
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(50);
-        let result = p.await_hw_at_least(100, deadline).await;
+        let result = p.await_hw_at_least(Offset(100), deadline).await;
         assert!(matches!(result, Err(crate::partition::HwTimeout)));
     }
 
@@ -1027,7 +1031,7 @@ mod tests {
             .expect("log mutex")
             .append(&mut batch)
             .expect("append");
-        assert!(p.log_end_offset() == 3);
+        assert!(p.log_end_offset() == Offset(3));
 
         // reported_hw below log_end: stored verbatim, notify fires.
         // A `Notified` future does not register with the `Notify` until it is
@@ -1039,27 +1043,27 @@ mod tests {
             futures_util::poll!(&mut waiter).is_pending(),
             "waiter registers on first poll"
         );
-        p.set_follower_hw(2).await;
-        assert!(p.high_watermark().await == 2);
+        p.set_follower_hw(Offset(2)).await;
+        assert!(p.high_watermark().await == Offset(2));
         assert!(
             futures_util::poll!(&mut waiter).is_ready(),
             "notify should fire when HW advances"
         );
 
         // reported_hw above log_end: clamped to log_end (3).
-        p.set_follower_hw(100).await;
-        assert!(p.high_watermark().await == 3);
+        p.set_follower_hw(Offset(100)).await;
+        assert!(p.high_watermark().await == Offset(3));
 
         // reported_hw below current HW: no regression.
-        p.set_follower_hw(1).await;
-        assert!(p.high_watermark().await == 3);
+        p.set_follower_hw(Offset(1)).await;
+        assert!(p.high_watermark().await == Offset(3));
     }
 
     #[tokio::test]
     async fn set_follower_hw_same_high_watermark_does_not_notify() {
         let hw_advance_notify = Arc::new(Notify::new());
         let (p, _td) = test_partition(hw_advance_notify.clone());
-        assert!(p.high_watermark().await == 0);
+        assert!(p.high_watermark().await == Offset(0));
 
         let waiter = hw_advance_notify.notified();
         tokio::pin!(waiter);
@@ -1068,9 +1072,9 @@ mod tests {
             "waiter registers on first poll"
         );
 
-        p.set_follower_hw(0).await;
+        p.set_follower_hw(Offset(0)).await;
 
-        assert!(p.high_watermark().await == 0);
+        assert!(p.high_watermark().await == Offset(0));
         assert!(
             futures_util::poll!(&mut waiter).is_pending(),
             "unchanged HW must not wake waiters"
@@ -1102,11 +1106,11 @@ mod tests {
         };
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            replica_state.lock().await.hw = 100;
+            replica_state.lock().await.hw = Offset(100);
             hw_advance_notify.notify_waiters();
         });
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        p.await_hw_at_least(50, deadline)
+        p.await_hw_at_least(Offset(50), deadline)
             .await
             .expect("woke on advance");
     }

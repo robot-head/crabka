@@ -214,7 +214,7 @@ async fn describe_partition(
     p: i32,
 ) -> DescribeShareGroupOffsetsResponsePartition {
     let (start_offset, error_code) = match persister.read_state(gid, topic_id, p).await {
-        Ok(Some(state)) => (state.start_offset, codes::NONE),
+        Ok(Some(state)) => (state.start_offset.0, codes::NONE),
         Ok(None) => (UNINITIALIZED_START_OFFSET, codes::NONE),
         Err(_) => (UNINITIALIZED_START_OFFSET, codes::COORDINATOR_NOT_AVAILABLE),
     };
@@ -224,7 +224,7 @@ async fn describe_partition(
             .current_leader_epoch
             .load(std::sync::atomic::Ordering::Acquire);
         let lag = if start_offset >= 0 {
-            (hwm - start_offset).max(0)
+            (hwm.0 - start_offset).max(0)
         } else {
             -1
         };
@@ -247,6 +247,7 @@ mod tests {
     use std::{net::SocketAddr, sync::Arc};
 
     use assert2::assert;
+    use crabka_log::Offset;
     use crabka_metadata::{MetadataImage, MetadataRecord, TopicRecord};
     use crabka_protocol::{
         UnknownTaggedFields,
@@ -451,7 +452,7 @@ mod tests {
         let topic_id = uuid::Uuid::from_u128(0xD5C0);
         let image = image_with_topic("orders", topic_id);
         persister
-            .initialize("g-desc", topic_id, 0, 1, 33)
+            .initialize("g-desc", topic_id, 0, 1, Offset(33))
             .await
             .expect("seed state");
 

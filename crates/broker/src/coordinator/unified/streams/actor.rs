@@ -22,6 +22,7 @@ use std::{
     time::Instant,
 };
 
+use crabka_log::Offset;
 use crabka_protocol::owned::{
     common::streams_group_heartbeat_response::{status::Status, task_ids::TaskIds as RespTaskIds},
     streams_group_heartbeat_request::StreamsGroupHeartbeatRequest,
@@ -701,7 +702,9 @@ fn task_lag(m: &StreamsMemberState) -> BTreeMap<(String, i32), i64> {
     let mut lag = BTreeMap::new();
     for (key, &end) in &m.task_end_offsets {
         if let Some(&pos) = m.task_offsets.get(key) {
-            lag.insert(key.clone(), end - pos);
+            // Lag is the delta between two offsets — a record count (i64),
+            // compared against `acceptable_recovery_lag`, not an offset.
+            lag.insert(key.clone(), end.0 - pos.0);
         }
     }
     lag
@@ -729,13 +732,14 @@ fn task_ids_to_map(
 }
 
 /// Convert request `TaskOffset` entries into a `(subtopology, partition) ->
-/// offset` map.
+/// offset` map. The wire `o.offset` field stays a raw `i64`; wrap it as an
+/// `Offset` for the in-memory changelog-position map.
 fn task_offsets_to_map(
     offsets: &[crabka_protocol::owned::common::streams_group_heartbeat_request::task_offset::TaskOffset],
-) -> BTreeMap<(String, i32), i64> {
+) -> BTreeMap<(String, i32), Offset> {
     offsets
         .iter()
-        .map(|o| ((o.subtopology_id.clone(), o.partition), o.offset))
+        .map(|o| ((o.subtopology_id.clone(), o.partition), Offset(o.offset)))
         .collect()
 }
 

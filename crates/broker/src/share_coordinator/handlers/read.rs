@@ -59,13 +59,13 @@ async fn handle_request(
                     Some(st) => PartitionResult {
                         partition: pd.partition,
                         state_epoch: st.state_epoch,
-                        start_offset: st.start_offset,
+                        start_offset: st.start_offset.0,
                         state_batches: st
                             .state_batches
                             .iter()
                             .map(|b| StateBatch {
-                                first_offset: b.first_offset,
-                                last_offset: b.last_offset,
+                                first_offset: b.first_offset.0,
+                                last_offset: b.last_offset.0,
                                 delivery_state: b.delivery_state,
                                 delivery_count: b.delivery_count,
                                 ..Default::default()
@@ -111,6 +111,7 @@ async fn handle_request(
 #[cfg(test)]
 mod tests {
     use assert2::assert;
+    use crabka_log::Offset;
     use crabka_protocol::{
         UnknownTaggedFields,
         owned::{
@@ -163,7 +164,7 @@ mod tests {
         let wire_topic_id = ProtoUuid(*topic_id.as_bytes());
         broker
             .share_coordinator
-            .initialize("share-group", topic_id, 4, 17, 90)
+            .initialize("share-group", topic_id, 4, 17, Offset(90))
             .await
             .expect("initialize state");
         broker
@@ -174,7 +175,7 @@ mod tests {
                 4,
                 17,
                 3,
-                101,
+                Offset(101),
                 9,
                 vec![super::super::test_support::batch(101, 105)],
             )

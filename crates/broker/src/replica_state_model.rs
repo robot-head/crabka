@@ -18,6 +18,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crabka_log::Offset;
 use crabka_raft::NodeId;
 use stateright::{Checker, Model, Property};
 
@@ -76,17 +77,17 @@ impl IsrModel {
 #[derive(Clone, Debug)]
 struct IsrState {
     rs: ReplicaState,
-    leader_leo: i64,
+    leader_leo: Offset,
 }
 
 impl IsrState {
     /// Normalized, timestamp-free projection used for Eq/Hash: the real state
     /// holds non-`Hash` `HashMap`/`HashSet` and non-deterministic timestamps,
     /// neither of which is safety-relevant here.
-    fn project(&self) -> (Vec<NodeId>, Vec<(NodeId, i64)>, i64, i32, i64) {
+    fn project(&self) -> (Vec<NodeId>, Vec<(NodeId, Offset)>, Offset, i32, Offset) {
         let mut isr: Vec<NodeId> = self.rs.isr.iter().copied().collect();
         isr.sort_unstable();
-        let mut pf: Vec<(NodeId, i64)> = self
+        let mut pf: Vec<(NodeId, Offset)> = self
             .rs
             .per_follower
             .iter()
@@ -120,7 +121,7 @@ enum IsrAction {
     /// Leader appends one record (`leader_leo` += 1) and recomputes HW.
     LeaderAppend,
     /// A follower reports `leo` via fetch.
-    FollowerFetch { follower: NodeId, leo: i64 },
+    FollowerFetch { follower: NodeId, leo: Offset },
     /// The controller installs a new committed ISR.
     InstallIsr { isr: Vec<NodeId> },
 }
@@ -133,13 +134,16 @@ impl Model for IsrModel {
         // Fresh leader: full replica set in the ISR, followers seeded at 0.
         let mut rs = ReplicaState::new();
         rs.install_isr(&self.replicas, &self.replicas, self.leader(), self.t0);
-        vec![IsrState { rs, leader_leo: 0 }]
+        vec![IsrState {
+            rs,
+            leader_leo: Offset(0),
+        }]
     }
 
     fn actions(&self, state: &Self::State, actions: &mut Vec<Self::Action>) {
         let leader = self.leader();
 
-        if state.leader_leo < self.max_offset {
+        if state.leader_leo.0 < self.max_offset {
             actions.push(IsrAction::LeaderAppend);
         }
 
@@ -148,8 +152,8 @@ impl Model for IsrModel {
         // follower's reported LEO never regresses, which is what keeps HW
         // monotone. `test_overshoot` additionally probes the defensive clamp.
         for f in self.followers() {
-            let cur = state.rs.per_follower.get(&f).map_or(0, |s| s.leo);
-            let mut targets: Vec<i64> = Vec::new();
+            let cur = state.rs.per_follower.get(&f).map_or(Offset(0), |s| s.leo);
+            let mut targets: Vec<Offset> = Vec::new();
             if cur < state.leader_leo {
                 targets.push(cur + 1);
                 targets.push(state.leader_leo);
@@ -184,7 +188,7 @@ impl Model for IsrModel {
             let expansion_ok = isr
                 .iter()
                 .filter(|&&n| n != leader && !cur_isr.contains(&n))
-                .all(|f| state.rs.per_follower.get(f).map_or(0, |s| s.leo) >= state.rs.hw);
+                .all(|f| state.rs.per_follower.get(f).map_or(Offset(0), |s| s.leo) >= state.rs.hw);
             if !expansion_ok {
                 continue;
             }
@@ -197,7 +201,7 @@ impl Model for IsrModel {
         let mut state = last.clone();
         match action {
             IsrAction::LeaderAppend => {
-                if state.leader_leo >= self.max_offset {
+                if state.leader_leo.0 >= self.max_offset {
                     return None;
                 }
                 state.leader_leo += 1;
@@ -243,16 +247,16 @@ impl Model for IsrModel {
             Property::always("leo_clamped", |_, s: &IsrState| {
                 s.rs.per_follower.values().all(|st| st.leo <= s.leader_leo)
             }),
-            Property::always("hw_nonneg", |_, s: &IsrState| s.rs.hw >= 0),
+            Property::always("hw_nonneg", |_, s: &IsrState| s.rs.hw >= Offset(0)),
             Property::always("leader_in_isr", |m: &IsrModel, s: &IsrState| {
                 s.rs.isr.contains(&m.leader())
             }),
-            Property::sometimes("can_advance_hw", |_, s: &IsrState| s.rs.hw > 0),
+            Property::sometimes("can_advance_hw", |_, s: &IsrState| s.rs.hw > Offset(0)),
             Property::sometimes("can_reach_leader_leo", |_, s: &IsrState| {
-                s.leader_leo > 0 && s.rs.hw == s.leader_leo
+                s.leader_leo > Offset(0) && s.rs.hw == s.leader_leo
             }),
             Property::sometimes("can_pin_below_leader", |_, s: &IsrState| {
-                s.rs.hw > 0 && s.rs.hw < s.leader_leo
+                s.rs.hw > Offset(0) && s.rs.hw < s.leader_leo
             }),
             Property::sometimes("can_shrink_isr", |m: &IsrModel, s: &IsrState| {
                 let leader = m.leader();
@@ -264,13 +268,13 @@ impl Model for IsrModel {
     }
 
     fn within_boundary(&self, state: &Self::State) -> bool {
-        state.leader_leo <= self.max_offset
-            && state.rs.hw <= self.max_offset
+        state.leader_leo.0 <= self.max_offset
+            && state.rs.hw.0 <= self.max_offset
             && state
                 .rs
                 .per_follower
                 .values()
-                .all(|s| s.leo <= self.max_offset)
+                .all(|s| s.leo.0 <= self.max_offset)
     }
 }
 

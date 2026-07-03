@@ -19,6 +19,7 @@
 use std::{collections::HashSet, sync::Arc};
 
 use bytes::Bytes;
+use crabka_log::Offset;
 use crabka_metadata::MetadataImage;
 use crabka_protocol::records::{Record, RecordBatch};
 use dashmap::DashMap;
@@ -63,7 +64,7 @@ pub(crate) type ShareErrorCode = i16;
 
 /// `(state_epoch, leader_epoch, start_offset, delivery_complete_count)` as
 /// returned by [`ShareCoordinator::read_summary`].
-pub(crate) type ShareStateSummary = (StateEpoch, LeaderEpoch, i64, i32);
+pub(crate) type ShareStateSummary = (StateEpoch, LeaderEpoch, Offset, i32);
 
 /// `start_offset` sentinel meaning "no persisted share state": tells the
 /// share-partition leader to initialize delivery from scratch (KIP-932).
@@ -162,7 +163,7 @@ impl ShareCoordinator {
         topic_id: uuid::Uuid,
         partition: i32,
         state_epoch: StateEpoch,
-        start_offset: i64,
+        start_offset: Offset,
     ) -> Result<(), ShareErrorCode> {
         let map_key = (group.to_string(), topic_id, partition);
         let state_partition = self.state_partition_for(group, &topic_id, partition);
@@ -222,7 +223,7 @@ impl ShareCoordinator {
         partition: i32,
         state_epoch: StateEpoch,
         leader_epoch: LeaderEpoch,
-        start_offset: i64,
+        start_offset: Offset,
         delivery_complete_count: i32,
         batches: Vec<StateBatch>,
     ) -> Result<(), ShareErrorCode> {
@@ -375,7 +376,7 @@ impl ShareCoordinator {
         state_partition: StatePartitionIndex,
         key: ShareStateKey,
         value: Option<Bytes>,
-    ) -> Result<i64, BrokerError> {
+    ) -> Result<Offset, BrokerError> {
         let part = self
             .partitions
             .get(bootstrap::TOPIC, state_partition)
@@ -490,7 +491,7 @@ impl ShareCoordinator {
 
                 for batch in &out.batches {
                     for rec in &batch.records {
-                        let rec_offset = batch.base_offset + i64::from(rec.offset_delta);
+                        let rec_offset = Offset(batch.base_offset + i64::from(rec.offset_delta));
                         let Some(key_bytes) = rec.key.as_ref() else {
                             continue;
                         };
@@ -515,7 +516,7 @@ impl ShareCoordinator {
 
                         self.replay_value(&key, &map_key, value, rec_offset, p);
                     }
-                    offset = batch.base_offset + i64::from(batch.last_offset_delta) + 1;
+                    offset = Offset(batch.base_offset + i64::from(batch.last_offset_delta) + 1);
                 }
             }
         }
@@ -529,7 +530,7 @@ impl ShareCoordinator {
         key: &ShareStateKey,
         map_key: &ShareStateKey3,
         value: &Bytes,
-        rec_offset: i64,
+        rec_offset: Offset,
         partition: i32,
     ) {
         let entry = self
@@ -585,8 +586,8 @@ mod tests {
 
     fn batch(first: i64, last: i64) -> StateBatch {
         StateBatch {
-            first_offset: first,
-            last_offset: last,
+            first_offset: Offset(first),
+            last_offset: Offset(last),
             delivery_state: 0,
             delivery_count: 1,
         }
@@ -635,13 +636,13 @@ mod tests {
         lead_all(&coord).await;
         let tid = uuid::Uuid::from_bytes([3; 16]);
 
-        coord.initialize("g", tid, 0, 5, 100).await.unwrap();
+        coord.initialize("g", tid, 0, 5, Offset(100)).await.unwrap();
 
         let st = coord.read("g", tid, 0).await.expect("present");
         assert!(st.state_epoch == 5);
-        assert!(st.start_offset == 100);
+        assert!(st.start_offset == Offset(100));
         let summary = coord.read_summary("g", tid, 0).await.expect("present");
-        assert!(summary == (5, 0, 100, 0));
+        assert!(summary == (5, 0, Offset(100), 0));
     }
 
     #[tokio::test]
@@ -651,8 +652,11 @@ mod tests {
         lead_all(&coord).await;
         let tid = uuid::Uuid::from_bytes([4; 16]);
 
-        coord.initialize("g", tid, 0, 5, 0).await.unwrap();
-        let err = coord.initialize("g", tid, 0, 5, 0).await.unwrap_err();
+        coord.initialize("g", tid, 0, 5, Offset(0)).await.unwrap();
+        let err = coord
+            .initialize("g", tid, 0, 5, Offset(0))
+            .await
+            .unwrap_err();
         assert!(err == crate::codes::FENCED_STATE_EPOCH);
     }
 
@@ -663,21 +667,21 @@ mod tests {
         lead_all(&coord).await;
         let tid = uuid::Uuid::from_bytes([5; 16]);
 
-        coord.initialize("g", tid, 0, 1, 0).await.unwrap();
+        coord.initialize("g", tid, 0, 1, Offset(0)).await.unwrap();
         coord
-            .write("g", tid, 0, 1, 2, 50, 7, vec![batch(50, 59)])
+            .write("g", tid, 0, 1, 2, Offset(50), 7, vec![batch(50, 59)])
             .await
             .unwrap();
 
         let st = coord.read("g", tid, 0).await.expect("present");
         check!(st.state_epoch == 1);
         check!(st.leader_epoch == 2);
-        check!(st.start_offset == 50);
+        check!(st.start_offset == Offset(50));
         check!(st.delivery_complete_count == 7);
         check!(st.state_batches == vec![batch(50, 59)]);
 
         let summary = coord.read_summary("g", tid, 0).await.expect("present");
-        assert!(summary == (1, 2, 50, 7));
+        assert!(summary == (1, 2, Offset(50), 7));
     }
 
     #[tokio::test]
@@ -687,9 +691,9 @@ mod tests {
         lead_all(&coord).await;
         let tid = uuid::Uuid::from_bytes([6; 16]);
 
-        coord.initialize("g", tid, 0, 5, 0).await.unwrap();
+        coord.initialize("g", tid, 0, 5, Offset(0)).await.unwrap();
         let err = coord
-            .write("g", tid, 0, 4, 0, 0, 0, vec![])
+            .write("g", tid, 0, 4, 0, Offset(0), 0, vec![])
             .await
             .unwrap_err();
         assert!(err == crate::codes::FENCED_STATE_EPOCH);
@@ -702,10 +706,13 @@ mod tests {
         lead_all(&coord).await;
         let tid = uuid::Uuid::from_bytes([7; 16]);
 
-        coord.initialize("g", tid, 0, 1, 0).await.unwrap();
-        coord.write("g", tid, 0, 1, 5, 0, 0, vec![]).await.unwrap();
+        coord.initialize("g", tid, 0, 1, Offset(0)).await.unwrap();
+        coord
+            .write("g", tid, 0, 1, 5, Offset(0), 0, vec![])
+            .await
+            .unwrap();
         let err = coord
-            .write("g", tid, 0, 1, 4, 0, 0, vec![])
+            .write("g", tid, 0, 1, 4, Offset(0), 0, vec![])
             .await
             .unwrap_err();
         assert!(err == crate::codes::FENCED_LEADER_EPOCH);
@@ -718,7 +725,7 @@ mod tests {
         lead_all(&coord).await;
         let tid = uuid::Uuid::from_bytes([8; 16]);
 
-        coord.initialize("g", tid, 0, 1, 0).await.unwrap();
+        coord.initialize("g", tid, 0, 1, Offset(0)).await.unwrap();
         assert!(coord.read("g", tid, 0).await.is_some());
         coord.delete("g", tid, 0).await.unwrap();
         assert!(coord.read("g", tid, 0).await.is_none());
@@ -740,11 +747,11 @@ mod tests {
         lead_all(&coord).await;
         let tid = uuid::Uuid::from_bytes([9; 16]);
 
-        coord.initialize("g", tid, 0, 1, 0).await.unwrap();
+        coord.initialize("g", tid, 0, 1, Offset(0)).await.unwrap();
         for i in 0..3 {
             let base = i64::from(i) * 10;
             coord
-                .write("g", tid, 0, 1, 1, 0, 0, vec![batch(base, base + 9)])
+                .write("g", tid, 0, 1, 1, Offset(0), 0, vec![batch(base, base + 9)])
                 .await
                 .unwrap();
         }
@@ -767,9 +774,9 @@ mod tests {
         {
             let coord = ShareCoordinator::new(1, reg.clone(), ShareCoordinatorConfig::default());
             lead_all(&coord).await;
-            coord.initialize("g", tid, 0, 2, 0).await.unwrap();
+            coord.initialize("g", tid, 0, 2, Offset(0)).await.unwrap();
             coord
-                .write("g", tid, 0, 2, 3, 20, 4, vec![batch(20, 29)])
+                .write("g", tid, 0, 2, 3, Offset(20), 4, vec![batch(20, 29)])
                 .await
                 .unwrap();
         }
@@ -785,7 +792,7 @@ mod tests {
         let st = recovered.read("g", tid, 0).await.expect("recovered");
         check!(st.state_epoch == 2);
         check!(st.leader_epoch == 3);
-        check!(st.start_offset == 20);
+        check!(st.start_offset == Offset(20));
         check!(st.delivery_complete_count == 4);
         check!(st.state_batches == vec![batch(20, 29)]);
     }

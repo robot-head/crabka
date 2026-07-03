@@ -12,7 +12,7 @@
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use crabka_client_core::{ClientError, Connection, ConnectionOptions};
-use crabka_log::{Log, LogConfig};
+use crabka_log::{Log, LogConfig, Offset};
 use crabka_protocol::{
     owned::{
         fetch_request::{FetchPartition, FetchRequest, FetchTopic, ReplicaState},
@@ -277,7 +277,7 @@ fn follower_partition_fetch_cap(cfg: &Config) -> FetchThrottleDecision {
 /// `partition_max_bytes`. Pass `FETCH_MAX_BYTES` when unthrottled.
 fn build_fetch_request(
     cfg: &Config,
-    fetch_offset: i64,
+    fetch_offset: Offset,
     partition_max_bytes_cap: i32,
 ) -> FetchRequest {
     let leader_epoch = cfg
@@ -317,7 +317,8 @@ fn build_fetch_request(
             topic_id: cfg.topic_id,
             partitions: vec![FetchPartition {
                 partition: cfg.partition,
-                fetch_offset,
+                // Unwrap the `Offset` into the wire `i64` field.
+                fetch_offset: fetch_offset.0,
                 current_leader_epoch: leader_epoch,
                 last_fetched_epoch,
                 partition_max_bytes: partition_max_bytes_cap,
@@ -397,7 +398,8 @@ async fn handle_response(mut resp: FetchResponse, cfg: &Config) -> LoopAction {
                 }
                 let end_offset = part_resp.diverging_epoch.end_offset;
                 if let Some(part) = cfg.partitions.get(&cfg.topic, cfg.partition) {
-                    match part.truncate_to(end_offset).await {
+                    // Wrap the wire `i64` into `Offset` for the log-layer call.
+                    match part.truncate_to(Offset(end_offset)).await {
                         Ok(()) => {
                             // Drop idempotent-producer dedup entries for the
                             // truncated tail, or a retried batch deduplicates
@@ -459,8 +461,8 @@ async fn handle_response(mut resp: FetchResponse, cfg: &Config) -> LoopAction {
             }
             // KIP-392: record the leader's high watermark so consumer reads
             // served from this follower are bounded correctly. Done on every
-            // successful response, including empty ones.
-            part.set_follower_hw(part_resp.high_watermark).await;
+            // successful response, including empty ones. Wrap the wire `i64`.
+            part.set_follower_hw(Offset(part_resp.high_watermark)).await;
             LoopAction::Continue
         }
         codes::OFFSET_OUT_OF_RANGE => {
@@ -489,7 +491,8 @@ async fn handle_response(mut resp: FetchResponse, cfg: &Config) -> LoopAction {
                 "replicator.out_of_range; resetting local log to leader log_start"
             );
             if let Some(part) = cfg.partitions.get(&cfg.topic, cfg.partition) {
-                match part.reset_to(leader_log_start).await {
+                // Wrap the wire `i64` into `Offset` for the log-layer call.
+                match part.reset_to(Offset(leader_log_start)).await {
                     Ok(()) => {
                         // The log restarts empty at leader_log_start; drop
                         // idempotent-producer dedup entries at/above it so a
@@ -623,8 +626,8 @@ async fn handle_epoch_fence(cfg: &Config) -> Result<(), String> {
     }
 
     if end_offset >= 0 {
-        // Truncate to the epoch boundary.
-        if let Err(e) = part.truncate_to(end_offset).await {
+        // Truncate to the epoch boundary. Wrap the wire `i64` into `Offset`.
+        if let Err(e) = part.truncate_to(Offset(end_offset)).await {
             warn!(
                 topic = %cfg.topic,
                 partition = cfg.partition,
@@ -646,7 +649,7 @@ async fn handle_epoch_fence(cfg: &Config) -> Result<(), String> {
     } else {
         // end_offset == -1 (UNDEFINED_OFFSET): no epoch info available;
         // reset to 0 as a safe fallback.
-        if let Err(e) = part.reset_to(0).await {
+        if let Err(e) = part.reset_to(Offset(0)).await {
             warn!(
                 topic = %cfg.topic,
                 partition = cfg.partition,
@@ -944,7 +947,7 @@ mod tests {
     fn build_fetch_request_populates_replica_and_partition_fields() {
         let (cfg, _log_dir) = test_config(image_with_leader(LEADER_ID));
 
-        let req = build_fetch_request(&cfg, 123, 456);
+        let req = build_fetch_request(&cfg, Offset(123), 456);
 
         let rid = i32::try_from(NODE_ID).unwrap();
         let expected = FetchRequest {
@@ -989,7 +992,7 @@ mod tests {
         let (mut cfg, _log_dir) = test_config(image_with_leader(LEADER_ID));
         cfg.node_id = NodeId::from(i32::MAX as u32) + 1;
 
-        let req = build_fetch_request(&cfg, 0, FETCH_MAX_BYTES);
+        let req = build_fetch_request(&cfg, Offset(0), FETCH_MAX_BYTES);
 
         assert!(req.replica_id == -1);
         assert!(req.replica_state.replica_id == -1);

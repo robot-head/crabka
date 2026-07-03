@@ -9,6 +9,7 @@ use std::{
 };
 
 use bytes::Bytes;
+use crabka_log::Offset;
 
 /// Five-state machine for a consumer group, matching the Apache Kafka
 /// classic protocol (KIP-62 / KIP-394).
@@ -159,7 +160,7 @@ pub fn select_protocol(members: &HashMap<String, Member>) -> Option<String> {
 /// [`Group::committed_offsets`].
 #[derive(Debug, Clone)]
 pub struct OffsetEntry {
-    pub offset: i64,
+    pub offset: Offset,
     pub leader_epoch: i32,
     pub metadata: String,
     pub commit_timestamp_ms: i64,

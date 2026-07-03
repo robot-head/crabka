@@ -325,7 +325,7 @@ async fn append_batch(
     for topic in &req.topics {
         for part in &topic.partitions {
             let value = OffsetCommitValue {
-                offset: part.committed_offset,
+                offset: crabka_log::Offset(part.committed_offset),
                 leader_epoch: part.committed_leader_epoch,
                 metadata: part.committed_metadata.clone().unwrap_or_default(),
                 commit_timestamp_ms: now_ms,
@@ -381,7 +381,7 @@ async fn update_committed(req: &OffsetCommitRequest, handle: &Arc<GroupActorHand
             entries.push((
                 (topic.name.clone(), part.partition_index),
                 OffsetEntry {
-                    offset: part.committed_offset,
+                    offset: crabka_log::Offset(part.committed_offset),
                     leader_epoch: part.committed_leader_epoch,
                     metadata: part.committed_metadata.clone().unwrap_or_default(),
                     commit_timestamp_ms: now_ms,

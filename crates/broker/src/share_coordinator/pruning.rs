@@ -8,13 +8,15 @@
 //! snapshot write — never above the minimum, so no key loses its latest
 //! snapshot.
 
+use crabka_log::Offset;
+
 /// Smallest latest-snapshot offset across all live keys on a state partition.
 ///
 /// Trimming the log below this is safe: every key retains its latest snapshot
 /// record (it sits at or after this offset). Returns `None` when there are no
 /// keys (nothing to prune).
 #[must_use]
-pub fn redundant_offset(per_key_last_snapshot: &[i64]) -> Option<i64> {
+pub fn redundant_offset(per_key_last_snapshot: &[Offset]) -> Option<Offset> {
     per_key_last_snapshot.iter().copied().min()
 }
 
@@ -31,16 +33,19 @@ mod tests {
 
     #[test]
     fn single_key_is_itself() {
-        assert!(redundant_offset(&[42]) == Some(42));
+        assert!(redundant_offset(&[Offset(42)]) == Some(Offset(42)));
     }
 
     #[test]
     fn picks_minimum() {
-        assert!(redundant_offset(&[100, 30, 75, 30, 200]) == Some(30));
+        assert!(
+            redundant_offset(&[Offset(100), Offset(30), Offset(75), Offset(30), Offset(200)])
+                == Some(Offset(30))
+        );
     }
 
     #[test]
     fn min_includes_zero() {
-        assert!(redundant_offset(&[0, 5, 9]) == Some(0));
+        assert!(redundant_offset(&[Offset(0), Offset(5), Offset(9)]) == Some(Offset(0)));
     }
 }

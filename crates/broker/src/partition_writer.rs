@@ -100,7 +100,7 @@ fn storage_failure_error(
 fn append_produce_batch(
     log: &Mutex<Log>,
     datas: Vec<ProduceData>,
-) -> (Vec<Result<i64, crate::error::BrokerError>>, i64) {
+) -> (Vec<Result<Offset, crate::error::BrokerError>>, Offset) {
     let mut guard = lock_log(log);
     let target = guard.config_snapshot().compression_type;
     let mut results = Vec::with_capacity(datas.len());
@@ -120,12 +120,11 @@ fn append_produce_batch(
                     .map_err(crate::error::BrokerError::from)
             }
         };
-        // Unwrap the log-layer `Offset` back into broker's `i64` world at the seam.
-        results.push(r.map(|o| o.0));
+        results.push(r);
     }
     // Read the post-append LEO once under the same lock so the HW recompute
     // reflects the whole group.
-    let leo = guard.log_end_offset().0;
+    let leo = guard.log_end_offset();
     (results, leo)
 }
 
@@ -138,7 +137,7 @@ fn append_produce_batch(
 async fn run_produce_append_batch(
     log: Arc<Mutex<Log>>,
     datas: Vec<ProduceData>,
-) -> Result<(Vec<Result<i64, crate::error::BrokerError>>, i64), crate::error::BrokerError> {
+) -> Result<(Vec<Result<Offset, crate::error::BrokerError>>, Offset), crate::error::BrokerError> {
     match Handle::current().runtime_flavor() {
         RuntimeFlavor::MultiThread => catch_unwind(AssertUnwindSafe(|| {
             tokio::task::block_in_place(move || append_produce_batch(&log, datas))
@@ -301,7 +300,7 @@ pub async fn run(
                 let log_for_blocking = log.clone();
                 let join = tokio::task::spawn_blocking(move || {
                     lock_log(&log_for_blocking)
-                        .truncate_to(Offset(offset))
+                        .truncate_to(offset)
                         .map_err(crate::error::BrokerError::from)
                 });
                 let result = match join.await {
@@ -324,7 +323,7 @@ pub async fn run(
                 // can be satisfied by a stale HW pointing past the truncated end
                 // of the log (and a consumer told to read vanished offsets).
                 if ok {
-                    let new_leo = lock_log(&log).log_end_offset().0;
+                    let new_leo = lock_log(&log).log_end_offset();
                     replica_state
                         .lock()
                         .await
@@ -335,7 +334,7 @@ pub async fn run(
                 let log_for_blocking = log.clone();
                 let join = tokio::task::spawn_blocking(move || {
                     lock_log(&log_for_blocking)
-                        .reset_to(Offset(new_base))
+                        .reset_to(new_base)
                         .map_err(crate::error::BrokerError::from)
                 });
                 let result = match join.await {
@@ -357,7 +356,7 @@ pub async fn run(
                 // so a stale HW can't satisfy an acks=all gate for a vanished
                 // offset (see the Truncate handler).
                 if ok {
-                    let new_leo = lock_log(&log).log_end_offset().0;
+                    let new_leo = lock_log(&log).log_end_offset();
                     replica_state
                         .lock()
                         .await
@@ -368,9 +367,7 @@ pub async fn run(
                 let log_for_blocking = log.clone();
                 let join = tokio::task::spawn_blocking(move || {
                     lock_log(&log_for_blocking)
-                        // Unwrap the trimmed `Offset` back to broker's `i64` ack.
-                        .trim_to_offset(Offset(new_start))
-                        .map(|o| o.0)
+                        .trim_to_offset(new_start)
                         .map_err(crate::error::BrokerError::from)
                 });
                 let result = match join.await {
@@ -445,7 +442,7 @@ pub async fn run(
             #[cfg(any(test, feature = "test-helpers"))]
             WriterMessage::TestSetLogStart { new_start, ack } => {
                 let result = lock_log(&log)
-                    .set_log_start_offset(Offset(new_start))
+                    .set_log_start_offset(new_start)
                     .map_err(crate::error::BrokerError::from);
                 let _ = ack.send(result);
             }
@@ -649,7 +646,7 @@ mod tests {
         .expect("send job");
 
         let assigned = ack_rx.await.expect("ack recv").expect("append ok");
-        assert!(assigned == 0);
+        assert!(assigned == Offset(0));
 
         // Second append assigns offset 3.
         let (ack, ack_rx) = oneshot::channel();
@@ -659,7 +656,7 @@ mod tests {
         }))
         .await
         .expect("send job 2");
-        assert!(ack_rx.await.expect("ack recv 2").expect("append 2 ok") == 3);
+        assert!(ack_rx.await.expect("ack recv 2").expect("append 2 ok") == Offset(3));
 
         drop(tx);
         writer.await.expect("writer join");
@@ -703,13 +700,13 @@ mod tests {
 
         let mut acks = acks.into_iter();
         let first = acks.next().expect("first ack");
-        assert!(first.await.expect("ack 0").expect("append 0 ok") == 0);
+        assert!(first.await.expect("ack 0").expect("append 0 ok") == Offset(0));
         for (idx, mut ack) in acks.enumerate() {
             let assigned = ack
                 .try_recv()
                 .expect("same group ack is ready")
                 .expect("append ok");
-            assert!(assigned == i64::try_from(idx + 1).unwrap());
+            assert!(assigned.0 == i64::try_from(idx + 1).unwrap());
         }
         assert!(
             log.lock().unwrap().log_end_offset()
@@ -752,7 +749,7 @@ mod tests {
         .expect("send job");
 
         let assigned = ack_rx.await.expect("ack recv").expect("append ok");
-        assert!(assigned == 0);
+        assert!(assigned == Offset(0));
 
         drop(tx);
         writer.await.expect("writer join");
@@ -808,7 +805,7 @@ mod tests {
         .await
         .expect("send verbatim job");
         let assigned = ack_rx.await.expect("ack").expect("append ok");
-        assert!(assigned == 0);
+        assert!(assigned == Offset(0));
 
         // Read back: bytes 21.. must equal the producer's, only offset+epoch changed.
         let r = log
@@ -848,8 +845,8 @@ mod tests {
         let (results, leo) = append_produce_batch(&log, vec![ProduceData::Owned(original)]);
         assert!(results.len() == 1);
         let assigned = results.into_iter().next().unwrap().expect("append ok");
-        assert!(assigned == 0);
-        assert!(leo == 2);
+        assert!(assigned == Offset(0));
+        assert!(leo == Offset(2));
 
         let read = log
             .lock()
@@ -1022,9 +1019,12 @@ mod tests {
         assert!(log.lock().unwrap().log_end_offset().0 == 4);
 
         let (ack, ack_rx) = oneshot::channel();
-        tx.send(WriterMessage::Truncate { offset: 0, ack })
-            .await
-            .expect("send truncate");
+        tx.send(WriterMessage::Truncate {
+            offset: Offset(0),
+            ack,
+        })
+        .await
+        .expect("send truncate");
         ack_rx.await.expect("ack").expect("truncate ok");
         assert!(log.lock().unwrap().log_end_offset().0 == 0);
 
@@ -1076,7 +1076,7 @@ mod tests {
             .await
             .expect("hw_advance_notify did not fire");
 
-        assert!(replica_state.lock().await.hw == 2);
+        assert!(replica_state.lock().await.hw == Offset(2));
 
         drop(tx);
         writer.await.expect("writer join");
@@ -1123,7 +1123,7 @@ mod tests {
         .expect("send job");
         ack_rx.await.expect("ack").expect("append ok");
 
-        assert!(replica_state.lock().await.hw == 0);
+        assert!(replica_state.lock().await.hw == Offset(0));
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(10), waiter)
                 .await
@@ -1215,12 +1215,15 @@ mod tests {
         ));
 
         let (ack, ack_rx) = tokio::sync::oneshot::channel();
-        tx.send(WriterMessage::TrimToOffset { new_start: 3, ack })
-            .await
-            .expect("send");
+        tx.send(WriterMessage::TrimToOffset {
+            new_start: Offset(3),
+            ack,
+        })
+        .await
+        .expect("send");
         let new_start = ack_rx.await.expect("ack").expect("trim ok");
-        assert!(new_start >= 3);
-        assert!(log.lock().expect("lock").log_start_offset().0 == new_start);
+        assert!(new_start >= Offset(3));
+        assert!(log.lock().expect("lock").log_start_offset() == new_start);
 
         drop(tx);
         writer.await.expect("writer join");
@@ -1264,7 +1267,7 @@ mod tests {
         .expect("send job");
         ack_rx.await.expect("ack").expect("append ok");
 
-        assert!(replica_state.lock().await.hw == 0);
+        assert!(replica_state.lock().await.hw == Offset(0));
 
         drop(tx);
         writer.await.expect("writer join");

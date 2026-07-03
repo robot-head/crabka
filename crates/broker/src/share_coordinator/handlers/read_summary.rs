@@ -58,7 +58,7 @@ pub(crate) fn handle(
                             partition: pd.partition,
                             state_epoch,
                             leader_epoch,
-                            start_offset,
+                            start_offset: start_offset.0,
                             delivery_complete_count,
                             ..Default::default()
                         },
@@ -100,6 +100,7 @@ pub(crate) fn handle(
 #[cfg(test)]
 mod tests {
     use assert2::assert;
+    use crabka_log::Offset;
     use crabka_protocol::{
         UnknownTaggedFields,
         owned::{
@@ -158,7 +159,7 @@ mod tests {
         let wire_topic_id = ProtoUuid(*topic_id.as_bytes());
         broker
             .share_coordinator
-            .initialize("share-group", topic_id, 4, 17, 90)
+            .initialize("share-group", topic_id, 4, 17, Offset(90))
             .await
             .expect("initialize state");
         broker
@@ -169,7 +170,7 @@ mod tests {
                 4,
                 17,
                 3,
-                101,
+                Offset(101),
                 9,
                 vec![super::super::test_support::batch(101, 105)],
             )

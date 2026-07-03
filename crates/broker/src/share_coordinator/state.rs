@@ -6,17 +6,19 @@
 //! share-partition start offset (SPSO), drop in-memory batches fully below
 //! it, and upsert written batches keyed by their first offset.
 
+use crabka_log::Offset;
+
 use crate::share_coordinator::persistence::{ShareSnapshotValue, ShareUpdateValue, StateBatch};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SharePartitionState {
     pub state_epoch: i32,
     pub leader_epoch: i32,
-    pub start_offset: i64,
+    pub start_offset: Offset,
     pub delivery_complete_count: i32,
     pub state_batches: Vec<StateBatch>,
     pub snapshot_epoch: i64,
-    pub last_snapshot_offset: i64,
+    pub last_snapshot_offset: Offset,
     pub updates_since_snapshot: u32,
 }
 
@@ -40,7 +42,7 @@ impl SharePartitionState {
 
     /// Advance the SPSO, drop batches fully below it, and upsert each
     /// written batch by its `first_offset` (sorted ascending afterwards).
-    pub fn merge_batches(&mut self, new_start: i64, written: &[StateBatch]) {
+    pub fn merge_batches(&mut self, new_start: Offset, written: &[StateBatch]) {
         if new_start > self.start_offset {
             self.start_offset = new_start;
         }
@@ -78,8 +80,8 @@ mod tests {
 
     fn batch(first: i64, last: i64) -> StateBatch {
         StateBatch {
-            first_offset: first,
-            last_offset: last,
+            first_offset: Offset(first),
+            last_offset: Offset(last),
             delivery_state: 0,
             delivery_count: 1,
         }
@@ -92,18 +94,18 @@ mod tests {
             snapshot_epoch: 1,
             state_epoch: 2,
             leader_epoch: 3,
-            start_offset: 0,
+            start_offset: Offset(0),
             delivery_complete_count: 0,
             state_batches: vec![batch(0, 9), batch(10, 19), batch(20, 29)],
         });
         assert!(s.state_epoch == 2);
-        assert!(s.start_offset == 0);
+        assert!(s.start_offset == Offset(0));
 
         // Advance SPSO past the first two batches and write a new one.
         s.apply_update(&ShareUpdateValue {
             snapshot_epoch: 1,
             leader_epoch: 4,
-            start_offset: 20,
+            start_offset: Offset(20),
             delivery_complete_count: 7,
             state_batches: vec![batch(30, 39)],
         });
@@ -113,11 +115,11 @@ mod tests {
         let expected = SharePartitionState {
             state_epoch: 2,
             leader_epoch: 4,
-            start_offset: 20,
+            start_offset: Offset(20),
             delivery_complete_count: 7,
             state_batches: vec![batch(20, 29), batch(30, 39)],
             snapshot_epoch: 1,
-            last_snapshot_offset: 0,
+            last_snapshot_offset: Offset(0),
             updates_since_snapshot: 1,
         };
         assert!(s == expected);
@@ -131,11 +133,11 @@ mod tests {
         };
         // Overwrite batch starting at 10 with a longer one and add a new one.
         s.merge_batches(
-            0,
+            Offset(0),
             &[
                 StateBatch {
-                    first_offset: 10,
-                    last_offset: 25,
+                    first_offset: Offset(10),
+                    last_offset: Offset(25),
                     delivery_state: 2,
                     delivery_count: 5,
                 },
@@ -146,23 +148,23 @@ mod tests {
         let updated = s
             .state_batches
             .iter()
-            .find(|b| b.first_offset == 10)
+            .find(|b| b.first_offset == Offset(10))
             .unwrap();
-        assert!(updated.last_offset == 25);
+        assert!(updated.last_offset == Offset(25));
         assert!(updated.delivery_count == 5);
         // Sorted ascending by first_offset.
-        let firsts: Vec<i64> = s.state_batches.iter().map(|b| b.first_offset).collect();
-        assert!(firsts == vec![0, 10, 30]);
+        let firsts: Vec<Offset> = s.state_batches.iter().map(|b| b.first_offset).collect();
+        assert!(firsts == vec![Offset(0), Offset(10), Offset(30)]);
     }
 
     #[test]
     fn merge_drops_written_batch_below_spso() {
         let mut s = SharePartitionState {
-            start_offset: 50,
+            start_offset: Offset(50),
             ..Default::default()
         };
         // A written batch entirely below the SPSO is ignored.
-        s.merge_batches(50, &[batch(0, 9)]);
+        s.merge_batches(Offset(50), &[batch(0, 9)]);
         assert!(s.state_batches.is_empty());
     }
 
@@ -171,7 +173,7 @@ mod tests {
         let s = SharePartitionState {
             snapshot_epoch: 4,
             state_epoch: 1,
-            start_offset: 10,
+            start_offset: Offset(10),
             state_batches: vec![batch(10, 19)],
             ..Default::default()
         };
@@ -180,7 +182,7 @@ mod tests {
             snapshot_epoch: 5,
             state_epoch: 1,
             leader_epoch: 0,
-            start_offset: 10,
+            start_offset: Offset(10),
             delivery_complete_count: 0,
             state_batches: vec![batch(10, 19)],
         };

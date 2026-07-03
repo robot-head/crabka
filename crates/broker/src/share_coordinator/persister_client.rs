@@ -21,6 +21,7 @@
 
 use std::sync::Arc;
 
+use crabka_log::Offset;
 use crabka_metadata::NodeId;
 use crabka_protocol::{
     owned::{
@@ -108,7 +109,7 @@ impl SharePersister {
         topic_id: uuid::Uuid,
         partition: i32,
         state_epoch: i32,
-        start_offset: i64,
+        start_offset: Offset,
     ) -> Result<(), BrokerError> {
         // Lazily create `__share_group_state` and refresh local leadership —
         // the lifecycle hook is the first thing to touch the topic when no
@@ -138,7 +139,7 @@ impl SharePersister {
                 partitions: vec![InitPartitionData {
                     partition,
                     state_epoch,
-                    start_offset,
+                    start_offset: start_offset.0,
                     ..Default::default()
                 }],
                 ..Default::default()
@@ -262,20 +263,20 @@ impl SharePersister {
         Ok(Some(SharePartitionState {
             state_epoch: pr.state_epoch,
             leader_epoch: 0,
-            start_offset: pr.start_offset,
+            start_offset: Offset(pr.start_offset),
             delivery_complete_count: 0,
             state_batches: pr
                 .state_batches
                 .into_iter()
                 .map(|b| StateBatch {
-                    first_offset: b.first_offset,
-                    last_offset: b.last_offset,
+                    first_offset: Offset(b.first_offset),
+                    last_offset: Offset(b.last_offset),
                     delivery_state: b.delivery_state,
                     delivery_count: b.delivery_count,
                 })
                 .collect(),
             snapshot_epoch: 0,
-            last_snapshot_offset: 0,
+            last_snapshot_offset: Offset(0),
             updates_since_snapshot: 0,
         }))
     }
@@ -295,7 +296,7 @@ impl SharePersister {
         partition: i32,
         state_epoch: i32,
         leader_epoch: i32,
-        start_offset: i64,
+        start_offset: Offset,
         delivery_complete_count: i32,
         batches: Vec<StateBatch>,
     ) -> Result<(), BrokerError> {
@@ -333,13 +334,13 @@ impl SharePersister {
                     partition,
                     state_epoch,
                     leader_epoch,
-                    start_offset,
+                    start_offset: start_offset.0,
                     delivery_complete_count,
                     state_batches: batches
                         .into_iter()
                         .map(|b| ProtoStateBatch {
-                            first_offset: b.first_offset,
-                            last_offset: b.last_offset,
+                            first_offset: b.first_offset.0,
+                            last_offset: b.last_offset.0,
                             delivery_state: b.delivery_state,
                             delivery_count: b.delivery_count,
                             ..Default::default()

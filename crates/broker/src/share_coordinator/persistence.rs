@@ -12,6 +12,7 @@
 //! this is a different topic with its own discriminator space.
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use crabka_log::Offset;
 use crabka_protocol::ProtocolError;
 use uuid::Uuid;
 
@@ -69,8 +70,8 @@ pub fn parse_state_key(mut buf: &[u8]) -> Result<ShareStateKey, BrokerError> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateBatch {
-    pub first_offset: i64,
-    pub last_offset: i64,
+    pub first_offset: Offset,
+    pub last_offset: Offset,
     pub delivery_state: i8,
     pub delivery_count: i16,
 }
@@ -80,7 +81,7 @@ pub struct ShareSnapshotValue {
     pub snapshot_epoch: i64,
     pub state_epoch: i32,
     pub leader_epoch: i32,
-    pub start_offset: i64,
+    pub start_offset: Offset,
     pub delivery_complete_count: i32,
     pub state_batches: Vec<StateBatch>,
 }
@@ -93,7 +94,7 @@ impl ShareSnapshotValue {
         buf.put_i64(self.snapshot_epoch);
         buf.put_i32(self.state_epoch);
         buf.put_i32(self.leader_epoch);
-        buf.put_i64(self.start_offset);
+        buf.put_i64(self.start_offset.0);
         buf.put_i32(self.delivery_complete_count);
         put_batches(&mut buf, &self.state_batches);
         buf.freeze()
@@ -104,7 +105,7 @@ impl ShareSnapshotValue {
         let snapshot_epoch = get_i64(&mut buf)?;
         let state_epoch = get_i32(&mut buf)?;
         let leader_epoch = get_i32(&mut buf)?;
-        let start_offset = get_i64(&mut buf)?;
+        let start_offset = Offset(get_i64(&mut buf)?);
         let delivery_complete_count = get_i32(&mut buf)?;
         let state_batches = get_batches(&mut buf)?;
         Ok(Self {
@@ -122,7 +123,7 @@ impl ShareSnapshotValue {
 pub struct ShareUpdateValue {
     pub snapshot_epoch: i64,
     pub leader_epoch: i32,
-    pub start_offset: i64,
+    pub start_offset: Offset,
     pub delivery_complete_count: i32,
     pub state_batches: Vec<StateBatch>,
 }
@@ -134,7 +135,7 @@ impl ShareUpdateValue {
         buf.put_i16(0);
         buf.put_i64(self.snapshot_epoch);
         buf.put_i32(self.leader_epoch);
-        buf.put_i64(self.start_offset);
+        buf.put_i64(self.start_offset.0);
         buf.put_i32(self.delivery_complete_count);
         put_batches(&mut buf, &self.state_batches);
         buf.freeze()
@@ -144,7 +145,7 @@ impl ShareUpdateValue {
         let _v = get_i16(&mut buf)?;
         let snapshot_epoch = get_i64(&mut buf)?;
         let leader_epoch = get_i32(&mut buf)?;
-        let start_offset = get_i64(&mut buf)?;
+        let start_offset = Offset(get_i64(&mut buf)?);
         let delivery_complete_count = get_i32(&mut buf)?;
         let state_batches = get_batches(&mut buf)?;
         Ok(Self {
@@ -161,8 +162,8 @@ fn put_batches(buf: &mut BytesMut, batches: &[StateBatch]) {
     let n = i32::try_from(batches.len()).expect("batch count fits in i32");
     buf.put_i32(n);
     for b in batches {
-        buf.put_i64(b.first_offset);
-        buf.put_i64(b.last_offset);
+        buf.put_i64(b.first_offset.0);
+        buf.put_i64(b.last_offset.0);
         buf.put_i8(b.delivery_state);
         buf.put_i16(b.delivery_count);
     }
@@ -173,8 +174,8 @@ fn get_batches(buf: &mut &[u8]) -> Result<Vec<StateBatch>, BrokerError> {
     let cap = usize::try_from(n.max(0)).expect("non-negative");
     let mut out = Vec::with_capacity(cap);
     for _ in 0..n.max(0) {
-        let first_offset = get_i64(buf)?;
-        let last_offset = get_i64(buf)?;
+        let first_offset = Offset(get_i64(buf)?);
+        let last_offset = Offset(get_i64(buf)?);
         if buf.remaining() < 1 {
             return Err(BrokerError::Protocol(ProtocolError::InvalidValue(
                 "share-state batch buf < i8",
@@ -245,18 +246,18 @@ mod tests {
             snapshot_epoch: 5,
             state_epoch: 2,
             leader_epoch: 9,
-            start_offset: 100,
+            start_offset: Offset(100),
             delivery_complete_count: 4,
             state_batches: vec![
                 StateBatch {
-                    first_offset: 100,
-                    last_offset: 109,
+                    first_offset: Offset(100),
+                    last_offset: Offset(109),
                     delivery_state: 0,
                     delivery_count: 1,
                 },
                 StateBatch {
-                    first_offset: 110,
-                    last_offset: 119,
+                    first_offset: Offset(110),
+                    last_offset: Offset(119),
                     delivery_state: 2,
                     delivery_count: 3,
                 },
@@ -270,11 +271,11 @@ mod tests {
         let v = ShareUpdateValue {
             snapshot_epoch: 7,
             leader_epoch: 4,
-            start_offset: 200,
+            start_offset: Offset(200),
             delivery_complete_count: 11,
             state_batches: vec![StateBatch {
-                first_offset: 200,
-                last_offset: 250,
+                first_offset: Offset(200),
+                last_offset: Offset(250),
                 delivery_state: 1,
                 delivery_count: 2,
             }],
@@ -288,7 +289,7 @@ mod tests {
             snapshot_epoch: 0,
             state_epoch: 0,
             leader_epoch: 0,
-            start_offset: 0,
+            start_offset: Offset(0),
             delivery_complete_count: 0,
             state_batches: vec![],
         };
@@ -299,8 +300,8 @@ mod tests {
     fn update_value_multi_batch_round_trip() {
         let batches: Vec<StateBatch> = (0..5)
             .map(|i| StateBatch {
-                first_offset: i64::from(i) * 10,
-                last_offset: i64::from(i) * 10 + 9,
+                first_offset: Offset(i64::from(i) * 10),
+                last_offset: Offset(i64::from(i) * 10 + 9),
                 delivery_state: i8::try_from(i % 3).unwrap(),
                 delivery_count: i16::try_from(i + 1).unwrap(),
             })
@@ -308,7 +309,7 @@ mod tests {
         let v = ShareUpdateValue {
             snapshot_epoch: 3,
             leader_epoch: 1,
-            start_offset: 0,
+            start_offset: Offset(0),
             delivery_complete_count: 42,
             state_batches: batches,
         };
@@ -321,7 +322,7 @@ mod tests {
             snapshot_epoch: 1,
             state_epoch: 1,
             leader_epoch: 1,
-            start_offset: 0,
+            start_offset: Offset(0),
             delivery_complete_count: 1_234_567,
             state_batches: vec![],
         };

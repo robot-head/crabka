@@ -249,7 +249,8 @@ async fn offset_lag_for(
     };
     let leo = part.log_end_offset();
     let hw = part.high_watermark().await;
-    (leo - hw).max(0)
+    // Lag is a record-count delta between two offsets, not an offset.
+    (leo.0 - hw.0).max(0)
 }
 
 /// `current_log.LEO − future_log.LEO`, clamped to ≥ 0, for an
@@ -270,18 +271,18 @@ fn future_offset_lag(
         return 0;
     };
     let current_leo = part.log_end_offset();
-    let future_leo = future_logs
-        .get(&(topic.to_string(), partition))
-        .map_or(0, |e| {
-            e.value()
-                .future_log
-                .lock()
-                .expect("future log mutex poisoned")
-                // Unwrap the log-layer `Offset` into broker's `i64` world at the seam.
-                .log_end_offset()
-                .0
-        });
-    (current_leo - future_leo).max(0)
+    let future_leo =
+        future_logs
+            .get(&(topic.to_string(), partition))
+            .map_or(crabka_log::Offset(0), |e| {
+                e.value()
+                    .future_log
+                    .lock()
+                    .expect("future log mutex poisoned")
+                    .log_end_offset()
+            });
+    // Lag is a record-count delta between two offsets, not an offset.
+    (current_leo.0 - future_leo.0).max(0)
 }
 
 /// Best-effort absolute path string for a log dir, matching Kafka's

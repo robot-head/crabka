@@ -23,6 +23,7 @@
 //!   `TOPIC_AUTHORIZATION_FAILED (29)` on the rows of that topic.
 
 use bytes::{Bytes, BytesMut};
+use crabka_log::Offset;
 use crabka_metadata::{AclOperation, ResourceType};
 use crabka_protocol::{
     Decode, Encode,
@@ -229,7 +230,7 @@ async fn append_txn_batch(
         }
         for part in &topic.partitions {
             let value = OffsetCommitValue {
-                offset: part.committed_offset,
+                offset: Offset(part.committed_offset),
                 leader_epoch: part.committed_leader_epoch,
                 metadata: part.committed_metadata.clone().unwrap_or_default(),
                 commit_timestamp_ms: now_ms,
@@ -487,7 +488,7 @@ mod tests {
                 (
                     topic.as_str(),
                     *partition,
-                    e.offset,
+                    e.offset.0,
                     e.leader_epoch,
                     e.metadata.as_str(),
                     e.commit_timestamp_ms,

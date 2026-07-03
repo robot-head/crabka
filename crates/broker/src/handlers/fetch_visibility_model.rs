@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use stateright::{Checker, Model, Property};
 
-use super::compute_visibility_window;
+use super::{Offset, compute_visibility_window};
 
 const MAX_STATES: usize = 200_000;
 const MAX_DEPTH: usize = 40;
@@ -129,11 +129,11 @@ impl Model for VisModel {
                 let w = compute_visibility_window(
                     is_follower,
                     read_committed,
-                    last.log_start,
-                    last.hw,
-                    last.lso,
-                    last.log_end,
-                    fetch_offset,
+                    Offset(last.log_start),
+                    Offset(last.hw),
+                    Offset(last.lso),
+                    Offset(last.log_end),
+                    Offset(fetch_offset),
                 );
                 assert_fetch_contract(last, is_follower, read_committed, fetch_offset, &w);
                 None // probes never change state
@@ -189,8 +189,13 @@ fn assert_fetch_contract(
     fetch_offset: i64,
     w: &super::VisibilityWindow,
 ) {
+    // Unwrap the `Offset` window fields into this model's `i64` world.
+    let limit_offset = w.limit_offset.0;
+    let win_response_hw = w.response_hw.0;
+    let win_response_lso = w.response_lso.0;
+    let effective_lso = w.effective_lso.0;
     // Valid targets.
-    assert!(w.limit_offset >= 0 && w.response_hw >= 0 && w.response_lso >= 0);
+    assert!(limit_offset >= 0 && win_response_hw >= 0 && win_response_lso >= 0);
     // out_of_range / empty correctness.
     assert!(w.out_of_range == (fetch_offset < s.log_start));
     let upper = if is_follower { s.log_end } else { s.hw };
@@ -198,18 +203,18 @@ fn assert_fetch_contract(
         assert!(w.empty == (fetch_offset >= upper));
     }
     // Response single-source-of-truth contract (OOR and success paths share it).
-    assert!(w.response_hw == response_hw(is_follower, s.hw, s.log_end));
-    assert!(w.response_lso == response_lso(is_follower, read_committed, s.hw, s.lso, s.log_end));
+    assert!(win_response_hw == response_hw(is_follower, s.hw, s.log_end));
+    assert!(win_response_lso == response_lso(is_follower, read_committed, s.hw, s.lso, s.log_end));
     if is_follower {
         // Follower bound: serve up to the log-end (>= hw).
-        assert!(w.limit_offset == s.log_end && w.limit_offset >= s.hw);
+        assert!(limit_offset == s.log_end && limit_offset >= s.hw);
     } else {
         // No dirty read: never expose beyond the high-watermark.
-        assert!(w.limit_offset <= s.hw, "consumer fetch exposed beyond HW");
-        assert!(w.response_lso <= w.response_hw);
+        assert!(limit_offset <= s.hw, "consumer fetch exposed beyond HW");
+        assert!(win_response_lso <= win_response_hw);
         if read_committed {
-            assert!(w.effective_lso == s.lso.min(s.hw));
-            assert!(w.limit_offset <= s.lso.min(s.hw));
+            assert!(effective_lso == s.lso.min(s.hw));
+            assert!(limit_offset <= s.lso.min(s.hw));
         }
     }
 }

@@ -95,7 +95,7 @@ mod tests {
     use std::sync::Arc;
 
     use assert2::assert;
-    use crabka_log::{Log, LogConfig};
+    use crabka_log::{Log, LogConfig, Offset};
 
     use super::*;
 
@@ -135,7 +135,7 @@ mod tests {
         .expect("write audit record");
 
         let out = partition
-            .read_log(0, 1 << 20)
+            .read_log(Offset(0), 1 << 20)
             .expect("read audit partition");
         let records: Vec<_> = out.batches.iter().flat_map(|b| &b.records).collect();
 

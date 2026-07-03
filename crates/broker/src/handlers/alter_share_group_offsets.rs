@@ -163,7 +163,13 @@ async fn reset_partition(
         .map_err(|_| ())?
         .map_or(0, |s| s.state_epoch);
     persister
-        .initialize(gid, topic_id, partition, cur_epoch + 1, start_offset)
+        .initialize(
+            gid,
+            topic_id,
+            partition,
+            cur_epoch + 1,
+            crabka_log::Offset(start_offset),
+        )
         .await
         .map_err(|_| ())
 }
@@ -430,7 +436,7 @@ mod tests {
         let topic_id = uuid::Uuid::from_u128(0xABCD);
 
         persister
-            .initialize("g-reset", topic_id, 0, 4, 10)
+            .initialize("g-reset", topic_id, 0, 4, crabka_log::Offset(10))
             .await
             .expect("seed share state");
         reset_partition(&persister, "g-reset", topic_id, 0, 33)
@@ -443,7 +449,7 @@ mod tests {
             .expect("state present");
 
         assert!(state.state_epoch == 5);
-        assert!(state.start_offset == 33);
+        assert!(state.start_offset == crabka_log::Offset(33));
         broker_handle.shutdown().await;
     }
 }

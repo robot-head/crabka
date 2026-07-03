@@ -128,10 +128,12 @@ fn real_hwm(s: &DpState, base: Instant) -> i64 {
     for b in 0..NB as u8 {
         if b != leader && has(s.isr, b) {
             let leo = consistent_leo(&s.log[b as usize], leader_log);
-            rs.update_follower_leo(node(b), leo, leader_leo, base);
+            // Wrap this model's `i64` LEOs into `Offset` for the real HWM core.
+            rs.update_follower_leo(node(b), Offset(leo), Offset(leader_leo), base);
         }
     }
-    rs.recompute_hw_for_leader_append(leader_leo)
+    // Unwrap the recomputed `Offset` HWM back into this model's `i64` world.
+    rs.recompute_hw_for_leader_append(Offset(leader_leo)).0
 }
 
 /// The leader-epoch entries for a log: one entry per epoch change.
@@ -393,19 +395,19 @@ impl Model for DpModel {
                 let vw = compute_visibility_window(
                     false, // consumer, not follower
                     read_committed,
-                    0, // log_start
-                    s.hwm,
-                    s.hwm, // lso = hwm (no txns in v1)
-                    leader_log_len,
-                    fetch_offset,
+                    Offset(0), // log_start
+                    Offset(s.hwm),
+                    Offset(s.hwm), // lso = hwm (no txns in v1)
+                    Offset(leader_log_len),
+                    Offset(fetch_offset),
                 );
                 assert!(
-                    vw.limit_offset <= s.hwm,
+                    vw.limit_offset <= Offset(s.hwm),
                     "consumer limit {} exceeds HWM {}",
                     vw.limit_offset,
                     s.hwm
                 );
-                assert!(vw.response_hw == s.hwm, "response_hw drift");
+                assert!(vw.response_hw == Offset(s.hwm), "response_hw drift");
             }
             Act::Die(b) => {
                 s.live &= !(1 << b);

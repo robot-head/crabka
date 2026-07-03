@@ -433,7 +433,13 @@ async fn reconcile_share_state(
     for (tid, partition) in to_init {
         let topic_uuid = uuid::Uuid::from_bytes(tid.0);
         match persister
-            .initialize(&state.group_id, topic_uuid, partition, state_epoch, 0)
+            .initialize(
+                &state.group_id,
+                topic_uuid,
+                partition,
+                state_epoch,
+                crabka_log::Offset(0),
+            )
             .await
         {
             Ok(()) => {

@@ -19,7 +19,7 @@ pub(crate) mod write;
 pub(crate) mod test_support {
     use std::{path::Path, sync::Arc};
 
-    use crabka_log::{Log, LogConfig};
+    use crabka_log::{Log, LogConfig, Offset};
 
     use crate::{
         broker::{Broker, BrokerHandle},
@@ -35,8 +35,8 @@ pub(crate) mod test_support {
 
     pub(crate) fn batch(first_offset: i64, last_offset: i64) -> StateBatch {
         StateBatch {
-            first_offset,
-            last_offset,
+            first_offset: Offset(first_offset),
+            last_offset: Offset(last_offset),
             delivery_state: 2,
             delivery_count: 3,
         }

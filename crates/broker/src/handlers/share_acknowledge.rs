@@ -16,6 +16,7 @@
 use std::time::Instant;
 
 use bytes::{Bytes, BytesMut};
+use crabka_log::Offset;
 use crabka_metadata::{AclOperation, ResourceType};
 use crabka_protocol::{
     Decode, Encode,
@@ -134,8 +135,8 @@ pub(crate) async fn handle(
                 let res = if req.is_renew_ack {
                     st.renew(
                         &member,
-                        batch.first_offset,
-                        batch.last_offset,
+                        Offset(batch.first_offset),
+                        Offset(batch.last_offset),
                         now,
                         cfg.record_lock_duration,
                     )

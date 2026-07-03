@@ -31,6 +31,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crabka_log::Offset;
+
 /// The reconciliation state of a single streams-group member's **active** task
 /// set, mirroring KIP-848's `MemberAssignmentState`. Standby/warmup tasks do
 /// not participate in this dance.
@@ -117,10 +119,10 @@ pub struct StreamsMemberState {
     // --- reported catch-up progress (for warmup -> active promotion) ---
     /// `(subtopology, partition)` -> the changelog position the member last
     /// reported for that task.
-    pub task_offsets: BTreeMap<(String, i32), i64>,
+    pub task_offsets: BTreeMap<(String, i32), Offset>,
     /// `(subtopology, partition)` -> the changelog end offset the member last
     /// reported for that task.
-    pub task_end_offsets: BTreeMap<(String, i32), i64>,
+    pub task_end_offsets: BTreeMap<(String, i32), Offset>,
 
     pub last_seen: Instant,
 }

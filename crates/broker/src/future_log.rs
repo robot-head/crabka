@@ -365,12 +365,10 @@ fn catch_up(
     let current_leo = part.log_end_offset();
     // Recover the guard if a panic elsewhere poisoned the mutex rather
     // than killing this (discarded-JoinHandle) replicator task.
-    // Unwrap the log-layer `Offset` into broker's `i64` world at the seam.
     let future_leo = future_log
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .log_end_offset()
-        .0;
+        .log_end_offset();
     if future_leo >= current_leo {
         return Ok(CatchUpProgress { caught_up: true });
     }
@@ -381,7 +379,7 @@ fn catch_up(
             .log
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        log.read(Offset(future_leo), MOVE_READ_CHUNK_BYTES)?
+        log.read(future_leo, MOVE_READ_CHUNK_BYTES)?
     };
     if read.batches.is_empty() {
         // Source advanced its log_start past `future_leo` (retention
@@ -628,7 +626,7 @@ mod tests {
         .await
         .expect("future log should catch up and swap");
 
-        assert!(part.log_end_offset() == 3);
+        assert!(part.log_end_offset() == Offset(3));
         assert!(
             canonicalize_or_self(&part.log_dir.load_full()) == canonicalize_or_self(target.path())
         );
@@ -672,7 +670,7 @@ mod tests {
         .await
         .expect("future log should keep copying after a partial catch-up pass");
 
-        assert!(part.log_end_offset() == 4);
+        assert!(part.log_end_offset() == Offset(4));
     }
 
     #[tokio::test]

@@ -11,7 +11,7 @@
 use std::{sync::Arc, time::Duration};
 
 use bytes::{Bytes, BytesMut};
-use crabka_log::VerbatimBatch;
+use crabka_log::{Offset, VerbatimBatch};
 use crabka_metadata::{AclOperation, ResourceType};
 use crabka_protocol::{
     Decode, Encode,
@@ -643,7 +643,9 @@ async fn process_partition(
             if acks == ACKS_ALL {
                 let target = base_offset + i64::from(last_offset_delta) + 1;
                 let deadline = std::time::Instant::now() + timeout;
-                match part.await_hw_at_least(target, deadline).await {
+                // `base_offset` here is the dedup tracker's raw wire `i64`; wrap
+                // the HW target into `Offset` for the log-layer gate.
+                match part.await_hw_at_least(Offset(target), deadline).await {
                     Ok(()) => {
                         out.error_code = codes::NONE;
                         out.base_offset = base_offset;
@@ -761,7 +763,7 @@ async fn finalize_ack(
     part: &Arc<Partition>,
     acks: i16,
     timeout: Duration,
-    base_offset: i64,
+    base_offset: Offset,
     producer_state: &Arc<crate::producer_state::ProducerState>,
     key: &CommitKey<'_>,
 ) {
@@ -775,7 +777,8 @@ async fn finalize_ack(
     } else {
         out.error_code = codes::NONE;
     }
-    out.base_offset = base_offset;
+    // Unwrap the assigned `Offset` into the wire `base_offset` response field.
+    out.base_offset = base_offset.0;
     // Only record the idempotent-producer commit if the appended batch is still
     // on the leader's log. A failover-rejoin divergence truncation can remove
     // the batch while the acks=all HW gate above is waiting (the gate then times
@@ -797,9 +800,9 @@ async fn finalize_ack(
         tracing::warn!(
             topic = key.topic,
             partition = key.partition,
-            base_offset,
-            target,
-            leo = part.log_end_offset(),
+            base_offset = base_offset.0,
+            target = target.0,
+            leo = part.log_end_offset().0,
             "produce: appended batch truncated before dedup commit; skipping commit so retry re-appends"
         );
     }
@@ -812,7 +815,8 @@ async fn finalize_ack(
                 key.epoch,
                 key.base_seq,
                 key.last_offset_delta,
-                base_offset,
+                // Unwrap the assigned `Offset` into the dedup tracker's `i64`.
+                base_offset.0,
                 key.max_timestamp,
             )
             .await;

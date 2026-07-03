@@ -356,6 +356,7 @@ fn is_not_controller_response(global_err: i16, part_err: i16) -> bool {
 mod tests {
     use std::{path::Path, sync::atomic::Ordering};
 
+    use crabka_log::Offset;
     use crabka_metadata::{BrokerRegistrationRecord, MetadataImage, MetadataRecord, TopicRecord};
     use tempfile::tempdir;
     use tokio::sync::watch;
@@ -413,7 +414,7 @@ mod tests {
             st.per_follower.insert(
                 follower,
                 crate::replica_state::FollowerStats {
-                    leo: 0,
+                    leo: Offset(0),
                     last_fetch: now
                         .checked_sub(last_fetch_age)
                         .expect("test fetch age is representable"),

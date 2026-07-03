@@ -119,7 +119,7 @@ pub(crate) async fn handle(
                 .or_default()
                 .push(OffsetFetchResponsePartition {
                     partition_index: *pid,
-                    committed_offset: entry.offset,
+                    committed_offset: entry.offset.0,
                     committed_leader_epoch: entry.leader_epoch,
                     metadata: Some(entry.metadata.clone()),
                     error_code: codes::NONE,
@@ -229,7 +229,7 @@ pub(crate) async fn handle(
                         .map(|&pid| match committed.get(&(t.name.clone(), pid)) {
                             Some(entry) => OffsetFetchResponsePartition {
                                 partition_index: pid,
-                                committed_offset: entry.offset,
+                                committed_offset: entry.offset.0,
                                 committed_leader_epoch: entry.leader_epoch,
                                 metadata: Some(entry.metadata.clone()),
                                 error_code: codes::NONE,
@@ -409,7 +409,7 @@ async fn handle_groups(
                                 match committed.get(&(name.clone(), pid)) {
                                     Some(entry) => OffsetFetchResponsePartitions {
                                         partition_index: pid,
-                                        committed_offset: entry.offset,
+                                        committed_offset: entry.offset.0,
                                         committed_leader_epoch: entry.leader_epoch,
                                         metadata: Some(entry.metadata.clone()),
                                         error_code: codes::NONE,
@@ -447,7 +447,7 @@ async fn handle_groups(
                     by_topic.entry(topic.clone()).or_default().push(
                         OffsetFetchResponsePartitions {
                             partition_index: *pid,
-                            committed_offset: entry.offset,
+                            committed_offset: entry.offset.0,
                             committed_leader_epoch: entry.leader_epoch,
                             metadata: Some(entry.metadata.clone()),
                             error_code: codes::NONE,

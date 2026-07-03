@@ -1959,6 +1959,7 @@ mod tests {
     use std::sync::Arc;
 
     use assert2::{assert, check};
+    use crabka_log::Offset;
 
     use super::*;
     use crate::coordinator::unified::{
@@ -2698,7 +2699,7 @@ mod tests {
                 entries: vec![(
                     ("t".to_string(), 0),
                     OffsetEntry {
-                        offset: 42,
+                        offset: Offset(42),
                         leader_epoch: 1,
                         metadata: String::new(),
                         commit_timestamp_ms: 0,
@@ -2716,7 +2717,7 @@ mod tests {
             .await
             .unwrap();
         let committed = rx.await.unwrap();
-        assert!(committed.get(&("t".to_string(), 0)).unwrap().offset == 42);
+        assert!(committed.get(&("t".to_string(), 0)).unwrap().offset == Offset(42));
 
         // Classic offset-commit validate: a simple consumer (no member/instance)
         // is allowed. `ValidateCommit` dispatches on the live (classic) kind.
@@ -2795,7 +2796,7 @@ mod tests {
             committed_offsets: [(
                 ("t".to_string(), 0),
                 OffsetEntry {
-                    offset: 7,
+                    offset: Offset(7),
                     leader_epoch: 0,
                     metadata: String::new(),
                     commit_timestamp_ms: 0,
@@ -2813,7 +2814,7 @@ mod tests {
             .send(GroupActorMessage::FetchCommitted { reply: tx })
             .await
             .unwrap();
-        assert!(rx.await.unwrap().get(&("t".to_string(), 0)).unwrap().offset == 7);
+        assert!(rx.await.unwrap().get(&("t".to_string(), 0)).unwrap().offset == Offset(7));
         // Non-empty group cannot be deleted.
         assert!(
             coord.delete_group("g").await == Err(crate::coordinator::DeleteGroupError::NonEmpty)
@@ -3756,7 +3757,7 @@ mod tests {
                 entries: vec![(
                     ("t".to_string(), 0),
                     OffsetEntry {
-                        offset: 99,
+                        offset: Offset(99),
                         leader_epoch: 3,
                         metadata: String::new(),
                         commit_timestamp_ms: 0,
@@ -3774,7 +3775,7 @@ mod tests {
         let native = up.member_id.expect("native member id");
         let after_upgrade = fetch_committed(&handle).await;
         assert!(
-            after_upgrade.get(&("t".to_string(), 0)).map(|e| e.offset) == Some(99),
+            after_upgrade.get(&("t".to_string(), 0)).map(|e| e.offset) == Some(Offset(99)),
             "committed offset must survive the upgrade"
         );
 
@@ -3783,7 +3784,7 @@ mod tests {
         assert!(leave.error_code == codes::NONE);
         let after_downgrade = fetch_committed(&handle).await;
         assert!(
-            after_downgrade.get(&("t".to_string(), 0)).map(|e| e.offset) == Some(99),
+            after_downgrade.get(&("t".to_string(), 0)).map(|e| e.offset) == Some(Offset(99)),
             "committed offset must survive the downgrade too"
         );
     }
