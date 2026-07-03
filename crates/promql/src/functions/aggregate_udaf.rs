@@ -26,7 +26,7 @@
 
 use std::sync::Arc;
 
-use arrow::array::{Array, ArrayRef, AsArray};
+use arrow::array::{ArrayRef, AsArray};
 use arrow::datatypes::{DataType, Float64Type};
 use datafusion::common::{Result as DfResult, ScalarValue};
 use datafusion::logical_expr::function::AccumulatorArgs;
@@ -100,10 +100,8 @@ impl Accumulator for PromExtremumAccumulator {
         // float), but a null is skipped defensively rather than seeding the
         // accumulator with a spurious sample.
         let array = values[0].as_primitive::<Float64Type>();
-        for index in 0..array.len() {
-            if array.is_valid(index) {
-                self.observe(array.value(index));
-            }
+        for value in array.iter().flatten() {
+            self.observe(value);
         }
         Ok(())
     }
@@ -137,15 +135,10 @@ impl Accumulator for PromExtremumAccumulator {
         // matches a single-pass scan exactly (including all-NaN -> NaN).
         let running = states[0].as_primitive::<Float64Type>();
         let seen = states[1].as_boolean();
-        for index in 0..running.len() {
-            if seen.is_valid(index) && seen.value(index) {
+        for (running, seen) in running.iter().zip(seen.iter()) {
+            if seen == Some(true) {
                 // A seen partition always carries a (possibly NaN) running value.
-                let value = if running.is_valid(index) {
-                    running.value(index)
-                } else {
-                    f64::NAN
-                };
-                self.observe(value);
+                self.observe(running.unwrap_or(f64::NAN));
             }
         }
         Ok(())
