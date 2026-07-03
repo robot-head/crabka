@@ -261,6 +261,17 @@ mod tests {
     }
 
     #[test]
+    fn debug_renders_bucket_fields() {
+        let b = TokenBucket::new();
+        b.set_rate_with_burst(100, 200);
+        let s = format!("{b:?}");
+        check!(s.contains("TokenBucket"));
+        check!(s.contains("rate_per_sec"));
+        check!(s.contains("burst"));
+        check!(s.contains("last_refill_nanos"));
+    }
+
+    #[test]
     fn plan_consume_grants_and_caps() {
         for ((available, refill, burst, requested), want) in [
             ((100, 0, 1000, 50), (50, 50)),

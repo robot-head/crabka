@@ -2446,6 +2446,7 @@ impl Broker {
                         spool,
                         stats: stats.clone(),
                         replay_every: AUDIT_SPOOL_REPLAY_INTERVAL,
+                        sleeper: std::sync::Arc::new(qubit_clock::sleep::SystemSleeper::new()),
                     },
                 );
                 tokio::spawn(writer.run());

@@ -1993,6 +1993,7 @@ dependencies = [
  "crabka-log",
  "crabka-protocol",
  "mutants",
+ "qubit-clock",
  "ring",
  "serde",
  "serde_json",
@@ -9044,6 +9045,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "parking_lot",
+ "tokio",
 ]
 
 [[package]]
