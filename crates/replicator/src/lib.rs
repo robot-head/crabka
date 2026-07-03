@@ -8,6 +8,7 @@ pub mod admin_util;
 pub mod checkpoint_store;
 pub mod config;
 pub mod error;
+pub mod ids;
 pub mod mm2;
 pub mod naming;
 pub mod offset_sync_store;

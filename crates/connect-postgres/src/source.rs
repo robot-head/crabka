@@ -7,6 +7,7 @@ use crabka_connect::{ConnectError, ConnectRecord, OffsetValue, Source, SourceOff
 use crate::{
     PgLsn, PostgresSourceConfig,
     catalog::{PgCatalog, TokioPgCatalog},
+    ids::{CommitLsn, EndLsn, TransactionId},
     model::Operation,
     pgoutput::{DecodedMessage, RelationCache, RelationEvent, RowEvent, decode_pgoutput_message},
     schema::PostgresProtoEncoder,
@@ -16,11 +17,11 @@ use crate::{
 pub enum LogicalEvent {
     Begin {
         final_lsn: PgLsn,
-        xid: i64,
+        xid: TransactionId,
     },
     Commit {
-        commit_lsn: PgLsn,
-        end_lsn: PgLsn,
+        commit_lsn: CommitLsn,
+        end_lsn: EndLsn,
         commit_timestamp_ms: i64,
     },
     Relation(RelationEvent),
@@ -29,7 +30,7 @@ pub enum LogicalEvent {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct TransactionState {
-    xid: i64,
+    xid: TransactionId,
 }
 
 #[derive(Debug)]
@@ -179,7 +180,7 @@ impl PostgresWalSource {
                 end_lsn,
                 commit_timestamp_ms,
             } => {
-                self.commit_transaction(end_lsn, commit_timestamp_ms);
+                self.commit_transaction(end_lsn.0, commit_timestamp_ms);
             }
             LogicalEvent::Relation(relation) => {
                 self.pending.push_back(LogicalEvent::Relation(relation));
@@ -706,6 +707,7 @@ mod tests {
     use super::{LogicalEvent, PostgresWalSource, validate_database};
     use crate::{
         PgLsn, PostgresSourceConfig,
+        ids::{CommitLsn, EndLsn, RelationId, TransactionId},
         model::{ColumnSchema, ColumnValue, ScalarValue},
         pgoutput::{RelationEvent, RowEvent, RowEventKind, RowTupleKind},
     };
@@ -735,7 +737,7 @@ mod tests {
 
     fn orders_relation() -> RelationEvent {
         RelationEvent {
-            relation_id: 7,
+            relation_id: RelationId(7),
             schema: "public".to_owned(),
             table: "orders".to_owned(),
             columns: vec![
@@ -769,10 +771,10 @@ mod tests {
 
     fn insert_event(lsn: PgLsn) -> RowEvent {
         RowEvent {
-            relation_id: 7,
+            relation_id: RelationId(7),
             lsn,
             commit_lsn: None,
-            txid: Some(99),
+            txid: Some(TransactionId(99)),
             commit_timestamp_ms: Some(1_700_000_000_000),
             kind: RowEventKind::Insert,
             values: vec![id(42), status("paid")],
@@ -781,7 +783,7 @@ mod tests {
 
     fn delete_event(lsn: PgLsn) -> RowEvent {
         RowEvent {
-            relation_id: 7,
+            relation_id: RelationId(7),
             lsn,
             commit_lsn: None,
             txid: None,
@@ -1035,13 +1037,13 @@ mod tests {
                 LogicalEvent::Relation(orders_relation()),
                 LogicalEvent::Begin {
                     final_lsn: PgLsn(0x40),
-                    xid: 123,
+                    xid: TransactionId(123),
                 },
                 LogicalEvent::Row(insert_event(PgLsn(0x2a))),
                 LogicalEvent::Row(second),
                 LogicalEvent::Commit {
-                    commit_lsn: PgLsn(0x41),
-                    end_lsn: PgLsn(0x42),
+                    commit_lsn: CommitLsn(PgLsn(0x41)),
+                    end_lsn: EndLsn(PgLsn(0x42)),
                     commit_timestamp_ms: 1_700_000_000_123,
                 },
             ],
@@ -1077,12 +1079,12 @@ mod tests {
 
         source.apply_decoded_message(crate::pgoutput::DecodedMessage::Begin {
             final_lsn: PgLsn(0x40),
-            xid: 123,
+            xid: TransactionId(123),
         });
         source.apply_decoded_message(crate::pgoutput::DecodedMessage::Row(row));
         source.apply_decoded_message(crate::pgoutput::DecodedMessage::Commit {
-            commit_lsn: PgLsn(0x41),
-            end_lsn: PgLsn(0x42),
+            commit_lsn: CommitLsn(PgLsn(0x41)),
+            end_lsn: EndLsn(PgLsn(0x42)),
             commit_timestamp_ms: 1_700_000_000_123,
         });
 
@@ -1091,7 +1093,7 @@ mod tests {
         };
         check!(row.lsn == PgLsn(0x2a));
         check!(row.commit_lsn == Some(PgLsn(0x42)));
-        check!(row.txid == Some(123));
+        check!(row.txid == Some(TransactionId(123)));
         check!(row.commit_timestamp_ms == Some(1_700_000_000_123));
     }
 }

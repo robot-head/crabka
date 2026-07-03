@@ -2,6 +2,8 @@
 
 use bytes::Bytes;
 
+use crate::ids::{Offset, PartitionIndex, Timestamp};
+
 /// One record from the source cluster, carried as the connect-value type `V`
 /// through the [`crabka_connect`] runtime.
 ///
@@ -12,11 +14,11 @@ pub struct ReplicatedRecord {
     /// The source topic name.
     pub topic: String,
     /// The source partition index.
-    pub partition: i32,
+    pub partition: PartitionIndex,
     /// The source offset (0-based).
-    pub offset: i64,
+    pub offset: Offset,
     /// Record timestamp in epoch milliseconds.
-    pub timestamp: i64,
+    pub timestamp: Timestamp,
     /// Record key, or `None` for a null key.
     pub key: Option<Bytes>,
     /// Record value, or `None` for a tombstone.

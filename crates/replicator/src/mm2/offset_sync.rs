@@ -1,12 +1,15 @@
 use super::{Reader, Writer};
-use crate::error::ReplicatorError;
+use crate::{
+    error::ReplicatorError,
+    ids::{DownstreamOffset, PartitionIndex, UpstreamOffset},
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OffsetSync {
     pub topic: String,
-    pub partition: i32,
-    pub upstream: i64,
-    pub downstream: i64,
+    pub partition: PartitionIndex,
+    pub upstream: UpstreamOffset,
+    pub downstream: DownstreamOffset,
 }
 
 impl OffsetSync {
@@ -19,7 +22,7 @@ impl OffsetSync {
     pub fn key_bytes(&self) -> Vec<u8> {
         Writer::keyless()
             .string(&self.topic)
-            .i32(self.partition)
+            .i32(self.partition.0)
             .finish()
     }
 
@@ -29,8 +32,8 @@ impl OffsetSync {
         // codec — both key and value are versionless (unlike Heartbeat and
         // Checkpoint, whose *value* carries a version header).
         Writer::keyless()
-            .i64(self.upstream)
-            .i64(self.downstream)
+            .i64(self.upstream.0)
+            .i64(self.downstream.0)
             .finish()
     }
 
@@ -39,9 +42,9 @@ impl OffsetSync {
         let mut v = Reader::keyless(val);
         Ok(Self {
             topic: k.string()?,
-            partition: k.i32()?,
-            upstream: v.i64()?,
-            downstream: v.i64()?,
+            partition: PartitionIndex(k.i32()?),
+            upstream: UpstreamOffset(v.i64()?),
+            downstream: DownstreamOffset(v.i64()?),
         })
     }
 }

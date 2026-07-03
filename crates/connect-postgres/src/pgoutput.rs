@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use crate::{
     PgLsn, PostgresConnectError,
+    ids::{CommitLsn, EndLsn, RelationId, TransactionId},
     model::{
         ColumnSchema, ColumnValue, EntityDifference, EntityKey, Operation, ScalarValue, TableSchema,
     },
@@ -9,7 +10,7 @@ use crate::{
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelationEvent {
-    pub relation_id: u32,
+    pub relation_id: RelationId,
     pub schema: String,
     pub table: String,
     pub columns: Vec<ColumnSchema>,
@@ -35,10 +36,10 @@ pub enum RowEventKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RowEvent {
-    pub relation_id: u32,
+    pub relation_id: RelationId,
     pub lsn: PgLsn,
     pub commit_lsn: Option<PgLsn>,
-    pub txid: Option<i64>,
+    pub txid: Option<TransactionId>,
     pub commit_timestamp_ms: Option<i64>,
     pub kind: RowEventKind,
     pub values: Vec<ColumnValue>,
@@ -48,11 +49,11 @@ pub struct RowEvent {
 pub enum DecodedMessage {
     Begin {
         final_lsn: PgLsn,
-        xid: i64,
+        xid: TransactionId,
     },
     Commit {
-        commit_lsn: PgLsn,
-        end_lsn: PgLsn,
+        commit_lsn: CommitLsn,
+        end_lsn: EndLsn,
         commit_timestamp_ms: i64,
     },
     Relation(RelationEvent),
@@ -63,7 +64,7 @@ pub enum DecodedMessage {
 pub fn decode_pgoutput_message(
     bytes: &[u8],
     lsn: PgLsn,
-    txid: Option<i64>,
+    txid: Option<TransactionId>,
 ) -> Result<DecodedMessage, PostgresConnectError> {
     let mut reader = PgOutputReader::new(bytes);
     let tag = reader.read_u8("message tag")?;
@@ -72,13 +73,13 @@ pub fn decode_pgoutput_message(
         b'B' => {
             let final_lsn = PgLsn(reader.read_u64("begin final_lsn")?);
             let _commit_time = reader.read_i64("begin commit_time")?;
-            let xid = i64::from(reader.read_u32("begin xid")?);
+            let xid = TransactionId(i64::from(reader.read_u32("begin xid")?));
             DecodedMessage::Begin { final_lsn, xid }
         }
         b'C' => {
             let _flags = reader.read_u8("commit flags")?;
-            let commit_lsn = PgLsn(reader.read_u64("commit commit_lsn")?);
-            let end_lsn = PgLsn(reader.read_u64("commit end_lsn")?);
+            let commit_lsn = CommitLsn(PgLsn(reader.read_u64("commit commit_lsn")?));
+            let end_lsn = EndLsn(PgLsn(reader.read_u64("commit end_lsn")?));
             let commit_timestamp_ms =
                 postgres_timestamp_micros_to_unix_ms(reader.read_i64("commit commit_time")?);
             DecodedMessage::Commit {
@@ -104,7 +105,7 @@ pub fn decode_pgoutput_message(
 }
 
 fn decode_relation(reader: &mut PgOutputReader<'_>) -> Result<RelationEvent, PostgresConnectError> {
-    let relation_id = reader.read_u32("relation id")?;
+    let relation_id = RelationId(reader.read_u32("relation id")?);
     let schema = reader.read_cstr("relation namespace")?;
     let table = reader.read_cstr("relation name")?;
     let _replica_identity = reader.read_u8("relation replica identity")?;
@@ -140,9 +141,9 @@ fn decode_relation(reader: &mut PgOutputReader<'_>) -> Result<RelationEvent, Pos
 fn decode_insert(
     reader: &mut PgOutputReader<'_>,
     lsn: PgLsn,
-    txid: Option<i64>,
+    txid: Option<TransactionId>,
 ) -> Result<RowEvent, PostgresConnectError> {
-    let relation_id = reader.read_u32("insert relation id")?;
+    let relation_id = RelationId(reader.read_u32("insert relation id")?);
     reader.expect_u8(b'N', "insert tuple tag N")?;
     let values = decode_tuple(reader)?;
 
@@ -160,9 +161,9 @@ fn decode_insert(
 fn decode_update(
     reader: &mut PgOutputReader<'_>,
     lsn: PgLsn,
-    txid: Option<i64>,
+    txid: Option<TransactionId>,
 ) -> Result<RowEvent, PostgresConnectError> {
-    let relation_id = reader.read_u32("update relation id")?;
+    let relation_id = RelationId(reader.read_u32("update relation id")?);
     let tag = reader.read_u8("update tuple tag")?;
     let (old, old_tuple_kind, new_tag) = match tag {
         b'K' | b'O' => (
@@ -204,9 +205,9 @@ fn decode_update(
 fn decode_delete(
     reader: &mut PgOutputReader<'_>,
     lsn: PgLsn,
-    txid: Option<i64>,
+    txid: Option<TransactionId>,
 ) -> Result<RowEvent, PostgresConnectError> {
-    let relation_id = reader.read_u32("delete relation id")?;
+    let relation_id = RelationId(reader.read_u32("delete relation id")?);
     let tag = reader.read_u8("delete tuple tag")?;
     if !matches!(tag, b'K' | b'O') {
         return Err(PostgresConnectError::Backend(format!(
@@ -411,7 +412,7 @@ impl<'a> PgOutputReader<'a> {
 
 #[derive(Debug, Clone, Default)]
 pub struct RelationCache {
-    relations: BTreeMap<u32, TableSchema>,
+    relations: BTreeMap<RelationId, TableSchema>,
 }
 
 impl RelationCache {
@@ -640,12 +641,13 @@ mod tests {
     };
     use crate::{
         PgLsn, PostgresConnectError,
+        ids::{RelationId, TransactionId},
         model::{ColumnSchema, ColumnValue, Operation, ScalarValue, TableSchema},
     };
 
     fn orders_relation(type_name: &str) -> RelationEvent {
         RelationEvent {
-            relation_id: 7,
+            relation_id: RelationId(7),
             schema: "public".to_owned(),
             table: "orders".to_owned(),
             columns: vec![
@@ -686,7 +688,7 @@ mod tests {
 
     fn composite_key_orders_relation() -> RelationEvent {
         RelationEvent {
-            relation_id: 7,
+            relation_id: RelationId(7),
             schema: "public".to_owned(),
             table: "orders".to_owned(),
             columns: vec![
@@ -717,10 +719,10 @@ mod tests {
         let values = vec![id(42), status("paid")];
         let difference = cache
             .translate(RowEvent {
-                relation_id: 7,
+                relation_id: RelationId(7),
                 lsn: PgLsn(0x16_b374_d848),
                 commit_lsn: None,
-                txid: Some(99),
+                txid: Some(TransactionId(99)),
                 commit_timestamp_ms: Some(1_700_000_000_000),
                 kind: RowEventKind::Insert,
                 values: values.clone(),
@@ -734,7 +736,7 @@ mod tests {
         check!(difference.before == Vec::new());
         check!(difference.after == values);
         check!(difference.lsn == PgLsn(0x16_b374_d848));
-        check!(difference.txid == Some(99));
+        check!(difference.txid == Some(TransactionId(99)));
         check!(difference.commit_timestamp_ms == Some(1_700_000_000_000));
         check!(difference.schema.table == "orders");
         check!(difference.schema.columns[0].key);
@@ -748,7 +750,7 @@ mod tests {
         let values = vec![id(42), status("cancelled")];
         let difference = cache
             .translate(RowEvent {
-                relation_id: 7,
+                relation_id: RelationId(7),
                 lsn: PgLsn(0x2a),
                 commit_lsn: None,
                 txid: None,
@@ -775,7 +777,7 @@ mod tests {
 
         let difference = cache
             .translate(RowEvent {
-                relation_id: 7,
+                relation_id: RelationId(7),
                 lsn: PgLsn(0x2b),
                 commit_lsn: None,
                 txid: None,
@@ -795,7 +797,7 @@ mod tests {
 
         let difference = cache
             .translate(RowEvent {
-                relation_id: 7,
+                relation_id: RelationId(7),
                 lsn: PgLsn(0x2c),
                 commit_lsn: None,
                 txid: None,
@@ -814,7 +816,7 @@ mod tests {
         cache.apply_relation(orders_relation("text"));
 
         let result = cache.translate(RowEvent {
-            relation_id: 7,
+            relation_id: RelationId(7),
             lsn: PgLsn(0x2d),
             commit_lsn: None,
             txid: None,
@@ -842,10 +844,10 @@ mod tests {
         let new = vec![id(42), status("paid")];
         let difference = cache
             .translate(RowEvent {
-                relation_id: 7,
+                relation_id: RelationId(7),
                 lsn: PgLsn(0x2e),
                 commit_lsn: None,
-                txid: Some(100),
+                txid: Some(TransactionId(100)),
                 commit_timestamp_ms: Some(1_700_000_000_001),
                 kind: RowEventKind::Update {
                     old: old.clone(),
@@ -867,7 +869,7 @@ mod tests {
         cache.apply_relation(orders_relation("text"));
 
         let result = cache.translate(RowEvent {
-            relation_id: 7,
+            relation_id: RelationId(7),
             lsn: PgLsn(0x2f),
             commit_lsn: None,
             txid: None,
@@ -895,7 +897,7 @@ mod tests {
 
         let difference = cache
             .translate(RowEvent {
-                relation_id: 7,
+                relation_id: RelationId(7),
                 lsn: PgLsn(0x30),
                 commit_lsn: None,
                 txid: None,
@@ -926,7 +928,7 @@ mod tests {
 
         let error = cache
             .translate(RowEvent {
-                relation_id: 7,
+                relation_id: RelationId(7),
                 lsn: PgLsn(0x31),
                 commit_lsn: None,
                 txid: None,
@@ -955,7 +957,7 @@ mod tests {
 
         let error = cache
             .translate(RowEvent {
-                relation_id: 7,
+                relation_id: RelationId(7),
                 lsn: PgLsn(0x34),
                 commit_lsn: None,
                 txid: None,
@@ -1041,7 +1043,7 @@ mod tests {
 
         let difference = cache
             .translate(RowEvent {
-                relation_id: 7,
+                relation_id: RelationId(7),
                 lsn: PgLsn(0x35),
                 commit_lsn: None,
                 txid: None,
@@ -1098,6 +1100,7 @@ mod decode_tests {
     use super::{DecodedMessage, RowEventKind, RowTupleKind, decode_pgoutput_message};
     use crate::{
         PgLsn, PostgresConnectError,
+        ids::{CommitLsn, EndLsn, RelationId, TransactionId},
         model::{ColumnSchema, ScalarValue},
     };
 
@@ -1131,7 +1134,7 @@ mod decode_tests {
 
     fn orders_relation_message() -> super::RelationEvent {
         super::RelationEvent {
-            relation_id: 7,
+            relation_id: RelationId(7),
             schema: "public".to_owned(),
             table: "orders".to_owned(),
             columns: vec![
@@ -1166,13 +1169,13 @@ mod decode_tests {
         put_i32(&mut bytes, 25);
         put_i32(&mut bytes, -1);
 
-        let decoded = decode_pgoutput_message(&bytes, PgLsn(0x2a), Some(99))
+        let decoded = decode_pgoutput_message(&bytes, PgLsn(0x2a), Some(TransactionId(99)))
             .expect("relation message should decode");
 
         let DecodedMessage::Relation(relation) = decoded else {
             panic!("expected relation message");
         };
-        check!(relation.relation_id == 7);
+        check!(relation.relation_id == RelationId(7));
         check!(relation.schema == "public");
         check!(relation.table == "orders");
         check!(relation.columns.len() == 2);
@@ -1193,15 +1196,15 @@ mod decode_tests {
         put_text_value(&mut bytes, "42");
         put_text_value(&mut bytes, "paid");
 
-        let decoded = decode_pgoutput_message(&bytes, PgLsn(0x2a), Some(99))
+        let decoded = decode_pgoutput_message(&bytes, PgLsn(0x2a), Some(TransactionId(99)))
             .expect("insert message should decode");
 
         let DecodedMessage::Row(row) = decoded else {
             panic!("expected row message");
         };
-        check!(row.relation_id == 7);
+        check!(row.relation_id == RelationId(7));
         check!(row.lsn == PgLsn(0x2a));
-        check!(row.txid == Some(99));
+        check!(row.txid == Some(TransactionId(99)));
         check!(row.commit_timestamp_ms == None);
         check!(row.kind == RowEventKind::Insert);
         check!(row.values.len() == 2);
@@ -1243,7 +1246,7 @@ mod decode_tests {
         put_text_value(&mut insert_bytes, "paid");
 
         let DecodedMessage::Row(row) =
-            decode_pgoutput_message(&insert_bytes, PgLsn(0x32), Some(101))
+            decode_pgoutput_message(&insert_bytes, PgLsn(0x32), Some(TransactionId(101)))
                 .expect("insert should decode")
         else {
             panic!("expected row");
@@ -1270,7 +1273,7 @@ mod decode_tests {
         put_text_value(&mut insert_bytes, "paid");
 
         let DecodedMessage::Row(row) =
-            decode_pgoutput_message(&insert_bytes, PgLsn(0x32), Some(101))
+            decode_pgoutput_message(&insert_bytes, PgLsn(0x32), Some(TransactionId(101)))
                 .expect("insert should decode")
         else {
             panic!("expected row");
@@ -1295,7 +1298,7 @@ mod decode_tests {
         put_text_value(&mut delete_bytes, "42");
 
         let DecodedMessage::Row(row) =
-            decode_pgoutput_message(&delete_bytes, PgLsn(0x35), Some(102))
+            decode_pgoutput_message(&delete_bytes, PgLsn(0x35), Some(TransactionId(102)))
                 .expect("delete should decode")
         else {
             panic!("expected row");
@@ -1325,7 +1328,7 @@ mod decode_tests {
         put_text_value(&mut update_bytes, "paid");
 
         let DecodedMessage::Row(row) =
-            decode_pgoutput_message(&update_bytes, PgLsn(0x36), Some(103))
+            decode_pgoutput_message(&update_bytes, PgLsn(0x36), Some(TransactionId(103)))
                 .expect("update should decode")
         else {
             panic!("expected row");
@@ -1354,7 +1357,7 @@ mod decode_tests {
         let DecodedMessage::Row(row) = decoded else {
             panic!("expected row message");
         };
-        check!(row.relation_id == 7);
+        check!(row.relation_id == RelationId(7));
         check!(row.lsn == PgLsn(0x2b));
         check!(row.txid == None);
         check!(
@@ -1379,13 +1382,13 @@ mod decode_tests {
         put_text_value(&mut bytes, "42");
         put_text_value(&mut bytes, "paid");
 
-        let decoded = decode_pgoutput_message(&bytes, PgLsn(0x2c), Some(100))
+        let decoded = decode_pgoutput_message(&bytes, PgLsn(0x2c), Some(TransactionId(100)))
             .expect("update message should decode");
 
         let DecodedMessage::Row(row) = decoded else {
             panic!("expected row message");
         };
-        check!(row.relation_id == 7);
+        check!(row.relation_id == RelationId(7));
         let RowEventKind::Update {
             old,
             old_tuple_kind,
@@ -1409,7 +1412,7 @@ mod decode_tests {
         put_text_value(&mut bytes, "42");
         bytes.push(b'u');
 
-        let decoded = decode_pgoutput_message(&bytes, PgLsn(0x33), Some(100))
+        let decoded = decode_pgoutput_message(&bytes, PgLsn(0x33), Some(TransactionId(100)))
             .expect("update message should decode");
 
         let DecodedMessage::Row(row) = decoded else {
@@ -1464,7 +1467,7 @@ mod decode_tests {
             decoded
                 == DecodedMessage::Begin {
                     final_lsn: PgLsn(0x0102_0304),
-                    xid: 123,
+                    xid: TransactionId(123),
                 }
         );
 
@@ -1478,8 +1481,8 @@ mod decode_tests {
         check!(
             decoded
                 == DecodedMessage::Commit {
-                    commit_lsn: PgLsn(0x0102_0305),
-                    end_lsn: PgLsn(0x0102_0306),
+                    commit_lsn: CommitLsn(PgLsn(0x0102_0305)),
+                    end_lsn: EndLsn(PgLsn(0x0102_0306)),
                     commit_timestamp_ms: 946_684_800_001,
                 }
         );
@@ -1497,7 +1500,7 @@ mod decode_tests {
             decoded
                 == DecodedMessage::Begin {
                     final_lsn: PgLsn(0x0102_0304),
-                    xid: 2_147_483_648,
+                    xid: TransactionId(2_147_483_648),
                 }
         );
     }

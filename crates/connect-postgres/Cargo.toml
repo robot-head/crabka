@@ -21,6 +21,7 @@ crabka-connect = { path = "../connect", version = "0.3.8" }
 crabka-schema-serde = { path = "../schema-serde", version = "0.3.8", features = ["protobuf"] }
 async-trait = { workspace = true }
 bytes = { workspace = true }
+derive_more = { workspace = true }
 futures-util = { workspace = true }
 postgres-types = { workspace = true }
 prost = { workspace = true }

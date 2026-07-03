@@ -109,7 +109,7 @@ impl PostgresProtoEncoder {
             Value::Message(self.key_to_message(&difference.key)?),
         )?;
         if let Some(txid) = difference.txid {
-            set_field(&mut message, "txid", Value::I64(txid))?;
+            set_field(&mut message, "txid", Value::I64(txid.0))?;
         }
         if let Some(commit_timestamp_ms) = difference.commit_timestamp_ms {
             set_field(
@@ -301,6 +301,7 @@ mod tests {
     };
     use crate::{
         ColumnValue, EntityDifference, EntityKey, Operation, PgLsn, TableSchema,
+        ids::{RelationId, TransactionId},
         model::{ColumnSchema, ScalarValue},
         pgoutput::{RelationCache, RelationEvent, RowEvent, RowEventKind},
     };
@@ -376,7 +377,7 @@ mod tests {
     fn decoded_int8_key_encodes_as_int_scalar_kind() {
         let mut cache = RelationCache::default();
         cache.apply_relation(RelationEvent {
-            relation_id: 7,
+            relation_id: RelationId(7),
             schema: "public".to_owned(),
             table: "orders".to_owned(),
             columns: vec![ColumnSchema {
@@ -387,7 +388,7 @@ mod tests {
         });
         let difference = cache
             .translate(RowEvent {
-                relation_id: 7,
+                relation_id: RelationId(7),
                 lsn: PgLsn(0x2a),
                 commit_lsn: None,
                 txid: None,
@@ -502,7 +503,7 @@ mod tests {
                 },
             ],
             lsn: PgLsn(42),
-            txid: Some(7),
+            txid: Some(TransactionId(7)),
             commit_timestamp_ms: Some(1_700_000_000_000),
             schema: TableSchema {
                 schema: "public".to_owned(),

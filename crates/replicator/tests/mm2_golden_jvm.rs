@@ -26,7 +26,10 @@
 
 use std::{collections::HashMap, fmt::Write as _};
 
-use crabka_replicator::mm2::{Checkpoint, Heartbeat, OffsetSync};
+use crabka_replicator::{
+    ids::{DownstreamOffset, PartitionIndex, UpstreamOffset},
+    mm2::{Checkpoint, Heartbeat, OffsetSync},
+};
 
 /// Load and hex-decode one named golden vector from the committed fixture.
 fn golden(name: &str) -> Vec<u8> {
@@ -78,9 +81,9 @@ fn checkpoint() -> Checkpoint {
     Checkpoint {
         group: "analytics".into(),
         topic: "orders".into(),
-        partition: 7,
-        upstream: 1000,
-        downstream: 742,
+        partition: PartitionIndex(7),
+        upstream: UpstreamOffset(1000),
+        downstream: DownstreamOffset(742),
         metadata: String::new(),
     }
 }
@@ -88,9 +91,9 @@ fn checkpoint() -> Checkpoint {
 fn offset_sync() -> OffsetSync {
     OffsetSync {
         topic: "orders".into(),
-        partition: 7,
-        upstream: 1000,
-        downstream: 742,
+        partition: PartitionIndex(7),
+        upstream: UpstreamOffset(1000),
+        downstream: DownstreamOffset(742),
     }
 }
 

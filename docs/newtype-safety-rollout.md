@@ -2,6 +2,14 @@
 
 Tracking document for applying the [Newtypes for Domain Values](style_guides/code_style_guide.md#newtypes-for-domain-values) rule across Crabka. It records what a workspace-wide survey found, what has been fixed, and the staged plan for the cross-crate core identifiers.
 
+## Status
+
+Crate-local fixes are being applied in verified batches — each brought to a green `cargo clippy --workspace --all-targets -- -D warnings` and passing tests before the next. **Done so far:** throttle, audit, bench-driver, connect, logql (batch 1, + downstream adaptations in connect-postgres, replicator, observability); cli, grpc-gateway, metrics-service, profiles, traces (batch 2); schema-registry, operator, traceql, promql (batch 3, + a metrics-service bridge); connect-postgres, replicator (batch 4). The cross-crate core identifiers below remain a staged program.
+
+**Observed at the batch boundary:** promql and metrics-service each grew their own crate-local `Offset`/`PartitionIndex`, and they meet at `apply_wal_record_at`, forcing a `.0.into()` bridge through the raw primitive. That friction is the concrete argument for treating `Offset`/`PartitionIndex` (and the other core ids) as a *single* shared type owned by one crate rather than duplicating them — i.e. the staged program, not more crate-local copies.
+
+---
+
 A survey of all 43 domain crates (excluding the generated protocol codec) found **232 newtype-safety findings** — places where two or more same-typed primitives (`i32`, `i64`, `u64`, `String`, …) with different meanings can be transposed at a call site and still compile. They split into two populations:
 
 - **~94 High-confidence, crate-local findings** across ~28 crates. Each is safe to fix in isolation: the newtype and all its uses live inside one crate, so there is no cross-crate ripple and no wire-format risk. These are being fixed in verified batches (below).

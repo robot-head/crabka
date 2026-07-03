@@ -31,6 +31,7 @@ crabka-client-producer = { version = "0.3.8", path = "../client-producer" }
 crabka-client-admin = { version = "0.3.8", path = "../client-admin" }
 crabka-logfmt = { version = "0.3.8", path = "../logfmt" }
 crabka-security = { workspace = true }
+derive_more = { workspace = true }
 qubit-clock = { workspace = true, features = ["tokio"] }
 regex = { workspace = true }
 rustls = { workspace = true }
