@@ -7,6 +7,7 @@ use axum::{
 
 use crate::{
     error::SrError,
+    ids::SchemaId,
     rest::{
         AppState, DeletedQ,
         response::{ok_json, ok_raw},
@@ -24,7 +25,7 @@ pub async fn get_by_id(
         .store
         .store
         .read()
-        .schema_by_id(id, q.deleted)
+        .schema_by_id(SchemaId(id), q.deleted)
         .ok_or(SrError::SchemaNotFound)?;
     let mut body = serde_json::Map::new();
     if let Some(t) = ty.wire_name() {
@@ -63,13 +64,13 @@ pub async fn get_by_id_versions(
         .store
         .store
         .read()
-        .schema_id_subject_versions(id, q.deleted);
+        .schema_id_subject_versions(SchemaId(id), q.deleted);
     if pairs.is_empty() {
         return Err(SrError::SchemaNotFound);
     }
     let arr: Vec<serde_json::Value> = pairs
         .into_iter()
-        .map(|(subject, version)| serde_json::json!({ "subject": subject, "version": version }))
+        .map(|(subject, version)| serde_json::json!({ "subject": subject, "version": version.0 }))
         .collect();
     Ok(ok_json(&serde_json::Value::Array(arr)))
 }
@@ -84,7 +85,7 @@ pub async fn get_by_id_schema(
         .store
         .store
         .read()
-        .schema_by_id(id, false)
+        .schema_by_id(SchemaId(id), false)
         .ok_or(SrError::SchemaNotFound)?;
     Ok(ok_raw(schema))
 }
@@ -100,7 +101,7 @@ pub async fn get_by_id_subjects(
         .store
         .store
         .read()
-        .schema_id_subject_versions(id, q.deleted);
+        .schema_id_subject_versions(SchemaId(id), q.deleted);
     if pairs.is_empty() {
         return Err(SrError::SchemaNotFound);
     }
@@ -124,8 +125,8 @@ pub async fn list_schemas(State(st): State<AppState>, Query(q): Query<DeletedQ>)
         .map(|row| {
             let mut m = serde_json::Map::new();
             m.insert("subject".into(), row.subject.into());
-            m.insert("version".into(), row.version.into());
-            m.insert("id".into(), row.id.into());
+            m.insert("version".into(), row.version.0.into());
+            m.insert("id".into(), row.id.0.into());
             if let Some(t) = row.ty.wire_name() {
                 m.insert("schemaType".into(), t.into());
             }

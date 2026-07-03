@@ -672,6 +672,7 @@ mod tests {
     use super::*;
     use crate::{
         crd::{KafkaCondition, KafkaRebalanceSpec, KafkaRebalanceStatus},
+        ids::{LeaderMovementCount, MaxLeadersCount, MaxReplicasCount, ReplicaMovementCount},
         rebalancer_client::ProposalSummary,
     };
 
@@ -686,12 +687,12 @@ mod tests {
             id: id.into(),
             status,
             summary: ProposalSummary {
-                replica_movements: 3,
-                leader_movements: 1,
-                max_replicas_before: 9,
-                max_replicas_after: 6,
-                max_leaders_before: 5,
-                max_leaders_after: 3,
+                replica_movements: ReplicaMovementCount(3),
+                leader_movements: LeaderMovementCount(1),
+                max_replicas_before: MaxReplicasCount(9),
+                max_replicas_after: MaxReplicasCount(6),
+                max_leaders_before: MaxLeadersCount(5),
+                max_leaders_after: MaxLeadersCount(3),
             },
             goals_applied: vec!["RackAware".into()],
             movement_count: 3,
@@ -801,12 +802,12 @@ mod tests {
                 requeue: Duration::from_mins(5),
                 new_session: Some("p1".into()),
                 new_optimization: Some(OptimizationResult {
-                    replica_movements: 3,
-                    leader_movements: 1,
-                    max_replicas_before: 9,
-                    max_replicas_after: 6,
-                    max_leaders_before: 5,
-                    max_leaders_after: 3,
+                    replica_movements: ReplicaMovementCount(3),
+                    leader_movements: LeaderMovementCount(1),
+                    max_replicas_before: MaxReplicasCount(9),
+                    max_replicas_after: MaxReplicasCount(6),
+                    max_leaders_before: MaxLeadersCount(5),
+                    max_leaders_after: MaxLeadersCount(3),
                     goals: vec!["RackAware".into()],
                 }),
                 advance_generation: true,

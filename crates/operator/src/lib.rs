@@ -24,6 +24,7 @@ pub mod controller;
 pub mod crd;
 pub mod gen_crds;
 pub mod health;
+pub mod ids;
 pub mod leader_election;
 pub mod rebalancer_client;
 pub mod run;

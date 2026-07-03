@@ -61,13 +61,14 @@ use crate::{
         Kafka, KafkaCondition, KafkaNodePool, KafkaStatus, Listener, ListenerAddress,
         ListenerAuthentication, ListenerAuthenticationOAuth, ListenerStatus, ListenerType,
     },
+    ids::{ReadyReplicaCount, ReplicaCount},
 };
 
 /// Rolled-up view of a cluster's pools. Computed by
 /// `aggregate_pool_status` and consumed by `rollup_condition`.
 pub(crate) struct ClusterRollup {
-    pub replicas: i32,
-    pub ready_replicas: i32,
+    pub replicas: ReplicaCount,
+    pub ready_replicas: ReadyReplicaCount,
     pub pool_count: usize,
 }
 
@@ -79,15 +80,15 @@ pub(crate) fn aggregate_pool_status<'a>(
     pools: impl IntoIterator<Item = &'a KafkaNodePool>,
 ) -> ClusterRollup {
     let mut r = ClusterRollup {
-        replicas: 0,
-        ready_replicas: 0,
+        replicas: ReplicaCount(0),
+        ready_replicas: ReadyReplicaCount(0),
         pool_count: 0,
     };
     for pool in pools {
         r.pool_count += 1;
         let s = pool.status.as_ref();
-        r.replicas += s.and_then(|s| s.replicas).unwrap_or(0);
-        r.ready_replicas += s.and_then(|s| s.ready_replicas).unwrap_or(0);
+        r.replicas += ReplicaCount(s.and_then(|s| s.replicas).unwrap_or(0));
+        r.ready_replicas += ReadyReplicaCount(s.and_then(|s| s.ready_replicas).unwrap_or(0));
     }
     r
 }
@@ -100,7 +101,7 @@ pub(crate) fn aggregate_pool_status<'a>(
 pub(crate) fn rolling_condition_from_rollup(
     rollup: &ClusterRollup,
 ) -> (bool, &'static str, String) {
-    if rollup.pool_count > 0 && rollup.ready_replicas < rollup.replicas {
+    if rollup.pool_count > 0 && rollup.ready_replicas.0 < rollup.replicas.0 {
         (
             true,
             "RollingUpdate",
@@ -128,7 +129,7 @@ pub(crate) fn rollup_condition(rollup: &ClusterRollup) -> (bool, &'static str, S
             "NoNodePools",
             "no KafkaNodePool with label crabka.io/cluster=<name>".into(),
         )
-    } else if rollup.ready_replicas == rollup.replicas && rollup.replicas > 0 {
+    } else if rollup.ready_replicas.0 == rollup.replicas.0 && rollup.replicas.0 > 0 {
         (
             true,
             "Available",
@@ -1615,8 +1616,8 @@ async fn reconcile_inner(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, R
     }
     let status = KafkaStatus {
         conditions,
-        replicas: Some(rollup.replicas),
-        ready_replicas: Some(rollup.ready_replicas),
+        replicas: Some(rollup.replicas.0),
+        ready_replicas: Some(rollup.ready_replicas.0),
         listeners: listener_status,
         cluster_ca: Some(crate::crd::CertificateAuthorityStatus {
             not_after: cluster_ca_outcome.not_after.clone(),
@@ -1906,8 +1907,8 @@ mod tests {
     #[test]
     fn rolling_condition_when_pool_partial() {
         let r = ClusterRollup {
-            replicas: 3,
-            ready_replicas: 1,
+            replicas: ReplicaCount(3),
+            ready_replicas: ReadyReplicaCount(1),
             pool_count: 1,
         };
         let (rolling, reason, _) = rolling_condition_from_rollup(&r);
@@ -1918,8 +1919,8 @@ mod tests {
     #[test]
     fn rolling_condition_when_pool_stable() {
         let r = ClusterRollup {
-            replicas: 1,
-            ready_replicas: 1,
+            replicas: ReplicaCount(1),
+            ready_replicas: ReadyReplicaCount(1),
             pool_count: 1,
         };
         let (rolling, reason, _) = rolling_condition_from_rollup(&r);

@@ -4,7 +4,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::format::SchemaType;
+use crate::{
+    format::SchemaType,
+    ids::{SchemaId, SchemaVersion},
+};
 
 /// Key for a `SCHEMA` record.
 ///
@@ -16,7 +19,7 @@ pub struct SchemaKey {
     /// Always `"SCHEMA"`.
     pub keytype: String,
     pub subject: String,
-    pub version: i32,
+    pub version: SchemaVersion,
     /// Always `1` for `SCHEMA` keys; `0` for `NOOP`/`CONFIG`/`MODE` keys.
     pub magic: u8,
 }
@@ -24,7 +27,7 @@ pub struct SchemaKey {
 impl SchemaKey {
     /// Construct a `SCHEMA` key with `magic = 1`.
     #[must_use]
-    pub fn new(subject: impl Into<String>, version: i32) -> Self {
+    pub fn new(subject: impl Into<String>, version: SchemaVersion) -> Self {
         Self {
             keytype: "SCHEMA".into(),
             subject: subject.into(),
@@ -41,8 +44,8 @@ impl SchemaKey {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SchemaValue {
     pub subject: String,
-    pub version: i32,
-    pub id: i32,
+    pub version: SchemaVersion,
+    pub id: SchemaId,
     #[serde(
         rename = "schemaType",
         skip_serializing_if = "Option::is_none",
@@ -67,7 +70,7 @@ pub struct SchemaValue {
 pub struct SchemaReference {
     pub name: String,
     pub subject: String,
-    pub version: i32,
+    pub version: SchemaVersion,
 }
 
 /// Key for a `CONFIG` record.
@@ -115,7 +118,7 @@ pub struct DeleteSubjectKey {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeleteSubjectValue {
     pub subject: String,
-    pub version: i32,
+    pub version: SchemaVersion,
 }
 
 /// A decoded `_schemas` record.
@@ -217,8 +220,8 @@ pub fn encode_config(subject: Option<&str>, level: &str) -> (Vec<u8>, Vec<u8>) {
 #[derive(Clone, Copy)]
 struct SchemaRecordParts<'a> {
     subject: &'a str,
-    version: i32,
-    id: i32,
+    version: SchemaVersion,
+    id: SchemaId,
     ty: SchemaType,
     schema: &'a str,
     references: &'a [SchemaReference],
@@ -248,8 +251,8 @@ fn schema_kv(record: SchemaRecordParts<'_>) -> (Vec<u8>, Vec<u8>) {
 #[must_use]
 pub fn encode_schema(
     subject: &str,
-    version: i32,
-    id: i32,
+    version: SchemaVersion,
+    id: SchemaId,
     ty: SchemaType,
     schema: &str,
     references: &[SchemaReference],
@@ -272,8 +275,8 @@ pub fn encode_schema(
 #[must_use]
 pub fn encode_schema_with_message_type(
     subject: &str,
-    version: i32,
-    id: i32,
+    version: SchemaVersion,
+    id: SchemaId,
     ty: SchemaType,
     schema: &str,
     references: &[SchemaReference],
@@ -296,8 +299,8 @@ pub fn encode_schema_with_message_type(
 #[must_use]
 pub fn encode_schema_deleted(
     subject: &str,
-    version: i32,
-    id: i32,
+    version: SchemaVersion,
+    id: SchemaId,
     ty: SchemaType,
     schema: &str,
     references: &[SchemaReference],
@@ -319,8 +322,8 @@ pub fn encode_schema_deleted(
 #[must_use]
 pub fn encode_schema_deleted_with_message_type(
     subject: &str,
-    version: i32,
-    id: i32,
+    version: SchemaVersion,
+    id: SchemaId,
     ty: SchemaType,
     schema: &str,
     references: &[SchemaReference],
@@ -341,7 +344,7 @@ pub fn encode_schema_deleted_with_message_type(
 /// Build the `SCHEMA` key bytes for a permanent-delete tombstone (value is null,
 /// produced via [`crate::kafkastore::writer::SchemaWriter::produce_tombstone`]).
 #[must_use]
-pub fn encode_tombstone(subject: &str, version: i32) -> Vec<u8> {
+pub fn encode_tombstone(subject: &str, version: SchemaVersion) -> Vec<u8> {
     serde_json::to_vec(&SchemaKey::new(subject, version)).expect("schema key serialises")
 }
 
@@ -386,7 +389,7 @@ pub fn config_key(subject: Option<&str>) -> Vec<u8> {
 
 /// Build a `DELETE_SUBJECT` record's (key, value).
 #[must_use]
-pub fn encode_delete_subject(subject: &str, version: i32) -> (Vec<u8>, Vec<u8>) {
+pub fn encode_delete_subject(subject: &str, version: SchemaVersion) -> (Vec<u8>, Vec<u8>) {
     let key = DeleteSubjectKey {
         keytype: "DELETE_SUBJECT".to_string(),
         subject: subject.to_string(),
@@ -405,6 +408,15 @@ pub fn encode_delete_subject(subject: &str, version: i32) -> (Vec<u8>, Vec<u8>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Test helpers so literals read as `sid(7)` / `sv(2)` instead of
+    /// `SchemaId(7)` / `SchemaVersion(2)` at every call site.
+    fn sid(n: i32) -> SchemaId {
+        SchemaId(n)
+    }
+    fn sv(n: i32) -> SchemaVersion {
+        SchemaVersion(n)
+    }
 
     #[test]
     fn encode_config_round_trips_via_decode() {
@@ -443,7 +455,7 @@ mod tests {
 
     #[test]
     fn encode_delete_subject_round_trips() {
-        let (k, v) = encode_delete_subject("s", 3);
+        let (k, v) = encode_delete_subject("s", sv(3));
         assert_eq!(
             &k,
             br#"{"keytype":"DELETE_SUBJECT","subject":"s","magic":0}"#
@@ -451,7 +463,7 @@ mod tests {
         match SchemaRecord::decode(&k, Some(&v)) {
             SchemaRecord::DeleteSubject(key, val) => {
                 assert_eq!(key.subject, "s");
-                assert_eq!((val.subject.as_str(), val.version), ("s", 3));
+                assert_eq!((val.subject.as_str(), val.version), ("s", sv(3)));
             }
             other => panic!("expected DeleteSubject, got {other:?}"),
         }
@@ -459,23 +471,30 @@ mod tests {
 
     #[test]
     fn schema_null_value_decodes_to_tombstone() {
-        let key = encode_tombstone("s", 2);
+        let key = encode_tombstone("s", sv(2));
         assert_eq!(
             &key,
             br#"{"keytype":"SCHEMA","subject":"s","version":2,"magic":1}"#
         );
         match SchemaRecord::decode(&key, None) {
-            SchemaRecord::Tombstone(k) => assert_eq!((k.subject.as_str(), k.version), ("s", 2)),
+            SchemaRecord::Tombstone(k) => assert_eq!((k.subject.as_str(), k.version), ("s", sv(2))),
             other => panic!("expected Tombstone, got {other:?}"),
         }
     }
 
     #[test]
     fn encode_schema_deleted_sets_flag() {
-        let (_k, v) = encode_schema_deleted("s", 1, 7, SchemaType::Avro, "{\"type\":\"int\"}", &[]);
+        let (_k, v) = encode_schema_deleted(
+            "s",
+            sv(1),
+            sid(7),
+            SchemaType::Avro,
+            "{\"type\":\"int\"}",
+            &[],
+        );
         let val: SchemaValue = serde_json::from_slice(&v).unwrap();
         assert!(val.deleted);
-        assert_eq!(val.id, 7);
+        assert_eq!(val.id, sid(7));
     }
 
     #[test]
@@ -483,9 +502,9 @@ mod tests {
         let refs = vec![SchemaReference {
             name: "n".into(),
             subject: "b".into(),
-            version: 1,
+            version: sv(1),
         }];
-        let (k, v) = encode_schema("s", 1, 1, SchemaType::Avro, "{}", &refs);
+        let (k, v) = encode_schema("s", sv(1), sid(1), SchemaType::Avro, "{}", &refs);
         match SchemaRecord::decode(&k, Some(&v)) {
             SchemaRecord::Schema(_, val) => assert_eq!(val.references, refs),
             other => panic!("expected Schema, got {other:?}"),
@@ -496,8 +515,8 @@ mod tests {
     fn encode_schema_round_trips_message_type_when_present() {
         let (k, v) = encode_schema_with_message_type(
             "pb-value",
-            1,
-            7,
+            sv(1),
+            sid(7),
             SchemaType::Protobuf,
             "syntax = \"proto3\"; message Order {}",
             &[],
@@ -523,9 +542,9 @@ mod tests {
         let refs = vec![SchemaReference {
             name: "Money".into(),
             subject: "av_money".into(),
-            version: 1,
+            version: sv(1),
         }];
-        let (_k, v) = encode_schema("av_order", 1, 2, SchemaType::Avro, "S", &refs);
+        let (_k, v) = encode_schema("av_order", sv(1), sid(2), SchemaType::Avro, "S", &refs);
         assert_eq!(
             String::from_utf8(v).unwrap(),
             r#"{"subject":"av_order","version":1,"id":2,"references":[{"name":"Money","subject":"av_money","version":1}],"schema":"S","deleted":false}"#
@@ -534,15 +553,22 @@ mod tests {
         let pbrefs = vec![SchemaReference {
             name: "money.proto".into(),
             subject: "pb_money".into(),
-            version: 1,
+            version: sv(1),
         }];
-        let (_k, pv) = encode_schema("pb_order", 1, 4, SchemaType::Protobuf, "S", &pbrefs);
+        let (_k, pv) = encode_schema(
+            "pb_order",
+            sv(1),
+            sid(4),
+            SchemaType::Protobuf,
+            "S",
+            &pbrefs,
+        );
         assert_eq!(
             String::from_utf8(pv).unwrap(),
             r#"{"subject":"pb_order","version":1,"id":4,"schemaType":"PROTOBUF","references":[{"name":"money.proto","subject":"pb_money","version":1}],"schema":"S","deleted":false}"#
         );
         // Empty references → field omitted (cp base schemas carry no `references`).
-        let (_k, ev) = encode_schema("av_money", 1, 1, SchemaType::Avro, "S", &[]);
+        let (_k, ev) = encode_schema("av_money", sv(1), sid(1), SchemaType::Avro, "S", &[]);
         assert!(!String::from_utf8(ev).unwrap().contains("references"));
     }
 
@@ -556,7 +582,7 @@ mod tests {
             SchemaRecord::decode(cs1, Some(br#"{"subject":"i"}"#)),
             SchemaRecord::Noop
         ));
-        let (dk, _dv) = encode_delete_subject("s", 1);
+        let (dk, _dv) = encode_delete_subject("s", sv(1));
         assert!(matches!(
             SchemaRecord::decode(&dk, None),
             SchemaRecord::Noop
@@ -568,11 +594,11 @@ mod tests {
     #[test]
     fn encoders_match_cp_captured_keys() {
         assert_eq!(
-            &encode_schema("t", 1, 1, SchemaType::Avro, "{}", &[]).0,
+            &encode_schema("t", sv(1), sid(1), SchemaType::Avro, "{}", &[]).0,
             br#"{"keytype":"SCHEMA","subject":"t","version":1,"magic":1}"#
         );
         assert_eq!(
-            &encode_delete_subject("d", 1).0,
+            &encode_delete_subject("d", sv(1)).0,
             br#"{"keytype":"DELETE_SUBJECT","subject":"d","magic":0}"#
         );
         assert_eq!(
@@ -580,11 +606,11 @@ mod tests {
             br#"{"keytype":"MODE","subject":"r","magic":0}"#
         );
         assert_eq!(
-            &encode_tombstone("t", 1),
+            &encode_tombstone("t", sv(1)),
             br#"{"keytype":"SCHEMA","subject":"t","version":1,"magic":1}"#
         );
         // soft-delete value: cp's SCHEMA value field order with `deleted:true`.
-        let (_k, v) = encode_schema_deleted("t", 1, 1, SchemaType::Avro, "{}", &[]);
+        let (_k, v) = encode_schema_deleted("t", sv(1), sid(1), SchemaType::Avro, "{}", &[]);
         assert_eq!(
             &v,
             br#"{"subject":"t","version":1,"id":1,"schema":"{}","deleted":true}"#

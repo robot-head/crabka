@@ -203,16 +203,19 @@ mod tests {
     use crabka_client_core::ClientError;
 
     use super::*;
-    use crate::kafkastore::record::{SchemaKey, SchemaValue};
+    use crate::{
+        ids::{SchemaId, SchemaVersion},
+        kafkastore::record::{SchemaKey, SchemaValue},
+    };
 
     #[test]
     fn apply_record_folds_schema_and_ignores_noop() {
         let store = RwLock::new(StoreState::default());
-        let k = SchemaKey::new("av-value", 1);
+        let k = SchemaKey::new("av-value", SchemaVersion(1));
         let v = SchemaValue {
             subject: "av-value".into(),
-            version: 1,
-            id: 1,
+            version: SchemaVersion(1),
+            id: SchemaId(1),
             schema_type: None,
             message_type: None,
             references: vec![],
@@ -221,9 +224,12 @@ mod tests {
         };
         apply_record(&store, SchemaRecord::Schema(k, v));
         apply_record(&store, SchemaRecord::Noop);
-        assert_eq!(store.read().versions("av-value", false).unwrap(), vec![1]);
         assert_eq!(
-            store.read().schema_by_id(1, false).unwrap().1,
+            store.read().versions("av-value", false).unwrap(),
+            vec![SchemaVersion(1)]
+        );
+        assert_eq!(
+            store.read().schema_by_id(SchemaId(1), false).unwrap().1,
             "{\"type\":\"int\"}"
         );
     }
@@ -264,15 +270,18 @@ mod tests {
         let store = RwLock::new(StoreState::default());
         let v = SchemaValue {
             subject: "s".into(),
-            version: 1,
-            id: 1,
+            version: SchemaVersion(1),
+            id: SchemaId(1),
             schema_type: None,
             message_type: None,
             references: vec![],
             schema: "{\"type\":\"int\"}".into(),
             deleted: false,
         };
-        apply_record(&store, SchemaRecord::Schema(SchemaKey::new("s", 1), v));
+        apply_record(
+            &store,
+            SchemaRecord::Schema(SchemaKey::new("s", SchemaVersion(1)), v),
+        );
         // global mode set then clear (Mode(None) -> clear_global_mode)
         apply_record(
             &store,
@@ -338,12 +347,15 @@ mod tests {
                 },
                 DeleteSubjectValue {
                     subject: "s".into(),
-                    version: 1,
+                    version: SchemaVersion(1),
                 },
             ),
         );
         assert!(store.read().versions("s", false).is_none());
-        apply_record(&store, SchemaRecord::Tombstone(SchemaKey::new("s", 1)));
+        apply_record(
+            &store,
+            SchemaRecord::Tombstone(SchemaKey::new("s", SchemaVersion(1))),
+        );
         assert!(store.read().versions("s", true).is_none());
     }
 }

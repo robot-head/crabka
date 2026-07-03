@@ -13,14 +13,15 @@ use crate::{
         StructuralOp,
     },
     error::{Result, TraceqlError},
+    ids::UnixNano,
     span_columns::{COL_NS_LEFT, COL_NS_RIGHT, COL_PARENT_ID, COL_SPAN_ID, COL_TRACE_ID},
     store::{MatchCmp, MatchScope, MatchValue, ScanOptions, SpanMatcher, SpanStore},
 };
 
 pub(crate) struct PlannerContext {
     pub tenant: String,
-    pub start_ns: i64,
-    pub end_ns: i64,
+    pub start_ns: UnixNano,
+    pub end_ns: UnixNano,
     pub scan_options: ScanOptions,
 }
 
@@ -57,7 +58,13 @@ async fn plan_spanset_sql<S: SpanStore>(
 ) -> Result<PlannedSpanset> {
     let scan_options = scan_options_with_pipeline_projections(&ctx.scan_options, pipeline);
     let scan = store
-        .scan_with_options(&ctx.tenant, &[], ctx.start_ns, ctx.end_ns, &scan_options)
+        .scan_with_options(
+            &ctx.tenant,
+            &[],
+            ctx.start_ns.into(),
+            ctx.end_ns.into(),
+            &scan_options,
+        )
         .await?;
     let inspected_bytes = scan.inspected_bytes;
     let nested_tables = register_nested_selector_tables(store, ctx, &scan.ctx, root).await?;
@@ -182,8 +189,8 @@ async fn register_nested_selector_tables<S: SpanStore>(
             .scan_with_options(
                 &ctx.tenant,
                 &selector::field_expr_to_matchers(&selector),
-                ctx.start_ns,
-                ctx.end_ns,
+                ctx.start_ns.into(),
+                ctx.end_ns.into(),
                 &ctx.scan_options,
             )
             .await?;
@@ -895,8 +902,8 @@ mod tests {
                 store,
                 &PlannerContext {
                     tenant: "t".into(),
-                    start_ns: 0,
-                    end_ns: 10_000,
+                    start_ns: UnixNano(0),
+                    end_ns: UnixNano(10_000),
                     scan_options: ScanOptions::default(),
                 },
                 &q,

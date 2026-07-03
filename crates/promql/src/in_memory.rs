@@ -18,6 +18,7 @@ use datafusion::{catalog::MemTable, prelude::SessionContext};
 use crate::{
     PromqlError,
     error::Result,
+    ids::{Offset, PartitionIndex},
     store::{
         ExemplarRecord, LabelNameCardinality, LabelValueCardinality, MetadataRecord, MetricStore,
         NamedTsdbStat, ScanResult, TsdbBlock, TsdbHeadStats, TsdbStats,
@@ -62,7 +63,12 @@ impl WalHead {
 
     /// Apply one decoded metrics WAL record and advance the offset watermarks
     /// for `partition` to include `offset`.
-    pub fn apply_wal_record_at(&self, record: &WalRecord, partition: i32, offset: i64) {
+    pub fn apply_wal_record_at(
+        &self,
+        record: &WalRecord,
+        partition: PartitionIndex,
+        offset: Offset,
+    ) {
         let mut guard = self.inner.write().expect("wal head lock poisoned");
         let store = Arc::make_mut(&mut *guard);
         store.apply_wal_record(record);
@@ -88,7 +94,7 @@ impl WalHead {
 
     /// The lowest WAL offset materialized in the head for `partition`.
     #[must_use]
-    pub fn low_water_offset(&self, partition: i32) -> Option<i64> {
+    pub fn low_water_offset(&self, partition: PartitionIndex) -> Option<Offset> {
         self.inner
             .read()
             .expect("wal head lock poisoned")
@@ -97,7 +103,7 @@ impl WalHead {
 
     /// The highest WAL offset materialized in the head for `partition`.
     #[must_use]
-    pub fn high_water_offset(&self, partition: i32) -> Option<i64> {
+    pub fn high_water_offset(&self, partition: PartitionIndex) -> Option<Offset> {
         self.inner
             .read()
             .expect("wal head lock poisoned")
@@ -106,7 +112,7 @@ impl WalHead {
 
     /// Snapshot of all per-partition WAL offset watermarks.
     #[must_use]
-    pub fn watermarks(&self) -> BTreeMap<i32, PartitionWatermark> {
+    pub fn watermarks(&self) -> BTreeMap<PartitionIndex, PartitionWatermark> {
         self.inner
             .read()
             .expect("wal head lock poisoned")
@@ -166,9 +172,9 @@ pub struct PruneStats {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PartitionWatermark {
     /// First WAL offset that was ingested into the head for this partition.
-    pub low_water_offset: i64,
+    pub low_water_offset: Offset,
     /// Most recent WAL offset that was ingested into the head for this partition.
-    pub high_water_offset: i64,
+    pub high_water_offset: Offset,
 }
 
 /// In-memory metric store keyed by tenant.
@@ -185,7 +191,7 @@ pub struct InMemoryMetricStore {
     /// WAL offset range currently materialized in the head, keyed by partition.
     /// Offsets track ingestion progress for observability and rebuild bounds;
     /// they are independent of timestamp-based retention.
-    watermarks: BTreeMap<i32, PartitionWatermark>,
+    watermarks: BTreeMap<PartitionIndex, PartitionWatermark>,
 }
 
 impl Default for InMemoryMetricStore {
@@ -367,7 +373,7 @@ impl InMemoryMetricStore {
     ///
     /// Offsets track ingestion progress for observability and rebuild bounds;
     /// they are never moved by [`InMemoryMetricStore::prune`].
-    pub fn record_offset(&mut self, partition: i32, offset: i64) {
+    pub fn record_offset(&mut self, partition: PartitionIndex, offset: Offset) {
         self.watermarks
             .entry(partition)
             .and_modify(|watermark| {
@@ -382,7 +388,7 @@ impl InMemoryMetricStore {
 
     /// The lowest WAL offset materialized in the head for `partition`.
     #[must_use]
-    pub fn low_water_offset(&self, partition: i32) -> Option<i64> {
+    pub fn low_water_offset(&self, partition: PartitionIndex) -> Option<Offset> {
         self.watermarks
             .get(&partition)
             .map(|watermark| watermark.low_water_offset)
@@ -390,7 +396,7 @@ impl InMemoryMetricStore {
 
     /// The highest WAL offset materialized in the head for `partition`.
     #[must_use]
-    pub fn high_water_offset(&self, partition: i32) -> Option<i64> {
+    pub fn high_water_offset(&self, partition: PartitionIndex) -> Option<Offset> {
         self.watermarks
             .get(&partition)
             .map(|watermark| watermark.high_water_offset)
@@ -398,7 +404,7 @@ impl InMemoryMetricStore {
 
     /// All per-partition WAL offset watermarks materialized in the head.
     #[must_use]
-    pub fn watermarks(&self) -> &BTreeMap<i32, PartitionWatermark> {
+    pub fn watermarks(&self) -> &BTreeMap<PartitionIndex, PartitionWatermark> {
         &self.watermarks
     }
 
@@ -1354,16 +1360,16 @@ mod tests {
         );
         store.push_metadata("tenant-a", "up", "gauge", "Target health.", "");
         store.push_tsdb_block("tenant-a", "block-a", 0, 5_000, 3, 3);
-        store.record_offset(0, 7);
-        store.record_offset(0, 9);
+        store.record_offset(PartitionIndex(0), Offset(7));
+        store.record_offset(PartitionIndex(0), Offset(9));
 
         let head = WalHead::from_store(store);
         check!(head.retention_ms() == 12_345);
         check!(
-            head.watermarks().get(&0)
+            head.watermarks().get(&PartitionIndex(0))
                 == Some(&PartitionWatermark {
-                    low_water_offset: 7,
-                    high_water_offset: 9,
+                    low_water_offset: Offset(7),
+                    high_water_offset: Offset(9),
                 })
         );
 
@@ -1783,12 +1789,12 @@ mod tests {
         };
 
         // No offsets ingested yet.
-        assert!(head.high_water_offset(0).is_none());
-        assert!(head.low_water_offset(0).is_none());
+        assert!(head.high_water_offset(PartitionIndex(0)).is_none());
+        assert!(head.low_water_offset(PartitionIndex(0)).is_none());
 
-        head.apply_wal_record_at(&record(10), 0, 5);
-        head.apply_wal_record_at(&record(20), 0, 6);
-        head.apply_wal_record_at(&record(30), 1, 100);
+        head.apply_wal_record_at(&record(10), PartitionIndex(0), Offset(5));
+        head.apply_wal_record_at(&record(20), PartitionIndex(0), Offset(6));
+        head.apply_wal_record_at(&record(30), PartitionIndex(1), Offset(100));
 
         // High water is the latest applied offset per partition, low water the
         // first; untracked partitions stay empty.
@@ -1798,18 +1804,18 @@ mod tests {
             (2, None, None),
         ] {
             assert!(
-                head.high_water_offset(partition) == want_high,
+                head.high_water_offset(PartitionIndex(partition)) == want_high.map(Offset),
                 "high water case {partition}"
             );
             assert!(
-                head.low_water_offset(partition) == want_low,
+                head.low_water_offset(PartitionIndex(partition)) == want_low.map(Offset),
                 "low water case {partition}"
             );
         }
 
         // Pruning does not move offsets (they track ingestion, not retention).
         head.prune(i64::MAX);
-        assert!(head.high_water_offset(0) == Some(6));
-        assert!(head.low_water_offset(0) == Some(5));
+        assert!(head.high_water_offset(PartitionIndex(0)) == Some(Offset(6)));
+        assert!(head.low_water_offset(PartitionIndex(0)) == Some(Offset(5)));
     }
 }

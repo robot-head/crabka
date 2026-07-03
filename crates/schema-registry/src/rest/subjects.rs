@@ -9,6 +9,7 @@ use serde::Deserialize;
 use crate::{
     error::SrError,
     format::SchemaType,
+    ids::{SchemaId, SchemaVersion},
     kafkastore::RegisterSchema,
     rest::{
         AppState, DeletedQ,
@@ -84,12 +85,12 @@ pub async fn register(
             schema: &schema,
             references: &req.references,
             message_type: req.message_type.as_deref(),
-            import_id: req.id,
-            import_version: req.version,
+            import_id: req.id.map(SchemaId),
+            import_version: req.version.map(SchemaVersion),
         })
         .await?;
-    tracing::Span::current().record("id", reg.id);
-    Ok(ok_json(&serde_json::json!({ "id": reg.id })))
+    tracing::Span::current().record("id", reg.id.0);
+    Ok(ok_json(&serde_json::json!({ "id": reg.id.0 })))
 }
 
 /// POST /subjects/{subject}[?normalize=true][&deleted=true] -> `{subject,id,version,schema}` | 404
@@ -133,12 +134,12 @@ pub async fn lookup(
     let (sty, schema, _references, message_type) = s
         .schema_by_id(found.id, q.deleted)
         .ok_or(SrError::SchemaNotFound)?;
-    tracing::Span::current().record("id", found.id);
-    tracing::Span::current().record("version", found.version);
+    tracing::Span::current().record("id", found.id.0);
+    tracing::Span::current().record("version", found.version.0);
     let mut m = serde_json::Map::new();
     m.insert("subject".into(), subject.into());
-    m.insert("id".into(), found.id.into());
-    m.insert("version".into(), found.version.into());
+    m.insert("id".into(), found.id.0.into());
+    m.insert("version".into(), found.version.0.into());
     if let Some(t) = sty.wire_name() {
         m.insert("schemaType".into(), t.into());
     }
@@ -173,12 +174,12 @@ pub async fn versions(
     Ok(ok_json(&vs))
 }
 
-fn parse_version(v: &str) -> Result<Option<i32>, SrError> {
+fn parse_version(v: &str) -> Result<Option<SchemaVersion>, SrError> {
     if v == "latest" {
         return Ok(None);
     }
     match v.parse::<i32>() {
-        Ok(n) if n >= 1 => Ok(Some(n)),
+        Ok(n) if n >= 1 => Ok(Some(SchemaVersion(n))),
         _ => Err(SrError::InvalidVersion(v.to_string())),
     }
 }
@@ -200,8 +201,8 @@ pub async fn get_version(
         .ok_or(SrError::VersionNotFound)?;
     let mut m = serde_json::Map::new();
     m.insert("subject".into(), subject.into());
-    m.insert("version".into(), found.version.into());
-    m.insert("id".into(), found.id.into());
+    m.insert("version".into(), found.version.0.into());
+    m.insert("id".into(), found.id.0.into());
     if let Some(t) = found.ty.wire_name() {
         m.insert("schemaType".into(), t.into());
     }

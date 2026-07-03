@@ -9,6 +9,7 @@
 mod ast;
 mod engine;
 mod error;
+mod ids;
 mod in_memory;
 mod lexer;
 mod parser;

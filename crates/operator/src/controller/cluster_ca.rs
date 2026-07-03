@@ -28,6 +28,7 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use crate::{
     controller::common::{FIELD_MANAGER, ReconcileError, owner_ref, read_pem_key},
     crd::{CertificateAuthority, Kafka},
+    ids::{CertGeneration, KeyGeneration},
 };
 
 pub(crate) const CLUSTER_CA_KEY_SUFFIX: &str = "-cluster-ca";
@@ -171,8 +172,8 @@ pub(crate) struct CaState {
     pub pending_key_pem: Option<String>,
     /// Staged new cert during `KeyReplaceTrust`.
     pub pending_cert_pem: Option<String>,
-    pub cert_generation: u64,
-    pub key_generation: u64,
+    pub cert_generation: CertGeneration,
+    pub key_generation: KeyGeneration,
     pub phase: CaPhase,
 }
 
@@ -324,8 +325,8 @@ pub(crate) struct CaReconcileOutcome {
     /// RFC3339 `notAfter` of the signing cert.
     pub not_after: String,
     pub generated: bool,
-    pub cert_generation: u64,
-    pub key_generation: u64,
+    pub cert_generation: CertGeneration,
+    pub key_generation: KeyGeneration,
     pub phase: CaPhase,
     pub trust_anchors: usize,
     /// Cluster CA only: every broker leaf must be reissued with the new key.
@@ -388,8 +389,8 @@ pub(crate) async fn reconcile_ca(
             key_pem,
             pending_key_pem: read_pem_key(k, NEXT_KEY),
             pending_cert_pem: read_pem_key(k, NEXT_CERT),
-            cert_generation: read_generation(c, ANN_CERT_GENERATION),
-            key_generation: read_generation(k, ANN_KEY_GENERATION),
+            cert_generation: CertGeneration(read_generation(c, ANN_CERT_GENERATION)),
+            key_generation: KeyGeneration(read_generation(k, ANN_KEY_GENERATION)),
             phase: read_phase(c),
         };
         let inp = RotationInputs {
@@ -461,8 +462,8 @@ pub(crate) async fn reconcile_ca(
         trust_bundle_pem: material.cert_pem,
         not_after,
         generated: true,
-        cert_generation: 0,
-        key_generation: 0,
+        cert_generation: CertGeneration(0),
+        key_generation: KeyGeneration(0),
         phase: CaPhase::Idle,
         trust_anchors: 1,
         force_reissue_leafs: false,
@@ -536,7 +537,7 @@ async fn apply_ca_rotation(
             let mut blocks = vec![normalize_block(&new_cert)];
             blocks.extend(prune_expired(&state.bundle, now));
             bundle = dedup_blocks(&blocks);
-            cert_gen += 1;
+            cert_gen += CertGeneration(1);
             phase = CaPhase::Idle;
             patch_cert_bundle(secret_api, kafka, cert_name, &bundle, cert_gen, phase).await?;
             raw_override = None;
@@ -587,8 +588,8 @@ async fn apply_ca_rotation(
             blocks.extend(remaining);
             bundle = prune_expired(&dedup_blocks(&blocks), now);
             key_pem = new_key.clone();
-            cert_gen += 1;
-            key_gen += 1;
+            cert_gen += CertGeneration(1);
+            key_gen += KeyGeneration(1);
             phase = CaPhase::KeyReplacePromote;
             force_reissue = matches!(which, WhichCa::Cluster);
             // Promote the key + drop the staged material.
@@ -658,7 +659,7 @@ async fn patch_cert_bundle(
     kafka: &Kafka,
     cert_name: &str,
     bundle: &[String],
-    cert_gen: u64,
+    cert_gen: CertGeneration,
     phase: CaPhase,
 ) -> Result<(), ReconcileError> {
     patch_secret(
@@ -1590,8 +1591,8 @@ mod rotation_tests {
             key_pem: key.to_string(),
             pending_key_pem: None,
             pending_cert_pem: None,
-            cert_generation: 0,
-            key_generation: 0,
+            cert_generation: CertGeneration(0),
+            key_generation: KeyGeneration(0),
             phase,
         }
     }

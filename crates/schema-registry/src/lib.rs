@@ -41,6 +41,7 @@ pub mod config;
 pub mod election;
 pub mod error;
 pub mod format;
+pub mod ids;
 pub mod kafkastore;
 pub mod rest;
 pub mod store;

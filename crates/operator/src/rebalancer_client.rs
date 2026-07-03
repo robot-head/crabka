@@ -20,6 +20,8 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
+use crate::ids::{LeaderMovementCount, MaxLeadersCount, MaxReplicasCount, ReplicaMovementCount};
+
 /// Test seam mirroring [`crate::context::AdminClientHandle`]. Production
 /// wraps [`ConnectRebalancerClient`]; reconcile tests substitute a fake.
 ///
@@ -93,12 +95,12 @@ impl ProposalStatus {
 /// Summary stats from a proposal's `ProposalSummary` message.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProposalSummary {
-    pub replica_movements: i32,
-    pub leader_movements: i32,
-    pub max_replicas_before: i32,
-    pub max_replicas_after: i32,
-    pub max_leaders_before: i32,
-    pub max_leaders_after: i32,
+    pub replica_movements: ReplicaMovementCount,
+    pub leader_movements: LeaderMovementCount,
+    pub max_replicas_before: MaxReplicasCount,
+    pub max_replicas_after: MaxReplicasCount,
+    pub max_leaders_before: MaxLeadersCount,
+    pub max_leaders_after: MaxLeadersCount,
 }
 
 /// The subset of the rebalancer's `Proposal` message the operator acts on.
@@ -154,12 +156,36 @@ pub fn proposal_from_json(body: &Value) -> RebalancerProposal {
             .to_string(),
         status: ProposalStatus::from_json(p.get("status").unwrap_or(&Value::Null)),
         summary: ProposalSummary {
-            replica_movements: json_i32(&summary, "replicaMovements", "replica_movements"),
-            leader_movements: json_i32(&summary, "leaderMovements", "leader_movements"),
-            max_replicas_before: json_i32(&summary, "maxReplicasBefore", "max_replicas_before"),
-            max_replicas_after: json_i32(&summary, "maxReplicasAfter", "max_replicas_after"),
-            max_leaders_before: json_i32(&summary, "maxLeadersBefore", "max_leaders_before"),
-            max_leaders_after: json_i32(&summary, "maxLeadersAfter", "max_leaders_after"),
+            replica_movements: ReplicaMovementCount(json_i32(
+                &summary,
+                "replicaMovements",
+                "replica_movements",
+            )),
+            leader_movements: LeaderMovementCount(json_i32(
+                &summary,
+                "leaderMovements",
+                "leader_movements",
+            )),
+            max_replicas_before: MaxReplicasCount(json_i32(
+                &summary,
+                "maxReplicasBefore",
+                "max_replicas_before",
+            )),
+            max_replicas_after: MaxReplicasCount(json_i32(
+                &summary,
+                "maxReplicasAfter",
+                "max_replicas_after",
+            )),
+            max_leaders_before: MaxLeadersCount(json_i32(
+                &summary,
+                "maxLeadersBefore",
+                "max_leaders_before",
+            )),
+            max_leaders_after: MaxLeadersCount(json_i32(
+                &summary,
+                "maxLeadersAfter",
+                "max_leaders_after",
+            )),
         },
         goals_applied,
         movement_count: p
@@ -352,12 +378,12 @@ mod tests {
                 id: "abc-123".to_string(),
                 status: ProposalStatus::Computed,
                 summary: ProposalSummary {
-                    replica_movements: 4,
-                    leader_movements: 2,
-                    max_replicas_before: 10,
-                    max_replicas_after: 7,
-                    max_leaders_before: 6,
-                    max_leaders_after: 4,
+                    replica_movements: ReplicaMovementCount(4),
+                    leader_movements: LeaderMovementCount(2),
+                    max_replicas_before: MaxReplicasCount(10),
+                    max_replicas_after: MaxReplicasCount(7),
+                    max_leaders_before: MaxLeadersCount(6),
+                    max_leaders_after: MaxLeadersCount(4),
                 },
                 goals_applied: vec!["RackAware".to_string(), "ReplicaDistribution".to_string()],
                 movement_count: 4,

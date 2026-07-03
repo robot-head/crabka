@@ -34,8 +34,8 @@ pub(crate) async fn plan_selector<S: SpanStore>(
         .scan_with_options(
             &ctx.tenant,
             &matchers,
-            ctx.start_ns,
-            ctx.end_ns,
+            ctx.start_ns.into(),
+            ctx.end_ns.into(),
             &ctx.scan_options,
         )
         .await?;
@@ -84,8 +84,8 @@ async fn plan_selector_disjuncts<S: SpanStore>(
             .scan_with_options(
                 &ctx.tenant,
                 matchers,
-                ctx.start_ns,
-                ctx.end_ns,
+                ctx.start_ns.into(),
+                ctx.end_ns.into(),
                 &ctx.scan_options,
             )
             .await?;
@@ -119,8 +119,8 @@ async fn register_unfiltered_parent_table<S: SpanStore>(
         .scan_with_options(
             &ctx.tenant,
             &[],
-            ctx.start_ns,
-            ctx.end_ns,
+            ctx.start_ns.into(),
+            ctx.end_ns.into(),
             &ctx.scan_options,
         )
         .await?;

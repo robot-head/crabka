@@ -21,6 +21,7 @@ use crate::{
         SpansetExpr, Value,
     },
     error::{Result, TraceqlError},
+    ids::{DurationNanos, UnixNano},
     parser::parse,
     planner::{PlannerContext, plan_query},
     result::{
@@ -177,8 +178,8 @@ impl<S: SpanStore> TraceqlEngine<S> {
             self.store.as_ref(),
             &PlannerContext {
                 tenant: tenant.to_string(),
-                start_ns,
-                end_ns,
+                start_ns: UnixNano(start_ns),
+                end_ns: UnixNano(end_ns),
                 scan_options: options.scan_options.clone(),
             },
             &q,
@@ -247,10 +248,10 @@ impl<S: SpanStore> TraceqlEngine<S> {
                     q.root,
                     compare,
                     MetricsRange {
-                        scan_start: start_ns,
-                        scan_end: end_ns,
-                        output_start: start_ns,
-                        step: step_ns,
+                        scan_start: UnixNano(start_ns),
+                        scan_end: UnixNano(end_ns),
+                        output_start: UnixNano(start_ns),
+                        step: DurationNanos(step_ns),
                     },
                     scan_options,
                 )
@@ -263,8 +264,8 @@ impl<S: SpanStore> TraceqlEngine<S> {
             self.store.as_ref(),
             &PlannerContext {
                 tenant: tenant.to_string(),
-                start_ns,
-                end_ns,
+                start_ns: UnixNano(start_ns),
+                end_ns: UnixNano(end_ns),
                 scan_options,
             },
             &Query {
@@ -277,12 +278,12 @@ impl<S: SpanStore> TraceqlEngine<S> {
         let batches = collect_planned_batches(planned).await?;
         assemble_metrics_response(
             &batches,
-            start_ns,
-            end_ns,
-            step_ns,
+            UnixNano(start_ns),
+            UnixNano(end_ns),
+            DurationNanos(step_ns),
             &metric,
             max_exemplars,
-            start_ns,
+            UnixNano(start_ns),
         )
     }
 
@@ -414,8 +415,8 @@ struct MetricPlan {
 struct CompareSpec {
     selection: crate::ast::SpansetExpr,
     top_n: usize,
-    start: Option<i64>,
-    end: Option<i64>,
+    start: Option<UnixNano>,
+    end: Option<UnixNano>,
 }
 
 #[derive(Clone, Copy)]
@@ -438,10 +439,10 @@ enum RankDirection {
 
 #[derive(Clone, Copy)]
 struct MetricsRange {
-    scan_start: i64,
-    scan_end: i64,
-    output_start: i64,
-    step: i64,
+    scan_start: UnixNano,
+    scan_end: UnixNano,
+    output_start: UnixNano,
+    step: DurationNanos,
 }
 
 fn metric_plan(q: &Query) -> Result<MetricPlan> {
@@ -556,8 +557,8 @@ fn metric_pipeline_parts(pipeline: &[Pipeline]) -> Result<Option<MetricPipelineP
                 compare = Some(CompareSpec {
                     selection: (**selection).clone(),
                     top_n: *top_n,
-                    start: *start,
-                    end: *end,
+                    start: start.map(UnixNano),
+                    end: end.map(UnixNano),
                 });
             }
             _ => return Ok(None),
@@ -793,7 +794,7 @@ fn compare_field_class(field: &Field) -> Result<CompareFieldClass> {
 /// start time, every scoped attribute (for the distribution), and the
 /// selection-evaluable intrinsics (for membership).
 struct CompareRow {
-    ts: i64,
+    ts: UnixNano,
     /// Fully-scoped attribute key (e.g. `span.http.method`,
     /// `resource.service.name`) → display value, deduplicated.
     attrs: Vec<(String, String)>,
@@ -831,14 +832,15 @@ fn assemble_compare_response(
     compare: &CompareSpec,
     range: MetricsRange,
 ) -> Result<TraceMetricsResponse> {
-    if range.step <= 0 {
+    if range.step.0 <= 0 {
         return Err(TraceqlError::Plan("metrics step must be positive".into()));
     }
     if range.scan_end < range.scan_start {
         return Err(TraceqlError::Plan("metrics end must be >= start".into()));
     }
-    let bucket_count = usize::try_from((range.scan_end - range.scan_start) / range.step + 1)
-        .map_err(|e| TraceqlError::Plan(e.to_string()))?;
+    let bucket_count =
+        usize::try_from((range.scan_end.0 - range.scan_start.0) / range.step.0 + 1)
+            .map_err(|e| TraceqlError::Plan(e.to_string()))?;
 
     let (counts, totals) = accumulate_compare_counts(batches, compare, range, bucket_count)?;
     let series = build_compare_series(counts, &totals, compare.top_n, range, bucket_count);
@@ -874,11 +876,11 @@ fn accumulate_compare_counts(
             .ok_or_else(|| TraceqlError::Exec(format!("missing column {COL_START}")))?
             .as_primitive::<arrow::datatypes::Int64Type>();
         for row in 0..batch.num_rows() {
-            let ts = starts.value(row);
+            let ts = UnixNano(starts.value(row));
             if ts < range.scan_start || ts > range.scan_end {
                 continue;
             }
-            let bucket = usize::try_from((ts - range.scan_start) / range.step)
+            let bucket = usize::try_from((ts.0 - range.scan_start.0) / range.step.0)
                 .map_err(|e| TraceqlError::Exec(e.to_string()))?;
             let compare_row = compare_row(batch, row, ts)?;
             let group = compare_group_for_row(&compare_row, compare, &regexes);
@@ -1049,7 +1051,7 @@ fn compare_comparison_matches(
 /// attribute-list columns (`attr_keys`/`attr_value*`), where a `__resource.`
 /// prefix on the key marks a resource attribute. The root-service column is
 /// surfaced as `resource.service.name`.
-fn compare_row(batch: &RecordBatch, row: usize, ts: i64) -> Result<CompareRow> {
+fn compare_row(batch: &RecordBatch, row: usize, ts: UnixNano) -> Result<CompareRow> {
     let mut attrs: Vec<(String, String)> = Vec::new();
     let mut raw_span_attrs: Vec<(String, AttrValue)> = Vec::new();
     let mut raw_resource_attrs: Vec<(String, AttrValue)> = Vec::new();
@@ -1512,7 +1514,7 @@ fn compare_points(buckets: &[u64], range: MetricsRange) -> Vec<(i64, f64)> {
         .iter()
         .enumerate()
         .map(|(idx, count)| {
-            let ts = range.output_start + i64::try_from(idx).unwrap_or(i64::MAX) * range.step;
+            let ts = range.output_start.0 + i64::try_from(idx).unwrap_or(i64::MAX) * range.step.0;
             (ts, f64_from_u64(*count).unwrap_or(0.0))
         })
         .collect()
@@ -1520,21 +1522,21 @@ fn compare_points(buckets: &[u64], range: MetricsRange) -> Vec<(i64, f64)> {
 
 fn assemble_metrics_response(
     batches: &[RecordBatch],
-    start_ns: i64,
-    end_ns: i64,
-    step_ns: i64,
+    start_ns: UnixNano,
+    end_ns: UnixNano,
+    step_ns: DurationNanos,
     metric: &MetricPlan,
     max_exemplars: usize,
-    output_start_ns: i64,
+    output_start_ns: UnixNano,
 ) -> Result<TraceMetricsResponse> {
-    if step_ns <= 0 {
+    if step_ns.0 <= 0 {
         return Err(TraceqlError::Plan("metrics step must be positive".into()));
     }
     if end_ns < start_ns {
         return Err(TraceqlError::Plan("metrics end must be >= start".into()));
     }
 
-    let bucket_count = usize::try_from((end_ns - start_ns) / step_ns + 1)
+    let bucket_count = usize::try_from((end_ns.0 - start_ns.0) / step_ns.0 + 1)
         .map_err(|e| TraceqlError::Plan(e.to_string()))?;
     let mut buckets: BTreeMap<Vec<(String, String)>, Vec<MetricBucket>> = BTreeMap::new();
     for batch in batches {
@@ -1543,11 +1545,11 @@ fn assemble_metrics_response(
             .ok_or_else(|| TraceqlError::Exec(format!("missing column {COL_START}")))?
             .as_primitive::<arrow::datatypes::Int64Type>();
         for row in 0..batch.num_rows() {
-            let ts = starts.value(row);
+            let ts = UnixNano(starts.value(row));
             if ts < start_ns || ts > end_ns {
                 continue;
             }
-            let idx = usize::try_from((ts - start_ns) / step_ns)
+            let idx = usize::try_from((ts.0 - start_ns.0) / step_ns.0)
                 .map_err(|e| TraceqlError::Exec(e.to_string()))?;
             let value = match metric.value.as_ref() {
                 // A metric with a value field (avg/min/max/sum/histogram/...)
@@ -1565,7 +1567,7 @@ fn assemble_metrics_response(
                 None => None,
             };
             let labels = metric_labels(batch, row, &metric.by)?;
-            let exemplar = metric_exemplar(batch, row, ts, value.unwrap_or(1.0))?;
+            let exemplar = metric_exemplar(batch, row, ts.0, value.unwrap_or(1.0))?;
             let series_buckets = buckets
                 .entry(labels)
                 .or_insert_with(|| vec![MetricBucket::default(); bucket_count]);
@@ -1578,7 +1580,7 @@ fn assemble_metrics_response(
         buckets.insert(Vec::new(), vec![MetricBucket::default(); bucket_count]);
     }
 
-    let step_seconds = f64_from_i64(step_ns) / 1_000_000_000.0;
+    let step_seconds = f64_from_i64(step_ns.0) / 1_000_000_000.0;
     let series = buckets
         .into_iter()
         .map(|(labels, buckets)| {
@@ -1586,8 +1588,8 @@ fn assemble_metrics_response(
                 labels,
                 buckets,
                 metric,
-                output_start_ns,
-                step_ns,
+                output_start_ns.0,
+                step_ns.0,
                 step_seconds,
                 max_exemplars,
             )
@@ -5494,13 +5496,33 @@ mod tests {
         // guard must NOT fire on equality (kills `< -> <=` and `< -> ==`).
         let batch = metric_start_batch(&[0]);
         let plan = count_plan();
-        let resp = assemble_metrics_response(&[batch], 0, 0, 60_000, &plan, 0, 0).unwrap();
+        let resp = assemble_metrics_response(
+            &[batch],
+            UnixNano(0),
+            UnixNano(0),
+            DurationNanos(60_000),
+            &plan,
+            0,
+            UnixNano(0),
+        )
+        .unwrap();
         assert!(resp.series.len() == 1);
         assert!(resp.series[0].points == vec![(0, 1.0)]);
 
         // end_ns < start_ns is rejected.
         let batch = metric_start_batch(&[0]);
-        assert!(assemble_metrics_response(&[batch], 10, 0, 60_000, &plan, 0, 0).is_err());
+        assert!(
+            assemble_metrics_response(
+                &[batch],
+                UnixNano(10),
+                UnixNano(0),
+                DurationNanos(60_000),
+                &plan,
+                0,
+                UnixNano(0),
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -5512,7 +5534,16 @@ mod tests {
         //  * `> -> ==` / `> -> >=` would drop the row exactly at end_ns.
         let batch = metric_start_batch(&[-10, 0, 60_000, 120_001]);
         let plan = count_plan();
-        let resp = assemble_metrics_response(&[batch], 0, 60_000, 60_000, &plan, 0, 0).unwrap();
+        let resp = assemble_metrics_response(
+            &[batch],
+            UnixNano(0),
+            UnixNano(60_000),
+            DurationNanos(60_000),
+            &plan,
+            0,
+            UnixNano(0),
+        )
+        .unwrap();
         assert!(resp.series.len() == 1);
         // bucket 0 (ts 0) -> 1, bucket 1 (ts 60_000) -> 1. The out-of-range rows
         // (-10 below start, 120_001 above end) are excluded.
@@ -5524,7 +5555,16 @@ mod tests {
         let batch = metric_start_batch(&[9, 10, 12, 14, 15]);
         let plan = count_plan();
 
-        let resp = assemble_metrics_response(&[batch], 10, 14, 2, &plan, 0, 10).unwrap();
+        let resp = assemble_metrics_response(
+            &[batch],
+            UnixNano(10),
+            UnixNano(14),
+            DurationNanos(2),
+            &plan,
+            0,
+            UnixNano(10),
+        )
+        .unwrap();
 
         assert!(resp.series.len() == 1);
         assert!(resp.series[0].points == vec![(10, 1.0), (12, 1.0), (14, 1.0)]);
@@ -5943,10 +5983,10 @@ mod tests {
 
     fn compare_range() -> MetricsRange {
         MetricsRange {
-            scan_start: 0,
-            scan_end: 60_000,
-            output_start: 0,
-            step: 60_000,
+            scan_start: UnixNano(0),
+            scan_end: UnixNano(60_000),
+            output_start: UnixNano(0),
+            step: DurationNanos(60_000),
         }
     }
 
@@ -5973,7 +6013,7 @@ mod tests {
         // once, equal to the trace-root service (COL_ROOT_SERVICE_NAME), never the
         // per-span `__resource.service.name` block attr.
         let batch = compare_block_batch();
-        let row = compare_row(&batch, 0, 0).unwrap();
+        let row = compare_row(&batch, 0, UnixNano(0)).unwrap();
         let service: Vec<&String> = row
             .attrs
             .iter()
@@ -6031,20 +6071,20 @@ mod tests {
         };
 
         let equal_range = MetricsRange {
-            scan_start: 0,
-            scan_end: 0,
-            output_start: 0,
-            step: 60_000,
+            scan_start: UnixNano(0),
+            scan_end: UnixNano(0),
+            output_start: UnixNano(0),
+            step: DurationNanos(60_000),
         };
         let resp =
             assemble_compare_response(&[compare_block_batch()], &compare, equal_range).unwrap();
         assert!(meta_total(&resp, "baseline_total") == 1);
 
         let reversed_range = MetricsRange {
-            scan_start: 60_000,
-            scan_end: 0,
-            output_start: 60_000,
-            step: 60_000,
+            scan_start: UnixNano(60_000),
+            scan_end: UnixNano(0),
+            output_start: UnixNano(60_000),
+            step: DurationNanos(60_000),
         };
         assert!(
             assemble_compare_response(&[compare_block_batch()], &compare, reversed_range).is_err()
@@ -6060,10 +6100,10 @@ mod tests {
             end: None,
         };
         let range = MetricsRange {
-            scan_start: 10,
-            scan_end: 14,
-            output_start: 10,
-            step: 2,
+            scan_start: UnixNano(10),
+            scan_end: UnixNano(14),
+            output_start: UnixNano(10),
+            step: DurationNanos(2),
         };
         let resp = assemble_compare_response(
             &[compare_start_batch(&[9, 10, 12, 14, 15])],
@@ -6088,7 +6128,7 @@ mod tests {
         // NOT be pulled into the selection group — an absent attr matches only
         // `= nil`, mirroring the planner SQL (`NULL != v` excludes).
         let row = CompareRow {
-            ts: 0,
+            ts: UnixNano(0),
             attrs: vec![("span.other".into(), "x".into())],
             raw_span_attrs: vec![("other".into(), AttrValue::Str("x".into()))],
             raw_resource_attrs: Vec::new(),
@@ -6126,7 +6166,7 @@ mod tests {
     #[test]
     fn compare_row_selection_evaluator_obeys_boolean_and_presence_semantics() {
         let row = CompareRow {
-            ts: 0,
+            ts: UnixNano(0),
             attrs: vec![("span.present".into(), "yes".into())],
             raw_span_attrs: vec![("present".into(), AttrValue::Str("yes".into()))],
             raw_resource_attrs: vec![
@@ -6227,7 +6267,7 @@ mod tests {
     #[test]
     fn compare_intrinsic_present_covers_supported_intrinsics_and_empty_values() {
         let populated = CompareRow {
-            ts: 0,
+            ts: UnixNano(0),
             attrs: Vec::new(),
             raw_span_attrs: Vec::new(),
             raw_resource_attrs: Vec::new(),
@@ -6269,7 +6309,7 @@ mod tests {
     #[test]
     fn compare_intrinsic_matches_covers_status_message_kind_and_duration() {
         let row = CompareRow {
-            ts: 0,
+            ts: UnixNano(0),
             attrs: Vec::new(),
             raw_span_attrs: Vec::new(),
             raw_resource_attrs: Vec::new(),
@@ -6398,7 +6438,7 @@ mod tests {
         )
         .unwrap();
 
-        let row = compare_row(&batch, 0, 0).unwrap();
+        let row = compare_row(&batch, 0, UnixNano(0)).unwrap();
 
         assert!(row.attrs == vec![("span.http.method".into(), "GET".into())]);
         assert!(row.raw_span_attrs == vec![("http.method".into(), AttrValue::Str("GET".into()))]);

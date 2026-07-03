@@ -14,6 +14,7 @@ mod error;
 mod extension;
 mod functions;
 mod http_api;
+mod ids;
 mod in_memory;
 mod merged_store;
 pub mod metrics;
@@ -44,6 +45,7 @@ pub use functions::{
     delta_udf, idelta_udf, increase_udf, irate_udf, rate_family_udfs, rate_udf, register_rate_udfs,
 };
 pub use http_api::{PrometheusApiState, prometheus_router};
+pub use ids::{Offset, PartitionIndex};
 pub use in_memory::{
     DEFAULT_RETENTION_MS, InMemoryMetricStore, PartitionWatermark, PruneStats, WalHead,
 };

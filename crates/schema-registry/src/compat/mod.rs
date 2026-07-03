@@ -5,6 +5,7 @@
 use crate::{
     error::SrError,
     format::{self, SchemaType},
+    ids::SchemaVersion,
     store::StoreState,
 };
 
@@ -176,7 +177,7 @@ pub fn check_against_version(
     ty: SchemaType,
     candidate: &str,
     candidate_refs: &[crate::format::ResolvedReference],
-    version: Option<i32>,
+    version: Option<SchemaVersion>,
 ) -> Result<Verdict, SrError> {
     if snap.versions(subject, false).is_none() {
         return Err(SrError::SubjectNotFound(subject.to_string()));

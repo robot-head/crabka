@@ -15,6 +15,7 @@ use crate::{
     config::RegistryConfig,
     error::SrError,
     format::{self, SchemaType},
+    ids::{SchemaId, SchemaVersion},
     kafkastore::record::SchemaReference,
     store::{Registered, StoreState},
 };
@@ -43,8 +44,8 @@ pub struct RegisterSchema<'a> {
     pub schema: &'a str,
     pub references: &'a [SchemaReference],
     pub message_type: Option<&'a str>,
-    pub import_id: Option<i32>,
-    pub import_version: Option<i32>,
+    pub import_id: Option<SchemaId>,
+    pub import_version: Option<SchemaVersion>,
 }
 
 impl KafkaStore {
@@ -164,8 +165,8 @@ impl KafkaStore {
                 .map_err(|e| SrError::Backend(e.to_string()))?;
             self.await_applied(offset).await;
             let span = tracing::Span::current();
-            span.record("id", id);
-            span.record("version", version);
+            span.record("id", id.0);
+            span.record("version", version.0);
             span.record("dedup", false);
             return Ok(Registered { id, version });
         }
@@ -178,8 +179,8 @@ impl KafkaStore {
             false,
         ) {
             let span = tracing::Span::current();
-            span.record("id", existing.id);
-            span.record("version", existing.version);
+            span.record("id", existing.id.0);
+            span.record("version", existing.version.0);
             span.record("dedup", true);
             return Ok(existing);
         }
@@ -210,8 +211,8 @@ impl KafkaStore {
             .map_err(|e| SrError::Backend(e.to_string()))?;
         self.await_applied(offset).await;
         let span = tracing::Span::current();
-        span.record("id", reg.id);
-        span.record("version", reg.version);
+        span.record("id", reg.id.0);
+        span.record("version", reg.version.0);
         span.record("dedup", false);
         Ok(reg)
     }
@@ -275,8 +276,12 @@ impl KafkaStore {
     }
 
     /// Soft-delete a version: re-emit its SCHEMA record with `deleted=true`.
-    #[tracing::instrument(level = "info", name = "kafkastore.soft_delete_version", skip_all, fields(subject = %subject, version), err)]
-    pub async fn soft_delete_version(&self, subject: &str, version: i32) -> Result<i32, SrError> {
+    #[tracing::instrument(level = "info", name = "kafkastore.soft_delete_version", skip_all, fields(subject = %subject, version = version.0), err)]
+    pub async fn soft_delete_version(
+        &self,
+        subject: &str,
+        version: SchemaVersion,
+    ) -> Result<SchemaVersion, SrError> {
         let _gate = self.write_gate.lock().await;
         self.ensure_writable(subject)?;
         let found = {
@@ -319,8 +324,8 @@ impl KafkaStore {
     pub async fn permanent_delete_version(
         &self,
         subject: &str,
-        version: i32,
-    ) -> Result<i32, SrError> {
+        version: SchemaVersion,
+    ) -> Result<SchemaVersion, SrError> {
         let _gate = self.write_gate.lock().await;
         self.ensure_writable(subject)?;
         {
@@ -332,7 +337,10 @@ impl KafkaStore {
                 return Err(SrError::VersionNotFound);
             }
             if s.version(subject, Some(version), false).is_some() {
-                return Err(SrError::VersionNotSoftDeleted(subject.to_string(), version));
+                return Err(SrError::VersionNotSoftDeleted(
+                    subject.to_string(),
+                    version.0,
+                ));
             }
         }
         // Reference-protection: a live referrer blocks deletion (42206).
@@ -356,7 +364,7 @@ impl KafkaStore {
 
     /// Soft-delete a subject (`DELETE_SUBJECT` marker). Returns the live versions.
     #[tracing::instrument(level = "info", name = "kafkastore.soft_delete_subject", skip_all, fields(subject = %subject), err)]
-    pub async fn soft_delete_subject(&self, subject: &str) -> Result<Vec<i32>, SrError> {
+    pub async fn soft_delete_subject(&self, subject: &str) -> Result<Vec<SchemaVersion>, SrError> {
         let _gate = self.write_gate.lock().await;
         self.ensure_writable(subject)?;
         let versions = {
@@ -382,7 +390,7 @@ impl KafkaStore {
                 return Err(SrError::ReferencedByOthers(format!("{subject}:{v}")));
             }
         }
-        let max = versions.iter().copied().max().unwrap_or(0);
+        let max = versions.iter().copied().max().unwrap_or(SchemaVersion(0));
         let (key, value) = record::encode_delete_subject(subject, max);
         let offset = self
             .writer
@@ -396,7 +404,10 @@ impl KafkaStore {
     /// Permanently delete a subject (per-version tombstones). Requires a prior
     /// soft delete (no live versions remain).
     #[tracing::instrument(level = "info", name = "kafkastore.permanent_delete_subject", skip_all, fields(subject = %subject), err)]
-    pub async fn permanent_delete_subject(&self, subject: &str) -> Result<Vec<i32>, SrError> {
+    pub async fn permanent_delete_subject(
+        &self,
+        subject: &str,
+    ) -> Result<Vec<SchemaVersion>, SrError> {
         let _gate = self.write_gate.lock().await;
         self.ensure_writable(subject)?;
         let all_versions = {

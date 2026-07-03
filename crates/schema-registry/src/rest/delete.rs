@@ -8,6 +8,7 @@ use serde::Deserialize;
 
 use crate::{
     error::SrError,
+    ids::SchemaVersion,
     rest::{AppState, response::ok_json},
 };
 
@@ -17,9 +18,9 @@ pub struct PermanentQ {
     permanent: bool,
 }
 
-fn parse_concrete_version(v: &str) -> Result<i32, SrError> {
+fn parse_concrete_version(v: &str) -> Result<SchemaVersion, SrError> {
     match v.parse::<i32>() {
-        Ok(n) if n >= 1 => Ok(n),
+        Ok(n) if n >= 1 => Ok(SchemaVersion(n)),
         _ => Err(SrError::InvalidVersion(v.to_string())),
     }
 }
