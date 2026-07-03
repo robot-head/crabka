@@ -219,7 +219,9 @@ impl DedupEngine {
             }
         };
 
-        txn.commit().await?;
+        txn.commit()
+            .await
+            .map_err(|e| GatewayError::Producer(e.source))?;
         crate::metrics::metrics().record_txn("commit");
 
         // Single-owner: update the local map directly.

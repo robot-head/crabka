@@ -356,7 +356,10 @@ async fn fenced_producer_cannot_commit() {
         .await
         .expect_err("commit should fail after fencing");
     assert!(
-        matches!(err, crabka_client_producer::ProducerError::FencedProducer),
+        matches!(
+            err.source,
+            crabka_client_producer::ProducerError::FencedProducer
+        ),
         "expected FencedProducer, got: {err:?}"
     );
 

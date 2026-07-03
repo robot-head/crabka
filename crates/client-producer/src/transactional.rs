@@ -25,8 +25,15 @@ pub(crate) enum TxnState {
 /// An open transaction, borrowing the [`Producer`] that opened it.
 ///
 /// Returned by [`Producer::begin_transaction`]. [`commit`](Self::commit) and
-/// [`abort`](Self::abort) each consume `self`, so a transaction can be
-/// finished at most once and never silently reused or finished twice.
+/// [`abort`](Self::abort) each consume `self` on success, so a transaction
+/// cannot be silently reused or finished twice. On failure the guard is
+/// handed back via [`EndTransactionError::transaction`] instead of being
+/// dropped: Kafka's `EndTxn` contract makes some failures (e.g.
+/// `CONCURRENT_TRANSACTIONS`) retryable against the very same broker-side
+/// transaction, so the caller can retry `commit()`, or switch to `abort()`,
+/// on the returned guard. For non-retryable failures the producer's
+/// transaction state has already moved on, and the returned guard's next
+/// `commit`/`abort` attempt will itself fail immediately.
 ///
 /// Dropping the guard without calling either does nothing — there is no
 /// auto-abort on `Drop` (`Producer` has no `Drop` impl today and this
@@ -35,6 +42,7 @@ pub(crate) enum TxnState {
 /// closed/dropped. This is intentionally caller error, not silently "fixed"
 /// by the type: do not add a `Drop` impl here without that being a
 /// deliberate, separately-reviewed behavior change.
+#[derive(Debug)]
 #[must_use = "a transaction must be finished with `commit()` or `abort()`"]
 pub struct Transaction<'p> {
     pub(crate) producer: &'p Producer,
@@ -46,8 +54,16 @@ impl Transaction<'_> {
     /// # Errors
     ///
     /// See [`Producer::begin_transaction`] for the shared error conditions.
-    pub async fn commit(self) -> Result<(), ProducerError> {
-        self.producer.end_transaction(true).await
+    /// On failure, `self` is returned via [`EndTransactionError::transaction`]
+    /// so a retryable failure can be retried or aborted.
+    pub async fn commit(self) -> Result<(), EndTransactionError<Self>> {
+        match self.producer.end_transaction(true).await {
+            Ok(()) => Ok(()),
+            Err(source) => Err(EndTransactionError {
+                transaction: self,
+                source,
+            }),
+        }
     }
 
     /// Abort this transaction.
@@ -55,8 +71,16 @@ impl Transaction<'_> {
     /// # Errors
     ///
     /// See [`Producer::begin_transaction`] for the shared error conditions.
-    pub async fn abort(self) -> Result<(), ProducerError> {
-        self.producer.end_transaction(false).await
+    /// On failure, `self` is returned via [`EndTransactionError::transaction`]
+    /// so a retryable failure can be retried or aborted.
+    pub async fn abort(self) -> Result<(), EndTransactionError<Self>> {
+        match self.producer.end_transaction(false).await {
+            Ok(()) => Ok(()),
+            Err(source) => Err(EndTransactionError {
+                transaction: self,
+                source,
+            }),
+        }
     }
 }
 
@@ -68,6 +92,7 @@ impl Transaction<'_> {
 /// field across many separate async calls. Returned by
 /// [`Producer::begin_transaction_owned`]. Mirrors
 /// `tokio::sync::Mutex::{lock, lock_owned}` / `MutexGuard`/`OwnedMutexGuard`.
+#[derive(Debug)]
 #[must_use = "a transaction must be finished with `commit()` or `abort()`"]
 pub struct OwnedTransaction {
     pub(crate) producer: Arc<Producer>,
@@ -79,8 +104,16 @@ impl OwnedTransaction {
     /// # Errors
     ///
     /// See [`Producer::begin_transaction`] for the shared error conditions.
-    pub async fn commit(self) -> Result<(), ProducerError> {
-        self.producer.end_transaction(true).await
+    /// On failure, `self` is returned via [`EndTransactionError::transaction`]
+    /// so a retryable failure can be retried or aborted.
+    pub async fn commit(self) -> Result<(), EndTransactionError<Self>> {
+        match self.producer.end_transaction(true).await {
+            Ok(()) => Ok(()),
+            Err(source) => Err(EndTransactionError {
+                transaction: self,
+                source,
+            }),
+        }
     }
 
     /// Abort this transaction.
@@ -88,7 +121,30 @@ impl OwnedTransaction {
     /// # Errors
     ///
     /// See [`Producer::begin_transaction`] for the shared error conditions.
-    pub async fn abort(self) -> Result<(), ProducerError> {
-        self.producer.end_transaction(false).await
+    /// On failure, `self` is returned via [`EndTransactionError::transaction`]
+    /// so a retryable failure can be retried or aborted.
+    pub async fn abort(self) -> Result<(), EndTransactionError<Self>> {
+        match self.producer.end_transaction(false).await {
+            Ok(()) => Ok(()),
+            Err(source) => Err(EndTransactionError {
+                transaction: self,
+                source,
+            }),
+        }
     }
+}
+
+/// Error returned by [`Transaction::commit`]/[`abort`](Transaction::abort) or
+/// the [`OwnedTransaction`] equivalents, carrying the guard back so a
+/// retryable failure (e.g. `CONCURRENT_TRANSACTIONS`) can be retried or
+/// aborted on the same underlying transaction instead of being stranded.
+#[derive(Debug, thiserror::Error)]
+#[error("{source}")]
+pub struct EndTransactionError<T> {
+    /// The guard the `commit`/`abort` call was made on, handed back so the
+    /// caller can retry `commit()` or call `abort()` on the same transaction.
+    pub transaction: T,
+    /// The underlying failure.
+    #[source]
+    pub source: ProducerError,
 }

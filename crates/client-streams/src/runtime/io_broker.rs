@@ -380,9 +380,20 @@ impl TransactionalProducer for BrokerTransactionalProducer {
                 "commit_transaction called without an open transaction".into(),
             )
         })?;
-        t.commit()
-            .await
-            .map_err(|e| StreamsClientError::Runtime(e.to_string()))
+        // On failure the broker may consider the transaction still open (e.g.
+        // CONCURRENT_TRANSACTIONS), so put the guard back rather than drop
+        // it -- the caller's abort-after-failed-commit recovery path (see
+        // StreamThread::abort_and_rollback) needs a live guard to actually
+        // reach the broker instead of failing locally with "no open
+        // transaction".
+        match t.commit().await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                let source = e.source.to_string();
+                *self.txn.lock().await = Some(e.transaction);
+                Err(StreamsClientError::Runtime(source))
+            }
+        }
     }
 
     async fn abort_transaction(&self) -> Result<(), StreamsClientError> {
@@ -391,9 +402,14 @@ impl TransactionalProducer for BrokerTransactionalProducer {
                 "abort_transaction called without an open transaction".into(),
             )
         })?;
-        t.abort()
-            .await
-            .map_err(|e| StreamsClientError::Runtime(e.to_string()))
+        match t.abort().await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                let source = e.source.to_string();
+                *self.txn.lock().await = Some(e.transaction);
+                Err(StreamsClientError::Runtime(source))
+            }
+        }
     }
 }
 
