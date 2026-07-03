@@ -58,14 +58,16 @@ Grouped into batches with non-overlapping file sets so each batch runs in parall
 
 High-value but wire-crossing. Each is a staged rollout: **define the canonical newtype in an owner crate → add `From`/`Into` at the generated-codec boundary → convert consumers crate-by-crate, leaf crates last.** One type at a time; do not interleave.
 
-| Rank | Newtype | Owner | Recurrence | Blast radius |
-| :--- | :--- | :--- | :--- | :--- |
-| 1 | `Offset(i64)` (+`+ i64`) | **`crabka-ids`** ✅ landed; adopted in observability, metrics, and the 4 unified crates | offset-family in **18 crates** | Very large (wire-facing core pending, needs the differential oracle) |
-| 2 | `PartitionIndex(i32)` | **`crabka-ids`** ✅ landed | **14 crates** | Very large (travels with `Offset`; wire-facing core pending) |
-| 3 | `BrokerId` / unify `NodeId` | `metadata` / `voters` | 5 crates; **two colliding `NodeId=u64` aliases** | Large — this is a rename+merge, not just a wrap |
-| 4 | `LeaderEpoch(i32)` (+ distinct `OffsetEpoch`) | `protocol`/`metadata` | ~7 crates | Medium-large |
-| 5 | `ProducerId(i64)` | `protocol` | 4 crates | Medium (ships with record-batch field newtypes) |
-| 6 | `ApiKey(i16)` / `ApiVersion(i16)` | `protocol`/`client-core` | client + tap | Medium — small, header-local; a good warm-up |
+All six live in **`crabka-ids`** (the canonical home), owned there rather than in `protocol`/`metadata` so the observability stack (which doesn't depend on `protocol`) can name them.
+
+| Rank | Newtype | Status | Blast radius |
+| :--- | :--- | :--- | :--- |
+| 1 | `Offset(i64)` | ✅ **done** — log/raft/broker (full) + observability/metrics/records-legacy; on-disk & wire byte-exact | Very large |
+| 2 | `PartitionIndex(i32)` | ✅ **done** — broker (full) | Very large |
+| 3 | `NodeId(u64)` | ✅ **done** — unified the 3 colliding `type NodeId = u64` aliases into one newtype across 11 crates | Large (rename+merge) |
+| 5 | `ProducerId(i64)` | ✅ **done** — log + broker (idempotent/txn paths) | Medium |
+| 4 | `LeaderEpoch` | ⏳ **pending** — needs a design call: `kraft-core` uses `u32` (consensus, ≥0), the wire uses `i32` with a `-1` sentinel; ~770 mentions, consensus-critical | Medium-large |
+| 6 | `ApiKey(i16)` / `ApiVersion(i16)` | ⏳ **pending** — small, client-core/kafka-tap header-local; lower value (protocol already has a typed `ApiKey` enum) | Small |
 
 Recommended order: `Offset` → `PartitionIndex` → `NodeId`/`BrokerId` collision cleanup → `LeaderEpoch`/`OffsetEpoch` → `ProducerId` → `ApiKey`/`ApiVersion`. The generated codec stays raw throughout; conversions live in the hand-written `owned.rs`/`borrowed.rs` and per-request domain types.
 
