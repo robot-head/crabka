@@ -40,12 +40,12 @@ pub enum ScramServerExchange {
 impl std::fmt::Debug for ScramServerExchange {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::AwaitingClientFirst(_) => {
-                f.debug_tuple("ScramServerExchange::AwaitingClientFirst").finish()
-            }
-            Self::AwaitingClientFinal(_) => {
-                f.debug_tuple("ScramServerExchange::AwaitingClientFinal").finish()
-            }
+            Self::AwaitingClientFirst(_) => f
+                .debug_tuple("ScramServerExchange::AwaitingClientFirst")
+                .finish(),
+            Self::AwaitingClientFinal(_) => f
+                .debug_tuple("ScramServerExchange::AwaitingClientFinal")
+                .finish(),
         }
     }
 }

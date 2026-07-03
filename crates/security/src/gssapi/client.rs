@@ -57,7 +57,10 @@ enum EstablishOutcome {
 }
 
 impl Establishing {
-    fn step(mut self, server_token: Option<&[u8]>) -> Result<EstablishOutcome, ClientExchangeError> {
+    fn step(
+        mut self,
+        server_token: Option<&[u8]>,
+    ) -> Result<EstablishOutcome, ClientExchangeError> {
         match self.initiator.step(server_token)? {
             InitStep::Continue(t) => Ok(EstablishOutcome::Continue(t, self)),
             InitStep::Established(t) => {

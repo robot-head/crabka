@@ -121,10 +121,7 @@ impl AwaitingServerFirst {
 
         let channel_binding = B64.encode(b"n,,");
         let client_final_no_proof = format!("c={channel_binding},r={combined_nonce}");
-        let auth_message = format!(
-            "{},{s},{client_final_no_proof}",
-            self.client_first_bare
-        );
+        let auth_message = format!("{},{s},{client_final_no_proof}", self.client_first_bare);
 
         let (proof, server_key) = match self.mechanism {
             SaslMechanism::ScramSha512 => {
