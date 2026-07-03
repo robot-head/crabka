@@ -137,7 +137,7 @@ async fn interactive_query_kv_store_over_broker() {
 
     // ── 2. Start the counting KafkaStreams app ────────────────────────────────
     let app_id = "iq-broker-app";
-    let mut streams = KafkaStreams::builder()
+    let streams = KafkaStreams::builder()
         .bootstrap(&bootstrap)
         .application_id(app_id)
         .topology(counting_topology(app_id))

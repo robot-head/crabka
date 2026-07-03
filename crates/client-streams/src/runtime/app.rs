@@ -26,21 +26,12 @@ use crate::runtime::thread::StreamThread;
 use crate::store::iq::StoreKind;
 use crate::topology::BuiltTopology;
 
-/// Lifecycle state of a [`KafkaStreams`] runtime.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum KafkaStreamsState {
-    Created,
-    Running,
-    Closed,
-}
-
 /// A managed Kafka Streams runtime: joins a streams group, runs assigned tasks
 /// (fetch → process → produce → commit, at-least-once), and reacts to rebalances.
 pub struct KafkaStreams {
     member_id: String,
     shutdown: CancellationToken,
-    handle: Option<JoinHandle<()>>,
-    state: KafkaStreamsState,
+    handle: JoinHandle<()>,
     /// Channel to the supervisor for interactive queries. Read by the
     /// `KafkaStreams` IQ accessors.
     iq_tx: mpsc::Sender<IqRequest>,
@@ -196,8 +187,7 @@ impl KafkaStreams {
         Ok(Self {
             member_id,
             shutdown,
-            handle: Some(handle),
-            state: KafkaStreamsState::Running,
+            handle,
             iq_tx,
             iq2_tx,
         })
@@ -211,26 +201,15 @@ impl KafkaStreams {
         &self.member_id
     }
 
-    /// Current lifecycle state.
-    #[must_use]
-    pub fn state(&self) -> KafkaStreamsState {
-        self.state
-    }
-
     /// A read-only view of the local `KeyValue` state store `name` for
-    /// interactive queries. Errors if the instance is not running, the store is
-    /// not assigned here, or it is a different store kind.
+    /// interactive queries. Errors if the store is not assigned here, or it is
+    /// a different store kind.
     pub async fn key_value_store<K, V>(
         &self,
         name: impl Into<String>,
         key_serde: impl Serde<K> + 'static,
         value_serde: impl Serde<V> + 'static,
     ) -> Result<ReadOnlyKeyValueStore<K, V>, StreamsClientError> {
-        if self.state != KafkaStreamsState::Running {
-            return Err(StreamsClientError::InteractiveQuery(
-                crate::runtime::iq::IqError::NotRunning,
-            ));
-        }
         let view = ReadOnlyKeyValueStore {
             tx: self.iq_tx.clone(),
             store: name.into(),
@@ -248,11 +227,6 @@ impl KafkaStreams {
         key_serde: impl Serde<K> + 'static,
         value_serde: impl Serde<V> + 'static,
     ) -> Result<crate::runtime::iq_view::ReadOnlyWindowStore<K, V>, StreamsClientError> {
-        if self.state != KafkaStreamsState::Running {
-            return Err(StreamsClientError::InteractiveQuery(
-                crate::runtime::iq::IqError::NotRunning,
-            ));
-        }
         let view = crate::runtime::iq_view::ReadOnlyWindowStore {
             tx: self.iq_tx.clone(),
             store: name.into(),
@@ -270,11 +244,6 @@ impl KafkaStreams {
         key_serde: impl Serde<K> + 'static,
         value_serde: impl Serde<V> + 'static,
     ) -> Result<crate::runtime::iq_view::ReadOnlySessionStore<K, V>, StreamsClientError> {
-        if self.state != KafkaStreamsState::Running {
-            return Err(StreamsClientError::InteractiveQuery(
-                crate::runtime::iq::IqError::NotRunning,
-            ));
-        }
         let view = crate::runtime::iq_view::ReadOnlySessionStore {
             tx: self.iq_tx.clone(),
             store: name.into(),
@@ -287,13 +256,10 @@ impl KafkaStreams {
 
     /// Run an `IQv2` query against locally assigned partitions and return one
     /// `QueryResult` per partition. Serde-free: the store supplies its own
-    /// serdes. If the instance is not running, the result has no partitions.
+    /// serdes.
     pub async fn query<Q: Query>(&self, req: StateQuery<Q>) -> StateQueryResult<Q::Result> {
         use crate::runtime::iqv2::dispatch::{Iq2Request, assemble};
 
-        if self.state != KafkaStreamsState::Running {
-            return StateQueryResult::new(std::collections::BTreeMap::new());
-        }
         let kind = req.query.store_kind();
         let (reply, rx) = tokio::sync::oneshot::channel();
         let iq2 = Iq2Request {
@@ -322,12 +288,9 @@ impl KafkaStreams {
         fields(member_id = %self.member_id),
         err,
     )]
-    pub async fn close(&mut self) -> Result<(), StreamsClientError> {
+    pub async fn close(self) -> Result<(), StreamsClientError> {
         self.shutdown.cancel();
-        if let Some(h) = self.handle.take() {
-            let _ = h.await;
-        }
-        self.state = KafkaStreamsState::Closed;
+        let _ = self.handle.await;
         Ok(())
     }
 }

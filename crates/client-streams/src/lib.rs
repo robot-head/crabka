@@ -764,7 +764,7 @@
 //! topo.add_sink("out", "output-topic", [&up]);
 //! let built = topo.build("my-app")?;
 //!
-//! let mut streams = KafkaStreams::builder()
+//! let streams = KafkaStreams::builder()
 //!     .bootstrap("localhost:9092")
 //!     .application_id("my-app")
 //!     .topology(built)
@@ -821,8 +821,7 @@
 //! `fetch`; [`ReadOnlySessionStore`] exposes `fetch`. Failures surface as
 //! [`StreamsClientError::InteractiveQuery`] wrapping an [`IqError`]:
 //! [`IqError::StoreNotFound`] (no such store assigned here),
-//! [`IqError::WrongStoreKind`] (queried the wrong store kind),
-//! [`IqError::NotRunning`] (instance closed), or
+//! [`IqError::WrongStoreKind`] (queried the wrong store kind), or
 //! [`IqError::RebalanceInProgress`] (no tasks assigned yet — retry).
 //!
 //! ## Exactly-once (EOS v2)
@@ -859,7 +858,7 @@
 //! let built = topo.build("my-app")?;
 //!
 //! // Opt into exactly-once: output + changelog + source offsets commit atomically.
-//! let mut streams = KafkaStreams::builder()
+//! let streams = KafkaStreams::builder()
 //!     .bootstrap("localhost:9092")
 //!     .application_id("my-app")
 //!     .topology(built)
@@ -920,10 +919,7 @@ pub use runtime::iqv2::{
     RangeQuery, StateQuery, StateQueryRequest, StateQueryResult, VersionedKeyQuery, WindowKeyQuery,
     WindowRangeQuery,
 };
-pub use runtime::{
-    KafkaStreams, KafkaStreamsState, ReadOnlyKeyValueStore, ReadOnlySessionStore,
-    ReadOnlyWindowStore,
-};
+pub use runtime::{KafkaStreams, ReadOnlyKeyValueStore, ReadOnlySessionStore, ReadOnlyWindowStore};
 pub use store::iq::StoreKind;
 pub use store::versioned::VersionedRecord;
 pub use store::{KeyValueBytesStore, KeyValueStore, StateStore, StoreBackend};

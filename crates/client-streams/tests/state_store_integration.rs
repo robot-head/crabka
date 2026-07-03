@@ -205,7 +205,7 @@ async fn stateful_count_and_restart_restore() {
 
     // ── 2. Start counting KafkaStreams app ────────────────────────────────────
     let app_id = "count-restart-app";
-    let mut streams = KafkaStreams::builder()
+    let streams = KafkaStreams::builder()
         .bootstrap(&bootstrap)
         .application_id(app_id)
         .topology(counting_topology(app_id))
@@ -253,7 +253,7 @@ async fn stateful_count_and_restart_restore() {
     );
     producer.flush().await.unwrap();
 
-    let mut streams2 = KafkaStreams::builder()
+    let streams2 = KafkaStreams::builder()
         .bootstrap(&bootstrap)
         .application_id(app_id)
         .topology(counting_topology(app_id))
