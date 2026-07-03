@@ -66,7 +66,7 @@ All six live in **`crabka-ids`** (the canonical home), owned there rather than i
 | 2 | `PartitionIndex(i32)` | ✅ **done** — broker (full) | Very large |
 | 3 | `NodeId(u64)` | ✅ **done** — unified the 3 colliding `type NodeId = u64` aliases into one newtype across 11 crates | Large (rename+merge) |
 | 5 | `ProducerId(i64)` | ✅ **done** — log + broker (idempotent/txn paths) | Medium |
-| 4 | `LeaderEpoch` | ⏳ **pending** — needs a design call: `kraft-core` uses `u32` (consensus, ≥0), the wire uses `i32` with a `-1` sentinel; ~770 mentions, consensus-critical | Medium-large |
+| 4 | `LeaderEpoch(i32)` | ✅ **done** — log/metadata/raft/broker/client-consumer/remote-storage(+topic); `kraft-core`'s consensus epoch renamed to `Epoch(u32)`, converted at the raft boundary. Wire/on-disk byte-exact (JVM golden + stateright) | Medium-large |
 | 6 | `ApiKey(i16)` / `ApiVersion(i16)` | ⏳ **pending** — small, client-core/kafka-tap header-local; lower value (protocol already has a typed `ApiKey` enum) | Small |
 
 Recommended order: `Offset` → `PartitionIndex` → `NodeId`/`BrokerId` collision cleanup → `LeaderEpoch`/`OffsetEpoch` → `ProducerId` → `ApiKey`/`ApiVersion`. The generated codec stays raw throughout; conversions live in the hand-written `owned.rs`/`borrowed.rs` and per-request domain types.
