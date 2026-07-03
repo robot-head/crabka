@@ -183,6 +183,7 @@ mod handlers;
 pub(crate) mod heartbeat;
 pub(crate) mod incarnation;
 pub(crate) mod isr_maintenance;
+pub(crate) mod kafka_hash;
 pub(crate) mod leader_election;
 pub mod leader_rebalance;
 mod log_dir;
