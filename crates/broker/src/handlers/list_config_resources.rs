@@ -169,12 +169,9 @@ mod tests {
     use assert2::assert;
     use crabka_metadata::{BrokerRegistrationRecord, MetadataImage, MetadataRecord, TopicRecord};
     use crabka_protocol::UnknownTaggedFields;
-    use crabka_security::Principal;
-    use std::net::SocketAddr;
     use std::sync::Arc;
     use uuid::Uuid;
 
-    use crate::authorizer::Authorizer;
     use crate::broker::BrokerHandle;
     use crate::test_support::{DenyAll, peer, principal};
 
@@ -206,28 +203,14 @@ mod tests {
         img
     }
 
-    fn encode_request(req: &ListConfigResourcesRequest) -> Bytes {
-        crate::test_support::encode_request(req, VERSION)
-    }
+    crate::test_support::wire_helpers!(
+        ListConfigResourcesRequest,
+        ListConfigResourcesResponse,
+        version = VERSION,
+        client_id = "admin-client"
+    );
 
-    fn decode_response(bytes: &Bytes) -> ListConfigResourcesResponse {
-        crate::test_support::decode_response(bytes, VERSION)
-    }
-
-    fn test_context<'a>(
-        principal: &'a Principal,
-        peer: &'a SocketAddr,
-    ) -> crate::handlers::RequestContext<'a> {
-        crate::test_support::request_context(principal, peer, "admin-client")
-    }
-
-    async fn start_broker(authorizer: Arc<dyn Authorizer>) -> (BrokerHandle, tempfile::TempDir) {
-        crate::test_support::start_broker_with(|cfg| {
-            cfg.audit_enabled = false;
-            cfg.authorizer = authorizer;
-        })
-        .await
-    }
+    use crate::test_support::start_broker_with_authorizer_no_audit as start_broker;
 
     async fn seed_topic(handle: &BrokerHandle, name: &str) {
         handle

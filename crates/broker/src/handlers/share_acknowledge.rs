@@ -206,13 +206,12 @@ mod tests {
     use crabka_security::Principal;
     use std::net::SocketAddr;
 
-    fn encode_request(req: &ShareAcknowledgeRequest) -> Bytes {
-        crate::test_support::encode_request(req, share_acknowledge_response::MAX_VERSION)
-    }
-
-    fn decode_response(bytes: &Bytes) -> ShareAcknowledgeResponse {
-        crate::test_support::decode_response(bytes, share_acknowledge_response::MAX_VERSION)
-    }
+    crate::test_support::wire_helpers!(
+        ShareAcknowledgeRequest,
+        ShareAcknowledgeResponse,
+        version = share_acknowledge_response::MAX_VERSION,
+        client_id = "client-a"
+    );
 
     fn request(topic_id: ProtoUuid, partitions: &[i32]) -> ShareAcknowledgeRequest {
         ShareAcknowledgeRequest {
@@ -232,13 +231,6 @@ mod tests {
             }],
             ..Default::default()
         }
-    }
-
-    fn test_context<'a>(
-        principal: &'a Principal,
-        peer: &'a SocketAddr,
-    ) -> crate::handlers::RequestContext<'a> {
-        crate::test_support::request_context(principal, peer, "client-a")
     }
 
     async fn start_broker(share_enabled: bool) -> (crate::broker::BrokerHandle, tempfile::TempDir) {

@@ -118,35 +118,21 @@ mod tests {
     use assert2::assert;
     use crabka_metadata::{MetadataRecord, TopicRecord};
     use crabka_protocol::owned::list_partition_reassignments_request::ListPartitionReassignmentsTopics;
-    use crabka_security::Principal;
-    use std::net::SocketAddr;
     use std::sync::Arc;
     use uuid::Uuid;
 
-    use crate::authorizer::Authorizer;
     use crate::broker::BrokerHandle;
     use crate::test_support::{DenyAll, peer, principal};
 
     const VERSION: i16 = crabka_protocol::owned::list_partition_reassignments_response::MAX_VERSION;
 
-    fn decode_response(bytes: &Bytes) -> ListPartitionReassignmentsResponse {
-        crate::test_support::decode_response(bytes, VERSION)
-    }
+    crate::test_support::response_helpers!(
+        ListPartitionReassignmentsResponse,
+        version = VERSION,
+        client_id = "admin-client"
+    );
 
-    fn test_context<'a>(
-        principal: &'a Principal,
-        peer: &'a SocketAddr,
-    ) -> crate::handlers::RequestContext<'a> {
-        crate::test_support::request_context(principal, peer, "admin-client")
-    }
-
-    async fn start_broker(authorizer: Arc<dyn Authorizer>) -> (BrokerHandle, tempfile::TempDir) {
-        crate::test_support::start_broker_with(|cfg| {
-            cfg.audit_enabled = false;
-            cfg.authorizer = authorizer;
-        })
-        .await
-    }
+    use crate::test_support::start_broker_with_authorizer_no_audit as start_broker;
 
     async fn seed_reassignments(handle: &BrokerHandle) {
         handle

@@ -121,13 +121,7 @@ mod tests {
         AlterReplicaLogDir, AlterReplicaLogDirTopic,
     };
 
-    fn encode_request(version: i16, req: &AlterReplicaLogDirsRequest) -> Bytes {
-        crate::test_support::encode_request(req, version)
-    }
-
-    fn decode_response(version: i16, bytes: &Bytes) -> AlterReplicaLogDirsResponse {
-        crate::test_support::decode_response(bytes, version)
-    }
+    crate::test_support::codec_helpers!(AlterReplicaLogDirsRequest, AlterReplicaLogDirsResponse);
 
     async fn start_broker() -> (crate::broker::BrokerHandle, tempfile::TempDir) {
         crate::test_support::start_broker_with(|_cfg| {}).await
@@ -150,12 +144,12 @@ mod tests {
             }],
             ..Default::default()
         };
-        let req_bytes = encode_request(version, &req);
+        let req_bytes = encode_request(&req, version);
 
         let bytes = handle(&broker, version, 123, &req_bytes)
             .await
             .expect("handle");
-        let resp = decode_response(version, &bytes);
+        let resp = decode_response(&bytes, version);
 
         let expected = AlterReplicaLogDirsResponse {
             throttle_time_ms: 0,

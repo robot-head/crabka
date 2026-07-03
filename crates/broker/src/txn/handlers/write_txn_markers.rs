@@ -123,7 +123,6 @@ mod tests {
     use std::sync::Arc;
 
     use assert2::assert;
-    use bytes::Bytes;
     use crabka_log::{Log, LogConfig};
     use crabka_protocol::UnknownTaggedFields;
     use crabka_protocol::owned::write_txn_markers_request::{
@@ -158,13 +157,11 @@ mod tests {
         .await
     }
 
-    fn encode_request(req: &WriteTxnMarkersRequest) -> Bytes {
-        crate::test_support::encode_request(req, VERSION)
-    }
-
-    fn decode_response(bytes: &Bytes) -> WriteTxnMarkersResponse {
-        crate::test_support::decode_response(bytes, VERSION)
-    }
+    crate::test_support::codec_helpers!(
+        WriteTxnMarkersRequest,
+        WriteTxnMarkersResponse,
+        version = VERSION
+    );
 
     #[tokio::test]
     async fn handle_returns_marker_topic_and_partition_result_rows() {

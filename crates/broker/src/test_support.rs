@@ -104,3 +104,132 @@ pub(crate) async fn start_broker_with(
     let handle = Broker::start(cfg).await.expect("start broker");
     (handle, dir)
 }
+
+/// Start an in-process broker with only its authorizer swapped in.
+///
+/// The single most common `start_broker` shape across handler test modules
+/// (see [`wire_helpers`]): a handler test drives an authorization-failure
+/// path by installing [`DenyAll`] or a custom authorizer and otherwise takes
+/// the `for_tests` defaults.
+pub(crate) async fn start_broker_with_authorizer(
+    authorizer: std::sync::Arc<dyn crate::authorizer::Authorizer>,
+) -> (BrokerHandle, tempfile::TempDir) {
+    start_broker_with(|cfg| cfg.authorizer = authorizer).await
+}
+
+/// Like [`start_broker_with_authorizer`], plus disabling audit logging.
+///
+/// The second most common `start_broker` shape: admin-handler tests that
+/// don't exercise the audit path swap the authorizer and turn `audit_enabled`
+/// off so audit-log assertions elsewhere in the suite aren't perturbed.
+pub(crate) async fn start_broker_with_authorizer_no_audit(
+    authorizer: std::sync::Arc<dyn crate::authorizer::Authorizer>,
+) -> (BrokerHandle, tempfile::TempDir) {
+    start_broker_with(|cfg| {
+        cfg.audit_enabled = false;
+        cfg.authorizer = authorizer;
+    })
+    .await
+}
+
+/// Generate the `encode_request` / `decode_response` / `test_context`
+/// wrapper trio that every handler's `#[cfg(test)] mod handler_tests` binds
+/// over [`encode_request`], [`decode_response`], and [`request_context`].
+///
+/// Two forms:
+///
+/// - `wire_helpers!(ReqTy, RespTy, version = V, client_id = "id")` — for
+///   handlers that always drive one fixed wire version.
+/// - `wire_helpers!(ReqTy, RespTy, client_id = "id")` — for handlers whose
+///   tests vary `version` per call (version-negotiation behaviour).
+macro_rules! wire_helpers {
+    ($req:ty, $resp:ty, version = $version:expr, client_id = $client_id:expr) => {
+        fn encode_request(req: &$req) -> ::bytes::Bytes {
+            crate::test_support::encode_request(req, $version)
+        }
+
+        fn decode_response(bytes: &::bytes::Bytes) -> $resp {
+            crate::test_support::decode_response(bytes, $version)
+        }
+
+        fn test_context<'a>(
+            principal: &'a crabka_security::Principal,
+            peer: &'a ::std::net::SocketAddr,
+        ) -> crate::handlers::RequestContext<'a> {
+            crate::test_support::request_context(principal, peer, $client_id)
+        }
+    };
+    ($req:ty, $resp:ty, client_id = $client_id:expr) => {
+        fn encode_request(req: &$req, version: i16) -> ::bytes::Bytes {
+            crate::test_support::encode_request(req, version)
+        }
+
+        fn decode_response(bytes: &::bytes::Bytes, version: i16) -> $resp {
+            crate::test_support::decode_response(bytes, version)
+        }
+
+        fn test_context<'a>(
+            principal: &'a crabka_security::Principal,
+            peer: &'a ::std::net::SocketAddr,
+        ) -> crate::handlers::RequestContext<'a> {
+            crate::test_support::request_context(principal, peer, $client_id)
+        }
+    };
+}
+pub(crate) use wire_helpers;
+
+/// Like [`wire_helpers`] but for handlers whose `handle()` takes an
+/// already-typed request (nothing to encode) and returns wire `Bytes`, so
+/// only `decode_response` / `test_context` are needed.
+macro_rules! response_helpers {
+    ($resp:ty, version = $version:expr, client_id = $client_id:expr) => {
+        fn decode_response(bytes: &::bytes::Bytes) -> $resp {
+            crate::test_support::decode_response(bytes, $version)
+        }
+
+        fn test_context<'a>(
+            principal: &'a crabka_security::Principal,
+            peer: &'a ::std::net::SocketAddr,
+        ) -> crate::handlers::RequestContext<'a> {
+            crate::test_support::request_context(principal, peer, $client_id)
+        }
+    };
+    ($resp:ty, client_id = $client_id:expr) => {
+        fn decode_response(bytes: &::bytes::Bytes, version: i16) -> $resp {
+            crate::test_support::decode_response(bytes, version)
+        }
+
+        fn test_context<'a>(
+            principal: &'a crabka_security::Principal,
+            peer: &'a ::std::net::SocketAddr,
+        ) -> crate::handlers::RequestContext<'a> {
+            crate::test_support::request_context(principal, peer, $client_id)
+        }
+    };
+}
+pub(crate) use response_helpers;
+
+/// Like [`wire_helpers`] but for handlers that take no [`RequestContext`]
+/// (so there's no `test_context` to generate) — just `encode_request` /
+/// `decode_response`.
+macro_rules! codec_helpers {
+    ($req:ty, $resp:ty, version = $version:expr) => {
+        fn encode_request(req: &$req) -> ::bytes::Bytes {
+            crate::test_support::encode_request(req, $version)
+        }
+
+        fn decode_response(bytes: &::bytes::Bytes) -> $resp {
+            crate::test_support::decode_response(bytes, $version)
+        }
+    };
+    ($req:ty, $resp:ty) => {
+        fn encode_request(req: &$req, version: i16) -> ::bytes::Bytes {
+            crate::test_support::encode_request(req, version)
+        }
+
+        fn decode_response(bytes: &::bytes::Bytes, version: i16) -> $resp {
+            crate::test_support::decode_response(bytes, version)
+        }
+    };
+}
+pub(crate) use codec_helpers;

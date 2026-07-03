@@ -329,7 +329,6 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use crate::authorizer::Authorizer;
     use crate::test_support::DenyAll;
 
     const TOPIC_ID_BYTES: [u8; 16] = [7; 16];
@@ -417,29 +416,13 @@ mod tests {
         }
     }
 
-    fn encode_request(version: i16, req: &AlterPartitionRequest) -> Bytes {
-        crate::test_support::encode_request(req, version)
-    }
+    crate::test_support::wire_helpers!(
+        AlterPartitionRequest,
+        AlterPartitionResponse,
+        client_id = "broker-client"
+    );
 
-    fn decode_response(version: i16, bytes: &Bytes) -> AlterPartitionResponse {
-        crate::test_support::decode_response(bytes, version)
-    }
-
-    fn test_context<'a>(
-        principal: &'a Principal,
-        peer: &'a SocketAddr,
-    ) -> crate::handlers::RequestContext<'a> {
-        crate::test_support::request_context(principal, peer, "broker-client")
-    }
-
-    async fn start_broker(
-        authorizer: Arc<dyn Authorizer>,
-    ) -> (crate::broker::BrokerHandle, tempfile::TempDir) {
-        crate::test_support::start_broker_with(|cfg| {
-            cfg.authorizer = authorizer;
-        })
-        .await
-    }
+    use crate::test_support::start_broker_with_authorizer as start_broker;
 
     async fn wait_for_leader(broker: &Broker) {
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -555,12 +538,12 @@ mod tests {
         };
         let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
         let ctx = test_context(&principal, &peer);
-        let req_bytes = encode_request(version, &request_with_topics(Vec::new()));
+        let req_bytes = encode_request(&request_with_topics(Vec::new()), version);
 
         let resp = super::handle(&broker, version, 123, &req_bytes, &ctx)
             .await
             .expect("handle");
-        let resp = decode_response(version, &resp);
+        let resp = decode_response(&resp, version);
 
         let expected = AlterPartitionResponse {
             throttle_time_ms: 0,
@@ -586,12 +569,12 @@ mod tests {
         };
         let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
         let ctx = test_context(&principal, &peer);
-        let req_bytes = encode_request(version, &request_with_topics(Vec::new()));
+        let req_bytes = encode_request(&request_with_topics(Vec::new()), version);
 
         let resp = super::handle(&broker, version, 123, &req_bytes, &ctx)
             .await
             .expect("handle");
-        let resp = decode_response(version, &resp);
+        let resp = decode_response(&resp, version);
 
         let expected = AlterPartitionResponse {
             throttle_time_ms: 0,
@@ -629,12 +612,12 @@ mod tests {
             }],
             ..Default::default()
         }]);
-        let req_bytes = encode_request(version, &req);
+        let req_bytes = encode_request(&req, version);
 
         let resp = super::handle(&broker, version, 123, &req_bytes, &ctx)
             .await
             .expect("handle");
-        let resp = decode_response(version, &resp);
+        let resp = decode_response(&resp, version);
 
         let expected = AlterPartitionResponse {
             throttle_time_ms: 0,

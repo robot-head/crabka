@@ -456,7 +456,6 @@ fn encode_response(resp: &AddPartitionsToTxnResponse, version: i16) -> Result<By
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
-    use std::net::SocketAddr;
     use std::sync::Arc;
 
     use assert2::assert;
@@ -464,8 +463,6 @@ mod tests {
     use crabka_security::Principal;
 
     use super::*;
-    use crate::authorizer::Authorizer;
-    use crate::broker::BrokerHandle;
     use crate::test_support::{DenyAll, peer};
     use crate::txn::state::TxnEntry;
 
@@ -567,13 +564,11 @@ mod tests {
         assert!(rows == expected);
     }
 
-    fn encode_request(req: &AddPartitionsToTxnRequest, version: i16) -> Bytes {
-        crate::test_support::encode_request(req, version)
-    }
-
-    fn decode_response(bytes: &Bytes, version: i16) -> AddPartitionsToTxnResponse {
-        crate::test_support::decode_response(bytes, version)
-    }
+    crate::test_support::wire_helpers!(
+        AddPartitionsToTxnRequest,
+        AddPartitionsToTxnResponse,
+        client_id = "producer-client"
+    );
 
     #[test]
     fn encode_response_round_trips_v4_transaction_results() {
@@ -629,20 +624,7 @@ mod tests {
         crate::test_support::principal("ANONYMOUS")
     }
 
-    fn test_context<'a>(
-        principal: &'a Principal,
-        peer: &'a SocketAddr,
-    ) -> crate::handlers::RequestContext<'a> {
-        crate::test_support::request_context(principal, peer, "producer-client")
-    }
-
-    async fn start_broker(authorizer: Arc<dyn Authorizer>) -> (BrokerHandle, tempfile::TempDir) {
-        crate::test_support::start_broker_with(|cfg| {
-            cfg.audit_enabled = false;
-            cfg.authorizer = authorizer;
-        })
-        .await
-    }
+    use crate::test_support::start_broker_with_authorizer_no_audit as start_broker;
 
     #[tokio::test]
     async fn handle_v4_transactional_id_deny_returns_transaction_rows() {

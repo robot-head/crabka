@@ -169,23 +169,22 @@ mod tests {
     use super::*;
     use assert2::assert;
     use crabka_metadata::{BrokerEndpoint, BrokerRegistrationRecord, MetadataRecord};
-    use crabka_security::{ListenerProtocol, Principal};
-    use std::net::SocketAddr;
+    use crabka_security::ListenerProtocol;
     use std::sync::Arc;
 
-    use crate::authorizer::Authorizer;
     use crate::broker::BrokerHandle;
     use crate::test_support::{DenyAll, peer, principal};
 
     const VERSION: i16 = 1;
 
-    fn encode_request(req: &DescribeClusterRequest) -> Bytes {
-        crate::test_support::encode_request(req, VERSION)
-    }
+    crate::test_support::wire_helpers!(
+        DescribeClusterRequest,
+        DescribeClusterResponse,
+        version = VERSION,
+        client_id = "admin-client"
+    );
 
-    fn decode_response(bytes: &Bytes) -> DescribeClusterResponse {
-        crate::test_support::decode_response(bytes, VERSION)
-    }
+    use crate::test_support::start_broker_with_authorizer_no_audit as start_broker;
 
     fn request(include_ops: bool) -> DescribeClusterRequest {
         DescribeClusterRequest {
@@ -193,21 +192,6 @@ mod tests {
             endpoint_type: 1,
             ..Default::default()
         }
-    }
-
-    fn test_context<'a>(
-        principal: &'a Principal,
-        peer: &'a SocketAddr,
-    ) -> crate::handlers::RequestContext<'a> {
-        crate::test_support::request_context(principal, peer, "admin-client")
-    }
-
-    async fn start_broker(authorizer: Arc<dyn Authorizer>) -> (BrokerHandle, tempfile::TempDir) {
-        crate::test_support::start_broker_with(|cfg| {
-            cfg.audit_enabled = false;
-            cfg.authorizer = authorizer;
-        })
-        .await
     }
 
     async fn seed_broker(handle: &BrokerHandle) {

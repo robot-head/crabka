@@ -111,7 +111,6 @@ mod tests {
     use std::net::SocketAddr;
     use std::sync::Arc;
 
-    use crate::authorizer::Authorizer;
     use crate::test_support::DenyAll;
 
     fn request(voter_id: i32) -> RemoveRaftVoterRequest {
@@ -123,29 +122,13 @@ mod tests {
         }
     }
 
-    fn encode_request(version: i16, req: &RemoveRaftVoterRequest) -> Bytes {
-        crate::test_support::encode_request(req, version)
-    }
+    crate::test_support::wire_helpers!(
+        RemoveRaftVoterRequest,
+        RemoveRaftVoterResponse,
+        client_id = "admin-client"
+    );
 
-    fn decode_response(version: i16, bytes: &Bytes) -> RemoveRaftVoterResponse {
-        crate::test_support::decode_response(bytes, version)
-    }
-
-    fn test_context<'a>(
-        principal: &'a Principal,
-        peer: &'a SocketAddr,
-    ) -> crate::handlers::RequestContext<'a> {
-        crate::test_support::request_context(principal, peer, "admin-client")
-    }
-
-    async fn start_broker(
-        authorizer: Arc<dyn Authorizer>,
-    ) -> (crate::broker::BrokerHandle, tempfile::TempDir) {
-        crate::test_support::start_broker_with(|cfg| {
-            cfg.authorizer = authorizer;
-        })
-        .await
-    }
+    use crate::test_support::start_broker_with_authorizer as start_broker;
 
     /// Decode→encode round-trip at min and max versions.
     #[test]
@@ -190,12 +173,12 @@ mod tests {
         };
         let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
         let ctx = test_context(&principal, &peer);
-        let req_bytes = encode_request(version, &request(2));
+        let req_bytes = encode_request(&request(2), version);
 
         let resp = super::handle(&broker, version, 123, &req_bytes, &ctx)
             .await
             .expect("handle");
-        let resp = decode_response(version, &resp);
+        let resp = decode_response(&resp, version);
 
         assert!(resp.error_code == codes::CLUSTER_AUTHORIZATION_FAILED);
         assert!(resp.error_message.as_deref() == Some("remove-raft-voter denied"));
@@ -215,12 +198,12 @@ mod tests {
         };
         let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
         let ctx = test_context(&principal, &peer);
-        let req_bytes = encode_request(version, &request(-7));
+        let req_bytes = encode_request(&request(-7), version);
 
         let resp = super::handle(&broker, version, 123, &req_bytes, &ctx)
             .await
             .expect("handle");
-        let resp = decode_response(version, &resp);
+        let resp = decode_response(&resp, version);
 
         assert!(resp.error_code == codes::INVALID_REQUEST);
         assert!(
