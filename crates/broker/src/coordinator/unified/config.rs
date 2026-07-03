@@ -313,4 +313,50 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn debug_renders_operator_fields_and_elides_sleeper() {
+        // The manual `Debug` impl exists because the `AsyncSleeper` trait object
+        // is not `Debug`. Assert on the rendered content — a stubbed-out `fmt`
+        // body (writing nothing) must not pass. Distinctive values on a subset
+        // of fields prove the real fields are emitted, not a static placeholder.
+        let mut cfg = NextGenConfig::default();
+        cfg.session_timeout = Duration::from_secs(37);
+        cfg.max_size = 4242;
+        cfg.migration_policy = ConsumerGroupMigrationPolicy::Downgrade;
+
+        let rendered = format!("{cfg:?}");
+
+        assert!(rendered.starts_with("NextGenConfig"), "got {rendered}");
+        for needle in [
+            "rebalance_protocols",
+            "session_timeout",
+            "37s",
+            "heartbeat_interval",
+            "min_session_timeout",
+            "max_session_timeout",
+            "min_heartbeat_interval",
+            "max_heartbeat_interval",
+            "assignors",
+            "max_size",
+            "4242",
+            "migration_policy",
+            "Downgrade",
+        ] {
+            assert!(
+                rendered.contains(needle),
+                "Debug output missing {needle:?}: {rendered}"
+            );
+        }
+        // `finish_non_exhaustive` elides the sleeper with a trailing `..`; the
+        // elided field's name must not leak into the output.
+        assert!(
+            rendered.contains(".."),
+            "expected non-exhaustive marker: {rendered}"
+        );
+        assert!(
+            !rendered.contains("sleeper"),
+            "sleeper must be elided: {rendered}"
+        );
+    }
 }
