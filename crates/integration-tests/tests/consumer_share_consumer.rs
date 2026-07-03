@@ -199,6 +199,7 @@ async fn produce_n(
         }
         // 3 = UNKNOWN_TOPIC_OR_PARTITION, 6 = NOT_LEADER_OR_FOLLOWER.
         if p.error_code == 3 || p.error_code == 6 {
+            // real-time wait (not a progress poll): bounded retry backoff between full Produce RPC round-trips
             tokio::time::sleep(Duration::from_millis(100)).await;
             continue;
         }
@@ -268,6 +269,7 @@ async fn produce_one_to(
             return;
         }
         if p.error_code == 3 || p.error_code == 6 {
+            // real-time wait (not a progress poll): bounded retry backoff between full Produce RPC round-trips
             tokio::time::sleep(Duration::from_millis(100)).await;
             continue;
         }
@@ -690,7 +692,7 @@ async fn close_leaves_group() {
             if absent {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::task::yield_now().await;
         }
     })
     .await

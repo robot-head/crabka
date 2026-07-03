@@ -310,6 +310,9 @@ async fn delegation_token_user_reconcile_renews_when_within_threshold() {
 
     // Sleep long enough that `now` advances past 1ms on the wall clock.
     // 20ms gives us comfortable headroom against scheduler jitter.
+    // real-time wait (not a progress poll): the renewed token's expiry is derived
+    // from wall-clock now(), which must actually advance between passes;
+    // yield_now() cannot move the clock forward.
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
     // ── Pass 2: Describe finds existing → Renew ────────────────────

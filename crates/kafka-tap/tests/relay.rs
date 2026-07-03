@@ -64,6 +64,10 @@ fn relays_and_records() {
         if (req && resp) || std::time::Instant::now() >= deadline {
             break;
         }
+        // real-time wait (not a progress poll): synchronous #[test] with
+        // std::thread::sleep — there is no async runtime here for
+        // yield_now().await, and the polled frames are produced by a background
+        // OS thread + the relay's own threads that need real time to run.
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     let frames = recorder.lock().unwrap().clone();

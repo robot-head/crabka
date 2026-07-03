@@ -101,7 +101,7 @@ async fn admin_round_trip_create_alter_delete() {
             {
                 break md;
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio::task::yield_now().await;
         }
     })
     .await
@@ -176,7 +176,7 @@ async fn admin_round_trip_create_alter_delete() {
             if !live {
                 break md;
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio::task::yield_now().await;
         }
     })
     .await

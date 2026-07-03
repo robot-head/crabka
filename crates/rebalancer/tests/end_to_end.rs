@@ -519,7 +519,7 @@ async fn execute_proposal_settles_against_real_broker() {
         if final_status != ProposalStatus::Executing && final_status != ProposalStatus::Computed {
             break;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::task::yield_now().await;
     }
     let _ = exec_task.await;
 
@@ -603,6 +603,8 @@ async fn cancel_clears_throttle_and_reverts() {
     let exec = Execution::new(live_client, executor_state, proposal, 50_000_000, cancel);
     let exec_task = tokio::spawn(exec.run());
 
+    // real-time wait (not a progress poll): bare settle to let the spawned execution reach
+    // an in-flight phase before cancelling; no cheap synchronous observable to poll on.
     tokio::time::sleep(Duration::from_millis(100)).await;
     cancel_for_caller.cancel();
     let _ = tokio::time::timeout(Duration::from_secs(10), exec_task).await;

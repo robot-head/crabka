@@ -214,7 +214,7 @@ async fn poll_until_latest(
             break;
         }
 
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::task::yield_now().await;
     }
 
     collected

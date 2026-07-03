@@ -14258,7 +14258,7 @@ async fn service_router_builds_querier_role_with_wal_consumer_hot_tail_poller() 
             if body == expected_api_error_with_stats(expected_loki_ingester_stats_with(1)) {
                 break body;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            tokio::task::yield_now().await;
         }
     })
     .await
@@ -14298,11 +14298,13 @@ async fn service_router_loads_persisted_frontier_for_configured_querier_hot_tail
 
     timeout(Duration::from_millis(500), async {
         while poll_count.load(Ordering::SeqCst) == 0 {
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            tokio::task::yield_now().await;
         }
     })
     .await
     .unwrap();
+    // real-time wait (not a progress poll): bare settle after the WAL consumer's first
+    // poll, before issuing the query; no cheap synchronous observable to poll on here.
     tokio::time::sleep(Duration::from_millis(10)).await;
     let response = app
         .oneshot(

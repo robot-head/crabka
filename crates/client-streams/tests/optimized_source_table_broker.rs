@@ -155,7 +155,7 @@ async fn poll_until_latest(admin: &Client, bootstrap: &str, topic: &str, key: &s
         if latest.as_deref() == Some(want) {
             return;
         }
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::task::yield_now().await;
     }
 }
 
@@ -215,6 +215,9 @@ async fn reuse_source_topic_store_does_not_loop_changelog() {
     .expect("optimized table app must emit k1 -> V1 within 45s");
 
     // Give the app several commit/poll cycles for any write-back loop to manifest.
+    // real-time wait (not a progress poll): settle-then-assert-ABSENCE — this window
+    // lets any changelog write-back loop manifest before we assert it did NOT (in_count
+    // == 1); there is no positive progress signal to poll for.
     tokio::time::sleep(Duration::from_secs(3)).await;
 
     // CRITICAL: nothing must re-produce to the reused source topic. Pre-fix, the
