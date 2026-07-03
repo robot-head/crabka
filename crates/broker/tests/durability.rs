@@ -336,7 +336,7 @@ async fn read_committed_under_rf1_unchanged() {
         .await
         .unwrap();
     producer.init_transactions().await.unwrap();
-    producer.begin_transaction().await.unwrap();
+    let txn = producer.begin_transaction().await.unwrap();
     for v in ["p", "q", "r"] {
         drop(
             producer
@@ -348,7 +348,7 @@ async fn read_committed_under_rf1_unchanged() {
                 .await,
         );
     }
-    producer.commit_transaction().await.unwrap();
+    txn.commit().await.unwrap();
 
     let mut consumer = Consumer::builder()
         .bootstrap(bootstrap)

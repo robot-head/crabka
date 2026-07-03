@@ -979,7 +979,7 @@ async fn read_committed_skips_open_txn_then_sees_committed() {
         .await
         .unwrap();
     producer.init_transactions().await.unwrap();
-    producer.begin_transaction().await.unwrap();
+    let txn = producer.begin_transaction().await.unwrap();
     for v in ["a", "b", "c"] {
         drop(
             producer
@@ -1014,7 +1014,7 @@ async fn read_committed_skips_open_txn_then_sees_committed() {
     // the committed records (proving they were deferred, not dropped). The
     // acquired window also covers the control-marker offset, whose bytes the
     // read path filters out — so we assert on the surfaced record VALUES.
-    producer.commit_transaction().await.unwrap();
+    txn.commit().await.unwrap();
     let mut values: Vec<String> = Vec::new();
     for epoch in 6..30 {
         let row = share_fetch(&client, "g1", &member, tid, 0, epoch, 0).await;

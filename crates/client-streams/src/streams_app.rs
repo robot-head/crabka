@@ -38,7 +38,7 @@
 //!     })
 //!     .to("orders-doubled");
 //!
-//! let mut streams = app.run(topology).await?;
+//! let streams = app.run(topology).await?;
 //! streams.close().await?;
 //! # Ok(()) }
 //! ```

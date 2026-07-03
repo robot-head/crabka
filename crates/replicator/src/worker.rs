@@ -167,7 +167,7 @@ impl FlowWorker {
             .checkpoint_store(Arc::new(store))
             .commit_interval(Duration::from_millis(500))
             .max_batch(500)
-            .run()?;
+            .run();
 
         let heartbeat = HeartbeatTask::start(HeartbeatParams {
             target_bootstrap: p.target_bootstrap.clone(),

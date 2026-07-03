@@ -69,9 +69,9 @@
 //! Kafka transactions (KIP-98 + full KIP-1319 v2) via a per-broker
 //! `txn::coordinator::TxnCoordinator` backed by the `__transaction_state`
 //! internal topic (50 partitions, lazily bootstrapped on first
-//! `FindCoordinator(TRANSACTION)`). Producers call `init_transactions`
-//! / `begin_transaction` / `commit_transaction` / `abort_transaction` /
-//! `send_offsets_to_transaction`; consumers set
+//! `FindCoordinator(TRANSACTION)`). Producers call `init_transactions`,
+//! `begin_transaction` (which returns a guard whose `commit`/`abort` finishes
+//! it), and `send_offsets_to_transaction`; consumers set
 //! `isolation_level=read_committed` to filter aborted records via the
 //! per-segment `.txnindex` and partition-level LSO.
 //!
@@ -183,6 +183,7 @@ mod handlers;
 pub(crate) mod heartbeat;
 pub(crate) mod incarnation;
 pub(crate) mod isr_maintenance;
+pub(crate) mod kafka_hash;
 pub(crate) mod leader_election;
 pub mod leader_rebalance;
 mod log_dir;

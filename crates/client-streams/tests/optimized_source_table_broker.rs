@@ -198,7 +198,7 @@ async fn reuse_source_topic_store_does_not_loop_changelog() {
     produce(&producer, "rt-in", "k1", "V1").await;
 
     let app_id = "reuse-source-no-loop-app";
-    let mut streams = KafkaStreams::builder()
+    let streams = KafkaStreams::builder()
         .bootstrap(&bootstrap)
         .application_id(app_id)
         .topology(reuse_topology(app_id))

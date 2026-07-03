@@ -217,10 +217,10 @@ async fn run_scram_client<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + ?Sized,
 {
-    let mut exch = ScramClientExchange::new(user.to_string(), pass.as_bytes().to_vec(), mechanism);
+    let exch = ScramClientExchange::new(user.to_string(), pass.as_bytes().to_vec(), mechanism);
 
     // Round 1: client-first → server-first.
-    let client_first = exch
+    let (client_first, exch) = exch
         .client_first()
         .map_err(|e| OutboundSaslError::Sasl(format!("scram client_first: {e:?}")))?;
     let resp1 = send_sasl_authenticate(stream, client_first, corr_id).await?;
@@ -233,7 +233,7 @@ where
     let server_first = resp1.auth_bytes.to_vec();
 
     // Round 2: client-final → server-final.
-    let client_final = exch
+    let (client_final, exch) = exch
         .step(&server_first)
         .map_err(|e| OutboundSaslError::Sasl(format!("scram client step: {e:?}")))?;
     let resp2 = send_sasl_authenticate(stream, client_final, corr_id).await?;
@@ -285,7 +285,7 @@ where
     let keytab = keytab_path.to_string_lossy();
     let initiator = SspiInitiator::new(&keytab, client_principal, &target_spn, kdc_url)
         .map_err(|e| OutboundSaslError::Sasl(format!("GSSAPI initiator init failed: {e}")))?;
-    let mut exchange = GssapiClientExchange::new(Box::new(initiator), GSSAPI_MAX_RECV_SIZE, None);
+    let exchange = GssapiClientExchange::new(Box::new(initiator), GSSAPI_MAX_RECV_SIZE, None);
 
     // Seed the exchange with no server token; this produces the AP-REQ.
     let mut step = exchange
@@ -293,7 +293,7 @@ where
         .map_err(|e| OutboundSaslError::Sasl(format!("GSSAPI initiate failed: {e}")))?;
     loop {
         match step {
-            ClientStep::Token(token) => {
+            ClientStep::Token(token, next) => {
                 let resp = send_sasl_authenticate(stream, token, corr_id).await?;
                 if resp.error_code != 0 {
                     return Err(OutboundSaslError::Sasl(format!(
@@ -301,11 +301,20 @@ where
                         resp.error_code, resp.error_message
                     )));
                 }
-                step = exchange
+                step = next
                     .step(Some(&resp.auth_bytes))
                     .map_err(|e| OutboundSaslError::Sasl(format!("GSSAPI step failed: {e}")))?;
             }
-            ClientStep::Done => return Ok(()),
+            ClientStep::Final(token) => {
+                let resp = send_sasl_authenticate(stream, token, corr_id).await?;
+                if resp.error_code != 0 {
+                    return Err(OutboundSaslError::Sasl(format!(
+                        "SaslAuthenticate(GSSAPI) error_code={} error_message={:?}",
+                        resp.error_code, resp.error_message
+                    )));
+                }
+                return Ok(());
+            }
         }
     }
 }
@@ -588,7 +597,7 @@ mod tests {
             assert_request_header(&hs_req, API_KEY_SASL_HANDSHAKE, 1, 1, false);
 
             let cred = hash_scram_password(b"p", SaslMechanism::ScramSha256, 4096);
-            let mut scram_server = ScramServerExchange::new("u".to_string(), cred);
+            let scram_server = ScramServerExchange::new("u".to_string(), cred);
 
             let first_req_len = server.read_u32().await.unwrap();
             let mut first_req = vec![0u8; first_req_len as usize];
@@ -597,7 +606,7 @@ mod tests {
             let mut first_body = request_body(&first_req, true);
             let first_auth = SaslAuthenticateRequest::decode(&mut first_body, 2).unwrap();
             let server_first = match scram_server.step(&first_auth.auth_bytes) {
-                StepResult::Continue(bytes) => bytes,
+                StepResult::Continue(bytes, _next) => bytes,
                 other => panic!("server first SCRAM step must continue, got {other:?}"),
             };
 

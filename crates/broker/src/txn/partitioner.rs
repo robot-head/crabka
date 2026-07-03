@@ -3,64 +3,14 @@
 //! JVM client so a tid hashes to the same `__transaction_state`
 //! partition on Crabka as it does on Apache Kafka.
 
-// The constants and murmur2 helper are retained for transaction-state
-// partition routing parity with Apache Kafka.
-#![allow(dead_code)]
-
-const SEED: u32 = 0x9747_b28c;
-const M: u32 = 0x5bd1_e995;
-const R: u32 = 24;
-
-// Intentional truncation: murmur2 operates on the low 32 bits of the
-// length, matching the JVM int-cast semantics.
-#[allow(clippy::cast_possible_truncation)]
-fn murmur2(data: &[u8]) -> u32 {
-    let length = data.len();
-    let mut h: u32 = SEED ^ (length as u32);
-    let chunks = data.chunks_exact(4);
-    let rem = chunks.remainder();
-    for chunk in chunks {
-        let mut k = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-        k = k.wrapping_mul(M);
-        k ^= k >> R;
-        k = k.wrapping_mul(M);
-        h = h.wrapping_mul(M);
-        h ^= k;
-    }
-    match rem.len() {
-        3 => {
-            h ^= u32::from(rem[2]) << 16;
-            h ^= u32::from(rem[1]) << 8;
-            h ^= u32::from(rem[0]);
-            h = h.wrapping_mul(M);
-        }
-        2 => {
-            h ^= u32::from(rem[1]) << 8;
-            h ^= u32::from(rem[0]);
-            h = h.wrapping_mul(M);
-        }
-        1 => {
-            h ^= u32::from(rem[0]);
-            h = h.wrapping_mul(M);
-        }
-        _ => {}
-    }
-    h ^= h >> 13;
-    h = h.wrapping_mul(M);
-    h ^= h >> 15;
-    h
-}
+use crate::kafka_hash::murmur2_partition;
 
 /// Map a `transactional_id` to a partition index in
 /// `__transaction_state`. Uses `i32`-cast then `abs` to match the JVM
 /// `Utils.abs(int)` semantics, which returns 0 for `Integer.MIN_VALUE`
 /// to avoid arithmetic overflow.
 pub fn partition_for_tid(transactional_id: &str, num_partitions: i32) -> i32 {
-    // cast_possible_wrap: intentional — mirrors JVM's (int) cast of the u32 hash.
-    let h = murmur2(transactional_id.as_bytes()).cast_signed();
-    // Match Utils.abs: return 0 for i32::MIN to avoid overflow, else Math.abs.
-    let abs = if h == i32::MIN { 0 } else { h.abs() };
-    abs % num_partitions
+    murmur2_partition(transactional_id.as_bytes(), num_partitions)
 }
 
 #[cfg(test)]

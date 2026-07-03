@@ -228,7 +228,7 @@ async fn run_stream(cli: &Cli) -> Result<(), BoxError> {
         .to_stream()
         .to(cli.output_topic.clone());
     tracing::info!("orders-analytics streams app starting");
-    let mut streams = app.run(topology).await?;
+    let streams = app.run(topology).await?;
     // Run until Ctrl-C.
     tokio::signal::ctrl_c().await.ok();
     streams.close().await?;

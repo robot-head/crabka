@@ -49,6 +49,7 @@
 //! then [`close`](Source::close)s both ends. These pause/resume + drain hooks are
 //! the seam a contact-window scheduler plugs into.
 
+use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -173,31 +174,46 @@ impl Default for Config {
 /// let handle = ConnectorRuntime::new()
 ///     .add_source(source)
 ///     .add_sink(sink)
-///     .run()
-///     .expect("source + sink configured");
+///     .run();
 /// // ... later ...
 /// handle.shutdown().await.expect("clean drain");
 /// # }
 /// ```
-pub struct ConnectorRuntime<K, V> {
-    source: Option<Box<dyn Source<K, V>>>,
-    sink: Option<Box<dyn Sink<K, V>>>,
+pub struct ConnectorRuntime<K, V, S = NoSource, T = NoSink> {
+    source: S,
+    sink: T,
     checkpoints: Arc<dyn CheckpointStore>,
     config: Config,
+    _marker: PhantomData<(K, V)>,
 }
 
-impl<K, V> Default for ConnectorRuntime<K, V> {
+/// Typestate marker: no source has been added to the runtime yet.
+/// [`run`](ConnectorRuntime::run) does not exist in this state.
+pub struct NoSource;
+
+/// Typestate marker: a source has been added and is ready to run.
+pub struct HasSource<K, V>(Box<dyn Source<K, V>>);
+
+/// Typestate marker: no sink has been added to the runtime yet.
+/// [`run`](ConnectorRuntime::run) does not exist in this state.
+pub struct NoSink;
+
+/// Typestate marker: a sink has been added and is ready to run.
+pub struct HasSink<K, V>(Box<dyn Sink<K, V>>);
+
+impl<K, V> Default for ConnectorRuntime<K, V, NoSource, NoSink> {
     fn default() -> Self {
         Self {
-            source: None,
-            sink: None,
+            source: NoSource,
+            sink: NoSink,
             checkpoints: Arc::new(InMemoryCheckpointStore::default()),
             config: Config::default(),
+            _marker: PhantomData,
         }
     }
 }
 
-impl<K, V> ConnectorRuntime<K, V>
+impl<K, V> ConnectorRuntime<K, V, NoSource, NoSink>
 where
     K: Send + 'static,
     V: Send + 'static,
@@ -208,19 +224,38 @@ where
     pub fn new() -> Self {
         Self::default()
     }
+}
 
+impl<K, V, S, T> ConnectorRuntime<K, V, S, T>
+where
+    K: Send + 'static,
+    V: Send + 'static,
+{
     /// Set the source the runtime polls. Replaces any previously-added source.
     #[must_use]
-    pub fn add_source<S: Source<K, V>>(mut self, source: S) -> Self {
-        self.source = Some(Box::new(source));
-        self
+    pub fn add_source<Src: Source<K, V>>(
+        self,
+        source: Src,
+    ) -> ConnectorRuntime<K, V, HasSource<K, V>, T> {
+        ConnectorRuntime {
+            source: HasSource(Box::new(source)),
+            sink: self.sink,
+            checkpoints: self.checkpoints,
+            config: self.config,
+            _marker: PhantomData,
+        }
     }
 
     /// Set the sink the runtime writes to. Replaces any previously-added sink.
     #[must_use]
-    pub fn add_sink<S: Sink<K, V>>(mut self, sink: S) -> Self {
-        self.sink = Some(Box::new(sink));
-        self
+    pub fn add_sink<Snk: Sink<K, V>>(self, sink: Snk) -> ConnectorRuntime<K, V, S, HasSink<K, V>> {
+        ConnectorRuntime {
+            source: self.source,
+            sink: HasSink(Box::new(sink)),
+            checkpoints: self.checkpoints,
+            config: self.config,
+            _marker: PhantomData,
+        }
     }
 
     /// Persist source checkpoints through `store` instead of the default
@@ -255,24 +290,23 @@ where
         self.config.poll_backoff = backoff;
         self
     }
+}
 
+impl<K, V> ConnectorRuntime<K, V, HasSource<K, V>, HasSink<K, V>>
+where
+    K: Send + 'static,
+    V: Send + 'static,
+{
     /// Spawn the driver loop and return a handle to control it.
     ///
     /// Must be called from within a Tokio runtime. The loop runs until
     /// [`shutdown`](ConnectorHandle::shutdown) (graceful drain) or a fatal
     /// error; an infinite source otherwise runs forever, backing off whenever it
     /// is momentarily caught up.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ConnectError::Backend`] if no source or no sink was added.
-    pub fn run(self) -> Result<ConnectorHandle, ConnectError> {
-        let source = self
-            .source
-            .ok_or_else(|| ConnectError::Backend("connector runtime has no source".into()))?;
-        let sink = self
-            .sink
-            .ok_or_else(|| ConnectError::Backend("connector runtime has no sink".into()))?;
+    #[must_use]
+    pub fn run(self) -> ConnectorHandle {
+        let source = self.source.0;
+        let sink = self.sink.0;
 
         let (control_tx, control_rx) = watch::channel(Control::Run);
         let (state_tx, state_rx) = watch::channel(RuntimeState::Starting);
@@ -287,11 +321,11 @@ where
         };
         let join = tokio::spawn(driver.run());
 
-        Ok(ConnectorHandle {
+        ConnectorHandle {
             control: control_tx,
             state: state_rx,
             join: Some(join),
-        })
+        }
     }
 }
 
@@ -715,8 +749,7 @@ mod tests {
             .add_source(VecSource::new(&[b"a", b"b", b"c"]))
             .add_sink(sink)
             .poll_backoff(Duration::from_millis(5))
-            .run()
-            .unwrap();
+            .run();
 
         let got = collect(&mut rx, 3).await;
         check!(
@@ -738,8 +771,7 @@ mod tests {
             .add_source(VecSource::new(&[b"x"]))
             .add_sink(sink)
             .poll_backoff(Duration::from_millis(5))
-            .run()
-            .unwrap();
+            .run();
 
         let got = collect(&mut rx, 1).await;
         check!(got == vec![Bytes::from_static(b"x")]);
@@ -761,8 +793,7 @@ mod tests {
             .add_sink(sink)
             .checkpoint_store(store.clone())
             .poll_backoff(Duration::from_millis(5))
-            .run()
-            .unwrap();
+            .run();
         let _ = collect(&mut rx, 2).await;
         shutdown(handle).await.unwrap();
 
@@ -778,8 +809,7 @@ mod tests {
             .add_sink(sink2)
             .checkpoint_store(store.clone())
             .poll_backoff(Duration::from_millis(5))
-            .run()
-            .unwrap();
+            .run();
         // Give the loop time to seek + poll a couple of backoff cycles.
         tokio::time::sleep(Duration::from_millis(50)).await;
         shutdown(handle2).await.unwrap();
@@ -796,8 +826,7 @@ mod tests {
             })
             .add_sink(sink)
             .poll_backoff(Duration::from_millis(5))
-            .run()
-            .unwrap();
+            .run();
 
         // Let it poll a few times, then pause and let the loop park.
         tokio::time::sleep(Duration::from_millis(40)).await;
@@ -815,19 +844,6 @@ mod tests {
         // Polling resumed.
         check!(polls.load(Ordering::SeqCst) > paused_count);
         shutdown(handle).await.unwrap();
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn run_without_source_or_sink_errors() {
-        let no_sink = ConnectorRuntime::<Bytes, Bytes>::new()
-            .add_source(VecSource::new(&[]))
-            .run();
-        check!(no_sink.is_err());
-
-        let no_source = ConnectorRuntime::<Bytes, Bytes>::new()
-            .add_sink(channel_sink(false).0)
-            .run();
-        check!(no_source.is_err());
     }
 
     /// A sink whose `put` always fails, to prove a transactional failure aborts.
@@ -864,8 +880,7 @@ mod tests {
                 aborts: aborts.clone(),
             })
             .poll_backoff(Duration::from_millis(5))
-            .run()
-            .unwrap();
+            .run();
 
         // The loop fails on the first delivery; shutdown surfaces that error.
         let result = shutdown(handle).await;
@@ -902,8 +917,7 @@ mod tests {
             .add_source(SeekFailSource)
             .add_sink(channel_sink(false).0)
             .checkpoint_store(store)
-            .run()
-            .unwrap();
+            .run();
         check!(shutdown(handle).await.is_err());
     }
 
@@ -937,8 +951,7 @@ mod tests {
             .add_source(VecSource::new(&[b"a"]))
             .add_sink(channel_sink(false).0)
             .checkpoint_store(Arc::new(FailingCheckpointStore { fail_load: true }))
-            .run()
-            .unwrap();
+            .run();
         check!(shutdown(handle).await.is_err());
     }
 
@@ -952,8 +965,7 @@ mod tests {
             .add_sink(sink)
             .checkpoint_store(Arc::new(FailingCheckpointStore { fail_load: false }))
             .poll_backoff(Duration::from_millis(5))
-            .run()
-            .unwrap();
+            .run();
         check!(collect(&mut rx, 1).await == vec![Bytes::from_static(b"a")]);
         check!(shutdown(handle).await.is_err());
     }
@@ -1049,8 +1061,7 @@ mod tests {
             })
             .checkpoint_store(store)
             .poll_backoff(Duration::from_millis(5))
-            .run()
-            .unwrap();
+            .run();
 
         tokio::time::sleep(Duration::from_millis(50)).await;
         shutdown(handle).await.unwrap();
@@ -1087,8 +1098,7 @@ mod tests {
             .add_source(VecSource::new(&[b"a"]))
             .add_sink(CloseFailSink)
             .poll_backoff(Duration::from_millis(5))
-            .run()
-            .unwrap();
+            .run();
         // The run drains cleanly; closing the sink fails, so shutdown reports it.
         check!(shutdown(handle).await.is_err());
     }
@@ -1107,8 +1117,7 @@ mod tests {
             .max_batch(100)
             .commit_interval(Duration::from_secs(30))
             .poll_backoff(Duration::from_millis(5))
-            .run()
-            .unwrap();
+            .run();
         let _ = collect(&mut rx, 3).await;
         shutdown(handle).await.unwrap();
         check!(*puts.lock().unwrap() == vec![3]);
@@ -1126,8 +1135,7 @@ mod tests {
             .max_batch(2)
             .commit_interval(Duration::from_secs(30))
             .poll_backoff(Duration::from_millis(5))
-            .run()
-            .unwrap();
+            .run();
         let _ = collect(&mut rx, 4).await;
         shutdown(handle).await.unwrap();
         let sizes = puts.lock().unwrap().clone();
@@ -1148,8 +1156,7 @@ mod tests {
             })
             .add_sink(sink)
             .poll_backoff(Duration::from_millis(50))
-            .run()
-            .unwrap();
+            .run();
         tokio::time::sleep(Duration::from_millis(250)).await;
         check!(polls.load(Ordering::SeqCst) < 100);
         shutdown(handle).await.unwrap();
@@ -1198,8 +1205,7 @@ mod tests {
             })
             .add_sink(sink)
             .poll_backoff(Duration::from_millis(5))
-            .run()
-            .unwrap();
+            .run();
 
         drop(handle);
         tokio::time::timeout(Duration::from_secs(5), closed_rx.recv())

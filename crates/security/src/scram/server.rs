@@ -12,34 +12,48 @@ use subtle::ConstantTimeEq;
 use super::{ScramCredential, scram_hash_len};
 use crate::{AuthError, AuthMethod, Principal, SaslMechanism};
 
-#[derive(Debug)]
-enum State {
-    AwaitingClientFirst,
-    AwaitingClientFinal {
-        client_first_bare: String,
-        server_first: String,
-    },
-    Finished,
-}
-
-#[derive(Debug)]
-pub struct ScramServerExchange {
+struct AwaitingClientFirst {
     username: String,
     credential: ScramCredential,
-    state: State,
-    /// KIP-48: when present, the `Done` arm yields this
-    /// principal instead of one synthesized from `username`. Used by
-    /// the delegation-token SCRAM fallback in
-    /// `crabka_broker::network::auth::handle_authenticate_scram` so a
-    /// client authenticating with a `tokenId` as the SCRAM username
-    /// surfaces as the token's owner (`User:alice`), not as
-    /// `User:<token-uuid>`.
     principal_override: Option<Principal>,
 }
 
+struct AwaitingClientFinal {
+    username: String,
+    credential: ScramCredential,
+    principal_override: Option<Principal>,
+    client_first_bare: String,
+    server_first: String,
+}
+
+/// RFC 5802 SCRAM server-side handshake, one type per negotiation phase.
+///
+/// The variant payload types are intentionally not exported: the phase is
+/// driven entirely through `step`/`StepResult`, so callers never need to
+/// name `AwaitingClientFirst`/`AwaitingClientFinal` directly.
+#[allow(private_interfaces)]
+pub enum ScramServerExchange {
+    AwaitingClientFirst(AwaitingClientFirst),
+    AwaitingClientFinal(AwaitingClientFinal),
+}
+
+impl std::fmt::Debug for ScramServerExchange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AwaitingClientFirst(_) => f
+                .debug_tuple("ScramServerExchange::AwaitingClientFirst")
+                .finish(),
+            Self::AwaitingClientFinal(_) => f
+                .debug_tuple("ScramServerExchange::AwaitingClientFinal")
+                .finish(),
+        }
+    }
+}
+
 #[derive(Debug)]
+#[must_use]
 pub enum StepResult {
-    Continue(Vec<u8>),
+    Continue(Vec<u8>, ScramServerExchange),
     Done(Principal, Vec<u8>),
     Failed(AuthError),
 }
@@ -47,12 +61,11 @@ pub enum StepResult {
 impl ScramServerExchange {
     #[must_use]
     pub fn new(username: String, credential: ScramCredential) -> Self {
-        Self {
+        Self::AwaitingClientFirst(AwaitingClientFirst {
             username,
             credential,
-            state: State::AwaitingClientFirst,
             principal_override: None,
-        }
+        })
     }
 
     /// KIP-48: variant of [`Self::new`] that stamps a
@@ -67,17 +80,26 @@ impl ScramServerExchange {
         credential: ScramCredential,
         override_principal: Principal,
     ) -> Self {
-        Self {
+        Self::AwaitingClientFirst(AwaitingClientFirst {
             username,
             credential,
-            state: State::AwaitingClientFirst,
             principal_override: Some(override_principal),
-        }
+        })
     }
 
+    /// Feed one client message and advance the negotiation.
+    pub fn step(self, client_bytes: &[u8]) -> StepResult {
+        match self {
+            Self::AwaitingClientFirst(s) => s.step(client_bytes),
+            Self::AwaitingClientFinal(s) => s.step(client_bytes),
+        }
+    }
+}
+
+impl AwaitingClientFirst {
     // Per-step SCRAM server driver. skip_all keeps the raw `client_bytes`
-    // (client-first/-final carrying nonce + proof) out of span fields; only
-    // the non-sensitive mechanism + username are recorded. Returns a
+    // (client-first carrying nonce) out of span fields; only the
+    // non-sensitive mechanism + username are recorded. Returns a
     // `StepResult` enum (not a Result), so no `err`.
     #[tracing::instrument(
         level = "debug",
@@ -87,18 +109,7 @@ impl ScramServerExchange {
             principal = %self.username,
         )
     )]
-    pub fn step(&mut self, client_bytes: &[u8]) -> StepResult {
-        match std::mem::replace(&mut self.state, State::Finished) {
-            State::AwaitingClientFirst => self.step_first(client_bytes),
-            State::AwaitingClientFinal {
-                client_first_bare,
-                server_first,
-            } => self.step_final(client_bytes, &client_first_bare, &server_first),
-            State::Finished => StepResult::Failed(AuthError::MalformedMessage),
-        }
-    }
-
-    fn step_first(&mut self, client_bytes: &[u8]) -> StepResult {
+    fn step(self, client_bytes: &[u8]) -> StepResult {
         let Ok(s) = std::str::from_utf8(client_bytes) else {
             return StepResult::Failed(AuthError::MalformedMessage);
         };
@@ -134,19 +145,34 @@ impl ScramServerExchange {
             self.credential.iterations,
         );
         let response = server_first.clone().into_bytes();
-        self.state = State::AwaitingClientFinal {
+        let next = AwaitingClientFinal {
+            username: self.username,
+            credential: self.credential,
+            principal_override: self.principal_override,
             client_first_bare: bare.to_string(),
             server_first,
         };
-        StepResult::Continue(response)
+        StepResult::Continue(response, ScramServerExchange::AwaitingClientFinal(next))
     }
+}
 
-    fn step_final(
-        &mut self,
-        client_bytes: &[u8],
-        client_first_bare: &str,
-        server_first: &str,
-    ) -> StepResult {
+impl AwaitingClientFinal {
+    // Per-step SCRAM server driver. skip_all keeps the raw `client_bytes`
+    // (client-final carrying proof) out of span fields; only the
+    // non-sensitive mechanism + username are recorded. Terminal: returns
+    // `Done`/`Failed` only. Returns a `StepResult` enum (not a Result), so
+    // no `err`.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(
+            mechanism = %self.credential.mechanism.wire_name(),
+            principal = %self.username,
+        )
+    )]
+    fn step(self, client_bytes: &[u8]) -> StepResult {
+        let client_first_bare = &self.client_first_bare;
+        let server_first = &self.server_first;
         let Ok(s) = std::str::from_utf8(client_bytes) else {
             return StepResult::Failed(AuthError::MalformedMessage);
         };

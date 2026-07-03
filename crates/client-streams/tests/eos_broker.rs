@@ -350,7 +350,7 @@ async fn eos_v2_atomic_output_and_restart_resume() {
     produce(&producer, &["a", "a", "b"]).await;
 
     // 3. Start the stateful counting app under EXACTLY_ONCE_V2.
-    let mut streams = eos_streams(&bootstrap).await;
+    let streams = eos_streams(&bootstrap).await;
 
     // 4. Read `out` with READ_COMMITTED until 3 committed records are visible.
     let got = tokio::time::timeout(
@@ -426,7 +426,7 @@ async fn eos_v2_atomic_output_and_restart_resume() {
     streams.close().await.unwrap();
     produce(&producer, &["a"]).await;
 
-    let mut streams2 = eos_streams(&bootstrap).await;
+    let streams2 = eos_streams(&bootstrap).await;
 
     // Collect the FULL committed output from offset 0 (READ_COMMITTED) until the
     // 4th committed record appears. Reading from 0 is robust to the EOS control

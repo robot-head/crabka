@@ -241,7 +241,7 @@ async fn dsl_count_restart_restore_emit_on_update() {
     // flush-on-commit wiring lands in a later record-caching sub-task, so this
     // emit-on-update test pins caching off until then.
     let app_id = "dsl-count-app";
-    let mut streams = KafkaStreams::builder()
+    let streams = KafkaStreams::builder()
         .bootstrap(&bootstrap)
         .application_id(app_id)
         .topology(dsl_counting_topology(app_id))
@@ -279,7 +279,7 @@ async fn dsl_count_restart_restore_emit_on_update() {
     // Produce one more "a" to dsl-in BEFORE starting so it's queued.
     produce_one(&producer, "a").await;
 
-    let mut streams2 = KafkaStreams::builder()
+    let streams2 = KafkaStreams::builder()
         .bootstrap(&bootstrap)
         .application_id(app_id)
         .topology(dsl_counting_topology(app_id))
@@ -371,7 +371,7 @@ async fn dsl_count_restart_restore_caching_on() {
     //       commit interval keeps flushes to at most one (the immediate first
     //       tick); the deduped emit is guaranteed by single-batch processing. ──
     let app_id = "dsl-count-cache-app";
-    let mut streams = KafkaStreams::builder()
+    let streams = KafkaStreams::builder()
         .bootstrap(&bootstrap)
         .application_id(app_id)
         .topology(dsl_counting_topology(app_id))
@@ -448,7 +448,7 @@ async fn dsl_count_restart_restore_caching_on() {
     //       the close-flush wrote. ────────────────────────────────────────────
     produce_one(&producer, "a").await;
 
-    let mut streams2 = KafkaStreams::builder()
+    let streams2 = KafkaStreams::builder()
         .bootstrap(&bootstrap)
         .application_id(app_id)
         .topology(dsl_counting_topology(app_id))
