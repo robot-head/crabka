@@ -48,6 +48,7 @@ crabka-remote-storage-topic = { version = "0.3.8", path = "../remote-storage-top
 crabka-client-core = { version = "0.3.8", path = "../client-core" }
 crabka-throttle = { version = "0.3.8", path = "../throttle" }
 crabka-security.workspace = true
+qubit-clock = { workspace = true }
 arc-swap.workspace = true
 async-trait.workspace = true
 rustls.workspace = true
