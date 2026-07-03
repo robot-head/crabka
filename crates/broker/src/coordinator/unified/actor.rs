@@ -1955,6 +1955,18 @@ mod tests {
     use crate::coordinator::unified::reconciler::ReconcileInput;
     use std::sync::Arc;
 
+    /// Yield-poll until `cond` holds, with a bounded hang-guard so a genuine
+    /// stall fails the test deterministically instead of spinning forever.
+    async fn await_until(what: &str, mut cond: impl FnMut() -> bool) {
+        for _ in 0..200_000 {
+            if cond() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("condition never held: {what}");
+    }
+
     #[derive(Debug)]
     struct StaticMetadata {
         input: ReconcileInput,
@@ -2318,8 +2330,8 @@ mod tests {
         let resp = rx.await.unwrap();
         assert!(resp.error_code == codes::COORDINATOR_LOAD_IN_PROGRESS);
 
-        // Wait briefly for the actor to drain.
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // Wait for the actor to drain and drop its receiver.
+        await_until("actor mpsc closed after exit", || handle.tx.is_closed()).await;
         assert!(
             handle.tx.is_closed(),
             "actor mpsc should be closed after exit"

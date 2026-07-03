@@ -4917,7 +4917,7 @@ mod tests {
                 std::time::Instant::now() < deadline,
                 "initial assignment was not reconciled"
             );
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            tokio::task::yield_now().await;
         }
 
         set_tx.send(vec![1]).expect("send changed assignment");
@@ -4927,7 +4927,7 @@ mod tests {
                 std::time::Instant::now() < deadline,
                 "changed assignment was not reconciled"
             );
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            tokio::task::yield_now().await;
         }
 
         shutdown.cancel();
@@ -4977,7 +4977,7 @@ mod tests {
         let mut endpoints = handle.self_registration_endpoints().await;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while endpoints.is_empty() && std::time::Instant::now() < deadline {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            tokio::task::yield_now().await;
             endpoints = handle.self_registration_endpoints().await;
         }
         assert!(!endpoints.is_empty());

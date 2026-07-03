@@ -232,6 +232,18 @@ mod tests {
     use qubit_clock::sleep::{MockSleeper, SystemSleeper};
     use std::net::SocketAddr;
 
+    /// Yield-poll until `cond` holds, with a bounded hang-guard so a genuine
+    /// stall fails the test deterministically instead of spinning forever.
+    async fn await_until(what: &str, mut cond: impl FnMut() -> bool) {
+        for _ in 0..200_000 {
+            if cond() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("condition never held: {what}");
+    }
+
     /// Serve a fixed body at `/jwks` on an ephemeral port; returns the bound
     /// address and a shutdown token for the server task.
     async fn serve_jwks(body: &'static str) -> (SocketAddr, CancellationToken) {
@@ -320,12 +332,10 @@ mod tests {
         let task = tokio::spawn(refresher.run());
 
         // Poll until the immediate first fetch lands.
-        for _ in 0..100 {
-            if !handle.load().is_empty() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        await_until("first JWKS fetch populates handle", || {
+            !handle.load().is_empty()
+        })
+        .await;
         assert!(handle.load().len() == 1);
 
         shutdown.cancel();
@@ -425,12 +435,10 @@ mod tests {
             Arc::new(SystemSleeper::new()),
         );
         let task = tokio::spawn(refresher.run());
-        for _ in 0..100 {
-            if !handle.load().is_empty() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        await_until("first HTTPS JWKS fetch populates handle", || {
+            !handle.load().is_empty()
+        })
+        .await;
         assert!(handle.load().len() == 1);
         shutdown.cancel();
         task.await.unwrap();
@@ -593,14 +601,13 @@ mod tests {
 
         // Drive at least one signal refresh.
         signal_tx.send(()).await.unwrap();
-        // Poll until the on-demand timestamp moves or until the handle has been
+        // Poll until the on-demand timestamp moves and the handle has been
         // populated by the on-demand fetch.
-        for _ in 0..100 {
-            if last_on_demand.load(Ordering::Relaxed) > 0 && !handle.load().is_empty() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        await_until(
+            "on-demand fetch advances timestamp and populates handle",
+            || last_on_demand.load(Ordering::Relaxed) > 0 && !handle.load().is_empty(),
+        )
+        .await;
         check!(
             last_on_demand.load(Ordering::Relaxed) > 0,
             "on-demand timestamp should have advanced past sentinel 0",
@@ -675,12 +682,11 @@ mod tests {
 
         assert!(last_successful.load(Ordering::Relaxed) == 0);
         signal_tx.send(()).await.unwrap();
-        for _ in 0..100 {
-            if last_successful.load(Ordering::Relaxed) > 0 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        await_until(
+            "successful fetch advances last_successful timestamp",
+            || last_successful.load(Ordering::Relaxed) > 0,
+        )
+        .await;
         assert!(
             last_successful.load(Ordering::Relaxed) > 0,
             "last_successful_fetch_ms must advance after a successful fetch",
@@ -718,13 +724,13 @@ mod tests {
         let task = tokio::spawn(refresher.run());
 
         signal_tx.send(()).await.unwrap();
-        // Wait long enough for the refresh attempt to complete & log.
-        for _ in 0..50 {
-            if last_on_demand.load(Ordering::Relaxed) > 0 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        // Wait for the failed refresh attempt to complete & log; the on-demand
+        // rate-limit timestamp advances even when the fetch itself fails.
+        await_until(
+            "failed on-demand fetch still advances rate-limit timestamp",
+            || last_on_demand.load(Ordering::Relaxed) > 0,
+        )
+        .await;
         // On-demand timestamp advances regardless (rate-limit accounting);
         // success timestamp must stay at 0.
         assert!(
@@ -756,12 +762,10 @@ mod tests {
         let task = tokio::spawn(refresher.run());
 
         signal_tx.send(()).await.unwrap();
-        for _ in 0..100 {
-            if !handle.load().is_empty() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        await_until("on-demand fetch installs the use=enc key", || {
+            !handle.load().is_empty()
+        })
+        .await;
         assert!(
             handle.load().len() == 1,
             "ignore_key_use=true must keep the use=enc key in the installed set"

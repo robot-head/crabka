@@ -932,7 +932,7 @@ mod tests {
                 if listed.len() >= expected {
                     break;
                 }
-                tokio::time::sleep(Duration::from_millis(10)).await;
+                tokio::task::yield_now().await;
             }
         })
         .await
