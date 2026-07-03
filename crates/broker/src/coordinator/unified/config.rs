@@ -320,10 +320,12 @@ mod tests {
         // is not `Debug`. Assert on the rendered content — a stubbed-out `fmt`
         // body (writing nothing) must not pass. Distinctive values on a subset
         // of fields prove the real fields are emitted, not a static placeholder.
-        let mut cfg = NextGenConfig::default();
-        cfg.session_timeout = Duration::from_secs(37);
-        cfg.max_size = 4242;
-        cfg.migration_policy = ConsumerGroupMigrationPolicy::Downgrade;
+        let cfg = NextGenConfig {
+            session_timeout: Duration::from_secs(37),
+            max_size: 4242,
+            migration_policy: ConsumerGroupMigrationPolicy::Downgrade,
+            ..Default::default()
+        };
 
         let rendered = format!("{cfg:?}");
 
