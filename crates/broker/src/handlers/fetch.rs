@@ -292,7 +292,7 @@ pub(crate) async fn handle(
                 continue;
             }
 
-            let part_opt = partitions.get(&topic_name, idx);
+            let part_opt = partitions.get(&topic_name, crabka_ids::PartitionIndex(idx));
 
             // KIP-101 epoch fence. The follower (or consumer using KIP-320)
             // includes its `current_leader_epoch`; we reject stale or future

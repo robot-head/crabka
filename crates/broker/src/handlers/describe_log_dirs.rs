@@ -154,7 +154,12 @@ pub(crate) async fn handle(
                 }
                 let future_path = log_dir::future_partition_dir(dir, &topic, partition);
                 let size = sum_partition_dir(&future_path).unwrap_or(0);
-                let offset_lag = future_offset_lag(&partitions, &future_logs, &topic, partition);
+                let offset_lag = future_offset_lag(
+                    &partitions,
+                    &future_logs,
+                    &topic,
+                    crabka_ids::PartitionIndex(partition),
+                );
                 by_topic
                     .entry(topic)
                     .or_default()
@@ -244,7 +249,7 @@ async fn offset_lag_for(
     topic: &str,
     partition: i32,
 ) -> i64 {
-    let Some(part) = partitions.get(topic, partition) else {
+    let Some(part) = partitions.get(topic, crabka_ids::PartitionIndex(partition)) else {
         return 0;
     };
     let leo = part.log_end_offset();
@@ -261,11 +266,11 @@ async fn offset_lag_for(
 fn future_offset_lag(
     partitions: &crate::partition_registry::PartitionRegistry,
     future_logs: &dashmap::DashMap<
-        (String, i32),
+        (String, crabka_ids::PartitionIndex),
         std::sync::Arc<crate::future_log::FutureLogState>,
     >,
     topic: &str,
-    partition: i32,
+    partition: crabka_ids::PartitionIndex,
 ) -> i64 {
     let Some(part) = partitions.get(topic, partition) else {
         return 0;

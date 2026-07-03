@@ -23,6 +23,7 @@
 //!   `TOPIC_AUTHORIZATION_FAILED (29)` on the rows of that topic.
 
 use bytes::{Bytes, BytesMut};
+use crabka_ids::PartitionIndex;
 use crabka_log::Offset;
 use crabka_metadata::{AclOperation, ResourceType};
 use crabka_protocol::{
@@ -266,7 +267,7 @@ async fn append_txn_batch(
 
     batch.last_offset_delta = (delta - 1).max(0);
 
-    let Some(part_handle) = partitions.get(OFFSETS_TOPIC, OFFSETS_PARTITION) else {
+    let Some(part_handle) = partitions.get(OFFSETS_TOPIC, PartitionIndex(OFFSETS_PARTITION)) else {
         // __consumer_offsets not hosted here — report NOT_COORDINATOR.
         return Err(codes::NOT_COORDINATOR);
     };
@@ -390,13 +391,17 @@ mod tests {
         let log = Log::open(&part_dir, LogConfig::default()).expect("open offsets log");
         let part = crate::broker::spawn_partition(
             OFFSETS_TOPIC.to_string(),
-            OFFSETS_PARTITION,
+            PartitionIndex(OFFSETS_PARTITION),
             log_dir.to_path_buf(),
             log,
             crate::log_dir_status::LogDirRegistry::default(),
             Arc::new(crate::producer_state::ProducerState::new()),
         );
-        registry.insert(OFFSETS_TOPIC.to_string(), OFFSETS_PARTITION, part);
+        registry.insert(
+            OFFSETS_TOPIC.to_string(),
+            PartitionIndex(OFFSETS_PARTITION),
+            part,
+        );
     }
 
     fn decode_response(bytes: &Bytes, version: i16) -> TxnOffsetCommitResponse {
@@ -503,7 +508,7 @@ mod tests {
         );
 
         let part = registry
-            .get(OFFSETS_TOPIC, OFFSETS_PARTITION)
+            .get(OFFSETS_TOPIC, PartitionIndex(OFFSETS_PARTITION))
             .expect("offsets partition");
         let log = part.log.lock().expect("lock offsets log");
         let read = log
@@ -545,7 +550,7 @@ mod tests {
 
         assert!(entries.is_empty());
         let part = registry
-            .get(OFFSETS_TOPIC, OFFSETS_PARTITION)
+            .get(OFFSETS_TOPIC, PartitionIndex(OFFSETS_PARTITION))
             .expect("offsets partition");
         let log = part.log.lock().expect("lock offsets log");
         let read = log

@@ -79,6 +79,7 @@ mod tests {
     use assert2::assert;
     use bytes::Bytes;
     use crabka_audit::chain::{GENESIS_HEAD, to_hex};
+    use crabka_ids::PartitionIndex;
     use crabka_log::{Log, LogConfig, Offset};
     use crabka_protocol::records::{Record, RecordBatch, RecordHeader};
     use tokio::sync::{Notify, mpsc};
@@ -92,7 +93,7 @@ mod tests {
         let writer = tokio::spawn(async {});
         let p = Partition {
             topic: "__audit".into(),
-            partition_id: 0,
+            partition_id: PartitionIndex(0),
             log_dir: Arc::new(arc_swap::ArcSwap::from_pointee(dir.path().to_path_buf())),
             log: Arc::new(Mutex::new(log)),
             writer_tx: tx,

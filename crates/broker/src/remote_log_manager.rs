@@ -107,7 +107,11 @@ async fn tick_all(
             continue;
         };
         let leader_epoch = partition.current_leader_epoch.load(Ordering::Acquire);
-        let tp = TopicIdPartition::new(topic_id, partition.topic.clone(), partition.partition_id);
+        let tp = TopicIdPartition::new(
+            topic_id,
+            partition.topic.clone(),
+            partition.partition_id.get(),
+        );
         copy_eligible(&tp, broker_id, leader_epoch, exports.clone(), rsm, rlmm).await;
         local_retention_pass(&tp, &partition, &exports, &log_config, rlmm, now_ms()).await;
         remote_retention_pass(&tp, broker_id, &log_config, rsm, rlmm, now_ms()).await;
@@ -692,6 +696,7 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use assert2::{assert, check};
+    use crabka_ids::PartitionIndex;
     use crabka_log::{Log, LogConfig};
     use crabka_metadata::{MetadataImage, MetadataRecord, TopicRecord};
     use crabka_protocol::records::{Record, RecordBatch};
@@ -905,7 +910,7 @@ mod tests {
         }
         let partition = crate::broker::spawn_partition(
             "orders".to_string(),
-            0,
+            PartitionIndex(0),
             log_dir.to_path_buf(),
             log,
             crate::log_dir_status::LogDirRegistry::default(),
@@ -956,7 +961,7 @@ mod tests {
             .tierable_segments()
             .len();
         assert!(export_count >= 2, "test needs multiple sealed segments");
-        partitions.insert("orders".to_string(), 0, partition);
+        partitions.insert("orders".to_string(), PartitionIndex(0), partition);
 
         let controller: Arc<dyn crate::metadata_source::MetadataSource> =
             Arc::new(FixedMetadataSource::new(image_with_orders_topic()));
@@ -1004,7 +1009,7 @@ mod tests {
             .tierable_segments()
             .len();
         assert!(export_count >= 2, "test needs multiple sealed segments");
-        partitions.insert("orders".to_string(), 0, partition);
+        partitions.insert("orders".to_string(), PartitionIndex(0), partition);
 
         let controller = FixedMetadataSource::new(image_with_orders_topic());
         let rsm: Arc<dyn RemoteStorageManager> =
@@ -1030,7 +1035,7 @@ mod tests {
         let partitions = PartitionRegistry::new();
         let partition = rolled_tiered_partition(log_dir.path());
         partition.current_leader.store(2, Ordering::Relaxed);
-        partitions.insert("orders".to_string(), 0, partition);
+        partitions.insert("orders".to_string(), PartitionIndex(0), partition);
 
         let controller = FixedMetadataSource::new(image_with_orders_topic());
         let rsm: Arc<dyn RemoteStorageManager> =
@@ -1058,7 +1063,7 @@ mod tests {
                 ..LogConfig::default()
             },
         );
-        partitions.insert("orders".to_string(), 0, partition);
+        partitions.insert("orders".to_string(), PartitionIndex(0), partition);
 
         let controller = FixedMetadataSource::new(image_with_orders_topic());
         let rsm: Arc<dyn RemoteStorageManager> =

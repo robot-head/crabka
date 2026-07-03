@@ -20,6 +20,7 @@ use std::{
 };
 
 use arc_swap::ArcSwap;
+use crabka_ids::PartitionIndex;
 use crabka_log::{AbortedTxn, Log, Offset, ReadOutput, VerbatimBatch};
 use crabka_protocol::records::RecordBatch;
 use tokio::{
@@ -179,7 +180,7 @@ pub struct HwTimeout;
 #[allow(clippy::struct_field_names)]
 pub struct Partition {
     pub topic: String,
-    pub partition_id: i32,
+    pub partition_id: PartitionIndex,
     /// Parent `log.dir` currently owning the partition (the parent of
     /// `log.lock().dir()` — i.e. the configured directory, not the
     /// `<topic>-<partition>` subdirectory). Updated by
@@ -511,7 +512,7 @@ impl Partition {
             // used to trace failover leadership churn / flip-flop.
             tracing::info!(
                 topic = %self.topic,
-                partition = self.partition_id,
+                partition = self.partition_id.get(),
                 prev_leader,
                 new_leader,
                 prev_epoch,
@@ -637,7 +638,7 @@ mod tests {
         let writer = tokio::spawn(async {});
         let p = Partition {
             topic: "t".into(),
-            partition_id: 0,
+            partition_id: PartitionIndex(0),
             log_dir: Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             log: Arc::new(Mutex::new(log)),
             writer_tx: tx,
@@ -667,7 +668,7 @@ mod tests {
         let hw_advance_notify = Arc::new(Notify::new());
         let writer = tokio::spawn(crate::partition_writer::run(
             "t".to_string(),
-            0,
+            PartitionIndex(0),
             log.clone(),
             log_dir.clone(),
             rx,
@@ -679,7 +680,7 @@ mod tests {
         ));
         let p = Partition {
             topic: "t".into(),
-            partition_id: 0,
+            partition_id: PartitionIndex(0),
             log_dir,
             log,
             writer_tx: tx,
@@ -741,7 +742,7 @@ mod tests {
         let writer = tokio::spawn(async {});
         let p = Partition {
             topic: "t".into(),
-            partition_id: 0,
+            partition_id: PartitionIndex(0),
             log_dir: Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             log: Arc::new(Mutex::new(log)),
             writer_tx: tx,
@@ -783,7 +784,7 @@ mod tests {
         }
         let p = Partition {
             topic: "t".into(),
-            partition_id: 0,
+            partition_id: PartitionIndex(0),
             log_dir: Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             log: Arc::new(Mutex::new(log)),
             writer_tx: tx,
@@ -805,7 +806,7 @@ mod tests {
         let writer = tokio::spawn(async {});
         let p = Partition {
             topic: "t".into(),
-            partition_id: 0,
+            partition_id: PartitionIndex(0),
             log_dir: Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             log: Arc::new(Mutex::new(log)),
             writer_tx: tx,
@@ -936,7 +937,7 @@ mod tests {
         }
         let p = Partition {
             topic: "t".into(),
-            partition_id: 0,
+            partition_id: PartitionIndex(0),
             log_dir: Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             log: Arc::new(Mutex::new(log)),
             writer_tx: tx,
@@ -961,7 +962,7 @@ mod tests {
         let writer = tokio::spawn(async {});
         let p = Partition {
             topic: "t".into(),
-            partition_id: 0,
+            partition_id: PartitionIndex(0),
             log_dir: Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             log: Arc::new(Mutex::new(log)),
             writer_tx: tx,
@@ -990,7 +991,7 @@ mod tests {
         let hw_advance_notify = Arc::new(Notify::new());
         let p = Partition {
             topic: "t".into(),
-            partition_id: 0,
+            partition_id: PartitionIndex(0),
             log_dir: Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             log: Arc::new(Mutex::new(log)),
             writer_tx: tx,
@@ -1093,7 +1094,7 @@ mod tests {
         let hw_advance_notify = Arc::new(Notify::new());
         let p = Partition {
             topic: "t".into(),
-            partition_id: 0,
+            partition_id: PartitionIndex(0),
             log_dir: Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             log: Arc::new(Mutex::new(log)),
             writer_tx: tx,

@@ -480,7 +480,7 @@ async fn process_partition(
     // reconcile lagging the image on a just-elected leader), treat it as a
     // transient not-leader — the client retries and the append lands once
     // the writer is ready, rather than failing the produce outright.
-    let Some(part) = partitions.get(topic_name, idx) else {
+    let Some(part) = partitions.get(topic_name, crabka_ids::PartitionIndex(idx)) else {
         out.error_code = codes::NOT_LEADER_OR_FOLLOWER;
         out.current_leader = LeaderIdAndEpoch {
             leader_id: i32::try_from(leader).unwrap_or(NO_LEADER_ID),
@@ -560,7 +560,7 @@ async fn process_partition(
                 }
                 let tp = crate::txn::state::TopicPartition {
                     topic: topic_name.to_string(),
-                    partition: idx,
+                    partition: crabka_ids::PartitionIndex(idx),
                 };
                 // Consider the partition "needs registering" if it
                 // isn't in the current partition set OR if the
@@ -620,7 +620,14 @@ async fn process_partition(
     let dedup_outcome = if pid >= 0 {
         Some(
             producer_state
-                .check(topic_name, idx, pid, epoch, base_seq, last_offset_delta)
+                .check(
+                    topic_name,
+                    crabka_ids::PartitionIndex(idx),
+                    pid,
+                    epoch,
+                    base_seq,
+                    last_offset_delta,
+                )
                 .await,
         )
     } else {
@@ -810,7 +817,7 @@ async fn finalize_ack(
         producer_state
             .commit(
                 key.topic,
-                key.partition,
+                crabka_ids::PartitionIndex(key.partition),
                 key.pid,
                 key.epoch,
                 key.base_seq,

@@ -58,7 +58,7 @@ fn topics_for(entry: &TxnEntry) -> Vec<TopicData> {
         by_topic
             .entry(tp.topic.clone())
             .or_default()
-            .push(tp.partition);
+            .push(tp.partition.get());
     }
     by_topic
         .into_iter()
@@ -161,15 +161,15 @@ mod tests {
         let mut e = TxnEntry::new_empty("tx".into(), 100, 0, 60_000, 1_000);
         e.partitions.insert(TopicPartition {
             topic: "b".into(),
-            partition: 2,
+            partition: crabka_ids::PartitionIndex(2),
         });
         e.partitions.insert(TopicPartition {
             topic: "b".into(),
-            partition: 0,
+            partition: crabka_ids::PartitionIndex(0),
         });
         e.partitions.insert(TopicPartition {
             topic: "a".into(),
-            partition: 1,
+            partition: crabka_ids::PartitionIndex(1),
         });
         e
     }

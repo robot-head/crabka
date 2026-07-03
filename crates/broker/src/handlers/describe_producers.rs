@@ -117,7 +117,7 @@ pub(crate) async fn handle(
 
             let snapshot = broker
                 .producer_state
-                .snapshot(topic_req.name.as_str(), idx)
+                .snapshot(topic_req.name.as_str(), crabka_ids::PartitionIndex(idx))
                 .await;
             let active_producers: Vec<ProducerState> = snapshot
                 .into_iter()

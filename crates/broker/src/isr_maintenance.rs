@@ -83,13 +83,13 @@ pub(crate) async fn run(cfg: Config) {
                 &cfg.controller,
                 cfg.broker_id,
                 &part.topic,
-                part.partition_id,
+                part.partition_id.get(),
                 proposal.new_isr,
                 proposal.leader_epoch,
             )
             .await
             {
-                warn!(topic = %part.topic, partition = part.partition_id, error = %e,
+                warn!(topic = %part.topic, partition = part.partition_id.get(), error = %e,
                     "AlterPartition propose failed");
             }
         }
@@ -356,6 +356,7 @@ fn is_not_controller_response(global_err: i16, part_err: i16) -> bool {
 mod tests {
     use std::{path::Path, sync::atomic::Ordering};
 
+    use crabka_ids::PartitionIndex;
     use crabka_log::Offset;
     use crabka_metadata::{BrokerRegistrationRecord, MetadataImage, MetadataRecord, TopicRecord};
     use tempfile::tempdir;
@@ -390,7 +391,7 @@ mod tests {
         let log = crabka_log::Log::open(&part_dir, crabka_log::LogConfig::default()).unwrap();
         crate::broker::spawn_partition(
             topic.to_string(),
-            partition,
+            PartitionIndex(partition),
             log_dir.to_path_buf(),
             log,
             crate::log_dir_status::LogDirRegistry::default(),
@@ -620,7 +621,7 @@ mod tests {
         .await;
 
         let partitions = Arc::new(PartitionRegistry::new());
-        partitions.insert("t".to_string(), 0, part);
+        partitions.insert("t".to_string(), PartitionIndex(0), part);
         let controller: Arc<dyn crate::metadata_source::MetadataSource> = Arc::new(
             TestMetadataSource::new(MetadataImage::new(uuid::Uuid::nil()), None),
         );

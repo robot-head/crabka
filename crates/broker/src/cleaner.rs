@@ -101,12 +101,12 @@ pub(crate) async fn tick_all(
         }
         match partition.compact_log().await {
             Ok(()) => {
-                metrics.record_compaction(&partition.topic, partition.partition_id);
+                metrics.record_compaction(&partition.topic, partition.partition_id.get());
             }
             Err(e) => {
                 warn!(
                     topic = %partition.topic,
-                    partition_id = partition.partition_id,
+                    partition_id = partition.partition_id.get(),
                     error = %e,
                     "compaction failed for partition",
                 );
@@ -125,6 +125,7 @@ mod tests {
 
     use assert2::assert;
     use bytes::Bytes;
+    use crabka_ids::PartitionIndex;
     use crabka_protocol::records::{Record, RecordBatch};
     use tempfile::TempDir;
     use tokio_util::sync::CancellationToken;
@@ -168,7 +169,7 @@ mod tests {
 
         let part = crate::broker::spawn_partition(
             topic.to_string(),
-            partition_id,
+            PartitionIndex(partition_id),
             root.path().to_path_buf(),
             log,
             crate::log_dir_status::LogDirRegistry::default(),
@@ -209,7 +210,7 @@ mod tests {
             .map(|(topic, leader, policy, expect_compacted)| {
                 let partition = compactable_partition(&dir, topic, 0, leader, policy);
                 let before = record_count(&partition);
-                registry.insert(topic.to_string(), 0, Arc::clone(&partition));
+                registry.insert(topic.to_string(), PartitionIndex(0), Arc::clone(&partition));
                 (topic, partition, before, expect_compacted)
             })
             .collect();
@@ -250,7 +251,11 @@ mod tests {
             crabka_log::CleanupPolicy::Compact,
         );
         let before = record_count(&partition);
-        registry.insert("run-compact".to_string(), 0, Arc::clone(&partition));
+        registry.insert(
+            "run-compact".to_string(),
+            PartitionIndex(0),
+            Arc::clone(&partition),
+        );
 
         // Drive the sweep cadence on a mock timeline instead of wall-clock time.
         let interval = Duration::from_secs(30);

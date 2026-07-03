@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use crabka_ids::PartitionIndex;
 use crabka_protocol::records::RecordBatch;
 use tokio::sync::oneshot;
 
@@ -36,7 +37,10 @@ impl ProductionOffsetsLog {
 #[async_trait]
 impl OffsetsLog for ProductionOffsetsLog {
     async fn append(&self, batch: RecordBatch) -> Result<(), BrokerError> {
-        let Some(partition) = self.partitions.get(OFFSETS_TOPIC, OFFSETS_PARTITION) else {
+        let Some(partition) = self
+            .partitions
+            .get(OFFSETS_TOPIC, PartitionIndex(OFFSETS_PARTITION))
+        else {
             return Err(BrokerError::PartitionWriterDied {
                 topic: OFFSETS_TOPIC.into(),
                 partition: OFFSETS_PARTITION,

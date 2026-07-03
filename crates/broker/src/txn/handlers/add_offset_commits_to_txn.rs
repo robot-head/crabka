@@ -7,6 +7,7 @@
 //! Response fields: `throttle_time_ms`, `error_code`.
 
 use bytes::{Bytes, BytesMut};
+use crabka_ids::PartitionIndex;
 use crabka_protocol::{
     Decode, Encode,
     owned::{
@@ -85,7 +86,7 @@ pub(crate) fn handle(
         // doc in `coordinator::bootstrap`.
         entry.partitions.insert(TopicPartition {
             topic: OFFSETS_TOPIC.to_string(),
-            partition: partition_for_tid(&req.group_id, OFFSETS_NUM_PARTITIONS),
+            partition: PartitionIndex(partition_for_tid(&req.group_id, OFFSETS_NUM_PARTITIONS)),
         });
         entry.last_update_ms = now_millis();
 

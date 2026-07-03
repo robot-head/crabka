@@ -346,7 +346,9 @@ async fn append_batch(
     }
     batch.last_offset_delta = (delta - 1).max(0);
 
-    let Some(part_handle) = partitions.get(OFFSETS_TOPIC, OFFSETS_PARTITION) else {
+    let Some(part_handle) =
+        partitions.get(OFFSETS_TOPIC, crabka_ids::PartitionIndex(OFFSETS_PARTITION))
+    else {
         return Err(codes::UNKNOWN_SERVER_ERROR);
     };
     let (ack_tx, ack_rx) = oneshot::channel();

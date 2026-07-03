@@ -10,19 +10,20 @@
 
 use std::sync::Arc;
 
+use crabka_ids::PartitionIndex;
 use dashmap::DashMap;
 
 use crate::partition::Partition;
 
 /// Concurrent registry of locally-hosted partitions, keyed by (topic, partition).
 ///
-/// Backed by a nested `DashMap<String, DashMap<i32, Arc<Partition>>>` so lookups
-/// can be performed with a borrowed `&str` topic name — no per-lookup `String`
-/// allocation, which matters on the produce/fetch hot path where a single
-/// request may resolve hundreds of partitions.
+/// Backed by a nested `DashMap<String, DashMap<PartitionIndex, Arc<Partition>>>`
+/// so lookups can be performed with a borrowed `&str` topic name — no per-lookup
+/// `String` allocation, which matters on the produce/fetch hot path where a
+/// single request may resolve hundreds of partitions.
 #[derive(Debug, Default)]
 pub(crate) struct PartitionRegistry {
-    inner: DashMap<String, DashMap<i32, Arc<Partition>>>,
+    inner: DashMap<String, DashMap<PartitionIndex, Arc<Partition>>>,
 }
 
 impl PartitionRegistry {
@@ -33,7 +34,7 @@ impl PartitionRegistry {
 
     /// Alloc-free lookup. Returns a cheap `Arc` clone of the partition, if present.
     #[must_use]
-    pub(crate) fn get(&self, topic: &str, partition: i32) -> Option<Arc<Partition>> {
+    pub(crate) fn get(&self, topic: &str, partition: PartitionIndex) -> Option<Arc<Partition>> {
         self.inner
             .get(topic)
             .and_then(|m| m.get(&partition).map(|p| Arc::clone(&p)))
@@ -41,7 +42,7 @@ impl PartitionRegistry {
 
     /// Returns `true` if the given (topic, partition) is hosted locally.
     #[must_use]
-    pub(crate) fn contains(&self, topic: &str, partition: i32) -> bool {
+    pub(crate) fn contains(&self, topic: &str, partition: PartitionIndex) -> bool {
         self.inner
             .get(topic)
             .is_some_and(|m| m.contains_key(&partition))
@@ -51,7 +52,7 @@ impl PartitionRegistry {
     pub(crate) fn insert(
         &self,
         topic: String,
-        partition: i32,
+        partition: PartitionIndex,
         part: Arc<Partition>,
     ) -> Option<Arc<Partition>> {
         self.inner.entry(topic).or_default().insert(partition, part)
@@ -59,7 +60,7 @@ impl PartitionRegistry {
 
     /// Remove a partition, returning it if present. Prunes the topic's inner map
     /// if it becomes empty.
-    pub(crate) fn remove(&self, topic: &str, partition: i32) -> Option<Arc<Partition>> {
+    pub(crate) fn remove(&self, topic: &str, partition: PartitionIndex) -> Option<Arc<Partition>> {
         let removed = self
             .inner
             .get(topic)
@@ -78,7 +79,7 @@ impl PartitionRegistry {
     pub(crate) fn materialize_if_vacant<E>(
         &self,
         topic: &str,
-        partition: i32,
+        partition: PartitionIndex,
         build: impl FnOnce() -> Result<Arc<Partition>, E>,
     ) -> Result<(), E> {
         use dashmap::mapref::entry::Entry;
@@ -97,7 +98,7 @@ impl PartitionRegistry {
     /// hosts nothing locally. Used by `DeleteTopics` to enumerate the local
     /// partitions to tear down without a full-registry key scan.
     #[must_use]
-    pub(crate) fn partitions_of(&self, topic: &str) -> Vec<i32> {
+    pub(crate) fn partitions_of(&self, topic: &str) -> Vec<PartitionIndex> {
         self.inner
             .get(topic)
             .map(|m| m.iter().map(|e| *e.key()).collect())
@@ -125,6 +126,7 @@ mod tests {
     use std::{path::Path, sync::Arc};
 
     use assert2::{assert, check};
+    use crabka_ids::PartitionIndex;
     use crabka_log::{Log, LogConfig};
     use tempfile::tempdir;
 
@@ -133,8 +135,8 @@ mod tests {
 
     /// Build a `Partition` rooted at `<log_dir>/<topic>-<partition>` via the
     /// real `spawn_partition` path, mirroring `future_log`'s test fixture.
-    fn fixture_partition(log_dir: &Path, topic: &str, partition: i32) -> Arc<Partition> {
-        let part_dir = crate::log_dir::partition_dir(log_dir, topic, partition);
+    fn fixture_partition(log_dir: &Path, topic: &str, partition: PartitionIndex) -> Arc<Partition> {
+        let part_dir = crate::log_dir::partition_dir(log_dir, topic, partition.get());
         std::fs::create_dir_all(&part_dir).unwrap();
         let log = Log::open(&part_dir, LogConfig::default()).unwrap();
         crate::broker::spawn_partition(
@@ -153,30 +155,33 @@ mod tests {
         let reg = PartitionRegistry::new();
         check!(reg.arcs().is_empty());
         check!(reg.arcs().len() == 0);
-        check!(reg.get("t", 0).is_none());
-        check!(!reg.contains("t", 0));
+        check!(reg.get("t", PartitionIndex(0)).is_none());
+        check!(!reg.contains("t", PartitionIndex(0)));
 
-        let p = fixture_partition(dir.path(), "t", 0);
-        check!(reg.insert("t".to_string(), 0, Arc::clone(&p)).is_none());
-        check!(reg.contains("t", 0));
+        let p = fixture_partition(dir.path(), "t", PartitionIndex(0));
+        check!(
+            reg.insert("t".to_string(), PartitionIndex(0), Arc::clone(&p))
+                .is_none()
+        );
+        check!(reg.contains("t", PartitionIndex(0)));
         check!(!reg.arcs().is_empty());
         check!(reg.arcs().len() == 1);
 
-        let got = reg.get("t", 0).expect("present");
+        let got = reg.get("t", PartitionIndex(0)).expect("present");
         assert!(Arc::ptr_eq(&got, &p));
 
         // Replace returns previous.
-        let p2 = fixture_partition(dir.path(), "t", 0);
+        let p2 = fixture_partition(dir.path(), "t", PartitionIndex(0));
         let prev = reg
-            .insert("t".to_string(), 0, Arc::clone(&p2))
+            .insert("t".to_string(), PartitionIndex(0), Arc::clone(&p2))
             .expect("prev");
         assert!(Arc::ptr_eq(&prev, &p));
         assert!(reg.arcs().len() == 1);
 
-        let removed = reg.remove("t", 0).expect("removed");
+        let removed = reg.remove("t", PartitionIndex(0)).expect("removed");
         check!(Arc::ptr_eq(&removed, &p2));
-        check!(reg.remove("t", 0).is_none());
-        check!(!reg.contains("t", 0));
+        check!(reg.remove("t", PartitionIndex(0)).is_none());
+        check!(!reg.contains("t", PartitionIndex(0)));
         check!(reg.arcs().is_empty());
     }
 
@@ -187,21 +192,33 @@ mod tests {
         assert!(reg.partitions_of("missing").is_empty());
         assert!(reg.len() == 0);
 
-        reg.insert("a".to_string(), 2, fixture_partition(dir.path(), "a", 2));
-        reg.insert("a".to_string(), 4, fixture_partition(dir.path(), "a", 4));
-        reg.insert("b".to_string(), 7, fixture_partition(dir.path(), "b", 7));
+        reg.insert(
+            "a".to_string(),
+            PartitionIndex(2),
+            fixture_partition(dir.path(), "a", PartitionIndex(2)),
+        );
+        reg.insert(
+            "a".to_string(),
+            PartitionIndex(4),
+            fixture_partition(dir.path(), "a", PartitionIndex(4)),
+        );
+        reg.insert(
+            "b".to_string(),
+            PartitionIndex(7),
+            fixture_partition(dir.path(), "b", PartitionIndex(7)),
+        );
 
         let mut a_parts = reg.partitions_of("a");
         a_parts.sort_unstable();
-        check!(a_parts == vec![2, 4]);
-        check!(reg.partitions_of("b") == vec![7]);
+        check!(a_parts == vec![PartitionIndex(2), PartitionIndex(4)]);
+        check!(reg.partitions_of("b") == vec![PartitionIndex(7)]);
         check!(reg.len() == 3);
 
-        let removed = reg.remove("a", 2).expect("removed");
+        let removed = reg.remove("a", PartitionIndex(2)).expect("removed");
         drop(removed);
 
-        check!(reg.partitions_of("a") == vec![4]);
-        check!(reg.partitions_of("missing") == Vec::<i32>::new());
+        check!(reg.partitions_of("a") == vec![PartitionIndex(4)]);
+        check!(reg.partitions_of("missing") == Vec::<PartitionIndex>::new());
         check!(reg.len() == 2);
     }
 
@@ -209,36 +226,49 @@ mod tests {
     async fn materialize_if_vacant_builds_once() {
         let dir = tempdir().unwrap();
         let reg = PartitionRegistry::new();
-        let p = fixture_partition(dir.path(), "t", 1);
-        reg.materialize_if_vacant::<String>("t", 1, || Ok(Arc::clone(&p)))
+        let p = fixture_partition(dir.path(), "t", PartitionIndex(1));
+        reg.materialize_if_vacant::<String>("t", PartitionIndex(1), || Ok(Arc::clone(&p)))
             .expect("build ok");
-        assert!(reg.contains("t", 1));
+        assert!(reg.contains("t", PartitionIndex(1)));
 
         // Already occupied: build closure must not run.
-        reg.materialize_if_vacant::<String>("t", 1, || {
+        reg.materialize_if_vacant::<String>("t", PartitionIndex(1), || {
             panic!("build must not be called when slot is occupied");
         })
         .expect("occupied ok");
 
-        let got = reg.get("t", 1).expect("present");
+        let got = reg.get("t", PartitionIndex(1)).expect("present");
         assert!(Arc::ptr_eq(&got, &p));
     }
 
     #[tokio::test]
     async fn materialize_if_vacant_propagates_error() {
         let reg = PartitionRegistry::new();
-        let err = reg.materialize_if_vacant::<String>("t", 2, || Err("boom".to_string()));
+        let err =
+            reg.materialize_if_vacant::<String>("t", PartitionIndex(2), || Err("boom".to_string()));
         assert!(err == Err("boom".to_string()));
-        assert!(!reg.contains("t", 2));
+        assert!(!reg.contains("t", PartitionIndex(2)));
     }
 
     #[tokio::test]
     async fn arcs_snapshots_all_partitions() {
         let dir = tempdir().unwrap();
         let reg = PartitionRegistry::new();
-        reg.insert("a".to_string(), 0, fixture_partition(dir.path(), "a", 0));
-        reg.insert("a".to_string(), 1, fixture_partition(dir.path(), "a", 1));
-        reg.insert("b".to_string(), 0, fixture_partition(dir.path(), "b", 0));
+        reg.insert(
+            "a".to_string(),
+            PartitionIndex(0),
+            fixture_partition(dir.path(), "a", PartitionIndex(0)),
+        );
+        reg.insert(
+            "a".to_string(),
+            PartitionIndex(1),
+            fixture_partition(dir.path(), "a", PartitionIndex(1)),
+        );
+        reg.insert(
+            "b".to_string(),
+            PartitionIndex(0),
+            fixture_partition(dir.path(), "b", PartitionIndex(0)),
+        );
         let arcs = reg.arcs();
         assert!(arcs.len() == 3);
     }

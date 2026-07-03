@@ -339,10 +339,11 @@ async fn acquire_pass(
 
         // Expire stale locks, materialize freshly produced records, acquire.
         st.expire_locks(now);
-        let part = p
-            .topic_name
-            .as_deref()
-            .and_then(|name| broker.partitions.get(name, p.partition_index));
+        let part = p.topic_name.as_deref().and_then(|name| {
+            broker
+                .partitions
+                .get(name, crabka_ids::PartitionIndex(p.partition_index))
+        });
         let Some(part) = part else {
             // Lost the partition between the leadership check and here.
             p.out.error_code = codes::NOT_LEADER_OR_FOLLOWER;
@@ -509,11 +510,11 @@ async fn long_poll(broker: &Broker, pending: &[PendingPartition], max_wait_ms: i
         if !p.leadable {
             continue;
         }
-        if let Some(part) = p
-            .topic_name
-            .as_deref()
-            .and_then(|name| broker.partitions.get(name, p.partition_index))
-        {
+        if let Some(part) = p.topic_name.as_deref().and_then(|name| {
+            broker
+                .partitions
+                .get(name, crabka_ids::PartitionIndex(p.partition_index))
+        }) {
             notifies.push(part.append_notify.clone());
             notifies.push(part.hw_advance_notify.clone());
         }

@@ -143,7 +143,8 @@ pub(crate) async fn handle(
             Vec::with_capacity(topic.partitions.len());
 
         for fp in topic.partitions {
-            let part_opt = partitions.get(&topic.name, fp.partition_index);
+            let part_opt =
+                partitions.get(&topic.name, crabka_ids::PartitionIndex(fp.partition_index));
             let Some(part) = part_opt else {
                 part_results.push(error_partition_result(
                     fp.partition_index,

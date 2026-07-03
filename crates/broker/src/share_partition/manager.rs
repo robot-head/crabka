@@ -11,6 +11,7 @@
 
 use std::{sync::Arc, time::Duration};
 
+use crabka_ids::PartitionIndex;
 use crabka_log::Offset;
 use crabka_metadata::NodeId;
 use dashmap::DashMap;
@@ -138,10 +139,12 @@ impl SharePartitionLeaderManager {
         let Some(topic) = image.topics().find(|t| t.topic_id == topic_id) else {
             return 0;
         };
-        self.partitions.get(&topic.name, partition).map_or(0, |p| {
-            p.current_leader_epoch
-                .load(std::sync::atomic::Ordering::Acquire)
-        })
+        self.partitions
+            .get(&topic.name, PartitionIndex(partition))
+            .map_or(0, |p| {
+                p.current_leader_epoch
+                    .load(std::sync::atomic::Ordering::Acquire)
+            })
     }
 
     /// Get (or lazily load) the acquisition-state cell for

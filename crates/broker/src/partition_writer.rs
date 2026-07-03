@@ -12,6 +12,7 @@ use std::{
 };
 
 use arc_swap::ArcSwap;
+use crabka_ids::PartitionIndex;
 use crabka_log::{Log, Offset};
 use tokio::{
     runtime::{Handle, RuntimeFlavor},
@@ -154,7 +155,7 @@ async fn run_produce_append_batch(
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub async fn run(
     topic: String,
-    partition: i32,
+    partition: PartitionIndex,
     log: Arc<Mutex<Log>>,
     log_dir: Arc<ArcSwap<PathBuf>>,
     mut rx: mpsc::Receiver<WriterMessage>,
@@ -624,7 +625,7 @@ mod tests {
         let notify = Arc::new(Notify::new());
         let writer = tokio::spawn(run(
             "t".to_string(),
-            0,
+            PartitionIndex(0),
             log.clone(),
             Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             rx,
@@ -685,7 +686,7 @@ mod tests {
 
         let writer = tokio::spawn(run(
             "t".to_string(),
-            0,
+            PartitionIndex(0),
             log.clone(),
             Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             rx,
@@ -727,7 +728,7 @@ mod tests {
         let notify = Arc::new(Notify::new());
         let writer = tokio::spawn(run(
             "t".to_string(),
-            0,
+            PartitionIndex(0),
             log.clone(),
             Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             rx,
@@ -768,7 +769,7 @@ mod tests {
         let notify = Arc::new(Notify::new());
         let writer = tokio::spawn(run(
             "t".to_string(),
-            0,
+            PartitionIndex(0),
             log.clone(),
             Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             rx,
@@ -868,7 +869,7 @@ mod tests {
         let notify = Arc::new(Notify::new());
         let writer = tokio::spawn(run(
             "t".to_string(),
-            0,
+            PartitionIndex(0),
             log.clone(),
             Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             rx,
@@ -912,7 +913,7 @@ mod tests {
         let notify = Arc::new(Notify::new());
         let writer = tokio::spawn(run(
             "t".to_string(),
-            0,
+            PartitionIndex(0),
             log.clone(),
             Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             rx,
@@ -950,7 +951,7 @@ mod tests {
         let notify = Arc::new(Notify::new());
         let writer = tokio::spawn(run(
             "t".to_string(),
-            0,
+            PartitionIndex(0),
             log.clone(),
             Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             rx,
@@ -992,7 +993,7 @@ mod tests {
         let notify = Arc::new(Notify::new());
         let writer = tokio::spawn(run(
             "t".to_string(),
-            0,
+            PartitionIndex(0),
             log.clone(),
             Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             rx,
@@ -1050,7 +1051,7 @@ mod tests {
         let hw_advance_notify = Arc::new(Notify::new());
         let writer = tokio::spawn(run(
             "t".to_string(),
-            0,
+            PartitionIndex(0),
             log.clone(),
             Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             rx,
@@ -1100,7 +1101,7 @@ mod tests {
         let hw_advance_notify = Arc::new(Notify::new());
         let writer = tokio::spawn(run(
             "t".to_string(),
-            0,
+            PartitionIndex(0),
             log.clone(),
             Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             rx,
@@ -1149,7 +1150,7 @@ mod tests {
         let hw_advance_notify = Arc::new(Notify::new());
         let writer = tokio::spawn(run(
             "t".to_string(),
-            0,
+            PartitionIndex(0),
             log.clone(),
             Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             rx,
@@ -1203,7 +1204,7 @@ mod tests {
         let hw_advance_notify = Arc::new(Notify::new());
         let writer = tokio::spawn(run(
             "t".to_string(),
-            0,
+            PartitionIndex(0),
             log.clone(),
             Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             rx,
@@ -1247,7 +1248,7 @@ mod tests {
         let hw_advance_notify = Arc::new(Notify::new());
         let writer = tokio::spawn(run(
             "t".to_string(),
-            0,
+            PartitionIndex(0),
             log.clone(),
             Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             rx,

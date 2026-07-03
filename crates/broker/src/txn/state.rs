@@ -2,6 +2,8 @@
 
 use std::collections::HashSet;
 
+use crabka_ids::PartitionIndex;
+
 /// Tx state machine, mirroring Apache Kafka's classic transaction
 /// states (KIP-98) extended for KIP-1319 v2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,7 +79,7 @@ impl TxnState {
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct TopicPartition {
     pub topic: String,
-    pub partition: i32,
+    pub partition: PartitionIndex,
 }
 
 #[derive(Debug, Clone)]

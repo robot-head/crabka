@@ -21,6 +21,7 @@
 
 use std::sync::Arc;
 
+use crabka_ids::PartitionIndex;
 use crabka_log::Offset;
 use crabka_metadata::NodeId;
 use crabka_protocol::{
@@ -360,11 +361,11 @@ impl SharePersister {
     /// endpoint resolution in `txn::handlers::end_txn`.
     async fn connect_to_leader(
         &self,
-        state_partition: i32,
+        state_partition: PartitionIndex,
     ) -> Result<crabka_client_core::Connection, BrokerError> {
         let image = self.controller.current_image();
         let pr = image
-            .partition(bootstrap::TOPIC, state_partition)
+            .partition(bootstrap::TOPIC, state_partition.get())
             .ok_or_else(|| {
                 BrokerError::Share(format!(
                     "{}-{state_partition} not present in metadata image",
@@ -403,7 +404,11 @@ impl SharePersister {
     }
 
     /// Send `req` to the `state_partition` leader, discarding the response.
-    async fn send_to_leader<R>(&self, state_partition: i32, req: R) -> Result<(), BrokerError>
+    async fn send_to_leader<R>(
+        &self,
+        state_partition: PartitionIndex,
+        req: R,
+    ) -> Result<(), BrokerError>
     where
         R: crabka_client_core::ProtocolRequest,
     {
@@ -420,7 +425,7 @@ impl SharePersister {
     /// response.
     async fn send_to_leader_resp<R>(
         &self,
-        state_partition: i32,
+        state_partition: PartitionIndex,
         req: R,
     ) -> Result<R::Response, BrokerError>
     where

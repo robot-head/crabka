@@ -105,7 +105,9 @@ pub(crate) async fn handle(
                     ..Default::default()
                 };
 
-                let Some(p) = partitions.get(&topic.topic, part.partition) else {
+                let Some(p) =
+                    partitions.get(&topic.topic, crabka_ids::PartitionIndex(part.partition))
+                else {
                     out.error_code = codes::UNKNOWN_TOPIC_OR_PARTITION;
                     parts_out.push(out);
                     continue;

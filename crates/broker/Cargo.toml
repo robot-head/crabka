@@ -39,6 +39,7 @@ crabka-protocol = { version = "0.3.8", path = "../protocol", default-features = 
 crabka-telemetry = { version = "0.3.8", path = "../telemetry" }
 crabka-records-legacy = { version = "0.3.8", path = "../records-legacy" }
 crabka-log = { version = "0.3.8", path = "../log" }
+crabka-ids = { version = "0.3.8", path = "../ids" }
 crabka-compression = { version = "0.3.8", path = "../compression", default-features = false }
 crabka-raft = { version = "0.3.8", path = "../raft" }
 crabka-metadata = { version = "0.3.8", path = "../metadata" }

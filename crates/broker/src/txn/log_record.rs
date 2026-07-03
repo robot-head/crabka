@@ -29,6 +29,7 @@
 use std::collections::{BTreeMap, HashSet};
 
 use bytes::{Bytes, BytesMut};
+use crabka_ids::PartitionIndex;
 use crabka_protocol::{
     ProtocolError,
     primitives::{
@@ -61,7 +62,10 @@ const PRODUCER_ID_NONE: i64 = -1;
 fn group_partitions(partitions: &HashSet<TopicPartition>) -> Vec<(&str, Vec<i32>)> {
     let mut by_topic: BTreeMap<&str, Vec<i32>> = BTreeMap::new();
     for tp in partitions {
-        by_topic.entry(&tp.topic).or_default().push(tp.partition);
+        by_topic
+            .entry(&tp.topic)
+            .or_default()
+            .push(tp.partition.get());
     }
     by_topic
         .into_iter()
@@ -174,7 +178,7 @@ pub(crate) fn decode_value(
                 let partition = get_i32(&mut buf)?;
                 partitions.insert(TopicPartition {
                     topic: topic.clone(),
-                    partition,
+                    partition: PartitionIndex(partition),
                 });
             }
             // PartitionsSchema tagged-field section (v1 only); no known tags.
@@ -284,7 +288,7 @@ mod tests {
         let mut partitions = HashSet::new();
         partitions.insert(TopicPartition {
             topic: "txtest".into(),
-            partition: 0,
+            partition: PartitionIndex(0),
         });
         TxnEntry {
             transactional_id: "my-txn-id".into(),
@@ -313,7 +317,7 @@ mod tests {
         check!(entry.start_ms == SAMPLE_TS);
         let expected: HashSet<TopicPartition> = [TopicPartition {
             topic: "txtest".into(),
-            partition: 0,
+            partition: PartitionIndex(0),
         }]
         .into_iter()
         .collect();
@@ -336,15 +340,15 @@ mod tests {
         let mut partitions = HashSet::new();
         partitions.insert(TopicPartition {
             topic: "zebra".into(),
-            partition: 5,
+            partition: PartitionIndex(5),
         });
         partitions.insert(TopicPartition {
             topic: "zebra".into(),
-            partition: 1,
+            partition: PartitionIndex(1),
         });
         partitions.insert(TopicPartition {
             topic: "alpha".into(),
-            partition: 3,
+            partition: PartitionIndex(3),
         });
         let entry = TxnEntry {
             transactional_id: "tid".into(),
@@ -382,7 +386,7 @@ mod tests {
         let mut partitions = HashSet::new();
         partitions.insert(TopicPartition {
             topic: "t".into(),
-            partition: 0,
+            partition: PartitionIndex(0),
         });
         let entry = TxnEntry {
             transactional_id: "tid".into(),
@@ -429,7 +433,7 @@ mod tests {
             for (t, p) in order {
                 partitions.insert(TopicPartition {
                     topic: (*t).into(),
-                    partition: *p,
+                    partition: PartitionIndex(*p),
                 });
             }
             TxnEntry {

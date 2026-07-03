@@ -69,7 +69,7 @@ pub(crate) fn handle(
                         &all_log_dirs,
                         &log_config,
                         &topic.name,
-                        partition_index,
+                        crabka_ids::PartitionIndex(partition_index),
                         &target_path,
                     ) {
                         Ok(()) => codes::NONE,

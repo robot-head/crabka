@@ -4,6 +4,7 @@
 
 use std::{collections::HashMap, sync::Arc};
 
+use crabka_ids::PartitionIndex;
 use crabka_metadata::{MetadataRecord, PartitionRecord, TopicRecord};
 use crabka_protocol::records::RecordBatch;
 use crabka_raft::RaftError;
@@ -255,13 +256,17 @@ pub async fn bootstrap(
     // Spawn a writer + register the partition handle.
     let partition = spawn_partition(
         OFFSETS_TOPIC.to_string(),
-        OFFSETS_PARTITION,
+        PartitionIndex(OFFSETS_PARTITION),
         owning_dir,
         log,
         log_dir_status.clone(),
         producer_state.clone(),
     );
-    partitions.insert(OFFSETS_TOPIC.into(), OFFSETS_PARTITION, partition);
+    partitions.insert(
+        OFFSETS_TOPIC.into(),
+        PartitionIndex(OFFSETS_PARTITION),
+        partition,
+    );
     Ok(())
 }
 
@@ -906,7 +911,7 @@ mod tests {
         .unwrap();
         let topic_dir = log_dir::partition_dir(&config.log_dir, OFFSETS_TOPIC, OFFSETS_PARTITION);
         check!(topic_dir.exists());
-        check!(partitions.contains(OFFSETS_TOPIC, OFFSETS_PARTITION));
+        check!(partitions.contains(OFFSETS_TOPIC, PartitionIndex(OFFSETS_PARTITION)));
         check!(controller.current_image().topic(OFFSETS_TOPIC).is_some());
     }
 

@@ -218,7 +218,10 @@ async fn describe_partition(
         Ok(None) => (UNINITIALIZED_START_OFFSET, codes::NONE),
         Err(_) => (UNINITIALIZED_START_OFFSET, codes::COORDINATOR_NOT_AVAILABLE),
     };
-    let (leader_epoch, lag) = if let Some(part) = broker.partitions.get(topic_name, p) {
+    let (leader_epoch, lag) = if let Some(part) = broker
+        .partitions
+        .get(topic_name, crabka_ids::PartitionIndex(p))
+    {
         let hwm = part.high_watermark().await;
         let le = part
             .current_leader_epoch

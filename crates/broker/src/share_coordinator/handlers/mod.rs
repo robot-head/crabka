@@ -19,6 +19,7 @@ pub(crate) mod write;
 pub(crate) mod test_support {
     use std::{path::Path, sync::Arc};
 
+    use crabka_ids::PartitionIndex;
     use crabka_log::{Log, LogConfig, Offset};
 
     use crate::{
@@ -48,13 +49,17 @@ pub(crate) mod test_support {
         let log = Log::open(&part_dir, LogConfig::default()).expect("open state partition log");
         let part = crate::broker::spawn_partition(
             bootstrap::TOPIC.to_string(),
-            partition,
+            PartitionIndex(partition),
             log_dir.to_path_buf(),
             log,
             crate::log_dir_status::LogDirRegistry::default(),
             Arc::new(crate::producer_state::ProducerState::new()),
         );
-        registry.insert(bootstrap::TOPIC.to_string(), partition, part);
+        registry.insert(
+            bootstrap::TOPIC.to_string(),
+            PartitionIndex(partition),
+            part,
+        );
     }
 
     pub(crate) fn open_all_state_partitions(registry: &PartitionRegistry, log_dir: &Path) {

@@ -23,6 +23,7 @@
 use std::net::SocketAddr;
 
 use bytes::{Bytes, BytesMut};
+use crabka_ids::PartitionIndex;
 use crabka_metadata::{AclOperation, MetadataImage, ResourceType};
 use crabka_protocol::{
     Decode, Encode,
@@ -323,7 +324,7 @@ async fn process_one_txn(
         for &p in &t.partitions {
             entry.partitions.insert(TopicPartition {
                 topic: t.name.clone(),
-                partition: p,
+                partition: PartitionIndex(p),
             });
         }
     }
@@ -382,7 +383,7 @@ fn verify_partitions(
                                 entry,
                                 &TopicPartition {
                                     topic: t.name.clone(),
-                                    partition: p,
+                                    partition: PartitionIndex(p),
                                 },
                             )
                         };
@@ -481,12 +482,12 @@ mod tests {
         let mut e = TxnEntry::new_empty("t".into(), 1, 0, 30_000, 0);
         let present = TopicPartition {
             topic: "a".into(),
-            partition: 0,
+            partition: PartitionIndex(0),
         };
         e.partitions.insert(present.clone());
         let absent = TopicPartition {
             topic: "b".into(),
-            partition: 0,
+            partition: PartitionIndex(0),
         };
         assert!(verify_partition_code(&e, &present) == codes::NONE);
         assert!(verify_partition_code(&e, &absent) == codes::TRANSACTION_ABORTABLE);
@@ -524,7 +525,7 @@ mod tests {
         let mut e = TxnEntry::new_empty("t".into(), 1, 0, 30_000, 0);
         e.partitions.insert(TopicPartition {
             topic: "alpha".into(),
-            partition: 1,
+            partition: PartitionIndex(1),
         });
         let topics = vec![topic("alpha", &[1, 2]), topic("denied", &[3])];
         let denied = HashSet::from(["denied".to_string()]);

@@ -12,6 +12,7 @@
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use crabka_client_core::{ClientError, Connection, ConnectionOptions};
+use crabka_ids::PartitionIndex;
 use crabka_log::{Log, LogConfig, Offset};
 use crabka_protocol::{
     owned::{
@@ -76,7 +77,7 @@ pub(crate) struct Config {
     /// `topic_id`. If we send `WireUuid::ZERO` here the leader returns
     /// `UNKNOWN_TOPIC_OR_PARTITION` for every fetch.
     pub topic_id: WireUuid,
-    pub partition: i32,
+    pub partition: PartitionIndex,
     pub leader_node_id: NodeId,
     /// Leader's `host` portion from the metadata image (the inter-broker
     /// endpoint when available, otherwise the legacy broker host).
@@ -118,24 +119,24 @@ pub(crate) struct Config {
 pub(crate) async fn run(cfg: Config) {
     info!(
         topic = %cfg.topic,
-        partition = cfg.partition,
+        partition = cfg.partition.get(),
         leader_node_id = cfg.leader_node_id,
         "replicator.started"
     );
 
     // First-run materialization of the local on-disk partition.
     if let Err(e) = ensure_local_partition(&cfg) {
-        warn!(error = %e, topic = %cfg.topic, partition = cfg.partition,
+        warn!(error = %e, topic = %cfg.topic, partition = cfg.partition.get(),
             "replicator failed to open local partition; aborting");
         return;
     }
 
     if let Err(e) = run_inner(&cfg).await {
-        warn!(error = %e, topic = %cfg.topic, partition = cfg.partition,
+        warn!(error = %e, topic = %cfg.topic, partition = cfg.partition.get(),
             "replicator stopped on unrecoverable error");
     }
 
-    info!(topic = %cfg.topic, partition = cfg.partition, "replicator.stopped");
+    info!(topic = %cfg.topic, partition = cfg.partition.get(), "replicator.stopped");
 }
 
 /// Build (or recover) the on-disk `Partition` for this follower, inserting
@@ -145,7 +146,8 @@ fn ensure_local_partition(cfg: &Config) -> Result<(), String> {
     // concurrent replicators for the same partition can never both build it.
     cfg.partitions
         .materialize_if_vacant(&cfg.topic, cfg.partition, || {
-            let dir = crate::log_dir::place_partition_dir(&cfg.log_dirs, &cfg.topic, cfg.partition);
+            let dir =
+                crate::log_dir::place_partition_dir(&cfg.log_dirs, &cfg.topic, cfg.partition.get());
             std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
             let log =
                 Log::open(&dir, cfg.log_config.clone()).map_err(|e| format!("Log::open: {e}"))?;
@@ -196,7 +198,7 @@ async fn run_inner(cfg: &Config) -> Result<(), String> {
             FetchThrottleDecision::Sleep => {
                 tracing::debug!(
                     topic = %cfg.topic,
-                    partition = cfg.partition,
+                    partition = cfg.partition.get(),
                     "follower throttle: skip fetch this round (bucket exhausted)"
                 );
                 // Bucket exhausted — yield and retry next loop iteration.
@@ -237,7 +239,7 @@ async fn run_inner(cfg: &Config) -> Result<(), String> {
         match handle_response(resp, cfg).await {
             LoopAction::Continue => {}
             LoopAction::StopNotLeader => {
-                info!(topic = %cfg.topic, partition = cfg.partition,
+                info!(topic = %cfg.topic, partition = cfg.partition.get(),
                     "replicator.not_leader; supervisor will re-evaluate");
                 return Ok(());
             }
@@ -248,7 +250,7 @@ async fn run_inner(cfg: &Config) -> Result<(), String> {
 fn follower_partition_fetch_cap(cfg: &Config) -> FetchThrottleDecision {
     let image = cfg.controller.current_image();
     let throttle = TopicThrottle::for_topic(&image, &cfg.topic);
-    let throttled = throttle.follower.contains(cfg.partition, cfg.node_id);
+    let throttled = throttle.follower.contains(cfg.partition.get(), cfg.node_id);
     if !throttled || cfg.throttle_state.follower_in.rate() == 0 {
         return FetchThrottleDecision::Fetch(FETCH_MAX_BYTES);
     }
@@ -316,7 +318,7 @@ fn build_fetch_request(
             topic: cfg.topic.clone(),
             topic_id: cfg.topic_id,
             partitions: vec![FetchPartition {
-                partition: cfg.partition,
+                partition: cfg.partition.get(),
                 // Unwrap the `Offset` into the wire `i64` field.
                 fetch_offset: fetch_offset.0,
                 current_leader_epoch: leader_epoch,
@@ -350,7 +352,7 @@ enum LoopAction {
 fn became_partition_leader(cfg: &Config) -> bool {
     cfg.controller
         .current_image()
-        .partition(&cfg.topic, cfg.partition)
+        .partition(&cfg.topic, cfg.partition.get())
         .map(|pr| pr.leader)
         == Some(cfg.node_id)
 }
@@ -375,7 +377,7 @@ async fn handle_response(mut resp: FetchResponse, cfg: &Config) -> LoopAction {
         .and_then(|t| {
             t.partitions
                 .iter_mut()
-                .find(|p| p.partition_index == cfg.partition)
+                .find(|p| p.partition_index == cfg.partition.get())
         })
     else {
         return LoopAction::Continue;
@@ -392,7 +394,7 @@ async fn handle_response(mut resp: FetchResponse, cfg: &Config) -> LoopAction {
                 // we have since become this partition's leader (see
                 // `became_partition_leader`).
                 if became_partition_leader(cfg) {
-                    warn!(topic = %cfg.topic, partition = cfg.partition,
+                    warn!(topic = %cfg.topic, partition = cfg.partition.get(),
                         "replicator: skipping diverging_epoch truncation — this broker is now the partition leader (stale fetch response)");
                     return LoopAction::StopNotLeader;
                 }
@@ -410,14 +412,14 @@ async fn handle_response(mut resp: FetchResponse, cfg: &Config) -> LoopAction {
                                 .await;
                             info!(
                                 topic = %cfg.topic,
-                                partition = cfg.partition,
+                                partition = cfg.partition.get(),
                                 end_offset,
                                 "replicator: truncated to diverging_epoch (KIP-320 in-band)"
                             );
                         }
                         Err(e) => warn!(
                             topic = %cfg.topic,
-                            partition = cfg.partition,
+                            partition = cfg.partition.get(),
                             end_offset,
                             error = %e,
                             "replicator: truncate_to(diverging_epoch) failed"
@@ -428,7 +430,7 @@ async fn handle_response(mut resp: FetchResponse, cfg: &Config) -> LoopAction {
             }
 
             let Some(part) = cfg.partitions.get(&cfg.topic, cfg.partition) else {
-                warn!(topic = %cfg.topic, partition = cfg.partition,
+                warn!(topic = %cfg.topic, partition = cfg.partition.get(),
                     "replicator: local partition vanished between fetches");
                 return LoopAction::Continue;
             };
@@ -448,13 +450,13 @@ async fn handle_response(mut resp: FetchResponse, cfg: &Config) -> LoopAction {
                     // touches the writer API (cross-file) so it's left as-is.
                     let batch_bytes = batch.encoded_len();
                     if let Err(e) = part.replicate_batch(batch).await {
-                        warn!(error = %e, topic = %cfg.topic, partition = cfg.partition,
+                        warn!(error = %e, topic = %cfg.topic, partition = cfg.partition.get(),
                             "replicator: replicate_batch failed");
                         break;
                     }
                     cfg.metrics.record_replication_in(
                         &cfg.topic,
-                        cfg.partition,
+                        cfg.partition.get(),
                         u64::try_from(batch_bytes).unwrap_or(0),
                     );
                 }
@@ -479,14 +481,14 @@ async fn handle_response(mut resp: FetchResponse, cfg: &Config) -> LoopAction {
             // Stale-response guard: never reset from a Fetch response if we have
             // since become this partition's leader (see `became_partition_leader`).
             if became_partition_leader(cfg) {
-                warn!(topic = %cfg.topic, partition = cfg.partition,
+                warn!(topic = %cfg.topic, partition = cfg.partition.get(),
                     "replicator: skipping out_of_range reset — this broker is now the partition leader (stale fetch response)");
                 return LoopAction::StopNotLeader;
             }
             let leader_log_start = part_resp.log_start_offset;
             warn!(
                 topic = %cfg.topic,
-                partition = cfg.partition,
+                partition = cfg.partition.get(),
                 leader_log_start,
                 "replicator.out_of_range; resetting local log to leader log_start"
             );
@@ -526,13 +528,13 @@ async fn handle_response(mut resp: FetchResponse, cfg: &Config) -> LoopAction {
             // cooperative cancellation that would otherwise retire it — the
             // broker then never becomes ready and crashloops.
             if became_partition_leader(cfg) {
-                warn!(topic = %cfg.topic, partition = cfg.partition,
+                warn!(topic = %cfg.topic, partition = cfg.partition.get(),
                     "replicator: stopping on fenced epoch — this broker is now the partition leader");
                 return LoopAction::StopNotLeader;
             }
             warn!(
                 topic = %cfg.topic,
-                partition = cfg.partition,
+                partition = cfg.partition.get(),
                 error_code = part_resp.error_code,
                 "replicator: fenced/unknown leader epoch; calling OffsetForLeaderEpoch"
             );
@@ -569,7 +571,7 @@ async fn handle_response(mut resp: FetchResponse, cfg: &Config) -> LoopAction {
     name = "replicator_handle_epoch_fence",
     level = "info",
     skip_all,
-    fields(topic = %cfg.topic, partition = cfg.partition),
+    fields(topic = %cfg.topic, partition = cfg.partition.get()),
     err,
 )]
 async fn handle_epoch_fence(cfg: &Config) -> Result<(), String> {
@@ -606,7 +608,11 @@ async fn handle_epoch_fence(cfg: &Config) -> Result<(), String> {
         .topics
         .iter()
         .find(|t| t.topic == cfg.topic)
-        .and_then(|t| t.partitions.iter().find(|p| p.partition == cfg.partition))
+        .and_then(|t| {
+            t.partitions
+                .iter()
+                .find(|p| p.partition == cfg.partition.get())
+        })
         .map(|p| p.end_offset)
     else {
         return Ok(());
@@ -620,7 +626,7 @@ async fn handle_epoch_fence(cfg: &Config) -> Result<(), String> {
     // response if we have since become this partition's leader (see
     // `became_partition_leader`).
     if became_partition_leader(cfg) {
-        warn!(topic = %cfg.topic, partition = cfg.partition,
+        warn!(topic = %cfg.topic, partition = cfg.partition.get(),
             "replicator: skipping epoch-fence truncation — this broker is now the partition leader (stale response)");
         return Ok(());
     }
@@ -630,7 +636,7 @@ async fn handle_epoch_fence(cfg: &Config) -> Result<(), String> {
         if let Err(e) = part.truncate_to(Offset(end_offset)).await {
             warn!(
                 topic = %cfg.topic,
-                partition = cfg.partition,
+                partition = cfg.partition.get(),
                 end_offset,
                 error = %e,
                 "handle_epoch_fence: truncate_to failed"
@@ -641,7 +647,7 @@ async fn handle_epoch_fence(cfg: &Config) -> Result<(), String> {
                 .await;
             info!(
                 topic = %cfg.topic,
-                partition = cfg.partition,
+                partition = cfg.partition.get(),
                 end_offset,
                 "handle_epoch_fence: truncated to epoch boundary"
             );
@@ -652,7 +658,7 @@ async fn handle_epoch_fence(cfg: &Config) -> Result<(), String> {
         if let Err(e) = part.reset_to(Offset(0)).await {
             warn!(
                 topic = %cfg.topic,
-                partition = cfg.partition,
+                partition = cfg.partition.get(),
                 error = %e,
                 "handle_epoch_fence: reset_to(0) failed"
             );
@@ -662,7 +668,7 @@ async fn handle_epoch_fence(cfg: &Config) -> Result<(), String> {
                 .await;
             info!(
                 topic = %cfg.topic,
-                partition = cfg.partition,
+                partition = cfg.partition.get(),
                 "handle_epoch_fence: reset to 0 (undefined epoch boundary)"
             );
         }
@@ -687,7 +693,7 @@ fn build_offset_for_leader_epoch_request(
         topics: vec![OffsetForLeaderTopic {
             topic: cfg.topic.clone(),
             partitions: vec![OffsetForLeaderPartition {
-                partition: cfg.partition,
+                partition: cfg.partition.get(),
                 current_leader_epoch: our_epoch,
                 leader_epoch: our_epoch,
                 ..OffsetForLeaderPartition::default()
@@ -896,7 +902,7 @@ mod tests {
             node_id: NODE_ID,
             topic: TOPIC.into(),
             topic_id: WIRE_TOPIC_ID,
-            partition: PARTITION,
+            partition: PartitionIndex(PARTITION),
             leader_node_id: LEADER_ID,
             leader_host: "127.0.0.1".into(),
             leader_port: 9,
@@ -1182,7 +1188,7 @@ mod tests {
 
         run(cfg).await;
 
-        assert!(partitions.contains(TOPIC, PARTITION));
+        assert!(partitions.contains(TOPIC, PartitionIndex(PARTITION)));
     }
 
     #[tokio::test]

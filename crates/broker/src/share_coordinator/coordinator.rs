@@ -19,6 +19,7 @@
 use std::{collections::HashSet, sync::Arc};
 
 use bytes::Bytes;
+use crabka_ids::PartitionIndex;
 use crabka_log::Offset;
 use crabka_metadata::MetadataImage;
 use crabka_protocol::records::{Record, RecordBatch};
@@ -54,10 +55,6 @@ pub(crate) type StateEpoch = i32;
 /// stale value is fenced with `FENCED_LEADER_EPOCH`.
 pub(crate) type LeaderEpoch = i32;
 
-/// Index of a `__share_group_state` partition (the coordinator-topic partition
-/// a share key hashes to) — distinct from the data-topic partition index.
-pub(crate) type StatePartitionIndex = i32;
-
 /// Kafka wire error code (see [`crate::codes`]) returned per partition when a
 /// state-machine operation fails.
 pub(crate) type ShareErrorCode = i16;
@@ -82,7 +79,7 @@ pub(crate) struct ShareCoordinator {
     /// Live in-memory state: `(group, topicId, partition)` → locked state.
     state: DashMap<ShareStateKey3, Arc<Mutex<SharePartitionState>>>,
     /// Set of `__share_group_state` partition indices this broker leads.
-    leader_partitions: RwLock<HashSet<StatePartitionIndex>>,
+    leader_partitions: RwLock<HashSet<PartitionIndex>>,
     config: ShareCoordinatorConfig,
 }
 
@@ -108,14 +105,14 @@ impl ShareCoordinator {
         let mut set = HashSet::new();
         for p in image.partitions_of(bootstrap::TOPIC) {
             if p.leader == self.node_id {
-                set.insert(p.partition);
+                set.insert(PartitionIndex(p.partition));
             }
         }
         *self.leader_partitions.write().await = set;
     }
 
     /// Returns `true` if this broker leads `__share_group_state`-`state_partition`.
-    pub(crate) async fn is_leader(&self, state_partition: StatePartitionIndex) -> bool {
+    pub(crate) async fn is_leader(&self, state_partition: PartitionIndex) -> bool {
         self.leader_partitions
             .read()
             .await
@@ -126,7 +123,7 @@ impl ShareCoordinator {
     pub(crate) async fn lead_all_partitions_for_test(&self) {
         let mut set = HashSet::new();
         for p in 0..bootstrap::NUM_PARTITIONS {
-            set.insert(p);
+            set.insert(PartitionIndex(p));
         }
         *self.leader_partitions.write().await = set;
     }
@@ -139,13 +136,13 @@ impl ShareCoordinator {
         group: &str,
         topic_id: &uuid::Uuid,
         partition: i32,
-    ) -> StatePartitionIndex {
-        partition_for_share_key(
+    ) -> PartitionIndex {
+        PartitionIndex(partition_for_share_key(
             group,
             topic_id,
             partition,
             self.config.state_topic_num_partitions,
-        )
+        ))
     }
 
     /// Initialize the share state for `(group, topic_id, partition)` at
@@ -373,7 +370,7 @@ impl ShareCoordinator {
     /// locally, or the underlying append error if `produce_batch` fails.
     async fn persist_record(
         &self,
-        state_partition: StatePartitionIndex,
+        state_partition: PartitionIndex,
         key: ShareStateKey,
         value: Option<Bytes>,
     ) -> Result<Offset, BrokerError> {
@@ -402,7 +399,7 @@ impl ShareCoordinator {
     /// current `log_start_offset`, trims the log up to it. Every retained key
     /// keeps its latest snapshot, so the trim is safe. Errors are logged and
     /// swallowed — pruning never fails a write.
-    async fn maybe_prune(&self, state_partition: StatePartitionIndex) {
+    async fn maybe_prune(&self, state_partition: PartitionIndex) {
         let Some(part) = self.partitions.get(bootstrap::TOPIC, state_partition) else {
             return;
         };
@@ -430,7 +427,7 @@ impl ShareCoordinator {
             && let Err(e) = part.trim_to_offset(redundant).await
         {
             warn!(
-                partition = state_partition,
+                partition = state_partition.get(),
                 error = %e,
                 "share-state log prune failed; continuing"
             );
@@ -458,7 +455,7 @@ impl ShareCoordinator {
     /// the in-memory state map. Assumes `leader_partitions` is already
     /// populated (via `refresh_leader_partitions`).
     async fn replay_led_partitions(&self) {
-        let local_partitions: Vec<StatePartitionIndex> = self
+        let local_partitions: Vec<PartitionIndex> = self
             .leader_partitions
             .read()
             .await
@@ -477,7 +474,7 @@ impl ShareCoordinator {
                     Ok(o) => o,
                     Err(e) => {
                         warn!(
-                            partition = p,
+                            partition = p.get(),
                             error = %e,
                             "read error during __share_group_state recovery; skipping partition"
                         );
@@ -499,7 +496,7 @@ impl ShareCoordinator {
                             Ok(k) => k,
                             Err(e) => {
                                 warn!(
-                                    partition = p,
+                                    partition = p.get(),
                                     error = %e,
                                     "invalid share-state key; skipping record"
                                 );
@@ -531,7 +528,7 @@ impl ShareCoordinator {
         map_key: &ShareStateKey3,
         value: &Bytes,
         rec_offset: Offset,
-        partition: i32,
+        partition: PartitionIndex,
     ) {
         let entry = self
             .state
@@ -552,7 +549,7 @@ impl ShareCoordinator {
                     st.last_snapshot_offset = rec_offset;
                 }
                 Err(e) => warn!(
-                    partition = partition,
+                    partition = partition.get(),
                     error = %e,
                     "invalid ShareSnapshot value; skipping record"
                 ),
@@ -560,13 +557,13 @@ impl ShareCoordinator {
             KEY_SHARE_UPDATE => match ShareUpdateValue::decode(value) {
                 Ok(upd) => st.apply_update(&upd),
                 Err(e) => warn!(
-                    partition = partition,
+                    partition = partition.get(),
                     error = %e,
                     "invalid ShareUpdate value; skipping record"
                 ),
             },
             other => warn!(
-                partition = partition,
+                partition = partition.get(),
                 record_type = other,
                 "unknown share-state record type"
             ),
@@ -601,13 +598,13 @@ mod tests {
         let log = Log::open(&part_dir, LogConfig::default()).unwrap();
         let part = crate::broker::spawn_partition(
             bootstrap::TOPIC.to_string(),
-            p,
+            PartitionIndex(p),
             log_dir.to_path_buf(),
             log,
             crate::log_dir_status::LogDirRegistry::default(),
             Arc::new(crate::producer_state::ProducerState::new()),
         );
-        reg.insert(bootstrap::TOPIC.to_string(), p, part);
+        reg.insert(bootstrap::TOPIC.to_string(), PartitionIndex(p), part);
     }
 
     /// A coordinator that leads every state partition it touches, with all
@@ -624,7 +621,7 @@ mod tests {
     async fn lead_all(coord: &ShareCoordinator) {
         let mut set = HashSet::new();
         for p in 0..bootstrap::NUM_PARTITIONS {
-            set.insert(p);
+            set.insert(PartitionIndex(p));
         }
         *coord.leader_partitions.write().await = set;
     }

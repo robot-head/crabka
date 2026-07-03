@@ -12,6 +12,7 @@ use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use crabka_ids::PartitionIndex;
 use crabka_log::Offset;
 use crabka_metadata::MetadataImage;
 use crabka_protocol::records::{Record, RecordBatch};
@@ -175,7 +176,7 @@ pub(crate) struct TxnCoordinator {
     /// Live in-memory state: `transactional_id` → locked `TxnEntry`.
     state: DashMap<String, Arc<Mutex<TxnEntry>>>,
     /// Set of `__transaction_state` partition indices this broker leads.
-    leader_partitions: RwLock<HashSet<i32>>,
+    leader_partitions: RwLock<HashSet<PartitionIndex>>,
     /// Reverse lookup: `producer_id` → `transactional_id`. Used by the
     /// Produce handler to verify transactional batches (KIP-1319 v2).
     pid_to_tid: DashMap<i64, String>,
@@ -252,7 +253,7 @@ impl TxnCoordinator {
         let mut set = HashSet::new();
         for p in image.partitions_of(bootstrap::TOPIC) {
             if p.leader == self.node_id {
-                set.insert(p.partition);
+                set.insert(PartitionIndex(p.partition));
             }
         }
         *self.leader_partitions.write().await = set;
@@ -263,8 +264,8 @@ impl TxnCoordinator {
     // `tid` and `NUM_PARTITIONS`, but keeping it as a method lets callers
     // use a consistent `coord.partition_for(tid)` style.
     #[allow(clippy::unused_self)]
-    pub(crate) fn partition_for(&self, tid: &str) -> i32 {
-        partition_for_tid(tid, bootstrap::NUM_PARTITIONS)
+    pub(crate) fn partition_for(&self, tid: &str) -> PartitionIndex {
+        PartitionIndex(partition_for_tid(tid, bootstrap::NUM_PARTITIONS))
     }
 
     /// Returns `true` if this broker is the transaction coordinator for `tid`.
@@ -415,7 +416,7 @@ impl TxnCoordinator {
     pub(crate) async fn recover(&self, image: &MetadataImage) -> Result<(), BrokerError> {
         self.refresh_leader_partitions(image).await;
 
-        let local_partitions: Vec<i32> = self
+        let local_partitions: Vec<PartitionIndex> = self
             .leader_partitions
             .read()
             .await
@@ -439,7 +440,7 @@ impl TxnCoordinator {
                     // read error as "nothing to replay here" to be safe.
                     Err(e) => {
                         warn!(
-                            partition = p,
+                            partition = p.get(),
                             error = %e,
                             "read error during __transaction_state recovery; skipping partition"
                         );
@@ -455,7 +456,7 @@ impl TxnCoordinator {
                     for rec in &batch.records {
                         let Some(key_bytes) = rec.key.as_ref() else {
                             warn!(
-                                partition = p,
+                                partition = p.get(),
                                 "__transaction_state record missing key; skipping"
                             );
                             continue;
@@ -464,7 +465,7 @@ impl TxnCoordinator {
                             Ok(t) => t,
                             Err(e) => {
                                 warn!(
-                                    partition = p,
+                                    partition = p.get(),
                                     error = %e,
                                     "invalid TransactionLogKey in __transaction_state; skipping"
                                 );
@@ -480,7 +481,7 @@ impl TxnCoordinator {
                             Ok(e) => e,
                             Err(e) => {
                                 warn!(
-                                    partition = p,
+                                    partition = p.get(),
                                     error = %e,
                                     "invalid TransactionLogValue in __transaction_state; skipping"
                                 );
@@ -545,7 +546,7 @@ impl ReaperBackend for TxnCoordinator {
             let Some(part) = self.partitions.get(&tp.topic, tp.partition) else {
                 warn!(
                     topic = %tp.topic,
-                    partition = tp.partition,
+                    partition = tp.partition.get(),
                     "txn reaper: partition not locally led; abort marker needs inter-broker \
                      WriteTxnMarkers (not yet wired), skipping"
                 );
@@ -560,7 +561,7 @@ impl ReaperBackend for TxnCoordinator {
             if let Err(e) = part.produce_batch(marker).await {
                 warn!(
                     topic = %tp.topic,
-                    partition = tp.partition,
+                    partition = tp.partition.get(),
                     error = %e,
                     "txn reaper: failed to write abort marker"
                 );

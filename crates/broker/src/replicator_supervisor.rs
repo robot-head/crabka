@@ -15,6 +15,7 @@
 
 use std::{collections::HashSet, path::PathBuf, sync::Arc};
 
+use crabka_ids::PartitionIndex;
 use crabka_log::{Log, LogConfig};
 use crabka_metadata::MetadataImage;
 use crabka_raft::NodeId;
@@ -93,7 +94,7 @@ pub(crate) fn materialize_partition(
     // `contains_key` + `insert` pattern. JBOD placement (KIP-113) happens
     // under this lock too, so two concurrent materializations of the same
     // partition can never pick two different log dirs.
-    partitions.materialize_if_vacant(topic, partition, || {
+    partitions.materialize_if_vacant(topic, PartitionIndex(partition), || {
         let dir = crate::log_dir::place_partition_dir(log_dirs, topic, partition);
         std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
         let log = Log::open(&dir, log_config.clone()).map_err(|e| format!("Log::open: {e}"))?;
@@ -103,7 +104,7 @@ pub(crate) fn materialize_partition(
             .to_path_buf();
         Ok(spawn_partition(
             topic.to_string(),
-            partition,
+            PartitionIndex(partition),
             owning_dir,
             log,
             log_dir_status.clone(),
@@ -123,7 +124,7 @@ pub(crate) async fn push_topic_configs(
 ) {
     let empty: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
     for (topic, partition) in desired {
-        let Some(part) = partitions.get(topic, *partition) else {
+        let Some(part) = partitions.get(topic, PartitionIndex(*partition)) else {
             continue;
         };
         let overrides = image.topic_config(topic).unwrap_or(&empty);
@@ -160,7 +161,7 @@ pub(crate) fn collect_changed_assignments(
     let mut wire = Vec::new();
     let mut updates = Vec::new();
     for (topic, partition) in local_set {
-        let Some(part) = partitions.get(topic, *partition) else {
+        let Some(part) = partitions.get(topic, PartitionIndex(*partition)) else {
             continue;
         };
         let dir = part.log_dir.load();
@@ -341,7 +342,7 @@ impl ReplicatorSupervisor {
             let Some(part_record) = image.partition(&key.0, key.1).cloned() else {
                 continue;
             };
-            let Some(part) = self.partitions.get(&key.0, key.1) else {
+            let Some(part) = self.partitions.get(&key.0, PartitionIndex(key.1)) else {
                 continue;
             };
             // Always sync the partition's cached leader + epoch.
@@ -440,7 +441,7 @@ impl ReplicatorSupervisor {
                 node_id: self.node_id,
                 topic: k.0,
                 topic_id: crabka_protocol::primitives::uuid::Uuid(topic_rec.topic_id.into_bytes()),
-                partition: k.1,
+                partition: crabka_ids::PartitionIndex(k.1),
                 leader_node_id: leader,
                 leader_host,
                 leader_port,
@@ -880,7 +881,7 @@ mod tests {
             &Arc::new(crate::producer_state::ProducerState::new()),
         )
         .expect("materialize");
-        let part = partitions.get("t", 0).expect("part");
+        let part = partitions.get("t", PartitionIndex(0)).expect("part");
         // Mirror what reconcile does for leader partitions.
         part.install_isr(&[1, 2, 3], &[1, 2, 3], 1).await;
         let st = part.replica_state.lock().await;
@@ -961,7 +962,9 @@ mod tests {
 
         supervisor.reconcile(&img).await;
 
-        let part = partitions.get("t", 0).expect("local leader materialized");
+        let part = partitions
+            .get("t", PartitionIndex(0))
+            .expect("local leader materialized");
         assert!(
             part.current_leader
                 .load(std::sync::atomic::Ordering::Acquire)
@@ -988,7 +991,9 @@ mod tests {
 
         supervisor.reconcile(&img).await;
 
-        let part = partitions.get("t", 0).expect("local follower materialized");
+        let part = partitions
+            .get("t", PartitionIndex(0))
+            .expect("local follower materialized");
         let state = part.replica_state.lock().await;
         assert!(state.isr.is_empty());
     }
@@ -1048,7 +1053,9 @@ mod tests {
         assert!(reporter.calls.load(Ordering::SeqCst) == 1);
         assert!(supervisor.reported_dirs.contains_key(&("t".to_string(), 0)));
 
-        let part = partitions.get("t", 0).expect("materialized");
+        let part = partitions
+            .get("t", PartitionIndex(0))
+            .expect("materialized");
         let dir = part.log_dir.load();
         let expected = supervisor.log_dir_ids.id_for(&dir).expect("dir id");
         assert!(
@@ -1067,7 +1074,7 @@ mod tests {
 
         supervisor.materialize_local_partition("t", 0).unwrap();
 
-        assert!(partitions.contains("t", 0));
+        assert!(partitions.contains("t", PartitionIndex(0)));
     }
 
     #[tokio::test]
@@ -1081,7 +1088,7 @@ mod tests {
 
         supervisor.run().await;
 
-        assert!(partitions.contains("t", 0));
+        assert!(partitions.contains("t", PartitionIndex(0)));
     }
 
     #[tokio::test]
@@ -1143,7 +1150,9 @@ mod tests {
 
         // Wait until the writer actor applies the SetLogConfig message and the
         // partition's Log reports retention.ms=60s.
-        let part = partitions.get("t", 0).expect("partition materialized");
+        let part = partitions
+            .get("t", PartitionIndex(0))
+            .expect("partition materialized");
         await_until("retention.ms=60s applied to partition log", || {
             part.log
                 .lock()
@@ -1204,7 +1213,7 @@ mod tests {
         // No overrides → default retention applies. Wait until the writer actor
         // has processed the push (the log already carries the default, so this
         // resolves as soon as the config snapshot matches).
-        let part = partitions.get("t", 0).expect("partition");
+        let part = partitions.get("t", PartitionIndex(0)).expect("partition");
         await_until("default retention applied to partition log", || {
             part.log
                 .lock()
@@ -1266,7 +1275,9 @@ mod tests {
 
         // Confirm the partition's log_dir equals the temp dir (the parent of
         // the placed partition sub-dir).
-        let part = partitions.get("t", 0).expect("part present");
+        let part = partitions
+            .get("t", PartitionIndex(0))
+            .expect("part present");
         let loaded_dir = part.log_dir.load();
         assert!(**loaded_dir == dir.path().to_path_buf());
 

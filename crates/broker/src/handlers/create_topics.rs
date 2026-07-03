@@ -340,7 +340,9 @@ pub(crate) async fn handle(
                             // metadata-watch fires sees `isr.is_empty()`, falls
                             // into `compute_hw == leader_leo`, and acks=-1 returns
                             // instantly without waiting for followers.
-                            if let Some(part) = partitions_map.get(&name, p_i32) {
+                            if let Some(part) =
+                                partitions_map.get(&name, crabka_ids::PartitionIndex(p_i32))
+                            {
                                 let leader = replicas[0];
                                 part.install_leader_change(leader, INITIAL_LEADER_EPOCH)
                                     .await;

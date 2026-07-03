@@ -15,6 +15,7 @@
 //! Wire format: v1 flexible (tagged fields), v2 flexible + `transaction_version`.
 
 use bytes::{Bytes, BytesMut};
+use crabka_ids::PartitionIndex;
 use crabka_protocol::{
     Decode, Encode,
     owned::{
@@ -63,7 +64,7 @@ pub(crate) fn handle(
                 let mut partition_results: Vec<WritableTxnMarkerPartitionResult> = Vec::new();
 
                 for &p in &topic.partition_indexes {
-                    let error_code = match partitions.get(&topic.name, p) {
+                    let error_code = match partitions.get(&topic.name, PartitionIndex(p)) {
                         None => {
                             tracing::debug!(
                                 topic = %topic.name,
@@ -148,13 +149,15 @@ mod tests {
         let log = Log::open(&part_dir, LogConfig::default()).expect("open partition log");
         let part = crate::broker::spawn_partition(
             topic.to_string(),
-            partition,
+            PartitionIndex(partition),
             log_dir.to_path_buf(),
             log,
             crate::log_dir_status::LogDirRegistry::default(),
             Arc::new(crate::producer_state::ProducerState::new()),
         );
-        broker.partitions.insert(topic.to_string(), partition, part);
+        broker
+            .partitions
+            .insert(topic.to_string(), PartitionIndex(partition), part);
     }
 
     async fn start_broker() -> (BrokerHandle, tempfile::TempDir) {

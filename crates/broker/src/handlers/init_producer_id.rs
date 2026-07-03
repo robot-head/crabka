@@ -169,7 +169,7 @@ pub(crate) async fn handle(
                 materialize_partition(
                     &coord.partitions,
                     crate::txn::bootstrap::TOPIC,
-                    txn_partition,
+                    txn_partition.get(),
                     &log_dirs,
                     &log_config,
                     &log_dir_status,
@@ -294,7 +294,7 @@ async fn dispatch_abort_markers(
             // but the new epoch prevents the original producer from completing.
             tracing::warn!(
                 topic = %tp.topic,
-                partition = tp.partition,
+                partition = tp.partition.get(),
                 "abort marker dispatch needs inter-broker WriteTxnMarkers (Tasks 15-16)"
             );
             continue;

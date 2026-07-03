@@ -470,7 +470,7 @@ async fn dispatch_markers(
 
     for tp in &entry.partitions {
         let leader = image
-            .partition(&tp.topic, tp.partition)
+            .partition(&tp.topic, tp.partition.get())
             .map_or(node_id, |p| p.leader);
         by_leader.entry(leader).or_default().push(tp.clone());
     }
@@ -482,7 +482,7 @@ async fn dispatch_markers(
                 let Some(part) = partitions.get(&tp.topic, tp.partition) else {
                     tracing::warn!(
                         topic = %tp.topic,
-                        partition = tp.partition,
+                        partition = tp.partition.get(),
                         "EndTxn: local partition not found; skipping marker"
                     );
                     continue;
@@ -571,7 +571,7 @@ async fn send_write_txn_markers(
         by_topic
             .entry(tp.topic.clone())
             .or_default()
-            .push(tp.partition);
+            .push(tp.partition.get());
     }
 
     let topics: Vec<WritableTxnMarkerTopic> = by_topic
@@ -656,6 +656,7 @@ fn encode_response(
 #[cfg(test)]
 mod tests {
     use assert2::assert;
+    use crabka_ids::PartitionIndex;
     use crabka_metadata::{BrokerEndpoint, BrokerRegistrationRecord, MetadataRecord};
     use crabka_protocol::{UnknownTaggedFields, owned::end_txn_response::EndTxnResponse};
 
@@ -848,7 +849,7 @@ mod tests {
     fn tps() -> Vec<TopicPartition> {
         vec![TopicPartition {
             topic: "t".to_string(),
-            partition: 0,
+            partition: PartitionIndex(0),
         }]
     }
 

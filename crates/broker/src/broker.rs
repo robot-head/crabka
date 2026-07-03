@@ -9,6 +9,7 @@ use std::{
     },
 };
 
+use crabka_ids::PartitionIndex;
 use dashmap::DashMap;
 use tokio::{net::TcpListener, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
@@ -110,7 +111,8 @@ pub struct Broker {
     /// `AlterReplicaLogDirs` handler reads it to make a second
     /// request for the same partition idempotent (or reject a
     /// conflicting target).
-    pub(crate) future_logs: Arc<DashMap<(String, i32), Arc<crate::future_log::FutureLogState>>>,
+    pub(crate) future_logs:
+        Arc<DashMap<(String, PartitionIndex), Arc<crate::future_log::FutureLogState>>>,
     pub(crate) group_coordinator: Arc<crate::coordinator::GroupCoordinator>,
     pub(crate) producer_ids: Arc<crate::producer_id_manager::ProducerIdManager>,
     pub(crate) producer_state: Arc<crate::producer_state::ProducerState>,
@@ -425,7 +427,10 @@ impl BrokerHandle {
     /// assert all followers caught up.
     #[allow(clippy::unused_async, clippy::used_underscore_binding)]
     pub async fn local_log_end_offset(&self, topic: &str, partition: i32) -> Option<i64> {
-        let part = self._broker.partitions.get(topic, partition)?;
+        let part = self
+            ._broker
+            .partitions
+            .get(topic, PartitionIndex(partition))?;
         // Unwrap `Offset` -> `i64` at this test-helper boundary: integration
         // tests compare the result against raw offset literals.
         Some(part.log_end_offset().0)
@@ -451,7 +456,7 @@ impl BrokerHandle {
         let part = self
             ._broker
             .partitions
-            .get(topic, partition)
+            .get(topic, PartitionIndex(partition))
             .ok_or_else(|| {
                 crate::error::BrokerError::Replication(format!(
                     "partition {topic}-{partition} not local"
@@ -464,7 +469,7 @@ impl BrokerHandle {
         // instead of deduplicating against a vanished offset.
         self._broker
             .producer_state
-            .truncate(topic, partition, offset)
+            .truncate(topic, PartitionIndex(partition), offset)
             .await;
         Ok(())
     }
@@ -489,7 +494,7 @@ impl BrokerHandle {
         let part = self
             ._broker
             .partitions
-            .get(topic, partition)
+            .get(topic, PartitionIndex(partition))
             .ok_or_else(|| {
                 crate::error::BrokerError::Replication(format!(
                     "partition {topic}-{partition} not local"
@@ -505,7 +510,11 @@ impl BrokerHandle {
     #[cfg(any(test, feature = "test-helpers"))]
     #[allow(clippy::used_underscore_binding)]
     pub fn test_set_leader_epoch(&self, topic: &str, partition: i32, epoch: i32) {
-        if let Some(part) = self._broker.partitions.get(topic, partition) {
+        if let Some(part) = self
+            ._broker
+            .partitions
+            .get(topic, PartitionIndex(partition))
+        {
             part.test_set_leader_epoch(epoch);
         }
     }
@@ -518,7 +527,9 @@ impl BrokerHandle {
     #[must_use]
     #[allow(clippy::used_underscore_binding)]
     pub fn partition_exists_for_test(&self, topic: &str, partition: i32) -> bool {
-        self._broker.partitions.contains(topic, partition)
+        self._broker
+            .partitions
+            .contains(topic, PartitionIndex(partition))
     }
 
     /// Test-only: read the share-state summary
@@ -865,7 +876,10 @@ impl BrokerHandle {
     #[must_use]
     #[allow(clippy::used_underscore_binding)]
     pub fn partition_log_start_for_test(&self, topic: &str, partition: i32) -> Option<i64> {
-        let part = self._broker.partitions.get(topic, partition)?;
+        let part = self
+            ._broker
+            .partitions
+            .get(topic, PartitionIndex(partition))?;
         // Unwrap `Offset` -> `i64` at this test-helper boundary.
         Some(part.log_start_offset().0)
     }
@@ -882,7 +896,10 @@ impl BrokerHandle {
         topic: &str,
         partition: i32,
     ) -> Option<Option<std::time::Duration>> {
-        let part = self._broker.partitions.get(topic, partition)?;
+        let part = self
+            ._broker
+            .partitions
+            .get(topic, PartitionIndex(partition))?;
         let snap = part.log.lock().ok()?.config_snapshot();
         Some(snap.retention_ms)
     }
@@ -900,7 +917,10 @@ impl BrokerHandle {
         topic: &str,
         partition: i32,
     ) -> Option<crabka_log::LogConfig> {
-        let part = self._broker.partitions.get(topic, partition)?;
+        let part = self
+            ._broker
+            .partitions
+            .get(topic, PartitionIndex(partition))?;
         Some(part.log.lock().ok()?.config_snapshot())
     }
 
@@ -926,7 +946,7 @@ impl BrokerHandle {
         let part = self
             ._broker
             .partitions
-            .get(topic, partition)
+            .get(topic, PartitionIndex(partition))
             .ok_or_else(|| {
                 crate::error::BrokerError::Replication(format!(
                     "partition {topic}-{partition} not local"
@@ -1338,7 +1358,11 @@ impl BrokerHandle {
     pub async fn wait_until_local_log_end_offset(&self, topic: &str, partition: i32, min: i64) {
         let res = tokio::time::timeout(TEST_AWAITER_TIMEOUT, async {
             loop {
-                if let Some(part) = self._broker.partitions.get(topic, partition) {
+                if let Some(part) = self
+                    ._broker
+                    .partitions
+                    .get(topic, PartitionIndex(partition))
+                {
                     let notified = part.append_notify.notified();
                     if part.log_end_offset() >= crabka_log::Offset(min) {
                         return;
@@ -1379,7 +1403,11 @@ impl BrokerHandle {
     ) {
         let res = tokio::time::timeout(TEST_AWAITER_TIMEOUT, async {
             loop {
-                if let Some(part) = self._broker.partitions.get(topic, partition) {
+                if let Some(part) = self
+                    ._broker
+                    .partitions
+                    .get(topic, PartitionIndex(partition))
+                {
                     let notified = part.append_notify.notified();
                     if part.log_end_offset() == crabka_log::Offset(target) {
                         return;
@@ -2271,13 +2299,13 @@ impl Broker {
                 let log = crabka_log::Log::open(&dir, config.log_config.clone())?;
                 let part = spawn_partition(
                     topic.clone(),
-                    partition_id,
+                    PartitionIndex(partition_id),
                     owning_dir,
                     log,
                     log_dir_status.clone(),
                     producer_state.clone(),
                 );
-                partitions.insert(topic.clone(), partition_id, part);
+                partitions.insert(topic.clone(), PartitionIndex(partition_id), part);
             }
         }
 
@@ -2414,13 +2442,13 @@ impl Broker {
         // Hoisted out of the audit_enabled block so block 2 (BrokerStarted
         // wait) can key on the actual led partition index rather than
         // hardcoding partition 0.
-        let audit_led_partition: Option<i32> = if config.audit_enabled {
+        let audit_led_partition: Option<PartitionIndex> = if config.audit_enabled {
             let image = controller.current_image();
-            let mut led: Option<i32> = None;
+            let mut led: Option<PartitionIndex> = None;
             let mut idx = 0i32;
             while let Some(part) = image.partition(&config.audit_topic, idx) {
                 if part.leader == config.node_id {
-                    led = Some(idx);
+                    led = Some(PartitionIndex(idx));
                     break;
                 }
                 idx += 1;
@@ -3369,15 +3397,17 @@ impl Broker {
         {
             config.advertised_listener = format!("{host}:{}", listen_addr.port());
         }
-        let future_logs: Arc<DashMap<(String, i32), Arc<crate::future_log::FutureLogState>>> =
-            Arc::new(DashMap::new());
+        let future_logs: Arc<
+            DashMap<(String, PartitionIndex), Arc<crate::future_log::FutureLogState>>,
+        > = Arc::new(DashMap::new());
 
         // KIP-113: resume any interrupted intra-broker moves left on
         // disk as `<topic>-<partition>-future` dirs.
         for owning_dir in config.all_log_dirs() {
             let futures = log_dir::scan_future(&owning_dir).unwrap_or_default();
             for (topic, partition_id) in futures {
-                if !partitions.contains(&topic, partition_id) {
+                let partition_idx = PartitionIndex(partition_id);
+                if !partitions.contains(&topic, partition_idx) {
                     // Stranded future dir — partition is no longer
                     // hosted (e.g. topic deleted). Remove the leftover.
                     let stranded = log_dir::future_partition_dir(&owning_dir, &topic, partition_id);
@@ -3396,7 +3426,7 @@ impl Broker {
                     &owning_dir,
                     &config.log_config,
                     &topic,
-                    partition_id,
+                    partition_idx,
                 ) {
                     tracing::warn!(
                         topic = %topic, partition = partition_id,
@@ -3805,7 +3835,7 @@ fn spawn_rlmm_reconciler(
 /// the path is not stable across canonicalisation.
 pub(crate) fn spawn_partition(
     topic: String,
-    partition_id: i32,
+    partition_id: PartitionIndex,
     log_dir: std::path::PathBuf,
     log: crabka_log::Log,
     log_dir_status: crate::log_dir_status::LogDirRegistry,
@@ -4331,7 +4361,7 @@ mod tests {
             .expect("open partition log");
         let part = spawn_partition(
             topic.to_string(),
-            partition,
+            PartitionIndex(partition),
             log_dir.to_path_buf(),
             log,
             crate::log_dir_status::LogDirRegistry::default(),
@@ -5143,9 +5173,11 @@ mod tests {
         let local_topic = "handle-local-log-mutant-topic";
         let local_part = local_partition_with_records(dir.path(), local_topic, 0, &[b"a", b"b"]);
         assert!(!handle.partition_exists_for_test(local_topic, 0));
-        broker
-            .partitions
-            .insert(local_topic.to_string(), 0, Arc::clone(&local_part));
+        broker.partitions.insert(
+            local_topic.to_string(),
+            PartitionIndex(0),
+            Arc::clone(&local_part),
+        );
         assert!(handle.partition_exists_for_test(local_topic, 0));
         assert!(handle.local_log_end_offset(local_topic, 0).await == Some(2));
         handle.test_set_leader_epoch(local_topic, 0, 7);
@@ -5173,9 +5205,11 @@ mod tests {
             .lock()
             .expect("helper partition log lock")
             .set_config(helper_config.clone());
-        broker
-            .partitions
-            .insert(helper_topic.to_string(), 0, Arc::clone(&helper_part));
+        broker.partitions.insert(
+            helper_topic.to_string(),
+            PartitionIndex(0),
+            Arc::clone(&helper_part),
+        );
         handle
             .test_advance_log_start(helper_topic, 0, 2)
             .await
@@ -5271,7 +5305,7 @@ mod tests {
         let share_state_part = local_partition_with_records(
             dir.path(),
             crate::share_coordinator::bootstrap::TOPIC,
-            share_state_partition,
+            share_state_partition.0,
             &[],
         );
         broker.partitions.insert(

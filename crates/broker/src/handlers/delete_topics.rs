@@ -222,7 +222,11 @@ pub(crate) async fn handle(
                                 })
                             })
                             .map(|idx| {
-                                crabka_remote_storage::TopicIdPartition::new(tid, name.clone(), idx)
+                                crabka_remote_storage::TopicIdPartition::new(
+                                    tid,
+                                    name.clone(),
+                                    idx.get(),
+                                )
                             })
                             .collect()
                     })
@@ -244,7 +248,7 @@ pub(crate) async fn handle(
                     partitions.remove(&name, idx);
                     // JBOD: the partition may live in any log dir; resolve
                     // its actual location (existing-location wins).
-                    let dir = log_dir::place_partition_dir(&log_dirs, &name, idx);
+                    let dir = log_dir::place_partition_dir(&log_dirs, &name, idx.get());
                     let _ = std::fs::remove_dir_all(dir);
                 }
                 // Now that the local tear-down is done, fire off
