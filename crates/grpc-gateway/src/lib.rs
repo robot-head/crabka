@@ -29,6 +29,7 @@ pub mod error;
 pub mod forward;
 pub mod handlers;
 pub mod health;
+pub mod ids;
 pub mod metrics;
 pub mod outbound;
 pub mod outbound_config;

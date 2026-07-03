@@ -20,6 +20,7 @@ use tracing::Instrument as _;
 
 use crate::{
     error::TracesError,
+    ids::{MaxOffset, MinOffset, WindowStartNs},
     metrics::ServiceMetrics,
     span::{AttrValue, Span, batch::span_batch_with_promoted_attrs},
     wal::SpanRecord,
@@ -204,10 +205,11 @@ impl FlushAccumulator {
 pub fn object_key(
     tenant: &str,
     partition: i32,
-    min_offset: i64,
-    max_offset: i64,
-    window_start_ns: i64,
+    min_offset: MinOffset,
+    max_offset: MaxOffset,
+    window_start_ns: WindowStartNs,
 ) -> String {
+    let (min_offset, max_offset, window_start_ns) = (min_offset.0, max_offset.0, window_start_ns.0);
     format!(
         "traces/{tenant}/{partition:05}/{min_offset:020}-{max_offset:020}-{window_start_ns}.parquet"
     )
@@ -367,9 +369,9 @@ async fn build_blocks_with_options(
     let key = object_key(
         tenant,
         partition,
-        offset_range.0,
-        offset_range.1,
-        window_start_ns,
+        MinOffset(offset_range.0),
+        MaxOffset(offset_range.1),
+        WindowStartNs(window_start_ns),
     );
     let key = prefixed_object_key(options.object_key_prefix, &key);
     let meta = writer

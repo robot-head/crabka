@@ -21,6 +21,8 @@ use prometheus_client::{
 };
 use tokio::sync::Mutex;
 
+use crate::ids::{IngestBytes, IngestItems};
+
 /// Shared registry owning every metric the service emits. `Arc<Mutex<…>>`
 /// because `prometheus-client` requires `&mut Registry` to register and the
 /// `/metrics` exporter needs shared read access.
@@ -171,18 +173,18 @@ impl ServiceMetrics {
     /// This does NOT touch `wal_append_failures` — increment that separately at
     /// the actual WAL/produce error site (a 4xx client/validation error is an
     /// `ok=false` request but not a WAL failure).
-    pub fn record_ingest(&self, ok: bool, bytes: u64, items: u64, secs: f64) {
+    pub fn record_ingest(&self, ok: bool, bytes: IngestBytes, items: IngestItems, secs: f64) {
         let status = if ok { "ok" } else { "error" };
         self.ingest_requests
             .get_or_create(&StatusLabel {
                 status: status.into(),
             })
             .inc();
-        if bytes > 0 {
-            self.ingest_bytes.inc_by(bytes);
+        if bytes.0 > 0 {
+            self.ingest_bytes.inc_by(bytes.0);
         }
-        if items > 0 {
-            self.ingest_items.inc_by(items);
+        if items.0 > 0 {
+            self.ingest_items.inc_by(items.0);
         }
         self.ingest_duration.observe(secs);
     }
@@ -287,8 +289,8 @@ mod tests {
     #[tokio::test]
     async fn registry_has_profiles_prefix_and_all_metrics() {
         let m = ServiceMetrics::new();
-        m.record_ingest(true, 1024, 3, 0.012);
-        m.record_ingest(false, 0, 0, 0.001);
+        m.record_ingest(true, IngestBytes(1024), IngestItems(3), 0.012);
+        m.record_ingest(false, IngestBytes(0), IngestItems(0), 0.001);
         m.record_wal_append_failure();
         m.record_ingest_samples("tenant-a", 3);
         m.record_blocks_built(2);
@@ -324,7 +326,7 @@ mod tests {
     #[tokio::test]
     async fn metrics_route_returns_openmetrics() {
         let m = ServiceMetrics::new();
-        m.record_ingest(true, 42, 1, 0.01);
+        m.record_ingest(true, IngestBytes(42), IngestItems(1), 0.01);
         let app = metrics_router(m.registry);
         let resp = app
             .oneshot(
@@ -355,7 +357,7 @@ mod tests {
     fn wal_append_failure_is_separate_from_request_outcome() {
         let m = ServiceMetrics::new();
         // An ok=false request alone must NOT bump wal_append_failures.
-        m.record_ingest(false, 0, 0, 0.001);
+        m.record_ingest(false, IngestBytes(0), IngestItems(0), 0.001);
         assert!(m.wal_append_failures.get() == 0);
         // Only the explicit WAL-failure call does.
         m.record_wal_append_failure();

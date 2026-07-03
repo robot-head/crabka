@@ -37,6 +37,7 @@ use crate::{
     codec::{CodecError, SchemaSelector},
     error::GatewayError,
     handlers::anonymous_principal,
+    ids::{Offset, PartitionIndex},
     metrics::metrics,
     state::AppState,
     types::GatewayRecord,
@@ -50,8 +51,8 @@ use crate::{
 /// Successful produce result returned as JSON.
 #[derive(Serialize)]
 pub struct WebhookResponse {
-    pub partition: i32,
-    pub offset: i64,
+    pub partition: PartitionIndex,
+    pub offset: Offset,
     pub deduplicated: bool,
 }
 

@@ -3,6 +3,7 @@
 use clap::{Parser, Subcommand};
 
 mod format;
+mod ids;
 
 #[derive(Parser)]
 #[command(name = "crabka", version, about = "Crabka operator CLI")]

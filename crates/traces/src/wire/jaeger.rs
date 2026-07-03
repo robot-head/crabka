@@ -1,6 +1,7 @@
 //! Jaeger push-door decoding.
 
 use crate::{
+    ids::{TraceIdHigh, TraceIdLow},
     span::{AttrValue, KeyValue, LinkRecord, Span, SpanKind, StatusCode},
     wire::WireError,
 };
@@ -195,7 +196,10 @@ fn jaeger_span_to_internal(span: &JaegerSpan, process: &JaegerProcess) -> Span {
         .iter()
         .filter(|reference| reference.ref_type != 0)
         .map(|reference| LinkRecord {
-            trace_id: trace_id(reference.trace_id_high, reference.trace_id_low),
+            trace_id: trace_id(
+                TraceIdHigh(reference.trace_id_high),
+                TraceIdLow(reference.trace_id_low),
+            ),
             span_id: i64_bytes(reference.span_id),
             attrs: vec![KeyValue {
                 key: "ref.type".into(),
@@ -204,7 +208,10 @@ fn jaeger_span_to_internal(span: &JaegerSpan, process: &JaegerProcess) -> Span {
         })
         .collect();
     Span {
-        trace_id: trace_id(span.trace_id_high, span.trace_id_low),
+        trace_id: trace_id(
+            TraceIdHigh(span.trace_id_high),
+            TraceIdLow(span.trace_id_low),
+        ),
         span_id: i64_bytes(span.span_id),
         parent_span_id,
         name: span.operation_name.clone(),
@@ -255,10 +262,10 @@ fn ref_type_name(ref_type: i32) -> &'static str {
     }
 }
 
-fn trace_id(high: i64, low: i64) -> [u8; 16] {
+fn trace_id(high: TraceIdHigh, low: TraceIdLow) -> [u8; 16] {
     let mut out = [0; 16];
-    out[..8].copy_from_slice(&high.to_be_bytes());
-    out[8..].copy_from_slice(&low.to_be_bytes());
+    out[..8].copy_from_slice(&high.0.to_be_bytes());
+    out[8..].copy_from_slice(&low.0.to_be_bytes());
     out
 }
 
@@ -721,6 +728,8 @@ impl<'a> BinaryInput<'a> {
     clippy::cast_sign_loss
 )]
 pub(crate) mod test_support {
+    use crate::ids::{TraceIdHigh, TraceIdLow};
+
     pub fn encode_sample_batch() -> Vec<u8> {
         let mut out = Vec::new();
         write_process(&mut out, 1, "checkout");
@@ -750,8 +759,8 @@ pub(crate) mod test_support {
         write_string_field(out, 5, "GET /", &mut last);
         write_field_header(out, 9, 6, &mut last);
         write_list_header(out, 12, 2);
-        write_span_ref(out, 0, 2, 1, 4);
-        write_span_ref(out, 1, 5, 6, 7);
+        write_span_ref(out, 0, TraceIdLow(2), TraceIdHigh(1), 4);
+        write_span_ref(out, 1, TraceIdLow(5), TraceIdHigh(6), 7);
         write_i32_field(out, 7, 0, &mut last);
         write_i64_field(out, 8, 1_000, &mut last);
         write_i64_field(out, 9, 25, &mut last);
@@ -766,11 +775,17 @@ pub(crate) mod test_support {
         out.push(0);
     }
 
-    fn write_span_ref(out: &mut Vec<u8>, ref_type: i32, low: i64, high: i64, span_id: i64) {
+    fn write_span_ref(
+        out: &mut Vec<u8>,
+        ref_type: i32,
+        low: TraceIdLow,
+        high: TraceIdHigh,
+        span_id: i64,
+    ) {
         let mut last = 0;
         write_i32_field(out, 1, ref_type, &mut last);
-        write_i64_field(out, 2, low, &mut last);
-        write_i64_field(out, 3, high, &mut last);
+        write_i64_field(out, 2, low.0, &mut last);
+        write_i64_field(out, 3, high.0, &mut last);
         write_i64_field(out, 4, span_id, &mut last);
         out.push(0);
     }
@@ -868,7 +883,10 @@ mod tests {
     use assert2::assert;
 
     use super::*;
-    use crate::span::{AttrValue, EventRecord, SpanKind, StatusCode};
+    use crate::{
+        ids::{TraceIdHigh, TraceIdLow},
+        span::{AttrValue, EventRecord, SpanKind, StatusCode},
+    };
 
     #[test]
     fn decodes_jaeger_thrift_batch() {
@@ -1141,8 +1159,8 @@ mod tests {
         write_string_field(out, 5, "GET /", &mut last);
         write_field_header(out, 9, 6, &mut last);
         write_list_header(out, 12, 2);
-        write_span_ref(out, 0, 2, 1, 4);
-        write_span_ref(out, 1, 5, 6, 7);
+        write_span_ref(out, 0, TraceIdLow(2), TraceIdHigh(1), 4);
+        write_span_ref(out, 1, TraceIdLow(5), TraceIdHigh(6), 7);
         write_i32_field(out, 7, 0, &mut last);
         write_i64_field(out, 8, 1_000, &mut last);
         write_i64_field(out, 9, 25, &mut last);
@@ -1157,11 +1175,17 @@ mod tests {
         out.push(0);
     }
 
-    fn write_span_ref(out: &mut Vec<u8>, ref_type: i32, low: i64, high: i64, span_id: i64) {
+    fn write_span_ref(
+        out: &mut Vec<u8>,
+        ref_type: i32,
+        low: TraceIdLow,
+        high: TraceIdHigh,
+        span_id: i64,
+    ) {
         let mut last = 0;
         write_i32_field(out, 1, ref_type, &mut last);
-        write_i64_field(out, 2, low, &mut last);
-        write_i64_field(out, 3, high, &mut last);
+        write_i64_field(out, 2, low.0, &mut last);
+        write_i64_field(out, 3, high.0, &mut last);
         write_i64_field(out, 4, span_id, &mut last);
         out.push(0);
     }

@@ -138,9 +138,12 @@ async fn duplicate_idempotency_key_produces_once() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn run_ownership_rebuilds_map_and_owns_all_as_sole_member() {
-    use crabka_grpc_gateway::dedup::{
-        store::{ClaimValue, DedupStore},
-        topic::ensure_dedup_topic,
+    use crabka_grpc_gateway::{
+        dedup::{
+            store::{ClaimValue, DedupStore},
+            topic::ensure_dedup_topic,
+        },
+        ids::{Offset, PartitionIndex},
     };
     use tokio_util::sync::CancellationToken;
 
@@ -159,8 +162,8 @@ async fn run_ownership_rebuilds_map_and_owns_all_as_sole_member() {
             "key-A",
             &ClaimValue {
                 topic: "u".into(),
-                partition: 0,
-                offset: 9,
+                partition: PartitionIndex(0),
+                offset: Offset(9),
             },
             None,
         )
@@ -192,7 +195,7 @@ async fn run_ownership_rebuilds_map_and_owns_all_as_sole_member() {
         assert!(store.owns(p), "should own partition {p}");
     }
     // Map rebuilt from the topic.
-    assert_eq!(store.get("key-A").map(|c| c.offset), Some(9));
+    assert_eq!(store.get("key-A").map(|c| c.offset), Some(Offset(9)));
 
     token.cancel();
     let _ = handle.await;

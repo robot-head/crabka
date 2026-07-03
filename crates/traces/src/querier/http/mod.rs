@@ -30,6 +30,7 @@ use serde_json::{Map, Value, json};
 
 use crate::{
     error::tempo_limit_error_response,
+    ids::UnixNano,
     limits::{LimitError, Limits, OverridesProvider, QueryEnforcer},
     metrics::ServiceMetrics,
 };
@@ -677,7 +678,7 @@ where
     if let Err(err) = QueryEnforcer::check_search_duration(limits, start_ns, end_ns) {
         return limit_error_response(&err);
     }
-    let step_ns = match step_param(&uri, start_ns, end_ns) {
+    let step_ns = match step_param(&uri, UnixNano(start_ns), UnixNano(end_ns)) {
         Ok(value) => value,
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
     };
@@ -1225,7 +1226,7 @@ fn parse_step_to_ns(value: &str) -> Option<i64> {
     parse_seconds_to_ns(value).or_else(|| i64::try_from(parse_go_duration_ns(value).ok()?).ok())
 }
 
-fn step_param(uri: &Uri, start_ns: i64, end_ns: i64) -> Result<i64, &'static str> {
+fn step_param(uri: &Uri, start_ns: UnixNano, end_ns: UnixNano) -> Result<i64, &'static str> {
     let Some(step) = query_param(uri, "step") else {
         // Tempo computes a default step when the client omits it; Grafana's
         // Traces Drilldown breakdown queries send no `step`. Match that instead
@@ -1244,9 +1245,9 @@ fn step_param(uri: &Uri, start_ns: i64, end_ns: i64) -> Result<i64, &'static str
 /// Default query-range step when none is supplied: aim for ~100 buckets over the
 /// range, rounded up to a whole second, with a 1s floor (mirrors Tempo's
 /// `DefaultQueryRangeStep` closely enough for a usable series).
-fn default_query_range_step_ns(start_ns: i64, end_ns: i64) -> i64 {
+fn default_query_range_step_ns(start_ns: UnixNano, end_ns: UnixNano) -> i64 {
     const SECOND_NS: i64 = 1_000_000_000;
-    let delta = end_ns.saturating_sub(start_ns).max(0);
+    let delta = end_ns.0.saturating_sub(start_ns.0).max(0);
     let raw = delta / 100;
     let rounded = raw.saturating_add(SECOND_NS - 1) / SECOND_NS * SECOND_NS;
     rounded.max(SECOND_NS)

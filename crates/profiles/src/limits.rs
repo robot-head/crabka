@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::ids::{EndMs, StartMs};
+
 #[path = "limits/overrides.rs"]
 mod overrides;
 
@@ -72,11 +74,15 @@ impl Limits {
         }
     }
 
-    pub fn validate_query_range_ms(&self, start_ms: i64, end_ms: i64) -> Result<(), LimitError> {
-        if self.max_query_length_secs == 0 || end_ms <= start_ms {
+    pub fn validate_query_range_ms(
+        &self,
+        start_ms: StartMs,
+        end_ms: EndMs,
+    ) -> Result<(), LimitError> {
+        if self.max_query_length_secs == 0 || end_ms.0 <= start_ms.0 {
             return Ok(());
         }
-        let observed_ms = i128::from(end_ms) - i128::from(start_ms);
+        let observed_ms = i128::from(end_ms.0) - i128::from(start_ms.0);
         let observed_secs = u64::try_from((observed_ms + 999) / 1000).unwrap_or(u64::MAX);
         if observed_secs > self.max_query_length_secs {
             return Err(LimitError::QueryLengthExceeded {
@@ -229,8 +235,14 @@ mod tests {
             ..Limits::default()
         };
 
-        assert!(limits.validate_query_range_ms(0, 60_000).is_ok());
-        let err = limits.validate_query_range_ms(0, 120_000).unwrap_err();
+        assert!(
+            limits
+                .validate_query_range_ms(StartMs(0), EndMs(60_000))
+                .is_ok()
+        );
+        let err = limits
+            .validate_query_range_ms(StartMs(0), EndMs(120_000))
+            .unwrap_err();
         assert!(
             err == LimitError::QueryLengthExceeded {
                 limit_secs: 60,
@@ -246,7 +258,9 @@ mod tests {
             ..Limits::default()
         };
 
-        let err = limits.validate_query_range_ms(0, i64::MAX).unwrap_err();
+        let err = limits
+            .validate_query_range_ms(StartMs(0), EndMs(i64::MAX))
+            .unwrap_err();
 
         assert!(matches!(
             err,

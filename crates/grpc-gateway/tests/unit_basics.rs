@@ -30,11 +30,14 @@ fn partition_for_is_deterministic_and_bounded() {
 
 #[test]
 fn claim_value_round_trips() {
-    use crabka_grpc_gateway::dedup::store::ClaimValue;
+    use crabka_grpc_gateway::{
+        dedup::store::ClaimValue,
+        ids::{Offset, PartitionIndex},
+    };
     let c = ClaimValue {
         topic: "t".into(),
-        partition: 3,
-        offset: 99,
+        partition: PartitionIndex(3),
+        offset: Offset(99),
     };
     let bytes = serde_json::to_vec(&c).unwrap();
     let back: ClaimValue = serde_json::from_slice(&bytes).unwrap();

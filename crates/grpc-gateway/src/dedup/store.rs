@@ -17,14 +17,17 @@ use crabka_client_producer::{Acks, Producer, ProducerRecord};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 
-use crate::error::GatewayError;
+use crate::{
+    error::GatewayError,
+    ids::{Offset, PartitionIndex},
+};
 
 /// The value stored under each `idempotency_key` claim.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClaimValue {
     pub topic: String,
-    pub partition: i32,
-    pub offset: i64,
+    pub partition: PartitionIndex,
+    pub offset: Offset,
 }
 
 pub struct DedupStore {

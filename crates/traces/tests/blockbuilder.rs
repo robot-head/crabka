@@ -18,6 +18,7 @@ use crabka_traces::{
         build_blocks_with_prefix, build_blocks_with_promoted_attrs, decode_consumer_records,
         flush_partition_windows, group_by_trace, object_key, run,
     },
+    ids::{MaxOffset, MinOffset, WindowStartNs},
     metrics::ServiceMetrics,
 };
 use futures::stream::BoxStream;
@@ -83,9 +84,27 @@ fn consumer_record(partition: i32, offset: i64, record: &SpanRecord) -> Consumer
 
 #[test]
 fn object_key_is_deterministic_and_offset_scoped() {
-    let a = object_key("tenant-a", 3, 10, 20, 1_000);
-    let b = object_key("tenant-a", 3, 10, 20, 1_000);
-    let c = object_key("tenant-a", 3, 10, 21, 1_000);
+    let a = object_key(
+        "tenant-a",
+        3,
+        MinOffset(10),
+        MaxOffset(20),
+        WindowStartNs(1_000),
+    );
+    let b = object_key(
+        "tenant-a",
+        3,
+        MinOffset(10),
+        MaxOffset(20),
+        WindowStartNs(1_000),
+    );
+    let c = object_key(
+        "tenant-a",
+        3,
+        MinOffset(10),
+        MaxOffset(21),
+        WindowStartNs(1_000),
+    );
 
     check!(a == b);
     check!(a != c);

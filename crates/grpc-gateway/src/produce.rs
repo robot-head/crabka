@@ -13,6 +13,7 @@ use crate::{
     dedup::membership::MembershipStore,
     error::GatewayError,
     forward::Forwarder,
+    ids::{Offset, PartitionIndex},
     types::{GatewayRecord, RecordOutcome},
 };
 
@@ -171,8 +172,8 @@ impl ProduceCore {
             .map_err(|_| GatewayError::ProducerCanceled)?
             .map_err(GatewayError::Producer)?;
         Ok(RecordOutcome {
-            partition: meta.partition,
-            offset: meta.offset,
+            partition: PartitionIndex(meta.partition),
+            offset: Offset(meta.offset),
             deduplicated: false,
         })
     }

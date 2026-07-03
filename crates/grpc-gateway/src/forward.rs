@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     error::GatewayError,
+    ids::{Offset, PartitionIndex},
     metrics::metrics,
     state::AppState,
     types::{GatewayRecord, RecordOutcome},
@@ -148,8 +149,8 @@ impl ForwardRecord {
 /// Wire form of a forward result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForwardResult {
-    pub partition: i32,
-    pub offset: i64,
+    pub partition: PartitionIndex,
+    pub offset: Offset,
     pub deduplicated: bool,
     /// Present when the owner could not produce; `retriable` ⇒ the origin maps
     /// it back to `Unavailable` and retries / re-resolves.
@@ -294,8 +295,8 @@ async fn forward_handler(
         return (
             StatusCode::FORBIDDEN,
             Json(ForwardResult {
-                partition: -1,
-                offset: -1,
+                partition: PartitionIndex(-1),
+                offset: Offset(-1),
                 deduplicated: false,
                 error: Some(ForwardError {
                     message: "forward requires an authenticated mTLS peer".into(),
@@ -337,8 +338,8 @@ async fn forward_handler(
         return (
             StatusCode::FORBIDDEN,
             Json(ForwardResult {
-                partition: -1,
-                offset: -1,
+                partition: PartitionIndex(-1),
+                offset: Offset(-1),
                 deduplicated: false,
                 error: Some(ForwardError {
                     message: format!("Write Topic:{}", req.topic),
@@ -361,8 +362,8 @@ async fn forward_handler(
         Err(e) => {
             let retriable = matches!(e, GatewayError::Unavailable);
             Json(ForwardResult {
-                partition: -1,
-                offset: -1,
+                partition: PartitionIndex(-1),
+                offset: Offset(-1),
                 deduplicated: false,
                 error: Some(ForwardError {
                     message: e.to_string(),

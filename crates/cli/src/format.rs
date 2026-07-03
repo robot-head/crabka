@@ -31,6 +31,8 @@ use serde_wincode::SerdeCompat;
 use uuid::Uuid;
 use wincode::Serialize as _;
 
+use crate::ids::{ClusterId, DirectoryId};
+
 /// Exit codes:
 /// - 0: success
 /// - 2: iterations < 4096
@@ -345,7 +347,7 @@ fn parse_initial_controller(spec: &str) -> Result<Voter, String> {
 /// - `--initial-controllers`: the explicitly-listed voters.
 /// - neither: an empty set — this node is a joiner that relies on auto-join
 ///   to enter an already-bootstrapped cluster.
-fn build_initial_voters(args: &FormatArgs, directory_id: Uuid) -> Result<VoterSet, String> {
+fn build_initial_voters(args: &FormatArgs, directory_id: DirectoryId) -> Result<VoterSet, String> {
     if args.standalone {
         let id = args.node_id.ok_or("--standalone requires --node-id")?;
         let listener = args
@@ -358,7 +360,9 @@ fn build_initial_voters(args: &FormatArgs, directory_id: Uuid) -> Result<VoterSe
         let port: u16 = port.parse().map_err(|_| "bad --controller-listener port")?;
         Ok(VoterSet::from_voters([Voter {
             id,
-            directory_id,
+            // `Voter.directory_id` is a raw `Uuid` (owned by `crabka_voters`);
+            // unwrap the newtype at this crate boundary.
+            directory_id: directory_id.into(),
             endpoints: vec![VoterEndpoint {
                 name: "CONTROLLER".into(),
                 host: host.to_string(),
@@ -389,8 +393,8 @@ fn build_initial_voters(args: &FormatArgs, directory_id: Uuid) -> Result<VoterSe
 )]
 fn write_meta_properties(
     log_dir: &std::path::Path,
-    cluster_id: Uuid,
-    directory_id: Uuid,
+    cluster_id: ClusterId,
+    directory_id: DirectoryId,
 ) -> Result<(), String> {
     let meta = serde_json::json!({
         "cluster_id": cluster_id.to_string(),
@@ -409,7 +413,9 @@ struct BootstrapManifest {
     /// Schema version of this bootstrap manifest. Bumped if the layout
     /// changes; the broker's future consumer will reject unknown values.
     schema: u32,
-    cluster_id: Uuid,
+    // `ClusterId` is `#[serde(transparent)]`, so this serializes as the bare
+    // UUID string exactly as the previous `Uuid` field did.
+    cluster_id: ClusterId,
     record_count: usize,
     /// Base64-encoded `SerdeCompat<MetadataRecord>` payloads, one per
     /// seed record. Mirrors the contents of `bootstrap.records.bin` so
@@ -460,12 +466,12 @@ pub async fn run(args: FormatArgs) -> i32 {
         return EXIT_BOOTSTRAP_FAIL;
     }
 
-    let cluster_id = args.cluster_id.unwrap_or_else(Uuid::new_v4);
+    let cluster_id = ClusterId(args.cluster_id.unwrap_or_else(Uuid::new_v4));
 
     // KIP-853: generate + persist this replica's stable directory id. The
     // broker reads it back from `meta.properties.json` on every boot; it is
     // the identity component of every `Voter` this node ever appears as.
-    let directory_id = Uuid::new_v4();
+    let directory_id = DirectoryId(Uuid::new_v4());
     if let Err(e) = write_meta_properties(&args.log_dir, cluster_id, directory_id) {
         eprintln!("crabka format: {e}");
         return EXIT_BOOTSTRAP_FAIL;
@@ -573,7 +579,7 @@ pub async fn run(args: FormatArgs) -> i32 {
 )]
 fn write_bootstrap_files(
     log_dir: &std::path::Path,
-    cluster_id: Uuid,
+    cluster_id: ClusterId,
     records: &[MetadataRecord],
 ) -> Result<(), String> {
     // 1. Per-record `SerdeCompat<MetadataRecord>` payloads.

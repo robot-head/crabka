@@ -13,6 +13,8 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+mod ids;
+
 use axum::Router;
 use bytes::Bytes;
 use crabka_blockstore::{BlockStore, LabelMatcher, Labels};
@@ -28,6 +30,7 @@ use crabka_promql::{
     evaluate_and_persist_ruler_rule_set_for_shard_due_for_eval, prometheus_router,
 };
 use futures::TryStreamExt;
+pub use ids::{Offset, PartitionIndex};
 use object_store::{ObjectStore, ObjectStoreExt, path::Path};
 use tokio::{net::TcpListener, task::JoinHandle};
 use url::Url;
@@ -46,7 +49,10 @@ pub enum MetricsServiceError {
 #[derive(Debug, thiserror::Error)]
 pub enum WalHeadReplayError {
     #[error("metrics WAL record at partition {partition} offset {offset} has no value")]
-    MissingValue { partition: i32, offset: i64 },
+    MissingValue {
+        partition: PartitionIndex,
+        offset: Offset,
+    },
 
     #[error("metrics WAL record decode failed: {0}")]
     Decode(String),
@@ -76,7 +82,10 @@ pub enum RulerStateWalRecordError {
 #[derive(Debug, thiserror::Error)]
 pub enum RulerStateReplayError {
     #[error("ruler state record at partition {partition} offset {offset} has no value")]
-    MissingValue { partition: i32, offset: i64 },
+    MissingValue {
+        partition: PartitionIndex,
+        offset: Offset,
+    },
 
     #[error("ruler state record decode failed: {0}")]
     Decode(String),
@@ -154,7 +163,7 @@ pub fn replay_ruler_state_records<S: MetricStore>(
     state_topic: &str,
     records: &[WalHeadConsumerRecord],
 ) -> Result<WalHeadReplayResult, RulerStateReplayError> {
-    let mut committed_offsets = BTreeMap::<i32, i64>::new();
+    let mut committed_offsets = BTreeMap::<PartitionIndex, Offset>::new();
     let mut replayed_records = 0;
     for record in records {
         if record.topic != state_topic {
@@ -173,8 +182,8 @@ pub fn replay_ruler_state_records<S: MetricStore>(
         replayed_records += 1;
         committed_offsets
             .entry(record.partition)
-            .and_modify(|offset| *offset = (*offset).max(record.offset + 1))
-            .or_insert(record.offset + 1);
+            .and_modify(|offset| *offset = (*offset).max(record.offset.next()))
+            .or_insert(record.offset.next());
     }
 
     Ok(WalHeadReplayResult {
@@ -190,16 +199,16 @@ pub fn replay_ruler_state_records<S: MetricStore>(
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WalHeadConsumerRecord {
     pub topic: String,
-    pub partition: i32,
-    pub offset: i64,
+    pub partition: PartitionIndex,
+    pub offset: Offset,
     pub value: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WalHeadPartitionOffset {
-    pub partition: i32,
+    pub partition: PartitionIndex,
     /// Kafka commit offset: the next offset after the last replayed record.
-    pub offset: i64,
+    pub offset: Offset,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -229,7 +238,7 @@ pub fn replay_wal_head_records(
     wal_topic: &str,
     records: &[WalHeadConsumerRecord],
 ) -> Result<WalHeadReplayResult, WalHeadReplayError> {
-    let mut committed_offsets = BTreeMap::<i32, i64>::new();
+    let mut committed_offsets = BTreeMap::<PartitionIndex, Offset>::new();
     let mut newest_timestamp_ms: Option<i64> = None;
     let mut replayed_records = 0;
     for record in records {
@@ -249,12 +258,12 @@ pub fn replay_wal_head_records(
             newest_timestamp_ms =
                 Some(newest_timestamp_ms.map_or(timestamp_ms, |current| current.max(timestamp_ms)));
         }
-        head.apply_wal_record_at(&wal_record, record.partition, record.offset);
+        head.apply_wal_record_at(&wal_record, record.partition.into(), record.offset.into());
         replayed_records += 1;
         committed_offsets
             .entry(record.partition)
-            .and_modify(|offset| *offset = (*offset).max(record.offset + 1))
-            .or_insert(record.offset + 1);
+            .and_modify(|offset| *offset = (*offset).max(record.offset.next()))
+            .or_insert(record.offset.next());
     }
     if let Some(timestamp_ms) = newest_timestamp_ms {
         head.prune(timestamp_ms);
@@ -339,8 +348,8 @@ where
         .into_iter()
         .map(|record| WalHeadConsumerRecord {
             topic: record.topic,
-            partition: record.partition,
-            offset: record.offset,
+            partition: record.partition.into(),
+            offset: record.offset.into(),
             value: record.value.map(|value| value.to_vec()),
         })
         .collect::<Vec<_>>();
@@ -379,8 +388,8 @@ where
         .into_iter()
         .map(|record| WalHeadConsumerRecord {
             topic: record.topic,
-            partition: record.partition,
-            offset: record.offset,
+            partition: record.partition.into(),
+            offset: record.offset.into(),
             value: record.value.map(|value| value.to_vec()),
         })
         .collect::<Vec<_>>();
@@ -1998,20 +2007,20 @@ rules:
         let records = vec![
             super::WalHeadConsumerRecord {
                 topic: "ignored".to_string(),
-                partition: 0,
-                offset: 10,
+                partition: super::PartitionIndex(0),
+                offset: super::Offset(10),
                 value: Some(group_record.encode().unwrap()),
             },
             super::WalHeadConsumerRecord {
                 topic: super::RULER_STATE_TOPIC.to_string(),
-                partition: 2,
-                offset: 20,
+                partition: super::PartitionIndex(2),
+                offset: super::Offset(20),
                 value: Some(group_record.encode().unwrap()),
             },
             super::WalHeadConsumerRecord {
                 topic: super::RULER_STATE_TOPIC.to_string(),
-                partition: 2,
-                offset: 21,
+                partition: super::PartitionIndex(2),
+                offset: super::Offset(21),
                 value: Some(alert_record.encode().unwrap()),
             },
         ];
@@ -2023,8 +2032,8 @@ rules:
             polled_records: 3,
             replayed_records: 2,
             committed_offsets: vec![super::WalHeadPartitionOffset {
-                partition: 2,
-                offset: 22,
+                partition: super::PartitionIndex(2),
+                offset: super::Offset(22),
             }],
         };
         assert!(result == expected);
@@ -2078,8 +2087,8 @@ rules:
             polled_records: 1,
             replayed_records: 1,
             committed_offsets: vec![super::WalHeadPartitionOffset {
-                partition: 1,
-                offset: 8,
+                partition: super::PartitionIndex(1),
+                offset: super::Offset(8),
             }],
         };
         assert!(result == expected);
@@ -2662,14 +2671,14 @@ rules:
             &[
                 super::WalHeadConsumerRecord {
                     topic: "other".to_string(),
-                    partition: 0,
-                    offset: 3,
+                    partition: super::PartitionIndex(0),
+                    offset: super::Offset(3),
                     value: Some(encoded.clone()),
                 },
                 super::WalHeadConsumerRecord {
                     topic: crabka_metrics::WAL_TOPIC.to_string(),
-                    partition: 2,
-                    offset: 41,
+                    partition: super::PartitionIndex(2),
+                    offset: super::Offset(41),
                     value: Some(encoded),
                 },
             ],
@@ -2680,8 +2689,8 @@ rules:
             polled_records: 2,
             replayed_records: 1,
             committed_offsets: vec![super::WalHeadPartitionOffset {
-                partition: 2,
-                offset: 42,
+                partition: super::PartitionIndex(2),
+                offset: super::Offset(42),
             }],
         };
         assert!(result == expected);
@@ -2715,14 +2724,14 @@ rules:
             &[
                 super::WalHeadConsumerRecord {
                     topic: crabka_metrics::WAL_TOPIC.to_string(),
-                    partition: 0,
-                    offset: 1,
+                    partition: super::PartitionIndex(0),
+                    offset: super::Offset(1),
                     value: Some(record("old", 1_000).encode().unwrap()),
                 },
                 super::WalHeadConsumerRecord {
                     topic: crabka_metrics::WAL_TOPIC.to_string(),
-                    partition: 0,
-                    offset: 2,
+                    partition: super::PartitionIndex(0),
+                    offset: super::Offset(2),
                     value: Some(record("new", 10_000).encode().unwrap()),
                 },
             ],
@@ -2750,8 +2759,8 @@ rules:
             crabka_metrics::WAL_TOPIC,
             &[super::WalHeadConsumerRecord {
                 topic: crabka_metrics::WAL_TOPIC.to_string(),
-                partition: 1,
-                offset: 9,
+                partition: super::PartitionIndex(1),
+                offset: super::Offset(9),
                 value: None,
             }],
         )
@@ -2760,8 +2769,8 @@ rules:
         assert!(matches!(
             error,
             super::WalHeadReplayError::MissingValue {
-                partition: 1,
-                offset: 9
+                partition: super::PartitionIndex(1),
+                offset: super::Offset(9)
             }
         ));
     }
@@ -2802,8 +2811,8 @@ rules:
             polled_records: 1,
             replayed_records: 1,
             committed_offsets: vec![super::WalHeadPartitionOffset {
-                partition: 0,
-                offset: 5,
+                partition: super::PartitionIndex(0),
+                offset: super::Offset(5),
             }],
         };
         assert!(result == expected);
@@ -2879,12 +2888,12 @@ rules:
             replayed_records: 2,
             committed_offsets: vec![
                 super::WalHeadPartitionOffset {
-                    partition: 0,
-                    offset: 5,
+                    partition: super::PartitionIndex(0),
+                    offset: super::Offset(5),
                 },
                 super::WalHeadPartitionOffset {
-                    partition: 0,
-                    offset: 6,
+                    partition: super::PartitionIndex(0),
+                    offset: super::Offset(6),
                 },
             ],
         };

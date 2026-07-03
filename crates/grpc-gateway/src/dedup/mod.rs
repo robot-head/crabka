@@ -28,6 +28,7 @@ use tokio::sync::Mutex;
 use self::store::{ClaimValue, DedupStore};
 use crate::{
     error::GatewayError,
+    ids::{Offset, PartitionIndex},
     produce::to_producer_record,
     types::{GatewayRecord, RecordOutcome},
 };
@@ -188,8 +189,8 @@ impl DedupEngine {
             // 2. claim → dedup topic (partition p), key = idempotency key
             let claim = ClaimValue {
                 topic: rec.topic.clone(),
-                partition: meta.partition,
-                offset: meta.offset,
+                partition: PartitionIndex(meta.partition),
+                offset: Offset(meta.offset),
             };
             let claim_rec = ProducerRecord {
                 topic: self.dedup_topic.clone(),
@@ -227,8 +228,8 @@ impl DedupEngine {
         // Single-owner: update the local map directly.
         self.store.apply(key.to_string(), claim);
         Ok(RecordOutcome {
-            partition: meta.partition,
-            offset: meta.offset,
+            partition: PartitionIndex(meta.partition),
+            offset: Offset(meta.offset),
             deduplicated: false,
         })
     }

@@ -214,8 +214,8 @@ pub async fn send(
             Ok(ref o) if o.deduplicated => {
                 metrics().record_send("deduplicated");
                 pb::RecordResult {
-                    partition: o.partition,
-                    offset: o.offset,
+                    partition: o.partition.into(),
+                    offset: o.offset.into(),
                     deduplicated: o.deduplicated,
                     error: None,
                 }
@@ -223,8 +223,8 @@ pub async fn send(
             Ok(o) => {
                 metrics().record_send("ok");
                 pb::RecordResult {
-                    partition: o.partition,
-                    offset: o.offset,
+                    partition: o.partition.into(),
+                    offset: o.offset.into(),
                     deduplicated: o.deduplicated,
                     error: None,
                 }

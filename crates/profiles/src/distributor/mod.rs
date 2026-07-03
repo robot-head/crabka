@@ -28,6 +28,7 @@ use tracing::Instrument as _;
 
 use crate::{
     error::ProfilesError,
+    ids::{IngestBytes, IngestItems},
     ingest::{
         RelabelConfig, TenantLimitConfig, apply_relabel, cap_session_id, decode_ingest_body,
         decode_otlp, decode_push, enforce_limits, parse_ingest_query, require_service_name,
@@ -481,9 +482,12 @@ async fn push_handler(
     if let Ok(tenant) = tenant_from_headers(&headers) {
         state.metrics.record_ingest_samples(&tenant, items);
     }
-    state
-        .metrics
-        .record_ingest(result.is_ok(), bytes, items, start.elapsed().as_secs_f64());
+    state.metrics.record_ingest(
+        result.is_ok(),
+        IngestBytes(bytes),
+        IngestItems(items),
+        start.elapsed().as_secs_f64(),
+    );
     result.map_err(connect_error)?;
     Ok(ConnectResponse::new(pb::push::v1::PushResponse {}))
 }
@@ -522,9 +526,12 @@ async fn export_handler(
     if let Ok(tenant) = tenant_from_headers(&headers) {
         state.metrics.record_ingest_samples(&tenant, items);
     }
-    state
-        .metrics
-        .record_ingest(result.is_ok(), bytes, items, start.elapsed().as_secs_f64());
+    state.metrics.record_ingest(
+        result.is_ok(),
+        IngestBytes(bytes),
+        IngestItems(items),
+        start.elapsed().as_secs_f64(),
+    );
     result.map_err(connect_error)?;
     Ok(ConnectResponse::new(
         pb::otlp_profiles::ExportProfilesServiceResponse {
@@ -573,9 +580,12 @@ async fn otlp_http_handler(
     if let Ok(tenant) = tenant_from_headers(&headers) {
         state.metrics.record_ingest_samples(&tenant, items);
     }
-    state
-        .metrics
-        .record_ingest(result.is_ok(), bytes, items, start.elapsed().as_secs_f64());
+    state.metrics.record_ingest(
+        result.is_ok(),
+        IngestBytes(bytes),
+        IngestItems(items),
+        start.elapsed().as_secs_f64(),
+    );
     match result {
         Ok(body) => (
             StatusCode::OK,
@@ -622,9 +632,12 @@ async fn ingest_handler(
         state.metrics.record_ingest_samples(&tenant, 1);
     }
     // The `/ingest` door carries exactly one profile per request.
-    state
-        .metrics
-        .record_ingest(result.is_ok(), bytes, 1, start.elapsed().as_secs_f64());
+    state.metrics.record_ingest(
+        result.is_ok(),
+        IngestBytes(bytes),
+        IngestItems(1),
+        start.elapsed().as_secs_f64(),
+    );
     match result {
         Ok(()) => StatusCode::OK.into_response(),
         Err(err) => profiles_error_response(err),

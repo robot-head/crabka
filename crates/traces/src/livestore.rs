@@ -14,6 +14,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     error::TracesError,
+    ids::UnixNano,
     querier::live::{LiveSource, Result as LiveResult},
     span::{
         AttrValue, EventRecord, KeyValue, LinkRecord, Span,
@@ -175,7 +176,7 @@ impl LiveSource for LiveStore {
             for spans in traces.values() {
                 let mut in_range = spans
                     .iter()
-                    .filter(|span| in_time_range(span, start_ns, end_ns))
+                    .filter(|span| in_time_range(span, UnixNano(start_ns), UnixNano(end_ns)))
                     .cloned()
                     .collect::<Vec<_>>();
                 if !in_range.is_empty() {
@@ -220,7 +221,7 @@ impl LiveSource for LiveStore {
             for item in traces
                 .values()
                 .flatten()
-                .filter(|item| in_time_range(item, start_ns, end_ns))
+                .filter(|item| in_time_range(item, UnixNano(start_ns), UnixNano(end_ns)))
             {
                 has_spans = true;
                 resource.extend(item.resource_attrs.iter().map(|attr| attr.key.clone()));
@@ -304,14 +305,14 @@ impl LiveSource for LiveStore {
             for spans in traces.values() {
                 let in_range = spans
                     .iter()
-                    .filter(|span| in_time_range(span, start_ns, end_ns))
+                    .filter(|span| in_time_range(span, UnixNano(start_ns), UnixNano(end_ns)))
                     .collect::<Vec<_>>();
                 collect_trace_intrinsic_values(&in_range, tag, &mut values);
             }
             for span in traces
                 .values()
                 .flatten()
-                .filter(|item| in_time_range(item, start_ns, end_ns))
+                .filter(|item| in_time_range(item, UnixNano(start_ns), UnixNano(end_ns)))
             {
                 if matches!(attr_scope, None | Some(crabka_traceql::TagScope::Resource)) {
                     values.extend(
@@ -369,8 +370,8 @@ fn order_spans(spans: &mut [Span]) {
     spans.sort_by_key(|span| (span.start_ns, span.span_id));
 }
 
-fn in_time_range(span: &Span, start_ns: i64, end_ns: i64) -> bool {
-    start_ns <= span.start_ns && span.start_ns <= end_ns
+fn in_time_range(span: &Span, start_ns: UnixNano, end_ns: UnixNano) -> bool {
+    start_ns.0 <= span.start_ns && span.start_ns <= end_ns.0
 }
 
 fn trace_spans(trace_id: &[u8; 16], spans: &[Span]) -> crabka_traceql::TraceSpans {

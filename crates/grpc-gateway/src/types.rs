@@ -4,7 +4,10 @@
 
 use bytes::Bytes;
 
-use crate::codec::{EncodeBody, SchemaSelector};
+use crate::{
+    codec::{EncodeBody, SchemaSelector},
+    ids::{Offset, PartitionIndex},
+};
 
 /// One record to produce, independent of transport.
 #[derive(Debug, Clone)]
@@ -43,8 +46,8 @@ impl GatewayRecord {
 /// Result of producing one record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RecordOutcome {
-    pub partition: i32,
-    pub offset: i64,
+    pub partition: PartitionIndex,
+    pub offset: Offset,
     /// True ⇒ a prior record with the same `idempotency_key` already
     /// existed; this call did not produce anything new.
     pub deduplicated: bool,

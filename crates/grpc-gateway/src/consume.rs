@@ -9,14 +9,15 @@ use crabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
 use crate::{
     codec::{RecordCodec, SchemaMeta},
     error::GatewayError,
+    ids::{Offset, PartitionIndex, Timestamp},
 };
 
 #[derive(Debug, Clone)]
 pub struct DecodedConsumerRecord {
     pub topic: String,
-    pub partition: i32,
-    pub offset: i64,
-    pub timestamp: i64,
+    pub partition: PartitionIndex,
+    pub offset: Offset,
+    pub timestamp: Timestamp,
     pub key: Option<bytes::Bytes>,
     pub value: bytes::Bytes,
     pub schema: Option<SchemaMeta>,
@@ -78,9 +79,9 @@ impl ConsumeSession {
             };
             decoded_batch.push(DecodedConsumerRecord {
                 topic: r.topic,
-                partition: r.partition,
-                offset: r.offset,
-                timestamp: r.timestamp,
+                partition: PartitionIndex(r.partition),
+                offset: Offset(r.offset),
+                timestamp: Timestamp(r.timestamp),
                 key: r.key,
                 value,
                 schema,

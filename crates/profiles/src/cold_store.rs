@@ -20,7 +20,11 @@ use datafusion::{catalog::MemTable, prelude::SessionContext};
 use object_store::{ObjectStore, ObjectStoreExt, path::Path};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
-use crate::{blockbuilder::STACKTRACE_PARTITION, symbolizer::AddressFallbackResolver};
+use crate::{
+    blockbuilder::STACKTRACE_PARTITION,
+    ids::{ExternalPartition, LocalPartition},
+    symbolizer::AddressFallbackResolver,
+};
 
 #[derive(Clone)]
 pub struct ColdProfileStore {
@@ -134,7 +138,11 @@ impl ProfileStore for ColdProfileStore {
             for (source_partition, external) in &partition_map {
                 // `source_partition` is the partition key within this block's own
                 // symbol DB, so resolution stays scoped to the correct block.
-                symbols.insert(*external, source.clone(), *source_partition);
+                symbols.insert(
+                    ExternalPartition(*external),
+                    source.clone(),
+                    LocalPartition(*source_partition),
+                );
             }
             batches.extend(
                 self.load_block_batches(
@@ -433,15 +441,15 @@ fn batch_fingerprints_overlap(batch: &RecordBatch, fps: &BTreeSet<SeriesFingerpr
 
 #[derive(Default)]
 struct CompositeSymbols {
-    by_partition: HashMap<u64, (Arc<dyn SymbolSource>, u64)>,
+    by_partition: HashMap<ExternalPartition, (Arc<dyn SymbolSource>, LocalPartition)>,
 }
 
 impl CompositeSymbols {
     fn insert(
         &mut self,
-        external_partition: u64,
+        external_partition: ExternalPartition,
         symbols: Arc<dyn SymbolSource>,
-        local_partition: u64,
+        local_partition: LocalPartition,
     ) {
         self.by_partition
             .insert(external_partition, (symbols, local_partition));
@@ -451,9 +459,9 @@ impl CompositeSymbols {
 impl SymbolSource for CompositeSymbols {
     fn resolve(&self, partition: u64, id: u32) -> Vec<Frame> {
         self.by_partition
-            .get(&partition)
+            .get(&ExternalPartition(partition))
             .map_or_else(Vec::new, |(symbols, local_partition)| {
-                symbols.resolve(*local_partition, id)
+                symbols.resolve(local_partition.0, id)
             })
     }
 }

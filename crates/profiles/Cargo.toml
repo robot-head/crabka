@@ -31,6 +31,7 @@ prometheus-client = { workspace = true }
 connectrpc-axum = { workspace = true }
 axum = { workspace = true }
 async-trait = { workspace = true }
+derive_more = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "time", "signal"] }
 tower = { workspace = true }
 futures = { workspace = true }

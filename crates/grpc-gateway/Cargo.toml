@@ -35,6 +35,9 @@ pbjson.workspace = true
 axum.workspace = true
 bytes.workspace = true
 dashmap.workspace = true
+# `Display`/`From`/`Into` derives for the crate's record-coordinate newtypes
+# (see `src/ids.rs`).
+derive_more = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "macros", "signal", "time", "sync"] }

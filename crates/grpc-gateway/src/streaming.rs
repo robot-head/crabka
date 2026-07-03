@@ -146,12 +146,12 @@ fn schema_meta_to_pb(meta: SchemaMeta) -> pb::SchemaSelector {
 fn inbound_from_decoded_record(record: crate::consume::DecodedConsumerRecord) -> pb::Inbound {
     pb::Inbound {
         topic: record.topic,
-        partition: record.partition,
-        offset: record.offset,
+        partition: record.partition.into(),
+        offset: record.offset.into(),
         key: record.key.map(|b| b.to_vec()),
         value: record.value.to_vec(),
         headers: std::collections::HashMap::new(),
-        timestamp_ms: record.timestamp,
+        timestamp_ms: record.timestamp.into(),
         structured: record.json.map(|json| pb::StructuredValue {
             json: json.to_vec(),
         }),
@@ -197,8 +197,8 @@ pub fn send_stream_inner(
                 }
                 let result = match state.produce.produce(rec, &principal).await {
                     Ok(o) => pb::RecordResult {
-                        partition: o.partition,
-                        offset: o.offset,
+                        partition: o.partition.into(),
+                        offset: o.offset.into(),
                         deduplicated: o.deduplicated,
                         error: None,
                     },
@@ -486,9 +486,9 @@ mod tests {
     fn inbound_carries_structured_json_and_schema_metadata() {
         let record = crate::consume::DecodedConsumerRecord {
             topic: "metadata".to_string(),
-            partition: 2,
-            offset: 9,
-            timestamp: 1234,
+            partition: crate::ids::PartitionIndex(2),
+            offset: crate::ids::Offset(9),
+            timestamp: crate::ids::Timestamp(1234),
             key: Some(Bytes::from_static(b"k")),
             value: Bytes::from_static(b"\x08\x07"),
             schema: Some(SchemaMeta {
