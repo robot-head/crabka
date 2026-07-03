@@ -167,7 +167,6 @@ mod tests {
     use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
 
     use crate::broker::Broker;
-    use crate::config::BrokerConfig;
 
     const API_VERSIONS_V3: i16 = 3;
 
@@ -184,18 +183,11 @@ mod tests {
     }
 
     fn decode_response(version: i16, bytes: &Bytes) -> ApiVersionsResponse {
-        let mut cur: &[u8] = bytes.as_ref();
-        let resp =
-            ApiVersionsResponse::decode(&mut cur, version).expect("decode ApiVersionsResponse");
-        assert!(cur.is_empty(), "response decoder consumed all bytes");
-        resp
+        crate::test_support::decode_response(bytes, version)
     }
 
     async fn start_broker() -> (crate::broker::BrokerHandle, tempfile::TempDir) {
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
-        let handle = Broker::start(cfg).await.expect("start broker");
-        (handle, dir)
+        crate::test_support::start_broker_with(|_cfg| {}).await
     }
 
     async fn wait_for_leader(broker: &Broker) {

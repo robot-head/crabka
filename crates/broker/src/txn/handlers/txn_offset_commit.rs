@@ -393,10 +393,7 @@ mod tests {
     }
 
     fn decode_response(bytes: &Bytes, version: i16) -> TxnOffsetCommitResponse {
-        let mut cur: &[u8] = bytes.as_ref();
-        let resp = TxnOffsetCommitResponse::decode(&mut cur, version).expect("decode response");
-        assert!(cur.is_empty(), "response decoder consumed all bytes");
-        resp
+        crate::test_support::decode_response(bytes, version)
     }
 
     fn assert_response_rows(resp: &TxnOffsetCommitResponse, code: i16) {

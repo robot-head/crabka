@@ -149,81 +149,43 @@ mod tests {
         SyncGroupRequest, SyncGroupRequestAssignment,
     };
     use crabka_protocol::owned::sync_group_response::{self, SyncGroupResponse};
-    use crabka_security::{AuthMethod, Principal};
+    use crabka_security::Principal;
     use std::net::SocketAddr;
     use std::sync::Arc;
 
-    use crate::authorizer::{AuthorizationRequest, Authorizer};
+    use crate::authorizer::Authorizer;
     use crate::broker::{Broker, BrokerHandle};
-    use crate::config::BrokerConfig;
+    use crate::test_support::{DenyAll, encode_request};
 
     const GROUP: &str = "sync-group-unit";
     const PROTOCOL_TYPE: &str = "consumer";
     const PROTOCOL_NAME: &str = "range";
 
-    #[derive(Debug)]
-    struct DenyAll;
-
-    impl Authorizer for DenyAll {
-        fn authorize(
-            &self,
-            _source: &dyn crabka_authz::AclSource,
-            _req: &AuthorizationRequest<'_>,
-        ) -> AuthorizationResult {
-            AuthorizationResult::Deny
-        }
-    }
-
-    fn encode_request<R: Encode>(req: &R, version: i16) -> Bytes {
-        let mut buf = BytesMut::with_capacity(req.encoded_len(version));
-        req.encode(&mut buf, version).expect("encode request");
-        buf.freeze()
-    }
-
     fn decode_join(bytes: &Bytes) -> JoinGroupResponse {
-        let version = join_group_response::MAX_VERSION;
-        let mut cur: &[u8] = bytes.as_ref();
-        let resp = JoinGroupResponse::decode(&mut cur, version).expect("decode JoinGroupResponse");
-        assert!(cur.is_empty(), "JoinGroup decoder consumed all bytes");
-        resp
+        crate::test_support::decode_response(bytes, join_group_response::MAX_VERSION)
     }
 
     fn decode_sync(bytes: &Bytes) -> SyncGroupResponse {
-        let version = sync_group_response::MAX_VERSION;
-        let mut cur: &[u8] = bytes.as_ref();
-        let resp = SyncGroupResponse::decode(&mut cur, version).expect("decode SyncGroupResponse");
-        assert!(cur.is_empty(), "SyncGroup decoder consumed all bytes");
-        resp
+        crate::test_support::decode_response(bytes, sync_group_response::MAX_VERSION)
     }
 
     fn principal() -> Principal {
-        Principal {
-            name: "alice".into(),
-            auth_method: AuthMethod::Anonymous,
-            groups: Vec::new(),
-        }
+        crate::test_support::principal("alice")
     }
 
     fn context<'a>(
         principal: &'a Principal,
         peer: &'a SocketAddr,
     ) -> crate::handlers::RequestContext<'a> {
-        crate::handlers::RequestContext {
-            principal,
-            peer,
-            client_id: "sync-group-client",
-            sendfile_capable: false,
-            connection_listener_name: "PLAINTEXT",
-        }
+        crate::test_support::request_context(principal, peer, "sync-group-client")
     }
 
     async fn start_broker(authorizer: Arc<dyn Authorizer>) -> (BrokerHandle, tempfile::TempDir) {
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
-        cfg.audit_enabled = false;
-        cfg.authorizer = authorizer;
-        let handle = Broker::start(cfg).await.expect("start broker");
-        (handle, dir)
+        crate::test_support::start_broker_with(|cfg| {
+            cfg.audit_enabled = false;
+            cfg.authorizer = authorizer;
+        })
+        .await
     }
 
     async fn bootstrap_member(

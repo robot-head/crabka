@@ -226,7 +226,6 @@ mod tests {
     use crabka_protocol::owned::streams_group_describe_response as response_mod;
     use std::time::Duration;
 
-    use crate::config::BrokerConfig;
     use crate::coordinator::unified::streams::actor::{
         StreamsDescribeMember, StreamsDescribeView, StreamsGroupActorMessage,
     };
@@ -242,29 +241,20 @@ mod tests {
     }
 
     fn encode_request(req: &StreamsGroupDescribeRequest) -> Bytes {
-        let version = response_mod::MAX_VERSION;
-        let mut buf = BytesMut::with_capacity(req.encoded_len(version));
-        req.encode(&mut buf, version).expect("encode request");
-        buf.freeze()
+        crate::test_support::encode_request(req, response_mod::MAX_VERSION)
     }
 
     fn decode_response(bytes: &Bytes) -> StreamsGroupDescribeResponse {
-        let version = response_mod::MAX_VERSION;
-        let mut cur: &[u8] = bytes.as_ref();
-        let resp =
-            StreamsGroupDescribeResponse::decode(&mut cur, version).expect("decode response");
-        assert!(cur.is_empty(), "response decoder consumed all bytes");
-        resp
+        crate::test_support::decode_response(bytes, response_mod::MAX_VERSION)
     }
 
     async fn start_broker(
         streams_enabled: bool,
     ) -> (crate::broker::BrokerHandle, tempfile::TempDir) {
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
-        cfg.streams_group.enable = streams_enabled;
-        let handle = Broker::start(cfg).await.expect("start broker");
-        (handle, dir)
+        crate::test_support::start_broker_with(|cfg| {
+            cfg.streams_group.enable = streams_enabled;
+        })
+        .await
     }
 
     async fn finalize_streams_version(broker: &Broker) {

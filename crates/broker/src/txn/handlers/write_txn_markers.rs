@@ -133,7 +133,6 @@ mod tests {
 
     use super::*;
     use crate::broker::{Broker, BrokerHandle};
-    use crate::config::BrokerConfig;
 
     const VERSION: i16 = 2;
 
@@ -153,24 +152,18 @@ mod tests {
     }
 
     async fn start_broker() -> (BrokerHandle, tempfile::TempDir) {
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
-        cfg.audit_enabled = false;
-        let handle = Broker::start(cfg).await.expect("start broker");
-        (handle, dir)
+        crate::test_support::start_broker_with(|cfg| {
+            cfg.audit_enabled = false;
+        })
+        .await
     }
 
     fn encode_request(req: &WriteTxnMarkersRequest) -> Bytes {
-        let mut buf = BytesMut::with_capacity(req.encoded_len(VERSION));
-        req.encode(&mut buf, VERSION).expect("encode request");
-        buf.freeze()
+        crate::test_support::encode_request(req, VERSION)
     }
 
     fn decode_response(bytes: &Bytes) -> WriteTxnMarkersResponse {
-        let mut cur: &[u8] = bytes.as_ref();
-        let resp = WriteTxnMarkersResponse::decode(&mut cur, VERSION).expect("decode response");
-        assert!(cur.is_empty(), "response decoder consumed all bytes");
-        resp
+        crate::test_support::decode_response(bytes, VERSION)
     }
 
     #[tokio::test]

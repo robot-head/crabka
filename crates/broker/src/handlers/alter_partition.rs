@@ -329,23 +329,10 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use crate::authorizer::{AuthorizationRequest, AuthorizationResult, Authorizer};
-    use crate::config::BrokerConfig;
+    use crate::authorizer::Authorizer;
+    use crate::test_support::DenyAll;
 
     const TOPIC_ID_BYTES: [u8; 16] = [7; 16];
-
-    #[derive(Debug)]
-    struct DenyAll;
-
-    impl Authorizer for DenyAll {
-        fn authorize(
-            &self,
-            _source: &dyn crabka_authz::AclSource,
-            _req: &AuthorizationRequest<'_>,
-        ) -> AuthorizationResult {
-            AuthorizationResult::Deny
-        }
-    }
 
     fn reg(node_id: u64, epoch: i64) -> MetadataRecord {
         MetadataRecord::V1BrokerRegistration(BrokerRegistrationRecord {
@@ -431,39 +418,27 @@ mod tests {
     }
 
     fn encode_request(version: i16, req: &AlterPartitionRequest) -> Bytes {
-        let mut buf = BytesMut::with_capacity(req.encoded_len(version));
-        req.encode(&mut buf, version).expect("encode request");
-        buf.freeze()
+        crate::test_support::encode_request(req, version)
     }
 
     fn decode_response(version: i16, bytes: &Bytes) -> AlterPartitionResponse {
-        let mut cur: &[u8] = bytes.as_ref();
-        let resp = AlterPartitionResponse::decode(&mut cur, version).expect("decode response");
-        assert!(cur.is_empty(), "response decoder consumed all bytes");
-        resp
+        crate::test_support::decode_response(bytes, version)
     }
 
     fn test_context<'a>(
         principal: &'a Principal,
         peer: &'a SocketAddr,
     ) -> crate::handlers::RequestContext<'a> {
-        crate::handlers::RequestContext {
-            principal,
-            peer,
-            client_id: "broker-client",
-            sendfile_capable: false,
-            connection_listener_name: "PLAINTEXT",
-        }
+        crate::test_support::request_context(principal, peer, "broker-client")
     }
 
     async fn start_broker(
         authorizer: Arc<dyn Authorizer>,
     ) -> (crate::broker::BrokerHandle, tempfile::TempDir) {
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
-        cfg.authorizer = authorizer;
-        let handle = Broker::start(cfg).await.expect("start broker");
-        (handle, dir)
+        crate::test_support::start_broker_with(|cfg| {
+            cfg.authorizer = authorizer;
+        })
+        .await
     }
 
     async fn wait_for_leader(broker: &Broker) {

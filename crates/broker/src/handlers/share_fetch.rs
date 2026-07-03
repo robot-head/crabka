@@ -562,11 +562,7 @@ mod tests {
     use crabka_protocol::primitives::uuid::Uuid as ProtoUuid;
 
     fn decode_response(bytes: &Bytes) -> ShareFetchResponse {
-        let version = share_fetch_response::MAX_VERSION;
-        let mut cur: &[u8] = bytes.as_ref();
-        let resp = ShareFetchResponse::decode(&mut cur, version).expect("decode response");
-        assert!(cur.is_empty(), "response decoder consumed all bytes");
-        resp
+        crate::test_support::decode_response(bytes, share_fetch_response::MAX_VERSION)
     }
 
     #[test]

@@ -212,6 +212,12 @@ mod replicator_supervisor;
 pub mod share_coordinator;
 pub mod share_partition;
 pub mod telemetry;
+/// Shared scaffolding for the per-handler `#[cfg(test)] mod tests` modules
+/// (deny-all authorizer, principal/peer/context builders, wire codec helpers,
+/// temp-dir broker launcher). Consolidates the copies the mutant-hardening
+/// pass duplicated across ~40 handlers.
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod throttle;
 pub(crate) mod time_util;
 pub(crate) mod tls_reload;

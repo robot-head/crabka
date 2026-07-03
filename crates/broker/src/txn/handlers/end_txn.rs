@@ -658,10 +658,7 @@ mod tests {
     use crabka_protocol::owned::end_txn_response::EndTxnResponse;
 
     fn decode_response(bytes: &Bytes, version: i16) -> EndTxnResponse {
-        let mut cur: &[u8] = bytes.as_ref();
-        let resp = EndTxnResponse::decode(&mut cur, version).expect("decode response");
-        assert!(cur.is_empty(), "response decoder consumed all bytes");
-        resp
+        crate::test_support::decode_response(bytes, version)
     }
 
     // ── KIP-890 TV_2 completion identity: next_producer_identity ────────────

@@ -183,7 +183,7 @@ mod tests {
     use super::*;
     use assert2::assert;
     use assert2::check;
-    use bytes::{Bytes, BytesMut};
+    use bytes::Bytes;
     use crabka_compression::CompressionType;
     use crabka_protocol::owned::push_telemetry_response;
     use crabka_protocol::primitives::uuid::Uuid as ProtoUuid;
@@ -213,27 +213,15 @@ mod tests {
     }
 
     fn encode_request(req: &PushTelemetryRequest) -> Bytes {
-        let version = push_telemetry_response::MAX_VERSION;
-        let mut buf = BytesMut::with_capacity(req.encoded_len(version));
-        req.encode(&mut buf, version).expect("encode request");
-        buf.freeze()
+        crate::test_support::encode_request(req, push_telemetry_response::MAX_VERSION)
     }
 
     fn decode_response(bytes: &Bytes) -> PushTelemetryResponse {
-        let version = push_telemetry_response::MAX_VERSION;
-        let mut cur: &[u8] = bytes.as_ref();
-        let resp = PushTelemetryResponse::decode(&mut cur, version).expect("decode response");
-        assert!(cur.is_empty(), "response decoder consumed all bytes");
-        resp
+        crate::test_support::decode_response(bytes, push_telemetry_response::MAX_VERSION)
     }
 
     async fn start_broker() -> (crate::broker::BrokerHandle, tempfile::TempDir) {
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let cfg = crate::config::BrokerConfig::for_tests(dir.path().to_path_buf());
-        let handle = crate::broker::Broker::start(cfg)
-            .await
-            .expect("start broker");
-        (handle, dir)
+        crate::test_support::start_broker_with(|_cfg| {}).await
     }
 
     #[tokio::test]
