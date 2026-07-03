@@ -58,20 +58,9 @@ mod tests {
 
     use super::*;
     use crate::authorizer::{AuthorizationRequest, AuthorizationResult, Authorizer};
+    use crate::test_support::DenyAll;
     use crabka_metadata::{AclOperation, ResourceType};
     use crabka_security::{AuthMethod, Principal};
-
-    #[derive(Debug)]
-    struct DenyAll;
-    impl Authorizer for DenyAll {
-        fn authorize(
-            &self,
-            _source: &dyn crabka_authz::AclSource,
-            _req: &AuthorizationRequest<'_>,
-        ) -> AuthorizationResult {
-            AuthorizationResult::Deny
-        }
-    }
 
     #[tokio::test]
     async fn deny_decision_emits_audit_record() {

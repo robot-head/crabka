@@ -154,7 +154,7 @@ mod tests {
     use assert2::assert;
     use crabka_metadata::{FeatureLevelRecord, MetadataRecord};
     use crabka_protocol::owned::streams_group_heartbeat_response;
-    use crabka_security::{AuthMethod, Principal};
+    use crabka_security::Principal;
     use std::net::SocketAddr;
     use std::sync::Arc;
 
@@ -168,51 +168,32 @@ mod tests {
     }
 
     fn encode_request(req: &StreamsGroupHeartbeatRequest) -> Bytes {
-        let version = streams_group_heartbeat_response::MAX_VERSION;
-        let mut buf = BytesMut::with_capacity(req.encoded_len(version));
-        req.encode(&mut buf, version).expect("encode request");
-        buf.freeze()
+        crate::test_support::encode_request(req, streams_group_heartbeat_response::MAX_VERSION)
     }
 
     fn decode_response(bytes: &Bytes) -> StreamsGroupHeartbeatResponse {
-        let version = streams_group_heartbeat_response::MAX_VERSION;
-        let mut cur: &[u8] = bytes.as_ref();
-        let resp =
-            StreamsGroupHeartbeatResponse::decode(&mut cur, version).expect("decode response");
-        assert!(cur.is_empty(), "response decoder consumed all bytes");
-        resp
+        crate::test_support::decode_response(bytes, streams_group_heartbeat_response::MAX_VERSION)
     }
 
     fn principal() -> Principal {
-        Principal {
-            name: "alice".into(),
-            auth_method: AuthMethod::Anonymous,
-            groups: Vec::new(),
-        }
+        crate::test_support::principal("alice")
     }
 
     fn context<'a>(
         principal: &'a Principal,
         peer: &'a SocketAddr,
     ) -> crate::handlers::RequestContext<'a> {
-        crate::handlers::RequestContext {
-            principal,
-            peer,
-            client_id: "streams-client",
-            sendfile_capable: false,
-            connection_listener_name: "PLAINTEXT",
-        }
+        crate::test_support::request_context(principal, peer, "streams-client")
     }
 
     async fn start_broker(
         streams_enabled: bool,
     ) -> (crate::broker::BrokerHandle, tempfile::TempDir) {
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let mut cfg = crate::config::BrokerConfig::for_tests(dir.path().to_path_buf());
-        cfg.authorizer = Arc::new(crate::authorizer::AllowAllAuthorizer);
-        cfg.streams_group.enable = streams_enabled;
-        let handle = Broker::start(cfg).await.expect("start broker");
-        (handle, dir)
+        crate::test_support::start_broker_with(|cfg| {
+            cfg.authorizer = Arc::new(crate::authorizer::AllowAllAuthorizer);
+            cfg.streams_group.enable = streams_enabled;
+        })
+        .await
     }
 
     async fn finalize_streams_version(broker: &Broker) {

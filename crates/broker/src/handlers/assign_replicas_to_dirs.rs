@@ -197,7 +197,6 @@ mod tests {
     use crabka_protocol::primitives::uuid::Uuid as ProtocolUuid;
 
     use crate::broker::Broker;
-    use crate::config::BrokerConfig;
 
     const VERSION: i16 = 0;
 
@@ -226,18 +225,11 @@ mod tests {
     }
 
     fn decode_response(bytes: &Bytes) -> AssignReplicasToDirsResponse {
-        let mut cur: &[u8] = bytes.as_ref();
-        let resp = AssignReplicasToDirsResponse::decode(&mut cur, VERSION)
-            .expect("decode AssignReplicasToDirsResponse");
-        assert!(cur.is_empty(), "response decoder consumed all bytes");
-        resp
+        crate::test_support::decode_response(bytes, VERSION)
     }
 
     async fn start_broker() -> (crate::broker::BrokerHandle, tempfile::TempDir) {
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
-        let handle = Broker::start(cfg).await.expect("start broker");
-        (handle, dir)
+        crate::test_support::start_broker_with(|_cfg| {}).await
     }
 
     async fn wait_for_leader(broker: &Broker) {

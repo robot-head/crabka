@@ -155,36 +155,23 @@ mod tests {
     }
 
     fn decode_response(bytes: &Bytes) -> ConsumerGroupHeartbeatResponse {
-        let mut cur: &[u8] = bytes.as_ref();
-        let resp = ConsumerGroupHeartbeatResponse::decode(&mut cur, VERSION)
-            .expect("decode ConsumerGroupHeartbeatResponse");
-        assert!(cur.is_empty(), "response decoder consumed all bytes");
-        resp
+        crate::test_support::decode_response(bytes, VERSION)
     }
 
     fn test_context<'a>(
         principal: &'a crabka_security::Principal,
         peer: &'a std::net::SocketAddr,
     ) -> crate::handlers::RequestContext<'a> {
-        crate::handlers::RequestContext {
-            principal,
-            peer,
-            client_id: "consumer-group-heartbeat-test",
-            sendfile_capable: false,
-            connection_listener_name: "PLAINTEXT",
-        }
+        crate::test_support::request_context(principal, peer, "consumer-group-heartbeat-test")
     }
 
     async fn start_broker(
         authorizer: Arc<dyn crate::authorizer::Authorizer>,
     ) -> (crate::broker::BrokerHandle, tempfile::TempDir) {
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let mut cfg = crate::config::BrokerConfig::for_tests(dir.path().to_path_buf());
-        cfg.authorizer = authorizer;
-        let handle = crate::broker::Broker::start(cfg)
-            .await
-            .expect("start broker");
-        (handle, dir)
+        crate::test_support::start_broker_with(|cfg| {
+            cfg.authorizer = authorizer;
+        })
+        .await
     }
 
     fn image_with_group_version(level: i16) -> MetadataImage {

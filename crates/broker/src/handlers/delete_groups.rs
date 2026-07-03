@@ -80,28 +80,14 @@ pub(crate) async fn handle(
 mod tests {
     use super::*;
     use assert2::assert;
-    use crabka_protocol::Decode;
-    use crabka_security::{AuthMethod, Principal};
+    use crabka_security::Principal;
     use std::net::SocketAddr;
     use std::sync::Arc;
 
-    use crate::authorizer::{AuthorizationRequest, Authorizer};
-    use crate::config::BrokerConfig;
+    use crate::authorizer::Authorizer;
+    use crate::test_support::{DenyAll, peer, principal};
 
     const VERSION: i16 = 2;
-
-    #[derive(Debug)]
-    struct DenyAll;
-
-    impl Authorizer for DenyAll {
-        fn authorize(
-            &self,
-            _source: &dyn crabka_authz::AclSource,
-            _req: &AuthorizationRequest<'_>,
-        ) -> AuthorizationResult {
-            AuthorizationResult::Deny
-        }
-    }
 
     fn request(groups: &[&str]) -> DeleteGroupsRequest {
         DeleteGroupsRequest {
@@ -111,52 +97,28 @@ mod tests {
     }
 
     fn encode_request(req: &DeleteGroupsRequest) -> Bytes {
-        let mut buf = BytesMut::with_capacity(req.encoded_len(VERSION));
-        req.encode(&mut buf, VERSION).expect("encode request");
-        buf.freeze()
+        crate::test_support::encode_request(req, VERSION)
     }
 
     fn decode_response(bytes: &Bytes) -> DeleteGroupsResponse {
-        let mut cur: &[u8] = bytes.as_ref();
-        let resp = DeleteGroupsResponse::decode(&mut cur, VERSION).expect("decode response");
-        assert!(cur.is_empty(), "response decoder consumed all bytes");
-        resp
+        crate::test_support::decode_response(bytes, VERSION)
     }
 
     fn test_context<'a>(
         principal: &'a Principal,
         peer: &'a SocketAddr,
     ) -> crate::handlers::RequestContext<'a> {
-        crate::handlers::RequestContext {
-            principal,
-            peer,
-            client_id: "admin-client",
-            sendfile_capable: false,
-            connection_listener_name: "PLAINTEXT",
-        }
-    }
-
-    fn principal(name: &str) -> Principal {
-        Principal {
-            name: name.into(),
-            auth_method: AuthMethod::Anonymous,
-            groups: Vec::new(),
-        }
-    }
-
-    fn peer() -> SocketAddr {
-        "127.0.0.1:9092".parse().unwrap()
+        crate::test_support::request_context(principal, peer, "admin-client")
     }
 
     async fn start_broker(
         authorizer: Arc<dyn Authorizer>,
     ) -> (crate::broker::BrokerHandle, tempfile::TempDir) {
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
-        cfg.audit_enabled = false;
-        cfg.authorizer = authorizer;
-        let handle = Broker::start(cfg).await.expect("start broker");
-        (handle, dir)
+        crate::test_support::start_broker_with(|cfg| {
+            cfg.audit_enabled = false;
+            cfg.authorizer = authorizer;
+        })
+        .await
     }
 
     async fn drive(

@@ -476,18 +476,7 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::time::{Duration, timeout};
 
-    #[derive(Debug)]
-    struct DenyAll;
-
-    impl crate::authorizer::Authorizer for DenyAll {
-        fn authorize(
-            &self,
-            _source: &dyn crate::authorizer::AclSource,
-            _req: &crate::authorizer::AuthorizationRequest<'_>,
-        ) -> crate::authorizer::AuthorizationResult {
-            crate::authorizer::AuthorizationResult::Deny
-        }
-    }
+    use crate::test_support::DenyAll;
 
     struct FixedResp(&'static [u8]);
 

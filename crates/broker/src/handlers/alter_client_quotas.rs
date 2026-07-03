@@ -252,28 +252,14 @@ fn encode_response<R: Encode>(
 mod tests {
     use super::*;
     use assert2::assert;
-    use crabka_protocol::Decode;
     use crabka_protocol::owned::alter_client_quotas_request::{EntityData, EntryData, OpData};
     use crabka_security::{AuthMethod, Principal};
     use std::net::SocketAddr;
     use std::sync::Arc;
 
-    use crate::authorizer::{AuthorizationRequest, Authorizer};
-    use crate::broker::{Broker, BrokerHandle};
-    use crate::config::BrokerConfig;
-
-    #[derive(Debug)]
-    struct DenyAll;
-
-    impl Authorizer for DenyAll {
-        fn authorize(
-            &self,
-            _source: &dyn crabka_authz::AclSource,
-            _req: &AuthorizationRequest<'_>,
-        ) -> AuthorizationResult {
-            AuthorizationResult::Deny
-        }
-    }
+    use crate::authorizer::Authorizer;
+    use crate::broker::BrokerHandle;
+    use crate::test_support::DenyAll;
 
     fn entry(entity: Vec<(&str, Option<&str>)>, ops: Vec<(&str, f64, bool)>) -> EntryData {
         EntryData {
@@ -307,31 +293,21 @@ mod tests {
     }
 
     fn decode_response(version: i16, bytes: &Bytes) -> AlterClientQuotasResponse {
-        let mut cur: &[u8] = bytes.as_ref();
-        let resp = AlterClientQuotasResponse::decode(&mut cur, version).expect("decode response");
-        assert!(cur.is_empty(), "response decoder consumed all bytes");
-        resp
+        crate::test_support::decode_response(bytes, version)
     }
 
     fn test_context<'a>(
         principal: &'a Principal,
         peer: &'a SocketAddr,
     ) -> crate::handlers::RequestContext<'a> {
-        crate::handlers::RequestContext {
-            principal,
-            peer,
-            client_id: "admin-client",
-            sendfile_capable: false,
-            connection_listener_name: "PLAINTEXT",
-        }
+        crate::test_support::request_context(principal, peer, "admin-client")
     }
 
     async fn start_broker(authorizer: Arc<dyn Authorizer>) -> (BrokerHandle, tempfile::TempDir) {
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
-        cfg.authorizer = authorizer;
-        let handle = Broker::start(cfg).await.expect("start broker");
-        (handle, dir)
+        crate::test_support::start_broker_with(|cfg| {
+            cfg.authorizer = authorizer;
+        })
+        .await
     }
 
     fn quota_value(handle: &BrokerHandle, user: &str, quota_key: &str) -> Option<f64> {

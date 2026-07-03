@@ -247,28 +247,15 @@ mod tests {
         DescribeShareGroupOffsetsRequestGroup, DescribeShareGroupOffsetsRequestTopic,
     };
     use crabka_protocol::owned::describe_share_group_offsets_response;
-    use crabka_security::{AuthMethod, Principal};
+    use crabka_security::Principal;
     use std::net::SocketAddr;
     use std::sync::Arc;
 
-    use crate::authorizer::{AuthorizationRequest, Authorizer};
-    use crate::config::BrokerConfig;
-
-    #[derive(Debug)]
-    struct DenyAll;
+    use crate::authorizer::Authorizer;
+    use crate::test_support::DenyAll;
 
     type RequestTopic<'a> = (&'a str, Vec<i32>);
     type RequestGroup<'a> = (&'a str, Vec<RequestTopic<'a>>);
-
-    impl Authorizer for DenyAll {
-        fn authorize(
-            &self,
-            _source: &dyn crabka_authz::AclSource,
-            _req: &AuthorizationRequest<'_>,
-        ) -> AuthorizationResult {
-            AuthorizationResult::Deny
-        }
-    }
 
     fn request(groups: &[RequestGroup<'_>]) -> DescribeShareGroupOffsetsRequest {
         DescribeShareGroupOffsetsRequest {
@@ -296,52 +283,36 @@ mod tests {
     }
 
     fn encode_request(req: &DescribeShareGroupOffsetsRequest) -> Bytes {
-        let version = describe_share_group_offsets_response::MAX_VERSION;
-        let mut buf = BytesMut::with_capacity(req.encoded_len(version));
-        req.encode(&mut buf, version).expect("encode request");
-        buf.freeze()
+        crate::test_support::encode_request(req, describe_share_group_offsets_response::MAX_VERSION)
     }
 
     fn decode_response(bytes: &Bytes) -> DescribeShareGroupOffsetsResponse {
-        let version = describe_share_group_offsets_response::MAX_VERSION;
-        let mut cur: &[u8] = bytes.as_ref();
-        let resp =
-            DescribeShareGroupOffsetsResponse::decode(&mut cur, version).expect("decode response");
-        assert!(cur.is_empty(), "response decoder consumed all bytes");
-        resp
+        crate::test_support::decode_response(
+            bytes,
+            describe_share_group_offsets_response::MAX_VERSION,
+        )
     }
 
     fn test_context<'a>(
         principal: &'a Principal,
         peer: &'a SocketAddr,
     ) -> crate::handlers::RequestContext<'a> {
-        crate::handlers::RequestContext {
-            principal,
-            peer,
-            client_id: "admin-client",
-            sendfile_capable: false,
-            connection_listener_name: "PLAINTEXT",
-        }
+        crate::test_support::request_context(principal, peer, "admin-client")
     }
 
     async fn start_broker(
         authorizer: Arc<dyn Authorizer>,
         share_enabled: bool,
     ) -> (crate::broker::BrokerHandle, tempfile::TempDir) {
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
-        cfg.authorizer = authorizer;
-        cfg.share_group.enable = share_enabled;
-        let handle = Broker::start(cfg).await.expect("start broker");
-        (handle, dir)
+        crate::test_support::start_broker_with(|cfg| {
+            cfg.authorizer = authorizer;
+            cfg.share_group.enable = share_enabled;
+        })
+        .await
     }
 
     fn principal() -> Principal {
-        Principal {
-            name: "alice".into(),
-            auth_method: AuthMethod::Anonymous,
-            groups: Vec::new(),
-        }
+        crate::test_support::principal("alice")
     }
 
     fn image_with_topic(name: &str, topic_id: uuid::Uuid) -> MetadataImage {

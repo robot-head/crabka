@@ -117,31 +117,20 @@ pub(crate) fn handle(
 mod tests {
     use super::*;
     use assert2::assert;
-    use crabka_protocol::Decode;
     use crabka_protocol::owned::alter_replica_log_dirs_request::{
         AlterReplicaLogDir, AlterReplicaLogDirTopic,
     };
 
-    use crate::config::BrokerConfig;
-
     fn encode_request(version: i16, req: &AlterReplicaLogDirsRequest) -> Bytes {
-        let mut buf = BytesMut::with_capacity(req.encoded_len(version));
-        req.encode(&mut buf, version).expect("encode request");
-        buf.freeze()
+        crate::test_support::encode_request(req, version)
     }
 
     fn decode_response(version: i16, bytes: &Bytes) -> AlterReplicaLogDirsResponse {
-        let mut cur: &[u8] = bytes.as_ref();
-        let resp = AlterReplicaLogDirsResponse::decode(&mut cur, version).expect("decode response");
-        assert!(cur.is_empty(), "response decoder consumed all bytes");
-        resp
+        crate::test_support::decode_response(bytes, version)
     }
 
     async fn start_broker() -> (crate::broker::BrokerHandle, tempfile::TempDir) {
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
-        let handle = Broker::start(cfg).await.expect("start broker");
-        (handle, dir)
+        crate::test_support::start_broker_with(|_cfg| {}).await
     }
 
     #[tokio::test]

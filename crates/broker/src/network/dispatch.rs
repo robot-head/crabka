@@ -4845,17 +4845,7 @@ mod tests {
         };
         use crabka_protocol::{Decode, Encode};
 
-        #[derive(Debug)]
-        struct DenyAll;
-        impl crate::authorizer::Authorizer for DenyAll {
-            fn authorize(
-                &self,
-                _source: &dyn crabka_authz::AclSource,
-                _req: &crate::authorizer::AuthorizationRequest<'_>,
-            ) -> crate::authorizer::AuthorizationResult {
-                crate::authorizer::AuthorizationResult::Deny
-            }
-        }
+        use crate::test_support::DenyAll;
 
         // Send a flexible (v2-header) request frame carrying `body` for
         // `api_key`/`version` and return the response body with its 5-byte

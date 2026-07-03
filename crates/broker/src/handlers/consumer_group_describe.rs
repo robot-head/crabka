@@ -150,20 +150,11 @@ mod tests {
     }
 
     fn decode_response(bytes: &Bytes) -> ConsumerGroupDescribeResponse {
-        let mut cur: &[u8] = bytes.as_ref();
-        let resp = ConsumerGroupDescribeResponse::decode(&mut cur, VERSION)
-            .expect("decode ConsumerGroupDescribeResponse");
-        assert!(cur.is_empty(), "response decoder consumed all bytes");
-        resp
+        crate::test_support::decode_response(bytes, VERSION)
     }
 
     async fn start_broker() -> (crate::broker::BrokerHandle, tempfile::TempDir) {
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let cfg = crate::config::BrokerConfig::for_tests(dir.path().to_path_buf());
-        let handle = crate::broker::Broker::start(cfg)
-            .await
-            .expect("start broker");
-        (handle, dir)
+        crate::test_support::start_broker_with(|_cfg| {}).await
     }
 
     fn image_with_group_version(level: i16) -> MetadataImage {

@@ -178,31 +178,18 @@ mod tests {
     }
 
     fn encode_request(req: &ShareGroupHeartbeatRequest) -> Bytes {
-        let version = share_group_heartbeat_response::MAX_VERSION;
-        let mut buf = BytesMut::with_capacity(req.encoded_len(version));
-        req.encode(&mut buf, version).expect("encode request");
-        buf.freeze()
+        crate::test_support::encode_request(req, share_group_heartbeat_response::MAX_VERSION)
     }
 
     fn decode_response(bytes: &Bytes) -> ShareGroupHeartbeatResponse {
-        let version = share_group_heartbeat_response::MAX_VERSION;
-        let mut cur: &[u8] = bytes.as_ref();
-        let resp = ShareGroupHeartbeatResponse::decode(&mut cur, version).expect("decode response");
-        assert!(cur.is_empty(), "response decoder consumed all bytes");
-        resp
+        crate::test_support::decode_response(bytes, share_group_heartbeat_response::MAX_VERSION)
     }
 
     fn test_context<'a>(
         principal: &'a Principal,
         peer: &'a SocketAddr,
     ) -> crate::handlers::RequestContext<'a> {
-        crate::handlers::RequestContext {
-            principal,
-            peer,
-            client_id: "client-a",
-            sendfile_capable: false,
-            connection_listener_name: "PLAINTEXT",
-        }
+        crate::test_support::request_context(principal, peer, "client-a")
     }
 
     #[tokio::test]

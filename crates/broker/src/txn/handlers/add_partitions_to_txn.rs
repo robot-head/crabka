@@ -461,12 +461,12 @@ mod tests {
 
     use assert2::assert;
     use crabka_protocol::owned::add_partitions_to_txn_request::AddPartitionsToTxnTransaction;
-    use crabka_security::{AuthMethod, Principal};
+    use crabka_security::Principal;
 
     use super::*;
     use crate::authorizer::Authorizer;
-    use crate::broker::{Broker, BrokerHandle};
-    use crate::config::BrokerConfig;
+    use crate::broker::BrokerHandle;
+    use crate::test_support::{DenyAll, peer};
     use crate::txn::state::TxnEntry;
 
     #[test]
@@ -568,16 +568,11 @@ mod tests {
     }
 
     fn encode_request(req: &AddPartitionsToTxnRequest, version: i16) -> Bytes {
-        let mut buf = BytesMut::with_capacity(req.encoded_len(version));
-        req.encode(&mut buf, version).expect("encode request");
-        buf.freeze()
+        crate::test_support::encode_request(req, version)
     }
 
     fn decode_response(bytes: &Bytes, version: i16) -> AddPartitionsToTxnResponse {
-        let mut cur: &[u8] = bytes.as_ref();
-        let resp = AddPartitionsToTxnResponse::decode(&mut cur, version).expect("decode response");
-        assert!(cur.is_empty(), "response decoder consumed all bytes");
-        resp
+        crate::test_support::decode_response(bytes, version)
     }
 
     #[test]
@@ -630,51 +625,23 @@ mod tests {
         assert!(decoded == expected);
     }
 
-    #[derive(Debug)]
-    struct DenyAll;
-
-    impl Authorizer for DenyAll {
-        fn authorize(
-            &self,
-            _source: &dyn crabka_authz::AclSource,
-            _req: &AuthorizationRequest<'_>,
-        ) -> AuthorizationResult {
-            AuthorizationResult::Deny
-        }
-    }
-
     fn principal() -> Principal {
-        Principal {
-            name: "ANONYMOUS".into(),
-            auth_method: AuthMethod::Anonymous,
-            groups: Vec::new(),
-        }
-    }
-
-    fn peer() -> SocketAddr {
-        "127.0.0.1:9092".parse().unwrap()
+        crate::test_support::principal("ANONYMOUS")
     }
 
     fn test_context<'a>(
         principal: &'a Principal,
         peer: &'a SocketAddr,
     ) -> crate::handlers::RequestContext<'a> {
-        crate::handlers::RequestContext {
-            principal,
-            peer,
-            client_id: "producer-client",
-            sendfile_capable: false,
-            connection_listener_name: "PLAINTEXT",
-        }
+        crate::test_support::request_context(principal, peer, "producer-client")
     }
 
     async fn start_broker(authorizer: Arc<dyn Authorizer>) -> (BrokerHandle, tempfile::TempDir) {
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
-        cfg.audit_enabled = false;
-        cfg.authorizer = authorizer;
-        let handle = Broker::start(cfg).await.expect("start broker");
-        (handle, dir)
+        crate::test_support::start_broker_with(|cfg| {
+            cfg.audit_enabled = false;
+            cfg.authorizer = authorizer;
+        })
+        .await
     }
 
     #[tokio::test]

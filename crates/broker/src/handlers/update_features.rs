@@ -289,28 +289,15 @@ mod tests {
     use super::*;
     use assert2::assert;
     use crabka_protocol::owned::update_features_request::FeatureUpdateKey;
-    use crabka_security::{AuthMethod, Principal};
+    use crabka_security::Principal;
     use std::net::SocketAddr;
     use std::sync::Arc;
 
-    use crate::authorizer::{AuthorizationRequest, Authorizer};
+    use crate::authorizer::Authorizer;
     use crate::broker::{Broker, BrokerHandle};
-    use crate::config::BrokerConfig;
+    use crate::test_support::DenyAll;
 
     const VERSION: i16 = 1;
-
-    #[derive(Debug)]
-    struct DenyAll;
-
-    impl Authorizer for DenyAll {
-        fn authorize(
-            &self,
-            _source: &dyn crabka_authz::AclSource,
-            _req: &AuthorizationRequest<'_>,
-        ) -> AuthorizationResult {
-            AuthorizationResult::Deny
-        }
-    }
 
     fn feature_update(name: &str, level: i16, upgrade_type: i8) -> FeatureUpdateKey {
         FeatureUpdateKey {
@@ -342,33 +329,22 @@ mod tests {
     }
 
     fn principal() -> Principal {
-        Principal {
-            name: "admin".into(),
-            auth_method: AuthMethod::Anonymous,
-            groups: Vec::new(),
-        }
+        crate::test_support::principal("admin")
     }
 
     fn context<'a>(
         principal: &'a Principal,
         peer: &'a SocketAddr,
     ) -> crate::handlers::RequestContext<'a> {
-        crate::handlers::RequestContext {
-            principal,
-            peer,
-            client_id: "update-features-client",
-            sendfile_capable: false,
-            connection_listener_name: "PLAINTEXT",
-        }
+        crate::test_support::request_context(principal, peer, "update-features-client")
     }
 
     async fn start_broker(authorizer: Arc<dyn Authorizer>) -> (BrokerHandle, tempfile::TempDir) {
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
-        cfg.audit_enabled = false;
-        cfg.authorizer = authorizer;
-        let handle = Broker::start(cfg).await.expect("start broker");
-        (handle, dir)
+        crate::test_support::start_broker_with(|cfg| {
+            cfg.audit_enabled = false;
+            cfg.authorizer = authorizer;
+        })
+        .await
     }
 
     async fn call_with(

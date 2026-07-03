@@ -203,22 +203,15 @@ mod tests {
     };
     use crabka_protocol::owned::share_acknowledge_response;
     use crabka_protocol::primitives::uuid::Uuid as ProtoUuid;
-    use crabka_security::{AuthMethod, Principal};
+    use crabka_security::Principal;
     use std::net::SocketAddr;
 
     fn encode_request(req: &ShareAcknowledgeRequest) -> Bytes {
-        let version = share_acknowledge_response::MAX_VERSION;
-        let mut buf = BytesMut::with_capacity(req.encoded_len(version));
-        req.encode(&mut buf, version).expect("encode request");
-        buf.freeze()
+        crate::test_support::encode_request(req, share_acknowledge_response::MAX_VERSION)
     }
 
     fn decode_response(bytes: &Bytes) -> ShareAcknowledgeResponse {
-        let version = share_acknowledge_response::MAX_VERSION;
-        let mut cur: &[u8] = bytes.as_ref();
-        let resp = ShareAcknowledgeResponse::decode(&mut cur, version).expect("decode response");
-        assert!(cur.is_empty(), "response decoder consumed all bytes");
-        resp
+        crate::test_support::decode_response(bytes, share_acknowledge_response::MAX_VERSION)
     }
 
     fn request(topic_id: ProtoUuid, partitions: &[i32]) -> ShareAcknowledgeRequest {
@@ -245,29 +238,18 @@ mod tests {
         principal: &'a Principal,
         peer: &'a SocketAddr,
     ) -> crate::handlers::RequestContext<'a> {
-        crate::handlers::RequestContext {
-            principal,
-            peer,
-            client_id: "client-a",
-            sendfile_capable: false,
-            connection_listener_name: "PLAINTEXT",
-        }
+        crate::test_support::request_context(principal, peer, "client-a")
     }
 
     async fn start_broker(share_enabled: bool) -> (crate::broker::BrokerHandle, tempfile::TempDir) {
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let mut cfg = crate::config::BrokerConfig::for_tests(dir.path().to_path_buf());
-        cfg.share_group.enable = share_enabled;
-        let handle = Broker::start(cfg).await.expect("start broker");
-        (handle, dir)
+        crate::test_support::start_broker_with(|cfg| {
+            cfg.share_group.enable = share_enabled;
+        })
+        .await
     }
 
     fn principal() -> Principal {
-        Principal {
-            name: "alice".into(),
-            auth_method: AuthMethod::Anonymous,
-            groups: Vec::new(),
-        }
+        crate::test_support::principal("alice")
     }
 
     #[test]
