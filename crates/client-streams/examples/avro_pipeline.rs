@@ -123,7 +123,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .process(|| PaidOrderSummarizer, std::iter::empty::<String>())
         .to("order-summaries");
 
-    let mut streams = app.run(topology).await?;
+    let streams = app.run(topology).await?;
     streams.close().await?;
     Ok(())
 }

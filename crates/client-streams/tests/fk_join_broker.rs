@@ -306,7 +306,7 @@ async fn fk_join_resolves_and_restores_over_broker() {
 
     // ── 2. Start the FK-join KafkaStreams app ─────────────────────────────────
     let app_id = "fk-join-broker-app";
-    let mut streams = KafkaStreams::builder()
+    let streams = KafkaStreams::builder()
         .bootstrap(&bootstrap)
         .application_id(app_id)
         .topology(fk_join_topology(app_id))
@@ -355,7 +355,7 @@ async fn fk_join_resolves_and_restores_over_broker() {
     // against the already-known foreign row "A"->"Y" WITHOUT b being re-produced.
     produce(&producer, "fk-a", "k2", "A").await;
 
-    let mut streams2 = KafkaStreams::builder()
+    let streams2 = KafkaStreams::builder()
         .bootstrap(&bootstrap)
         .application_id(app_id)
         .topology(fk_join_topology(app_id))

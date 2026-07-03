@@ -249,12 +249,12 @@ async fn sasl_scram_sha256_authenticate(
         )));
     }
 
-    let mut client = crabka_security::ScramClientExchange::new(
+    let client = crabka_security::ScramClientExchange::new(
         username.to_string(),
         password.as_bytes().to_vec(),
         SaslMechanism::ScramSha256,
     );
-    let client_first = client
+    let (client_first, client) = client
         .client_first()
         .map_err(|e| io::Error::other(format!("scram client_first: {e:?}")))?;
 
@@ -276,7 +276,7 @@ async fn sasl_scram_sha256_authenticate(
         )));
     }
 
-    let client_final = client
+    let (client_final, client) = client
         .step(&r1_resp.auth_bytes)
         .map_err(|e| io::Error::other(format!("scram step: {e:?}")))?;
     let mut body = BytesMut::new();

@@ -773,12 +773,12 @@ async fn drive_sasl_scram_session(
     }
 
     // ── 3. SCRAM client-first → server-first.
-    let mut client = crabka_security::ScramClientExchange::new(
+    let client = crabka_security::ScramClientExchange::new(
         user.to_string(),
         password.as_bytes().to_vec(),
         mechanism,
     );
-    let client_first = client
+    let (client_first, client) = client
         .client_first()
         .map_err(|e| io::Error::other(format!("scram client_first: {e:?}")))?;
     let scram_req_first = SaslAuthenticateRequest {
@@ -803,7 +803,7 @@ async fn drive_sasl_scram_session(
     let server_first = scram_first_response.auth_bytes.to_vec();
 
     // ── 4. SCRAM client-final → server-final.
-    let client_final = client
+    let (client_final, client) = client
         .step(&server_first)
         .map_err(|e| io::Error::other(format!("scram client step: {e:?}")))?;
     let scram_req_final = SaslAuthenticateRequest {

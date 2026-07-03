@@ -87,7 +87,7 @@ async fn boot_with_ongoing_txn(
         .await
         .unwrap();
     producer.init_transactions().await.unwrap();
-    producer.begin_transaction().await.unwrap();
+    let _ = producer.begin_transaction().await.unwrap();
     // `send` enqueues into the producer's local batch; without
     // `flush()` the AddPartitionsToTxn round-trip that registers
     // `(topic, partition)` on the coordinator's TxnEntry may not run

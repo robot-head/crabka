@@ -204,7 +204,7 @@ async fn global_table_join_reads_all_partitions() {
 
     // ── 2. Start the global-table-join KafkaStreams app ───────────────────────
     let app_id = "global-join-app";
-    let mut streams = KafkaStreams::builder()
+    let streams = KafkaStreams::builder()
         .bootstrap(&bootstrap)
         .application_id(app_id)
         .topology(global_join_topology(app_id))

@@ -151,11 +151,11 @@ async fn full_cycle_commit_and_read(bootstrap: &str, topic: &str, tid: &str, gro
         .await
         .unwrap();
     producer.init_transactions().await.unwrap();
-    producer.begin_transaction().await.unwrap();
+    let txn = producer.begin_transaction().await.unwrap();
     for v in ["a", "b", "c"] {
         drop(producer.send(rec(topic, v)).await);
     }
-    producer.commit_transaction().await.unwrap();
+    txn.commit().await.unwrap();
 
     let mut consumer = Consumer::builder()
         .bootstrap(bootstrap.to_string())
