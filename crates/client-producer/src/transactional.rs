@@ -148,3 +148,179 @@ pub struct EndTransactionError<T> {
     #[source]
     pub source: ProducerError,
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicI16, AtomicU16, Ordering};
+
+    use bytes::BytesMut;
+    use crabka_client_core::MockBroker;
+    use crabka_protocol::Encode;
+    use crabka_protocol::owned::api_versions_request;
+    use crabka_protocol::owned::api_versions_response::ApiVersionsResponse;
+    use crabka_protocol::owned::end_txn_request;
+    use crabka_protocol::owned::end_txn_response::EndTxnResponse;
+    use crabka_protocol::owned::find_coordinator_request;
+    use crabka_protocol::owned::find_coordinator_response::FindCoordinatorResponse;
+    use crabka_protocol::owned::init_producer_id_request;
+    use crabka_protocol::owned::init_producer_id_response::InitProducerIdResponse;
+
+    use crate::error::ProducerError;
+    use crate::producer::Producer;
+
+    fn encode_v0(resp: &impl Encode) -> Vec<u8> {
+        let mut buf = BytesMut::new();
+        resp.encode(&mut buf, 0).unwrap();
+        buf.to_vec()
+    }
+
+    /// Boots a mock broker that also answers as its own transaction
+    /// coordinator (`FindCoordinator` resolves back to the mock's own
+    /// address), and returns a transactional `Producer` with
+    /// `init_transactions` already completed against it. `end_txn_error`
+    /// lets each test steer the `EndTxn` response's `error_code` (0 =
+    /// success) independently per call, so a test can fail a `commit`/`abort`
+    /// and then flip the mock to let a retry on the same guard succeed.
+    async fn transactional_producer(end_txn_error: Arc<AtomicI16>) -> (MockBroker, Producer) {
+        let port_cell = Arc::new(AtomicU16::new(0));
+        let handler_port = port_cell.clone();
+        let mock = MockBroker::start(move |api_key, _version, _corr_id, _body| {
+            if api_key == api_versions_request::API_KEY {
+                return Some(encode_v0(&ApiVersionsResponse::default()));
+            }
+            if api_key == find_coordinator_request::API_KEY {
+                return Some(encode_v0(&FindCoordinatorResponse {
+                    error_code: 0,
+                    node_id: 1,
+                    host: "127.0.0.1".into(),
+                    port: i32::from(handler_port.load(Ordering::SeqCst)),
+                    ..Default::default()
+                }));
+            }
+            if api_key == init_producer_id_request::API_KEY {
+                return Some(encode_v0(&InitProducerIdResponse {
+                    error_code: 0,
+                    producer_id: 7,
+                    producer_epoch: 3,
+                    ..Default::default()
+                }));
+            }
+            if api_key == end_txn_request::API_KEY {
+                return Some(encode_v0(&EndTxnResponse {
+                    error_code: end_txn_error.load(Ordering::SeqCst),
+                    ..Default::default()
+                }));
+            }
+            None
+        })
+        .await;
+        port_cell.store(mock.addr.port(), Ordering::SeqCst);
+
+        let producer = Producer::builder()
+            .bootstrap(mock.addr.to_string())
+            .enable_idempotence(false)
+            .transactional_id("test-txn")
+            .build()
+            .await
+            .expect("producer connects to the mock");
+        producer
+            .init_transactions()
+            .await
+            .expect("init_transactions against the mock coordinator");
+        (mock, producer)
+    }
+
+    /// `CONCURRENT_TRANSACTIONS (49)` on `EndTxn` proves `commit` actually
+    /// drives the broker round trip (a body replaced with `Ok(())` would
+    /// never observe the error), and the guard handed back in
+    /// `EndTransactionError::transaction` must still be usable once the
+    /// broker clears the condition.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn transaction_commit_reports_broker_error_and_retries_on_the_same_guard() {
+        let end_txn_error = Arc::new(AtomicI16::new(49));
+        let (mock, producer) = transactional_producer(end_txn_error.clone()).await;
+
+        let txn = producer
+            .begin_transaction()
+            .await
+            .expect("begin_transaction");
+        let err = txn
+            .commit()
+            .await
+            .expect_err("broker reported CONCURRENT_TRANSACTIONS");
+        assert!(matches!(err.source, ProducerError::ConcurrentTransactions));
+
+        end_txn_error.store(0, Ordering::SeqCst);
+        err.transaction.commit().await.expect("retry succeeds");
+
+        mock.stop();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn transaction_abort_reports_broker_error_and_retries_on_the_same_guard() {
+        let end_txn_error = Arc::new(AtomicI16::new(49));
+        let (mock, producer) = transactional_producer(end_txn_error.clone()).await;
+
+        let txn = producer
+            .begin_transaction()
+            .await
+            .expect("begin_transaction");
+        let err = txn
+            .abort()
+            .await
+            .expect_err("broker reported CONCURRENT_TRANSACTIONS");
+        assert!(matches!(err.source, ProducerError::ConcurrentTransactions));
+
+        end_txn_error.store(0, Ordering::SeqCst);
+        err.transaction.abort().await.expect("retry succeeds");
+
+        mock.stop();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn owned_transaction_commit_reports_broker_error_and_retries_on_the_same_guard() {
+        let end_txn_error = Arc::new(AtomicI16::new(49));
+        let (mock, producer) = transactional_producer(end_txn_error.clone()).await;
+        let producer = Arc::new(producer);
+
+        let txn = producer
+            .clone()
+            .begin_transaction_owned()
+            .await
+            .expect("begin_transaction_owned");
+        let err = txn
+            .commit()
+            .await
+            .expect_err("broker reported CONCURRENT_TRANSACTIONS");
+        assert!(matches!(err.source, ProducerError::ConcurrentTransactions));
+
+        end_txn_error.store(0, Ordering::SeqCst);
+        err.transaction.commit().await.expect("retry succeeds");
+
+        mock.stop();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn owned_transaction_abort_reports_broker_error_and_retries_on_the_same_guard() {
+        let end_txn_error = Arc::new(AtomicI16::new(49));
+        let (mock, producer) = transactional_producer(end_txn_error.clone()).await;
+        let producer = Arc::new(producer);
+
+        let txn = producer
+            .clone()
+            .begin_transaction_owned()
+            .await
+            .expect("begin_transaction_owned");
+        let err = txn
+            .abort()
+            .await
+            .expect_err("broker reported CONCURRENT_TRANSACTIONS");
+        assert!(matches!(err.source, ProducerError::ConcurrentTransactions));
+
+        end_txn_error.store(0, Ordering::SeqCst);
+        err.transaction.abort().await.expect("retry succeeds");
+
+        mock.stop();
+    }
+}

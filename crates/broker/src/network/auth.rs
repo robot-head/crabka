@@ -1278,6 +1278,115 @@ mod tests {
     }
 
     #[test]
+    fn handle_authenticate_gssapi_round1_bad_keytab_fails_and_leaves_state_untouched() {
+        let config = crabka_security::gssapi::GssapiConfig {
+            keytab_path: std::path::PathBuf::from("/nonexistent.keytab"),
+            service_name: "kafka".to_string(),
+            principal_to_local_rules: vec![crabka_security::gssapi::name::Rule::Default],
+            realm: Some("CRABKA.TEST".to_string()),
+            kdc: None,
+        };
+        let mut auth = ConnectionAuth::Negotiating {
+            mechanism: SaslMechanism::Gssapi,
+            exchange: SaslExchange::GssapiPending,
+            pending_token_expiry_ms: None,
+        };
+        let req = SaslAuthenticateRequest {
+            auth_bytes: bytes::Bytes::from_static(b"AP-REQ"),
+            ..Default::default()
+        };
+
+        let resp = handle_authenticate_gssapi(&req, &mut auth, &config);
+
+        assert_failed_authenticate_response(&resp);
+        assert!(matches!(
+            auth,
+            ConnectionAuth::Negotiating {
+                exchange: SaslExchange::GssapiPending,
+                ..
+            }
+        ));
+    }
+
+    /// Establishes the GSS context on the first token with no trailing
+    /// AP-REP, so a single `step()` reaches `AwaitingChoice` directly —
+    /// mirrors `crabka-security`'s own `gssapi::server` unit tests.
+    struct FakeAcceptor;
+
+    impl crabka_security::gssapi::GssAcceptor for FakeAcceptor {
+        fn accept(
+            &mut self,
+            _client_token: &[u8],
+        ) -> Result<crabka_security::gssapi::AcceptStep, crabka_security::gssapi::GssError>
+        {
+            Ok(crabka_security::gssapi::AcceptStep::Established(None))
+        }
+        fn wrap(
+            &self,
+            plaintext: &[u8],
+            _confidential: bool,
+        ) -> Result<Vec<u8>, crabka_security::gssapi::GssError> {
+            Ok(plaintext.to_vec())
+        }
+        fn unwrap(&self, token: &[u8]) -> Result<Vec<u8>, crabka_security::gssapi::GssError> {
+            Ok(token.to_vec())
+        }
+        fn src_principal(&self) -> Result<String, crabka_security::gssapi::GssError> {
+            Ok("alice@CRABKA.TEST".to_string())
+        }
+    }
+
+    #[test]
+    fn handle_authenticate_gssapi_subsequent_round_completes_and_authenticates() {
+        use crabka_security::gssapi::server::{GssapiServerExchange, ServerStep};
+
+        let config = crabka_security::gssapi::GssapiConfig {
+            keytab_path: std::path::PathBuf::from("/unused.keytab"),
+            service_name: "kafka".to_string(),
+            principal_to_local_rules: vec![crabka_security::gssapi::name::Rule::Default],
+            realm: Some("CRABKA.TEST".to_string()),
+            kdc: None,
+        };
+
+        // Drive the exchange to `AwaitingChoice` up front (mirroring round
+        // 1's work), so this test targets `handle_authenticate_gssapi`'s
+        // *subsequent round* branch specifically.
+        let exchange = GssapiServerExchange::new(Box::new(FakeAcceptor), 0x1_0000);
+        let exchange = match exchange.step(b"AP-REQ").expect("round 1 step") {
+            ServerStep::Challenge(_, next) => next,
+            ServerStep::Done { .. } => panic!("expected challenge"),
+        };
+
+        let mut auth = ConnectionAuth::Negotiating {
+            mechanism: SaslMechanism::Gssapi,
+            exchange: SaslExchange::Gssapi(Box::new(exchange)),
+            pending_token_expiry_ms: None,
+        };
+
+        let mut choice = vec![0x01u8, 0x00, 0x10, 0x00];
+        choice.extend_from_slice(b"alice");
+        let req = SaslAuthenticateRequest {
+            auth_bytes: bytes::Bytes::from(choice),
+            ..Default::default()
+        };
+
+        let resp = handle_authenticate_gssapi(&req, &mut auth, &config);
+
+        assert_success_authenticate_response(&resp, b"", 0);
+        match auth {
+            ConnectionAuth::Authenticated {
+                principal,
+                mechanism,
+                ..
+            } => {
+                check!(principal.name.as_str() == "alice");
+                check!(mechanism == SaslMechanism::Gssapi);
+            }
+            _ => panic!("expected GSSAPI authenticated state"),
+        }
+    }
+
+    #[test]
     fn map_gssapi_principal_uppercases_realm_before_default_rule() {
         let config = crabka_security::gssapi::GssapiConfig {
             keytab_path: std::path::PathBuf::from("/unused.keytab"),

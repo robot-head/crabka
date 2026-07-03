@@ -278,4 +278,33 @@ mod tests {
             assert!(rendered.contains(part), "missing {part:?} in {rendered}");
         }
     }
+
+    #[test]
+    fn debug_includes_offering_layer_and_awaiting_choice_phases() {
+        let ex = GssapiServerExchange::new(Box::new(FakeAcceptor { established: false }), 0x1_0000);
+
+        // Round 1: FakeAcceptor establishes with a trailing AP-REP -> OfferingLayer.
+        let ex = match ex.step(b"AP-REQ").unwrap() {
+            ServerStep::Challenge(_, next) => next,
+            ServerStep::Done { .. } => panic!("expected challenge"),
+        };
+        let rendered = format!("{ex:?}");
+        for part in [
+            "GssapiServerExchange::OfferingLayer",
+            "OfferingLayer",
+            "max_recv_size",
+        ] {
+            assert!(rendered.contains(part), "missing {part:?} in {rendered}");
+        }
+
+        // Round 2: layer offer sent -> AwaitingChoice.
+        let ex = match ex.step(b"").unwrap() {
+            ServerStep::Challenge(_, next) => next,
+            ServerStep::Done { .. } => panic!("expected challenge"),
+        };
+        let rendered = format!("{ex:?}");
+        for part in ["GssapiServerExchange::AwaitingChoice", "AwaitingChoice"] {
+            assert!(rendered.contains(part), "missing {part:?} in {rendered}");
+        }
+    }
 }

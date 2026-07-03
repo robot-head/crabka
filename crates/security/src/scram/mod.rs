@@ -303,6 +303,42 @@ mod tests {
         assert!(final_check.is_ok(), "server signature must verify");
     }
 
+    /// The hand-written `Debug` impl on `ScramServerExchange` prints the
+    /// observable negotiation phase (the variant payload isn't exported, so
+    /// callers can only ever see the phase name via `Debug`/logging).
+    #[test]
+    fn scram_server_exchange_debug_includes_the_observable_phase() {
+        let password = b"hunter2";
+        let cred = hash_scram_password_with_salt(
+            password,
+            SaslMechanism::ScramSha256,
+            4096,
+            (0..16).collect::<Vec<u8>>(),
+        );
+        let server = ScramServerExchange::new("alice".to_string(), cred);
+        let rendered = format!("{server:?}");
+        assert!(
+            rendered.contains("ScramServerExchange::AwaitingClientFirst"),
+            "missing phase in {rendered}"
+        );
+
+        let client = ScramClientExchange::new(
+            "alice".to_string(),
+            password.to_vec(),
+            SaslMechanism::ScramSha256,
+        );
+        let (c1, _client) = client.client_first().expect("client first");
+        let server = match server.step(&c1) {
+            StepResult::Continue(_, next) => next,
+            other => panic!("server step 1 must continue, got {other:?}"),
+        };
+        let rendered = format!("{server:?}");
+        assert!(
+            rendered.contains("ScramServerExchange::AwaitingClientFinal"),
+            "missing phase in {rendered}"
+        );
+    }
+
     #[test]
     fn scram_client_rejects_tampered_server_final_signature() {
         let password = b"hunter2";

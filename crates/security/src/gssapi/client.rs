@@ -219,6 +219,39 @@ mod tests {
     }
 
     #[test]
+    fn debug_includes_observable_phase_and_max_receive_size() {
+        let establishing =
+            GssapiClientExchange::new(Box::new(FakeInitiator { done: false }), 0x1_0000, None);
+        let rendered = format!("{establishing:?}");
+        for part in [
+            "GssapiClientExchange::Establishing",
+            "Establishing",
+            "max_recv_size",
+        ] {
+            assert!(rendered.contains(part), "missing {part:?} in {rendered}");
+        }
+
+        // First step: still negotiating -> stays `Establishing`.
+        let establishing = match establishing.step(None).unwrap() {
+            ClientStep::Token(_, next) => next,
+            ClientStep::Final(_) => panic!("expected token"),
+        };
+        // Second step: context completes -> `AwaitingOffer`.
+        let awaiting_offer = match establishing.step(Some(b"AP-REP")).unwrap() {
+            ClientStep::Token(_, next) => next,
+            ClientStep::Final(_) => panic!("expected token"),
+        };
+        let rendered = format!("{awaiting_offer:?}");
+        for part in [
+            "GssapiClientExchange::AwaitingOffer",
+            "AwaitingOffer",
+            "max_recv_size",
+        ] {
+            assert!(rendered.contains(part), "missing {part:?} in {rendered}");
+        }
+    }
+
+    #[test]
     fn rejects_offer_without_auth_layer_even_when_other_layers_present() {
         let ex = GssapiClientExchange::new(Box::new(FakeInitiator { done: false }), 0x1_0000, None);
 
