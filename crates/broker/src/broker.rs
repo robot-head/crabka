@@ -1976,6 +1976,7 @@ impl Broker {
                     cluster_id: config.cluster_id.unwrap_or_else(uuid::Uuid::nil),
                     max_bytes: OBSERVER_FETCH_MAX_BYTES,
                     poll_interval: OBSERVER_POLL_INTERVAL,
+                    sleeper: std::sync::Arc::new(qubit_clock::sleep::SystemSleeper::new()),
                 },
             );
             let forwarder = crate::metadata_source::QuorumForwarder {
@@ -2910,6 +2911,7 @@ impl Broker {
                     .oauthbearer_jwks_last_on_demand_refresh_ms
                     .clone(),
                 ignore_key_use: config.oauthbearer_jwks_ignore_key_use,
+                sleeper: std::sync::Arc::new(qubit_clock::sleep::SystemSleeper::new()),
             };
             tokio::spawn(refresher.run());
         }
