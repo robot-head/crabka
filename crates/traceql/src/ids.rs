@@ -28,9 +28,7 @@ use derive_more::{Display, From, Into};
 ///
 /// Used for query window bounds (`start_ns`/`end_ns`), a span row's start time,
 /// and the per-bucket output timestamps of a metrics range query.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Display, From, Into,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Display, From, Into)]
 pub(crate) struct UnixNano(pub i64);
 
 /// A duration in nanoseconds (a *span of time*, not an instant).
@@ -38,7 +36,5 @@ pub(crate) struct UnixNano(pub i64);
 /// Used for the metrics range-query `step`. Kept distinct from [`UnixNano`] so a
 /// step can never be transposed into a timestamp position (or vice versa) in the
 /// metrics-range structs and the `assemble_*` arg lists.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Display, From, Into,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Display, From, Into)]
 pub(crate) struct DurationNanos(pub i64);

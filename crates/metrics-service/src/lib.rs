@@ -260,7 +260,11 @@ pub fn replay_wal_head_records(
         }
         // Bridge this crate's `ids::{PartitionIndex, Offset}` to promql's own
         // newtypes via the raw primitive (`.0`), the wire-boundary conversion.
-        head.apply_wal_record_at(&wal_record, record.partition.0.into(), record.offset.0.into());
+        head.apply_wal_record_at(
+            &wal_record,
+            record.partition.0.into(),
+            record.offset.0.into(),
+        );
         replayed_records += 1;
         committed_offsets
             .entry(record.partition)
