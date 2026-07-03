@@ -200,7 +200,7 @@ fn capture_and_generate_corpus() {
             captured
                 .lock()
                 .unwrap()
-                .entry((f.api_key, f.version, f.is_request))
+                .entry((f.api_key.0, f.version.0, f.is_request))
                 .or_insert(f.body);
         })
     };

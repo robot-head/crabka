@@ -2201,6 +2201,7 @@ dependencies = [
  "crabka-client-consumer",
  "crabka-client-core",
  "crabka-client-producer",
+ "crabka-ids",
  "crabka-metadata",
  "crabka-protocol",
  "crabka-security",
@@ -2248,6 +2249,7 @@ dependencies = [
  "async-trait",
  "bon",
  "bytes",
+ "crabka-ids",
  "crabka-protocol",
  "crabka-security",
  "dashmap",
@@ -2537,6 +2539,9 @@ dependencies = [
 [[package]]
 name = "crabka-kafka-tap"
 version = "0.3.8"
+dependencies = [
+ "crabka-ids",
+]
 
 [[package]]
 name = "crabka-kraft-core"

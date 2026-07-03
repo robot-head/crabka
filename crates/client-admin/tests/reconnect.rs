@@ -110,17 +110,22 @@ impl ClosingAclBroker {
                                         if frame.len() < 8 {
                                             continue;
                                         }
-                                        let api_key = i16::from_be_bytes([frame[0], frame[1]]);
-                                        let version = i16::from_be_bytes([frame[2], frame[3]]);
+                                        // Parse the request header's two adjacent
+                                        // `int16`s into distinct newtypes so the
+                                        // api_key/api_version pair cannot be transposed.
+                                        let api_key = crabka_ids::ApiKey(i16::from_be_bytes([frame[0], frame[1]]));
+                                        let version = crabka_ids::ApiVersion(i16::from_be_bytes([frame[2], frame[3]]));
                                         let corr_id = i32::from_be_bytes([frame[4], frame[5], frame[6], frame[7]]);
-                                        let body = if api_key == api_versions_request::API_KEY {
+                                        let body = if api_key == crabka_ids::ApiKey(api_versions_request::API_KEY) {
                                             Some(api_versions_response_v0())
-                                        } else if api_key == describe_acls_request::API_KEY {
+                                        } else if api_key == crabka_ids::ApiKey(describe_acls_request::API_KEY) {
                                             conn_describe_calls.fetch_add(1, Ordering::SeqCst);
                                             if conn_first_acl_request.swap(false, Ordering::SeqCst) {
                                                 break;
                                             }
-                                            Some(describe_acls_response(version))
+                                            // Unwrap at the generated-codec boundary: the
+                                            // encoder takes the raw wire `int16` version.
+                                            Some(describe_acls_response(version.get()))
                                         } else {
                                             None
                                         };

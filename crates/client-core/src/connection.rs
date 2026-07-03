@@ -11,6 +11,7 @@ use std::{
 };
 
 use bytes::{BufMut, Bytes, BytesMut};
+use crabka_ids::{ApiKey, ApiVersion};
 use dashmap::DashMap;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
@@ -268,8 +269,8 @@ impl Connection {
         // per the upstream `RequestHeader.json` schema.
         let body_flexible = version >= R::FLEXIBLE_MIN;
         let mut frame = build_request_header(
-            R::API_KEY,
-            version,
+            ApiKey(R::API_KEY),
+            ApiVersion(version),
             corr_id,
             &self.inner.options.client_id,
             body_flexible,
@@ -358,8 +359,8 @@ impl Connection {
         // RequestHeader v2 (flexible). Crabka-private api keys are always
         // declared flexible so the header shape is predictable.
         let mut frame = build_request_header(
-            api_key,
-            api_version,
+            ApiKey(api_key),
+            ApiVersion(api_version),
             corr_id,
             &self.inner.options.client_id,
             true,
@@ -520,15 +521,15 @@ fn spawn_io_tasks(
 /// Pass `with_tagged_fields = true` iff the request body is flexible
 /// (`version >= R::FLEXIBLE_MIN`).
 fn build_request_header(
-    api_key: i16,
-    version: i16,
+    api_key: ApiKey,
+    version: ApiVersion,
     corr_id: i32,
     client_id: &str,
     with_tagged_fields: bool,
 ) -> BytesMut {
     let mut buf = BytesMut::with_capacity(32);
-    buf.put_i16(api_key);
-    buf.put_i16(version);
+    buf.put_i16(api_key.0);
+    buf.put_i16(version.0);
     buf.put_i32(corr_id);
     let n = i16::try_from(client_id.len()).expect("client_id fits in i16");
     buf.put_i16(n);
@@ -558,8 +559,8 @@ async fn fetch_api_versions(conn: &Connection) -> Result<ApiVersionTable, Client
 
     // v0 is non-flexible: header v1, no tagged-fields byte.
     let mut frame = build_request_header(
-        ApiVersionsRequest::API_KEY,
-        0,
+        ApiKey(ApiVersionsRequest::API_KEY),
+        ApiVersion(0),
         corr_id,
         &conn.inner.options.client_id,
         false,

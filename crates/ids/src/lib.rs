@@ -221,3 +221,68 @@ impl LeaderEpoch {
         LeaderEpoch(self.0 + 1)
     }
 }
+
+/// A Kafka request API key, as the raw wire `int16`.
+///
+/// This is the numeric code in a request header (`ApiKey` field). It is distinct
+/// from the typed [`crabka_protocol::ApiKey`] *enum*, which names each key
+/// (`Produce`, `Fetch`, …): this newtype is the boundary value threaded through
+/// hand-written header construction and the tap/proxy frame parsers, paired with
+/// an [`ApiVersion`] — two adjacent `i16`s that must not be transposed.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Display,
+    From,
+    Into,
+    Serialize,
+    Deserialize,
+)]
+#[serde(transparent)]
+pub struct ApiKey(pub i16);
+
+impl ApiKey {
+    /// The inner `i16` — use at the wire/generated boundary.
+    #[must_use]
+    pub const fn get(self) -> i16 {
+        self.0
+    }
+}
+
+/// A Kafka request/response API version (wire type: `int16`).
+///
+/// Paired with an [`ApiKey`] in a request header; the two adjacent `i16`s are the
+/// textbook swap shape, which these distinct types prevent.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Display,
+    From,
+    Into,
+    Serialize,
+    Deserialize,
+)]
+#[serde(transparent)]
+pub struct ApiVersion(pub i16);
+
+impl ApiVersion {
+    /// The inner `i16` — use at the wire/generated boundary.
+    #[must_use]
+    pub const fn get(self) -> i16 {
+        self.0
+    }
+}

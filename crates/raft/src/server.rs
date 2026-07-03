@@ -16,6 +16,7 @@
 use std::sync::Arc;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use crabka_ids::{ApiKey, ApiVersion};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::TcpListener,
@@ -36,27 +37,23 @@ use crate::{
     },
 };
 
-/// Kafka request-header `api_key` (`RequestHeader` field 1).
-type ApiKey = i16;
-/// Kafka request-header `api_version` (`RequestHeader` field 2).
-type ApiVersion = i16;
 /// Kafka request-header `correlation_id`, echoed back in the response header.
 type CorrelationId = i32;
 
 /// Kafka's `ApiVersions` API key. The controller TCP listener answers this
 /// because `crabka_client_core::Connection::connect` performs an `ApiVersions`
 /// handshake before any other request.
-const API_KEY_API_VERSIONS: ApiKey = 18;
+const API_KEY_API_VERSIONS: i16 = 18;
 
 /// Highest `ApiVersions` request version this listener speaks: the advertised
 /// max in the `api_keys` table and the clamp applied to the response body codec
 /// (JVM controllers dial at v4; Crabka's own client at v0).
-const API_VERSIONS_MAX_VERSION: ApiVersion = 4;
+const API_VERSIONS_MAX_VERSION: i16 = 4;
 
 /// `DescribeCluster` (KIP-919) — served on the controller listener so an
 /// `AdminClient` bootstrapped with `--bootstrap-controller` can discover the
 /// quorum's controller (or broker) endpoints directly from the leader.
-const API_KEY_DESCRIBE_CLUSTER: ApiKey = 60;
+const API_KEY_DESCRIBE_CLUSTER: i16 = 60;
 
 /// `CrabkaSubmitChangeResponse::error_code`: the change was applied.
 const SUBMIT_CHANGE_APPLIED: i16 = 0;
@@ -144,13 +141,14 @@ where
                 // tagged-fields byte) and expects a ResponseHeader v0 reply (also
                 // no tagged-fields byte) — the documented Kafka asymmetry. We
                 // serialize it separately rather than poisoning the generic codec.
-                if api_key_n == API_KEY_API_VERSIONS {
+                if api_key_n.get() == API_KEY_API_VERSIONS {
                     // ApiVersionsResponse always uses a v0 ResponseHeader (no
                     // tagged-fields byte), but the BODY shape depends on the
                     // request version: v0..=2 are non-flexible (i32 array), v3+
                     // are flexible (compact array). Crabka's own client asks at
-                    // v0; the JVM controller asks at v4.
-                    let resp = api_versions_response_body(api_version);
+                    // v0; the JVM controller asks at v4. The generated codec
+                    // speaks the raw `int16`, so unwrap the version here.
+                    let resp = api_versions_response_body(api_version.get());
                     write_response_no_tagged_fields(&mut stream, correlation_id, resp).await?;
                     continue;
                 }
@@ -158,8 +156,9 @@ where
                 // `dispatch` because it needs the request version (for the
                 // flexible body codec) and the controller's metadata image. The
                 // flexible v1 ResponseHeader is supplied by `write_response`.
-                if api_key_n == API_KEY_DESCRIBE_CLUSTER {
-                    let resp = describe_cluster_response_body(api_version, &body, &engine).await?;
+                if api_key_n.get() == API_KEY_DESCRIBE_CLUSTER {
+                    let resp =
+                        describe_cluster_response_body(api_version.get(), &body, &engine).await?;
                     write_response(&mut stream, correlation_id, resp).await?;
                     continue;
                 }
@@ -209,10 +208,12 @@ where
 
     // RequestHeader v2 (flexible): api_key(i16), api_version(i16),
     // correlation_id(i32), client_id(NULLABLE_STRING), tagged_fields(varint=0).
+    // The two adjacent header `int16`s are wrapped into distinct newtypes here so
+    // the transpose-prone pair can't be swapped by callers.
     let mut cur: &[u8] = &frame;
     require_remaining(cur.remaining(), REQUEST_HEADER_FIXED_LEN)?;
-    let api_key_n = cur.get_i16();
-    let api_version = cur.get_i16();
+    let api_key_n = ApiKey(cur.get_i16());
+    let api_version = ApiVersion(cur.get_i16());
     let correlation_id = cur.get_i32();
 
     // Skip client_id: NULLABLE_STRING (i16 length + bytes; -1 = null).
@@ -292,7 +293,7 @@ where
 /// `throttle_time_ms(i32)`, response-level `tagged(0)`. Per the documented Kafka
 /// asymmetry, the *response header* stays v0 (no leading tagged-fields byte) —
 /// so this is written via [`write_response_no_tagged_fields`].
-fn api_versions_response_body(req_version: ApiVersion) -> Bytes {
+fn api_versions_response_body(req_version: i16) -> Bytes {
     use crabka_protocol::{
         Encode,
         owned::api_versions_response::{ApiVersion as ApiVersionEntry, ApiVersionsResponse},
@@ -300,7 +301,7 @@ fn api_versions_response_body(req_version: ApiVersion) -> Bytes {
     // (api_key, max_version) — min_version/error_code/throttle_time_ms are all
     // protocol defaults of 0, so leave them implicit. Each max_version is the
     // highest version the engine's codec speaks for that API.
-    const KEYS: &[(ApiKey, ApiVersion)] = &[
+    const KEYS: &[(i16, i16)] = &[
         (api_key::FETCH, 17),
         (API_KEY_API_VERSIONS, API_VERSIONS_MAX_VERSION),
         (api_key::VOTE, 2),
@@ -337,32 +338,34 @@ fn api_versions_response_body(req_version: ApiVersion) -> Bytes {
 /// which decodes the body, runs the core, and replies on a oneshot with the
 /// encoded response body. The Crabka-private 1003/1004 keep their bespoke
 /// request/response wire types.
-#[tracing::instrument(level = "debug", skip_all, fields(node = engine.node_id().0, api_key = api_key_n), err)]
+#[tracing::instrument(level = "debug", skip_all, fields(node = engine.node_id().0, api_key = api_key_n.get()), err)]
 async fn dispatch(
     api_key_n: ApiKey,
     body: Bytes,
     engine: &KraftController,
 ) -> Result<Bytes, RaftError> {
     match api_key_n {
-        api_key::FETCH => {
+        ApiKey(api_key::FETCH) => {
             deliver_inbound(engine, |reply| Inbound::Fetch { req: body, reply }).await
         }
-        api_key::VOTE => deliver_inbound(engine, |reply| Inbound::Vote { req: body, reply }).await,
-        api_key::BEGIN_QUORUM_EPOCH => {
+        ApiKey(api_key::VOTE) => {
+            deliver_inbound(engine, |reply| Inbound::Vote { req: body, reply }).await
+        }
+        ApiKey(api_key::BEGIN_QUORUM_EPOCH) => {
             deliver_inbound(engine, |reply| Inbound::BeginQuorumEpoch {
                 req: body,
                 reply,
             })
             .await
         }
-        api_key::END_QUORUM_EPOCH => {
+        ApiKey(api_key::END_QUORUM_EPOCH) => {
             deliver_inbound(engine, |reply| Inbound::EndQuorumEpoch { req: body, reply }).await
         }
-        api_key::FETCH_SNAPSHOT => {
+        ApiKey(api_key::FETCH_SNAPSHOT) => {
             deliver_inbound(engine, |reply| Inbound::FetchSnapshot { req: body, reply }).await
         }
-        API_KEY_SUBMIT_CHANGE => dispatch_submit_change(&body, engine).await,
-        API_KEY_METADATA_FETCH => dispatch_metadata_fetch(&body, engine).await,
+        ApiKey(API_KEY_SUBMIT_CHANGE) => dispatch_submit_change(&body, engine).await,
+        ApiKey(API_KEY_METADATA_FETCH) => dispatch_metadata_fetch(&body, engine).await,
         _ => Err(RaftError::Protocol(
             crabka_protocol::ProtocolError::InvalidValue("unknown controller api key"),
         )),
@@ -469,7 +472,7 @@ async fn dispatch_metadata_fetch(
 /// listener carries no principal/ACL context (it is the inter-node trust
 /// boundary, like `metadata_fetch`), so there is no auth gate.
 async fn describe_cluster_response_body(
-    version: ApiVersion,
+    version: i16,
     body: &[u8],
     engine: &KraftController,
 ) -> Result<Bytes, RaftError> {
@@ -531,7 +534,7 @@ async fn describe_cluster_response_body(
 /// Encode a `DescribeClusterResponse` body for `version` from already-projected
 /// node tuples. Pure (no engine), so the projection-and-encode is unit-testable.
 fn build_describe_cluster_body(
-    version: ApiVersion,
+    version: i16,
     endpoint_type: i8,
     voters: &[(i32, String, i32)],
     brokers: &[(i32, String, i32, Option<String>)],
@@ -602,15 +605,15 @@ mod tests {
     }
 
     fn request_frame(
-        api_key: i16,
-        api_version: i16,
+        api_key: ApiKey,
+        api_version: ApiVersion,
         correlation_id: i32,
         client_id: &str,
         body: &[u8],
     ) -> Vec<u8> {
         let mut frame = bytes::BytesMut::new();
-        frame.put_i16(api_key);
-        frame.put_i16(api_version);
+        frame.put_i16(api_key.get());
+        frame.put_i16(api_version.get());
         frame.put_i32(correlation_id);
         frame.put_i16(i16::try_from(client_id.len()).unwrap());
         frame.put_slice(client_id.as_bytes());
@@ -620,16 +623,16 @@ mod tests {
     }
 
     fn raw_request_frame(
-        api_key: i16,
-        api_version: i16,
+        api_key: ApiKey,
+        api_version: ApiVersion,
         correlation_id: i32,
         client_id_len: i16,
         client_id_bytes: &[u8],
         tagged_or_body: &[u8],
     ) -> Vec<u8> {
         let mut frame = bytes::BytesMut::new();
-        frame.put_i16(api_key);
-        frame.put_i16(api_version);
+        frame.put_i16(api_key.get());
+        frame.put_i16(api_version.get());
         frame.put_i32(correlation_id);
         frame.put_i16(client_id_len);
         frame.put_slice(client_id_bytes);
@@ -769,12 +772,12 @@ mod tests {
         let cases = [
             (
                 "flexible header with client id and body",
-                request_frame(52, 2, 123, "raft-client", b"payload"),
+                request_frame(ApiKey(52), ApiVersion(2), 123, "raft-client", b"payload"),
                 b"payload".as_slice(),
             ),
             (
                 "null client id with no body",
-                raw_request_frame(52, 2, 123, -1, &[], &[]),
+                raw_request_frame(ApiKey(52), ApiVersion(2), 123, -1, &[], &[]),
                 b"".as_slice(),
             ),
         ];
@@ -787,8 +790,8 @@ mod tests {
             let (api_key, api_version, correlation_id, body) =
                 super::read_one_request(&mut server).await.expect("decode");
 
-            check!(api_key == 52, "case: {case}");
-            check!(api_version == 2, "case: {case}");
+            check!(api_key == ApiKey(52), "case: {case}");
+            check!(api_version == ApiVersion(2), "case: {case}");
             check!(correlation_id == 123, "case: {case}");
             check!(body.as_ref() == want_body, "case: {case}");
             writer.await.unwrap();
@@ -824,7 +827,7 @@ mod tests {
             // Client-id length declares 4 bytes; only 1 present.
             (
                 "client id bytes shortfall",
-                raw_request_frame(52, 2, 123, 4, b"x", &[]),
+                raw_request_frame(ApiKey(52), ApiVersion(2), 123, 4, b"x", &[]),
                 3,
             ),
         ];
@@ -854,7 +857,14 @@ mod tests {
     #[tokio::test]
     async fn read_one_request_keeps_nonzero_tagged_byte_as_body() {
         let (mut client, mut server) = tokio::io::duplex(128);
-        let frame = raw_request_frame(52, 2, 123, 0, &[], &[1, b'p', b'a', b'y']);
+        let frame = raw_request_frame(
+            ApiKey(52),
+            ApiVersion(2),
+            123,
+            0,
+            &[],
+            &[1, b'p', b'a', b'y'],
+        );
         let writer = tokio::spawn(async move {
             client.write_all(&frame).await.unwrap();
         });
@@ -881,7 +891,7 @@ mod tests {
             pre_vote: false,
         }
         .encode();
-        let vote_resp = super::dispatch(api_key::VOTE, vote, &engine)
+        let vote_resp = super::dispatch(ApiKey(api_key::VOTE), vote, &engine)
             .await
             .expect("vote dispatch");
         assert!(PeerResponse::decode_vote(&vote_resp).is_some());
@@ -892,7 +902,7 @@ mod tests {
             fetch_offset: 0,
         }
         .encode();
-        let fetch_resp = super::dispatch(api_key::FETCH, fetch, &engine)
+        let fetch_resp = super::dispatch(ApiKey(api_key::FETCH), fetch, &engine)
             .await
             .expect("fetch dispatch");
         assert!(PeerResponse::decode_fetch(&fetch_resp).is_some());
@@ -904,7 +914,7 @@ mod tests {
             max_bytes: 32,
         }
         .encode();
-        let snapshot_resp = super::dispatch(api_key::FETCH_SNAPSHOT, snapshot, &engine)
+        let snapshot_resp = super::dispatch(ApiKey(api_key::FETCH_SNAPSHOT), snapshot, &engine)
             .await
             .expect("snapshot dispatch");
         assert!(matches!(
@@ -917,7 +927,7 @@ mod tests {
             leader_epoch: 1,
         }
         .encode();
-        let begin_resp = super::dispatch(api_key::BEGIN_QUORUM_EPOCH, begin, &engine)
+        let begin_resp = super::dispatch(ApiKey(api_key::BEGIN_QUORUM_EPOCH), begin, &engine)
             .await
             .expect("begin dispatch");
         assert!(!begin_resp.is_empty());
@@ -927,7 +937,7 @@ mod tests {
             leader_epoch: 1,
         }
         .encode();
-        let end_resp = super::dispatch(api_key::END_QUORUM_EPOCH, end, &engine)
+        let end_resp = super::dispatch(ApiKey(api_key::END_QUORUM_EPOCH), end, &engine)
             .await
             .expect("end dispatch");
         assert!(!end_resp.is_empty());
@@ -939,7 +949,7 @@ mod tests {
         wait_for_leader(&engine).await;
 
         let ok_body = super::dispatch(
-            API_KEY_SUBMIT_CHANGE,
+            ApiKey(API_KEY_SUBMIT_CHANGE),
             submit_change_body(&[topic_record("submit-ok")]),
             &engine,
         )
@@ -954,9 +964,13 @@ mod tests {
         };
         let mut bad_body = Vec::new();
         bad_req.encode_v0(&mut bad_body).unwrap();
-        let err_body = super::dispatch(API_KEY_SUBMIT_CHANGE, Bytes::from(bad_body), &engine)
-            .await
-            .expect("decode failure dispatch");
+        let err_body = super::dispatch(
+            ApiKey(API_KEY_SUBMIT_CHANGE),
+            Bytes::from(bad_body),
+            &engine,
+        )
+        .await
+        .expect("decode failure dispatch");
         let err = decode_submit_change_response(&err_body);
         assert!(err.error_code == 2);
         assert!(err.leader_hint == -1);
@@ -969,7 +983,7 @@ mod tests {
 
         let topic = topic_record("duplicate");
         let first = super::dispatch(
-            API_KEY_SUBMIT_CHANGE,
+            ApiKey(API_KEY_SUBMIT_CHANGE),
             submit_change_body(std::slice::from_ref(&topic)),
             &engine,
         )
@@ -977,10 +991,13 @@ mod tests {
         .expect("first submit");
         assert!(decode_submit_change_response(&first).error_code == 0);
 
-        let duplicate =
-            super::dispatch(API_KEY_SUBMIT_CHANGE, submit_change_body(&[topic]), &engine)
-                .await
-                .expect("duplicate submit");
+        let duplicate = super::dispatch(
+            ApiKey(API_KEY_SUBMIT_CHANGE),
+            submit_change_body(&[topic]),
+            &engine,
+        )
+        .await
+        .expect("duplicate submit");
         let duplicate = decode_submit_change_response(&duplicate);
         assert!(duplicate.error_code == 2);
         assert!(duplicate.leader_hint == -1);
@@ -990,9 +1007,13 @@ mod tests {
     async fn dispatch_metadata_fetch_clamps_negative_request_and_reports_unknown_leader() {
         let (engine, _dir) = test_engine_with_voters(1, std::iter::empty());
 
-        let body = super::dispatch(API_KEY_METADATA_FETCH, metadata_fetch_body(-5, -1), &engine)
-            .await
-            .expect("metadata fetch dispatch");
+        let body = super::dispatch(
+            ApiKey(API_KEY_METADATA_FETCH),
+            metadata_fetch_body(-5, -1),
+            &engine,
+        )
+        .await
+        .expect("metadata fetch dispatch");
 
         let resp = decode_metadata_fetch_response(&body);
         check!(resp.error_code == 0);
@@ -1011,7 +1032,7 @@ mod tests {
             .expect("submit");
 
         let body = super::dispatch(
-            API_KEY_METADATA_FETCH,
+            ApiKey(API_KEY_METADATA_FETCH),
             metadata_fetch_body(0, 1_048_576),
             &engine,
         )

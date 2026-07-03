@@ -18,6 +18,7 @@ workspace = true
 
 [dependencies]
 crabka-client-core = { version = "0.3.8", path = "../client-core" }
+crabka-ids         = { version = "0.3.8", path = "../ids" }
 crabka-metadata    = { version = "0.3.8", path = "../metadata" }
 crabka-protocol    = { version = "0.3.8", path = "../protocol", default-features = false }
 crabka-security    = { version = "0.3.8", path = "../security" }
