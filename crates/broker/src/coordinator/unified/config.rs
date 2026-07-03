@@ -4,6 +4,8 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use qubit_clock::sleep::{AsyncSleeper, SystemSleeper};
+
 use super::assignor::{Assignor, RangeAssignor, UniformAssignor};
 
 /// `group.consumer.migration.policy` — governs classic ↔ next-gen consumer
@@ -60,7 +62,7 @@ impl FromStr for ConsumerGroupMigrationPolicy {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct NextGenConfig {
     /// Comma-separated list; "consumer" enables KIP-848. Default "classic,consumer".
     pub rebalance_protocols: Vec<RebalanceProtocol>,
@@ -80,6 +82,31 @@ pub struct NextGenConfig {
     /// `group.consumer.migration.policy` — governs classic ↔ next-gen
     /// conversion. Consulted by the conversion triggers.
     pub migration_policy: ConsumerGroupMigrationPolicy,
+    /// Relative sleeper driving the per-group actor's session-expiry tick
+    /// cadence. Production uses [`qubit_clock::sleep::SystemSleeper`] (real
+    /// time); tests inject a [`qubit_clock::sleep::MockSleeper`] so the tick
+    /// fires on a controlled mock timeline instead of wall-clock time.
+    pub sleeper: Arc<dyn AsyncSleeper>,
+}
+
+// Manual `Debug` (the `AsyncSleeper` trait object is not `Debug`): print every
+// operator-relevant field and elide the sleeper. Kept so the enclosing
+// `#[derive(Debug)]` `GroupCoordinator` still derives.
+impl std::fmt::Debug for NextGenConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NextGenConfig")
+            .field("rebalance_protocols", &self.rebalance_protocols)
+            .field("session_timeout", &self.session_timeout)
+            .field("heartbeat_interval", &self.heartbeat_interval)
+            .field("min_session_timeout", &self.min_session_timeout)
+            .field("max_session_timeout", &self.max_session_timeout)
+            .field("min_heartbeat_interval", &self.min_heartbeat_interval)
+            .field("max_heartbeat_interval", &self.max_heartbeat_interval)
+            .field("assignors", &self.assignors)
+            .field("max_size", &self.max_size)
+            .field("migration_policy", &self.migration_policy)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,6 +165,7 @@ impl Default for NextGenConfig {
             assignors: vec![Arc::new(UniformAssignor), Arc::new(RangeAssignor)],
             max_size: DEFAULT_MAX_GROUP_SIZE,
             migration_policy: ConsumerGroupMigrationPolicy::default(),
+            sleeper: Arc::new(SystemSleeper::new()),
         }
     }
 }

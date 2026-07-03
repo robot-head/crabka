@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use qubit_clock::sleep::{AsyncSleeper, SystemSleeper};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
@@ -24,15 +25,21 @@ use crate::partition_registry::PartitionRegistry;
 const DEFAULT_COMPACTION_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Tunables for [`run`].
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct CleanerConfig {
     pub interval: Duration,
+    /// Relative sleeper driving the compaction-sweep cadence. Production uses
+    /// [`qubit_clock::sleep::SystemSleeper`] (real time); tests inject a
+    /// [`qubit_clock::sleep::MockSleeper`] so the sweep interval fires on a
+    /// controlled mock timeline instead of wall-clock time.
+    pub sleeper: Arc<dyn AsyncSleeper>,
 }
 
 impl Default for CleanerConfig {
     fn default() -> Self {
         Self {
             interval: DEFAULT_COMPACTION_INTERVAL,
+            sleeper: Arc::new(SystemSleeper::new()),
         }
     }
 }
@@ -44,16 +51,26 @@ pub(crate) async fn run(
     cfg: CleanerConfig,
     shutdown: CancellationToken,
 ) {
-    let mut ticker = tokio::time::interval(cfg.interval);
+    // Drive the sweep cadence through the injected `AsyncSleeper` (production:
+    // real time; tests: a controlled mock timeline). A zero-duration first sleep
+    // reproduces `tokio::time::interval`'s immediate t=0 tick, so the first sweep
+    // fires at startup; each subsequent sleep is re-armed to `cfg.interval` only
+    // after the sweep completes (`MissedTickBehavior::Delay` semantics — a slow
+    // sweep never triggers a catch-up burst). The sleeper is cloned into a local
+    // so the tick future borrows it rather than `cfg`, leaving `cfg` free.
+    let sleeper = cfg.sleeper.clone();
+    let mut tick = sleeper.sleep_for_async(Duration::ZERO);
     loop {
         tokio::select! {
-            _ = ticker.tick() => {}
+            () = &mut tick => {
+                tick_all(&partitions, node_id).await;
+                tick = sleeper.sleep_for_async(cfg.interval);
+            }
             () = shutdown.cancelled() => {
                 debug!("cleaner task shutting down");
                 return;
             }
         }
-        tick_all(&partitions, node_id).await;
     }
 }
 
@@ -200,6 +217,9 @@ mod tests {
 
     #[tokio::test]
     async fn run_ticks_until_shutdown() {
+        use qubit_clock::MockWaiterKind;
+        use qubit_clock::sleep::MockSleeper;
+
         let dir = tempfile::tempdir().expect("log root");
         let registry = Arc::new(PartitionRegistry::new());
         let partition = compactable_partition(
@@ -211,27 +231,61 @@ mod tests {
         );
         let before = record_count(&partition);
         registry.insert("run-compact".to_string(), 0, Arc::clone(&partition));
+
+        // Drive the sweep cadence on a mock timeline instead of wall-clock time.
+        let interval = Duration::from_secs(30);
+        let sleeper = MockSleeper::new();
+        let timeline = sleeper.timeline();
         let shutdown = CancellationToken::new();
         let task = tokio::spawn(run(
             Arc::clone(&registry),
             7,
             CleanerConfig {
-                interval: Duration::from_millis(20),
+                interval,
+                sleeper: Arc::new(sleeper),
             },
             shutdown.clone(),
         ));
 
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        loop {
-            if record_count(&partition) < before {
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "cleaner run loop did not compact eligible partition"
-            );
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        // The immediate t=0 tick runs a compaction sweep, then the loop re-arms
+        // on `sleep_for_async(interval)`. Block (bounded real time, hang-guard
+        // only) until that interval-sleep waiter is parked — it registers
+        // strictly after the first sweep's `tick_all` returns, so the compaction
+        // is fully applied by then. `wait_for_blocked_waiters` runs on a blocking
+        // thread so it never stalls the current-thread runtime that must drive
+        // the cleaner task and the partition writer actor to completion.
+        let tl = timeline.clone();
+        let parked = tokio::task::spawn_blocking(move || {
+            tl.wait_for_blocked_waiters(MockWaiterKind::Sleep, 1, Duration::from_secs(5))
+        })
+        .await
+        .unwrap();
+        assert!(
+            parked,
+            "cleaner should park on the interval sleep after the first sweep"
+        );
+        assert!(
+            record_count(&partition) < before,
+            "immediate first sweep should compact the eligible partition"
+        );
+
+        // Advance one interval to fire a second sweep, then confirm the loop
+        // re-parks — proving it keeps ticking on the injected cadence with no
+        // wall-clock time (the second sweep is idempotent, so the log stays
+        // compacted rather than shrinking further).
+        timeline.advance(interval);
+        let tl = timeline.clone();
+        let parked_again = tokio::task::spawn_blocking(move || {
+            tl.wait_for_blocked_waiters(MockWaiterKind::Sleep, 1, Duration::from_secs(5))
+        })
+        .await
+        .unwrap();
+        assert!(
+            parked_again,
+            "cleaner should re-park on the interval sleep after the second sweep"
+        );
+        assert!(record_count(&partition) < before, "log stays compacted");
+
         shutdown.cancel();
         task.await.expect("cleaner task exits");
     }

@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
+use qubit_clock::sleep::AsyncSleeper;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
@@ -380,8 +381,16 @@ async fn actor_loop(
     // `last_seen`-vs-`session_timeout` comparison, so ticking once a second
     // (rather than on the heartbeat interval for consumer groups) only changes
     // how often we check, never the outcome.
-    let mut tick = tokio::time::interval(SESSION_EXPIRY_TICK_INTERVAL);
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    //
+    // Driven through the injected `AsyncSleeper` (production: real time; tests:
+    // a controlled mock timeline). A zero-duration first sleep reproduces
+    // `tokio::time::interval`'s immediate t=0 tick; each subsequent sleep is
+    // re-armed to `SESSION_EXPIRY_TICK_INTERVAL` only after the tick body runs
+    // (`MissedTickBehavior::Delay` semantics — a slow tick never bursts). The
+    // future is held across loop iterations so an inbound-message stream never
+    // resets the tick schedule (matching the persistent `Interval`).
+    let sleeper = config.sleeper.clone();
+    let mut tick = sleeper.sleep_for_async(Duration::ZERO);
     loop {
         let deadline = classic_deadline(&group);
         tokio::select! {
@@ -665,7 +674,7 @@ async fn actor_loop(
                     }
                 }
             }
-            _ = tick.tick() => {
+            () = &mut tick => {
                 // Dispatch on the LIVE `group.kind`; the captured spawn-time
                 // `kind` is not a reliable discriminator after migration.
                 let gid = group.group_id.clone();
@@ -707,6 +716,9 @@ async fn actor_loop(
                         );
                     }
                 }
+                // Re-arm the next tick only after the body ran, so a slow tick
+                // never bursts (`MissedTickBehavior::Delay` cadence).
+                tick = sleeper.sleep_for_async(SESSION_EXPIRY_TICK_INTERVAL);
             }
             () = opt_sleep(deadline) => {
                 // Classic rebalance deadline fired: complete with whoever is here.
