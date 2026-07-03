@@ -114,7 +114,7 @@ async fn producer_routes_to_non_bootstrap_leaders() {
             Instant::now() <= deadline,
             "topic partitions didn't materialize across the cluster in 2 min"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
 
     // Wait until node 1 knows every partition's leader (controller image
@@ -131,7 +131,7 @@ async fn producer_routes_to_non_bootstrap_leaders() {
             Instant::now() <= deadline,
             "partition leaders didn't converge within 30s"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
 
     // Discriminating guard: at least one partition must be led by a

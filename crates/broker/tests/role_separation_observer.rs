@@ -56,7 +56,7 @@ async fn broker_only_node_observes_and_forwards() {
         if Instant::now() > deadline {
             panic!("controller did not become leader within 2 min");
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::task::yield_now().await;
     }
 
     // Broker-only node (node 2): no openraft voter. Keeps its metadata image
@@ -85,7 +85,7 @@ async fn broker_only_node_observes_and_forwards() {
         if Instant::now() > deadline {
             panic!("broker-only node did not register with the controller within 2 min");
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::task::yield_now().await;
     }
 
     // CreateTopics against the broker-only node — forwarded to the controller
@@ -121,7 +121,7 @@ async fn broker_only_node_observes_and_forwards() {
         if Instant::now() > deadline {
             panic!("topic did not propagate to the broker-only image within 2 min");
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::task::yield_now().await;
     }
 
     // Assertion 2: the controller itself committed the forwarded topic.

@@ -146,7 +146,7 @@ async fn wait_partition_exists(handle: &BrokerHandle, topic: &str, partition: i3
             Instant::now() <= deadline,
             "partition {topic}-{partition} never appeared within 15s"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
 }
 
@@ -200,7 +200,7 @@ async fn controller_leader_addr(handles: &[&BrokerHandle]) -> SocketAddr {
             Instant::now() <= deadline,
             "raft leader not stable within 15s; got {lid:?}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::task::yield_now().await;
     }
 }
 
@@ -379,7 +379,7 @@ async fn alter_then_complete_via_isr_catchup() {
             Instant::now() <= deadline,
             "adding_replicas never set within 10s; pr={pr:?}"
         );
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::task::yield_now().await;
     };
     assert!(
         pr_after_alter
@@ -424,7 +424,7 @@ async fn alter_then_complete_via_isr_catchup() {
         if Instant::now() > deadline {
             panic!("reassignment did not complete; pr={:?}", pr);
         }
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::task::yield_now().await;
     }
 }
 
@@ -461,7 +461,7 @@ async fn list_in_flight_returns_pending_rows() {
             Instant::now() <= deadline,
             "adding_replicas never set within 10s"
         );
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::task::yield_now().await;
     }
 
     let listed = drive_list_reassignments(raft_addr, None).await;
@@ -735,6 +735,7 @@ async fn non_super_user_denied() {
     // `submit_metadata_record_for_test` blocks until the raft entry is
     // committed and the state machine applies it to the image, so the ACL
     // is guaranteed to be in the image before we proceed.
+    // real-time wait (not a progress poll): redundant settle after a blocking committed-record apply; the next step is a network CreateTopics, so there is no cheap synchronous positive observable to poll.
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     create_topic_as_admin(addr, "foo", 1, 1).await;
@@ -760,6 +761,7 @@ async fn non_super_user_denied() {
             Instant::now() <= deadline_auth,
             "ACL shim still active or wrong error after 5s; got {r:?}"
         );
+        // real-time wait (not a progress poll): retry/backoff cadence between attempts — each attempt opens a fresh TCP connection + full SASL handshake, so the 100ms backoff bounds connection churn while the raft ACL apply propagates.
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
 
@@ -806,7 +808,7 @@ async fn cancel_via_null_replicas_reverts() {
             Instant::now() <= deadline,
             "adding_replicas never set within 10s"
         );
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::task::yield_now().await;
     }
 
     // Cancel: replicas = None.
@@ -838,6 +840,6 @@ async fn cancel_via_null_replicas_reverts() {
             Instant::now() <= deadline,
             "cancel did not complete within 10s; pr={pr_after_cancel:?}"
         );
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::task::yield_now().await;
     }
 }

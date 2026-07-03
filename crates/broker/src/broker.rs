@@ -1976,6 +1976,7 @@ impl Broker {
                     cluster_id: config.cluster_id.unwrap_or_else(uuid::Uuid::nil),
                     max_bytes: OBSERVER_FETCH_MAX_BYTES,
                     poll_interval: OBSERVER_POLL_INTERVAL,
+                    sleeper: std::sync::Arc::new(qubit_clock::sleep::SystemSleeper::new()),
                 },
             );
             let forwarder = crate::metadata_source::QuorumForwarder {
@@ -2446,6 +2447,7 @@ impl Broker {
                         spool,
                         stats: stats.clone(),
                         replay_every: AUDIT_SPOOL_REPLAY_INTERVAL,
+                        sleeper: std::sync::Arc::new(qubit_clock::sleep::SystemSleeper::new()),
                     },
                 );
                 tokio::spawn(writer.run());
@@ -2909,6 +2911,7 @@ impl Broker {
                     .oauthbearer_jwks_last_on_demand_refresh_ms
                     .clone(),
                 ignore_key_use: config.oauthbearer_jwks_ignore_key_use,
+                sleeper: std::sync::Arc::new(qubit_clock::sleep::SystemSleeper::new()),
             };
             tokio::spawn(refresher.run());
         }
@@ -4914,7 +4917,7 @@ mod tests {
                 std::time::Instant::now() < deadline,
                 "initial assignment was not reconciled"
             );
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            tokio::task::yield_now().await;
         }
 
         set_tx.send(vec![1]).expect("send changed assignment");
@@ -4924,7 +4927,7 @@ mod tests {
                 std::time::Instant::now() < deadline,
                 "changed assignment was not reconciled"
             );
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            tokio::task::yield_now().await;
         }
 
         shutdown.cancel();
@@ -4974,7 +4977,7 @@ mod tests {
         let mut endpoints = handle.self_registration_endpoints().await;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while endpoints.is_empty() && std::time::Instant::now() < deadline {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            tokio::task::yield_now().await;
             endpoints = handle.self_registration_endpoints().await;
         }
         assert!(!endpoints.is_empty());

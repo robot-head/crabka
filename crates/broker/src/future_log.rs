@@ -616,7 +616,7 @@ mod tests {
                 if moved && future_logs.is_empty() {
                     break;
                 }
-                tokio::time::sleep(Duration::from_millis(10)).await;
+                tokio::task::yield_now().await;
             }
         })
         .await
@@ -660,7 +660,7 @@ mod tests {
                 if moved && future_logs.is_empty() {
                     break;
                 }
-                tokio::time::sleep(Duration::from_millis(10)).await;
+                tokio::task::yield_now().await;
             }
         })
         .await

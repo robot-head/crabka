@@ -185,7 +185,7 @@ async fn await_all_brokers_registered(b1: &BrokerHandle, b2: &BrokerHandle, b3: 
             Instant::now() <= deadline,
             "brokers didn't converge on 3-broker view within 60s (b1={c1} b2={c2} b3={c3})"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
 }
 
@@ -203,7 +203,7 @@ async fn await_all_rlmm_active(b1: &BrokerHandle, b2: &BrokerHandle, b3: &Broker
             Instant::now() <= deadline,
             "topic-backed RLMM not active on all brokers within 60s (b1={a1} b2={a2} b3={a3})"
         );
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::task::yield_now().await;
     }
 }
 
@@ -277,7 +277,7 @@ async fn fetch_all_records(
             Instant::now() <= deadline,
             "survivor never returned a valid topic id for {topic} within deadline"
         );
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        tokio::task::yield_now().await;
     };
 
     let mut total_records = 0usize;
@@ -332,7 +332,7 @@ async fn fetch_all_records(
             "survivor only served {total_records}/{expected_count} records before deadline; \
              fetch_offset={fetch_offset}"
         );
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        tokio::task::yield_now().await;
     }
 
     total_records
@@ -446,7 +446,7 @@ async fn tiered_storage_metadata_sharing_via_survivor() {
             b1.partition_log_config_for_test(TOPIC, 0),
             b2.partition_log_config_for_test(TOPIC, 0),
         );
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::task::yield_now().await;
     }
     eprintln!("ITEST: tiered config propagated; discovering partition leader");
 
@@ -468,7 +468,7 @@ async fn tiered_storage_metadata_sharing_via_survivor() {
             "no partition leader on b1 or b2 within 30s; b1 reports {:?}",
             b1.partition_leader_for_test(TOPIC, 0),
         );
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::task::yield_now().await;
     };
     eprintln!(
         "ITEST: partition leader=broker{leader_node_id} follower=broker{follower_node_id}; \
@@ -531,12 +531,13 @@ async fn tiered_storage_metadata_sharing_via_survivor() {
             Instant::now() <= copy_deadline,
             "fewer than 2 segments tiered within 60s (found {n})"
         );
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        tokio::task::yield_now().await;
     }
 
     // Give the RLMM time to propagate CopySegment metadata to the follower via
     // __remote_log_metadata (rf=2).  Interval=1s → 8 ticks plus consume latency.
     eprintln!("ITEST: waiting 8s for RLMM metadata propagation to follower");
+    // real-time wait (not a progress poll): RLMM propagates CopySegment metadata to the follower over the broker's own 1s interval ticks; no in-process observable to poll.
     tokio::time::sleep(Duration::from_secs(8)).await;
 
     // Shut down the partition leader.  The surviving 2/3 quorum (broker 2 + 3)
@@ -582,11 +583,12 @@ async fn tiered_storage_metadata_sharing_via_survivor() {
              current={:?}",
             survivor.partition_leader_for_test(TOPIC, 0),
         );
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::task::yield_now().await;
     }
 
     // Give the survivor's RLMM 3 more reconcile ticks to settle on the
     // now-led partition's metadata (RLMM interval=1s → 3 extra ticks).
+    // real-time wait (not a progress poll): waits for the broker's own 1s RLMM reconcile-interval ticks; no in-process observable to poll.
     tokio::time::sleep(Duration::from_secs(3)).await;
 
     // Consume ALL produced records from the survivor at offset 0.

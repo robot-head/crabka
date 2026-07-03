@@ -380,8 +380,16 @@ async fn actor_loop(
     // `last_seen`-vs-`session_timeout` comparison, so ticking once a second
     // (rather than on the heartbeat interval for consumer groups) only changes
     // how often we check, never the outcome.
-    let mut tick = tokio::time::interval(SESSION_EXPIRY_TICK_INTERVAL);
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    //
+    // Driven through the injected `AsyncSleeper` (production: real time; tests:
+    // a controlled mock timeline). A zero-duration first sleep reproduces
+    // `tokio::time::interval`'s immediate t=0 tick; each subsequent sleep is
+    // re-armed to `SESSION_EXPIRY_TICK_INTERVAL` only after the tick body runs
+    // (`MissedTickBehavior::Delay` semantics — a slow tick never bursts). The
+    // future is held across loop iterations so an inbound-message stream never
+    // resets the tick schedule (matching the persistent `Interval`).
+    let sleeper = config.sleeper.clone();
+    let mut tick = sleeper.sleep_for_async(Duration::ZERO);
     loop {
         let deadline = classic_deadline(&group);
         tokio::select! {
@@ -665,7 +673,7 @@ async fn actor_loop(
                     }
                 }
             }
-            _ = tick.tick() => {
+            () = &mut tick => {
                 // Dispatch on the LIVE `group.kind`; the captured spawn-time
                 // `kind` is not a reliable discriminator after migration.
                 let gid = group.group_id.clone();
@@ -707,6 +715,9 @@ async fn actor_loop(
                         );
                     }
                 }
+                // Re-arm the next tick only after the body ran, so a slow tick
+                // never bursts (`MissedTickBehavior::Delay` cadence).
+                tick = sleeper.sleep_for_async(SESSION_EXPIRY_TICK_INTERVAL);
             }
             () = opt_sleep(deadline) => {
                 // Classic rebalance deadline fired: complete with whoever is here.
@@ -1944,6 +1955,18 @@ mod tests {
     use crate::coordinator::unified::reconciler::ReconcileInput;
     use std::sync::Arc;
 
+    /// Yield-poll until `cond` holds, with a bounded hang-guard so a genuine
+    /// stall fails the test deterministically instead of spinning forever.
+    async fn await_until(what: &str, mut cond: impl FnMut() -> bool) {
+        for _ in 0..200_000 {
+            if cond() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("condition never held: {what}");
+    }
+
     #[derive(Debug)]
     struct StaticMetadata {
         input: ReconcileInput,
@@ -2307,8 +2330,8 @@ mod tests {
         let resp = rx.await.unwrap();
         assert!(resp.error_code == codes::COORDINATOR_LOAD_IN_PROGRESS);
 
-        // Wait briefly for the actor to drain.
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // Wait for the actor to drain and drop its receiver.
+        await_until("actor mpsc closed after exit", || handle.tx.is_closed()).await;
         assert!(
             handle.tx.is_closed(),
             "actor mpsc should be closed after exit"
@@ -2801,18 +2824,72 @@ mod tests {
 
     /// KIP-848 live migration: the tick must dispatch on the LIVE `group.kind`,
     /// not the captured spawn-time kind. Spawn a classic actor, flip it to a
-    /// consumer group in place, and let a tick fire — the actor must keep
-    /// running rather than panic on a kind-mismatched `expect(...)`.
+    /// consumer group in place, and fire a tick — the actor must keep running
+    /// rather than panic on a kind-mismatched `expect(...)`.
+    ///
+    /// The session-expiry tick is driven by an injected mock sleeper, so the
+    /// tick fires on a controlled timeline instead of a real ~1.2s wall-clock
+    /// sleep: deterministic and instant.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn actor_tick_does_not_panic_after_in_place_flip() {
-        let (coord, _log) = make_coordinator();
+        use qubit_clock::MockWaiterKind;
+        use qubit_clock::sleep::MockSleeper;
+
+        let sleeper = MockSleeper::new();
+        let timeline = sleeper.timeline();
+        let log = Arc::new(InMemoryOffsetsLog::default());
+        let coord = Arc::new(GroupCoordinator::new(
+            NextGenConfig {
+                sleeper: Arc::new(sleeper),
+                ..NextGenConfig::default()
+            },
+            crate::coordinator::unified::share::config::ShareGroupConfig::default(),
+            empty_metadata(),
+            log.clone(),
+            crate::coordinator::unified::streams::config::StreamsGroupConfig::default(),
+        ));
+
         let handle = coord.get_or_create_group("g", GroupKindTag::Classic);
+
+        // Flip the group to consumer in place, then round-trip a synchronous
+        // inspect. The mpsc is FIFO with a single consumer, so the inspect reply
+        // proves the flip message was already processed before we fire a tick.
         handle
             .tx
             .send(GroupActorMessage::TestForceConsumerKind)
             .await
             .unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::InspectAny { reply: tx })
+            .await
+            .unwrap();
+        let _ = rx.await;
+
+        // The actor is now parked on the re-armed session-expiry tick sleep.
+        // Confirm the waiter is registered (only advance the timeline once
+        // parked), fire exactly one tick, then confirm the loop re-parks — which
+        // proves the tick body ran to completion on the LIVE consumer kind
+        // without panicking. `wait_for_blocked_waiters` runs on a blocking thread
+        // so it never stalls the runtime driving the actor.
+        let tl = timeline.clone();
+        let parked = tokio::task::spawn_blocking(move || {
+            tl.wait_for_blocked_waiters(MockWaiterKind::Sleep, 1, Duration::from_secs(5))
+        })
+        .await
+        .unwrap();
+        assert!(parked, "actor should park on the session-expiry tick sleep");
+
+        timeline.advance(SESSION_EXPIRY_TICK_INTERVAL);
+
+        let tl = timeline.clone();
+        let reparked = tokio::task::spawn_blocking(move || {
+            tl.wait_for_blocked_waiters(MockWaiterKind::Sleep, 1, Duration::from_secs(5))
+        })
+        .await
+        .unwrap();
+        assert!(reparked, "actor should re-park after processing the tick");
         assert!(!handle.tx.is_closed());
     }
 

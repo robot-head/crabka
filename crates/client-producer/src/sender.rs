@@ -2605,12 +2605,22 @@ mod harness {
         let transport = MockTransport::new(Duration::ZERO);
         let h = spawn_sender_with(transport.clone(), 5, Duration::from_secs(30));
 
-        // Let the immediate first (empty) linger-tick drain pass, then register a
-        // flush waiter; from here only finish_in_flight can notify it.
+        // Let the immediate first (empty) linger-tick drain pass before
+        // registering the waiter. That tick's `notify_waiters` leaves no
+        // trace (it wakes only already-registered waiters and this drain
+        // mutates no observable state), so there is no positive condition to
+        // poll — this is a deliberate ordering delay that keeps the first
+        // empty tick from waking the waiter for the wrong reason.
         tokio::time::sleep(Duration::from_millis(50)).await;
         let flush = h.flush_notify.clone();
-        let watcher = tokio::spawn(async move { flush.notified().await });
-        tokio::time::sleep(Duration::from_millis(30)).await;
+        // Register the flush waiter synchronously: a `Notified` future only
+        // registers once enabled/polled, and `notify_waiters` wakes only
+        // already-registered waiters, so `enable()` removes the registration
+        // race deterministically (no settle needed). From here only
+        // finish_in_flight can notify it.
+        let watcher = flush.notified();
+        tokio::pin!(watcher);
+        watcher.as_mut().enable();
 
         let rx = produce_burst(&h, "t", 0, 1).await.pop().expect("one rx");
         let fired = tokio::time::timeout(Duration::from_secs(3), watcher).await;

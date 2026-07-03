@@ -1,19 +1,21 @@
 //! Shared KIP-73 token bucket rate limiter.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering, Ordering::Relaxed};
-use std::sync::{Arc, OnceLock};
-use std::time::Instant;
 
-static EPOCH: OnceLock<Instant> = OnceLock::new();
+use qubit_clock::{NanoClock, NanoMonotonicClock};
 
+/// Reads the injected clock's current epoch-nanoseconds as a `u64`.
+///
+/// Refill arithmetic only uses **differences** of this value, so the absolute
+/// anchor is irrelevant; a wall-clock-anchored epoch (~1.75e18 ns today) or a
+/// mock timeline anchored at the Unix epoch both fit comfortably in `u64`.
 #[inline]
-#[allow(clippy::cast_possible_truncation)]
-fn now_nanos() -> u64 {
-    let epoch = *EPOCH.get_or_init(Instant::now);
-    epoch.elapsed().as_nanos() as u64
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn clock_nanos(clock: &dyn NanoClock) -> u64 {
+    clock.nanos() as u64
 }
 
-#[derive(Debug)]
 pub struct TokenBucket {
     rate_per_sec: AtomicU64,
     burst: AtomicU64,
@@ -26,6 +28,21 @@ pub struct TokenBucket {
     /// never clobbered by a stale `available` CAS. See the stateright model in
     /// `tests/bucket_model.rs`.
     generation: AtomicU64,
+    /// Monotonic nanosecond time source. Injectable so tests can drive refills
+    /// deterministically with a [`qubit_clock::MockClock`] instead of sleeping.
+    clock: Arc<dyn NanoClock>,
+}
+
+impl std::fmt::Debug for TokenBucket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TokenBucket")
+            .field("rate_per_sec", &self.rate_per_sec.load(Relaxed))
+            .field("burst", &self.burst.load(Relaxed))
+            .field("available", &self.available.load(Relaxed))
+            .field("last_refill_nanos", &self.last_refill_nanos.load(Relaxed))
+            .field("generation", &self.generation.load(Relaxed))
+            .finish_non_exhaustive()
+    }
 }
 
 /// Pure token-bucket consume arithmetic. Given the current `available`, the
@@ -42,13 +59,30 @@ pub fn plan_consume(available: u64, refill: u64, burst: u64, requested: u64) -> 
 impl TokenBucket {
     #[must_use]
     pub fn new() -> Self {
+        Self::with_clock(Arc::new(NanoMonotonicClock::new()))
+    }
+
+    /// Constructs a bucket backed by a caller-supplied [`NanoClock`].
+    ///
+    /// Production uses [`TokenBucket::new`] (a [`NanoMonotonicClock`]); tests
+    /// pass a [`qubit_clock::MockClock`] so refill windows advance by an exact,
+    /// controlled amount rather than by wall-clock sleeping.
+    #[must_use]
+    pub fn with_clock(clock: Arc<dyn NanoClock>) -> Self {
+        let last_refill_nanos = AtomicU64::new(clock_nanos(&*clock));
         Self {
             rate_per_sec: AtomicU64::new(0),
             burst: AtomicU64::new(0),
             available: AtomicU64::new(0),
-            last_refill_nanos: AtomicU64::new(now_nanos()),
+            last_refill_nanos,
             generation: AtomicU64::new(0),
+            clock,
         }
+    }
+
+    #[inline]
+    fn now_nanos(&self) -> u64 {
+        clock_nanos(&*self.clock)
     }
 
     /// Update the rate. Resets `available` to a one-second burst at the new rate.
@@ -72,7 +106,7 @@ impl TokenBucket {
         self.rate_per_sec.store(new_rate, Relaxed);
         self.burst.store(burst, Relaxed);
         self.available.store(burst, Relaxed);
-        self.last_refill_nanos.store(now_nanos(), Relaxed);
+        self.last_refill_nanos.store(self.now_nanos(), Relaxed);
         std::sync::atomic::fence(Ordering::Release);
         // Leave the write section (generation becomes even again, advanced by 2
         // total so any straddling reader sees a changed generation).
@@ -125,7 +159,7 @@ impl TokenBucket {
                 return 0;
             }
 
-            let now = now_nanos();
+            let now = self.now_nanos();
             let last = self.last_refill_nanos.swap(now, Relaxed);
             let elapsed = now.saturating_sub(last);
             let refill = ((u128::from(elapsed) * u128::from(rate)) / 1_000_000_000) as u64;
@@ -187,8 +221,18 @@ mod tests {
     use std::time::Duration;
 
     use assert2::{assert, check};
+    use qubit_clock::MockTime;
 
     use super::*;
+
+    /// Builds a bucket whose refill clock is a mock timeline anchored at the
+    /// Unix epoch. Returns the bucket alongside the [`MockTime`] handle so the
+    /// test can advance logical time with `mock.advance(..)` instead of sleeping.
+    fn mock_bucket() -> (Arc<TokenBucket>, MockTime) {
+        let mock = MockTime::unix_epoch();
+        let bucket = Arc::new(TokenBucket::with_clock(Arc::new(mock.clock())));
+        (bucket, mock)
+    }
 
     const TRY_CONSUME_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -214,6 +258,17 @@ mod tests {
                 panic!("try_consume worker exited without sending a result");
             }
         }
+    }
+
+    #[test]
+    fn debug_renders_bucket_fields() {
+        let b = TokenBucket::new();
+        b.set_rate_with_burst(100, 200);
+        let s = format!("{b:?}");
+        check!(s.contains("TokenBucket"));
+        check!(s.contains("rate_per_sec"));
+        check!(s.contains("burst"));
+        check!(s.contains("last_refill_nanos"));
     }
 
     #[test]
@@ -265,25 +320,26 @@ mod tests {
 
     #[test]
     fn bucket_refills_at_rate_after_elapsed_time() {
-        let b = Arc::new(TokenBucket::new());
+        let (b, mock) = mock_bucket();
         b.set_rate(1024);
         try_consume_with_timeout(&b, 1024);
-        std::thread::sleep(Duration::from_millis(500));
+        // 500ms at 1024 tokens/s refills exactly 512 tokens — deterministic,
+        // where a real 500ms sleep only gets "roughly" 512 under scheduler jitter.
+        mock.advance(Duration::from_millis(500));
         let g = try_consume_with_timeout(&b, 1024);
-        assert!((400..=700).contains(&g), "expected ~512, got {g}");
+        assert!(g == 512, "expected exactly 512 after 500ms, got {g}");
     }
 
     #[test]
     fn bucket_caps_at_burst_capacity() {
-        let b = Arc::new(TokenBucket::new());
+        let (b, mock) = mock_bucket();
         b.set_rate_with_burst(1024, 2048);
         try_consume_with_timeout(&b, 2048);
-        std::thread::sleep(Duration::from_millis(2500));
+        // 2.5s at 1024 tokens/s would refill 2560 tokens, but the 2048 burst cap
+        // clamps it; advancing logical time makes this exact and instant.
+        mock.advance(Duration::from_millis(2500));
         let g = try_consume_with_timeout(&b, 4096);
-        assert!(
-            (1900..=2048).contains(&g),
-            "expected ~2048 capped at burst, got {g}"
-        );
+        assert!(g == 2048, "expected exactly 2048 capped at burst, got {g}");
     }
 
     #[test]

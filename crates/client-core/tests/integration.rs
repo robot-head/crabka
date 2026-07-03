@@ -115,6 +115,9 @@ async fn bootstrap_client(bootstrap: &str) -> Client {
                 );
                 client.close();
                 last_err = Some(ClientError::Disconnected);
+                // real-time wait (not a progress poll): retry/backoff between full
+                // ApiVersions RPC round-trips while a real Docker broker warms up;
+                // iteration-count-bounded by BOOTSTRAP_MAX_ATTEMPTS.
                 tokio::time::sleep(BOOTSTRAP_RETRY_DELAY).await;
             }
             Err(e) => panic!("bootstrap ApiVersions failed with non-retryable error: {e}"),

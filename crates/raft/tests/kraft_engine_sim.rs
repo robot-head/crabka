@@ -163,7 +163,7 @@ where
             tokio::time::Instant::now() < deadline,
             "await_until timed out"
         );
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        tokio::task::yield_now().await;
     }
 }
 
@@ -209,7 +209,7 @@ async fn await_single_leader(net: &SimNet, ids: &[NodeId], timeout: Duration) ->
             "no single agreed leader within timeout: {:?}",
             leaders(&net, &ids).await
         );
-        tokio::time::sleep(Duration::from_millis(15)).await;
+        tokio::task::yield_now().await;
     }
 }
 
@@ -450,6 +450,9 @@ async fn restart_recovers_image() {
     victim_ctrl.shutdown().await;
     net.remove(victim);
     // Let the loop drain.
+    // real-time wait (not a progress poll): bare settle to let the shut-down
+    // engine loop drain after shutdown()/remove(); there is no synchronous
+    // observable to poll on here.
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let victim_dir = dirs.get(&victim).unwrap().path().to_path_buf();

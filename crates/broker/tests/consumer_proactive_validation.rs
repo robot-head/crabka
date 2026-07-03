@@ -144,6 +144,7 @@ async fn produce(client: &Client, topic: &str, values: &[&str]) {
                 break;
             }
             if err == 3 && attempt < 5 {
+                // real-time wait (not a progress poll): retry/backoff between produce attempts on the transient unknown-topic-or-partition metadata-apply race
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 continue;
             }

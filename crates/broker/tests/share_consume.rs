@@ -242,6 +242,7 @@ async fn produce_n(client: &Client, topic: &str, tid: uuid::Uuid, partition: i32
             return;
         }
         if p.error_code == 3 || p.error_code == 6 {
+            // real-time wait (not a progress poll): retry/backoff between produce attempts on transient not-ready errors
             tokio::time::sleep(Duration::from_millis(100)).await;
             continue;
         }
@@ -445,6 +446,7 @@ async fn fetch_until_acquired(
         if row.error_code == NONE && acquired_count(&row) > 0 {
             return row;
         }
+        // real-time wait (not a progress poll): iteration-bounded acquire-retry budget; no wall-clock deadline to guard a yield
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     panic!("share fetch never acquired any records for {group}:{tid}:{partition}");
@@ -614,6 +616,7 @@ async fn reject_archives() {
         if acquired_count(&row3) > 0 {
             break;
         }
+        // real-time wait (not a progress poll): iteration-bounded re-fetch retry budget; no wall-clock deadline to guard a yield
         tokio::time::sleep(Duration::from_millis(100)).await;
         row3 = share_fetch(&client, "g1", &member, tid, 0, epoch, 0).await;
     }
@@ -670,6 +673,7 @@ async fn acquire_past_leading_batch_returns_bytes() {
         if acquired_count(&row3) > 0 {
             break;
         }
+        // real-time wait (not a progress poll): iteration-bounded re-fetch retry budget; no wall-clock deadline to guard a yield
         tokio::time::sleep(Duration::from_millis(100)).await;
         row3 = share_fetch(&client, "g1", &member, tid, 0, epoch, 0).await;
     }
@@ -1006,6 +1010,7 @@ async fn read_committed_skips_open_txn_then_sees_committed() {
             "read_committed must not surface open-txn records, got {:?}",
             row.acquired_records
         );
+        // real-time wait (not a progress poll): settle between re-checks asserting open-txn records stay unacquired (absence, not a positive poll)
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
@@ -1032,6 +1037,7 @@ async fn read_committed_skips_open_txn_then_sees_committed() {
                 break;
             }
         }
+        // real-time wait (not a progress poll): iteration-bounded re-fetch budget after commit; no wall-clock deadline to guard a yield
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     assert!(
@@ -1085,6 +1091,7 @@ async fn produce_one(client: &Client, topic: &str, tid: uuid::Uuid, partition: i
             return;
         }
         if p.error_code == 3 || p.error_code == 6 {
+            // real-time wait (not a progress poll): retry/backoff between produce attempts on transient not-ready errors
             tokio::time::sleep(Duration::from_millis(100)).await;
             continue;
         }
@@ -1144,6 +1151,7 @@ async fn fragmented_window_records_match_acquired_offsets() {
         if acquired_count(&row2) >= 2 {
             break;
         }
+        // real-time wait (not a progress poll): iteration-bounded re-fetch retry budget; no wall-clock deadline to guard a yield
         tokio::time::sleep(Duration::from_millis(100)).await;
         row2 = share_fetch(&client, "g1", &member, tid, 0, epoch, 0).await;
     }

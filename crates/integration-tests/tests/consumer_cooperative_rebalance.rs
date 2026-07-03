@@ -95,7 +95,7 @@ async fn cooperative_three_member_partial_revocation() {
             if union.len() == 6 && !overlap && !a1.is_empty() && !a2.is_empty() && !a3.is_empty() {
                 break union;
             }
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            tokio::task::yield_now().await;
         }
     })
     .await
@@ -158,7 +158,7 @@ async fn cooperative_transparent_to_poll() {
                     .unwrap()
                     .insert((r.partition, r.offset));
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio::task::yield_now().await;
         }
     })
     .await
@@ -188,7 +188,7 @@ async fn cooperative_transparent_to_poll() {
                     .unwrap()
                     .insert((r.partition, r.offset));
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio::task::yield_now().await;
         }
     })
     .await
@@ -236,7 +236,7 @@ async fn cooperative_transparent_to_poll() {
             if m1_n == 2 && m2_n == 2 {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::task::yield_now().await;
         }
     })
     .await
@@ -263,7 +263,7 @@ async fn cooperative_transparent_to_poll() {
                     .unwrap()
                     .insert((r.partition, r.offset));
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio::task::yield_now().await;
         }
     })
     .await
@@ -323,7 +323,7 @@ async fn cooperative_single_member_steady_state() {
             for r in recs {
                 seen.insert(value_string(r.value.as_ref()));
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio::task::yield_now().await;
         }
     })
     .await
@@ -431,6 +431,7 @@ async fn produce_to_partition(
         }
         if err == 3 && attempt < 5 {
             // UNKNOWN_TOPIC_OR_PARTITION — metadata-apply race; retry.
+            // real-time wait (not a progress poll): bounded retry backoff between full Produce RPC round-trips
             tokio::time::sleep(Duration::from_millis(100)).await;
             continue;
         }
@@ -472,7 +473,7 @@ async fn wait_for_assignment_count(consumer: &Consumer, expected: usize) {
             if consumer.assignment().await.len() == expected {
                 return;
             }
-            tokio::time::sleep(Duration::from_millis(200)).await;
+            tokio::task::yield_now().await;
         }
     })
     .await
@@ -494,7 +495,7 @@ async fn wait_for_total_assignment(consumers: &[&Consumer], expected: usize) {
             if union.len() == expected {
                 return;
             }
-            tokio::time::sleep(Duration::from_millis(200)).await;
+            tokio::task::yield_now().await;
         }
     })
     .await

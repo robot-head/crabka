@@ -247,7 +247,7 @@ mod tests {
                 if controller.submitted_len() >= count {
                     break;
                 }
-                tokio::time::sleep(Duration::from_millis(10)).await;
+                tokio::task::yield_now().await;
             }
         })
         .await

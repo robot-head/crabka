@@ -235,7 +235,7 @@ async fn wait_for_compression(
             Instant::now() <= deadline,
             "compression_type={expected:?} never propagated to partition LogConfig within 10s"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
 }
 

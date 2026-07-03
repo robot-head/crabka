@@ -369,7 +369,7 @@ async fn retry_produce_until_allowed(
         if std::time::Instant::now() > deadline {
             return Ok(resp);
         }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        tokio::task::yield_now().await;
     }
 }
 

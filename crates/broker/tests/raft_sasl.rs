@@ -171,7 +171,7 @@ async fn controller_listener_sasl_plaintext_two_broker_quorum() {
             if b1.broker_count().await == 2 && b2.broker_count().await == 2 {
                 return;
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::task::yield_now().await;
         }
     };
     // 60s mirrors `auth_handlers::two_broker_sasl::two_broker_sasl_plaintext_replication`
@@ -239,6 +239,7 @@ async fn controller_listener_sasl_plaintext_rejects_mismatched_creds() {
     // Give the brokers time to (fail to) discover each other. Each is its own
     // single-voter cluster and mismatched creds block any raft cross-talk, so
     // b1 must still see only itself.
+    // real-time wait (not a progress poll): settle then assert an ABSENCE (broker_count stays < 2); there is no positive condition to poll for
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert!(
         b1.broker_count().await < 2,
@@ -310,6 +311,7 @@ async fn controller_listener_sasl_denies_unauthorized_principal() {
     // Authentication succeeds but CLUSTER_ACTION is denied, so the
     // controller listener drops every cross-broker connection: the clusters
     // never merge.
+    // real-time wait (not a progress poll): settle then assert an ABSENCE (broker_count stays < 2); there is no positive condition to poll for
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert!(
         b1.broker_count().await < 2,
@@ -371,7 +373,7 @@ async fn controller_listener_plaintext_legacy_path_unchanged() {
             if b1.broker_count().await == 2 && b2.broker_count().await == 2 {
                 return;
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::task::yield_now().await;
         }
     };
     tokio::time::timeout(Duration::from_secs(10), converge)

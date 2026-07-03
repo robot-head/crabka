@@ -191,7 +191,7 @@ async fn start_two_sasl() -> Result<Vec<(BrokerHandle, BrokerConfig, TempDir)>, 
                 broker0.voter_count_for_test()
             )));
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
 
     Ok(vec![(broker0, cfg0, dir0), (broker1, cfg1, dir1)])
@@ -207,6 +207,7 @@ async fn start_two_sasl_with_retry() -> Vec<(BrokerHandle, BrokerConfig, TempDir
             Err(e) => {
                 tracing::warn!(attempt, error = %e, "SASL cluster boot failed; retrying");
                 last = Some(e);
+                // real-time wait (not a progress poll): backoff between cluster-boot retry attempts
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
         }
@@ -233,7 +234,7 @@ async fn wait_both_registered(cluster: &[(BrokerHandle, BrokerConfig, TempDir)])
             Instant::now() <= deadline,
             "brokers didn't converge on a 2-broker view within 60s"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
 }
 
@@ -270,7 +271,7 @@ async fn partition_leaders(client: &Client) -> Vec<(i32, i32)> {
             Instant::now() < deadline,
             "topic leaders not assigned within 30s"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
 }
 
@@ -341,7 +342,7 @@ async fn end_txn_marker_fanout_to_remote_leader_over_sasl() {
             Instant::now() <= fc_deadline,
             "txn coordinator never became available: {fc:?}"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     };
 
     // Pick the partition led by the broker that is NOT the coordinator, so

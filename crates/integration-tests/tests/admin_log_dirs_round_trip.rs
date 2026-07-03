@@ -112,7 +112,7 @@ async fn admin_log_dirs_alter_then_describe_converges() {
             if !any_future && current_in_target == vec![0, 1] {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio::task::yield_now().await;
         }
     })
     .await

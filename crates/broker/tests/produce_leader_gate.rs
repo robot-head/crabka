@@ -121,7 +121,7 @@ async fn wait_for_local_replica(broker: &BrokerHandle, topic: &str, partition: i
             Instant::now() <= deadline,
             "broker never materialized a local replica for {topic}/{partition}"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
 }
 
@@ -199,7 +199,7 @@ async fn produce_to_non_leader_is_rejected() {
             Instant::now() <= deadline,
             "partition leaders didn't converge within 30s"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
 
     // ───────────────────────────────────────────────────────────────────

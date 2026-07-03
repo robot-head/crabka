@@ -191,7 +191,7 @@ async fn wait_partition_exists(handle: &BrokerHandle, topic: &str, partition: i3
             Instant::now() <= deadline,
             "partition {topic}-{partition} never appeared within 15s"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
 }
 
@@ -207,7 +207,7 @@ async fn wait_partition_leader(handle: &BrokerHandle, topic: &str, partition: i3
             "partition {topic}-{partition} didn't elect leader={leader} within 15s; current={:?}",
             handle.partition_leader_for_test(topic, partition)
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
 }
 
@@ -227,7 +227,7 @@ async fn wait_isr_contains(handle: &BrokerHandle, topic: &str, partition: i32, n
             "ISR for {topic}-{partition} never included node={node} within 15s; current={:?}",
             handle.partition_isr_for_test(topic, partition)
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
 }
 
@@ -253,7 +253,7 @@ async fn wait_partition_isr_only(
             expected,
             handle.partition_isr_for_test(topic, partition)
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
 }
 
@@ -278,7 +278,7 @@ async fn wait_partition_isr_contains(
             "ISR for {topic}-{partition} never contained {member} within 15s; current={:?}",
             handle.partition_isr_for_test(topic, partition)
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
 }
 
@@ -338,7 +338,7 @@ async fn preferred_election_via_wire_returns_success() {
             Instant::now() <= deadline,
             "no new partition leader within 15s; current={l:?}"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
     let _ = new_leader; // used for diagnostics
 
@@ -377,7 +377,7 @@ async fn preferred_election_via_wire_returns_success() {
                 Instant::now() <= deadline,
                 "raft leader not stable within 15s"
             );
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio::task::yield_now().await;
         }
     };
     eprintln!("sending ElectLeaders Preferred to raft leader at {elect_addr}");
@@ -578,7 +578,7 @@ async fn wait_partition_record_known(
             Instant::now() <= deadline,
             "partition {topic}-{partition} record never appeared within 15s"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
 }
 
@@ -647,6 +647,7 @@ async fn non_super_user_without_acl_denied() {
     // committed and the state machine applies it to the image, so the ACL
     // is guaranteed to be in the image before we proceed. A small extra
     // wait absorbs any race on very slow CI runners.
+    // real-time wait (not a progress poll): bare settle after an already-committed metadata submit; no cheap synchronous positive observable follows (the next step is a wire RPC).
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Drive ElectLeaders Preferred as alice. Because the compat shim is
@@ -675,6 +676,7 @@ async fn non_super_user_without_acl_denied() {
             Instant::now() <= deadline_auth,
             "ACL shim still active or wrong error after 5s; got {r:?}"
         );
+        // real-time wait (not a progress poll): retry cadence between full ElectLeaders RPC attempts (each iteration opens a fresh SASL connection).
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
 
@@ -796,7 +798,7 @@ async fn auto_rebalance_restores_preferred_leader() {
                 Instant::now() <= deadline,
                 "brokers didn't converge on 3-broker view within 30s; counts={counts:?}"
             );
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::task::yield_now().await;
         }
     }
 
@@ -830,7 +832,7 @@ async fn auto_rebalance_restores_preferred_leader() {
             Instant::now() <= deadline,
             "no failover leader within 15s; current={l:?}"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
 
     // ── Phase 4: revive broker 1 (Rejoin). ───────────────────────────────
@@ -859,7 +861,7 @@ async fn auto_rebalance_restores_preferred_leader() {
             "auto-rebalance didn't restore preferred leader within 15s; \
              h1={leader_from_h1:?} h0_new={leader_from_new:?}"
         );
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::task::yield_now().await;
     }
 
     // Clean up.

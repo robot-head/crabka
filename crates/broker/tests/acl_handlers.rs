@@ -723,7 +723,7 @@ async fn retry_produce_until_allowed(
         if std::time::Instant::now() > deadline {
             return Ok(resp);
         }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        tokio::task::yield_now().await;
     }
 }
 
@@ -1279,7 +1279,7 @@ async fn retry_metadata_until_topic_visible(
         if std::time::Instant::now() > deadline {
             return Ok(resp);
         }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        tokio::task::yield_now().await;
     }
 }
 
@@ -1305,7 +1305,7 @@ async fn retry_join_group_until_allowed(
         if std::time::Instant::now() > deadline {
             return Ok(resp);
         }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        tokio::task::yield_now().await;
     }
 }
 

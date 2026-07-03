@@ -223,12 +223,14 @@ async fn metrics_endpoint_serves_openmetrics_and_counters_tick() {
     // counters get at least one entry and start emitting series.
     create_topic(kafka_addr).await;
     // Wait briefly for the partition writer to be ready.
+    // real-time wait (not a progress poll): settle before a network Produce; no cheap sync observable to poll
     tokio::time::sleep(Duration::from_millis(100)).await;
     produce_one(kafka_addr).await;
     fetch_one(kafka_addr).await;
 
     // Allow the gauge updater (1s tick) to set partitions_led at
     // least once.
+    // real-time wait (not a progress poll): waits for the broker's 1s gauge-updater tick
     tokio::time::sleep(Duration::from_millis(1200)).await;
 
     let body = scrape(metrics_addr).await;
@@ -317,10 +319,12 @@ async fn partition_level_metrics_and_disk_gauge_render() {
     // counters fire and the on-disk segment exists for the scanner.
     create_topic(kafka_addr).await;
     // Wait briefly for the partition writer to be ready.
+    // real-time wait (not a progress poll): settle before a network Produce; no cheap sync observable to poll
     tokio::time::sleep(Duration::from_millis(100)).await;
     produce_one(kafka_addr).await;
 
     // Wait for the disk scanner to tick at least once (configured 1s).
+    // real-time wait (not a progress poll): waits for the broker's configured 1s disk-scan interval tick
     tokio::time::sleep(Duration::from_millis(1500)).await;
 
     let body = scrape(metrics_addr).await;

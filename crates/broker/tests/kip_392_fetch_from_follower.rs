@@ -95,7 +95,7 @@ async fn wait_for_partition_on_all(
         if Instant::now() > deadline {
             panic!("topic '{topic}' didn't propagate to all brokers within 2 min");
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
 }
 
@@ -124,7 +124,7 @@ async fn wait_leader_and_isr(
                  within 2 min; leader={cur_leader:?} isr={cur_isr:?}"
             );
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
 }
 
@@ -270,7 +270,7 @@ async fn rack_aware_consumer_is_redirected_to_same_rack_follower() {
         if Instant::now() > deadline {
             panic!("follower (broker 2) didn't replicate to {N_RECORDS} within 15s; leo={leo}");
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::task::yield_now().await;
     }
 
     // Step 5: consumer Fetch to the LEADER with rack_id=rack-b → the
@@ -318,6 +318,7 @@ async fn rack_aware_consumer_is_redirected_to_same_rack_follower() {
         if Instant::now() > deadline {
             panic!("follower didn't serve {N_RECORDS} records within 5s; last count={count}");
         }
+        // real-time wait (not a progress poll): retry cadence between follower Fetch RPC attempts while HW propagation catches up (observed via a wire Fetch, not an in-process accessor).
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
     assert!(got == N_RECORDS as usize, "follower returned all N records");

@@ -54,6 +54,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use qubit_clock::sleep::{AsyncSleeper, SystemSleeper};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
@@ -184,6 +185,10 @@ pub struct ConnectorRuntime<K, V, S = NoSource, T = NoSink> {
     sink: T,
     checkpoints: Arc<dyn CheckpointStore>,
     config: Config,
+    /// Drives the poll-backoff sleep. Kept out of `Config` (which is `Copy`) so
+    /// production uses real time via [`SystemSleeper`] while tests inject a mock
+    /// timeline.
+    sleeper: Arc<dyn AsyncSleeper>,
     _marker: PhantomData<(K, V)>,
 }
 
@@ -208,6 +213,7 @@ impl<K, V> Default for ConnectorRuntime<K, V, NoSource, NoSink> {
             sink: NoSink,
             checkpoints: Arc::new(InMemoryCheckpointStore::default()),
             config: Config::default(),
+            sleeper: Arc::new(SystemSleeper::new()),
             _marker: PhantomData,
         }
     }
@@ -242,6 +248,7 @@ where
             sink: self.sink,
             checkpoints: self.checkpoints,
             config: self.config,
+            sleeper: self.sleeper,
             _marker: PhantomData,
         }
     }
@@ -254,6 +261,7 @@ where
             sink: HasSink(Box::new(sink)),
             checkpoints: self.checkpoints,
             config: self.config,
+            sleeper: self.sleeper,
             _marker: PhantomData,
         }
     }
@@ -290,6 +298,16 @@ where
         self.config.poll_backoff = backoff;
         self
     }
+
+    /// Drive the poll-backoff sleep through `sleeper` instead of the default
+    /// [`SystemSleeper`]. Production leaves this as real time; tests inject a
+    /// mock so the backoff cadence advances on a mock timeline deterministically
+    /// instead of on the wall clock.
+    #[must_use]
+    pub fn sleeper(mut self, sleeper: Arc<dyn AsyncSleeper>) -> Self {
+        self.sleeper = sleeper;
+        self
+    }
 }
 
 impl<K, V> ConnectorRuntime<K, V, HasSource<K, V>, HasSink<K, V>>
@@ -316,6 +334,7 @@ where
             sink,
             checkpoints: self.checkpoints,
             config: self.config,
+            sleeper: self.sleeper,
             control: control_rx,
             state: state_tx,
         };
@@ -401,6 +420,7 @@ struct Driver<K, V> {
     sink: Box<dyn Sink<K, V>>,
     checkpoints: Arc<dyn CheckpointStore>,
     config: Config,
+    sleeper: Arc<dyn AsyncSleeper>,
     control: watch::Receiver<Control>,
     state: watch::Sender<RuntimeState>,
 }
@@ -458,8 +478,13 @@ where
             let _ = self.state.send(RuntimeState::Running);
             if self.run_once().await? == Progress::CaughtUp {
                 // Caught up: back off, but wake immediately on a control change.
+                // The backoff sleep goes through the injected `AsyncSleeper`
+                // (production: real time; tests: a mock timeline). The sleeper is
+                // cloned into a local so its future borrows the local rather than
+                // `self`, leaving `self.control` free for the `&mut self` wait.
+                let sleeper = self.sleeper.clone();
                 tokio::select! {
-                    () = tokio::time::sleep(self.config.poll_backoff) => {}
+                    () = sleeper.sleep_for_async(self.config.poll_backoff) => {}
                     _ = self.control.changed() => {}
                 }
             }
@@ -584,10 +609,25 @@ mod tests {
     use assert2::check;
     use async_trait::async_trait;
     use bytes::Bytes;
+    use qubit_clock::MockTimeline;
+    use qubit_clock::sleep::MockSleeper;
     use tokio::sync::mpsc;
 
     use super::*;
     use crate::record::{ConnectRecord, OffsetMap, OffsetValue};
+
+    /// Yield until `cond` holds, letting a spawned task make progress between
+    /// checks without sleeping on real time. The bound makes a stuck condition
+    /// fail the test fast instead of hanging it.
+    async fn await_until(what: &str, mut cond: impl FnMut() -> bool) {
+        for _ in 0..100_000 {
+            if cond() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("condition never held: {what}");
+    }
 
     /// A source that yields a fixed list of values once, tracking its position
     /// as the index, then reports caught-up forever.
@@ -1143,22 +1183,47 @@ mod tests {
         check!(sizes.iter().sum::<usize>() == 4);
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[tokio::test]
     async fn idle_source_backs_off_between_polls() {
         // A caught-up source must be polled on the backoff cadence, not spun on.
-        // Over ~250ms at a 50ms backoff that is a handful of polls; without the
-        // backoff it would be thousands.
+        // Injecting a mock timeline makes this exact rather than fuzzy: the loop
+        // polls once, finds the source caught up, and parks on the backoff sleep;
+        // thereafter each advance of one `poll_backoff` period releases exactly
+        // one further poll. No real time elapses.
+        const ADVANCES: usize = 5;
         let polls = Arc::new(AtomicUsize::new(0));
         let (sink, _rx) = channel_sink(false);
+        let backoff = Duration::from_millis(50);
+        let sleeper = MockSleeper::new();
+        let timeline: MockTimeline = sleeper.timeline();
         let handle = ConnectorRuntime::new()
             .add_source(CountingIdleSource {
                 polls: polls.clone(),
             })
             .add_sink(sink)
-            .poll_backoff(Duration::from_millis(50))
+            .poll_backoff(backoff)
+            .sleeper(Arc::new(sleeper))
             .run();
-        tokio::time::sleep(Duration::from_millis(250)).await;
-        check!(polls.load(Ordering::SeqCst) < 100);
+
+        // First poll: the loop reaches the select and parks on the backoff sleep
+        // (the mock waiter registers as the future is created).
+        await_until("first idle poll", || polls.load(Ordering::SeqCst) >= 1).await;
+
+        // Each advance of one backoff period wakes the parked sleep, letting the
+        // loop poll exactly once more before parking again.
+        for i in 0..ADVANCES {
+            timeline.advance(backoff);
+            let expected = i + 2;
+            await_until("poll after backoff advance", || {
+                polls.load(Ordering::SeqCst) >= expected
+            })
+            .await;
+        }
+
+        // Deterministic: exactly the initial poll plus one per advance — the loop
+        // never spins, because it stays parked on a sleep the timeline has not
+        // yet passed.
+        check!(polls.load(Ordering::SeqCst) == ADVANCES + 1);
         shutdown(handle).await.unwrap();
     }
 

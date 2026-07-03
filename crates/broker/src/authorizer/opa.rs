@@ -17,15 +17,13 @@
 use std::collections::HashSet;
 use std::net::IpAddr;
 use std::num::NonZeroUsize;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crabka_authz::{AclSource, AuthorizationRequest, AuthorizationResult, Authorizer};
 use crabka_metadata::{AclOperation, ResourceType};
 use lru::LruCache;
 use serde::{Deserialize, Serialize};
-
-use crate::time_util::now_ms;
 
 /// HTTP request timeout for a single OPA decision call. Conservative —
 /// OPA in-policy evaluation should be sub-millisecond; this catches
@@ -61,6 +59,12 @@ pub struct OpaAuthorizer {
     cache: Mutex<LruCache<CacheKey, CachedDecision>>,
     expire_after_ms: i64,
     runtime: tokio::runtime::Handle,
+    /// Clock backing the decision-cache TTL (the `expires_at_ms` stamp and its
+    /// expiry comparison). Production uses [`qubit_clock::SystemClock`] (wall
+    /// time); tests inject a [`qubit_clock::MockClock`] so cache entries expire
+    /// on a controlled timeline instead of a real `sleep`. It governs *only*
+    /// cache freshness — never the authorization decision itself.
+    clock: Arc<dyn qubit_clock::Clock>,
 }
 
 impl std::fmt::Debug for OpaAuthorizer {
@@ -148,6 +152,34 @@ impl OpaAuthorizer {
         max_cache_size: usize,
         expire_after_ms: i64,
     ) -> Result<Self, OpaConfigError> {
+        Self::with_clock(
+            super_users,
+            url,
+            allow_on_error,
+            max_cache_size,
+            expire_after_ms,
+            Arc::new(qubit_clock::SystemClock::new()),
+        )
+    }
+
+    /// Same as [`OpaAuthorizer::new`] but with a caller-supplied
+    /// [`qubit_clock::Clock`] backing the decision-cache TTL. Production uses
+    /// [`OpaAuthorizer::new`] (a [`qubit_clock::SystemClock`]); tests pass a
+    /// [`qubit_clock::MockClock`] so cached decisions expire on a controlled
+    /// timeline without a real `sleep`. The clock affects *only* cache
+    /// freshness, never the authorization decision.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`OpaAuthorizer::new`].
+    pub fn with_clock(
+        super_users: HashSet<String>,
+        url: String,
+        allow_on_error: bool,
+        max_cache_size: usize,
+        expire_after_ms: i64,
+        clock: Arc<dyn qubit_clock::Clock>,
+    ) -> Result<Self, OpaConfigError> {
         let http_client = reqwest::Client::builder()
             .timeout(OPA_HTTP_TIMEOUT)
             .build()
@@ -164,6 +196,7 @@ impl OpaAuthorizer {
             cache,
             expire_after_ms,
             runtime,
+            clock,
         })
     }
 
@@ -241,7 +274,9 @@ impl Authorizer for OpaAuthorizer {
             resource_name: req.resource_name.to_string(),
             host: req.host.ip(),
         };
-        let now = now_ms();
+        // Cache-freshness timestamp only — read from the injected clock so tests
+        // can expire entries on a mock timeline. Not part of the decision.
+        let now = self.clock.millis();
         {
             let mut cache = self.cache.lock().expect("OPA cache mutex poisoned");
             if let Some(cached) = cache.get(&key)
@@ -448,14 +483,26 @@ mod tests {
             .mount(&mock)
             .await;
 
-        // 10ms TTL — wall-clock; reliable on any host that isn't paused
-        // in a debugger.
-        let auth = OpaAuthorizer::new(HashSet::new(), opa_url(&mock), false, 100, 10).unwrap();
+        // 10ms decision-cache TTL, driven by an injected mock clock so the entry
+        // expires on a controlled timeline — deterministic, no wall-clock sleep.
+        let clock = Arc::new(qubit_clock::MockClock::new());
+        let auth = OpaAuthorizer::with_clock(
+            HashSet::new(),
+            opa_url(&mock),
+            false,
+            100,
+            10,
+            clock.clone(),
+        )
+        .unwrap();
         let image = img();
         let p = test_principal("alice");
         let h = host();
+        // Cache miss -> HTTP call #1; caches the decision with expires_at = now+10ms.
         assert!(auth.authorize(&image, &req(&p, &h, "t")) == AuthorizationResult::Allow);
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Advance the mock clock past the TTL so the cached entry is now stale.
+        clock.advance(Duration::from_millis(50));
+        // Cache entry expired -> HTTP call #2 (verified by the mock's expect(2)).
         assert!(auth.authorize(&image, &req(&p, &h, "t")) == AuthorizationResult::Allow);
     }
 

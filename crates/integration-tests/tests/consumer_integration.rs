@@ -100,6 +100,7 @@ async fn produce(broker: &BrokerHandle, client: &Client, topic: &str, values: &[
         }
         if err == 3 && attempt < 5 {
             // UNKNOWN_TOPIC_OR_PARTITION — metadata-apply race; retry.
+            // real-time wait (not a progress poll): bounded retry backoff between full Produce RPC round-trips
             tokio::time::sleep(Duration::from_millis(100)).await;
             continue;
         }
@@ -162,6 +163,7 @@ async fn produce_to_partition(
         }
         if err == 3 && attempt < 5 {
             // UNKNOWN_TOPIC_OR_PARTITION — metadata-apply race; retry.
+            // real-time wait (not a progress poll): bounded retry backoff between full Produce RPC round-trips
             tokio::time::sleep(Duration::from_millis(100)).await;
             continue;
         }
@@ -366,7 +368,7 @@ async fn eager_rebalance_reacquires_and_primes() {
                 m1.assignment().await.len(),
                 m2.assignment().await.len()
             );
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::task::yield_now().await;
         }
     })
     .await
@@ -389,7 +391,7 @@ async fn eager_rebalance_reacquires_and_primes() {
                 "m1 did not re-acquire both partitions, last={}",
                 m1.assignment().await.len()
             );
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::task::yield_now().await;
         }
     })
     .await
@@ -470,7 +472,7 @@ async fn commit_succeeds_after_rebalance_bumps_generation() {
                 break;
             }
             assert!(Instant::now() < settle, "group did not split 1+1");
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::task::yield_now().await;
         }
     })
     .await
@@ -491,7 +493,7 @@ async fn commit_succeeds_after_rebalance_bumps_generation() {
                 Instant::now() < regain,
                 "m1 did not re-acquire both partitions"
             );
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::task::yield_now().await;
         }
     })
     .await
@@ -812,7 +814,7 @@ async fn consumer_none_policy_surfaces_log_truncation() {
             let settle = Instant::now() + Duration::from_secs(10);
             while seed.assignment().await.is_empty() {
                 assert!(Instant::now() < settle, "seed assignment did not settle");
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                tokio::task::yield_now().await;
             }
         })
         .await
@@ -1078,7 +1080,7 @@ async fn cold_start_rejoins_when_subscribed_topic_appears() {
                 "consumer never rejoined after its topic appeared (last assignment len {})",
                 consumer.assignment().await.len()
             );
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            tokio::task::yield_now().await;
         }
     })
     .await

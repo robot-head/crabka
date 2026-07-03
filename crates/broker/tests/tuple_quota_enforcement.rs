@@ -276,7 +276,7 @@ async fn wait_partition_exists(handle: &BrokerHandle, topic: &str, partition: i3
             Instant::now() <= deadline,
             "partition {topic}-{partition} never appeared within 15s"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
 }
 
@@ -298,6 +298,7 @@ async fn seed_compat_shim_disable_acl(handle: &BrokerHandle) {
         .await
         .expect("seed dummy ACL to disable compat shim");
     // Small pause to absorb raft commit-then-apply gap.
+    // real-time wait (not a progress poll): raft commit-then-apply settle, no local condition to poll
     tokio::time::sleep(Duration::from_millis(50)).await;
 }
 
@@ -315,6 +316,7 @@ async fn seed_alice_write_acl(handle: &BrokerHandle, topic: &str) {
         }))
         .await
         .expect("seed alice Write ACL");
+    // real-time wait (not a progress poll): raft commit-then-apply settle, no local condition to poll
     tokio::time::sleep(Duration::from_millis(50)).await;
 }
 
@@ -557,7 +559,7 @@ async fn tuple_quota_throttles_only_matching_client_id() {
             Instant::now() <= deadline,
             "tuple quota not visible in metadata image within 15s"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
 
     // ── Case 1: (alice, app-x) — tuple matches, must throttle ────────────────
@@ -590,6 +592,7 @@ async fn tuple_quota_throttles_only_matching_client_id() {
             Instant::now() <= deadline,
             "ACL still not applied after 15s; error_code=29"
         );
+        // real-time wait (not a progress poll): retry cadence between network produce attempts (ACL propagation), deadline-guarded
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
 
@@ -637,6 +640,7 @@ async fn tuple_quota_throttles_only_matching_client_id() {
             Instant::now() <= deadline,
             "ACL still not applied after 15s; error_code=29"
         );
+        // real-time wait (not a progress poll): retry cadence between network produce attempts (ACL propagation), deadline-guarded
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
 

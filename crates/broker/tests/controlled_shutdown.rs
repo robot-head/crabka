@@ -122,7 +122,7 @@ async fn wait_partition_exists(handle: &BrokerHandle, topic: &str, partition: i3
             Instant::now() <= deadline,
             "partition {topic}-{partition} never appeared within 15s"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
 }
 
@@ -180,7 +180,7 @@ async fn force_leadership_for_test(
             Instant::now() <= deadline,
             "forced leader {target} not observed on all {partitions} partitions within 15s"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::task::yield_now().await;
     }
 }
 
@@ -227,7 +227,7 @@ async fn controlled_shutdown_drains_leadership_and_returns_ok() {
                 Instant::now() <= deadline,
                 "controller leader not visible within 15s"
             );
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio::task::yield_now().await;
         }
     };
     let target_idx = (raft_leader_idx + 1) % cluster.len();
@@ -308,7 +308,7 @@ async fn controlled_shutdown_drains_leadership_and_returns_ok() {
             "target broker {target_node_id} still leads {remaining} partitions \
              15s after controlled_shutdown returned"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::task::yield_now().await;
     }
 
     // Tidy up surviving brokers.

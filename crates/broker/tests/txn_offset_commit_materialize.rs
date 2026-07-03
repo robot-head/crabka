@@ -63,7 +63,7 @@ async fn await_txn_coordinator(client: &crabka_client_core::Client, tid: &str) {
             Instant::now() <= deadline,
             "txn coordinator never became available: {fc:?}"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
 }
 
@@ -191,7 +191,7 @@ async fn begin_and_commit_offsets(
             init.error_code == NOT_COORDINATOR && Instant::now() <= deadline,
             "InitProducerId: {init:?}"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     };
 
     // AddOffsetsToTxn registers __consumer_offsets in the txn's partition set,

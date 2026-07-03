@@ -1345,6 +1345,8 @@ async fn compactor_runtime_retries_object_store_errors_before_committing_offsets
     let descriptors = tokio::time::timeout(
         Duration::from_secs(1),
         run_compactor_until_shutdown(&config, dependencies, Some(&store), async {
+            // real-time wait (not a progress poll): shutdown future — this sleep is the
+            // compactor's run-duration/retry budget, not a poll cadence for a condition.
             tokio::time::sleep(Duration::from_millis(250)).await;
         }),
     )
@@ -1383,6 +1385,8 @@ async fn compactor_runtime_retries_shard_manifest_write_errors_before_committing
     let descriptors = tokio::time::timeout(
         Duration::from_secs(1),
         run_compactor_until_shutdown(&config, dependencies, Some(&store), async {
+            // real-time wait (not a progress poll): shutdown future — this sleep is the
+            // compactor's run-duration/retry budget, not a poll cadence for a condition.
             tokio::time::sleep(Duration::from_millis(250)).await;
         }),
     )
@@ -1428,6 +1432,8 @@ async fn compactor_runtime_retries_compaction_frontier_write_errors_after_commit
     let descriptors = tokio::time::timeout(
         Duration::from_secs(1),
         run_compactor_until_shutdown(&config, dependencies, Some(&store), async {
+            // real-time wait (not a progress poll): shutdown future — this sleep is the
+            // compactor's run-duration/retry budget, not a poll cadence for a condition.
             tokio::time::sleep(Duration::from_millis(250)).await;
         }),
     )
@@ -1698,6 +1704,8 @@ async fn compactor_service_accumulates_adjacent_small_wal_polls_into_one_block()
         &config,
         dependencies,
         Some(&store),
+        // real-time wait (not a progress poll): shutdown future — this sleep is the
+        // compactor's run-duration budget, not a poll cadence for a condition.
         tokio::time::sleep(Duration::from_millis(50)),
     )
     .await
@@ -1767,6 +1775,8 @@ async fn compactor_service_listener_serves_http_while_polling_wal() {
                 rows = Some(block_rows);
                 break;
             }
+            // real-time wait (not a progress poll): iteration-count-bounded retry
+            // (`for _ in 0..20`); the sleep is the fixed time budget between reads.
             Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
         }
     }
@@ -1995,6 +2005,8 @@ async fn wait_for_log_block(
         if let Ok(rows) = read_log_block_from_object_store(store, prefix, key).await {
             return rows;
         }
+        // real-time wait (not a progress poll): iteration-count-bounded retry
+        // (`for _ in 0..50`); the sleep is the fixed time budget between reads.
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     read_log_block_from_object_store(store, prefix, key)

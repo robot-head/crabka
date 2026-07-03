@@ -80,6 +80,7 @@ async fn tls_listener_rejects_plaintext_connection() {
     let h = tokio::spawn(async move {
         let _ = serve::serve(listener, app, Some(dynamic), t).await;
     });
+    // real-time wait (not a progress poll): waits on a real TLS handshake to reject a plaintext client; settle-then-assert-failure over a network round-trip.
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     // Plain HTTP (no TLS) to the TLS port ⇒ rustls handshake fails server-side

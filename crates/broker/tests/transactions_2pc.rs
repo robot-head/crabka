@@ -162,7 +162,7 @@ async fn enable_2pc_persists_no_timeout_sentinel() {
             std::time::Instant::now() < deadline,
             "DescribeTransactions never returned the tid: {row:?}"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     };
     assert!(
         timeout_ms == i32::MAX,

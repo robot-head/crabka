@@ -144,7 +144,7 @@ async fn collect_output_keyed(
             break;
         }
 
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::task::yield_now().await;
     }
 
     collected
@@ -164,7 +164,7 @@ async fn open_counts_store(
             {
                 Ok(store) => return store,
                 // Not yet assigned / still joining: retry.
-                Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
+                Err(_) => tokio::task::yield_now().await,
             }
         }
     })
@@ -394,7 +394,7 @@ async fn dsl_count_restart_restore_caching_on() {
             if a == Some(2) && b == Some(1) {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio::task::yield_now().await;
         }
     })
     .await;
@@ -465,7 +465,7 @@ async fn dsl_count_restart_restore_caching_on() {
             if store2.get(&"a".to_string()).await.unwrap() == Some(3) {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio::task::yield_now().await;
         }
     })
     .await;

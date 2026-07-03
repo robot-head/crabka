@@ -97,6 +97,7 @@ async fn produce_one(
         // topic_id, so a target leader that hasn't yet applied the topic record
         // answers UNKNOWN_TOPIC_ID until the metadata image catches up.
         if (err == 3 || err == 6 || err == 100) && attempt < 10 {
+            // real-time wait (not a progress poll): retry/backoff cadence between Produce attempts after a transient metadata-fanout error.
             tokio::time::sleep(Duration::from_millis(150)).await;
             continue;
         }
@@ -182,7 +183,7 @@ async fn consumer_fetches_from_non_bootstrap_leaders() {
             Instant::now() <= deadline,
             "topic partitions didn't materialize across the cluster in 2 min"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
 
     // Wait until node 1 knows every partition's leader (the controller image
@@ -199,7 +200,7 @@ async fn consumer_fetches_from_non_bootstrap_leaders() {
             Instant::now() <= deadline,
             "partition leaders didn't converge within 30s"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
 
     // Discriminating guard: assert at least one partition is led by a

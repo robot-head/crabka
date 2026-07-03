@@ -518,6 +518,7 @@ mod tests {
                 cluster_id,
                 max_bytes: 1_048_576,
                 poll_interval: std::time::Duration::from_mins(1),
+                sleeper: Arc::new(qubit_clock::sleep::SystemSleeper::new()),
             },
         );
         let writer = Arc::new(RecordingWriter {

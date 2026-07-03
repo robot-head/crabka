@@ -198,6 +198,7 @@ async fn produce_n(client: &Client, topic: &str, tid: uuid::Uuid, partition: i32
             return;
         }
         if p.error_code == 3 || p.error_code == 6 {
+            // real-time wait (not a progress poll): retry/backoff between produce attempts on transient not-ready errors
             tokio::time::sleep(Duration::from_millis(100)).await;
             continue;
         }
@@ -236,6 +237,7 @@ async fn join(client: &Client, group: &str, topic: &str) -> (String, i32) {
             .await
             .expect("ShareGroupHeartbeat steady-state");
         epoch = hb.member_epoch;
+        // real-time wait (not a progress poll): fixed settle cadence between steady-state heartbeats so the async lifecycle hook can initialize share state
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     (member_id, epoch)
@@ -373,6 +375,7 @@ async fn fetch_until_acquired(
         if row.error_code == NONE && acquired_count(&row) > 0 {
             return row;
         }
+        // real-time wait (not a progress poll): iteration-bounded acquire-retry budget; no wall-clock deadline to guard a yield
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     panic!("share fetch never acquired any records for {group}:{tid}:{partition}");
@@ -479,6 +482,7 @@ async fn describe_until(
         {
             return last;
         }
+        // real-time wait (not a progress poll): iteration-bounded describe-retry budget while the SPSO persist is in flight; no wall-clock deadline to guard a yield
         tokio::time::sleep(Duration::from_millis(100)).await;
         last = describe_offsets(client, group, topic, partitions.clone()).await;
     }
@@ -536,6 +540,7 @@ async fn alter_resets_empty_group() {
             altered = true;
             break;
         }
+        // real-time wait (not a progress poll): retry/backoff between Alter attempts while persister leadership settles
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     assert!(altered, "AlterShareGroupOffsets never succeeded");
@@ -877,6 +882,7 @@ async fn delete_rewrites_metadata_topic_absent_after_restart() {
                 absent = true;
                 break;
             }
+            // real-time wait (not a progress poll): settle between re-checks asserting the deleted topic stays absent (absence, not a positive poll)
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         assert!(
@@ -920,6 +926,7 @@ async fn delete_rewrites_metadata_topic_absent_after_restart() {
             if std::time::Instant::now() >= deadline {
                 break;
             }
+            // real-time wait (not a progress poll): settle between re-checks asserting the deleted topic stays absent throughout the window (liveness, not a positive poll)
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
     }

@@ -130,7 +130,7 @@ async fn alter_configs_round_trip() {
         if std::time::Instant::now() > deadline {
             break cur;
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     };
     assert!(
         last == Some(want),
@@ -202,7 +202,7 @@ async fn min_insync_replicas_blocks_acks_all_when_isr_too_small() {
         if std::time::Instant::now() > deadline {
             panic!("partition 0 did not materialize within 10s");
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::task::yield_now().await;
     }
 
     // Produce v13+ drops `name` from the wire and demands `topic_id`.
@@ -357,7 +357,7 @@ async fn create_partitions_extends_topic() {
                 .collect();
             panic!("only partitions {present:?} present after 10 s; expected [0, 1, 2]");
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
 }
 
@@ -408,7 +408,7 @@ async fn create_partitions_honors_explicit_assignments() {
         if std::time::Instant::now() > deadline {
             panic!("partition 1 did not materialize after 10 s");
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
 
     // Invalid path: ask for 1 more partition (total 3) but supply 2

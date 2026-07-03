@@ -253,7 +253,7 @@ async fn metadata_response_carries_listener_endpoints() {
     let mut endpoints = handle.self_registration_endpoints().await;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     while endpoints.len() < 2 && std::time::Instant::now() < deadline {
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        tokio::task::yield_now().await;
         endpoints = handle.self_registration_endpoints().await;
     }
     assert!(
@@ -1819,6 +1819,7 @@ async fn alter_scram_creds_super_user_can_provision() {
             }
             Err(e) => last_err = Some(e),
         }
+        // real-time wait (not a progress poll): retry/backoff cadence between full SCRAM sessions; loop is iteration-bounded (0..40) with no wall-clock deadline, so the sleep is the test's time budget for the raft commit to apply
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     handle.shutdown().await;
@@ -1887,6 +1888,7 @@ async fn alter_scram_creds_super_user_can_provision_sha256() {
             }
             Err(e) => last_err = Some(e),
         }
+        // real-time wait (not a progress poll): retry/backoff cadence between full SCRAM sessions; loop is iteration-bounded (0..40) with no wall-clock deadline, so the sleep is the test's time budget for the raft commit to apply
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     handle.shutdown().await;
@@ -2733,7 +2735,7 @@ mod two_broker_sasl {
                 Instant::now() <= deadline,
                 "brokers didn't converge on 2-broker view within 60s"
             );
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio::task::yield_now().await;
         }
 
         let leader_addr = cluster[0].1.listen_addr.to_string();
@@ -2775,7 +2777,7 @@ mod two_broker_sasl {
                 Instant::now() <= deadline,
                 "topic did not propagate within 60s"
             );
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::task::yield_now().await;
         }
 
         // Produce 10 records to the leader.
@@ -2833,7 +2835,7 @@ mod two_broker_sasl {
                 Instant::now() <= deadline,
                 "SASL-replicated brokers didn't reach 10 records within 90s; saw: {offsets:?}"
             );
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::task::yield_now().await;
         }
 
         for (h, _, _) in cluster {

@@ -237,6 +237,10 @@ async fn collect_committed(
             break;
         }
 
+        // real-time wait (not a progress poll): left per the conservative directive for
+        // this known-flaky EOS-restart test — each iteration is a full broker RPC
+        // round-trip (READ_COMMITTED fetch), and busy-polling could perturb the restart
+        // race timing. Deliberately kept as a real sleep.
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 
@@ -321,6 +325,10 @@ async fn await_committed_source_offset(admin: &Client) -> i64 {
         if let Some(off) = committed_source_offset(admin).await {
             return off;
         }
+        // real-time wait (not a progress poll): left per the conservative directive for
+        // this known-flaky EOS-restart test — each iteration is a full broker RPC
+        // round-trip (OffsetFetch), and busy-polling could perturb the restart race
+        // timing. Deliberately kept as a real sleep.
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 }

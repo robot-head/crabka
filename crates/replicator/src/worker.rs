@@ -175,6 +175,7 @@ impl FlowWorker {
             target_alias: p.target_alias.clone(),
             interval: Duration::from_secs(1),
             now_ms,
+            sleeper: Arc::new(qubit_clock::sleep::SystemSleeper::new()),
             security: p.security_target.clone(),
         })
         .await?;

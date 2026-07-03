@@ -119,7 +119,7 @@ async fn wait_all_partitions(handle: &BrokerHandle, topic: &str, n: i32) {
             return;
         }
         assert!(Instant::now() <= deadline, "partitions never materialized");
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
 }
 

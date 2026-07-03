@@ -120,6 +120,7 @@ async fn initialize_ready(
         if !not_ready(code) {
             return code;
         }
+        // real-time wait (not a progress poll): retry/backoff while the share coordinator materializes the state partition
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     panic!("share coordinator never became ready for {group}:{tid}:{partition}");
