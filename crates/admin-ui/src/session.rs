@@ -85,6 +85,11 @@ impl SessionStore {
         }
     }
 
+    #[must_use]
+    pub const fn ttl(&self) -> Duration {
+        self.ttl
+    }
+
     pub fn create(&self, user: SessionUser) -> SessionId {
         let session_id = SessionId::new();
         let now = Instant::now();

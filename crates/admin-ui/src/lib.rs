@@ -7,6 +7,7 @@ pub mod dto;
 pub mod error;
 pub mod permissions;
 pub mod server;
+pub mod server_fns;
 pub mod session;
 
 use dioxus::dioxus_core::{Element, Template, TemplateAttribute, TemplateNode, VNode};
