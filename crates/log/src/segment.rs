@@ -1090,6 +1090,26 @@ mod tests {
     }
 
     #[test]
+    fn scan_returns_absolute_offset_of_matching_record() {
+        // A full-size window keeps the match in the first read so the
+        // cursor-advance path isn't involved.
+        const WINDOW: usize = 64 * 1024;
+        let dir = tempdir().unwrap();
+        let mut seg = Segment::create(dir.path(), Offset(0)).unwrap();
+        // A leading single-record batch at offset 0, then a 3-record batch
+        // based at offset 1 (abs offsets 1,2,3; timestamps 200,201,202). The
+        // match is the *third* record, whose absolute offset is
+        // `base_offset + offset_delta = 1 + 2 = 3` — a value that only a
+        // correct `+` reproduces (`1 - 2` or `1 * 2` both differ), so this
+        // pins the returned offset arithmetic.
+        seg.append(&sample_batch(0, 1, 100), 0).unwrap();
+        seg.append(&sample_batch(1, 3, 200), 0).unwrap();
+        let got = seg.scan_from_floor_windowed(Offset(0), WINDOW, |ts| ts >= 202);
+        assert!(got == Some((Offset(3), 202)));
+        drop(dir);
+    }
+
+    #[test]
     fn offset_of_max_timestamp_earliest_on_tie() {
         let dir = tempdir().unwrap();
         let mut seg = Segment::create(dir.path(), Offset(0)).unwrap();
