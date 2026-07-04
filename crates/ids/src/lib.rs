@@ -18,10 +18,25 @@
 //! here is `#[serde(transparent)]`, so a serialized field is encoded as the bare
 //! inner primitive.
 //!
+//! # Comparison against raw primitives
+//!
+//! For ergonomics, each newtype implements `PartialEq`/`PartialOrd` against its
+//! own inner primitive in both directions, so `offset >= 0`, `node_id == 7`, or
+//! `epoch == LeaderEpoch::UNKNOWN` read without an explicit `.0`. This is scoped
+//! to *comparisons only*: a newtype still cannot be passed where its primitive is
+//! expected (or vice versa), used as a differently-typed map key, or compared
+//! against a *different* newtype — so the argument-transposition safety that
+//! motivates these types is preserved. Sentinel values that carry Kafka meaning
+//! are exposed as named constants ([`Offset::ZERO`], [`ProducerId::NONE`],
+//! [`LeaderEpoch::UNKNOWN`]) rather than bare integers.
+//!
 //! See `docs/newtype-safety-rollout.md` and the code style guide's
 //! "Newtypes for Domain Values" section.
 
-use core::ops::{Add, AddAssign, Sub};
+use core::{
+    cmp::Ordering,
+    ops::{Add, AddAssign, Sub},
+};
 
 use derive_more::{Display, From, Into};
 use serde::{Deserialize, Serialize};
@@ -52,6 +67,10 @@ use serde::{Deserialize, Serialize};
 pub struct Offset(pub i64);
 
 impl Offset {
+    /// The log's first offset — also the initial log-start offset and the
+    /// high-watermark of an empty partition.
+    pub const ZERO: Self = Offset(0);
+
     /// The inner `i64` — use at the wire/generated boundary and for arithmetic
     /// against other integer quantities.
     #[must_use]
@@ -171,10 +190,20 @@ impl NodeId {
 pub struct ProducerId(pub i64);
 
 impl ProducerId {
+    /// KIP-98 `NO_PRODUCER_ID` (`-1`): no idempotent/transactional producer is
+    /// assigned.
+    pub const NONE: Self = ProducerId(-1);
+
     /// The inner `i64` — use at the wire/generated boundary.
     #[must_use]
     pub const fn get(self) -> i64 {
         self.0
+    }
+
+    /// Whether this is the [`ProducerId::NONE`] sentinel (no producer assigned).
+    #[must_use]
+    pub const fn is_none(self) -> bool {
+        self.0 == Self::NONE.0
     }
 }
 
@@ -209,10 +238,24 @@ impl ProducerId {
 pub struct LeaderEpoch(pub i32);
 
 impl LeaderEpoch {
+    /// KIP-320 `UNKNOWN_LEADER_EPOCH` (`-1`): the leader epoch is unknown or
+    /// unset (e.g. an older client, or a partition with no elected leader yet).
+    pub const UNKNOWN: Self = LeaderEpoch(-1);
+
+    /// The epoch a partition's first leader starts at (`0`).
+    pub const INITIAL: Self = LeaderEpoch(0);
+
     /// The inner `i32` — use at the wire/generated boundary.
     #[must_use]
     pub const fn get(self) -> i32 {
         self.0
+    }
+
+    /// Whether this is a real epoch rather than the
+    /// [`UNKNOWN`](LeaderEpoch::UNKNOWN) sentinel.
+    #[must_use]
+    pub const fn is_known(self) -> bool {
+        self.0 >= 0
     }
 
     /// The next epoch after this one (a leader change bumps the epoch by one).
@@ -284,5 +327,86 @@ impl ApiVersion {
     #[must_use]
     pub const fn get(self) -> i16 {
         self.0
+    }
+}
+
+/// Generates cross-type comparison impls (both directions) so a domain newtype
+/// can be compared directly against its raw inner primitive — e.g. `offset >= 0`
+/// or `node_id == 7` — without an explicit `.0`. Deliberately scoped to
+/// comparisons (not argument passing or map keys); see the module docs.
+macro_rules! impl_primitive_cmp {
+    ($ty:ty, $inner:ty) => {
+        impl PartialEq<$inner> for $ty {
+            #[inline]
+            fn eq(&self, other: &$inner) -> bool {
+                self.0 == *other
+            }
+        }
+        impl PartialEq<$ty> for $inner {
+            #[inline]
+            fn eq(&self, other: &$ty) -> bool {
+                *self == other.0
+            }
+        }
+        impl PartialOrd<$inner> for $ty {
+            #[inline]
+            fn partial_cmp(&self, other: &$inner) -> Option<Ordering> {
+                self.0.partial_cmp(other)
+            }
+        }
+        impl PartialOrd<$ty> for $inner {
+            #[inline]
+            fn partial_cmp(&self, other: &$ty) -> Option<Ordering> {
+                self.partial_cmp(&other.0)
+            }
+        }
+    };
+}
+
+impl_primitive_cmp!(Offset, i64);
+impl_primitive_cmp!(PartitionIndex, i32);
+impl_primitive_cmp!(NodeId, u64);
+impl_primitive_cmp!(ProducerId, i64);
+impl_primitive_cmp!(LeaderEpoch, i32);
+impl_primitive_cmp!(ApiKey, i16);
+impl_primitive_cmp!(ApiVersion, i16);
+
+#[cfg(test)]
+mod tests {
+    use assert2::check;
+
+    use super::{ApiKey, LeaderEpoch, NodeId, Offset, ProducerId};
+
+    #[test]
+    fn compares_against_raw_primitive_in_both_directions() {
+        check!(Offset(5) == 5);
+        check!(5 == Offset(5));
+        check!(Offset(5) != 6);
+        check!(Offset(5) > 3);
+        check!(3 < Offset(5));
+        check!(Offset(0) >= 0);
+        check!(NodeId(7) == 7);
+        check!(ApiKey(18) == 18);
+    }
+
+    #[test]
+    fn newtype_to_newtype_comparison_still_holds() {
+        check!(Offset(1) < Offset(2));
+        check!(Offset(2) == Offset(2));
+        let mut xs = [Offset(3), Offset(1), Offset(2)];
+        xs.sort();
+        check!(xs == [Offset(1), Offset(2), Offset(3)]);
+    }
+
+    #[test]
+    fn sentinels_carry_kafka_meaning() {
+        check!(LeaderEpoch::UNKNOWN == -1);
+        check!(!LeaderEpoch::UNKNOWN.is_known());
+        check!(LeaderEpoch::INITIAL == 0);
+        check!(LeaderEpoch::INITIAL.is_known());
+        check!(ProducerId::NONE == -1);
+        check!(ProducerId::NONE.is_none());
+        check!(!ProducerId(0).is_none());
+        check!(Offset::ZERO == 0);
     }
 }

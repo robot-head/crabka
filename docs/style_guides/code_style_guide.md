@@ -220,6 +220,7 @@ Guidance:
   pub struct ProducerId(pub i64);
   ```
 - **Use `#[serde(transparent)]`** on newtypes that are serialised, so the wire/JSON encoding is exactly the inner primitive — never a wrapping object.
+- **Comparison against the inner primitive is allowed; nothing else is relaxed.** The shared `crabka-ids` identifiers hand-implement `PartialEq`/`PartialOrd` against their inner primitive in both directions, so a value check like `offset >= 0` or `epoch == LeaderEpoch::UNKNOWN` reads without an explicit `.0`. This is deliberately narrow — it does **not** let the newtype be passed where its primitive is expected, keyed differently in a map, or compared to a *different* newtype, so the swap-bug safety is intact. Expose Kafka sentinels (`-1` unknown/none, `0` initial) as **named constants** (`LeaderEpoch::UNKNOWN`, `ProducerId::NONE`, `Offset::ZERO`) so the comparison reads as intent rather than a magic number.
 - **Validate in the constructor** for newtypes over `String` or other unconstrained inputs (`ClientId`, a validated principal): expose `fn new(..) -> Result<Self, _>` and an `as_str`/accessor — and do **not** also derive `From`, since an infallible `From` would bypass the validation. An instance should be proof the value is well-formed. This is [parse, don't validate](https://github.com/leonardomso/rust-skills/blob/master/rules/api-parse-dont-validate.md).
 - **The newtype is zero-cost** — same size and layout as the primitive — so there is no runtime reason to avoid one.
 
