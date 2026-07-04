@@ -19,52 +19,9 @@ use crate::server_fns::{
     UserRow,
 };
 use crate::session::SessionStore;
+use crate::views::Route;
 
 pub const SESSION_COOKIE_NAME: &str = "crabka_admin_session";
-
-const ROOT_HTML: &str = r#"<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Crabka Admin</title>
-  </head>
-  <body>
-    <main class="operations-shell">
-      <h1>Crabka Admin</h1>
-      <p>Standalone broker administration UI checkpoint.</p>
-      <nav aria-label="Admin sections">
-        <a href="/login">Login</a>
-        <a href="/topics">Topics</a>
-        <a href="/groups">Consumer Groups</a>
-        <a href="/acls">ACLs</a>
-        <a href="/users">SCRAM Users</a>
-        <a href="/quotas">Quotas</a>
-        <a href="/log-dirs">Log Dirs</a>
-      </nav>
-    </main>
-  </body>
-</html>"#;
-
-const LOGIN_HTML: &str = r#"<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Sign in to Crabka</title>
-  </head>
-  <body>
-    <main class="login-shell">
-      <h1>Sign in to Crabka</h1>
-      <p>Authentication is required before broker operations are shown.</p>
-      <form method="post" action="/login">
-        <label>Username <input name="username" autocomplete="username"></label>
-        <label>Password <input name="password" type="password" autocomplete="current-password"></label>
-        <button type="submit">Sign in</button>
-      </form>
-    </main>
-  </body>
-</html>"#;
 
 #[derive(Debug, Clone)]
 pub struct AppState {
@@ -150,12 +107,16 @@ async fn healthz() -> StatusCode {
     StatusCode::OK
 }
 
-async fn root() -> Html<&'static str> {
-    Html(ROOT_HTML)
+async fn root() -> Html<String> {
+    Html(render_route_page(Route::Overview, "Crabka Admin", ""))
 }
 
-async fn login() -> Html<&'static str> {
-    Html(LOGIN_HTML)
+async fn login() -> Html<String> {
+    Html(render_route_page(
+        Route::Login,
+        "Sign in to Crabka",
+        login_form(),
+    ))
 }
 
 async fn post_login<F, B>(
@@ -178,7 +139,8 @@ where
     let Ok(success) = result else {
         return (
             StatusCode::UNAUTHORIZED,
-            Html(render_page(
+            Html(render_route_page(
+                Route::Login,
                 "Sign in to Crabka",
                 "<p>Authentication failed.</p>",
             )),
@@ -193,7 +155,11 @@ where
 
     (
         [(header::SET_COOKIE, cookie)],
-        Html(render_page("Crabka Admin", "<p>Signed in.</p>")),
+        Html(render_route_page(
+            Route::Overview,
+            "Crabka Admin",
+            "<p>Signed in.</p>",
+        )),
     )
         .into_response()
 }
@@ -208,13 +174,19 @@ where
     B: LoginBroker + Clone + Send + Sync + 'static,
 {
     let Some(context) = context_from_headers(&state, &headers) else {
-        return Html(render_page("Topics", "<p>Authentication required.</p>"));
+        return Html(render_route_page(
+            Route::Topics,
+            "Topics",
+            "<p>Authentication required.</p>",
+        ));
     };
 
     Html(match server_fns::list_topics_with_context(&context).await {
         Ok(rows) => render_topics(rows),
-        Err(UiError::NotAuthenticated) => render_page("Topics", "<p>Authentication required.</p>"),
-        Err(_) => render_page("Topics", "<p>Unable to load topics.</p>"),
+        Err(UiError::NotAuthenticated) => {
+            render_route_page(Route::Topics, "Topics", "<p>Authentication required.</p>")
+        }
+        Err(_) => render_route_page(Route::Topics, "Topics", "<p>Unable to load topics.</p>"),
     })
 }
 
@@ -228,7 +200,8 @@ where
     B: LoginBroker + Clone + Send + Sync + 'static,
 {
     let Some(context) = context_from_headers(&state, &headers) else {
-        return Html(render_page(
+        return Html(render_route_page(
+            Route::Groups,
             "Consumer Groups",
             "<p>Authentication required.</p>",
         ));
@@ -236,10 +209,16 @@ where
 
     Html(match server_fns::list_groups_with_context(&context).await {
         Ok(rows) => render_groups(rows),
-        Err(UiError::NotAuthenticated) => {
-            render_page("Consumer Groups", "<p>Authentication required.</p>")
-        }
-        Err(_) => render_page("Consumer Groups", "<p>Unable to load consumer groups.</p>"),
+        Err(UiError::NotAuthenticated) => render_route_page(
+            Route::Groups,
+            "Consumer Groups",
+            "<p>Authentication required.</p>",
+        ),
+        Err(_) => render_route_page(
+            Route::Groups,
+            "Consumer Groups",
+            "<p>Unable to load consumer groups.</p>",
+        ),
     })
 }
 
@@ -250,13 +229,19 @@ where
     B: LoginBroker + Clone + Send + Sync + 'static,
 {
     let Some(context) = context_from_headers(&state, &headers) else {
-        return Html(render_page("ACLs", "<p>Authentication required.</p>"));
+        return Html(render_route_page(
+            Route::Acls,
+            "ACLs",
+            "<p>Authentication required.</p>",
+        ));
     };
 
     Html(match server_fns::list_acls(&context).await {
         Ok(rows) => render_acls(rows),
-        Err(UiError::NotAuthenticated) => render_page("ACLs", "<p>Authentication required.</p>"),
-        Err(_) => render_page("ACLs", "<p>Unable to load ACLs.</p>"),
+        Err(UiError::NotAuthenticated) => {
+            render_route_page(Route::Acls, "ACLs", "<p>Authentication required.</p>")
+        }
+        Err(_) => render_route_page(Route::Acls, "ACLs", "<p>Unable to load ACLs.</p>"),
     })
 }
 
@@ -270,7 +255,8 @@ where
     B: LoginBroker + Clone + Send + Sync + 'static,
 {
     let Some(context) = context_from_headers(&state, &headers) else {
-        return Html(render_page(
+        return Html(render_route_page(
+            Route::Users,
             "SCRAM Users",
             "<p>Authentication required.</p>",
         ));
@@ -278,10 +264,16 @@ where
 
     Html(match server_fns::list_users(&context).await {
         Ok(rows) => render_users(rows),
-        Err(UiError::NotAuthenticated) => {
-            render_page("SCRAM Users", "<p>Authentication required.</p>")
-        }
-        Err(_) => render_page("SCRAM Users", "<p>Unable to load SCRAM users.</p>"),
+        Err(UiError::NotAuthenticated) => render_route_page(
+            Route::Users,
+            "SCRAM Users",
+            "<p>Authentication required.</p>",
+        ),
+        Err(_) => render_route_page(
+            Route::Users,
+            "SCRAM Users",
+            "<p>Unable to load SCRAM users.</p>",
+        ),
     })
 }
 
@@ -295,13 +287,19 @@ where
     B: LoginBroker + Clone + Send + Sync + 'static,
 {
     let Some(context) = context_from_headers(&state, &headers) else {
-        return Html(render_page("Quotas", "<p>Authentication required.</p>"));
+        return Html(render_route_page(
+            Route::Quotas,
+            "Quotas",
+            "<p>Authentication required.</p>",
+        ));
     };
 
     Html(match server_fns::list_quotas(&context).await {
         Ok(rows) => render_quotas(rows),
-        Err(UiError::NotAuthenticated) => render_page("Quotas", "<p>Authentication required.</p>"),
-        Err(_) => render_page("Quotas", "<p>Unable to load quotas.</p>"),
+        Err(UiError::NotAuthenticated) => {
+            render_route_page(Route::Quotas, "Quotas", "<p>Authentication required.</p>")
+        }
+        Err(_) => render_route_page(Route::Quotas, "Quotas", "<p>Unable to load quotas.</p>"),
     })
 }
 
@@ -315,16 +313,26 @@ where
     B: LoginBroker + Clone + Send + Sync + 'static,
 {
     let Some(context) = context_from_headers(&state, &headers) else {
-        return Html(render_page("Log Dirs", "<p>Authentication required.</p>"));
+        return Html(render_route_page(
+            Route::LogDirs,
+            "Log Dirs",
+            "<p>Authentication required.</p>",
+        ));
     };
 
     Html(
         match server_fns::list_log_dirs_with_context(&context).await {
             Ok(rows) => render_log_dirs(rows),
-            Err(UiError::NotAuthenticated) => {
-                render_page("Log Dirs", "<p>Authentication required.</p>")
-            }
-            Err(_) => render_page("Log Dirs", "<p>Unable to load log-dir data.</p>"),
+            Err(UiError::NotAuthenticated) => render_route_page(
+                Route::LogDirs,
+                "Log Dirs",
+                "<p>Authentication required.</p>",
+            ),
+            Err(_) => render_route_page(
+                Route::LogDirs,
+                "Log Dirs",
+                "<p>Unable to load log-dir data.</p>",
+            ),
         },
     )
 }
@@ -354,7 +362,7 @@ fn session_cookie(headers: &HeaderMap) -> Option<&str> {
 
 fn render_topics(rows: Vec<TopicRow>) -> String {
     if rows.is_empty() {
-        return render_page("Topics", "<p>No topics loaded yet.</p>");
+        return render_route_page(Route::Topics, "Topics", "<p>No topics loaded yet.</p>");
     }
 
     let mut rendered_rows = String::new();
@@ -363,12 +371,20 @@ fn render_topics(rows: Vec<TopicRow>) -> String {
         write!(rendered_rows, "<li>{escaped_name}</li>").expect("writing to String cannot fail");
     }
 
-    render_page("Topics", &format!("<ul>{rendered_rows}</ul>"))
+    render_route_page(
+        Route::Topics,
+        "Topics",
+        &format!("<ul>{rendered_rows}</ul>"),
+    )
 }
 
 fn render_groups(rows: Vec<GroupRow>) -> String {
     if rows.is_empty() {
-        return render_page("Consumer Groups", "<p>No consumer groups loaded yet.</p>");
+        return render_route_page(
+            Route::Groups,
+            "Consumer Groups",
+            "<p>No consumer groups loaded yet.</p>",
+        );
     }
 
     let mut rendered_rows = String::new();
@@ -378,12 +394,16 @@ fn render_groups(rows: Vec<GroupRow>) -> String {
             .expect("writing to String cannot fail");
     }
 
-    render_page("Consumer Groups", &format!("<ul>{rendered_rows}</ul>"))
+    render_route_page(
+        Route::Groups,
+        "Consumer Groups",
+        &format!("<ul>{rendered_rows}</ul>"),
+    )
 }
 
 fn render_acls(rows: Vec<AclRow>) -> String {
     if rows.is_empty() {
-        return render_page("ACLs", "<p>No ACLs loaded yet.</p>");
+        return render_route_page(Route::Acls, "ACLs", "<p>No ACLs loaded yet.</p>");
     }
 
     let mut rendered_rows = String::new();
@@ -399,12 +419,16 @@ fn render_acls(rows: Vec<AclRow>) -> String {
         .expect("writing to String cannot fail");
     }
 
-    render_page("ACLs", &format!("<ul>{rendered_rows}</ul>"))
+    render_route_page(Route::Acls, "ACLs", &format!("<ul>{rendered_rows}</ul>"))
 }
 
 fn render_users(rows: Vec<UserRow>) -> String {
     if rows.is_empty() {
-        return render_page("SCRAM Users", "<p>No SCRAM users loaded yet.</p>");
+        return render_route_page(
+            Route::Users,
+            "SCRAM Users",
+            "<p>No SCRAM users loaded yet.</p>",
+        );
     }
 
     let mut rendered_rows = String::new();
@@ -418,12 +442,16 @@ fn render_users(rows: Vec<UserRow>) -> String {
         .expect("writing to String cannot fail");
     }
 
-    render_page("SCRAM Users", &format!("<ul>{rendered_rows}</ul>"))
+    render_route_page(
+        Route::Users,
+        "SCRAM Users",
+        &format!("<ul>{rendered_rows}</ul>"),
+    )
 }
 
 fn render_quotas(rows: Vec<QuotaRow>) -> String {
     if rows.is_empty() {
-        return render_page("Quotas", "<p>No quotas loaded yet.</p>");
+        return render_route_page(Route::Quotas, "Quotas", "<p>No quotas loaded yet.</p>");
     }
 
     let mut rendered_rows = String::new();
@@ -438,12 +466,20 @@ fn render_quotas(rows: Vec<QuotaRow>) -> String {
         .expect("writing to String cannot fail");
     }
 
-    render_page("Quotas", &format!("<ul>{rendered_rows}</ul>"))
+    render_route_page(
+        Route::Quotas,
+        "Quotas",
+        &format!("<ul>{rendered_rows}</ul>"),
+    )
 }
 
 fn render_log_dirs(rows: Vec<LogDirRow>) -> String {
     if rows.is_empty() {
-        return render_page("Log Dirs", "<p>No log-dir data loaded yet.</p>");
+        return render_route_page(
+            Route::LogDirs,
+            "Log Dirs",
+            "<p>No log-dir data loaded yet.</p>",
+        );
     }
 
     let mut rendered_rows = String::new();
@@ -458,17 +494,28 @@ fn render_log_dirs(rows: Vec<LogDirRow>) -> String {
         .expect("writing to String cannot fail");
     }
 
-    render_page("Log Dirs", &format!("<ul>{rendered_rows}</ul>"))
+    render_route_page(
+        Route::LogDirs,
+        "Log Dirs",
+        &format!("<ul>{rendered_rows}</ul>"),
+    )
 }
 
-fn render_page(title: &str, body: &str) -> String {
+fn render_route_page(route: Route, title: &str, body: &str) -> String {
+    let route_body = dioxus_ssr::render_element(crate::views::render_route(route));
+
     format!(
         r#"<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{}</title></head><body><main><h1>{}</h1>{}</main></body></html>"#,
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{}</title></head><body>{}<main><h1>{}</h1>{}</main></body></html>"#,
         escape_html(title),
+        route_body,
         escape_html(title),
         body
     )
+}
+
+fn login_form() -> &'static str {
+    r#"<form method="post" action="/login"><label>Username <input name="username" autocomplete="username"></label><label>Password <input name="password" type="password" autocomplete="current-password"></label><button type="submit">Sign in</button></form>"#
 }
 
 fn escape_html(value: &str) -> String {

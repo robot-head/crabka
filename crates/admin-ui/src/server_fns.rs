@@ -8,10 +8,14 @@ use std::pin::Pin;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use crabka_client_admin::{AdminClient, CreateTopicSpec};
+use crabka_client_admin::{
+    AclEntry, AclEntryFilter, AclOperation, AdminClient, CreatePartitionsOp, CreateTopicSpec,
+    IncrementalAlterOp, PatternType, PermissionType, QuotaOp, ResourceType, ScramDeletion,
+    ScramUpsertion,
+};
 use serde::{Deserialize, Serialize};
 
-use crate::admin::AdminFacade;
+use crate::admin::{AdminFacade, quota_mutation_outcome, resource_outcome_rows};
 use crate::auth::{
     AdminClientLoginBroker, LoginBroker, LoginRequest, LoginSuccess, build_scram_sha512_security,
 };
@@ -606,30 +610,27 @@ impl AdminReadSeam for BrokerAdminReadSeam {
     fn acls<'a>(
         &'a self,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<AclRow>, UiError>> + Send + 'a>> {
-        Box::pin(async {
-            Err(UiError::Admin(
-                "list ACLs is unsupported by the broker admin seam yet".to_string(),
-            ))
+        Box::pin(async move {
+            let mut facade = self.facade().await?;
+            Ok(facade.acls().await?)
         })
     }
 
     fn users<'a>(
         &'a self,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<UserRow>, UiError>> + Send + 'a>> {
-        Box::pin(async {
-            Err(UiError::Admin(
-                "list SCRAM users is unsupported by the broker admin seam yet".to_string(),
-            ))
+        Box::pin(async move {
+            let mut facade = self.facade().await?;
+            Ok(facade.users().await?)
         })
     }
 
     fn quotas<'a>(
         &'a self,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<QuotaRow>, UiError>> + Send + 'a>> {
-        Box::pin(async {
-            Err(UiError::Admin(
-                "list quotas is unsupported by the broker admin seam yet".to_string(),
-            ))
+        Box::pin(async move {
+            let mut facade = self.facade().await?;
+            Ok(facade.quotas_for_user(&self.username).await?)
         })
     }
 
@@ -676,13 +677,7 @@ impl AdminMutationSeam for BrokerAdminMutationSeam {
                 )
                 .await?;
 
-            Ok(outcomes
-                .into_iter()
-                .map(|outcome| ResourceOutcome {
-                    resource: outcome.name,
-                    error: outcome.error.as_ref().map(crate::dto::KafkaErrorDto::from),
-                })
-                .collect())
+            Ok(resource_outcome_rows(outcomes))
         })
     }
 
@@ -690,87 +685,283 @@ impl AdminMutationSeam for BrokerAdminMutationSeam {
         &'a self,
         request: DeleteTopicRequestDto,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
-        Box::pin(async move { unsupported_mutation_outcome(&request.name, "delete topic") })
+        Box::pin(async move {
+            let mut facade = self.0.facade().await?;
+            let outcomes = facade
+                .client_mut()
+                .delete_topics(&[request.name.as_str()], 30_000)
+                .await?;
+
+            Ok(resource_outcome_rows(outcomes))
+        })
     }
 
     fn create_partitions<'a>(
         &'a self,
         request: CreatePartitionsRequestDto,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
-        Box::pin(async move { unsupported_mutation_outcome(&request.topic, "create partitions") })
+        Box::pin(async move {
+            let mut facade = self.0.facade().await?;
+            let outcomes = facade
+                .client_mut()
+                .create_partitions(
+                    &[CreatePartitionsOp {
+                        name: request.topic,
+                        new_total_count: request.total_count,
+                    }],
+                    30_000,
+                )
+                .await?;
+
+            Ok(resource_outcome_rows(outcomes))
+        })
     }
 
     fn alter_configs<'a>(
         &'a self,
         request: AlterConfigRequestDto,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
-        Box::pin(
-            async move { unsupported_mutation_outcome(&request.resource_name, "alter configs") },
-        )
+        Box::pin(async move {
+            ensure_topic_config_resource(&request.resource_type, &request.resource_name)?;
+            let mut facade = self.0.facade().await?;
+            let ops = request
+                .configs
+                .into_iter()
+                .map(|config| IncrementalAlterOp::Set {
+                    topic: request.resource_name.clone(),
+                    key: config.name,
+                    value: config.value,
+                })
+                .collect::<Vec<_>>();
+            let outcomes = facade.client_mut().incremental_alter_configs(&ops).await?;
+
+            Ok(resource_outcome_rows(outcomes))
+        })
     }
 
     fn create_acl<'a>(
         &'a self,
         request: AclRequestDto,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
-        Box::pin(async move { unsupported_mutation_outcome(&request.principal, "create ACL") })
+        Box::pin(async move {
+            let mut facade = self.0.facade().await?;
+            let acl = acl_entry_from_request(&request)?;
+            let outcomes = facade.client_mut().create_acls(&[acl]).await?;
+
+            Ok(resource_outcome_rows(outcomes))
+        })
     }
 
     fn delete_acl<'a>(
         &'a self,
         request: AclRequestDto,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
-        Box::pin(async move { unsupported_mutation_outcome(&request.principal, "delete ACL") })
+        Box::pin(async move {
+            let mut facade = self.0.facade().await?;
+            let filter = acl_filter_from_request(&request)?;
+            let outcomes = facade.client_mut().delete_acls(&[filter]).await?;
+
+            Ok(resource_outcome_rows(outcomes))
+        })
     }
 
     fn upsert_scram_sha512_user<'a>(
         &'a self,
         request: ScramUserUpsertDto,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
-        Box::pin(
-            async move { unsupported_mutation_outcome(&request.username, "upsert SCRAM user") },
-        )
+        Box::pin(async move {
+            let mut facade = self.0.facade().await?;
+            let outcomes = facade
+                .client_mut()
+                .alter_user_scram_credentials_sha512(
+                    &[ScramUpsertion {
+                        username: request.username,
+                        password: request.password,
+                        iterations: request.iterations,
+                    }],
+                    &[],
+                )
+                .await?;
+
+            Ok(resource_outcome_rows(outcomes))
+        })
     }
 
     fn delete_scram_user<'a>(
         &'a self,
         request: ScramUserDeleteDto,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
-        Box::pin(
-            async move { unsupported_mutation_outcome(&request.username, "delete SCRAM user") },
-        )
+        Box::pin(async move {
+            let mut facade = self.0.facade().await?;
+            let outcomes = facade
+                .client_mut()
+                .alter_user_scram_credentials_sha512(
+                    &[],
+                    &[ScramDeletion {
+                        username: request.username,
+                    }],
+                )
+                .await?;
+
+            Ok(resource_outcome_rows(outcomes))
+        })
     }
 
     fn upsert_quota<'a>(
         &'a self,
         request: QuotaUpsertDto,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
-        Box::pin(async move { unsupported_mutation_outcome(&request.entity, "upsert quota") })
+        Box::pin(async move {
+            let mut facade = self.0.facade().await?;
+            let error = facade
+                .client_mut()
+                .alter_user_quotas(
+                    &request.entity,
+                    &[QuotaOp::Set {
+                        key: request.quota_type.clone(),
+                        value: request.value,
+                    }],
+                    false,
+                )
+                .await?;
+
+            Ok(vec![quota_mutation_outcome(
+                &request.entity,
+                &request.quota_type,
+                error,
+            )])
+        })
     }
 
     fn delete_quota<'a>(
         &'a self,
         request: QuotaDeleteDto,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
-        Box::pin(async move { unsupported_mutation_outcome(&request.entity, "delete quota") })
+        Box::pin(async move {
+            let mut facade = self.0.facade().await?;
+            let error = facade
+                .client_mut()
+                .alter_user_quotas(
+                    &request.entity,
+                    &[QuotaOp::Remove {
+                        key: request.quota_type.clone(),
+                    }],
+                    false,
+                )
+                .await?;
+
+            Ok(vec![quota_mutation_outcome(
+                &request.entity,
+                &request.quota_type,
+                error,
+            )])
+        })
     }
 
     fn move_log_dir<'a>(
         &'a self,
         request: LogDirMoveRequestDto,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
-        Box::pin(async move { unsupported_mutation_outcome(&request.topic, "move log dir") })
-    }
-}
+        Box::pin(async move {
+            let mut facade = self.0.facade().await?;
+            let assignments = BTreeMap::from([(
+                request.destination_log_dir,
+                vec![(request.topic, vec![request.partition])],
+            )]);
+            let outcomes = facade
+                .client_mut()
+                .alter_replica_log_dirs(&assignments)
+                .await?;
 
-fn unsupported_mutation_outcome<T>(resource: &str, operation: &'static str) -> Result<T, UiError> {
-    Err(UiError::Admin(format!(
-        "{operation} is not supported by the broker admin seam yet for {resource}"
-    )))
+            Ok(resource_outcome_rows(outcomes))
+        })
+    }
 }
 
 fn ensure_valid_request(validation: Result<(), String>) -> Result<(), UiError> {
     validation.map_err(UiError::Admin)
+}
+
+fn ensure_topic_config_resource(resource_type: &str, resource_name: &str) -> Result<(), UiError> {
+    if resource_type.eq_ignore_ascii_case("topic") {
+        return Ok(());
+    }
+
+    Err(UiError::Admin(format!(
+        "alter configs only supports topic resources through crabka-client-admin; {resource_type}:{resource_name} is unsupported"
+    )))
+}
+
+fn acl_entry_from_request(request: &AclRequestDto) -> Result<AclEntry, UiError> {
+    Ok(AclEntry {
+        resource_type: parse_resource_type(&request.resource_type)?,
+        resource_name: request.resource_name.clone(),
+        pattern_type: PatternType::Literal,
+        principal: request.principal.clone(),
+        host: request.host.clone(),
+        operation: parse_acl_operation(&request.operation)?,
+        permission_type: parse_permission_type(&request.permission)?,
+    })
+}
+
+fn acl_filter_from_request(request: &AclRequestDto) -> Result<AclEntryFilter, UiError> {
+    Ok(AclEntryFilter {
+        resource_type: Some(parse_resource_type(&request.resource_type)?),
+        resource_name: Some(request.resource_name.clone()),
+        pattern_type: Some(PatternType::Literal),
+        principal: Some(request.principal.clone()),
+        host: Some(request.host.clone()),
+        operation: Some(parse_acl_operation(&request.operation)?),
+        permission_type: Some(parse_permission_type(&request.permission)?),
+    })
+}
+
+fn parse_resource_type(value: &str) -> Result<ResourceType, UiError> {
+    match value.to_ascii_lowercase().as_str() {
+        "topic" => Ok(ResourceType::Topic),
+        "group" => Ok(ResourceType::Group),
+        "cluster" => Ok(ResourceType::Cluster),
+        "transactionalid" | "transactional_id" | "transactional-id" => {
+            Ok(ResourceType::TransactionalId)
+        }
+        _ => Err(UiError::Admin(format!(
+            "unsupported ACL resource type {value}"
+        ))),
+    }
+}
+
+fn parse_acl_operation(value: &str) -> Result<AclOperation, UiError> {
+    match value.to_ascii_lowercase().as_str() {
+        "all" => Ok(AclOperation::All),
+        "read" => Ok(AclOperation::Read),
+        "write" => Ok(AclOperation::Write),
+        "create" => Ok(AclOperation::Create),
+        "delete" => Ok(AclOperation::Delete),
+        "alter" => Ok(AclOperation::Alter),
+        "describe" => Ok(AclOperation::Describe),
+        "clusteraction" | "cluster_action" | "cluster-action" => Ok(AclOperation::ClusterAction),
+        "describeconfigs" | "describe_configs" | "describe-configs" => {
+            Ok(AclOperation::DescribeConfigs)
+        }
+        "alterconfigs" | "alter_configs" | "alter-configs" => Ok(AclOperation::AlterConfigs),
+        "idempotentwrite" | "idempotent_write" | "idempotent-write" => {
+            Ok(AclOperation::IdempotentWrite)
+        }
+        "twophasecommit" | "two_phase_commit" | "two-phase-commit" => {
+            Ok(AclOperation::TwoPhaseCommit)
+        }
+        _ => Err(UiError::Admin(format!("unsupported ACL operation {value}"))),
+    }
+}
+
+fn parse_permission_type(value: &str) -> Result<PermissionType, UiError> {
+    match value.to_ascii_lowercase().as_str() {
+        "allow" => Ok(PermissionType::Allow),
+        "deny" => Ok(PermissionType::Deny),
+        _ => Err(UiError::Admin(format!(
+            "unsupported ACL permission {value}"
+        ))),
+    }
 }
 
 fn require_session_id(

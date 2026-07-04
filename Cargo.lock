@@ -2186,6 +2186,7 @@ dependencies = [
  "crabka-client-core",
  "crabka-security",
  "dioxus",
+ "dioxus-ssr",
  "parking_lot",
  "playwright-rs",
  "serde",

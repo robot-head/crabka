@@ -104,6 +104,8 @@ async fn root_returns_html() {
     let body = response_text(response).await;
     assert!(body.contains("<!doctype html>"));
     assert!(body.contains("Crabka Admin"));
+    assert!(body.contains("operations-shell"));
+    assert!(body.contains("Crabka Operations"));
 }
 
 #[tokio::test]
@@ -169,20 +171,51 @@ async fn posting_login_sets_session_cookie_and_cookie_authenticates_protected_ro
 }
 
 #[tokio::test]
-async fn linked_admin_pages_return_static_html() {
-    for (path, heading, empty_state) in [
-        ("/topics", "Topics", "Authentication required."),
-        ("/groups", "Consumer Groups", "Authentication required."),
-        ("/acls", "ACLs", "Authentication required."),
-        ("/users", "SCRAM Users", "Authentication required."),
-        ("/quotas", "Quotas", "Authentication required."),
-        ("/log-dirs", "Log Dirs", "Authentication required."),
+async fn linked_admin_pages_render_shared_dioxus_route_shells() {
+    for (path, heading, route_marker, empty_state) in [
+        (
+            "/topics",
+            "Topics",
+            "admin-section topics-section",
+            "Authentication required.",
+        ),
+        (
+            "/groups",
+            "Consumer Groups",
+            "admin-section groups-section",
+            "Authentication required.",
+        ),
+        (
+            "/acls",
+            "ACLs",
+            "admin-section acls-section",
+            "Authentication required.",
+        ),
+        (
+            "/users",
+            "SCRAM Users",
+            "admin-section users-section",
+            "Authentication required.",
+        ),
+        (
+            "/quotas",
+            "Quotas",
+            "admin-section quotas-section",
+            "Authentication required.",
+        ),
+        (
+            "/log-dirs",
+            "Log Dirs",
+            "admin-section log-dirs-section",
+            "Authentication required.",
+        ),
     ] {
         let response = get(path).await;
 
         assert_eq!(response.status(), StatusCode::OK, "{path} status");
         let body = response_text(response).await;
         assert!(body.contains(heading), "{path} heading");
+        assert!(body.contains(route_marker), "{path} Dioxus route marker");
         assert!(body.contains(empty_state), "{path} empty state");
     }
 }

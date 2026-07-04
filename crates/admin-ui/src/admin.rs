@@ -1,6 +1,14 @@
-use crabka_client_admin::{AdminClient, AdminError, LogDirInfo, TopicMetadata};
+use std::collections::BTreeMap;
 
-use crate::dto::{GroupRow, KafkaErrorDto, LogDirRow, TopicRow};
+use crabka_client_admin::{
+    AclEntry, AclEntryFilter, AdminClient, AdminError, AlterConfigsOutcome,
+    AlterReplicaLogDirOutcome, CreateAclOutcome, CreatePartitionsOutcome, CreateTopicOutcome,
+    DeleteAclFilterOutcome, DeleteTopicOutcome, KafkaError, LogDirInfo, ScramUserOutcome,
+    TopicMetadata, UserQuotaConfig, UserScramCredentials,
+};
+
+use crate::dto::{GroupRow, KafkaErrorDto, LogDirRow, ResourceOutcome, TopicRow};
+use crate::server_fns::{AclRow, QuotaRow, UserRow};
 
 pub struct AdminFacade {
     client: AdminClient,
@@ -33,6 +41,27 @@ impl AdminFacade {
 
         Ok(log_dir_rows(log_dirs))
     }
+
+    pub async fn acls(&mut self) -> Result<Vec<AclRow>, AdminError> {
+        let acls = self
+            .client
+            .describe_acls(&AclEntryFilter::default())
+            .await?;
+
+        Ok(acl_rows(acls))
+    }
+
+    pub async fn quotas_for_user(&mut self, username: &str) -> Result<Vec<QuotaRow>, AdminError> {
+        let quotas = self.client.describe_user_quotas(username).await?;
+
+        Ok(quota_rows(username, quotas))
+    }
+
+    pub async fn users(&mut self) -> Result<Vec<UserRow>, AdminError> {
+        let users = self.client.describe_user_scram_credentials(None).await?;
+
+        Ok(user_rows(users))
+    }
 }
 
 #[must_use]
@@ -56,6 +85,64 @@ pub fn group_rows(group_ids: Vec<String>) -> Vec<GroupRow> {
         .into_iter()
         .map(|group_id| GroupRow { group_id })
         .collect()
+}
+
+#[must_use]
+pub fn acl_rows(acls: Vec<AclEntry>) -> Vec<AclRow> {
+    acls.into_iter()
+        .map(|acl| AclRow {
+            resource: format!(
+                "{:?}:{} ({:?})",
+                acl.resource_type, acl.resource_name, acl.pattern_type
+            ),
+            principal: acl.principal,
+            operation: format!("{:?}", acl.operation),
+            permission: format!("{:?}", acl.permission_type),
+        })
+        .collect()
+}
+
+#[must_use]
+pub fn quota_rows(username: &str, quotas: UserQuotaConfig) -> Vec<QuotaRow> {
+    quotas
+        .into_iter()
+        .map(|(quota_type, value)| QuotaRow {
+            entity: username.to_string(),
+            quota_type,
+            value: format_quota_value(value),
+        })
+        .collect()
+}
+
+#[must_use]
+pub fn user_rows(users: Vec<UserScramCredentials>) -> Vec<UserRow> {
+    users
+        .into_iter()
+        .map(|user| UserRow {
+            username: user.username,
+            principal: user.mechanisms.join(", "),
+        })
+        .collect()
+}
+
+#[must_use]
+pub fn resource_outcome_rows<T>(outcomes: Vec<T>) -> Vec<ResourceOutcome>
+where
+    T: IntoResourceOutcomeDto,
+{
+    outcomes
+        .into_iter()
+        .map(IntoResourceOutcomeDto::into_resource_outcome)
+        .collect()
+}
+
+#[must_use]
+pub fn quota_mutation_outcome(
+    username: &str,
+    quota_type: &str,
+    error: Option<KafkaError>,
+) -> ResourceOutcome {
+    kafka_error_outcome(format!("{username}:{quota_type}"), error)
 }
 
 #[must_use]
@@ -103,4 +190,80 @@ fn log_dir_partition_rows(log_dir: LogDirInfo) -> Vec<LogDirRow> {
                 })
         })
         .collect()
+}
+
+fn format_quota_value(value: f64) -> String {
+    if value.fract() == 0.0 {
+        return format!("{value:.0}");
+    }
+
+    value.to_string()
+}
+
+fn kafka_error_outcome(resource: String, error: Option<KafkaError>) -> ResourceOutcome {
+    ResourceOutcome {
+        resource,
+        error: error.map(|error| KafkaErrorDto {
+            code: error.code,
+            name: error.name.to_string(),
+            message: error.message,
+        }),
+    }
+}
+
+pub trait IntoResourceOutcomeDto {
+    fn into_resource_outcome(self) -> ResourceOutcome;
+}
+
+impl IntoResourceOutcomeDto for CreateTopicOutcome {
+    fn into_resource_outcome(self) -> ResourceOutcome {
+        kafka_error_outcome(self.name, self.error)
+    }
+}
+
+impl IntoResourceOutcomeDto for DeleteTopicOutcome {
+    fn into_resource_outcome(self) -> ResourceOutcome {
+        kafka_error_outcome(self.name, self.error)
+    }
+}
+
+impl IntoResourceOutcomeDto for CreatePartitionsOutcome {
+    fn into_resource_outcome(self) -> ResourceOutcome {
+        kafka_error_outcome(self.name, self.error)
+    }
+}
+
+impl IntoResourceOutcomeDto for AlterConfigsOutcome {
+    fn into_resource_outcome(self) -> ResourceOutcome {
+        kafka_error_outcome(self.topic, self.error)
+    }
+}
+
+impl IntoResourceOutcomeDto for CreateAclOutcome {
+    fn into_resource_outcome(self) -> ResourceOutcome {
+        kafka_error_outcome("acl".to_string(), self.error)
+    }
+}
+
+impl IntoResourceOutcomeDto for DeleteAclFilterOutcome {
+    fn into_resource_outcome(self) -> ResourceOutcome {
+        kafka_error_outcome("acl-filter".to_string(), self.error)
+    }
+}
+
+impl IntoResourceOutcomeDto for ScramUserOutcome {
+    fn into_resource_outcome(self) -> ResourceOutcome {
+        kafka_error_outcome(self.username, self.error)
+    }
+}
+
+impl IntoResourceOutcomeDto for AlterReplicaLogDirOutcome {
+    fn into_resource_outcome(self) -> ResourceOutcome {
+        kafka_error_outcome(format!("{}-{}", self.topic, self.partition), self.error)
+    }
+}
+
+#[must_use]
+pub fn singleton_quota_config(quota_type: String, value: f64) -> UserQuotaConfig {
+    BTreeMap::from([(quota_type, value)])
 }

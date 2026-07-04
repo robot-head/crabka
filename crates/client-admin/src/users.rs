@@ -19,6 +19,7 @@ use crabka_protocol::owned::{
     create_acls_request::{AclCreation, CreateAclsRequest},
     delete_acls_request::{DeleteAclsFilter, DeleteAclsRequest},
     describe_acls_request::DescribeAclsRequest,
+    describe_user_scram_credentials_request::{DescribeUserScramCredentialsRequest, UserName},
 };
 use crabka_security::SaslMechanism;
 use ring::rand::{SecureRandom, SystemRandom};
@@ -117,6 +118,13 @@ pub struct ScramUserOutcome {
     pub error: Option<KafkaError>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserScramCredentials {
+    pub username: String,
+    pub mechanisms: Vec<String>,
+    pub error: Option<KafkaError>,
+}
+
 #[derive(Debug, Clone)]
 pub struct CreateAclOutcome {
     pub error: Option<KafkaError>,
@@ -187,6 +195,39 @@ impl AdminClient {
             Err(error) => return Err(AdminError::from(error)),
         };
         parse_describe_acls(resp)
+    }
+
+    pub async fn describe_user_scram_credentials(
+        &mut self,
+        users: Option<&[String]>,
+    ) -> Result<Vec<UserScramCredentials>, AdminError> {
+        let req = DescribeUserScramCredentialsRequest {
+            users: users.map(|users| {
+                users
+                    .iter()
+                    .map(|name| UserName {
+                        name: name.clone(),
+                        ..Default::default()
+                    })
+                    .collect()
+            }),
+            ..Default::default()
+        };
+        let resp = self.conn.send(req).await?;
+
+        Ok(resp
+            .results
+            .into_iter()
+            .map(|result| UserScramCredentials {
+                username: result.user,
+                mechanisms: result
+                    .credential_infos
+                    .into_iter()
+                    .map(|credential| scram_mechanism_name(credential.mechanism).to_string())
+                    .collect(),
+                error: error_if(result.error_code, result.error_message),
+            })
+            .collect())
     }
 
     /// Create the supplied ACLs.
@@ -355,6 +396,14 @@ fn parse_alter_scram_results(
             error: error_if(r.error_code, r.error_message),
         })
         .collect()
+}
+
+fn scram_mechanism_name(mechanism: i8) -> &'static str {
+    match mechanism {
+        SCRAM_SHA_256_WIRE => "SCRAM-SHA-256",
+        SCRAM_SHA_512_WIRE => "SCRAM-SHA-512",
+        _ => "UNKNOWN",
+    }
 }
 
 fn filter_to_describe_request(f: &AclEntryFilter) -> DescribeAclsRequest {

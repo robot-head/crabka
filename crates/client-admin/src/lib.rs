@@ -34,7 +34,7 @@ pub use topics::{
 pub use users::{
     AclEntry, AclEntryFilter, AclOperation, CreateAclOutcome, DEFAULT_SCRAM_ITERATIONS,
     DeleteAclFilterOutcome, PatternType, PermissionType, ResourceType, ScramDeletion,
-    ScramUpsertion, ScramUserOutcome,
+    ScramUpsertion, ScramUserOutcome, UserScramCredentials,
 };
 
 /// Test seam for `AdminClient`. The operator's reconcile only needs

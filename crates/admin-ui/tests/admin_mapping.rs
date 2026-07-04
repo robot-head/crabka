@@ -1,13 +1,18 @@
-use crabka_admin_ui::admin::{group_rows, log_dir_rows, topic_rows};
+use crabka_admin_ui::admin::{
+    acl_rows, group_rows, log_dir_rows, quota_rows, resource_outcome_rows, topic_rows,
+};
 use crabka_admin_ui::dto::{
     ConfigEntryDto, CreateTopicRequestDto, KafkaErrorDto, LogDirMoveRequestDto, ResourceOutcome,
     ScramUserUpsertDto,
 };
 use crabka_admin_ui::error::UiError;
 use crabka_client_admin::{
-    AdminError, KafkaError, LogDirInfo, LogDirPartitionInfo, LogDirTopicInfo, TopicMetadata,
-    TopicMetadataEntry,
+    AclEntry, AclOperation, AdminError, AlterReplicaLogDirOutcome, CreatePartitionsOutcome,
+    DeleteAclFilterOutcome, DeleteTopicOutcome, KafkaError, LogDirInfo, LogDirPartitionInfo,
+    LogDirTopicInfo, PatternType, PermissionType, ResourceType, ScramUserOutcome, TopicMetadata,
+    TopicMetadataEntry, UserScramCredentials,
 };
+use std::collections::BTreeMap;
 
 #[test]
 fn resource_outcome_reports_error_state() {
@@ -206,6 +211,93 @@ fn maps_group_ids_to_group_rows() {
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].group_id, "payments");
     assert_eq!(rows[1].group_id, "shipping");
+}
+
+#[test]
+fn maps_acl_entries_to_visible_rows() {
+    let rows = acl_rows(vec![AclEntry {
+        resource_type: ResourceType::Topic,
+        resource_name: "orders".to_string(),
+        pattern_type: PatternType::Literal,
+        principal: "User:alice".to_string(),
+        host: "*".to_string(),
+        operation: AclOperation::Read,
+        permission_type: PermissionType::Allow,
+    }]);
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].resource, "Topic:orders (Literal)");
+    assert_eq!(rows[0].principal, "User:alice");
+    assert_eq!(rows[0].operation, "Read");
+    assert_eq!(rows[0].permission, "Allow");
+}
+
+#[test]
+fn maps_user_quota_config_to_visible_rows() {
+    let quotas = BTreeMap::from([
+        ("consumer_byte_rate".to_string(), 2048.0),
+        ("producer_byte_rate".to_string(), 1024.5),
+    ]);
+
+    let rows = quota_rows("alice", quotas);
+
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].entity, "alice");
+    assert_eq!(rows[0].quota_type, "consumer_byte_rate");
+    assert_eq!(rows[0].value, "2048");
+    assert_eq!(rows[1].quota_type, "producer_byte_rate");
+    assert_eq!(rows[1].value, "1024.5");
+}
+
+#[test]
+fn maps_scram_credentials_to_user_rows() {
+    let rows = crabka_admin_ui::admin::user_rows(vec![UserScramCredentials {
+        username: "alice".to_string(),
+        mechanisms: vec!["SCRAM-SHA-512".to_string()],
+        error: None,
+    }]);
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].username, "alice");
+    assert_eq!(rows[0].principal, "SCRAM-SHA-512");
+}
+
+#[test]
+fn maps_mutation_outcomes_preserving_kafka_errors() {
+    let error = KafkaError {
+        code: 3,
+        name: "UNKNOWN_TOPIC_OR_PARTITION",
+        message: Some("missing".to_string()),
+    };
+
+    let delete_topic_rows = resource_outcome_rows(vec![DeleteTopicOutcome {
+        name: "orders".to_string(),
+        error: Some(error.clone()),
+    }]);
+    let partition_rows = resource_outcome_rows(vec![CreatePartitionsOutcome {
+        name: "payments".to_string(),
+        error: None,
+    }]);
+    let scram_rows = resource_outcome_rows(vec![ScramUserOutcome {
+        username: "alice".to_string(),
+        error: Some(error.clone()),
+    }]);
+    let log_dir_rows = resource_outcome_rows(vec![AlterReplicaLogDirOutcome {
+        topic: "orders".to_string(),
+        partition: 1,
+        error: None,
+    }]);
+    let delete_acl_rows = resource_outcome_rows(vec![DeleteAclFilterOutcome {
+        error: Some(error),
+        matched: Vec::new(),
+    }]);
+
+    assert_eq!(delete_topic_rows[0].resource, "orders");
+    assert!(delete_topic_rows[0].has_error());
+    assert_eq!(partition_rows[0].resource, "payments");
+    assert_eq!(scram_rows[0].resource, "alice");
+    assert_eq!(log_dir_rows[0].resource, "orders-1");
+    assert!(delete_acl_rows[0].has_error());
 }
 
 #[test]
