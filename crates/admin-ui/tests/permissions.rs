@@ -20,6 +20,13 @@ fn deny(resource_type: ResourceType, operation: AclOperation) -> AclEntry {
     }
 }
 
+fn wildcard_allow(resource_type: ResourceType, operation: AclOperation) -> AclEntry {
+    AclEntry {
+        principal: "User:*".to_string(),
+        ..allow(resource_type, operation)
+    }
+}
+
 #[test]
 fn derives_topic_admin_capabilities_from_topic_acls() {
     let entries = vec![
@@ -114,12 +121,38 @@ fn cluster_alter_configs_does_not_grant_acl_or_user_admin() {
 
     assert!(!capabilities.can_alter_acls);
     assert!(!capabilities.can_alter_users);
+    assert!(capabilities.can_view_quotas);
     assert!(capabilities.can_alter_quotas);
     assert_eq!(
         capabilities,
         Capabilities {
+            can_view_quotas: true,
             can_alter_quotas: true,
             ..Capabilities::default()
         }
     );
+}
+
+#[test]
+fn wildcard_principal_grants_matching_user_capabilities() {
+    let entries = vec![wildcard_allow(ResourceType::Topic, AclOperation::Describe)];
+
+    let capabilities = derive_capabilities("User:alice", &entries);
+
+    assert!(capabilities.can_view_topics);
+}
+
+#[test]
+fn topic_mutating_operations_imply_topic_view() {
+    let entries = vec![
+        allow(ResourceType::Topic, AclOperation::Write),
+        allow(ResourceType::Topic, AclOperation::Alter),
+        allow(ResourceType::Topic, AclOperation::Delete),
+    ];
+
+    let capabilities = derive_capabilities("User:alice", &entries);
+
+    assert!(capabilities.can_view_topics);
+    assert!(capabilities.can_alter_topics);
+    assert!(capabilities.can_delete_topics);
 }

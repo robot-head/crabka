@@ -157,3 +157,34 @@ fn maps_log_dir_info_to_partition_rows_with_directory_errors() {
     );
     assert_eq!(rows[1].error, rows[0].error);
 }
+
+#[test]
+fn maps_errored_empty_log_dir_to_sentinel_row() {
+    let log_dirs = vec![LogDirInfo {
+        log_dir: "/var/lib/crabka-offline".to_string(),
+        error: Some(KafkaError {
+            code: 57,
+            name: "KAFKA_STORAGE_ERROR",
+            message: Some("disk offline".to_string()),
+        }),
+        topics: Vec::new(),
+    }];
+
+    let rows = log_dir_rows(log_dirs);
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].log_dir, "/var/lib/crabka-offline");
+    assert_eq!(rows[0].topic, "");
+    assert_eq!(rows[0].partition, -1);
+    assert_eq!(rows[0].partition_size, 0);
+    assert_eq!(rows[0].offset_lag, 0);
+    assert!(!rows[0].is_future_key);
+    assert_eq!(
+        rows[0].error,
+        Some(KafkaErrorDto {
+            code: 57,
+            name: "KAFKA_STORAGE_ERROR".to_string(),
+            message: Some("disk offline".to_string()),
+        })
+    );
+}
