@@ -18,11 +18,28 @@ pub struct Capabilities {
 
 #[must_use]
 pub fn derive_capabilities(principal: &str, entries: &[AclEntry]) -> Capabilities {
+    derive_capabilities_for_optional_host(principal, None, entries)
+}
+
+#[must_use]
+pub fn derive_capabilities_for_host(
+    principal: &str,
+    peer_host: &str,
+    entries: &[AclEntry],
+) -> Capabilities {
+    derive_capabilities_for_optional_host(principal, Some(peer_host), entries)
+}
+
+fn derive_capabilities_for_optional_host(
+    principal: &str,
+    peer_host: Option<&str>,
+    entries: &[AclEntry],
+) -> Capabilities {
     let mut capabilities = Capabilities::default();
     let mut denied_capabilities = Capabilities::default();
 
     for entry in entries {
-        if !is_for_principal(entry, principal) {
+        if !is_for_principal_and_host(entry, principal, peer_host) {
             continue;
         }
 
@@ -37,8 +54,20 @@ pub fn derive_capabilities(principal: &str, entries: &[AclEntry]) -> Capabilitie
     capabilities
 }
 
+fn is_for_principal_and_host(entry: &AclEntry, principal: &str, peer_host: Option<&str>) -> bool {
+    is_for_principal(entry, principal) && is_for_host(entry, peer_host)
+}
+
 fn is_for_principal(entry: &AclEntry, principal: &str) -> bool {
     entry.principal == principal || entry.principal == "User:*"
+}
+
+fn is_for_host(entry: &AclEntry, peer_host: Option<&str>) -> bool {
+    if entry.host == "*" {
+        return true;
+    }
+
+    peer_host.is_some_and(|host| entry.host == host)
 }
 
 fn apply_entry(capabilities: &mut Capabilities, entry: &AclEntry) {

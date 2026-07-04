@@ -1,4 +1,6 @@
-use crabka_admin_ui::permissions::{Capabilities, derive_capabilities};
+use crabka_admin_ui::permissions::{
+    Capabilities, derive_capabilities, derive_capabilities_for_host,
+};
 use crabka_client_admin::{AclEntry, AclOperation, PatternType, PermissionType, ResourceType};
 
 fn allow(resource_type: ResourceType, operation: AclOperation) -> AclEntry {
@@ -30,6 +32,20 @@ fn wildcard_allow(resource_type: ResourceType, operation: AclOperation) -> AclEn
 fn wildcard_deny(resource_type: ResourceType, operation: AclOperation) -> AclEntry {
     AclEntry {
         principal: "User:*".to_string(),
+        ..deny(resource_type, operation)
+    }
+}
+
+fn host_allow(resource_type: ResourceType, operation: AclOperation, host: &str) -> AclEntry {
+    AclEntry {
+        host: host.to_string(),
+        ..allow(resource_type, operation)
+    }
+}
+
+fn host_deny(resource_type: ResourceType, operation: AclOperation, host: &str) -> AclEntry {
+    AclEntry {
+        host: host.to_string(),
         ..deny(resource_type, operation)
     }
 }
@@ -217,4 +233,47 @@ fn cluster_alter_implies_acl_view_and_admin_capabilities() {
     assert!(capabilities.can_view_acls);
     assert!(capabilities.can_alter_acls);
     assert!(capabilities.can_alter_users);
+}
+
+#[test]
+fn derive_capabilities_ignores_host_specific_allow_without_peer_host() {
+    let entries = vec![host_allow(
+        ResourceType::Topic,
+        AclOperation::Describe,
+        "10.0.0.1",
+    )];
+
+    let capabilities = derive_capabilities("User:alice", &entries);
+
+    assert_eq!(capabilities, Capabilities::default());
+}
+
+#[test]
+fn derive_capabilities_for_host_matches_exact_or_wildcard_host() {
+    let entries = vec![
+        host_allow(ResourceType::Topic, AclOperation::Describe, "10.0.0.1"),
+        allow(ResourceType::Cluster, AclOperation::Create),
+    ];
+
+    let matching = derive_capabilities_for_host("User:alice", "10.0.0.1", &entries);
+    let nonmatching = derive_capabilities_for_host("User:alice", "10.0.0.2", &entries);
+
+    assert!(matching.can_view_topics);
+    assert!(matching.can_create_topics);
+    assert!(!nonmatching.can_view_topics);
+    assert!(nonmatching.can_create_topics);
+}
+
+#[test]
+fn host_matching_controls_deny_precedence() {
+    let entries = vec![
+        allow(ResourceType::Topic, AclOperation::Describe),
+        host_deny(ResourceType::Topic, AclOperation::Describe, "10.0.0.2"),
+    ];
+
+    let matching_deny = derive_capabilities_for_host("User:alice", "10.0.0.2", &entries);
+    let nonmatching_deny = derive_capabilities_for_host("User:alice", "10.0.0.1", &entries);
+
+    assert!(!matching_deny.can_view_topics);
+    assert!(nonmatching_deny.can_view_topics);
 }
