@@ -120,27 +120,57 @@ Ensures clauses cover the full KIP-534 case space:
 
 ## Toolchain
 
-- Creusot installed from its repo at a **pinned release tag** (the latest release at
-  implementation time; v0.12.0 as of this writing) via
-  `./INSTALL` (opam + Why3 + why3find + SMT provers Z3/CVC5/Alt-Ergo). Creusot brings
-  its own pinned nightly for verification builds only; workspace stays on stable 1.96.
-- Linux/WSL only. Local proof authoring on Windows happens in WSL.
-- The pinned Creusot version lives in one place (version file read by CI and docs).
-- `docs/verification.md`: install, running `cargo creusot` on the two packages, proof
-  debugging via the Why3 IDE (`-i`), how to update proof sessions.
+- Creusot at a **pinned release tag** (the latest release at implementation time;
+  v0.12.0 as of this writing): the Creusot compiler, `cargo-creusot`, Why3, why3find,
+  the SMT provers (Z3/CVC5/Alt-Ergo), and the specific nightly Rust that Creusot pins
+  for verification builds. The workspace itself stays on stable 1.96.
+- The pinned Creusot version lives in one place (version file read by the image
+  recipe, CI, and docs).
+- `docs/verification.md`: building/pulling the toolchain image, running
+  `cargo creusot` on the two packages, proof debugging via the Why3 IDE (`-i`), how
+  to update proof sessions.
 - why3find **proof sessions are checked in** so CI replays rather than re-searches.
+
+### Creusot toolchain image (melange/apko)
+
+The Creusot toolchain is Linux-only (opam/Why3), so it ships as a Docker image built
+with the house melange/apko pattern (`packaging/melange/`, `packaging/apko/`,
+mirroring `tools/build-image.sh`) — the single toolchain artifact used both for local
+development on Windows and by CI:
+
+- **`packaging/melange/creusot-toolchain.yaml`**: builds a `creusot-toolchain` APK
+  from Wolfi — pipeline installs OCaml/opam, builds Creusot at the pinned tag via its
+  `./INSTALL` flow (Why3, why3find, Alt-Ergo via opam), stages Z3/CVC5 (Wolfi packages
+  where available, upstream release binaries otherwise), and installs rustup with
+  Creusot's pinned nightly preloaded.
+- **`packaging/apko/creusot-toolchain.yaml`**: assembles the image (tagged with the
+  Creusot pin, e.g. `crabka-creusot:v0.12.0`) with `git`, `build-base`, and a
+  non-root user matching the bench-driver image conventions.
+- **`tools/build-creusot-image.sh`**: mirrors `tools/build-image.sh` (melange build →
+  apko build, `MELANGE_RUNNER=docker` on Windows).
+- Published to ghcr via the existing image-publish workflow pattern, rebuilt only when
+  the pin or the recipes change.
+
+**Windows dev flow**: `docker run` the image with the workspace bind-mounted, e.g.
+`docker run --rm -v ${PWD}:/work -w /work crabka-creusot:v0.12.0 cargo creusot ...`
+(a thin wrapper script/justfile recipe provides this). `CARGO_TARGET_DIR` inside the
+container points at a named Docker volume so verification builds never collide with
+the host's MSVC target dir; proof sessions are written back through the bind mount so
+they can be committed from Windows. The Why3 IDE flow (`-i`) needs X forwarding and
+stays a documented Linux/WSLg option; day-to-day proving and replay are headless.
 
 ## CI
 
-New Linux job `creusot-verify`, a **required check**:
+New Linux job `creusot-verify`, a **required check**, running **in the toolchain
+image** (`container: ghcr.io/.../crabka-creusot:<pin>`) so CI and local dev share one
+environment and there is no opam install or cache to manage in the job:
 
-1. Cache the opam switch + built Creusot, keyed on the pinned Creusot version
-   (cold install: tens of minutes; warm: fast).
-2. Replay checked-in proof sessions for `crabka-verified` and `crabka-throttle`
+1. Replay checked-in proof sessions for `crabka-verified` and `crabka-throttle`
    (`cargo creusot` replay mode); red if any contract no longer proves.
-3. The job **always runs** but short-circuits to success when the PR touches neither
-   the two crates, the proof sessions, nor the version pin — a required check with
-   workflow-level path filters would wedge as "expected".
+2. The job **always runs** but short-circuits to success when the PR touches neither
+   the two crates, the proof sessions, the version pin, nor the toolchain image
+   recipes — a required check with workflow-level path filters would wedge as
+   "expected".
 
 ## Testing and drift protection
 
@@ -157,8 +187,9 @@ New Linux job `creusot-verify`, a **required check**:
 
 ## Sequencing
 
-Slice 1 is deliberately `plan_consume` end-to-end — toolchain install, contract, proof,
-checked-in session, CI job green — before any extraction work, to de-risk the rest.
+Slice 1 is deliberately `plan_consume` end-to-end — toolchain image built and
+published, contract, proof authored via the image on Windows, checked-in session,
+CI job green in the image — before any extraction work, to de-risk the rest.
 Then the `crabka-verified` crate + kernel extractions + their proofs.
 
 ## Known risks
@@ -172,5 +203,10 @@ Then the `crabka-verified` crate + kernel extractions + their proofs.
 3. **Proof difficulty**: `recompute_high_watermark`'s majority-witness postcondition is
    the hardest obligation. If SMT won't discharge it automatically, add
    `proof_assert!`/lemma functions rather than weakening the contract.
-4. **CI cold-install time**: mitigated by aggressive caching keyed on the pin; an
-   acceptable one-time cost when the pin bumps.
+4. **Toolchain image build**: Wolfi may not package OCaml/opam (or Z3/CVC5) at the
+   versions Creusot needs. Fallbacks, in order: build opam from source inside the
+   melange pipeline; fetch upstream prover release binaries; as a last resort the
+   melange step delegates to Creusot's `./INSTALL` in a network-enabled pipeline
+   (the same way the crabka recipe already runs `cargo build` with network). The
+   image is a dev/CI tool, not a shipped artifact, so size and hermeticity standards
+   are relaxed relative to the broker images.
