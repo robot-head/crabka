@@ -1,5 +1,7 @@
 //! Broker-backed login for the admin UI.
 
+use std::fmt;
+
 use crabka_client_admin::AdminClient;
 use crabka_client_core::security::{ClientSecurity, SaslCredentials};
 use crabka_security::SaslMechanism;
@@ -15,11 +17,22 @@ pub struct LoginRequest {
     pub password: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize)]
 pub struct LoginSuccess {
     pub username: String,
     pub principal: String,
     pub session_id: String,
+}
+
+impl fmt::Debug for LoginSuccess {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LoginSuccess")
+            .field("username", &self.username)
+            .field("principal", &self.principal)
+            .field("session_id", &"<redacted>")
+            .finish()
+    }
 }
 
 #[must_use]

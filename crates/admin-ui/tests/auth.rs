@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crabka_admin_ui::auth::build_scram_sha512_security;
+use crabka_admin_ui::auth::{LoginSuccess, build_scram_sha512_security};
 use crabka_admin_ui::config::{AdminUiConfig, BrokerSecurityConfig};
 use crabka_client_core::security::SaslCredentials;
 use crabka_security::{ListenerProtocol, SaslMechanism};
@@ -59,4 +59,20 @@ fn build_security_preserves_sasl_ssl_tls_material() {
             ref password,
         }) if username == "carol" && password == "top-secret"
     ));
+}
+
+#[test]
+fn login_success_debug_redacts_session_id() {
+    let success = LoginSuccess {
+        username: "alice".to_string(),
+        principal: "User:alice".to_string(),
+        session_id: "raw-session-cookie-value".to_string(),
+    };
+
+    let debug = format!("{success:?}");
+
+    assert!(debug.contains("alice"));
+    assert!(debug.contains("User:alice"));
+    assert!(debug.contains("<redacted>"));
+    assert!(!debug.contains("raw-session-cookie-value"));
 }
