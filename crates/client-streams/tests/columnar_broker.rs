@@ -146,6 +146,9 @@ impl RecordFetcher for BrokerFetchAdapter {
                         .collect(),
                 });
             }
+            // real-time wait (not a progress poll): the enclosing `for _ in 0..50` is
+            // the loop bound, so this sleep IS the retry time budget (≈5s), not a
+            // cadence inside a deadline-guarded poll loop.
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         Ok(FetchBatch::default())
@@ -279,6 +282,9 @@ async fn columnar_runtime_bridge_against_live_broker() {
         if total_rows >= 1 {
             break 'poll;
         }
+        // real-time wait (not a progress poll): the enclosing `for _ in 0..50` is the
+        // loop bound, so this sleep IS the retry time budget (≈5s), not a cadence
+        // inside a deadline-guarded poll loop.
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     assert_eq!(total_rows, 1, "only amount=9 passes the amount>4 filter");

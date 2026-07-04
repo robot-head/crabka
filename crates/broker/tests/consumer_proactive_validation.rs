@@ -144,6 +144,11 @@ async fn produce(client: &Client, topic: &str, values: &[&str]) {
                 break;
             }
             if err == 3 && attempt < 5 {
+                // intentional: bounded RPC-response retry on the
+                // UNKNOWN_TOPIC_OR_PARTITION (3) metadata-apply race. This is a
+                // client-only helper with no broker handle, so it polls the
+                // produce response's error_code rather than a broker awaiter;
+                // back off briefly and re-send.
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 continue;
             }
@@ -334,8 +339,12 @@ async fn consumer_proactively_validates_and_surfaces_truncation() {
             Instant::now() < settle,
             "consumer assignment did not propagate within 10s after member-count gate"
         );
-        // Brief re-check tick (the background coordinator task publishes the
-        // assignment); avoids a tight `yield_now` busy-spin on loaded runners.
+        // intentional: bounded re-check tick for a client-side coordinator RPC
+        // poll. The SyncGroup response + prime_offsets propagate to the client's
+        // `assignment()` a few async hops after the broker-side member-count gate
+        // (`wait_until_classic_group_member_count`) fires; that client-side state
+        // has no metadata-image or metric signal to await on. The brief sleep
+        // avoids a tight `yield_now` busy-spin on loaded runners.
         tokio::time::sleep(Duration::from_millis(1)).await;
     }
 

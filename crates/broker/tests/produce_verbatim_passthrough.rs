@@ -25,7 +25,6 @@ use crabka_protocol::owned::produce_request::{
 };
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 use crabka_protocol::records::{Attributes, HEADER_LEN, Record, RecordBatch, RecordsPayload};
-use tokio::time::{Duration, Instant};
 
 async fn topic_id_for(client: &crabka_client_core::Client, name: &str) -> WireUuid {
     let resp = client
@@ -151,49 +150,45 @@ async fn produce_batches(
 }
 
 /// Fetch partition 0 from offset 0 and return the first decoded batch.
+///
+/// `n` is the number of records already produced to partition 0. Single-broker
+/// RF=1 means the high-watermark tracks the local log end offset, so waiting for
+/// LEO >= n makes the produced records readable before a single deterministic
+/// fetch (no polling loop needed).
 async fn fetch_first_batch(
+    broker: &crabka_broker::BrokerHandle,
     client: &crabka_client_core::Client,
     topic: &str,
     topic_id: WireUuid,
+    n: i64,
 ) -> RecordBatch {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let resp = client
-            .send(FetchRequest {
-                replica_id: -1,
-                max_wait_ms: 1_000,
-                min_bytes: 1,
-                max_bytes: 8 << 20,
-                topics: vec![FetchTopic {
-                    topic: topic.into(),
-                    topic_id,
-                    partitions: vec![FetchPartition {
-                        partition: 0,
-                        fetch_offset: 0,
-                        partition_max_bytes: 8 << 20,
-                        ..FetchPartition::default()
-                    }],
-                    ..FetchTopic::default()
+    broker.wait_until_local_log_end_offset(topic, 0, n).await;
+    let resp = client
+        .send(FetchRequest {
+            replica_id: -1,
+            max_wait_ms: 1_000,
+            min_bytes: 1,
+            max_bytes: 8 << 20,
+            topics: vec![FetchTopic {
+                topic: topic.into(),
+                topic_id,
+                partitions: vec![FetchPartition {
+                    partition: 0,
+                    fetch_offset: 0,
+                    partition_max_bytes: 8 << 20,
+                    ..FetchPartition::default()
                 }],
-                ..FetchRequest::default()
-            })
-            .await
-            .expect("Fetch");
-        let pd = &resp.responses[0].partitions[0];
-        assert!(pd.error_code == 0, "fetch error: {pd:?}");
-        if let Some(payload) = pd.records.as_ref() {
-            let batches = payload.as_v2().expect("v2 payload");
-            if let Some(batch) = batches.first() {
-                return batch.clone();
-            }
-        }
-        let last_partition = format!("{pd:?}");
-        assert!(
-            Instant::now() < deadline,
-            "records present; last partition: {last_partition}"
-        );
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
+                ..FetchTopic::default()
+            }],
+            ..FetchRequest::default()
+        })
+        .await
+        .expect("Fetch");
+    let pd = &resp.responses[0].partitions[0];
+    assert!(pd.error_code == 0, "fetch error: {pd:?}");
+    let payload = pd.records.as_ref().expect("records present");
+    let batches = payload.as_v2().expect("v2 payload");
+    batches.first().cloned().expect("at least one batch")
 }
 
 async fn boot() -> (crabka_broker::BrokerHandle, String, tempfile::TempDir) {
@@ -243,7 +238,7 @@ async fn lz4_batch_passes_through_and_roundtrips() {
 
     // Fetch it back: the stored batch must still be Lz4-compressed (no
     // recompression to a different codec) and decode to the same records.
-    let fetched = fetch_first_batch(&client, "lz4t", topic_id).await;
+    let fetched = fetch_first_batch(&broker, &client, "lz4t", topic_id, 200).await;
     check!(
         fetched.attributes.compression() == CompressionType::Lz4,
         "stored batch must keep producer's Lz4 codec; got {:?}",
@@ -282,7 +277,7 @@ async fn uncompressed_batch_roundtrips_byte_identically() {
         .await
         .expect("produce ok");
 
-    let fetched = fetch_first_batch(&client, "raw", topic_id).await;
+    let fetched = fetch_first_batch(&broker, &client, "raw", topic_id, 3).await;
     let fetched_wire = encode_batch(&fetched);
 
     // The CRC-covered region (attributes onward) must be byte-identical to
@@ -335,7 +330,7 @@ async fn recompression_config_takes_owned_path() {
         .await
         .expect("produce ok");
 
-    let fetched = fetch_first_batch(&client, "recmp", topic_id).await;
+    let fetched = fetch_first_batch(&broker, &client, "recmp", topic_id, 10).await;
     // Owned path recompressed lz4 → zstd: stored batch carries the TOPIC codec.
     check!(
         fetched.attributes.compression() == CompressionType::Zstd,
@@ -382,7 +377,7 @@ async fn control_batch_takes_owned_path() {
         .await
         .expect("produce ok");
 
-    let fetched = fetch_first_batch(&client, "ctrl", topic_id).await;
+    let fetched = fetch_first_batch(&broker, &client, "ctrl", topic_id, 1).await;
     assert!(
         fetched.attributes.is_control_batch(),
         "control bit preserved"

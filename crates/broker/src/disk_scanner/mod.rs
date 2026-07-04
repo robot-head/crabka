@@ -147,7 +147,7 @@ mod tests {
                 if metrics.partition_disk_bytes.get_or_create(&label).get() == 321 {
                     break;
                 }
-                tokio::time::sleep(Duration::from_millis(10)).await;
+                tokio::task::yield_now().await;
             }
         })
         .await

@@ -56,8 +56,6 @@ pub enum IqError {
         found: StoreKind,
         requested: StoreKind,
     },
-    #[error("streams instance is not running")]
-    NotRunning,
     #[error("a rebalance is in progress; retry the query")]
     RebalanceInProgress,
 }

@@ -50,7 +50,8 @@ pub use crabka_connect_derive::ConnectorConfig;
 pub use error::ConnectError;
 pub use record::{ConnectRecord, Header, OffsetMap, OffsetValue, SourceOffset};
 pub use runtime::{
-    CheckpointStore, ConnectorHandle, ConnectorRuntime, InMemoryCheckpointStore, RuntimeState,
+    CheckpointStore, ConnectorHandle, ConnectorRuntime, HasSink, HasSource,
+    InMemoryCheckpointStore, NoSink, NoSource, RuntimeState,
 };
 #[doc(hidden)]
 pub use serde_json as __serde_json;

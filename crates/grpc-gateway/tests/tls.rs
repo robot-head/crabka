@@ -369,6 +369,7 @@ async fn mtls_required_rejects_no_client_cert() {
     // Give the accept loop a moment; an early connection-refused would also be
     // `is_err()`, but we want to prove the *handshake* (not startup) rejects, so
     // wait until the listener is up, then assert the certless request fails.
+    // real-time wait (not a progress poll): waits on a real mTLS handshake to reject a certless client; settle-then-assert-failure over a network round-trip.
     tokio::time::sleep(Duration::from_millis(300)).await;
     let result = client.get(&url).send().await;
     assert!(

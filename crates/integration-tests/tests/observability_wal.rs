@@ -650,7 +650,7 @@ async fn config_built_querier_enforces_tenant_read_acl_before_query() {
         if response.status() == StatusCode::FORBIDDEN || std::time::Instant::now() >= deadline {
             break response;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        tokio::task::yield_now().await;
     };
 
     assert!(response.status() == StatusCode::FORBIDDEN);
@@ -1357,6 +1357,7 @@ async fn run_configured_compactor_for(
         config,
         build_service_dependencies(config).await.unwrap(),
         None,
+        // real-time wait (not a progress poll): fixed run-duration shutdown signal for the compactor
         tokio::time::sleep(duration),
     )
     .await
@@ -1506,7 +1507,7 @@ async fn query_until_api_error(app: axum::Router) -> serde_json::Value {
             Instant::now() < deadline,
             "query never observed hot WAL row"
         );
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        tokio::task::yield_now().await;
     }
 }
 
@@ -1547,7 +1548,7 @@ async fn query_until_hot_cold_errors(
             Instant::now() < deadline,
             "query never observed exact hot/cold merge result: {body}"
         );
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        tokio::task::yield_now().await;
     }
 }
 
@@ -1580,7 +1581,7 @@ async fn query_until_native_kafka_error(app: axum::Router) -> serde_json::Value 
             Instant::now() < deadline,
             "query never observed native Kafka produced log: {body}"
         );
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        tokio::task::yield_now().await;
     }
 }
 
@@ -1614,7 +1615,7 @@ async fn query_until_otlp_loop_error(app: axum::Router, timestamp_ns: &str) -> s
             Instant::now() < deadline,
             "query never observed OTLP produced log: {body}"
         );
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        tokio::task::yield_now().await;
     }
 }
 
@@ -1649,7 +1650,7 @@ async fn query_until_tenant_shared_error(
             Instant::now() < deadline,
             "query never observed shared WAL row for {tenant}: {body}"
         );
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        tokio::task::yield_now().await;
     }
 }
 
@@ -1690,7 +1691,7 @@ async fn query_until_restart_errors(
             Instant::now() < deadline,
             "query never observed exact restart result: {body}"
         );
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        tokio::task::yield_now().await;
     }
 }
 
@@ -1760,6 +1761,6 @@ async fn query_until_loop_error(app: axum::Router, timestamp: &str) -> serde_jso
             Instant::now() < deadline,
             "query never observed compacted loop row"
         );
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        tokio::task::yield_now().await;
     }
 }

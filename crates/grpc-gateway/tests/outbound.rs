@@ -148,6 +148,7 @@ async fn spawn_mock(state: Arc<MockState>) -> String {
     tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
+    // real-time wait (not a progress poll): readiness settle for the spawned mock HTTP receiver, not in-process gateway state.
     // Small readiness pause so the first request doesn't race serve startup.
     tokio::time::sleep(Duration::from_millis(150)).await;
     addr
@@ -451,6 +452,7 @@ async fn retries_then_succeeds() {
         .build()
         .await
         .unwrap();
+    // real-time wait (not a progress poll): settle-then-assert-absence — a record that eventually delivers must NOT be dead-lettered; the observable (fetch_dlq) is async, so there is no cheap synchronous positive to poll.
     // Give any (incorrect) DLQ produce a brief chance, then assert emptiness.
     tokio::time::sleep(Duration::from_millis(500)).await;
     let dlq_recs = fetch_dlq(&client, dlq).await;
@@ -640,6 +642,7 @@ async fn filter_skips_nonmatching() {
         wait_until(|| received_len(&state) >= 1).await,
         "the matching record must be delivered"
     );
+    // real-time wait (not a progress poll): settle-then-assert-absence — proving the filtered (false) record never slips through; polling to len==1 could pass before the false record would have arrived.
     // Give the filtered (false) record a chance to (wrongly) slip through.
     tokio::time::sleep(Duration::from_millis(750)).await;
     let recv = state.received.lock().unwrap().clone();

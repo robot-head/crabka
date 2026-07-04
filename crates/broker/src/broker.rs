@@ -1193,6 +1193,56 @@ impl BrokerHandle {
         assert!(res.is_ok(), "wait_for_image timed out after 30s");
     }
 
+    /// Test-only: borrow this broker's live [`crate::metrics::BrokerMetrics`]
+    /// bundle so integration tests can read counters / gauges in-process.
+    ///
+    /// Pair with [`Self::wait_for_metrics`] to replace fixed-duration `sleep`s
+    /// with a bounded poll on an observable signal (a counter crossing a
+    /// threshold, a gauge reaching an expected value) — the metric moves the
+    /// instant the awaited work lands, so the wait is race-free rather than a
+    /// timing guess.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[must_use]
+    #[allow(clippy::used_underscore_binding)]
+    pub fn metrics(&self) -> &crate::metrics::BrokerMetrics {
+        &self._broker.metrics
+    }
+
+    /// Test-only: poll `predicate` against this broker's live metrics every
+    /// ~25ms until it returns `true` or [`TEST_AWAITER_TIMEOUT`] elapses.
+    ///
+    /// The metrics-driven replacement for a fixed `sleep` in integration
+    /// tests: instead of sleeping "long enough" for a background loop (the
+    /// gauge sampler, disk scanner, cleaner, ISR-maintenance tick, audit
+    /// flush, …) to run and hoping it did, wait until the counter / gauge it
+    /// bumps reflects the awaited state. `what` names the condition for the
+    /// timeout panic message. Unlike [`Self::wait_for_image`] there is no
+    /// change-notification channel behind a Prometheus metric, so this polls;
+    /// the 25ms cadence is an internal implementation detail, not a
+    /// test-visible timing assumption.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[allow(clippy::used_underscore_binding)]
+    pub async fn wait_for_metrics<F>(&self, what: &str, mut predicate: F)
+    where
+        F: FnMut(&crate::metrics::BrokerMetrics) -> bool,
+    {
+        let res = tokio::time::timeout(TEST_AWAITER_TIMEOUT, async {
+            loop {
+                if predicate(&self._broker.metrics) {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await;
+        assert!(
+            res.is_ok(),
+            "wait_for_metrics({what}) timed out after {TEST_AWAITER_TIMEOUT:?}"
+        );
+    }
+
     /// Test-only: await until a non-zero controller leader is elected.
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-helpers"))]
@@ -1976,6 +2026,7 @@ impl Broker {
                     cluster_id: config.cluster_id.unwrap_or_else(uuid::Uuid::nil),
                     max_bytes: OBSERVER_FETCH_MAX_BYTES,
                     poll_interval: OBSERVER_POLL_INTERVAL,
+                    sleeper: std::sync::Arc::new(qubit_clock::sleep::SystemSleeper::new()),
                 },
             );
             let forwarder = crate::metadata_source::QuorumForwarder {
@@ -2446,6 +2497,7 @@ impl Broker {
                         spool,
                         stats: stats.clone(),
                         replay_every: AUDIT_SPOOL_REPLAY_INTERVAL,
+                        sleeper: std::sync::Arc::new(qubit_clock::sleep::SystemSleeper::new()),
                     },
                 );
                 tokio::spawn(writer.run());
@@ -2909,6 +2961,7 @@ impl Broker {
                     .oauthbearer_jwks_last_on_demand_refresh_ms
                     .clone(),
                 ignore_key_use: config.oauthbearer_jwks_ignore_key_use,
+                sleeper: std::sync::Arc::new(qubit_clock::sleep::SystemSleeper::new()),
             };
             tokio::spawn(refresher.run());
         }
@@ -3002,6 +3055,7 @@ impl Broker {
                 config.node_id,
                 cfg,
                 shutdown,
+                metrics.clone(),
             ));
         }
 
@@ -4914,7 +4968,7 @@ mod tests {
                 std::time::Instant::now() < deadline,
                 "initial assignment was not reconciled"
             );
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            tokio::task::yield_now().await;
         }
 
         set_tx.send(vec![1]).expect("send changed assignment");
@@ -4924,7 +4978,7 @@ mod tests {
                 std::time::Instant::now() < deadline,
                 "changed assignment was not reconciled"
             );
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            tokio::task::yield_now().await;
         }
 
         shutdown.cancel();
@@ -4974,7 +5028,7 @@ mod tests {
         let mut endpoints = handle.self_registration_endpoints().await;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while endpoints.is_empty() && std::time::Instant::now() < deadline {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            tokio::task::yield_now().await;
             endpoints = handle.self_registration_endpoints().await;
         }
         assert!(!endpoints.is_empty());

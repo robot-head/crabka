@@ -235,6 +235,12 @@ async fn wait_for_compression(
             Instant::now() <= deadline,
             "compression_type={expected:?} never propagated to partition LogConfig within 10s"
         );
+        // intentional: this polls the partition writer's applied LogConfig
+        // (partition_log_config_for_test), not the metadata image. No awaiter
+        // captures "the reconcile loop has pushed the compression override into
+        // the writer"; waiting on the image alone would fire strictly earlier
+        // and reintroduce the produce-before-override race this helper exists to
+        // prevent. The loop is bounded by the 10s deadline asserted above.
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }

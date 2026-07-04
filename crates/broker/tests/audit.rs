@@ -46,8 +46,11 @@ async fn audit_topic_exists_after_startup() {
 async fn broker_started_event_is_written_to_audit_topic() {
     let p = support::start().await;
 
-    // Let bootstrap + the BrokerStarted emit settle.
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    // Wait for the BrokerStarted event to be durably written to the audit topic
+    // (the sink increments `audit_events_total` on each successful produce).
+    p.broker
+        .wait_for_metrics("audit event written", |m| m.audit_events_total.get() >= 1)
+        .await;
 
     let topic_id = support::topic_id_for(&p.client, AUDIT_TOPIC).await;
     let fr = p
@@ -102,6 +105,7 @@ async fn broker_started_event_is_written_to_audit_topic() {
 async fn successful_create_topics_is_audited() {
     let p = support::start().await;
 
+    let audit_before = p.broker.metrics().audit_events_total.get();
     let cr = p
         .client
         .send(CreateTopicsRequest {
@@ -118,7 +122,12 @@ async fn successful_create_topics_is_audited() {
         .unwrap();
     assert2::check!(cr.topics[0].error_code == 0);
 
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    // Wait for the CreateTopics AdminOperation audit record to be durable.
+    p.broker
+        .wait_for_metrics("audit event written", |m| {
+            m.audit_events_total.get() > audit_before
+        })
+        .await;
 
     let recs = support::consume_audit_records(&p.client).await;
     let saw = recs.iter().any(|j| {
@@ -150,6 +159,7 @@ async fn signed_checkpoints_appear_on_audit_topic() {
     let p = support::start_with_audit_key(&keypath, "k-test", 1).await;
 
     // Cause some audit events (a create succeeds; super-user path).
+    let audit_before = p.broker.metrics().audit_events_total.get();
     let _ = p
         .client
         .send(CreateTopicsRequest {
@@ -165,7 +175,14 @@ async fn signed_checkpoints_appear_on_audit_topic() {
         .await
         .unwrap();
 
-    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    // Wait for the create's chained record AND its signed checkpoint to be
+    // durable: with `every_n = 1`, each audit event triggers a checkpoint, so
+    // the counter advances by 2 (chained record + checkpoint) per create.
+    p.broker
+        .wait_for_metrics("audit checkpoint written", |m| {
+            m.audit_events_total.get() >= audit_before + 2
+        })
+        .await;
 
     let recs = support::consume_audit_records(&p.client).await;
     let saw_checkpoint = recs
@@ -265,6 +282,7 @@ async fn audit_chain_continues_across_restart() {
     // First boot: generate some audit events, then shut down cleanly.
     {
         let (broker, client) = support::start_with_dir(dir.path()).await;
+        let audit_before = broker.metrics().audit_events_total.get();
         let _ = client
             .send(CreateTopicsRequest {
                 topics: vec![CreatableTopic {
@@ -278,12 +296,18 @@ async fn audit_chain_continues_across_restart() {
             })
             .await
             .unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        // Ensure the r1 CreateTopics audit record is durable before shutdown.
+        broker
+            .wait_for_metrics("audit event written", |m| {
+                m.audit_events_total.get() > audit_before
+            })
+            .await;
         broker.shutdown().await;
     }
 
     // Second boot on the SAME data dir: more events.
     let (broker, client) = support::start_with_dir(dir.path()).await;
+    let audit_before = broker.metrics().audit_events_total.get();
     let _ = client
         .send(CreateTopicsRequest {
             topics: vec![CreatableTopic {
@@ -297,7 +321,12 @@ async fn audit_chain_continues_across_restart() {
         })
         .await
         .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    // Ensure the r2 CreateTopics audit record is durable before consuming.
+    broker
+        .wait_for_metrics("audit event written", |m| {
+            m.audit_events_total.get() > audit_before
+        })
+        .await;
 
     // Consume the audit topic and assert seqs are a contiguous, duplicate-free
     // chain (recovery worked — no reset to 0 on the second boot).

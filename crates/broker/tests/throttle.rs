@@ -30,7 +30,6 @@
 use assert2::assert;
 use std::io;
 use std::net::SocketAddr;
-use std::time::{Duration, Instant};
 
 use bytes::{Buf, BufMut, BytesMut};
 use crabka_broker::config::ListenerSpec;
@@ -277,19 +276,9 @@ async fn create_topic_plaintext(addr: SocketAddr, topic: &str, partitions: i32, 
     );
 }
 
-/// Poll until `handle` sees `(topic, partition)` present in its image.
+/// Await until `handle` sees `(topic, partition)` present in its image.
 async fn wait_partition_exists(handle: &BrokerHandle, topic: &str, partition: i32) {
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        if handle.has_partition(topic, partition).await {
-            return;
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "partition {topic}-{partition} never appeared within 15s"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    handle.wait_until_partition_present(topic, partition).await;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -615,20 +604,13 @@ async fn broker_scoped_alter_persists_in_image() {
     .await;
     assert!(err == 0, "alter should succeed; got error_code={err}");
 
-    // Poll the image until the config is visible (absorb raft commit latency).
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let img = handle.controller_image_for_test();
-        if img.broker_throttle_rate(node_id, crabka_metadata::ThrottleKind::Leader) == Some(2048) {
-            handle.shutdown().await;
-            return;
-        }
-        if Instant::now() > deadline {
-            let rate = img.broker_throttle_rate(node_id, crabka_metadata::ThrottleKind::Leader);
-            panic!("config not visible in image within 5s; got {rate:?}");
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    // Await until the config is visible (absorb raft commit latency).
+    handle
+        .wait_for_image(|img| {
+            img.broker_throttle_rate(node_id, crabka_metadata::ThrottleKind::Leader) == Some(2048)
+        })
+        .await;
+    handle.shutdown().await;
 }
 
 /// Test 2: `IncrementalAlterConfigs` with resource_type=Topic sets
@@ -660,19 +642,13 @@ async fn topic_throttle_config_propagates() {
     assert!(err == 0, "topic alter should succeed; got error_code={err}");
 
     // Allow raft commit to propagate.
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let img = handle.controller_image_for_test();
-        let throttle = crabka_broker::throttle::TopicThrottle::for_topic(&img, "foo");
-        if throttle.leader.contains(0, 1) && throttle.leader.contains(0, 2) {
-            handle.shutdown().await;
-            return;
-        }
-        if Instant::now() > deadline {
-            panic!("topic throttle config not visible in image within 5s");
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    handle
+        .wait_for_image(|img| {
+            let throttle = crabka_broker::throttle::TopicThrottle::for_topic(img, "foo");
+            throttle.leader.contains(0, 1) && throttle.leader.contains(0, 2)
+        })
+        .await;
+    handle.shutdown().await;
 }
 
 /// Test 3: After setting a very low leader throttle rate (512 bytes/sec) and
@@ -725,20 +701,13 @@ async fn throttle_rate_caps_fetch_response_size() {
 
     // Wait for the configs to appear in the image before producing (so the
     // throttle enforcement is armed when the Fetch arrives).
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let img = handle.controller_image_for_test();
-        let rate = img.broker_throttle_rate(node_id, crabka_metadata::ThrottleKind::Leader);
-        let throttle = crabka_broker::throttle::TopicThrottle::for_topic(&img, "bar");
-        if rate == Some(512) && throttle.leader.contains(0, 2) {
-            break;
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "throttle configs not visible in image within 5s; rate={rate:?}"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    handle
+        .wait_for_image(|img| {
+            let rate = img.broker_throttle_rate(node_id, crabka_metadata::ThrottleKind::Leader);
+            let throttle = crabka_broker::throttle::TopicThrottle::for_topic(img, "bar");
+            rate == Some(512) && throttle.leader.contains(0, 2)
+        })
+        .await;
 
     // Produce 8 KB of data (8 records of 1 KB each).
     produce_plaintext(addr, "bar", 1024, 8).await;

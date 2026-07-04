@@ -37,9 +37,10 @@
 //! to a sessionless response — matching Apache Kafka's behavior.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicI32, AtomicU64, AtomicUsize, Ordering};
-use std::time::Instant;
+use std::sync::{Arc, Mutex};
+
+use qubit_clock::{NanoClock, NanoMonotonicClock};
 
 use crabka_protocol::owned::fetch_request::{FetchRequest, FetchTopic, ForgottenTopic};
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
@@ -128,7 +129,10 @@ pub struct FetchSession {
     pub privileged: bool,
     pub creator_principal: String,
     pub partitions: HashMap<FetchSessionKey, CachedPartitionState>,
-    pub last_used: Instant,
+    /// Monotonic epoch-nanosecond timestamp of the last time this session was
+    /// touched, read from the cache's injected [`NanoClock`]. Ordering of these
+    /// values selects the LRU eviction victim; only their relative order matters.
+    pub last_used_nanos: i128,
 }
 
 /// Outcome of `FetchSessionCache::classify`. The handler dispatches on
@@ -182,6 +186,10 @@ pub struct FetchSessionCache {
     /// (forget / evict / close). Read lock-free via
     /// `total_partitions_cached()`.
     num_partitions: AtomicUsize,
+    /// Monotonic time source stamped onto `FetchSession::last_used_nanos` for
+    /// LRU eviction. Injectable so tests drive eviction order with a
+    /// [`qubit_clock::MockClock`] instead of `thread::sleep`.
+    clock: Arc<dyn NanoClock>,
 }
 
 /// Pure core of the incremental-fetch session update (KIP-227): drop forgotten
@@ -240,6 +248,16 @@ pub(crate) fn apply_incremental(
 impl FetchSessionCache {
     #[must_use]
     pub fn new(max_slots: usize) -> Self {
+        Self::with_clock(max_slots, Arc::new(NanoMonotonicClock::new()))
+    }
+
+    /// Constructs a cache with a caller-supplied monotonic [`NanoClock`].
+    ///
+    /// Production uses [`FetchSessionCache::new`] (a [`NanoMonotonicClock`]);
+    /// tests pass a [`qubit_clock::MockClock`] so successive allocations get
+    /// distinct, deterministic `last_used_nanos` without sleeping between them.
+    #[must_use]
+    pub fn with_clock(max_slots: usize, clock: Arc<dyn NanoClock>) -> Self {
         Self {
             inner: Mutex::new(Inner {
                 sessions: HashMap::new(),
@@ -251,6 +269,7 @@ impl FetchSessionCache {
             evictions: AtomicU64::new(0),
             num_sessions: AtomicUsize::new(0),
             num_partitions: AtomicUsize::new(0),
+            clock,
         }
     }
 
@@ -332,7 +351,7 @@ impl FetchSessionCache {
             };
         }
 
-        session.last_used = Instant::now();
+        session.last_used_nanos = self.clock.nanos();
 
         // The forget + merge below add and drop partitions; snapshot the
         // count now so we can fold the net delta into `num_partitions`
@@ -403,7 +422,7 @@ impl FetchSessionCache {
                 .sessions
                 .iter()
                 .filter(|(_, s)| if privileged { true } else { !s.privileged })
-                .min_by_key(|(_, s)| s.last_used)
+                .min_by_key(|(_, s)| s.last_used_nanos)
                 .map(|(id, _)| *id);
             match victim {
                 Some(id) => {
@@ -452,7 +471,7 @@ impl FetchSessionCache {
             privileged,
             creator_principal,
             partitions,
-            last_used: Instant::now(),
+            last_used_nanos: self.clock.nanos(),
         };
         let added_partitions = session.partitions.len();
         guard.sessions.insert(id, session);
@@ -507,9 +526,25 @@ mod fetch_session_model;
 
 #[cfg(test)]
 mod tests {
+    use qubit_clock::MockTime;
+
     use super::*;
     use assert2::{assert, check};
     use crabka_protocol::owned::fetch_request::{FetchPartition, FetchTopic, ForgottenTopic};
+
+    /// Builds a cache whose LRU clock is a mock timeline anchored at the Unix
+    /// epoch. Returns the [`MockTime`] handle so a test can make successive
+    /// allocations land on distinct `last_used_nanos` by advancing logical time
+    /// (`mock.advance(..)`) instead of sleeping between them.
+    fn mock_cache(max_slots: usize) -> (FetchSessionCache, MockTime) {
+        let mock = MockTime::unix_epoch();
+        let cache = FetchSessionCache::with_clock(max_slots, Arc::new(mock.clock()));
+        (cache, mock)
+    }
+
+    /// A one-nanosecond tick: the smallest advance that still gives the next
+    /// allocation a strictly greater `last_used_nanos` than the previous one.
+    const TICK: std::time::Duration = std::time::Duration::from_nanos(1);
 
     fn req(
         session_id: i32,
@@ -1001,11 +1036,13 @@ mod tests {
 
     #[test]
     fn lru_eviction_drops_oldest_non_privileged() {
-        let cache = FetchSessionCache::new(2);
+        let (cache, mock) = mock_cache(2);
         let a = cache.try_allocate(false, "a".into(), vec![]);
-        std::thread::sleep(std::time::Duration::from_millis(2));
+        // Advance logical time so each session gets a strictly increasing
+        // `last_used_nanos`, making `a` the unambiguous LRU victim — no sleep.
+        mock.advance(TICK);
         let b = cache.try_allocate(false, "b".into(), vec![]);
-        std::thread::sleep(std::time::Duration::from_millis(2));
+        mock.advance(TICK);
         let c = cache.try_allocate(false, "c".into(), vec![]);
         assert!(cache.len() == 2);
         assert!(cache.evictions_total() == 1);
@@ -1030,9 +1067,10 @@ mod tests {
 
     #[test]
     fn privileged_can_evict_privileged() {
-        let cache = FetchSessionCache::new(1);
+        let (cache, mock) = mock_cache(1);
         let p1 = cache.try_allocate(true, "f1".into(), vec![]);
-        std::thread::sleep(std::time::Duration::from_millis(2));
+        // Advance so `f2` is strictly newer than `f1`; `f1` is the LRU victim.
+        mock.advance(TICK);
         let p2 = cache.try_allocate(true, "f2".into(), vec![]);
         // p2 gets the next monotonic id (p1 + 1) after evicting p1.
         check!(p2 == p1 + 1);

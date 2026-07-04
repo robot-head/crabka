@@ -121,6 +121,8 @@ async fn selective_replication_naming_and_residency() {
     .await;
 
     // Give time for any wrongly replicated records to arrive.
+    // real-time wait (not a progress poll): settle-then-assert-absence; proves excluded and
+    // residency-blocked topics received zero records, so the wait can't be a progress poll.
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     // --- assertions -------------------------------------------------------
@@ -255,6 +257,8 @@ async fn active_active_loop_prevention() {
     common::await_count(&a.bootstrap, "cb.pings", 1, Duration::from_secs(20)).await;
 
     // Allow several supervision cycles for any additional loop bounce.
+    // real-time wait (not a progress poll): settle-then-assert-absence; proves the looped
+    // `cb.ca.orders` never appears, so the wait can't be a progress poll.
     tokio::time::sleep(Duration::from_secs(3)).await;
 
     // --- assertions -------------------------------------------------------

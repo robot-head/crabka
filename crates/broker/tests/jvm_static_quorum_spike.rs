@@ -217,6 +217,9 @@ async fn static_mixed_jvm_crabka_quorum() {
             );
         }
         tick += 1;
+        // intentional: paces the fixed ~50s observation window; the loop
+        // deliberately never breaks so the external JVM container has time to
+        // boot, join, and produce the logs/telemetry this test greps below.
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
 
@@ -425,6 +428,10 @@ async fn contested_election_crabka_counts_jvm_prevote() {
             leader0 = l1;
             break;
         }
+        // intentional: cross-checks BOTH in-process voters' leader watches for
+        // agreement in {1,2}; no single awaiter expresses the l1 == l2
+        // convergence, and awaiting each handle separately would drop this
+        // retry and could spuriously trip on a transient election disagreement.
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     let leader0 = leader0.expect("Crabka 2/3 majority did not elect a leader in {1,2}");
@@ -460,6 +467,9 @@ async fn contested_election_crabka_counts_jvm_prevote() {
             jvm_joined = true;
             break;
         }
+        // intentional: polls the external JVM container's `docker logs` for its
+        // Follower/Leader transition + HWM catch-up; no in-process crabka
+        // metric reflects the JVM's internal role/replication state.
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
     if !jvm_joined {
@@ -542,6 +552,10 @@ async fn contested_election_crabka_counts_jvm_prevote() {
             break;
         }
         tick += 1;
+        // intentional: waits for the survivor to win at a HIGHER raft term
+        // (current_term > epoch0); the controller quorum term is not in the
+        // metadata image and has no awaiter/metric — wait_until_controller_leader
+        // only observes a non-zero leader, not term advance or leader identity.
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     let final_qs = survivor.controller_quorum_state_for_test();

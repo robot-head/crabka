@@ -580,8 +580,10 @@ fn append_exemplar_label_map(labels: &mut Labels, label_maps: &MapArray, row: us
         .ok_or_else(|| {
             PromqlError::Store("exemplar label map value column has wrong type".into())
         })?;
-    for index in 0..entries.len() {
-        labels.insert(keys.value(index), values.value(index));
+    for (key, value) in keys.iter().zip(values.iter()) {
+        if let (Some(key), Some(value)) = (key, value) {
+            labels.insert(key, value);
+        }
     }
     Ok(())
 }

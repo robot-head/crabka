@@ -180,58 +180,30 @@ async fn drive_elect_leaders(
 // Polling helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Poll until `handle` sees `(topic, partition)` present in its image.
+/// Await until `handle` sees `(topic, partition)` present in its image.
 async fn wait_partition_exists(handle: &BrokerHandle, topic: &str, partition: i32) {
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        if handle.has_partition(topic, partition).await {
-            return;
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "partition {topic}-{partition} never appeared within 15s"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    handle.wait_until_partition_present(topic, partition).await;
 }
 
-/// Poll until `handle` reports `leader` as the leader for `(topic, partition)`.
+/// Await until `handle` reports `leader` as the leader for `(topic, partition)`.
 async fn wait_partition_leader(handle: &BrokerHandle, topic: &str, partition: i32, leader: u64) {
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        if handle.partition_leader_for_test(topic, partition) == Some(leader) {
-            return;
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "partition {topic}-{partition} didn't elect leader={leader} within 15s; current={:?}",
-            handle.partition_leader_for_test(topic, partition)
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    handle
+        .wait_for_image(|img| img.partition(topic, partition).map(|p| p.leader) == Some(leader))
+        .await;
 }
 
-/// Poll until the ISR for `(topic, partition)` contains `node`.
+/// Await until the ISR for `(topic, partition)` contains `node`.
 async fn wait_isr_contains(handle: &BrokerHandle, topic: &str, partition: i32, node: u64) {
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        if handle
-            .partition_isr_for_test(topic, partition)
-            .map(|isr| isr.contains(&node))
-            .unwrap_or(false)
-        {
-            return;
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "ISR for {topic}-{partition} never included node={node} within 15s; current={:?}",
-            handle.partition_isr_for_test(topic, partition)
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    handle
+        .wait_for_image(|img| {
+            img.partition(topic, partition)
+                .map(|p| p.isr.contains(&node))
+                .unwrap_or(false)
+        })
+        .await;
 }
 
-/// Poll until the ISR for `(topic, partition)` is exactly `expected`.
+/// Await until the ISR for `(topic, partition)` is exactly `expected`.
 async fn wait_partition_isr_only(
     handle: &BrokerHandle,
     topic: &str,
@@ -239,22 +211,17 @@ async fn wait_partition_isr_only(
     expected: &[u64],
 ) {
     let expected_set: std::collections::HashSet<u64> = expected.iter().copied().collect();
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        if let Some(isr) = handle.partition_isr_for_test(topic, partition) {
-            let actual_set: std::collections::HashSet<u64> = isr.iter().copied().collect();
-            if actual_set == expected_set {
-                return;
-            }
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "ISR for {topic}-{partition} didn't converge to {:?} within 15s; current={:?}",
-            expected,
-            handle.partition_isr_for_test(topic, partition)
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    handle
+        .wait_for_image(|img| {
+            img.partition(topic, partition)
+                .map(|p| {
+                    let actual_set: std::collections::HashSet<u64> =
+                        p.isr.iter().copied().collect();
+                    actual_set == expected_set
+                })
+                .unwrap_or(false)
+        })
+        .await;
 }
 
 /// Poll until the partition's ISR contains `member`. Unlike
@@ -266,20 +233,13 @@ async fn wait_partition_isr_contains(
     partition: i32,
     member: u64,
 ) {
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        if let Some(isr) = handle.partition_isr_for_test(topic, partition)
-            && isr.contains(&member)
-        {
-            return;
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "ISR for {topic}-{partition} never contained {member} within 15s; current={:?}",
-            handle.partition_isr_for_test(topic, partition)
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    handle
+        .wait_for_image(|img| {
+            img.partition(topic, partition)
+                .map(|p| p.isr.contains(&member))
+                .unwrap_or(false)
+        })
+        .await;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -325,21 +285,15 @@ async fn preferred_election_via_wire_returns_success() {
 
     // Wait for the surviving cluster to elect a new partition leader
     // (i.e., not broker 1).
-    let deadline = Instant::now() + Duration::from_secs(15);
-    let new_leader;
-    loop {
-        let l = cluster[0].0.partition_leader_for_test("foo-preferred", 0);
-        if l.is_some() && l != Some(1) {
-            new_leader = l.unwrap();
-            eprintln!("new partition leader after broker 1 death: {new_leader}");
-            break;
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "no new partition leader within 15s; current={l:?}"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    cluster[0]
+        .0
+        .wait_until_partition_leader_changed("foo-preferred", 0, 1)
+        .await;
+    let new_leader = cluster[0]
+        .0
+        .partition_leader_for_test("foo-preferred", 0)
+        .unwrap();
+    eprintln!("new partition leader after broker 1 death: {new_leader}");
     let _ = new_leader; // used for diagnostics
 
     // Revive broker 1 (Rejoin reads the existing raft log).
@@ -365,20 +319,12 @@ async fn preferred_election_via_wire_returns_success() {
     // `&[(BrokerHandle, BrokerConfig, TempDir)]` function signature that
     // triggers the Rust 1.95 annotate-snippets ICE in clippy::type_complexity.
     let elect_addr = {
-        let deadline = Instant::now() + Duration::from_secs(15);
-        loop {
-            let lid = cluster[0].0.controller_leader_id().await;
-            if let Some(l) = lid
-                && let Some(pos) = cluster.iter().position(|(_, cfg, _)| cfg.node_id == l)
-            {
-                break cluster[pos].1.listen_addr;
-            }
-            assert!(
-                Instant::now() <= deadline,
-                "raft leader not stable within 15s"
-            );
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        let leader = cluster[0].0.wait_until_controller_leader().await;
+        let pos = cluster
+            .iter()
+            .position(|(_, cfg, _)| cfg.node_id == leader)
+            .expect("raft leader must be one of the surviving brokers");
+        cluster[pos].1.listen_addr
     };
     eprintln!("sending ElectLeaders Preferred to raft leader at {elect_addr}");
 
@@ -550,35 +496,31 @@ async fn wait_partition_record_known(
     topic: &str,
     partition: i32,
 ) -> PartitionRecord {
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        if let Some(isr) = handle.partition_isr_for_test(topic, partition)
-            && let Some(leader) = handle.partition_leader_for_test(topic, partition)
-        {
-            // Reconstruct the record from the accessors we have.
-            return PartitionRecord {
-                topic: topic.to_string(),
-                partition,
-                leader,
-                // We don't have a direct `replicas` accessor, but the
-                // ISR is enough for our purposes (replicas=[1,2] is
-                // well-known from the CreateTopics call with rf=2 on a
-                // 3-broker cluster where the first two brokers are the
-                // natural assignment).
-                replicas: vec![1, 2],
-                isr,
-                leader_epoch: 0, // bumped by the forged record, not critical
-                adding_replicas: vec![],
-                removing_replicas: vec![],
-                directories: vec![],
-                partition_epoch: 0,
-            };
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "partition {topic}-{partition} record never appeared within 15s"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+    handle.wait_until_partition_present(topic, partition).await;
+    // A present partition record implies both accessors are populated.
+    let isr = handle
+        .partition_isr_for_test(topic, partition)
+        .expect("partition present implies ISR known");
+    let leader = handle
+        .partition_leader_for_test(topic, partition)
+        .expect("partition present implies leader known");
+    // Reconstruct the record from the accessors we have.
+    PartitionRecord {
+        topic: topic.to_string(),
+        partition,
+        leader,
+        // We don't have a direct `replicas` accessor, but the
+        // ISR is enough for our purposes (replicas=[1,2] is
+        // well-known from the CreateTopics call with rf=2 on a
+        // 3-broker cluster where the first two brokers are the
+        // natural assignment).
+        replicas: vec![1, 2],
+        isr,
+        leader_epoch: 0, // bumped by the forged record, not critical
+        adding_replicas: vec![],
+        removing_replicas: vec![],
+        directories: vec![],
+        partition_epoch: 0,
     }
 }
 
@@ -647,6 +589,9 @@ async fn non_super_user_without_acl_denied() {
     // committed and the state machine applies it to the image, so the ACL
     // is guaranteed to be in the image before we proceed. A small extra
     // wait absorbs any race on very slow CI runners.
+    // intentional: defensive barrier for ACL visibility to the authorizer;
+    // no ACL-image awaiter/metric exists, and the retry loop below is the
+    // real convergence gate.
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Drive ElectLeaders Preferred as alice. Because the compat shim is
@@ -675,6 +620,10 @@ async fn non_super_user_without_acl_denied() {
             Instant::now() <= deadline_auth,
             "ACL shim still active or wrong error after 5s; got {r:?}"
         );
+        // intentional: backoff between bounded RPC-response retries that
+        // re-drive the SASL ElectLeaders wire path to observe the authorizer's
+        // decision; the awaited state is on the request path, not in the
+        // metadata image, and has no metric.
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
 
@@ -781,24 +730,9 @@ async fn auto_rebalance_restores_preferred_leader() {
     let h2 = join2.await.expect("spawn join2").expect("broker 3 start");
 
     // Wait for all 3 brokers to see each other registered.
-    {
-        let deadline = Instant::now() + Duration::from_secs(30);
-        loop {
-            let counts = (
-                h0.broker_count().await,
-                h1.broker_count().await,
-                h2.broker_count().await,
-            );
-            if counts.0 >= 3 && counts.1 >= 3 && counts.2 >= 3 {
-                break;
-            }
-            assert!(
-                Instant::now() <= deadline,
-                "brokers didn't converge on 3-broker view within 30s; counts={counts:?}"
-            );
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    }
+    h0.wait_until_brokers_registered(3).await;
+    h1.wait_until_brokers_registered(3).await;
+    h2.wait_until_brokers_registered(3).await;
 
     let addr = h0.listen_addr();
     let topic = "foo-rebalance";
@@ -819,19 +753,11 @@ async fn auto_rebalance_restores_preferred_leader() {
     eprintln!("broker 1 shut down; waiting for failover");
 
     // Wait for broker 2 or 3 to report a new leader (not broker 1).
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        let l = h1.partition_leader_for_test(topic, 0);
-        if l.is_some() && l != Some(1) {
-            eprintln!("new leader after broker 1 death: {l:?}");
-            break;
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "no failover leader within 15s; current={l:?}"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    h1.wait_until_partition_leader_changed(topic, 0, 1).await;
+    eprintln!(
+        "new leader after broker 1 death: {:?}",
+        h1.partition_leader_for_test(topic, 0)
+    );
 
     // ── Phase 4: revive broker 1 (Rejoin). ───────────────────────────────
     let mut rejoin_cfg = cfg0.clone();
@@ -844,23 +770,10 @@ async fn auto_rebalance_restores_preferred_leader() {
     eprintln!("broker 1 back in ISR; waiting for auto-rebalance tick to fire");
 
     // ── Phase 5: wait for auto-rebalance to restore broker 1 as leader. ──
-    // The ticker fires every 1s with threshold=0%, so within a few ticks
-    // the preferred leader (broker 1) must be elected.
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        let leader_from_h1 = h1.partition_leader_for_test(topic, 0);
-        let leader_from_new = h0_new.partition_leader_for_test(topic, 0);
-        if leader_from_h1 == Some(1) || leader_from_new == Some(1) {
-            eprintln!("auto-rebalance restored preferred leader (broker 1)");
-            break;
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "auto-rebalance didn't restore preferred leader within 15s; \
-             h1={leader_from_h1:?} h0_new={leader_from_new:?}"
-        );
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
+    // The ticker fires every 1s with threshold=0%; observe the committed
+    // metadata image on a surviving broker reflect broker 1 as leader again.
+    wait_partition_leader(&h1, topic, 0, 1).await;
+    eprintln!("auto-rebalance restored preferred leader (broker 1)");
 
     // Clean up.
     h0_new.shutdown().await;
