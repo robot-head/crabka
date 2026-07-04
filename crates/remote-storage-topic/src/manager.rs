@@ -177,8 +177,8 @@ impl TopicBasedRemoteLogMetadataManager {
         let (stream, assignment_handle) = log.subscribe(Vec::new());
         let pump = runtime.spawn(pump_loop(
             stream,
-            inner.clone(),
-            applied.clone(),
+            Arc::clone(&inner),
+            Arc::clone(&applied),
             applied_tx.clone(),
             shutdown.clone(),
         ));
@@ -542,7 +542,7 @@ impl TopicBasedRemoteLogMetadataManager {
         event: Bytes,
     ) -> Result<(), RemoteStorageError> {
         let partition = metadata_partition_for(tp, self.log.partition_count());
-        let log = self.log.clone();
+        let log = Arc::clone(&self.log);
         // Caller is on a non-runtime (spawn_blocking) thread; block_on
         // is safe and gives us the assigned offset to wait on.
         self.runtime.block_on(async {

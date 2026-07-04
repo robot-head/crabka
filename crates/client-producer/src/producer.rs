@@ -628,12 +628,12 @@ impl Producer {
         tracing::Span::current().record("partition", partition);
 
         let key = (record.topic.clone(), partition);
-        let acc = self
-            .accumulators
-            .entry(key)
-            .or_insert_with(|| Arc::new(Mutex::new(Accumulator::new(self.batch_size))))
-            .value()
-            .clone();
+        let acc = Arc::clone(
+            self.accumulators
+                .entry(key)
+                .or_insert_with(|| Arc::new(Mutex::new(Accumulator::new(self.batch_size))))
+                .value(),
+        );
 
         let timestamp = record.timestamp_ms.unwrap_or_else(current_millis);
         let mut a = acc.lock().await;

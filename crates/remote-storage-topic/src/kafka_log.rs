@@ -199,19 +199,20 @@ struct ConsumerState {
 }
 
 impl ConsumerState {
-    fn spawn_partition(self: &Arc<Self>, start: PartitionStart) {
+    fn spawn_partition(self: &Arc<Self>, start: PartitionStart) -> bool {
         let mut tasks = self.tasks.lock().expect("metadata tasks mutex poisoned");
         if tasks.contains_key(&start.partition) {
-            return; // already assigned
+            return false; // already assigned
         }
         let cancel = CancellationToken::new();
         tasks.insert(start.partition, cancel.clone());
         tokio::spawn(partition_fetch_loop(
-            self.clone(),
+            Arc::clone(self),
             start.partition,
             start.start_offset,
             cancel,
         ));
+        true
     }
 
     fn cancel_partition(&self, partition: i32) {
@@ -311,7 +312,7 @@ impl MetadataEventLog for KafkaMetadataEventLog {
             state.spawn_partition(ps);
         }
         if let Ok(mut subs) = self.subscriptions.try_lock() {
-            subs.push(state.clone());
+            subs.push(Arc::clone(&state));
         } else {
             warn!("KafkaMetadataEventLog: could not track subscription state");
         }
@@ -587,6 +588,42 @@ mod tests {
         check!(cfg.replication == 3);
         check!(cfg.bootstrap == "127.0.0.1:9092");
         check!(cfg.security.is_none());
+    }
+
+    #[tokio::test]
+    async fn spawn_partition_tracks_assignment_and_deduplicates() {
+        let (tx, _rx) = mpsc::channel::<MetadataEventRecord>(1);
+        let state = Arc::new(ConsumerState {
+            bootstrap: "127.0.0.1:0".into(),
+            client_id: "test-consumer".into(),
+            security: None,
+            topic: METADATA_TOPIC.into(),
+            topic_id: WireUuid::ZERO,
+            tx,
+            tasks: StdMutex::new(HashMap::new()),
+        });
+
+        let first_spawned = state.spawn_partition(PartitionStart {
+            partition: 7,
+            start_offset: 3,
+        });
+        let duplicate_spawned = state.spawn_partition(PartitionStart {
+            partition: 7,
+            start_offset: 99,
+        });
+
+        let assigned: Vec<_> = state
+            .tasks
+            .lock()
+            .expect("metadata tasks mutex poisoned")
+            .keys()
+            .copied()
+            .collect();
+        assert!(first_spawned);
+        assert!(!duplicate_spawned);
+        assert!(assigned == vec![7]);
+
+        state.cancel_all();
     }
 
     #[test]
