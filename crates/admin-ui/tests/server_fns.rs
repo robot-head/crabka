@@ -7,7 +7,10 @@ use std::time::Duration;
 use crabka_admin_ui::auth::{LoginBroker, LoginRequest};
 use crabka_admin_ui::config::{AdminUiConfig, BrokerSecurityConfig};
 use crabka_admin_ui::dto::{
-    CreateTopicRequestDto, GroupRow, LogDirRow, ResourceOutcome, ScramUserUpsertDto, TopicRow,
+    AclRequestDto, AlterConfigRequestDto, ConfigEntryDto, CreatePartitionsRequestDto,
+    CreateTopicRequestDto, DeleteTopicRequestDto, GroupRow, LogDirMoveRequestDto, LogDirRow,
+    QuotaDeleteDto, QuotaUpsertDto, ResourceOutcome, ScramUserDeleteDto, ScramUserUpsertDto,
+    TopicRow,
 };
 use crabka_admin_ui::error::UiError;
 use crabka_admin_ui::server::AppState;
@@ -344,7 +347,7 @@ async fn authenticated_mutation_seam_validates_then_calls_admin_mutation() {
     .expect("authenticated mutation succeeds");
 
     assert_eq!(outcomes, vec![ResourceOutcome::ok("orders")]);
-    assert_eq!(mutations.create_topic_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(mutations.create_topic.load(Ordering::SeqCst), 1);
     assert!(matches!(
         crabka_admin_ui::server_fns::create_topic_with_mutations(
             &sessions,
@@ -389,10 +392,7 @@ async fn public_context_create_topic_validates_session_and_calls_admin_mutation(
 
     assert_eq!(outcomes, vec![ResourceOutcome::ok("orders")]);
     assert_eq!(factory.mutation_seam_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        factory.mutations.create_topic_calls.load(Ordering::SeqCst),
-        1
-    );
+    assert_eq!(factory.mutations.create_topic.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -437,6 +437,168 @@ async fn public_context_create_topic_validates_before_authentication() {
 
     assert!(matches!(result, Err(UiError::Admin(_))));
     assert_eq!(factory.mutation_seam_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn logout_with_context_removes_authenticated_session() {
+    let sessions = SessionStore::new(Duration::from_secs(60));
+    let session_id = authenticated_session(&sessions);
+    let cfg = AdminUiConfig::default();
+    let factory = RecordingAdminSeamFactory::default();
+    let context = ServerFunctionContext::new(
+        &cfg,
+        &sessions,
+        Some(session_id.expose_for_cookie()),
+        &factory,
+    );
+
+    crabka_admin_ui::server_fns::logout_with_context(&context)
+        .await
+        .expect("authenticated logout succeeds");
+
+    assert!(sessions.get(&session_id).is_none());
+    assert!(matches!(
+        crabka_admin_ui::server_fns::current_session_with_store(
+            &sessions,
+            Some(session_id.expose_for_cookie())
+        ),
+        Err(UiError::NotAuthenticated)
+    ));
+}
+
+#[tokio::test]
+async fn public_context_mutations_validate_session_and_call_admin_mutation() {
+    let sessions = SessionStore::new(Duration::from_secs(60));
+    let session_id = authenticated_session(&sessions);
+    let cfg = AdminUiConfig::default();
+    let factory = RecordingAdminSeamFactory::default();
+    let context = ServerFunctionContext::new(
+        &cfg,
+        &sessions,
+        Some(session_id.expose_for_cookie()),
+        &factory,
+    );
+
+    crabka_admin_ui::server_fns::delete_topic_with_context(&context, delete_topic_request())
+        .await
+        .expect("delete topic mutation succeeds");
+    crabka_admin_ui::server_fns::create_partitions_with_context(
+        &context,
+        create_partitions_request(),
+    )
+    .await
+    .expect("create partitions mutation succeeds");
+    crabka_admin_ui::server_fns::alter_configs_with_context(&context, alter_config_request())
+        .await
+        .expect("alter config mutation succeeds");
+    crabka_admin_ui::server_fns::create_acl_with_context(&context, acl_request())
+        .await
+        .expect("create ACL mutation succeeds");
+    crabka_admin_ui::server_fns::delete_acl_with_context(&context, acl_request())
+        .await
+        .expect("delete ACL mutation succeeds");
+    crabka_admin_ui::server_fns::upsert_scram_sha512_user_with_context(
+        &context,
+        scram_upsert_request(),
+    )
+    .await
+    .expect("SCRAM upsert mutation succeeds");
+    crabka_admin_ui::server_fns::delete_scram_user_with_context(&context, scram_delete_request())
+        .await
+        .expect("SCRAM delete mutation succeeds");
+    crabka_admin_ui::server_fns::upsert_quota_with_context(&context, quota_upsert_request())
+        .await
+        .expect("quota upsert mutation succeeds");
+    crabka_admin_ui::server_fns::delete_quota_with_context(&context, quota_delete_request())
+        .await
+        .expect("quota delete mutation succeeds");
+    crabka_admin_ui::server_fns::move_log_dir_with_context(&context, log_dir_move_request())
+        .await
+        .expect("log-dir move mutation succeeds");
+
+    assert_eq!(factory.mutation_seam_calls.load(Ordering::SeqCst), 10);
+    assert_eq!(factory.mutations.delete_topic.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        factory.mutations.create_partitions.load(Ordering::SeqCst),
+        1
+    );
+    assert_eq!(factory.mutations.alter_configs.load(Ordering::SeqCst), 1);
+    assert_eq!(factory.mutations.create_acl.load(Ordering::SeqCst), 1);
+    assert_eq!(factory.mutations.delete_acl.load(Ordering::SeqCst), 1);
+    assert_eq!(factory.mutations.upsert_scram.load(Ordering::SeqCst), 1);
+    assert_eq!(factory.mutations.delete_scram.load(Ordering::SeqCst), 1);
+    assert_eq!(factory.mutations.upsert_quota.load(Ordering::SeqCst), 1);
+    assert_eq!(factory.mutations.delete_quota.load(Ordering::SeqCst), 1);
+    assert_eq!(factory.mutations.move_log_dir.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn public_context_mutations_reject_unauthenticated_without_calling_admin_mutation() {
+    let sessions = SessionStore::new(Duration::from_secs(60));
+    let cfg = AdminUiConfig::default();
+    let factory = RecordingAdminSeamFactory::default();
+    let context = ServerFunctionContext::new(&cfg, &sessions, None, &factory);
+
+    assert!(matches!(
+        crabka_admin_ui::server_fns::delete_topic_with_context(&context, delete_topic_request())
+            .await,
+        Err(UiError::NotAuthenticated)
+    ));
+    assert!(matches!(
+        crabka_admin_ui::server_fns::create_partitions_with_context(
+            &context,
+            create_partitions_request()
+        )
+        .await,
+        Err(UiError::NotAuthenticated)
+    ));
+    assert!(matches!(
+        crabka_admin_ui::server_fns::alter_configs_with_context(&context, alter_config_request())
+            .await,
+        Err(UiError::NotAuthenticated)
+    ));
+    assert!(matches!(
+        crabka_admin_ui::server_fns::create_acl_with_context(&context, acl_request()).await,
+        Err(UiError::NotAuthenticated)
+    ));
+    assert!(matches!(
+        crabka_admin_ui::server_fns::delete_acl_with_context(&context, acl_request()).await,
+        Err(UiError::NotAuthenticated)
+    ));
+    assert!(matches!(
+        crabka_admin_ui::server_fns::upsert_scram_sha512_user_with_context(
+            &context,
+            scram_upsert_request()
+        )
+        .await,
+        Err(UiError::NotAuthenticated)
+    ));
+    assert!(matches!(
+        crabka_admin_ui::server_fns::delete_scram_user_with_context(
+            &context,
+            scram_delete_request()
+        )
+        .await,
+        Err(UiError::NotAuthenticated)
+    ));
+    assert!(matches!(
+        crabka_admin_ui::server_fns::upsert_quota_with_context(&context, quota_upsert_request())
+            .await,
+        Err(UiError::NotAuthenticated)
+    ));
+    assert!(matches!(
+        crabka_admin_ui::server_fns::delete_quota_with_context(&context, quota_delete_request())
+            .await,
+        Err(UiError::NotAuthenticated)
+    ));
+    assert!(matches!(
+        crabka_admin_ui::server_fns::move_log_dir_with_context(&context, log_dir_move_request())
+            .await,
+        Err(UiError::NotAuthenticated)
+    ));
+
+    assert_eq!(factory.mutation_seam_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(factory.mutations.total_calls(), 0);
 }
 
 #[derive(Default)]
@@ -514,7 +676,33 @@ impl AdminReadSeam for RecordingAdminReadSeam {
 
 #[derive(Default)]
 struct RecordingAdminMutationSeam {
-    create_topic_calls: AtomicUsize,
+    create_topic: AtomicUsize,
+    delete_topic: AtomicUsize,
+    create_partitions: AtomicUsize,
+    alter_configs: AtomicUsize,
+    create_acl: AtomicUsize,
+    delete_acl: AtomicUsize,
+    upsert_scram: AtomicUsize,
+    delete_scram: AtomicUsize,
+    upsert_quota: AtomicUsize,
+    delete_quota: AtomicUsize,
+    move_log_dir: AtomicUsize,
+}
+
+impl RecordingAdminMutationSeam {
+    fn total_calls(&self) -> usize {
+        self.create_topic.load(Ordering::SeqCst)
+            + self.delete_topic.load(Ordering::SeqCst)
+            + self.create_partitions.load(Ordering::SeqCst)
+            + self.alter_configs.load(Ordering::SeqCst)
+            + self.create_acl.load(Ordering::SeqCst)
+            + self.delete_acl.load(Ordering::SeqCst)
+            + self.upsert_scram.load(Ordering::SeqCst)
+            + self.delete_scram.load(Ordering::SeqCst)
+            + self.upsert_quota.load(Ordering::SeqCst)
+            + self.delete_quota.load(Ordering::SeqCst)
+            + self.move_log_dir.load(Ordering::SeqCst)
+    }
 }
 
 #[derive(Default)]
@@ -577,6 +765,76 @@ impl AdminMutationSeam for &RecordingAdminMutationSeam {
     ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
         (*self).create_topic(request)
     }
+
+    fn delete_topic<'a>(
+        &'a self,
+        request: DeleteTopicRequestDto,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
+        (*self).delete_topic(request)
+    }
+
+    fn create_partitions<'a>(
+        &'a self,
+        request: CreatePartitionsRequestDto,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
+        (*self).create_partitions(request)
+    }
+
+    fn alter_configs<'a>(
+        &'a self,
+        request: AlterConfigRequestDto,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
+        (*self).alter_configs(request)
+    }
+
+    fn create_acl<'a>(
+        &'a self,
+        request: AclRequestDto,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
+        (*self).create_acl(request)
+    }
+
+    fn delete_acl<'a>(
+        &'a self,
+        request: AclRequestDto,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
+        (*self).delete_acl(request)
+    }
+
+    fn upsert_scram_sha512_user<'a>(
+        &'a self,
+        request: ScramUserUpsertDto,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
+        (*self).upsert_scram_sha512_user(request)
+    }
+
+    fn delete_scram_user<'a>(
+        &'a self,
+        request: ScramUserDeleteDto,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
+        (*self).delete_scram_user(request)
+    }
+
+    fn upsert_quota<'a>(
+        &'a self,
+        request: QuotaUpsertDto,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
+        (*self).upsert_quota(request)
+    }
+
+    fn delete_quota<'a>(
+        &'a self,
+        request: QuotaDeleteDto,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
+        (*self).delete_quota(request)
+    }
+
+    fn move_log_dir<'a>(
+        &'a self,
+        request: LogDirMoveRequestDto,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
+        (*self).move_log_dir(request)
+    }
 }
 
 fn authenticated_session(sessions: &SessionStore) -> crabka_admin_ui::session::SessionId {
@@ -595,9 +853,181 @@ impl AdminMutationSeam for RecordingAdminMutationSeam {
         request: CreateTopicRequestDto,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
         Box::pin(async move {
-            self.create_topic_calls.fetch_add(1, Ordering::SeqCst);
+            self.create_topic.fetch_add(1, Ordering::SeqCst);
             Ok(vec![ResourceOutcome::ok(request.name)])
         })
+    }
+
+    fn delete_topic<'a>(
+        &'a self,
+        request: DeleteTopicRequestDto,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
+        Box::pin(async move {
+            self.delete_topic.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![ResourceOutcome::ok(request.name)])
+        })
+    }
+
+    fn create_partitions<'a>(
+        &'a self,
+        request: CreatePartitionsRequestDto,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
+        Box::pin(async move {
+            self.create_partitions.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![ResourceOutcome::ok(request.topic)])
+        })
+    }
+
+    fn alter_configs<'a>(
+        &'a self,
+        request: AlterConfigRequestDto,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
+        Box::pin(async move {
+            self.alter_configs.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![ResourceOutcome::ok(request.resource_name)])
+        })
+    }
+
+    fn create_acl<'a>(
+        &'a self,
+        request: AclRequestDto,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
+        Box::pin(async move {
+            self.create_acl.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![ResourceOutcome::ok(request.principal)])
+        })
+    }
+
+    fn delete_acl<'a>(
+        &'a self,
+        request: AclRequestDto,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
+        Box::pin(async move {
+            self.delete_acl.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![ResourceOutcome::ok(request.principal)])
+        })
+    }
+
+    fn upsert_scram_sha512_user<'a>(
+        &'a self,
+        request: ScramUserUpsertDto,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
+        Box::pin(async move {
+            self.upsert_scram.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![ResourceOutcome::ok(request.username)])
+        })
+    }
+
+    fn delete_scram_user<'a>(
+        &'a self,
+        request: ScramUserDeleteDto,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
+        Box::pin(async move {
+            self.delete_scram.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![ResourceOutcome::ok(request.username)])
+        })
+    }
+
+    fn upsert_quota<'a>(
+        &'a self,
+        request: QuotaUpsertDto,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
+        Box::pin(async move {
+            self.upsert_quota.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![ResourceOutcome::ok(request.entity)])
+        })
+    }
+
+    fn delete_quota<'a>(
+        &'a self,
+        request: QuotaDeleteDto,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
+        Box::pin(async move {
+            self.delete_quota.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![ResourceOutcome::ok(request.entity)])
+        })
+    }
+
+    fn move_log_dir<'a>(
+        &'a self,
+        request: LogDirMoveRequestDto,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
+        Box::pin(async move {
+            self.move_log_dir.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![ResourceOutcome::ok(request.topic)])
+        })
+    }
+}
+
+fn delete_topic_request() -> DeleteTopicRequestDto {
+    DeleteTopicRequestDto {
+        name: "orders".to_string(),
+    }
+}
+
+fn create_partitions_request() -> CreatePartitionsRequestDto {
+    CreatePartitionsRequestDto {
+        topic: "orders".to_string(),
+        total_count: 6,
+    }
+}
+
+fn alter_config_request() -> AlterConfigRequestDto {
+    AlterConfigRequestDto {
+        resource_type: "topic".to_string(),
+        resource_name: "orders".to_string(),
+        configs: vec![ConfigEntryDto {
+            name: "cleanup.policy".to_string(),
+            value: "compact".to_string(),
+        }],
+    }
+}
+
+fn acl_request() -> AclRequestDto {
+    AclRequestDto {
+        resource_type: "topic".to_string(),
+        resource_name: "orders".to_string(),
+        principal: "User:alice".to_string(),
+        operation: "Read".to_string(),
+        permission: "Allow".to_string(),
+        host: "*".to_string(),
+    }
+}
+
+fn scram_upsert_request() -> ScramUserUpsertDto {
+    ScramUserUpsertDto {
+        username: "alice".to_string(),
+        password: "redacted-password".to_string(),
+        iterations: 4096,
+    }
+}
+
+fn scram_delete_request() -> ScramUserDeleteDto {
+    ScramUserDeleteDto {
+        username: "alice".to_string(),
+    }
+}
+
+fn quota_upsert_request() -> QuotaUpsertDto {
+    QuotaUpsertDto {
+        entity: "user=alice".to_string(),
+        quota_type: "producer_byte_rate".to_string(),
+        value: 1024.0,
+    }
+}
+
+fn quota_delete_request() -> QuotaDeleteDto {
+    QuotaDeleteDto {
+        entity: "user=alice".to_string(),
+        quota_type: "producer_byte_rate".to_string(),
+    }
+}
+
+fn log_dir_move_request() -> LogDirMoveRequestDto {
+    LogDirMoveRequestDto {
+        topic: "orders".to_string(),
+        partition: 0,
+        destination_log_dir: "/var/lib/crabka-1".to_string(),
     }
 }
 

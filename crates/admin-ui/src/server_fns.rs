@@ -58,7 +58,11 @@ pub async fn login(request: LoginRequest) -> Result<LoginSuccess, UiError> {
 }
 
 pub async fn logout() -> Result<(), UiError> {
-    Err(UiError::NotAuthenticated)
+    let factory = BrokerAdminSeamFactory;
+    let cfg = AdminUiConfig::default();
+    let context = ServerFunctionContext::new(&cfg, runtime_sessions(), None, &factory);
+
+    logout_with_context(&context).await
 }
 
 pub async fn current_session() -> Result<CurrentSession, UiError> {
@@ -133,7 +137,11 @@ pub async fn create_topic(request: CreateTopicRequestDto) -> Result<Vec<Resource
 pub async fn delete_topic(request: DeleteTopicRequestDto) -> Result<Vec<ResourceOutcome>, UiError> {
     ensure_valid_request(request.validate())?;
 
-    reject_missing_session().await
+    let factory = BrokerAdminSeamFactory;
+    let cfg = AdminUiConfig::default();
+    let context = ServerFunctionContext::new(&cfg, runtime_sessions(), None, &factory);
+
+    delete_topic_with_context(&context, request).await
 }
 
 pub async fn create_partitions(
@@ -141,7 +149,11 @@ pub async fn create_partitions(
 ) -> Result<Vec<ResourceOutcome>, UiError> {
     ensure_valid_request(request.validate())?;
 
-    reject_missing_session().await
+    let factory = BrokerAdminSeamFactory;
+    let cfg = AdminUiConfig::default();
+    let context = ServerFunctionContext::new(&cfg, runtime_sessions(), None, &factory);
+
+    create_partitions_with_context(&context, request).await
 }
 
 pub async fn alter_configs(
@@ -149,19 +161,31 @@ pub async fn alter_configs(
 ) -> Result<Vec<ResourceOutcome>, UiError> {
     ensure_valid_request(request.validate())?;
 
-    reject_missing_session().await
+    let factory = BrokerAdminSeamFactory;
+    let cfg = AdminUiConfig::default();
+    let context = ServerFunctionContext::new(&cfg, runtime_sessions(), None, &factory);
+
+    alter_configs_with_context(&context, request).await
 }
 
 pub async fn create_acl(request: AclRequestDto) -> Result<Vec<ResourceOutcome>, UiError> {
     ensure_valid_request(request.validate())?;
 
-    reject_missing_session().await
+    let factory = BrokerAdminSeamFactory;
+    let cfg = AdminUiConfig::default();
+    let context = ServerFunctionContext::new(&cfg, runtime_sessions(), None, &factory);
+
+    create_acl_with_context(&context, request).await
 }
 
 pub async fn delete_acl(request: AclRequestDto) -> Result<Vec<ResourceOutcome>, UiError> {
     ensure_valid_request(request.validate())?;
 
-    reject_missing_session().await
+    let factory = BrokerAdminSeamFactory;
+    let cfg = AdminUiConfig::default();
+    let context = ServerFunctionContext::new(&cfg, runtime_sessions(), None, &factory);
+
+    delete_acl_with_context(&context, request).await
 }
 
 pub async fn upsert_scram_sha512_user(
@@ -169,7 +193,11 @@ pub async fn upsert_scram_sha512_user(
 ) -> Result<Vec<ResourceOutcome>, UiError> {
     ensure_valid_request(request.validate())?;
 
-    reject_missing_session().await
+    let factory = BrokerAdminSeamFactory;
+    let cfg = AdminUiConfig::default();
+    let context = ServerFunctionContext::new(&cfg, runtime_sessions(), None, &factory);
+
+    upsert_scram_sha512_user_with_context(&context, request).await
 }
 
 pub async fn delete_scram_user(
@@ -177,25 +205,41 @@ pub async fn delete_scram_user(
 ) -> Result<Vec<ResourceOutcome>, UiError> {
     ensure_valid_request(request.validate())?;
 
-    reject_missing_session().await
+    let factory = BrokerAdminSeamFactory;
+    let cfg = AdminUiConfig::default();
+    let context = ServerFunctionContext::new(&cfg, runtime_sessions(), None, &factory);
+
+    delete_scram_user_with_context(&context, request).await
 }
 
 pub async fn upsert_quota(request: QuotaUpsertDto) -> Result<Vec<ResourceOutcome>, UiError> {
     ensure_valid_request(request.validate())?;
 
-    reject_missing_session().await
+    let factory = BrokerAdminSeamFactory;
+    let cfg = AdminUiConfig::default();
+    let context = ServerFunctionContext::new(&cfg, runtime_sessions(), None, &factory);
+
+    upsert_quota_with_context(&context, request).await
 }
 
 pub async fn delete_quota(request: QuotaDeleteDto) -> Result<Vec<ResourceOutcome>, UiError> {
     ensure_valid_request(request.validate())?;
 
-    reject_missing_session().await
+    let factory = BrokerAdminSeamFactory;
+    let cfg = AdminUiConfig::default();
+    let context = ServerFunctionContext::new(&cfg, runtime_sessions(), None, &factory);
+
+    delete_quota_with_context(&context, request).await
 }
 
 pub async fn move_log_dir(request: LogDirMoveRequestDto) -> Result<Vec<ResourceOutcome>, UiError> {
     ensure_valid_request(request.validate())?;
 
-    reject_missing_session().await
+    let factory = BrokerAdminSeamFactory;
+    let cfg = AdminUiConfig::default();
+    let context = ServerFunctionContext::new(&cfg, runtime_sessions(), None, &factory);
+
+    move_log_dir_with_context(&context, request).await
 }
 
 pub trait AdminReadSeam {
@@ -216,6 +260,56 @@ pub trait AdminMutationSeam {
     fn create_topic<'a>(
         &'a self,
         request: CreateTopicRequestDto,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>>;
+
+    fn delete_topic<'a>(
+        &'a self,
+        request: DeleteTopicRequestDto,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>>;
+
+    fn create_partitions<'a>(
+        &'a self,
+        request: CreatePartitionsRequestDto,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>>;
+
+    fn alter_configs<'a>(
+        &'a self,
+        request: AlterConfigRequestDto,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>>;
+
+    fn create_acl<'a>(
+        &'a self,
+        request: AclRequestDto,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>>;
+
+    fn delete_acl<'a>(
+        &'a self,
+        request: AclRequestDto,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>>;
+
+    fn upsert_scram_sha512_user<'a>(
+        &'a self,
+        request: ScramUserUpsertDto,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>>;
+
+    fn delete_scram_user<'a>(
+        &'a self,
+        request: ScramUserDeleteDto,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>>;
+
+    fn upsert_quota<'a>(
+        &'a self,
+        request: QuotaUpsertDto,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>>;
+
+    fn delete_quota<'a>(
+        &'a self,
+        request: QuotaDeleteDto,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>>;
+
+    fn move_log_dir<'a>(
+        &'a self,
+        request: LogDirMoveRequestDto,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>>;
 }
 
@@ -297,6 +391,13 @@ pub async fn login_with_context<B: LoginBroker>(
     crate::auth::AuthService::new_with_broker(cfg, sessions, broker)
         .login(request)
         .await
+}
+
+pub async fn logout_with_context<F>(context: &ServerFunctionContext<'_, F>) -> Result<(), UiError> {
+    let session_id = require_session_id(context.sessions, context.raw_session_id)?;
+
+    context.sessions.remove(&session_id);
+    Ok(())
 }
 
 pub fn current_session_with_store(
@@ -391,6 +492,106 @@ pub async fn create_topic_with_context<F: AdminSeamFactory>(
     let mutations = mutation_seam_from_context(context)?;
 
     mutations.create_topic(request).await
+}
+
+pub async fn delete_topic_with_context<F: AdminSeamFactory>(
+    context: &ServerFunctionContext<'_, F>,
+    request: DeleteTopicRequestDto,
+) -> Result<Vec<ResourceOutcome>, UiError> {
+    ensure_valid_request(request.validate())?;
+    let mutations = mutation_seam_from_context(context)?;
+
+    mutations.delete_topic(request).await
+}
+
+pub async fn create_partitions_with_context<F: AdminSeamFactory>(
+    context: &ServerFunctionContext<'_, F>,
+    request: CreatePartitionsRequestDto,
+) -> Result<Vec<ResourceOutcome>, UiError> {
+    ensure_valid_request(request.validate())?;
+    let mutations = mutation_seam_from_context(context)?;
+
+    mutations.create_partitions(request).await
+}
+
+pub async fn alter_configs_with_context<F: AdminSeamFactory>(
+    context: &ServerFunctionContext<'_, F>,
+    request: AlterConfigRequestDto,
+) -> Result<Vec<ResourceOutcome>, UiError> {
+    ensure_valid_request(request.validate())?;
+    let mutations = mutation_seam_from_context(context)?;
+
+    mutations.alter_configs(request).await
+}
+
+pub async fn create_acl_with_context<F: AdminSeamFactory>(
+    context: &ServerFunctionContext<'_, F>,
+    request: AclRequestDto,
+) -> Result<Vec<ResourceOutcome>, UiError> {
+    ensure_valid_request(request.validate())?;
+    let mutations = mutation_seam_from_context(context)?;
+
+    mutations.create_acl(request).await
+}
+
+pub async fn delete_acl_with_context<F: AdminSeamFactory>(
+    context: &ServerFunctionContext<'_, F>,
+    request: AclRequestDto,
+) -> Result<Vec<ResourceOutcome>, UiError> {
+    ensure_valid_request(request.validate())?;
+    let mutations = mutation_seam_from_context(context)?;
+
+    mutations.delete_acl(request).await
+}
+
+pub async fn upsert_scram_sha512_user_with_context<F: AdminSeamFactory>(
+    context: &ServerFunctionContext<'_, F>,
+    request: ScramUserUpsertDto,
+) -> Result<Vec<ResourceOutcome>, UiError> {
+    ensure_valid_request(request.validate())?;
+    let mutations = mutation_seam_from_context(context)?;
+
+    mutations.upsert_scram_sha512_user(request).await
+}
+
+pub async fn delete_scram_user_with_context<F: AdminSeamFactory>(
+    context: &ServerFunctionContext<'_, F>,
+    request: ScramUserDeleteDto,
+) -> Result<Vec<ResourceOutcome>, UiError> {
+    ensure_valid_request(request.validate())?;
+    let mutations = mutation_seam_from_context(context)?;
+
+    mutations.delete_scram_user(request).await
+}
+
+pub async fn upsert_quota_with_context<F: AdminSeamFactory>(
+    context: &ServerFunctionContext<'_, F>,
+    request: QuotaUpsertDto,
+) -> Result<Vec<ResourceOutcome>, UiError> {
+    ensure_valid_request(request.validate())?;
+    let mutations = mutation_seam_from_context(context)?;
+
+    mutations.upsert_quota(request).await
+}
+
+pub async fn delete_quota_with_context<F: AdminSeamFactory>(
+    context: &ServerFunctionContext<'_, F>,
+    request: QuotaDeleteDto,
+) -> Result<Vec<ResourceOutcome>, UiError> {
+    ensure_valid_request(request.validate())?;
+    let mutations = mutation_seam_from_context(context)?;
+
+    mutations.delete_quota(request).await
+}
+
+pub async fn move_log_dir_with_context<F: AdminSeamFactory>(
+    context: &ServerFunctionContext<'_, F>,
+    request: LogDirMoveRequestDto,
+) -> Result<Vec<ResourceOutcome>, UiError> {
+    ensure_valid_request(request.validate())?;
+    let mutations = mutation_seam_from_context(context)?;
+
+    mutations.move_log_dir(request).await
 }
 
 pub struct BrokerAdminReadSeam {
@@ -492,14 +693,110 @@ impl AdminMutationSeam for BrokerAdminMutationSeam {
                 .collect())
         })
     }
+
+    fn delete_topic<'a>(
+        &'a self,
+        request: DeleteTopicRequestDto,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
+        Box::pin(async move { unsupported_mutation_outcome(&request.name, "delete topic") })
+    }
+
+    fn create_partitions<'a>(
+        &'a self,
+        request: CreatePartitionsRequestDto,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
+        Box::pin(async move { unsupported_mutation_outcome(&request.topic, "create partitions") })
+    }
+
+    fn alter_configs<'a>(
+        &'a self,
+        request: AlterConfigRequestDto,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
+        Box::pin(
+            async move { unsupported_mutation_outcome(&request.resource_name, "alter configs") },
+        )
+    }
+
+    fn create_acl<'a>(
+        &'a self,
+        request: AclRequestDto,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
+        Box::pin(async move { unsupported_mutation_outcome(&request.principal, "create ACL") })
+    }
+
+    fn delete_acl<'a>(
+        &'a self,
+        request: AclRequestDto,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
+        Box::pin(async move { unsupported_mutation_outcome(&request.principal, "delete ACL") })
+    }
+
+    fn upsert_scram_sha512_user<'a>(
+        &'a self,
+        request: ScramUserUpsertDto,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
+        Box::pin(
+            async move { unsupported_mutation_outcome(&request.username, "upsert SCRAM user") },
+        )
+    }
+
+    fn delete_scram_user<'a>(
+        &'a self,
+        request: ScramUserDeleteDto,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
+        Box::pin(
+            async move { unsupported_mutation_outcome(&request.username, "delete SCRAM user") },
+        )
+    }
+
+    fn upsert_quota<'a>(
+        &'a self,
+        request: QuotaUpsertDto,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
+        Box::pin(async move { unsupported_mutation_outcome(&request.entity, "upsert quota") })
+    }
+
+    fn delete_quota<'a>(
+        &'a self,
+        request: QuotaDeleteDto,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
+        Box::pin(async move { unsupported_mutation_outcome(&request.entity, "delete quota") })
+    }
+
+    fn move_log_dir<'a>(
+        &'a self,
+        request: LogDirMoveRequestDto,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
+        Box::pin(async move { unsupported_mutation_outcome(&request.topic, "move log dir") })
+    }
+}
+
+fn unsupported_mutation_outcome<T>(resource: &str, operation: &'static str) -> Result<T, UiError> {
+    Err(UiError::Admin(format!(
+        "{operation} is not supported by the broker admin seam yet for {resource}"
+    )))
 }
 
 fn ensure_valid_request(validation: Result<(), String>) -> Result<(), UiError> {
     validation.map_err(UiError::Admin)
 }
 
-async fn reject_missing_session<T>() -> Result<T, UiError> {
-    Err(UiError::NotAuthenticated)
+fn require_session_id(
+    sessions: &SessionStore,
+    raw_session_id: Option<&str>,
+) -> Result<SessionId, UiError> {
+    let Some(raw_session_id) = raw_session_id else {
+        return Err(UiError::NotAuthenticated);
+    };
+    let Ok(session_id) = SessionId::try_from(raw_session_id) else {
+        return Err(UiError::NotAuthenticated);
+    };
+
+    if sessions.get(&session_id).is_none() {
+        return Err(UiError::NotAuthenticated);
+    }
+
+    Ok(session_id)
 }
 
 fn require_session(

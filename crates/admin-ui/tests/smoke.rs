@@ -7,7 +7,11 @@ use std::time::Duration;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
 use crabka_admin_ui::config::AdminUiConfig;
-use crabka_admin_ui::dto::{GroupRow, LogDirRow, ResourceOutcome, TopicRow};
+use crabka_admin_ui::dto::{
+    AclRequestDto, AlterConfigRequestDto, CreatePartitionsRequestDto, CreateTopicRequestDto,
+    DeleteTopicRequestDto, GroupRow, LogDirMoveRequestDto, LogDirRow, QuotaDeleteDto,
+    QuotaUpsertDto, ResourceOutcome, ScramUserDeleteDto, ScramUserUpsertDto, TopicRow,
+};
 use crabka_admin_ui::error::UiError;
 use crabka_admin_ui::server::{AppState, SESSION_COOKIE_NAME, router, router_with_factory};
 use crabka_admin_ui::server_fns::{AdminMutationSeam, AdminReadSeam, AdminSeamFactory};
@@ -258,7 +262,77 @@ impl AdminReadSeam for RecordingAdminSeamFactory {
 impl AdminMutationSeam for RecordingAdminSeamFactory {
     fn create_topic<'a>(
         &'a self,
-        _request: crabka_admin_ui::dto::CreateTopicRequestDto,
+        _request: CreateTopicRequestDto,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn delete_topic<'a>(
+        &'a self,
+        _request: DeleteTopicRequestDto,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn create_partitions<'a>(
+        &'a self,
+        _request: CreatePartitionsRequestDto,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn alter_configs<'a>(
+        &'a self,
+        _request: AlterConfigRequestDto,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn create_acl<'a>(
+        &'a self,
+        _request: AclRequestDto,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn delete_acl<'a>(
+        &'a self,
+        _request: AclRequestDto,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn upsert_scram_sha512_user<'a>(
+        &'a self,
+        _request: ScramUserUpsertDto,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn delete_scram_user<'a>(
+        &'a self,
+        _request: ScramUserDeleteDto,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn upsert_quota<'a>(
+        &'a self,
+        _request: QuotaUpsertDto,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn delete_quota<'a>(
+        &'a self,
+        _request: QuotaDeleteDto,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn move_log_dir<'a>(
+        &'a self,
+        _request: LogDirMoveRequestDto,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
         Box::pin(async { Ok(Vec::new()) })
     }
