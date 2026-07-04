@@ -13,6 +13,8 @@
 use assert2::{assert, check};
 mod support;
 
+use std::time::{Duration, Instant};
+
 use bytes::Bytes;
 use crabka_compression::CompressionType;
 use crabka_protocol::{
@@ -72,6 +74,26 @@ fn encode_batch(b: &RecordBatch) -> Bytes {
 
 async fn create_topic(broker: &crabka_broker::BrokerHandle, bootstrap: &str, name: &str) {
     create_topic_with_configs(broker, bootstrap, name, vec![]).await;
+}
+
+async fn wait_for_compression(
+    broker: &crabka_broker::BrokerHandle,
+    topic: &str,
+    expected: Option<CompressionType>,
+) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(cfg) = broker.partition_log_config_for_test(topic, 0)
+            && cfg.compression_type == expected
+        {
+            return;
+        }
+        assert!(
+            Instant::now() <= deadline,
+            "compression_type={expected:?} never propagated to partition LogConfig within 10s"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 async fn create_topic_with_configs(
@@ -316,6 +338,7 @@ async fn recompression_config_takes_owned_path() {
         }],
     )
     .await;
+    wait_for_compression(&broker, "recmp", Some(CompressionType::Zstd)).await;
 
     let client = crabka_client_core::Client::builder()
         .bootstrap(bootstrap.clone())
@@ -438,6 +461,7 @@ async fn idempotent_dedup_over_verbatim_path() {
         .await
         .expect("second append ok");
     assert!(base1 == 3);
+    broker.wait_until_local_log_end_offset("idem", 0, 5).await;
 
     // Retry the MOST RECENT batch (seq 3..=4) → DUPLICATE: the dedup tracker
     // tracks the last committed batch and echoes its base offset (3), no error.

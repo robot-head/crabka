@@ -254,6 +254,9 @@ async fn concurrent_topic_creates_one_wins() {
     let _g = cluster_lock().lock().await;
     let cluster = support::start_n_node_with_retry(3).await;
     wait_for_leader(&cluster).await;
+    for (h, _, _) in &cluster {
+        h.wait_until_brokers_registered(3).await;
+    }
 
     let clients = {
         let mut v = Vec::new();
@@ -296,8 +299,17 @@ async fn concurrent_topic_creates_one_wins() {
             other => panic!("unexpected error_code {other}"),
         }
     }
-    assert!(zero == 1, "exactly one winner");
-    assert!(already == 2, "two losers see TOPIC_ALREADY_EXISTS");
+    for (h, _, _) in &cluster {
+        h.wait_until_partition_present("race", 0).await;
+    }
+    assert!(
+        zero == 1,
+        "exactly one winner, got zero={zero} already={already}"
+    );
+    assert!(
+        already == 2,
+        "two losers see TOPIC_ALREADY_EXISTS, got zero={zero} already={already}"
+    );
 
     for (h, _, _) in cluster {
         h.shutdown().await;
