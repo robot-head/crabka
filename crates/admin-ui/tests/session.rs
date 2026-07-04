@@ -51,3 +51,39 @@ fn session_id_try_from_accepts_cookie_uuid_and_rejects_invalid_value() {
     assert_eq!(parsed, id);
     assert!(SessionId::try_from("not-a-uuid").is_err());
 }
+
+#[test]
+fn session_id_debug_redacts_cookie_value() {
+    let id = SessionId::new();
+
+    let debug_output = format!("{id:?}");
+
+    assert!(!debug_output.contains(id.expose_for_cookie()));
+}
+
+#[test]
+fn oversized_ttl_session_creation_does_not_panic() {
+    let result = std::panic::catch_unwind(|| {
+        let store = SessionStore::new(Duration::MAX);
+        store.create(SessionUser {
+            username: "dave".to_string(),
+            principal: "User:dave".to_string(),
+        })
+    });
+
+    assert!(result.is_ok());
+}
+
+#[test]
+fn session_store_debug_does_not_include_session_storage() {
+    let store = SessionStore::new(Duration::from_secs(60));
+    store.create(SessionUser {
+        username: "erin".to_string(),
+        principal: "User:erin".to_string(),
+    });
+
+    let debug_output = format!("{store:?}");
+
+    assert!(!debug_output.contains("sessions"));
+    assert!(!debug_output.contains("erin"));
+}

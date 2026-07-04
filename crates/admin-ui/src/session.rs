@@ -1,10 +1,11 @@
 use std::collections::HashMap;
+use std::fmt;
 use std::time::{Duration, Instant};
 
 use parking_lot::RwLock;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct SessionId(String);
 
 impl SessionId {
@@ -16,6 +17,12 @@ impl SessionId {
     #[must_use]
     pub fn expose_for_cookie(&self) -> &str {
         &self.0
+    }
+}
+
+impl fmt::Debug for SessionId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SessionId(<redacted>)")
     }
 }
 
@@ -54,10 +61,19 @@ impl SessionRecord {
     }
 }
 
-#[derive(Debug)]
 pub struct SessionStore {
     ttl: Duration,
     sessions: RwLock<HashMap<SessionId, SessionRecord>>,
+}
+
+impl fmt::Debug for SessionStore {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SessionStore")
+            .field("ttl", &self.ttl)
+            .field("session_count", &self.sessions.read().len())
+            .finish()
+    }
 }
 
 impl SessionStore {
@@ -71,9 +87,10 @@ impl SessionStore {
 
     pub fn create(&self, user: SessionUser) -> SessionId {
         let session_id = SessionId::new();
+        let now = Instant::now();
         let session_record = SessionRecord {
             user,
-            expires_at: Instant::now() + self.ttl,
+            expires_at: now.checked_add(self.ttl).unwrap_or(now),
         };
 
         self.sessions
