@@ -120,7 +120,13 @@ async fn initialize_ready(
         if !not_ready(code) {
             return code;
         }
-        // real-time wait (not a progress poll): retry/backoff while the share coordinator materializes the state partition
+        // intentional: bounded retry of the Initialize RPC while the share
+        // coordinator is still asynchronously loading/materializing the
+        // __share_group_state partition. This helper holds only a `Client`
+        // (no `BrokerHandle`), and the awaited condition is coordinator LOAD
+        // state (COORDINATOR_LOAD_IN_PROGRESS) — not share-partition state, so
+        // the wait_until_share_* awaiters don't apply (they observe SPSO /
+        // delivery / acquired state that this very Initialize creates).
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     panic!("share coordinator never became ready for {group}:{tid}:{partition}");

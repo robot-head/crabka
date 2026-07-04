@@ -122,7 +122,10 @@ async fn list_transactions_returns_ongoing_txn() {
         if std::time::Instant::now() > deadline {
             panic!("ListTransactions never saw the ongoing txn: {r:?}");
         }
-        tokio::task::yield_now().await;
+        // intentional: polls RPC response until the txn is visible as Ongoing
+        // (coordinator TxnEntry state after AddPartitionsToTxn); no
+        // metadata-image signal for this
+        tokio::time::sleep(Duration::from_millis(100)).await;
     };
 
     assert!(resp.error_code == 0);
@@ -217,7 +220,10 @@ async fn describe_transactions_returns_full_state_for_known_tid() {
         if std::time::Instant::now() > deadline {
             panic!("Ongoing txn never showed its partitions: {row:?}");
         }
-        tokio::task::yield_now().await;
+        // intentional: polls RPC response until the txn shows its registered
+        // partitions (coordinator TxnEntry state after AddPartitionsToTxn); no
+        // metadata-image signal for this
+        tokio::time::sleep(Duration::from_millis(100)).await;
     };
 
     check!(row.transactional_id == "describe-tid");

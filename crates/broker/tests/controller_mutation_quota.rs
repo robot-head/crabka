@@ -385,9 +385,18 @@ async fn controller_mutation_rate_throttles_create_topics() {
     .await;
     assert!(alter[0].1 == 0, "alter should succeed");
 
-    // Wait for refresh task to pick up the rate.
-    // real-time wait (not a progress poll): settle for periodic quota refresh task, no local condition to poll
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    // Wait until the controller_mutation_rate quota is committed to this
+    // broker's metadata image. The CreateTopics handler reads the rate
+    // straight from the image on the first consume (the bucket is created
+    // lazily with that rate; the refresh task only re-rates existing buckets),
+    // so image visibility — not the refresh task — is the real precondition.
+    handle
+        .wait_for_image(|img| {
+            img.client_quotas()
+                .values()
+                .any(|configs| configs.contains_key("controller_mutation_rate"))
+        })
+        .await;
 
     // Create topic with 10 partitions (mutations=10, burst=2, overage=8 → delay capped at 1s).
     let started = std::time::Instant::now();
@@ -448,8 +457,14 @@ async fn controller_mutation_rate_throttles_delete_topics() {
         .submit_metadata_record_for_test(shim_disable)
         .await
         .expect("seed compat shim disable ACL");
-    // real-time wait (not a progress poll): raft commit-then-apply settle, no local condition to poll
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    // Wait until the shim-disable ACL is visible in the metadata image so the
+    // allow-all compat shim is actually off before the scenario proceeds.
+    handle
+        .wait_for_image(|img| {
+            img.all_acls()
+                .any(|a| a.resource_name == "__compat_shim_disable__")
+        })
+        .await;
 
     // Pre-create topic as admin (no quota for admin) with 10 partitions.
     let (_, ec) = drive_create_topics_sasl(addr, "admin", "admin-secret", "to-delete", 10).await;
@@ -469,8 +484,14 @@ async fn controller_mutation_rate_throttles_delete_topics() {
         .submit_metadata_record_for_test(alice_delete_acl)
         .await
         .expect("seed alice Delete ACL");
-    // real-time wait (not a progress poll): raft commit-then-apply settle, no local condition to poll
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    // Wait until alice's Delete ACL on "to-delete" is visible in the image so
+    // the later delete is authorized.
+    handle
+        .wait_for_image(|img| {
+            img.all_acls()
+                .any(|a| a.resource_name == "to-delete" && a.principal == "User:alice")
+        })
+        .await;
 
     // Now set the quota for alice and delete.
     let alter = drive_alter_client_quotas_sasl(
@@ -485,8 +506,15 @@ async fn controller_mutation_rate_throttles_delete_topics() {
     )
     .await;
     assert!(alter[0].1 == 0);
-    // real-time wait (not a progress poll): settle for periodic quota refresh task, no local condition to poll
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    // Wait for alice's controller_mutation_rate quota to land in the image
+    // before deleting; DeleteTopics reads the rate from the image on consume.
+    handle
+        .wait_for_image(|img| {
+            img.client_quotas()
+                .values()
+                .any(|configs| configs.contains_key("controller_mutation_rate"))
+        })
+        .await;
 
     let (throttle_ms, err_code) =
         drive_delete_topics_sasl(addr, "alice", "alice-secret", "to-delete").await;

@@ -135,19 +135,10 @@ async fn create_topic_plaintext(
 // Polling helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Poll until `handle` sees `(topic, partition)` present in its image.
+/// Wait until `handle` sees `(topic, partition)` present in its image.
 async fn wait_partition_exists(handle: &BrokerHandle, topic: &str, partition: i32) {
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        if handle.has_partition(topic, partition).await {
-            return;
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "partition {topic}-{partition} never appeared within 15s"
-        );
-        tokio::task::yield_now().await;
-    }
+    // Event-driven: subscribes to the image watch channel via the awaiter.
+    handle.wait_until_partition_present(topic, partition).await;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -180,28 +171,19 @@ async fn start_three_broker_plaintext_cluster() -> (
 /// Tries each handle in `handles` to find the one whose `node_id` matches the
 /// reported raft leader.
 async fn controller_leader_addr(handles: &[&BrokerHandle]) -> SocketAddr {
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        // Ask the first handle for the leader node id.
-        let lid = handles[0].controller_leader_id().await;
-        if let Some(leader_id) = lid {
-            // Find which handle has that node_id by checking its broker_id.
-            // BrokerHandle::listen_addr() returns the port the leader is
-            // listening on. We identify the leader by the node_id via
-            // controller_leader_id() — it returns the raft node id (u64) which
-            // equals (broker_index + 1). The handles slice is ordered
-            // [broker1, broker2, broker3], so handle[i] has node_id = i+1.
-            let idx = usize::try_from(leader_id).unwrap().saturating_sub(1);
-            if idx < handles.len() {
-                return handles[idx].listen_addr();
-            }
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "raft leader not stable within 15s; got {lid:?}"
-        );
-        tokio::task::yield_now().await;
-    }
+    // Event-driven: await a non-zero elected controller leader on the first
+    // handle's leader watch channel instead of polling `controller_leader_id`.
+    let leader_id = handles[0].wait_until_controller_leader().await;
+    // We identify the leader by the node_id — it is the raft node id (u64)
+    // which equals (broker_index + 1). The handles slice is ordered
+    // [broker1, broker2, broker3], so handle[i] has node_id = i+1.
+    let idx = usize::try_from(leader_id).unwrap().saturating_sub(1);
+    assert!(
+        idx < handles.len(),
+        "raft leader id {leader_id} out of range for {} handles",
+        handles.len()
+    );
+    handles[idx].listen_addr()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -369,18 +351,12 @@ async fn alter_then_complete_via_isr_catchup() {
     );
 
     // Wait for the image to reflect the in-flight reassignment.
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let pr_after_alter = loop {
-        let pr = h1.partition_record_for_test("foo", 0).expect("partition");
-        if !pr.adding_replicas.is_empty() {
-            break pr;
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "adding_replicas never set within 10s; pr={pr:?}"
-        );
-        tokio::task::yield_now().await;
-    };
+    h1.wait_for_image(|img| {
+        img.partition("foo", 0)
+            .is_some_and(|p| !p.adding_replicas.is_empty())
+    })
+    .await;
+    let pr_after_alter = h1.partition_record_for_test("foo", 0).expect("partition");
     assert!(
         pr_after_alter
             .adding_replicas
@@ -403,29 +379,24 @@ async fn alter_then_complete_via_isr_catchup() {
         .await
         .expect("inject");
 
-    // Within ~10s the background task should observe adding ⊆ isr and complete.
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let pr = h1.partition_record_for_test("foo", 0).expect("partition");
-        if pr.adding_replicas.is_empty() && pr.removing_replicas.is_empty() {
-            let actual: std::collections::HashSet<u64> = pr.replicas.iter().copied().collect();
-            let expected: std::collections::HashSet<u64> =
-                target.iter().map(|n| *n as u64).collect();
-            assert!(
-                actual == expected,
-                "replicas after completion should match target; pr={pr:?}"
-            );
-            // Clean up.
-            h1.shutdown().await;
-            h2.shutdown().await;
-            h3.shutdown().await;
-            return;
-        }
-        if Instant::now() > deadline {
-            panic!("reassignment did not complete; pr={:?}", pr);
-        }
-        tokio::task::yield_now().await;
-    }
+    // The background task should observe adding ⊆ isr and complete, clearing
+    // adding_replicas and removing_replicas.
+    h1.wait_for_image(|img| {
+        img.partition("foo", 0)
+            .is_some_and(|p| p.adding_replicas.is_empty() && p.removing_replicas.is_empty())
+    })
+    .await;
+    let pr = h1.partition_record_for_test("foo", 0).expect("partition");
+    let actual: std::collections::HashSet<u64> = pr.replicas.iter().copied().collect();
+    let expected: std::collections::HashSet<u64> = target.iter().map(|n| *n as u64).collect();
+    assert!(
+        actual == expected,
+        "replicas after completion should match target; pr={pr:?}"
+    );
+    // Clean up.
+    h1.shutdown().await;
+    h2.shutdown().await;
+    h3.shutdown().await;
 }
 
 /// Test 2: After AlterPartitionReassignments starts a reassignment, the
@@ -451,18 +422,11 @@ async fn list_in_flight_returns_pending_rows() {
     drive_alter_reassignments(raft_addr, vec![("foo", 0, Some(target))]).await;
 
     // Wait for the image to reflect adding_replicas, then list.
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let pr = h1.partition_record_for_test("foo", 0).expect("partition");
-        if !pr.adding_replicas.is_empty() {
-            break;
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "adding_replicas never set within 10s"
-        );
-        tokio::task::yield_now().await;
-    }
+    h1.wait_for_image(|img| {
+        img.partition("foo", 0)
+            .is_some_and(|p| !p.adding_replicas.is_empty())
+    })
+    .await;
 
     let listed = drive_list_reassignments(raft_addr, None).await;
     let foo = listed
@@ -734,14 +698,19 @@ async fn non_super_user_denied() {
 
     // `submit_metadata_record_for_test` blocks until the raft entry is
     // committed and the state machine applies it to the image, so the ACL
-    // is guaranteed to be in the image before we proceed.
-    // real-time wait (not a progress poll): redundant settle after a blocking committed-record apply; the next step is a network CreateTopics, so there is no cheap synchronous positive observable to poll.
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // is already present here; await it explicitly on the image watch channel
+    // rather than sleeping.
+    handle
+        .wait_for_image(|img| img.all_acls().next().is_some())
+        .await;
 
     create_topic_as_admin(addr, "foo", 1, 1).await;
     wait_partition_exists(&handle, "foo", 0).await;
 
     // Retry up to 5s to absorb raft apply latency on slow runners.
+    // intentional: bounded RPC-response poll on the alter response error code
+    // (CLUSTER_AUTHORIZATION_FAILED=31) — an end-to-end authorizer verdict, not
+    // a metadata-image or metric signal, so there is no awaiter to wait on.
     let deadline_auth = Instant::now() + Duration::from_secs(5);
     let resp = loop {
         let r = drive_alter_reassignments_sasl_plain(
@@ -798,18 +767,11 @@ async fn cancel_via_null_replicas_reverts() {
     drive_alter_reassignments(raft_addr, vec![("foo", 0, Some(target))]).await;
 
     // Wait for the image to reflect adding_replicas (reassignment started).
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let pr = h1.partition_record_for_test("foo", 0).expect("partition");
-        if !pr.adding_replicas.is_empty() {
-            break;
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "adding_replicas never set within 10s"
-        );
-        tokio::task::yield_now().await;
-    }
+    h1.wait_for_image(|img| {
+        img.partition("foo", 0)
+            .is_some_and(|p| !p.adding_replicas.is_empty())
+    })
+    .await;
 
     // Cancel: replicas = None.
     let resp = drive_alter_reassignments(raft_addr, vec![("foo", 0, None)]).await;
@@ -820,26 +782,18 @@ async fn cancel_via_null_replicas_reverts() {
     );
 
     // Wait for the image to reflect the cancellation.
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let pr_after_cancel = h1.partition_record_for_test("foo", 0).expect("partition");
-        if pr_after_cancel.adding_replicas.is_empty()
-            && pr_after_cancel.removing_replicas.is_empty()
-        {
-            assert!(
-                pr_after_cancel.replicas == original_replicas,
-                "replicas should revert to original after cancel; pr={pr_after_cancel:?}"
-            );
-            // Clean up.
-            h1.shutdown().await;
-            h2.shutdown().await;
-            h3.shutdown().await;
-            return;
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "cancel did not complete within 10s; pr={pr_after_cancel:?}"
-        );
-        tokio::task::yield_now().await;
-    }
+    h1.wait_for_image(|img| {
+        img.partition("foo", 0)
+            .is_some_and(|p| p.adding_replicas.is_empty() && p.removing_replicas.is_empty())
+    })
+    .await;
+    let pr_after_cancel = h1.partition_record_for_test("foo", 0).expect("partition");
+    assert!(
+        pr_after_cancel.replicas == original_replicas,
+        "replicas should revert to original after cancel; pr={pr_after_cancel:?}"
+    );
+    // Clean up.
+    h1.shutdown().await;
+    h2.shutdown().await;
+    h3.shutdown().await;
 }

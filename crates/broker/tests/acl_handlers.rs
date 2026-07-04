@@ -723,7 +723,13 @@ async fn retry_produce_until_allowed(
         if std::time::Instant::now() > deadline {
             return Ok(resp);
         }
-        tokio::task::yield_now().await;
+        // intentional: bounded RPC-response poll. The ground truth is the
+        // broker's authorization decision (and partition-writer readiness for
+        // acks=-1), observed by re-driving Produce — not an image/metric an
+        // awaiter exposes. wait_for_image watches the controller's committed
+        // image, which can lead the request path's applied copy, so an image
+        // wait would race; re-driving absorbs the commit-then-apply gap.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 }
 
@@ -1279,7 +1285,13 @@ async fn retry_metadata_until_topic_visible(
         if std::time::Instant::now() > deadline {
             return Ok(resp);
         }
-        tokio::task::yield_now().await;
+        // intentional: bounded RPC-response poll. The awaited signal is the
+        // broker's authorization decision (topic visible to alice), observed by
+        // re-driving Metadata — not an image/metric an awaiter exposes.
+        // wait_for_image watches the controller's committed image, which can
+        // lead the request path's applied copy, so an image wait would race;
+        // re-driving absorbs the raft commit-then-apply gap.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 }
 
@@ -1305,7 +1317,13 @@ async fn retry_join_group_until_allowed(
         if std::time::Instant::now() > deadline {
             return Ok(resp);
         }
-        tokio::task::yield_now().await;
+        // intentional: bounded RPC-response poll. The awaited signal is the
+        // broker's authorization decision (JoinGroup no longer denied),
+        // observed by re-driving JoinGroup — not an image/metric an awaiter
+        // exposes. wait_for_image watches the controller's committed image,
+        // which can lead the request path's applied copy, so an image wait
+        // would race; re-driving absorbs the raft commit-then-apply gap.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 }
 

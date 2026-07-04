@@ -318,6 +318,22 @@ pub struct BrokerMetrics {
     pub audit_records_replayed_total: Counter,
     /// Cumulative audit records lost (channel-full or spool-full).
     pub audit_records_dropped_total: Counter,
+    /// Cumulative count of completed log-compaction sweeps run by this
+    /// broker's cleaner — one increment per `tick_all` pass, whether or
+    /// not any partition was eligible. Lets tests (and operators) observe
+    /// that the compaction ticker has completed at least one full pass
+    /// after a segment was sealed, replacing fixed `sleep`s with a poll on
+    /// this counter. Mirrors the intent of Kafka's `LogCleaner` run
+    /// accounting.
+    pub log_cleaner_runs_total: Counter,
+    /// Per-partition cumulative count of compaction passes
+    /// (`Partition::compact_log`) this broker's cleaner completed
+    /// successfully. Bumped once per eligible (leader &&
+    /// `cleanup.policy=compact`) partition per sweep. Pairs with
+    /// `log_cleaner_runs_total`: a test that seals a segment then waits for
+    /// this counter to advance knows the sealed segment has been through a
+    /// compaction pass without guessing a duration.
+    pub log_compactions_total: Family<PartitionLabel, Counter>,
 }
 
 impl BrokerMetrics {
@@ -376,6 +392,8 @@ impl BrokerMetrics {
         let audit_records_spooled_total = Counter::default();
         let audit_records_replayed_total = Counter::default();
         let audit_records_dropped_total = Counter::default();
+        let log_cleaner_runs_total = Counter::default();
+        let log_compactions_total: Family<PartitionLabel, Counter> = Family::default();
 
         registry.register(
             "topic_bytes_in",
@@ -729,6 +747,18 @@ impl BrokerMetrics {
             "Cumulative audit records lost (channel-full or spool-full)",
             audit_records_dropped_total.clone(),
         );
+        registry.register(
+            "log_cleaner_runs",
+            "Cumulative count of completed log-compaction sweeps run by \
+             this broker's cleaner (one per tick_all pass).",
+            log_cleaner_runs_total.clone(),
+        );
+        registry.register(
+            "log_compactions",
+            "Per-partition cumulative count of compaction passes this \
+             broker's cleaner completed successfully.",
+            log_compactions_total.clone(),
+        );
 
         Self {
             registry: Arc::new(Mutex::new(registry)),
@@ -778,6 +808,8 @@ impl BrokerMetrics {
             audit_records_spooled_total,
             audit_records_replayed_total,
             audit_records_dropped_total,
+            log_cleaner_runs_total,
+            log_compactions_total,
         }
     }
 
@@ -1024,6 +1056,24 @@ impl BrokerMetrics {
         };
         self.partition_cpu_micros.get_or_create(&lbl).inc_by(micros);
     }
+
+    /// Account one completed log-compaction sweep (a full `tick_all`
+    /// pass). Called once per cleaner tick, whether or not any partition
+    /// was eligible, so a test can observe that a full pass ran after it
+    /// sealed a segment.
+    pub fn record_cleaner_run(&self) {
+        self.log_cleaner_runs_total.inc();
+    }
+
+    /// Account one successful per-partition compaction pass
+    /// (`Partition::compact_log` returned `Ok`).
+    pub fn record_compaction(&self, topic: &str, partition: i32) {
+        let lbl = PartitionLabel {
+            topic: topic.to_string(),
+            partition,
+        };
+        self.log_compactions_total.get_or_create(&lbl).inc();
+    }
 }
 
 impl Default for BrokerMetrics {
@@ -1057,6 +1107,8 @@ mod tests {
         m.record_partition_cpu_micros("topic-a", 0, 250);
         m.record_replication_in("topic-a", 0, 4096);
         m.record_replication_out("topic-a", 0, 8192);
+        m.record_cleaner_run();
+        m.record_compaction("topic-a", 0);
         m.record_produce_message_conversion("topic-a");
         m.record_fetch_message_conversion("topic-a");
         m.record_failed_produce("topic-a");
@@ -1120,6 +1172,8 @@ mod tests {
             "crabka_broker_produce_message_conversions_total",
             "crabka_broker_fetch_message_conversions_total",
             "crabka_broker_unclean_leader_elections_total",
+            "crabka_broker_log_cleaner_runs_total",
+            "crabka_broker_log_compactions_total",
             "crabka_broker_api_requests_total",
             "crabka_broker_unsupported_api_requests_total",
             "crabka_broker_request_duration_seconds_bucket",

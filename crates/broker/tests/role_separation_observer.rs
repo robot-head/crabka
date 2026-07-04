@@ -8,7 +8,6 @@
 
 use assert2::assert;
 use std::collections::BTreeSet;
-use std::time::{Duration, Instant};
 
 use crabka_broker::config::NodeRole;
 use crabka_broker::{BootstrapMode, Broker};
@@ -51,13 +50,8 @@ async fn broker_only_node_observes_and_forwards() {
 
     // Wait until the controller is leader before starting the observer, so
     // the observer's first fetch already has a committed log to replicate.
-    let deadline = Instant::now() + Duration::from_mins(2);
-    while controller.controller_leader_id().await != Some(1) {
-        if Instant::now() > deadline {
-            panic!("controller did not become leader within 2 min");
-        }
-        tokio::task::yield_now().await;
-    }
+    // (Node 1 is the only voter, so it elects itself.)
+    controller.wait_until_controller_leader().await;
 
     // Broker-only node (node 2): no openraft voter. Keeps its metadata image
     // current by fetching `__cluster_metadata` from the controller, and
@@ -80,13 +74,7 @@ async fn broker_only_node_observes_and_forwards() {
     // The broker-only node self-registers (it IS a broker) by forwarding the
     // registration to the controller; wait until the controller's committed
     // image reflects it, so CreateTopics has a broker to place replicas on.
-    let deadline = Instant::now() + Duration::from_mins(2);
-    while controller.broker_count().await < 1 {
-        if Instant::now() > deadline {
-            panic!("broker-only node did not register with the controller within 2 min");
-        }
-        tokio::task::yield_now().await;
-    }
+    controller.wait_until_brokers_registered(1).await;
 
     // CreateTopics against the broker-only node — forwarded to the controller
     // quorum via the observer's write path.
@@ -116,13 +104,7 @@ async fn broker_only_node_observes_and_forwards() {
 
     // Assertion 1: the topic propagates back to the broker-only node's image
     // via observer fetch (it is not a voter, so this cannot be a raft apply).
-    let deadline = Instant::now() + Duration::from_mins(2);
-    while !broker_only.has_partition(topic, 0).await {
-        if Instant::now() > deadline {
-            panic!("topic did not propagate to the broker-only image within 2 min");
-        }
-        tokio::task::yield_now().await;
-    }
+    broker_only.wait_until_partition_present(topic, 0).await;
 
     // Assertion 2: the controller itself committed the forwarded topic.
     assert!(

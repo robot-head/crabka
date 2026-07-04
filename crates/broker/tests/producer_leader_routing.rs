@@ -94,45 +94,23 @@ async fn producer_routes_to_non_bootstrap_leaders() {
         .unwrap();
     assert!(cr.topics[0].error_code == 0, "create_topic: {cr:?}");
 
-    // Wait for all partitions to materialize on their respective single brokers.
-    let deadline = Instant::now() + Duration::from_mins(2);
-    loop {
-        let mut all_known = true;
-        'outer: for p in 0..n_partitions {
-            for (h, _, _) in &cluster {
-                if h.has_partition(topic, p).await {
-                    continue 'outer;
-                }
-            }
-            all_known = false;
-            break;
-        }
-        if all_known {
-            break;
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "topic partitions didn't materialize across the cluster in 2 min"
-        );
-        tokio::task::yield_now().await;
+    // Wait for all partitions to materialize in the cluster metadata. Partition
+    // records are raft-replicated into every broker's controller image, so once
+    // each is present in the bootstrap node's image the cluster has converged —
+    // awaiting the bootstrap node's image (event-driven) is sufficient.
+    for p in 0..n_partitions {
+        cluster[0].0.wait_until_partition_present(topic, p).await;
     }
 
     // Wait until node 1 knows every partition's leader (controller image
-    // propagation may lag slightly after has_partition returns true).
-    let deadline = Instant::now() + Duration::from_secs(30);
+    // propagation may lag slightly after the partitions become present).
     let bootstrap_node = cluster[0].0.node_id();
-    loop {
-        let all_have_leader =
-            (0..n_partitions).all(|p| cluster[0].0.partition_leader_for_test(topic, p).is_some());
-        if all_have_leader {
-            break;
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "partition leaders didn't converge within 30s"
-        );
-        tokio::task::yield_now().await;
-    }
+    cluster[0]
+        .0
+        .wait_for_image(|img| {
+            (0..n_partitions).all(|p| img.partition(topic, p).is_some_and(|part| part.leader != 0))
+        })
+        .await;
 
     // Discriminating guard: at least one partition must be led by a
     // non-bootstrap broker, otherwise the test exercises no cross-broker

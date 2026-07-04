@@ -198,7 +198,9 @@ async fn produce_n(client: &Client, topic: &str, tid: uuid::Uuid, partition: i32
             return;
         }
         if p.error_code == 3 || p.error_code == 6 {
-            // real-time wait (not a progress poll): retry/backoff between produce attempts on transient not-ready errors
+            // intentional: bounded produce-RPC retry on UNKNOWN_TOPIC_OR_PARTITION /
+            // NOT_LEADER_OR_FOLLOWER while the partition's local writer materializes;
+            // this helper has no BrokerHandle to await on and returns via the RPC response.
             tokio::time::sleep(Duration::from_millis(100)).await;
             continue;
         }
@@ -237,7 +239,9 @@ async fn join(client: &Client, group: &str, topic: &str) -> (String, i32) {
             .await
             .expect("ShareGroupHeartbeat steady-state");
         epoch = hb.member_epoch;
-        // real-time wait (not a progress poll): fixed settle cadence between steady-state heartbeats so the async lifecycle hook can initialize share state
+        // intentional: paces steady-state heartbeats to drive the membership
+        // reconciliation / lifecycle hook forward; this drives the protocol rather
+        // than waiting on a single observable state (share init is awaited separately).
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     (member_id, epoch)
@@ -375,7 +379,8 @@ async fn fetch_until_acquired(
         if row.error_code == NONE && acquired_count(&row) > 0 {
             return row;
         }
-        // real-time wait (not a progress poll): iteration-bounded acquire-retry budget; no wall-clock deadline to guard a yield
+        // intentional: bounded ShareFetch-RPC poll — the fetch IS the acquiring action
+        // and its response row is returned for assertions, so an awaiter can't replace it.
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     panic!("share fetch never acquired any records for {group}:{tid}:{partition}");
@@ -482,7 +487,9 @@ async fn describe_until(
         {
             return last;
         }
-        // real-time wait (not a progress poll): iteration-bounded describe-retry budget while the SPSO persist is in flight; no wall-clock deadline to guard a yield
+        // intentional: bounded Describe-RPC poll for the async persister write of the
+        // SPSO; returns the response for assertions and also serves the deleted (-1)
+        // case that no share-SPSO awaiter covers.
         tokio::time::sleep(Duration::from_millis(100)).await;
         last = describe_offsets(client, group, topic, partitions.clone()).await;
     }
@@ -540,7 +547,9 @@ async fn alter_resets_empty_group() {
             altered = true;
             break;
         }
-        // real-time wait (not a progress poll): retry/backoff between Alter attempts while persister leadership settles
+        // intentional: bounded retry of the Alter mutation RPC while the share
+        // persister leadership settles; coordinator-local state with no
+        // metadata-image signal or awaiter.
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     assert!(altered, "AlterShareGroupOffsets never succeeded");

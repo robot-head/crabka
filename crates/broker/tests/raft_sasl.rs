@@ -164,22 +164,11 @@ async fn controller_listener_sasl_plaintext_two_broker_quorum() {
         "secret",
     )
     .await;
-    // Wait until both brokers see two registered peers in the metadata
-    // image. Bounded wait — fail the test if convergence takes too long.
-    let converge = async {
-        loop {
-            if b1.broker_count().await == 2 && b2.broker_count().await == 2 {
-                return;
-            }
-            tokio::task::yield_now().await;
-        }
-    };
-    // 60s mirrors `auth_handlers::two_broker_sasl::two_broker_sasl_plaintext_replication`
-    // which exercises the same path; raft + SASL handshake under short
-    // election timings occasionally needs more than 15s on busy runners.
-    tokio::time::timeout(Duration::from_mins(1), converge)
-        .await
-        .expect("brokers converge on 2-broker quorum within 60s");
+    // Wait until both brokers see two registered peers in the metadata image.
+    // Event-driven: each awaiter observes `img.brokers().count() >= 2` (the
+    // same signal `broker_count()` reads) and panics if convergence stalls.
+    b1.wait_until_brokers_registered(2).await;
+    b2.wait_until_brokers_registered(2).await;
     b1.shutdown().await;
     b2.shutdown().await;
 }
@@ -239,7 +228,8 @@ async fn controller_listener_sasl_plaintext_rejects_mismatched_creds() {
     // Give the brokers time to (fail to) discover each other. Each is its own
     // single-voter cluster and mismatched creds block any raft cross-talk, so
     // b1 must still see only itself.
-    // real-time wait (not a progress poll): settle then assert an ABSENCE (broker_count stays < 2); there is no positive condition to poll for
+    // intentional: negative test — observe that no convergence happens within a
+    // fixed window; there is no awaiter for "state stays put".
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert!(
         b1.broker_count().await < 2,
@@ -311,7 +301,8 @@ async fn controller_listener_sasl_denies_unauthorized_principal() {
     // Authentication succeeds but CLUSTER_ACTION is denied, so the
     // controller listener drops every cross-broker connection: the clusters
     // never merge.
-    // real-time wait (not a progress poll): settle then assert an ABSENCE (broker_count stays < 2); there is no positive condition to poll for
+    // intentional: negative test — observe that no convergence happens within a
+    // fixed window; there is no awaiter for "state stays put".
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert!(
         b1.broker_count().await < 2,
@@ -368,17 +359,10 @@ async fn controller_listener_plaintext_legacy_path_unchanged() {
 
     let b2 = join.await.expect("join spawn").expect("start b2");
 
-    let converge = async {
-        loop {
-            if b1.broker_count().await == 2 && b2.broker_count().await == 2 {
-                return;
-            }
-            tokio::task::yield_now().await;
-        }
-    };
-    tokio::time::timeout(Duration::from_secs(10), converge)
-        .await
-        .expect("legacy plaintext path still converges");
+    // Event-driven convergence: both brokers observe two registered peers in
+    // the metadata image (same signal `broker_count()` reads).
+    b1.wait_until_brokers_registered(2).await;
+    b2.wait_until_brokers_registered(2).await;
     b1.shutdown().await;
     b2.shutdown().await;
 }

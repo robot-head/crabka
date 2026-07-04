@@ -449,10 +449,10 @@ async fn restart_recovers_image() {
     victim_ctrl.trigger_snapshot().await.unwrap();
     victim_ctrl.shutdown().await;
     net.remove(victim);
-    // Let the loop drain.
-    // real-time wait (not a progress poll): bare settle to let the shut-down
-    // engine loop drain after shutdown()/remove(); there is no synchronous
-    // observable to poll on here.
+    // intentional: let the shutdown-signalled engine task exit and drop its
+    // KraftLog before we reopen the same data dir. `shutdown()` only sends
+    // `Command::Shutdown`; the loop is spawned fire-and-forget with no JoinHandle,
+    // so there is no accessor to await loop teardown / log-handle release.
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let victim_dir = dirs.get(&victim).unwrap().path().to_path_buf();

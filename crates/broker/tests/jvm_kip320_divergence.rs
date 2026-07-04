@@ -457,6 +457,10 @@ impl MixedCluster {
                 );
                 return false;
             }
+            // intentional: bounded poll for an EXTERNAL JVM broker's KRaft
+            // registration; the 2-min bound + bool-on-timeout return (surfacing
+            // "JVM never joined") can't be replaced by a 30s panic-on-timeout
+            // awaiter.
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
     }
@@ -597,20 +601,10 @@ async fn start_mixed_cluster(container: &str) -> MixedCluster {
         .expect("docker run JVM broker");
     assert!(status.success(), "docker run JVM broker failed");
 
-    // Wait (bounded) for the Crabka voters to elect a shared leader.
-    let deadline = Instant::now() + Duration::from_secs(40);
-    loop {
-        let l1 = c1.controller_leader_id().await;
-        let l2 = c2.controller_leader_id().await;
-        if l1.is_some() && l1 == l2 {
-            break;
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "Crabka voters failed to elect a shared leader"
-        );
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
+    // Wait for the Crabka voters to elect a shared leader (event-driven: each
+    // awaiter resolves once that voter observes a non-zero controller leader).
+    c1.wait_until_controller_leader().await;
+    c2.wait_until_controller_leader().await;
 
     let bootstrap_all = format!(
         "host.docker.internal:{},host.docker.internal:{},host.docker.internal:{}",
@@ -708,6 +702,9 @@ async fn kip320_jvm_follower_truncates_from_crabka_leader() {
             Instant::now() <= deadline,
             "JVM follower never joined ISR: {s}"
         );
+        // intentional: polls an EXTERNAL kafka-topics --describe CLI for the
+        // JVM follower (id 3) to catch up and join the ISR; driven by the JVM
+        // broker's fetch, with a 2-min bound the 30s image awaiter can't match.
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
 
@@ -718,6 +715,8 @@ async fn kip320_jvm_follower_truncates_from_crabka_leader() {
         TOPIC,
         &(0..10).map(|i| format!("prefix-{i}")).collect::<Vec<_>>(),
     );
+    // intentional: let the EXTERNAL JVM follower replicate the acks=all prefix;
+    // the follower's replication progress is not a Crabka image/metric signal.
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     // 4. INDUCE DIVERGENCE on the Crabka side (mirrors tests/unclean_recovery.rs):
@@ -728,14 +727,10 @@ async fn kip320_jvm_follower_truncates_from_crabka_leader() {
     //    suffix-divergent log must truncate to the Crabka leader's via the
     //    in-band OffsetForLeaderEpoch / diverging_epoch path.
     let pr = {
-        let dl = Instant::now() + Duration::from_secs(15);
-        loop {
-            if let Some(pr) = c1.partition_record_for_test(TOPIC, 0) {
-                break pr;
-            }
-            assert!(Instant::now() <= dl, "partition record never appeared");
-            tokio::time::sleep(Duration::from_millis(200)).await;
-        }
+        // Wait for the partition to materialize in the Crabka leader's image.
+        c1.wait_until_partition_present(TOPIC, 0).await;
+        c1.partition_record_for_test(TOPIC, 0)
+            .expect("partition record present after wait")
     };
     eprintln!("CRABKA[kip320] partition before divergence: {pr:?}");
 
@@ -756,6 +751,9 @@ async fn kip320_jvm_follower_truncates_from_crabka_leader() {
     c1.submit_metadata_record_for_test(forged)
         .await
         .expect("inject dead-leader PartitionRecord");
+    // intentional: allow the forged dead-leader record to apply AND the
+    // replication fetchers to park before the direct divergent append; fetcher
+    // parking has no image/metric signal to await on.
     tokio::time::sleep(Duration::from_millis(750)).await;
 
     // Append a divergent suffix directly to the Crabka leader's log at the new
@@ -791,6 +789,8 @@ async fn kip320_jvm_follower_truncates_from_crabka_leader() {
 
     // 5. Give the JVM follower time to re-fetch, detect divergence via
     //    OffsetForLeaderEpoch / diverging_epoch, truncate, and re-replicate.
+    // intentional: waits on the EXTERNAL JVM follower's fetch/truncate path,
+    // which produces no Crabka image/metric signal.
     tokio::time::sleep(Duration::from_secs(8)).await;
 
     // 6. ASSERTION (a): the JVM follower's on-disk log converged on the Crabka
@@ -946,6 +946,8 @@ async fn kip320_crabka_follower_truncates_from_jvm_leader() {
         TOPIC,
         &(0..8).map(|i| format!("rev-{i}")).collect::<Vec<_>>(),
     );
+    // intentional: let the EXTERNAL JVM producer/replication settle so the
+    // Crabka follower shares the prefix; no Crabka image/metric signal for it.
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     // 4. Force the Crabka follower's local log to carry a *divergent* suffix the
@@ -976,6 +978,12 @@ async fn kip320_crabka_follower_truncates_from_jvm_leader() {
             converged = true;
             break;
         }
+        // intentional: bounded best-effort poll for the Crabka follower's LEO
+        // to DROP below the forced-diverged LEO (truncation against the EXTERNAL
+        // JVM leader). No "LEO < x" awaiter exists, the exact target is unknown,
+        // and truncation may never occur (leader != 3) — the graceful 20s
+        // timeout feeds the `converged` best-effort assert, which a
+        // panic-on-timeout awaiter would break.
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     eprintln!(
