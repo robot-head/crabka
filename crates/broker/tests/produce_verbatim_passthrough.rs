@@ -13,6 +13,8 @@
 use assert2::{assert, check};
 mod support;
 
+use std::time::{Duration, Instant};
+
 use bytes::Bytes;
 use crabka_compression::CompressionType;
 use crabka_protocol::{
@@ -25,7 +27,6 @@ use crabka_protocol::{
     primitives::uuid::Uuid as WireUuid,
     records::{Attributes, HEADER_LEN, Record, RecordBatch, RecordsPayload},
 };
-use std::time::{Duration, Instant};
 
 async fn topic_id_for(client: &crabka_client_core::Client, name: &str) -> WireUuid {
     let resp = client
