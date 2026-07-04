@@ -88,3 +88,38 @@ fn all_grants_resource_specific_capabilities() {
     assert!(capabilities.can_alter_quotas);
     assert!(capabilities.can_view_log_dirs);
 }
+
+#[test]
+fn cluster_describe_configs_does_not_grant_acl_view() {
+    let entries = vec![allow(ResourceType::Cluster, AclOperation::DescribeConfigs)];
+
+    let capabilities = derive_capabilities("User:alice", &entries);
+
+    assert!(!capabilities.can_view_acls);
+    assert!(capabilities.can_view_quotas);
+    assert_eq!(
+        capabilities,
+        Capabilities {
+            can_view_quotas: true,
+            ..Capabilities::default()
+        }
+    );
+}
+
+#[test]
+fn cluster_alter_configs_does_not_grant_acl_or_user_admin() {
+    let entries = vec![allow(ResourceType::Cluster, AclOperation::AlterConfigs)];
+
+    let capabilities = derive_capabilities("User:alice", &entries);
+
+    assert!(!capabilities.can_alter_acls);
+    assert!(!capabilities.can_alter_users);
+    assert!(capabilities.can_alter_quotas);
+    assert_eq!(
+        capabilities,
+        Capabilities {
+            can_alter_quotas: true,
+            ..Capabilities::default()
+        }
+    );
+}

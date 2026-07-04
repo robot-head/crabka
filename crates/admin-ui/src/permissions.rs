@@ -95,12 +95,13 @@ fn apply_cluster_operation(capabilities: &mut Capabilities, operation: AclOperat
             capabilities.can_view_log_dirs = true;
             capabilities.can_view_quotas = true;
         }
-        AclOperation::DescribeConfigs => capabilities.can_view_acls = true,
-        AclOperation::Alter | AclOperation::AlterConfigs => {
+        AclOperation::DescribeConfigs => capabilities.can_view_quotas = true,
+        AclOperation::Alter => {
             capabilities.can_alter_acls = true;
             capabilities.can_alter_users = true;
             capabilities.can_alter_quotas = true;
         }
+        AclOperation::AlterConfigs => capabilities.can_alter_quotas = true,
         AclOperation::Read
         | AclOperation::Write
         | AclOperation::Create
