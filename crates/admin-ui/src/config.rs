@@ -97,10 +97,10 @@ impl AdminUiConfig {
         if self.bootstrap_addrs.is_empty() {
             return Err(ConfigError::MissingBootstrap);
         }
-        if let BrokerSecurityConfig::SaslSsl { server_name, .. } = &self.security {
-            if server_name.is_empty() {
-                return Err(ConfigError::MissingTlsServerName);
-            }
+        if let BrokerSecurityConfig::SaslSsl { server_name, .. } = &self.security
+            && server_name.trim().is_empty()
+        {
+            return Err(ConfigError::MissingTlsServerName);
         }
 
         Ok(self)
