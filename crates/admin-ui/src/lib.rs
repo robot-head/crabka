@@ -1,5 +1,6 @@
 //! Standalone Dioxus administration UI for one Crabka cluster.
 
+pub mod config;
 pub mod server;
 
 use dioxus::dioxus_core::{Element, Template, TemplateAttribute, TemplateNode, VNode};
