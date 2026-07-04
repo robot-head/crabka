@@ -36,6 +36,10 @@ pub enum ConfigError {
     InvalidSecurityProtocol,
     #[error("CRABKA_ADMIN_UI_TLS_SERVER_NAME is required for SASL_SSL")]
     MissingTlsServerName,
+    #[error(
+        "CRABKA_ADMIN_UI_TLS_CLIENT_CERT_PEM and CRABKA_ADMIN_UI_TLS_CLIENT_KEY_PEM must be set together"
+    )]
+    IncompleteTlsClientIdentity,
 }
 
 impl Default for AdminUiConfig {
@@ -83,7 +87,8 @@ impl AdminUiConfig {
                         std::env::var_os("CRABKA_ADMIN_UI_TLS_CLIENT_KEY_PEM"),
                     ) {
                         (Some(cert), Some(key)) => Some((PathBuf::from(cert), PathBuf::from(key))),
-                        _ => None,
+                        (None, None) => None,
+                        _ => return Err(ConfigError::IncompleteTlsClientIdentity),
                     },
                 },
                 _ => return Err(ConfigError::InvalidSecurityProtocol),

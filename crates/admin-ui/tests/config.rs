@@ -97,6 +97,64 @@ fn whitespace_tls_server_name_from_env_child() {
 }
 
 #[test]
+fn from_env_rejects_tls_client_cert_without_key() {
+    let output = Command::new(std::env::current_exe().expect("test binary path is available"))
+        .arg("--exact")
+        .arg("incomplete_tls_client_identity_from_env_child")
+        .arg("--nocapture")
+        .env("CRABKA_ADMIN_UI_CONFIG_INCOMPLETE_TLS_IDENTITY_CHILD", "1")
+        .env("CRABKA_ADMIN_UI_BOOTSTRAP", "127.0.0.1:9092")
+        .env("CRABKA_ADMIN_UI_SECURITY_PROTOCOL", "SASL_SSL")
+        .env("CRABKA_ADMIN_UI_TLS_SERVER_NAME", "localhost")
+        .env("CRABKA_ADMIN_UI_TLS_CLIENT_CERT_PEM", "client.crt")
+        .env_remove("CRABKA_ADMIN_UI_TLS_CLIENT_KEY_PEM")
+        .env_remove("CRABKA_ADMIN_UI_LISTEN_ADDR")
+        .output()
+        .expect("child test process runs");
+
+    assert!(
+        output.status.success(),
+        "child test failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn from_env_rejects_tls_client_key_without_cert() {
+    let output = Command::new(std::env::current_exe().expect("test binary path is available"))
+        .arg("--exact")
+        .arg("incomplete_tls_client_identity_from_env_child")
+        .arg("--nocapture")
+        .env("CRABKA_ADMIN_UI_CONFIG_INCOMPLETE_TLS_IDENTITY_CHILD", "1")
+        .env("CRABKA_ADMIN_UI_BOOTSTRAP", "127.0.0.1:9092")
+        .env("CRABKA_ADMIN_UI_SECURITY_PROTOCOL", "SASL_SSL")
+        .env("CRABKA_ADMIN_UI_TLS_SERVER_NAME", "localhost")
+        .env_remove("CRABKA_ADMIN_UI_TLS_CLIENT_CERT_PEM")
+        .env("CRABKA_ADMIN_UI_TLS_CLIENT_KEY_PEM", "client.key")
+        .env_remove("CRABKA_ADMIN_UI_LISTEN_ADDR")
+        .output()
+        .expect("child test process runs");
+
+    assert!(
+        output.status.success(),
+        "child test failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn incomplete_tls_client_identity_from_env_child() {
+    if std::env::var_os("CRABKA_ADMIN_UI_CONFIG_INCOMPLETE_TLS_IDENTITY_CHILD").is_none() {
+        return;
+    }
+
+    let error = AdminUiConfig::from_env().expect_err("incomplete TLS identity is invalid");
+    assert!(matches!(error, ConfigError::IncompleteTlsClientIdentity));
+}
+
+#[test]
 fn validate_rejects_manual_sasl_ssl_empty_server_name() {
     let cfg = AdminUiConfig {
         bootstrap_addrs: vec!["127.0.0.1:9092".to_string()],
