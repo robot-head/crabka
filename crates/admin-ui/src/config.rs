@@ -30,6 +30,8 @@ pub struct AdminUiConfig {
 pub enum ConfigError {
     #[error("at least one CRABKA_ADMIN_UI_BOOTSTRAP address is required")]
     MissingBootstrap,
+    #[error("CRABKA_ADMIN_UI_BOOTSTRAP contains an invalid address: {0}")]
+    InvalidBootstrapAddr(String),
     #[error("CRABKA_ADMIN_UI_LISTEN_ADDR is invalid: {0}")]
     InvalidListenAddr(String),
     #[error("CRABKA_ADMIN_UI_SECURITY_PROTOCOL must be SASL_PLAINTEXT or SASL_SSL")]
@@ -70,7 +72,6 @@ impl AdminUiConfig {
             cfg.bootstrap_addrs = addrs
                 .split(',')
                 .map(str::trim)
-                .filter(|addr| !addr.is_empty())
                 .map(ToOwned::to_owned)
                 .collect();
         }
@@ -102,6 +103,9 @@ impl AdminUiConfig {
         if self.bootstrap_addrs.is_empty() {
             return Err(ConfigError::MissingBootstrap);
         }
+        for bootstrap_addr in &self.bootstrap_addrs {
+            validate_bootstrap_addr(bootstrap_addr)?;
+        }
         if let BrokerSecurityConfig::SaslSsl { server_name, .. } = &self.security
             && server_name.trim().is_empty()
         {
@@ -110,6 +114,20 @@ impl AdminUiConfig {
 
         Ok(self)
     }
+}
+
+fn validate_bootstrap_addr(addr: &str) -> Result<(), ConfigError> {
+    let Some((host, port)) = addr.rsplit_once(':') else {
+        return Err(ConfigError::InvalidBootstrapAddr(addr.to_string()));
+    };
+    if host.is_empty() || port.is_empty() {
+        return Err(ConfigError::InvalidBootstrapAddr(addr.to_string()));
+    }
+    if port.parse::<u16>().is_err() {
+        return Err(ConfigError::InvalidBootstrapAddr(addr.to_string()));
+    }
+
+    Ok(())
 }
 
 impl BrokerSecurityConfig {
