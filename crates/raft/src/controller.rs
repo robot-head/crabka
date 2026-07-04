@@ -691,7 +691,7 @@ impl Controller {
         let peers = Arc::new(RealPeerSender::new(
             voters.clone(),
             config.client_id.clone(),
-            dialer.clone(),
+            Arc::clone(&dialer),
         ));
 
         let election_ms = u64::try_from(config.election_timeout.as_millis()).unwrap_or(1_000);

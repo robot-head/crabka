@@ -108,7 +108,7 @@ impl<C: BrokerConnector> BrokerPool<C> {
     #[tracing::instrument(level = "debug", skip_all, fields(broker_id), err)]
     pub async fn get(&self, broker_id: i32) -> Result<Arc<C::Conn>, ClientError> {
         if let Some(entry) = self.by_id.get(&broker_id) {
-            return Ok(entry.clone());
+            return Ok(Arc::clone(&entry));
         }
         let addr = self
             .by_addr
@@ -116,7 +116,7 @@ impl<C: BrokerConnector> BrokerPool<C> {
             .map(|e| *e)
             .ok_or(ClientError::Disconnected)?;
         let conn = Arc::new(self.connector.dial(addr).await?);
-        self.by_id.insert(broker_id, conn.clone());
+        self.by_id.insert(broker_id, Arc::clone(&conn));
         Ok(conn)
     }
 
@@ -156,7 +156,7 @@ impl<C: BrokerConnector> BrokerPool<C> {
     #[tracing::instrument(level = "debug", skip_all, err)]
     pub async fn bootstrap_connection(&self) -> Result<Arc<C::Conn>, ClientError> {
         if let Some(entry) = self.by_id.get(&BOOTSTRAP_ID) {
-            return Ok(entry.clone());
+            return Ok(Arc::clone(&entry));
         }
         let bootstrap = match self.bootstrap.read() {
             Ok(guard) => guard.clone(),
@@ -167,7 +167,7 @@ impl<C: BrokerConnector> BrokerPool<C> {
             match self.connector.dial(addr).await {
                 Ok(c) => {
                     let arc = Arc::new(c);
-                    self.by_id.insert(BOOTSTRAP_ID, arc.clone());
+                    self.by_id.insert(BOOTSTRAP_ID, Arc::clone(&arc));
                     return Ok(arc);
                 }
                 Err(e) => last_err = Some(e),
@@ -225,7 +225,7 @@ impl<C: BrokerConnector> BrokerPool<C> {
     // cargo-mutants: teardown; no observable return to assert against
     #[cfg_attr(test, mutants::skip)]
     pub fn close_all(self) {
-        let conns: Vec<_> = self.by_id.iter().map(|e| e.value().clone()).collect();
+        let conns: Vec<_> = self.by_id.iter().map(|e| Arc::clone(e.value())).collect();
         drop(self.by_id);
         // Drop each Arc; when the last reference goes away the background tasks
         // shut down naturally via the CancellationToken in ConnectionInner.

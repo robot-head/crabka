@@ -279,7 +279,7 @@ impl S3RemoteStorage {
     #[instrument(skip_all, fields(key = %key, chunk_size = self.multipart_chunk_size), err)]
     fn put_path_multipart(&self, key: &ObjectPath, path: &Path) -> Result<(), RemoteStorageError> {
         let file = std::fs::File::open(path)?;
-        let store = self.store.clone();
+        let store = Arc::clone(&self.store);
         let key = key.clone();
         let chunk_size = self.multipart_chunk_size;
         Self::block(async move {

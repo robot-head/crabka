@@ -207,7 +207,7 @@ impl ConsumerState {
         let cancel = CancellationToken::new();
         tasks.insert(start.partition, cancel.clone());
         tokio::spawn(partition_fetch_loop(
-            self.clone(),
+            Arc::clone(self),
             start.partition,
             start.start_offset,
             cancel,
@@ -311,7 +311,7 @@ impl MetadataEventLog for KafkaMetadataEventLog {
             state.spawn_partition(ps);
         }
         if let Ok(mut subs) = self.subscriptions.try_lock() {
-            subs.push(state.clone());
+            subs.push(Arc::clone(&state));
         } else {
             warn!("KafkaMetadataEventLog: could not track subscription state");
         }
@@ -610,5 +610,39 @@ mod tests {
             }),
         };
         assert!(cfg.security.is_some());
+    }
+
+    #[tokio::test]
+    async fn assignment_handle_tracks_spawned_partitions() {
+        let (tx, _rx) = mpsc::channel::<MetadataEventRecord>(1);
+        let state = Arc::new(ConsumerState {
+            bootstrap: "invalid-bootstrap".into(),
+            client_id: "test-consumer".into(),
+            security: None,
+            topic: METADATA_TOPIC.into(),
+            topic_id: WireUuid::ZERO,
+            tx,
+            tasks: StdMutex::new(HashMap::new()),
+        });
+        let handle = KafkaAssignmentHandle {
+            state: Arc::clone(&state),
+        };
+
+        state.spawn_partition(PartitionStart {
+            partition: 2,
+            start_offset: 7,
+        });
+        state.spawn_partition(PartitionStart {
+            partition: 2,
+            start_offset: 9,
+        });
+        handle.add(PartitionStart {
+            partition: 0,
+            start_offset: 0,
+        });
+        handle.remove(2);
+
+        assert!(handle.assigned() == vec![0]);
+        state.cancel_all();
     }
 }

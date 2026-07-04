@@ -338,7 +338,7 @@ async fn drain_once(cfg: &mut SenderConfig, state: &mut PipelineState) {
             continue;
         }
         let acc = match cfg.accumulators.get(&key) {
-            Some(a) => a.value().clone(),
+            Some(a) => Arc::clone(a.value()),
             None => continue,
         };
         // Seal the in-progress batch, then take a single ready batch.
@@ -1722,15 +1722,15 @@ mod harness {
             request_timeout: Duration::from_secs(5),
             retry_backoff: Duration::from_millis(1),
             max_in_flight,
-            metadata_cache: metadata_cache.clone(),
-            partition_leaders: partition_leaders.clone(),
-            partitioner: partitioner.clone(),
-            accumulators: accumulators.clone(),
-            next_seq: next_seq.clone(),
-            state: state.clone(),
+            metadata_cache: Arc::clone(&metadata_cache),
+            partition_leaders: Arc::clone(&partition_leaders),
+            partitioner: Arc::clone(&partitioner),
+            accumulators: Arc::clone(&accumulators),
+            next_seq: Arc::clone(&next_seq),
+            state: Arc::clone(&state),
             wake_rx,
-            flush_notify: flush_notify.clone(),
-            in_flight: in_flight.clone(),
+            flush_notify: Arc::clone(&flush_notify),
+            in_flight: Arc::clone(&in_flight),
             shutdown: shutdown.clone(),
             transactional_id: None,
             txn_state: Arc::new(Mutex::new(TxnState::Uninitialized)),
@@ -2612,7 +2612,7 @@ mod harness {
         // poll — this is a deliberate ordering delay that keeps the first
         // empty tick from waking the waiter for the wrong reason.
         tokio::time::sleep(Duration::from_millis(50)).await;
-        let flush = h.flush_notify.clone();
+        let flush = Arc::clone(&h.flush_notify);
         // Register the flush waiter synchronously: a `Notified` future only
         // registers once enabled/polled, and `notify_waiters` wakes only
         // already-registered waiters, so `enable()` removes the registration

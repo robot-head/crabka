@@ -1,7 +1,7 @@
 //! `Consumer::commit_sync` and `commit_async`.
 
 use std::collections::HashMap;
-use std::sync::atomic::Ordering;
+use std::sync::{Arc, atomic::Ordering};
 
 use crabka_protocol::owned::offset_commit_request::OffsetCommitRequest;
 use crabka_protocol::owned::offset_commit_response::OffsetCommitResponse;
@@ -185,10 +185,10 @@ impl Consumer {
         let generation = self.current_generation.load(Ordering::Relaxed);
         let member_id = self.member_id.clone();
         let group_instance_id = self.group_instance_id.clone();
-        let offsets = self.next_offsets.clone();
-        let positions = self.positions.clone();
-        let topic_ids = self.topic_ids.clone();
-        let coordinator_id = self.coordinator_id.clone();
+        let offsets = Arc::clone(&self.next_offsets);
+        let positions = Arc::clone(&self.positions);
+        let topic_ids = Arc::clone(&self.topic_ids);
+        let coordinator_id = Arc::clone(&self.coordinator_id);
         tokio::spawn(async move {
             let raw_snapshot = offsets.lock().await.clone();
             if raw_snapshot.is_empty() {

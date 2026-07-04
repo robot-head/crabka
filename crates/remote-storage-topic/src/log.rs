@@ -277,21 +277,21 @@ impl MetadataEventLog for InProcessMetadataEventLog {
             .subscriptions
             .lock()
             .expect("metadata-log subscriptions mutex poisoned")
-            .insert(sub_id, state.clone());
+            .insert(sub_id, Arc::clone(&state));
         drop(guard);
 
         let snapshot_stream = stream::iter(snapshot);
         let inject_stream = unfold(inject_rx, |mut rx| async move {
             rx.recv().await.map(|r| (r, rx))
         });
-        let live = filtered_broadcast(rx, state.clone());
+        let live = filtered_broadcast(rx, state);
         // Snapshot first (subscribe-time backlog), then a merge of injected
         // backlog (from `add`) and assignment-filtered live records.
         let merged = stream::select(inject_stream, live);
         let stream = snapshot_stream.chain(merged).boxed();
 
         let handle: Arc<dyn AssignmentHandle> = Arc::new(InProcessAssignmentHandle {
-            inner: self.inner.clone(),
+            inner: Arc::clone(&self.inner),
             sub_id,
         });
         (stream, handle)
