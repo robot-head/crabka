@@ -1449,7 +1449,7 @@ mod tests {
                 leader: NodeId(1),
                 replicas: vec![NodeId(1), NodeId(2), NodeId(3)],
                 isr: vec![NodeId(1), NodeId(2)],
-                leader_epoch: 0,
+                leader_epoch: crabka_ids::LeaderEpoch(0),
                 adding_replicas: vec![NodeId(3)],
                 removing_replicas: vec![],
                 directories: vec![uuid::Uuid::nil(), dir, uuid::Uuid::nil()],

@@ -524,7 +524,7 @@ async fn wait_partition_record_known(
         // natural assignment).
         replicas: vec![crabka_broker::NodeId(1), crabka_broker::NodeId(2)],
         isr: isr.into_iter().map(crabka_broker::NodeId).collect(),
-        leader_epoch: crabka_metadata::LeaderEpoch(0), // bumped by the forged record, not critical
+        leader_epoch: LeaderEpoch(0), // bumped by the forged record, not critical
         adding_replicas: vec![],
         removing_replicas: vec![],
         directories: vec![],
