@@ -102,7 +102,12 @@ async fn login_with_context_calls_broker_and_stores_session() {
 
 #[tokio::test]
 async fn session_seams_reject_without_exposing_session_values() {
-    let logout_result = crabka_admin_ui::server_fns::logout().await;
+    let sessions = SessionStore::new(Duration::from_secs(60));
+    let cfg = AdminUiConfig::default();
+    let factory = RecordingAdminSeamFactory::default();
+    let context = ServerFunctionContext::new(&cfg, &sessions, None, &factory);
+
+    let logout_result = crabka_admin_ui::server_fns::logout(&context).await;
     let current_session_result = crabka_admin_ui::server_fns::current_session().await;
 
     assert!(matches!(logout_result, Err(UiError::NotAuthenticated)));
@@ -282,43 +287,67 @@ async fn public_context_reads_reject_unauthenticated_sessions() {
 
 #[tokio::test]
 async fn mutation_seams_validate_requests_before_requiring_authentication() {
-    let invalid_topic = crabka_admin_ui::server_fns::create_topic(CreateTopicRequestDto {
-        name: "orders".to_string(),
-        partitions: 0,
-        replicas: 1,
-        configs: Vec::new(),
-    })
+    let sessions = SessionStore::new(Duration::from_secs(60));
+    let cfg = AdminUiConfig::default();
+    let factory = RecordingAdminSeamFactory::default();
+    let context = ServerFunctionContext::new(&cfg, &sessions, None, &factory);
+
+    let invalid_topic = crabka_admin_ui::server_fns::create_topic(
+        &context,
+        CreateTopicRequestDto {
+            name: "orders".to_string(),
+            partitions: 0,
+            replicas: 1,
+            configs: Vec::new(),
+        },
+    )
     .await;
-    let invalid_scram = crabka_admin_ui::server_fns::upsert_scram_sha512_user(ScramUserUpsertDto {
-        username: "alice".to_string(),
-        password: String::new(),
-        iterations: 4096,
-    })
+    let invalid_scram = crabka_admin_ui::server_fns::upsert_scram_sha512_user(
+        &context,
+        ScramUserUpsertDto {
+            username: "alice".to_string(),
+            password: String::new(),
+            iterations: 4096,
+        },
+    )
     .await;
 
     assert!(matches!(invalid_topic, Err(UiError::Admin(_))));
     assert!(matches!(invalid_scram, Err(UiError::Admin(_))));
+    assert_eq!(factory.mutation_seam_calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
 async fn mutation_seams_require_authentication_after_validation_without_leaking_password() {
     let password_sentinel = "server-fn-scram-password-sentinel";
-    let create_topic = crabka_admin_ui::server_fns::create_topic(CreateTopicRequestDto {
-        name: "orders".to_string(),
-        partitions: 3,
-        replicas: 1,
-        configs: Vec::new(),
-    })
+    let sessions = SessionStore::new(Duration::from_secs(60));
+    let cfg = AdminUiConfig::default();
+    let factory = RecordingAdminSeamFactory::default();
+    let context = ServerFunctionContext::new(&cfg, &sessions, None, &factory);
+
+    let create_topic = crabka_admin_ui::server_fns::create_topic(
+        &context,
+        CreateTopicRequestDto {
+            name: "orders".to_string(),
+            partitions: 3,
+            replicas: 1,
+            configs: Vec::new(),
+        },
+    )
     .await;
-    let upsert_scram = crabka_admin_ui::server_fns::upsert_scram_sha512_user(ScramUserUpsertDto {
-        username: "alice".to_string(),
-        password: password_sentinel.to_string(),
-        iterations: 4096,
-    })
+    let upsert_scram = crabka_admin_ui::server_fns::upsert_scram_sha512_user(
+        &context,
+        ScramUserUpsertDto {
+            username: "alice".to_string(),
+            password: password_sentinel.to_string(),
+            iterations: 4096,
+        },
+    )
     .await;
 
     assert!(matches!(create_topic, Err(UiError::NotAuthenticated)));
     assert!(matches!(upsert_scram, Err(UiError::NotAuthenticated)));
+    assert_eq!(factory.mutation_seam_calls.load(Ordering::SeqCst), 0);
     assert_debug_does_not_contain_secret(
         &format!("{upsert_scram:?}"),
         password_sentinel,
@@ -366,7 +395,7 @@ async fn authenticated_mutation_seam_validates_then_calls_admin_mutation() {
 }
 
 #[tokio::test]
-async fn public_context_create_topic_validates_session_and_calls_admin_mutation() {
+async fn public_create_topic_validates_session_and_calls_admin_mutation() {
     let sessions = SessionStore::new(Duration::from_secs(60));
     let session_id = authenticated_session(&sessions);
     let cfg = AdminUiConfig::default();
@@ -378,7 +407,7 @@ async fn public_context_create_topic_validates_session_and_calls_admin_mutation(
         &factory,
     );
 
-    let outcomes = crabka_admin_ui::server_fns::create_topic_with_context(
+    let outcomes = crabka_admin_ui::server_fns::create_topic(
         &context,
         CreateTopicRequestDto {
             name: "orders".to_string(),
@@ -396,13 +425,13 @@ async fn public_context_create_topic_validates_session_and_calls_admin_mutation(
 }
 
 #[tokio::test]
-async fn public_context_create_topic_rejects_unauthenticated_after_validation() {
+async fn public_create_topic_rejects_unauthenticated_after_validation() {
     let sessions = SessionStore::new(Duration::from_secs(60));
     let cfg = AdminUiConfig::default();
     let factory = RecordingAdminSeamFactory::default();
     let context = ServerFunctionContext::new(&cfg, &sessions, None, &factory);
 
-    let result = crabka_admin_ui::server_fns::create_topic_with_context(
+    let result = crabka_admin_ui::server_fns::create_topic(
         &context,
         CreateTopicRequestDto {
             name: "orders".to_string(),
@@ -418,13 +447,13 @@ async fn public_context_create_topic_rejects_unauthenticated_after_validation() 
 }
 
 #[tokio::test]
-async fn public_context_create_topic_validates_before_authentication() {
+async fn public_create_topic_validates_before_authentication() {
     let sessions = SessionStore::new(Duration::from_secs(60));
     let cfg = AdminUiConfig::default();
     let factory = RecordingAdminSeamFactory::default();
     let context = ServerFunctionContext::new(&cfg, &sessions, None, &factory);
 
-    let result = crabka_admin_ui::server_fns::create_topic_with_context(
+    let result = crabka_admin_ui::server_fns::create_topic(
         &context,
         CreateTopicRequestDto {
             name: "orders".to_string(),
@@ -440,7 +469,7 @@ async fn public_context_create_topic_validates_before_authentication() {
 }
 
 #[tokio::test]
-async fn logout_with_context_removes_authenticated_session() {
+async fn public_logout_removes_authenticated_session() {
     let sessions = SessionStore::new(Duration::from_secs(60));
     let session_id = authenticated_session(&sessions);
     let cfg = AdminUiConfig::default();
@@ -452,7 +481,7 @@ async fn logout_with_context_removes_authenticated_session() {
         &factory,
     );
 
-    crabka_admin_ui::server_fns::logout_with_context(&context)
+    crabka_admin_ui::server_fns::logout(&context)
         .await
         .expect("authenticated logout succeeds");
 
@@ -479,40 +508,34 @@ async fn public_context_mutations_validate_session_and_call_admin_mutation() {
         &factory,
     );
 
-    crabka_admin_ui::server_fns::delete_topic_with_context(&context, delete_topic_request())
+    crabka_admin_ui::server_fns::delete_topic(&context, delete_topic_request())
         .await
         .expect("delete topic mutation succeeds");
-    crabka_admin_ui::server_fns::create_partitions_with_context(
-        &context,
-        create_partitions_request(),
-    )
-    .await
-    .expect("create partitions mutation succeeds");
-    crabka_admin_ui::server_fns::alter_configs_with_context(&context, alter_config_request())
+    crabka_admin_ui::server_fns::create_partitions(&context, create_partitions_request())
+        .await
+        .expect("create partitions mutation succeeds");
+    crabka_admin_ui::server_fns::alter_configs(&context, alter_config_request())
         .await
         .expect("alter config mutation succeeds");
-    crabka_admin_ui::server_fns::create_acl_with_context(&context, acl_request())
+    crabka_admin_ui::server_fns::create_acl(&context, acl_request())
         .await
         .expect("create ACL mutation succeeds");
-    crabka_admin_ui::server_fns::delete_acl_with_context(&context, acl_request())
+    crabka_admin_ui::server_fns::delete_acl(&context, acl_request())
         .await
         .expect("delete ACL mutation succeeds");
-    crabka_admin_ui::server_fns::upsert_scram_sha512_user_with_context(
-        &context,
-        scram_upsert_request(),
-    )
-    .await
-    .expect("SCRAM upsert mutation succeeds");
-    crabka_admin_ui::server_fns::delete_scram_user_with_context(&context, scram_delete_request())
+    crabka_admin_ui::server_fns::upsert_scram_sha512_user(&context, scram_upsert_request())
+        .await
+        .expect("SCRAM upsert mutation succeeds");
+    crabka_admin_ui::server_fns::delete_scram_user(&context, scram_delete_request())
         .await
         .expect("SCRAM delete mutation succeeds");
-    crabka_admin_ui::server_fns::upsert_quota_with_context(&context, quota_upsert_request())
+    crabka_admin_ui::server_fns::upsert_quota(&context, quota_upsert_request())
         .await
         .expect("quota upsert mutation succeeds");
-    crabka_admin_ui::server_fns::delete_quota_with_context(&context, quota_delete_request())
+    crabka_admin_ui::server_fns::delete_quota(&context, quota_delete_request())
         .await
         .expect("quota delete mutation succeeds");
-    crabka_admin_ui::server_fns::move_log_dir_with_context(&context, log_dir_move_request())
+    crabka_admin_ui::server_fns::move_log_dir(&context, log_dir_move_request())
         .await
         .expect("log-dir move mutation succeeds");
 
@@ -540,60 +563,44 @@ async fn public_context_mutations_reject_unauthenticated_without_calling_admin_m
     let context = ServerFunctionContext::new(&cfg, &sessions, None, &factory);
 
     assert!(matches!(
-        crabka_admin_ui::server_fns::delete_topic_with_context(&context, delete_topic_request())
+        crabka_admin_ui::server_fns::delete_topic(&context, delete_topic_request()).await,
+        Err(UiError::NotAuthenticated)
+    ));
+    assert!(matches!(
+        crabka_admin_ui::server_fns::create_partitions(&context, create_partitions_request()).await,
+        Err(UiError::NotAuthenticated)
+    ));
+    assert!(matches!(
+        crabka_admin_ui::server_fns::alter_configs(&context, alter_config_request()).await,
+        Err(UiError::NotAuthenticated)
+    ));
+    assert!(matches!(
+        crabka_admin_ui::server_fns::create_acl(&context, acl_request()).await,
+        Err(UiError::NotAuthenticated)
+    ));
+    assert!(matches!(
+        crabka_admin_ui::server_fns::delete_acl(&context, acl_request()).await,
+        Err(UiError::NotAuthenticated)
+    ));
+    assert!(matches!(
+        crabka_admin_ui::server_fns::upsert_scram_sha512_user(&context, scram_upsert_request())
             .await,
         Err(UiError::NotAuthenticated)
     ));
     assert!(matches!(
-        crabka_admin_ui::server_fns::create_partitions_with_context(
-            &context,
-            create_partitions_request()
-        )
-        .await,
+        crabka_admin_ui::server_fns::delete_scram_user(&context, scram_delete_request()).await,
         Err(UiError::NotAuthenticated)
     ));
     assert!(matches!(
-        crabka_admin_ui::server_fns::alter_configs_with_context(&context, alter_config_request())
-            .await,
+        crabka_admin_ui::server_fns::upsert_quota(&context, quota_upsert_request()).await,
         Err(UiError::NotAuthenticated)
     ));
     assert!(matches!(
-        crabka_admin_ui::server_fns::create_acl_with_context(&context, acl_request()).await,
+        crabka_admin_ui::server_fns::delete_quota(&context, quota_delete_request()).await,
         Err(UiError::NotAuthenticated)
     ));
     assert!(matches!(
-        crabka_admin_ui::server_fns::delete_acl_with_context(&context, acl_request()).await,
-        Err(UiError::NotAuthenticated)
-    ));
-    assert!(matches!(
-        crabka_admin_ui::server_fns::upsert_scram_sha512_user_with_context(
-            &context,
-            scram_upsert_request()
-        )
-        .await,
-        Err(UiError::NotAuthenticated)
-    ));
-    assert!(matches!(
-        crabka_admin_ui::server_fns::delete_scram_user_with_context(
-            &context,
-            scram_delete_request()
-        )
-        .await,
-        Err(UiError::NotAuthenticated)
-    ));
-    assert!(matches!(
-        crabka_admin_ui::server_fns::upsert_quota_with_context(&context, quota_upsert_request())
-            .await,
-        Err(UiError::NotAuthenticated)
-    ));
-    assert!(matches!(
-        crabka_admin_ui::server_fns::delete_quota_with_context(&context, quota_delete_request())
-            .await,
-        Err(UiError::NotAuthenticated)
-    ));
-    assert!(matches!(
-        crabka_admin_ui::server_fns::move_log_dir_with_context(&context, log_dir_move_request())
-            .await,
+        crabka_admin_ui::server_fns::move_log_dir(&context, log_dir_move_request()).await,
         Err(UiError::NotAuthenticated)
     ));
 

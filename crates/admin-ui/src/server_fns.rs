@@ -57,12 +57,8 @@ pub async fn login(request: LoginRequest) -> Result<LoginSuccess, UiError> {
     login_with_context(&cfg, runtime_sessions(), &AdminClientLoginBroker, request).await
 }
 
-pub async fn logout() -> Result<(), UiError> {
-    let factory = BrokerAdminSeamFactory;
-    let cfg = AdminUiConfig::default();
-    let context = ServerFunctionContext::new(&cfg, runtime_sessions(), None, &factory);
-
-    logout_with_context(&context).await
+pub async fn logout<F>(context: &ServerFunctionContext<'_, F>) -> Result<(), UiError> {
+    logout_with_context(context).await
 }
 
 pub async fn current_session() -> Result<CurrentSession, UiError> {
@@ -124,122 +120,81 @@ pub async fn list_log_dirs() -> Result<Vec<LogDirRow>, UiError> {
     list_log_dirs_with_context(&context).await
 }
 
-pub async fn create_topic(request: CreateTopicRequestDto) -> Result<Vec<ResourceOutcome>, UiError> {
-    ensure_valid_request(request.validate())?;
-
-    let factory = BrokerAdminSeamFactory;
-    let cfg = AdminUiConfig::default();
-    let context = ServerFunctionContext::new(&cfg, runtime_sessions(), None, &factory);
-
-    create_topic_with_context(&context, request).await
+pub async fn create_topic<F: AdminSeamFactory>(
+    context: &ServerFunctionContext<'_, F>,
+    request: CreateTopicRequestDto,
+) -> Result<Vec<ResourceOutcome>, UiError> {
+    create_topic_with_context(context, request).await
 }
 
-pub async fn delete_topic(request: DeleteTopicRequestDto) -> Result<Vec<ResourceOutcome>, UiError> {
-    ensure_valid_request(request.validate())?;
-
-    let factory = BrokerAdminSeamFactory;
-    let cfg = AdminUiConfig::default();
-    let context = ServerFunctionContext::new(&cfg, runtime_sessions(), None, &factory);
-
-    delete_topic_with_context(&context, request).await
+pub async fn delete_topic<F: AdminSeamFactory>(
+    context: &ServerFunctionContext<'_, F>,
+    request: DeleteTopicRequestDto,
+) -> Result<Vec<ResourceOutcome>, UiError> {
+    delete_topic_with_context(context, request).await
 }
 
-pub async fn create_partitions(
+pub async fn create_partitions<F: AdminSeamFactory>(
+    context: &ServerFunctionContext<'_, F>,
     request: CreatePartitionsRequestDto,
 ) -> Result<Vec<ResourceOutcome>, UiError> {
-    ensure_valid_request(request.validate())?;
-
-    let factory = BrokerAdminSeamFactory;
-    let cfg = AdminUiConfig::default();
-    let context = ServerFunctionContext::new(&cfg, runtime_sessions(), None, &factory);
-
-    create_partitions_with_context(&context, request).await
+    create_partitions_with_context(context, request).await
 }
 
-pub async fn alter_configs(
+pub async fn alter_configs<F: AdminSeamFactory>(
+    context: &ServerFunctionContext<'_, F>,
     request: AlterConfigRequestDto,
 ) -> Result<Vec<ResourceOutcome>, UiError> {
-    ensure_valid_request(request.validate())?;
-
-    let factory = BrokerAdminSeamFactory;
-    let cfg = AdminUiConfig::default();
-    let context = ServerFunctionContext::new(&cfg, runtime_sessions(), None, &factory);
-
-    alter_configs_with_context(&context, request).await
+    alter_configs_with_context(context, request).await
 }
 
-pub async fn create_acl(request: AclRequestDto) -> Result<Vec<ResourceOutcome>, UiError> {
-    ensure_valid_request(request.validate())?;
-
-    let factory = BrokerAdminSeamFactory;
-    let cfg = AdminUiConfig::default();
-    let context = ServerFunctionContext::new(&cfg, runtime_sessions(), None, &factory);
-
-    create_acl_with_context(&context, request).await
+pub async fn create_acl<F: AdminSeamFactory>(
+    context: &ServerFunctionContext<'_, F>,
+    request: AclRequestDto,
+) -> Result<Vec<ResourceOutcome>, UiError> {
+    create_acl_with_context(context, request).await
 }
 
-pub async fn delete_acl(request: AclRequestDto) -> Result<Vec<ResourceOutcome>, UiError> {
-    ensure_valid_request(request.validate())?;
-
-    let factory = BrokerAdminSeamFactory;
-    let cfg = AdminUiConfig::default();
-    let context = ServerFunctionContext::new(&cfg, runtime_sessions(), None, &factory);
-
-    delete_acl_with_context(&context, request).await
+pub async fn delete_acl<F: AdminSeamFactory>(
+    context: &ServerFunctionContext<'_, F>,
+    request: AclRequestDto,
+) -> Result<Vec<ResourceOutcome>, UiError> {
+    delete_acl_with_context(context, request).await
 }
 
-pub async fn upsert_scram_sha512_user(
+pub async fn upsert_scram_sha512_user<F: AdminSeamFactory>(
+    context: &ServerFunctionContext<'_, F>,
     request: ScramUserUpsertDto,
 ) -> Result<Vec<ResourceOutcome>, UiError> {
-    ensure_valid_request(request.validate())?;
-
-    let factory = BrokerAdminSeamFactory;
-    let cfg = AdminUiConfig::default();
-    let context = ServerFunctionContext::new(&cfg, runtime_sessions(), None, &factory);
-
-    upsert_scram_sha512_user_with_context(&context, request).await
+    upsert_scram_sha512_user_with_context(context, request).await
 }
 
-pub async fn delete_scram_user(
+pub async fn delete_scram_user<F: AdminSeamFactory>(
+    context: &ServerFunctionContext<'_, F>,
     request: ScramUserDeleteDto,
 ) -> Result<Vec<ResourceOutcome>, UiError> {
-    ensure_valid_request(request.validate())?;
-
-    let factory = BrokerAdminSeamFactory;
-    let cfg = AdminUiConfig::default();
-    let context = ServerFunctionContext::new(&cfg, runtime_sessions(), None, &factory);
-
-    delete_scram_user_with_context(&context, request).await
+    delete_scram_user_with_context(context, request).await
 }
 
-pub async fn upsert_quota(request: QuotaUpsertDto) -> Result<Vec<ResourceOutcome>, UiError> {
-    ensure_valid_request(request.validate())?;
-
-    let factory = BrokerAdminSeamFactory;
-    let cfg = AdminUiConfig::default();
-    let context = ServerFunctionContext::new(&cfg, runtime_sessions(), None, &factory);
-
-    upsert_quota_with_context(&context, request).await
+pub async fn upsert_quota<F: AdminSeamFactory>(
+    context: &ServerFunctionContext<'_, F>,
+    request: QuotaUpsertDto,
+) -> Result<Vec<ResourceOutcome>, UiError> {
+    upsert_quota_with_context(context, request).await
 }
 
-pub async fn delete_quota(request: QuotaDeleteDto) -> Result<Vec<ResourceOutcome>, UiError> {
-    ensure_valid_request(request.validate())?;
-
-    let factory = BrokerAdminSeamFactory;
-    let cfg = AdminUiConfig::default();
-    let context = ServerFunctionContext::new(&cfg, runtime_sessions(), None, &factory);
-
-    delete_quota_with_context(&context, request).await
+pub async fn delete_quota<F: AdminSeamFactory>(
+    context: &ServerFunctionContext<'_, F>,
+    request: QuotaDeleteDto,
+) -> Result<Vec<ResourceOutcome>, UiError> {
+    delete_quota_with_context(context, request).await
 }
 
-pub async fn move_log_dir(request: LogDirMoveRequestDto) -> Result<Vec<ResourceOutcome>, UiError> {
-    ensure_valid_request(request.validate())?;
-
-    let factory = BrokerAdminSeamFactory;
-    let cfg = AdminUiConfig::default();
-    let context = ServerFunctionContext::new(&cfg, runtime_sessions(), None, &factory);
-
-    move_log_dir_with_context(&context, request).await
+pub async fn move_log_dir<F: AdminSeamFactory>(
+    context: &ServerFunctionContext<'_, F>,
+    request: LogDirMoveRequestDto,
+) -> Result<Vec<ResourceOutcome>, UiError> {
+    move_log_dir_with_context(context, request).await
 }
 
 pub trait AdminReadSeam {
