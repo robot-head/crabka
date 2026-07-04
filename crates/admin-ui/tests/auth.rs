@@ -1,7 +1,14 @@
 use std::path::PathBuf;
+use std::pin::Pin;
+use std::sync::Mutex;
+use std::time::Duration;
 
-use crabka_admin_ui::auth::{LoginSuccess, build_scram_sha512_security};
+use crabka_admin_ui::auth::{
+    AuthService, LoginBroker, LoginRequest, LoginSuccess, build_scram_sha512_security,
+};
 use crabka_admin_ui::config::{AdminUiConfig, BrokerSecurityConfig};
+use crabka_admin_ui::error::UiError;
+use crabka_admin_ui::session::{SessionId, SessionStore};
 use crabka_client_core::security::SaslCredentials;
 use crabka_security::{ListenerProtocol, SaslMechanism};
 
@@ -75,4 +82,70 @@ fn login_success_debug_redacts_session_id() {
     assert!(debug.contains("User:alice"));
     assert!(debug.contains("<redacted>"));
     assert!(!debug.contains("raw-session-cookie-value"));
+}
+
+#[tokio::test]
+async fn login_uses_broker_probe_and_creates_session() {
+    let cfg = AdminUiConfig {
+        bootstrap_addrs: vec!["127.0.0.1:9092".to_string()],
+        security: BrokerSecurityConfig::SaslPlaintext,
+        ..AdminUiConfig::default()
+    };
+    let sessions = SessionStore::new(Duration::from_mins(1));
+    let broker = RecordingLoginBroker::default();
+    let service = AuthService::new_with_broker(&cfg, &sessions, &broker);
+
+    let success = service
+        .login(LoginRequest {
+            username: "alice".to_string(),
+            password: "secret".to_string(),
+        })
+        .await
+        .expect("broker probe succeeds");
+
+    assert_eq!(success.username, "alice");
+    assert_eq!(success.principal, "User:alice");
+    assert_eq!(
+        broker
+            .calls
+            .lock()
+            .expect("calls lock is not poisoned")
+            .as_slice(),
+        &[(
+            vec!["127.0.0.1:9092".to_string()],
+            "alice".to_string(),
+            "secret".to_string(),
+        )]
+    );
+
+    let session_id = SessionId::try_from(success.session_id.as_str()).expect("session id is valid");
+    let session = sessions.get(&session_id).expect("login creates session");
+    assert_eq!(session.user.username, "alice");
+    assert_eq!(session.user.principal, "User:alice");
+}
+
+#[derive(Default)]
+struct RecordingLoginBroker {
+    calls: Mutex<Vec<(Vec<String>, String, String)>>,
+}
+
+impl LoginBroker for RecordingLoginBroker {
+    fn check_login<'a>(
+        &'a self,
+        cfg: &'a AdminUiConfig,
+        username: &'a str,
+        password: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<(), UiError>> + Send + 'a>> {
+        Box::pin(async move {
+            self.calls
+                .lock()
+                .expect("calls lock is not poisoned")
+                .push((
+                    cfg.bootstrap_addrs.clone(),
+                    username.to_string(),
+                    password.to_string(),
+                ));
+            Ok(())
+        })
+    }
 }

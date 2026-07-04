@@ -1,6 +1,8 @@
 //! Broker-backed login for the admin UI.
 
 use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
 
 use crabka_client_admin::AdminClient;
 use crabka_client_core::security::{ClientSecurity, SaslCredentials};
@@ -53,22 +55,79 @@ pub fn build_scram_sha512_security(
     }
 }
 
-pub struct AuthService<'a> {
-    cfg: &'a AdminUiConfig,
-    sessions: &'a SessionStore,
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AdminClientLoginBroker;
+
+pub trait LoginBroker {
+    fn check_login<'a>(
+        &'a self,
+        cfg: &'a AdminUiConfig,
+        username: &'a str,
+        password: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<(), UiError>> + Send + 'a>>;
 }
 
-impl<'a> AuthService<'a> {
+impl LoginBroker for AdminClientLoginBroker {
+    fn check_login<'a>(
+        &'a self,
+        cfg: &'a AdminUiConfig,
+        username: &'a str,
+        password: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<(), UiError>> + Send + 'a>> {
+        Box::pin(async move {
+            let security = build_scram_sha512_security(cfg, username, password);
+            AdminClient::connect_secured(&cfg.bootstrap_addrs, Some(security)).await?;
+            Ok(())
+        })
+    }
+}
+
+impl<T: LoginBroker + ?Sized> LoginBroker for &T {
+    fn check_login<'a>(
+        &'a self,
+        cfg: &'a AdminUiConfig,
+        username: &'a str,
+        password: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<(), UiError>> + Send + 'a>> {
+        (*self).check_login(cfg, username, password)
+    }
+}
+
+pub struct AuthService<'a, B = AdminClientLoginBroker> {
+    cfg: &'a AdminUiConfig,
+    sessions: &'a SessionStore,
+    broker: B,
+}
+
+impl<'a> AuthService<'a, AdminClientLoginBroker> {
     #[must_use]
     pub const fn new(cfg: &'a AdminUiConfig, sessions: &'a SessionStore) -> Self {
-        Self { cfg, sessions }
+        Self {
+            cfg,
+            sessions,
+            broker: AdminClientLoginBroker,
+        }
+    }
+}
+
+impl<'a, B: LoginBroker> AuthService<'a, B> {
+    #[must_use]
+    pub const fn new_with_broker(
+        cfg: &'a AdminUiConfig,
+        sessions: &'a SessionStore,
+        broker: B,
+    ) -> Self {
+        Self {
+            cfg,
+            sessions,
+            broker,
+        }
     }
 
     pub async fn login(&self, request: LoginRequest) -> Result<LoginSuccess, UiError> {
-        let security = build_scram_sha512_security(self.cfg, &request.username, &request.password);
-        let mut client =
-            AdminClient::connect_secured(&self.cfg.bootstrap_addrs, Some(security)).await?;
-        client.metadata(&[]).await?;
+        self.broker
+            .check_login(self.cfg, &request.username, &request.password)
+            .await?;
 
         let principal = format!("User:{}", request.username);
         let session_id = self.sessions.create(SessionUser {
