@@ -5,6 +5,7 @@
 set -euo pipefail
 PIN="$(cat "$(dirname "$0")/../.creusot-version")"
 TAG="${1:-crabka-creusot:${PIN}}"
+RUST_TOOLCHAIN="1.96.1"
 RUNNER="${MELANGE_RUNNER:-docker}"
 WORK="$(pwd)"
 mkdir -p packages
@@ -26,5 +27,13 @@ apko build packaging/apko/creusot-toolchain.yaml \
   --arch x86_64 \
   --repository-append "$WORK/packages" \
   --keyring-append "$WORK/melange.rsa.pub"
+
+if command -v docker >/dev/null && docker info >/dev/null 2>&1; then
+  docker load -i creusot-toolchain.tar >/dev/null
+  docker run --rm "$TAG" \
+    "rustc --version | grep -F '$RUST_TOOLCHAIN' && cargo creusot --help >/dev/null"
+else
+  echo "Skipping Docker smoke verification: docker is unavailable." >&2
+fi
 
 echo "Built image archive: creusot-toolchain.tar (tag: $TAG)"
