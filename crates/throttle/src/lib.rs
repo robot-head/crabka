@@ -1,12 +1,31 @@
 //! Shared KIP-73 token bucket rate limiter.
 
+use creusot_std::prelude::*;
+
 mod ids;
+
+#[cfg(not(creusot))]
 mod runtime;
 
 pub use ids::{
     AvailableTokens, BurstCapacity, GrantedTokens, NewAvailable, RefillTokens, RequestedTokens,
 };
+
+#[cfg(not(creusot))]
 pub use runtime::{ThrottleState, TokenBucket};
+
+/// `min(available + refill, burst)` in unbounded integers. Equal to the
+/// executable `available.saturating_add(refill).min(burst)` whenever the
+/// saturating sum would exceed `burst`, which is the only case that matters.
+#[cfg(creusot)]
+#[logic]
+fn capped(available: Int, refill: Int, burst: Int) -> Int {
+    if available + refill <= burst {
+        available + refill
+    } else {
+        burst
+    }
+}
 
 /// Pure token-bucket consume arithmetic. Given the current `available`, the
 /// `refill` claimed for this call, the `burst` cap, and `requested` tokens,
@@ -15,6 +34,14 @@ pub use runtime::{ThrottleState, TokenBucket};
 ///
 /// The four inputs are distinct newtypes so a transposed call site — the
 /// textbook swap bug for four adjacent `u64`s — no longer compiles.
+#[ensures(result.0.0@ <= requested.0@)]
+#[ensures(result.1.0@ <= burst.0@)]
+#[ensures(result.0.0@ + result.1.0@ == capped(available.0@, refill.0@, burst.0@))]
+#[ensures(result.0.0@ == if requested.0@ <= capped(available.0@, refill.0@, burst.0@) {
+    requested.0@
+} else {
+    capped(available.0@, refill.0@, burst.0@)
+})]
 #[must_use]
 pub fn plan_consume(
     available: AvailableTokens,

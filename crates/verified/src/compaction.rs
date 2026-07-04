@@ -2,7 +2,10 @@
 //! Creusot can verify it. The host crate re-exports these; the stateright
 //! model in `crabka-log/src/compact_model.rs` drives these exact functions.
 
+use creusot_std::prelude::*;
+
 /// Per-record facts the retain decision needs.
+#[cfg_attr(creusot, derive(DeepModel))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RecordMeta {
     /// Whether the record has a key.
@@ -12,6 +15,7 @@ pub struct RecordMeta {
 }
 
 /// Per-batch facts the retain decision needs.
+#[cfg_attr(creusot, derive(DeepModel))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BatchMeta {
     /// Whether the batch is a transactional control batch.
@@ -24,6 +28,7 @@ pub struct BatchMeta {
 }
 
 /// Whether a producer's transactional DATA still survives compaction.
+#[cfg_attr(creusot, derive(DeepModel))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TxnDataState {
     /// `producer_id < 0`: not a transactional producer.
@@ -35,6 +40,7 @@ pub enum TxnDataState {
 }
 
 /// What to do with a record during the rewrite pass.
+#[cfg_attr(creusot, derive(DeepModel))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RetainDecision {
     /// Keep the record as-is.
@@ -48,6 +54,13 @@ pub enum RetainDecision {
 
 /// Compute the delete horizon timestamp: `now + delete.retention.ms`. The
 /// tombstone/marker is retained until wall-clock reaches this value.
+#[ensures(result@ == if now_ms@ + delete_retention_ms@ > 9223372036854775807 {
+    9223372036854775807
+} else if now_ms@ + delete_retention_ms@ < -9223372036854775807 - 1 {
+    -9223372036854775807 - 1
+} else {
+    now_ms@ + delete_retention_ms@
+})]
 #[must_use]
 pub const fn compute_horizon(now_ms: i64, delete_retention_ms: i64) -> i64 {
     now_ms.saturating_add(delete_retention_ms)
@@ -60,6 +73,23 @@ pub const fn compute_horizon(now_ms: i64, delete_retention_ms: i64) -> i64 {
 /// marker ages out via the delete horizon. Data records dedup newest-wins;
 /// tombstones (null value) age out via the delete horizon once they are the
 /// newest entry for their key.
+#[ensures(batch.is_control && (txn == TxnDataState::DataSurvives || txn == TxnDataState::NotTransactional)
+    ==> result == RetainDecision::Keep)]
+#[ensures(batch.is_control && txn == TxnDataState::DataFullyGone && batch.existing_horizon == None
+    ==> result == RetainDecision::SetHorizon(compute_horizon(now_ms, delete_retention_ms)))]
+#[ensures(forall<h: i64> batch.is_control && txn == TxnDataState::DataFullyGone
+        && batch.existing_horizon == Some(h)
+    ==> result == (if now_ms@ >= h@ { RetainDecision::Delete } else { RetainDecision::Keep }))]
+#[ensures(!batch.is_control && !rec.has_key ==> result == RetainDecision::Delete)]
+#[ensures(!batch.is_control && rec.has_key && !is_newest_for_key ==> result == RetainDecision::Delete)]
+#[ensures(!batch.is_control && rec.has_key && is_newest_for_key && rec.has_value
+    ==> result == RetainDecision::Keep)]
+#[ensures(!batch.is_control && rec.has_key && is_newest_for_key && !rec.has_value
+        && batch.existing_horizon == None
+    ==> result == RetainDecision::SetHorizon(compute_horizon(now_ms, delete_retention_ms)))]
+#[ensures(forall<h: i64> !batch.is_control && rec.has_key && is_newest_for_key && !rec.has_value
+        && batch.existing_horizon == Some(h)
+    ==> result == (if now_ms@ >= h@ { RetainDecision::Delete } else { RetainDecision::Keep }))]
 #[must_use]
 pub const fn retain_decision(
     rec: RecordMeta,

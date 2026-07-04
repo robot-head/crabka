@@ -3,10 +3,21 @@
 //! loop) instead of `binary_search_by_key`, so the proof doesn't depend on
 //! std's search being modeled.
 
+use creusot_std::prelude::*;
+
 /// The byte position to start reading at for `target`: the position field of
 /// the largest entry with `relative_offset <= target`, or 0 if none exists.
 /// `entries` must be strictly sorted by relative offset (true by construction
 /// of `OffsetIndex`).
+#[requires(forall<i: Int, j: Int> 0 <= i && i < j && j < entries@.len()
+    ==> entries@[i].0@ < entries@[j].0@)]
+#[ensures((exists<i: Int> 0 <= i && i < entries@.len() && entries@[i].0@ <= target@)
+    ==> exists<i: Int> 0 <= i && i < entries@.len()
+        && entries@[i].0@ <= target@
+        && result@ == entries@[i].1@
+        && (forall<j: Int> i < j && j < entries@.len() ==> entries@[j].0@ > target@))]
+#[ensures((forall<i: Int> 0 <= i && i < entries@.len() ==> entries@[i].0@ > target@)
+    ==> result@ == 0)]
 #[must_use]
 pub fn offset_index_lookup(entries: &[(u32, u32)], target: u32) -> u32 {
     let mut lo = 0usize; // entries[..lo] all have rel <= target

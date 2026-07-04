@@ -3,11 +3,38 @@
 //! untranslatable). Contracts are added in a follow-up task; the bodies here
 //! are already written in the loop style the proofs need (no std sort).
 
+use creusot_std::prelude::*;
+
+/// Members of `{log_end} U s` with value >= `v` (the majority-replication witness).
+#[cfg(creusot)]
+#[logic]
+#[variant(s.len())]
+fn count_ge(log_end: Int, s: Seq<i64>, v: Int) -> Int {
+    pearlite! {
+        (if log_end >= v { 1 } else { 0 }) + count_ge_seq(s, v)
+    }
+}
+
+#[cfg(creusot)]
+#[logic]
+#[variant(s.len())]
+fn count_ge_seq(s: Seq<i64>, v: Int) -> Int {
+    pearlite! {
+        if s.len() == 0 {
+            0
+        } else {
+            (if s[0]@ >= v { 1 } else { 0 }) + count_ge_seq(s.subsequence(1, s.len()), v)
+        }
+    }
+}
+
 /// Deterministic per-`(node, epoch)` election-timeout jitter in `[0, base_ms)`,
 /// Raft's randomized backoff made reproducible for the deterministic sims.
 /// Different nodes (and the same node across re-election epochs) get different
 /// spreads, so closely-synchronized voters don't arm their election timers in
 /// lockstep and split the vote indefinitely.
+#[ensures(base_ms@ == 0 ==> result@ == 0)]
+#[ensures(base_ms@ > 0 ==> result@ < base_ms@)]
 #[must_use]
 pub fn election_jitter_ms(me: u64, epoch: u32, base_ms: u64) -> u64 {
     if base_ms == 0 {
@@ -22,6 +49,8 @@ pub fn election_jitter_ms(me: u64, epoch: u32, base_ms: u64) -> u64 {
 
 /// `true` if the candidate's log is at least as up-to-date as ours
 /// (KIP-595: higher last epoch wins; on tie, higher/equal offset wins).
+#[ensures(result == (cand_epoch@ > my_epoch@
+    || (cand_epoch@ == my_epoch@ && cand_offset@ >= my_end@)))]
 #[must_use]
 pub const fn log_is_up_to_date(
     my_epoch: u32,
@@ -42,6 +71,18 @@ pub const fn log_is_up_to_date(
 /// member m of `{log_end} U follower_offsets` with at least `majority`
 /// members >= m - rather than by sorting: voter counts are tiny (<= ~7), and a
 /// definition-mirroring loop is what the Creusot proof quantifies over.
+#[requires(1 <= majority@ && majority@ <= follower_offsets@.len() + 1)]
+#[requires(current_hwm@ <= log_end@)]
+#[requires(forall<k: Int> 0 <= k && k < follower_offsets@.len()
+    ==> follower_offsets@[k]@ <= log_end@)]
+#[ensures(result@ >= current_hwm@)]
+#[ensures(result@ <= log_end@)]
+#[ensures(forall<v: Int> v > epoch_start_offset@
+    && count_ge(log_end@, follower_offsets@, v) >= majority@
+    ==> v <= result@)]
+#[ensures(result@ > current_hwm@
+    ==> result@ > epoch_start_offset@
+        && count_ge(log_end@, follower_offsets@, result@) >= majority@)]
 #[must_use]
 pub fn recompute_high_watermark(
     log_end: i64,
