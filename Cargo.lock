@@ -3361,6 +3361,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "crabka-verified"
+version = "0.3.8"
+dependencies = [
+ "assert2",
+ "proptest",
+]
+
+[[package]]
 name = "crabka-voters"
 version = "0.3.8"
 dependencies = [
