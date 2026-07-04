@@ -34,8 +34,9 @@ Holds the five kraft-core/log kernels as **pure free functions over primitive ty
 (`u64`/`i64`/`u32`/slices) plus the small plain data types `retain_decision` needs
 (`RecordMeta`, `BatchMeta`, `TxnDataState`, `RetainDecision`, moved from
 `crabka-log`). No dependency on `kraft-core` or `log` types, so the crate is trivially
-translatable by Creusot. Sole dependency: `creusot-contracts` (macros erase to no-ops
-under normal rustc, so stable builds/clippy/tests are unaffected).
+translatable by Creusot. Sole dependency: `creusot-std` (the renamed successor of the
+deprecated `creusot-contracts`; its macros erase to no-ops under normal rustc, so
+stable builds/clippy/tests are unaffected).
 
 Host crates **call through** — original bodies are deleted, never duplicated:
 
@@ -53,7 +54,7 @@ The crate has no async/IO, and `plan_consume` is already a pure free function. T
 `TokenBucket` runtime shell (struct + impl + `clock_nanos`, which use `AtomicU64` and
 `Arc<dyn NanoClock>` — untranslatable) moves into a `mod runtime` gated
 `#[cfg(not(creusot))]`, re-exported so the public API is unchanged. Creusot sees only
-the pure arithmetic. The crate adds the `creusot-contracts` dependency.
+the pure arithmetic. The crate adds the `creusot-std` dependency.
 
 ### Verification targets
 
@@ -194,9 +195,12 @@ Then the `crabka-verified` crate + kernel extractions + their proofs.
 
 ## Known risks
 
-1. **`creusot-contracts` erasure on stable / edition 2024** must be confirmed in
-   slice 1 against Rust 1.96. Fallback if the published crate lags: pin a git revision
-   of `creusot-contracts` matching the pinned Creusot tag.
+1. **`creusot-std` erasure on stable / edition 2024** must be confirmed in slice 1
+   against Rust 1.96 (`creusot-std` 0.12.0 on crates.io is the matched pair for tool
+   tag v0.12.0). If it does not build on stable, fallback: make it an optional
+   dependency behind a `creusot-proofs` cargo feature enabled only in verification
+   builds, with contract attributes applied via `#[cfg_attr(creusot, ...)]` — a git
+   dependency is NOT an option because release-plz publishes these crates to crates.io.
 2. **std-modeling gaps**: if Creusot's std spec doesn't cover `sort_unstable_by` /
    `binary_search_by_key`, the kernel bodies are rewritten as explicit loops with
    `#[invariant]`s (standard Creusot pattern, behavior-identical; contracts unchanged).
