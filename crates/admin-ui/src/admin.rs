@@ -12,6 +12,10 @@ impl AdminFacade {
         Self { client }
     }
 
+    pub fn client_mut(&mut self) -> &mut AdminClient {
+        &mut self.client
+    }
+
     pub async fn topics(&mut self) -> Result<Vec<TopicRow>, AdminError> {
         let metadata = self.client.metadata(&[]).await?;
 

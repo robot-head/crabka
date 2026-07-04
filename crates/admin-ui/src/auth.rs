@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::AdminUiConfig;
 use crate::error::UiError;
-use crate::session::{SessionStore, SessionUser};
+use crate::session::{SessionCredentials, SessionStore, SessionUser};
 
 #[derive(Clone, PartialEq, Eq, Deserialize)]
 pub struct LoginRequest {
@@ -130,10 +130,13 @@ impl<'a, B: LoginBroker> AuthService<'a, B> {
             .await?;
 
         let principal = format!("User:{}", request.username);
-        let session_id = self.sessions.create(SessionUser {
-            username: request.username.clone(),
-            principal: principal.clone(),
-        });
+        let session_id = self.sessions.create_authenticated(
+            SessionUser {
+                username: request.username.clone(),
+                principal: principal.clone(),
+            },
+            SessionCredentials::scram_sha512(request.password),
+        );
 
         Ok(LoginSuccess {
             username: request.username,

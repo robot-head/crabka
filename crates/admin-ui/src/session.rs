@@ -48,9 +48,33 @@ pub struct SessionUser {
     pub principal: String,
 }
 
+#[derive(Clone, PartialEq, Eq)]
+pub struct SessionCredentials {
+    password: String,
+}
+
+impl SessionCredentials {
+    #[must_use]
+    pub fn scram_sha512(password: String) -> Self {
+        Self { password }
+    }
+
+    #[must_use]
+    pub fn password(&self) -> &str {
+        &self.password
+    }
+}
+
+impl fmt::Debug for SessionCredentials {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SessionCredentials(<redacted>)")
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRecord {
     pub user: SessionUser,
+    pub credentials: Option<SessionCredentials>,
     pub expires_at: Instant,
 }
 
@@ -91,10 +115,34 @@ impl SessionStore {
     }
 
     pub fn create(&self, user: SessionUser) -> SessionId {
+        self.create_record(user, None)
+    }
+
+    pub fn create_user(&self, username: &str, principal: &str) -> SessionId {
+        self.create(SessionUser {
+            username: username.to_string(),
+            principal: principal.to_string(),
+        })
+    }
+
+    pub fn create_authenticated(
+        &self,
+        user: SessionUser,
+        credentials: SessionCredentials,
+    ) -> SessionId {
+        self.create_record(user, Some(credentials))
+    }
+
+    fn create_record(
+        &self,
+        user: SessionUser,
+        credentials: Option<SessionCredentials>,
+    ) -> SessionId {
         let session_id = SessionId::new();
         let now = Instant::now();
         let session_record = SessionRecord {
             user,
+            credentials,
             expires_at: now.checked_add(self.ttl).unwrap_or(now),
         };
 

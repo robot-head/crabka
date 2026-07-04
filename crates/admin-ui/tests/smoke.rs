@@ -72,3 +72,26 @@ async fn login_returns_html_with_login_prompt() {
     let body = response_text(response).await;
     assert!(body.contains("Sign in to Crabka"));
 }
+
+#[tokio::test]
+async fn linked_admin_pages_return_static_html() {
+    for (path, heading, empty_state) in [
+        ("/topics", "Topics", "No topics loaded yet."),
+        (
+            "/groups",
+            "Consumer Groups",
+            "No consumer groups loaded yet.",
+        ),
+        ("/acls", "ACLs", "No ACL operation selected."),
+        ("/users", "SCRAM Users", "No user operation selected."),
+        ("/quotas", "Quotas", "No quota data loaded yet."),
+        ("/log-dirs", "Log Dirs", "No log-dir data loaded yet."),
+    ] {
+        let response = get(path).await;
+
+        assert_eq!(response.status(), StatusCode::OK, "{path} status");
+        let body = response_text(response).await;
+        assert!(body.contains(heading), "{path} heading");
+        assert!(body.contains(empty_state), "{path} empty state");
+    }
+}
