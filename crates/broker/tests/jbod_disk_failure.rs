@@ -16,7 +16,6 @@
 use assert2::{assert, check};
 use std::io;
 use std::net::SocketAddr;
-use std::time::{Duration, Instant};
 
 use bytes::{Buf, BufMut, BytesMut};
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
@@ -108,20 +107,9 @@ async fn create_topic(addr: SocketAddr, topic: &str, partitions: i32) {
 }
 
 async fn wait_all_partitions(handle: &BrokerHandle, topic: &str, n: i32) {
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        let mut all = true;
-        for p in 0..n {
-            if !handle.has_partition(topic, p).await {
-                all = false;
-                break;
-            }
-        }
-        if all {
-            return;
-        }
-        assert!(Instant::now() <= deadline, "partitions never materialized");
-        tokio::time::sleep(Duration::from_millis(100)).await;
+    // Wait until every partition of `topic` has materialized in the image.
+    for p in 0..n {
+        handle.wait_until_partition_present(topic, p).await;
     }
 }
 
@@ -383,14 +371,7 @@ async fn heartbeat_with_offline_log_dirs_is_accepted() {
 
     // Wait until the broker has registered itself and elected a raft leader
     // (so the heartbeat handler reaches the leader branch, not NOT_CONTROLLER).
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        if handle.controller_leader_id().await.is_some() {
-            break;
-        }
-        assert!(Instant::now() <= deadline, "raft leader never elected");
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    handle.wait_until_controller_leader().await;
 
     // Send a heartbeat with a made-up offline dir UUID. The broker is the
     // only replica so alive_isr is empty → no change → no error.

@@ -97,6 +97,10 @@ async fn produce_one(
         // topic_id, so a target leader that hasn't yet applied the topic record
         // answers UNKNOWN_TOPIC_ID until the metadata image catches up.
         if (err == 3 || err == 6 || err == 100) && attempt < 10 {
+            // intentional: retry backoff between produce attempts while the
+            // topic's existence / leadership / topic-id mapping fans out across
+            // brokers — there is no single broker signal to await here (the
+            // target leader varies per partition), so back off and re-send.
             tokio::time::sleep(Duration::from_millis(150)).await;
             continue;
         }
@@ -151,55 +155,18 @@ async fn consumer_fetches_from_non_bootstrap_leaders() {
     assert!(cr.topics[0].error_code == 0, "create_topic: {cr:?}");
     let topic_id = cr.topics[0].topic_id;
 
-    // Wait for all partitions to materialize on their respective single brokers.
-    // With rf=1 only the owning broker reports has_partition=true; we wait for
-    // each partition on exactly the broker that owns it once we know the leader
-    // assignment.
-    //
-    // Simpler: poll until node 1's controller image (which tracks all partition
-    // states) reports every partition's leader is non-zero, and that each owning
-    // handle reports the partition.
-    let deadline = Instant::now() + Duration::from_mins(2);
-    loop {
-        let mut all_known = true;
-        'outer: for p in 0..n_partitions {
-            for (h, _, _) in &cluster {
-                // has_partition checks local replica presence. With rf=1, only
-                // the owning broker returns true. If at least one broker owns it
-                // we're good; wait until all partitions are owned somewhere.
-                if h.has_partition(topic, p).await {
-                    continue 'outer;
-                }
-            }
-            // No broker owns partition p yet.
-            all_known = false;
-            break;
-        }
-        if all_known {
-            break;
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "topic partitions didn't materialize across the cluster in 2 min"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-
-    // Wait until node 1 knows every partition's leader (the controller image
-    // propagation may lag slightly after has_partition returns true).
-    let deadline = Instant::now() + Duration::from_secs(30);
+    // Wait until node 1's controller image knows every partition AND its
+    // assigned leader. The metadata image is raft-replicated and is the exact
+    // image the routing path below reads (`partition_leader_for_test` on
+    // `cluster[0].0`). `leader != 0` subsumes partition-presence, so a single
+    // per-partition awaiter covers both the "materialized" and "leader-known"
+    // phases the two old poll-loops handled separately.
     let bootstrap_node = cluster[0].0.node_id();
-    loop {
-        let all_have_leader =
-            (0..n_partitions).all(|p| cluster[0].0.partition_leader_for_test(topic, p).is_some());
-        if all_have_leader {
-            break;
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "partition leaders didn't converge within 30s"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+    for p in 0..n_partitions {
+        cluster[0]
+            .0
+            .wait_for_image(|img| img.partition(topic, p).is_some_and(|part| part.leader != 0))
+            .await;
     }
 
     // Discriminating guard: assert at least one partition is led by a

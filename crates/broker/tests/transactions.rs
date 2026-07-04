@@ -151,11 +151,11 @@ async fn commit_then_read_committed_sees_records() {
         .await
         .unwrap();
     producer.init_transactions().await.unwrap();
-    producer.begin_transaction().await.unwrap();
+    let txn = producer.begin_transaction().await.unwrap();
     for v in ["a", "b", "c"] {
         drop(producer.send(rec("t", v)).await);
     }
-    producer.commit_transaction().await.unwrap();
+    txn.commit().await.unwrap();
 
     let mut consumer = Consumer::builder()
         .bootstrap(bootstrap)
@@ -196,11 +196,11 @@ async fn abort_then_read_committed_skips_records() {
         .await
         .unwrap();
     producer.init_transactions().await.unwrap();
-    producer.begin_transaction().await.unwrap();
+    let txn = producer.begin_transaction().await.unwrap();
     for v in ["x", "y", "z"] {
         drop(producer.send(rec("ta", v)).await);
     }
-    producer.abort_transaction().await.unwrap();
+    txn.abort().await.unwrap();
 
     // read_committed: must see 0 records.
     let mut consumer = Consumer::builder()
@@ -277,25 +277,25 @@ async fn interleaved_commit_and_abort() {
     producer.init_transactions().await.unwrap();
 
     // First txn: commit ["a", "b", "c"].
-    producer.begin_transaction().await.unwrap();
+    let txn = producer.begin_transaction().await.unwrap();
     for v in ["a", "b", "c"] {
         drop(producer.send(rec("ti", v)).await);
     }
-    producer.commit_transaction().await.unwrap();
+    txn.commit().await.unwrap();
 
     // Second txn: abort ["X", "Y"].
-    producer.begin_transaction().await.unwrap();
+    let txn = producer.begin_transaction().await.unwrap();
     for v in ["X", "Y"] {
         drop(producer.send(rec("ti", v)).await);
     }
-    producer.abort_transaction().await.unwrap();
+    txn.abort().await.unwrap();
 
     // Third txn: commit ["d", "e", "f", "g"].
-    producer.begin_transaction().await.unwrap();
+    let txn = producer.begin_transaction().await.unwrap();
     for v in ["d", "e", "f", "g"] {
         drop(producer.send(rec("ti", v)).await);
     }
-    producer.commit_transaction().await.unwrap();
+    txn.commit().await.unwrap();
 
     let mut consumer = Consumer::builder()
         .bootstrap(bootstrap)
@@ -324,7 +324,7 @@ async fn interleaved_commit_and_abort() {
 // ── test 4 ────────────────────────────────────────────────────────────────────
 
 /// Producer B with the same `transactional_id` fences Producer A.
-/// Producer A's `commit_transaction` must return `ProducerError::FencedProducer`.
+/// Producer A's `Transaction::commit` must return `ProducerError::FencedProducer`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fenced_producer_cannot_commit() {
     let (broker, bootstrap, _dir) = boot_single().await;
@@ -337,7 +337,7 @@ async fn fenced_producer_cannot_commit() {
         .await
         .unwrap();
     producer_a.init_transactions().await.unwrap();
-    producer_a.begin_transaction().await.unwrap();
+    let txn_a = producer_a.begin_transaction().await.unwrap();
     drop(producer_a.send(rec("tf", "first")).await);
 
     // Producer B initializes with the same transactional_id — bumps epoch,
@@ -351,12 +351,15 @@ async fn fenced_producer_cannot_commit() {
     producer_b.init_transactions().await.unwrap();
 
     // Producer A's commit must fail with FencedProducer.
-    let err = producer_a
-        .commit_transaction()
+    let err = txn_a
+        .commit()
         .await
         .expect_err("commit should fail after fencing");
     assert!(
-        matches!(err, crabka_client_producer::ProducerError::FencedProducer),
+        matches!(
+            err.source,
+            crabka_client_producer::ProducerError::FencedProducer
+        ),
         "expected FencedProducer, got: {err:?}"
     );
 
@@ -417,7 +420,7 @@ async fn send_offsets_to_transaction_atomic_with_records() {
             .await
             .unwrap();
         producer.init_transactions().await.unwrap();
-        producer.begin_transaction().await.unwrap();
+        let txn = producer.begin_transaction().await.unwrap();
 
         // Read all 5 records from input.
         let mut last_offset: Option<((String, i32), i64)> = None;
@@ -447,7 +450,7 @@ async fn send_offsets_to_transaction_atomic_with_records() {
                 .await
                 .unwrap();
         }
-        producer.commit_transaction().await.unwrap();
+        txn.commit().await.unwrap();
 
         input_consumer.close().await.unwrap();
         producer.close().await.unwrap();
@@ -508,7 +511,7 @@ async fn sasl_authenticated_transactional_flow_commits() {
     // init_transactions dials the txn coordinator on a fresh connection —
     // this is the call that failed with Client(Disconnected) before the fix.
     producer.init_transactions().await.unwrap();
-    producer.begin_transaction().await.unwrap();
+    let txn = producer.begin_transaction().await.unwrap();
     for v in ["a", "b", "c"] {
         drop(producer.send(rec("sasl-txn", v)).await);
     }
@@ -521,7 +524,7 @@ async fn sasl_authenticated_transactional_flow_commits() {
         )
         .await
         .unwrap();
-    producer.commit_transaction().await.unwrap();
+    txn.commit().await.unwrap();
 
     // llvm-cov reliably exercises the SASL coordinator connections above, but
     // this final visibility poll can stall under coverage instrumentation.

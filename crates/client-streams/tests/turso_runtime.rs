@@ -165,7 +165,7 @@ async fn collect_output_keyed(
             break;
         }
 
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::task::yield_now().await;
     }
 
     collected
@@ -221,7 +221,7 @@ async fn turso_stateful_count_and_restart_restore() {
 
     // ── 2. Start counting KafkaStreams app with Turso backend ─────────────────
     let app_id = "turso-count-restart-app";
-    let mut streams = KafkaStreams::builder()
+    let streams = KafkaStreams::builder()
         .bootstrap(&bootstrap)
         .application_id(app_id)
         .topology(counting_topology(app_id))
@@ -282,7 +282,7 @@ async fn turso_stateful_count_and_restart_restore() {
     // ── 6. Start a FRESH instance with the SAME application_id + SAME state_dir
     // TursoBytes::open DROPs+CREATEs the table → empty store.
     // The runtime's restore() replays the changelog into the fresh Turso DB.
-    let mut streams2 = KafkaStreams::builder()
+    let streams2 = KafkaStreams::builder()
         .bootstrap(&bootstrap)
         .application_id(app_id)
         .topology(counting_topology(app_id))

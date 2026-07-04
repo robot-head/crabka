@@ -35,6 +35,9 @@ thiserror = { workspace = true }
 # watch channel for pause/resume/shutdown, and times commit intervals.
 tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
 tracing = { workspace = true }
+# The poll-backoff sleep goes through an injectable clock so the production loop
+# sleeps on real time while tests drive a deterministic mock timeline.
+qubit-clock = { workspace = true, features = ["tokio"] }
 
 [dev-dependencies]
 assert2 = { workspace = true }

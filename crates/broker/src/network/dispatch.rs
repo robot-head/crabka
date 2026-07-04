@@ -4651,16 +4651,24 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    // `start_paused = true` runs these on tokio's virtual clock: with no other
+    // work pending, the runtime auto-advances logical time to the next timer, so
+    // the `sleep_until`/`timeout` deadlines fire instantly and deterministically
+    // instead of burning real wall-clock milliseconds.
+    #[tokio::test(start_paused = true)]
     async fn sleep_until_some_none_remains_pending() {
+        // `None` never resolves; the 10ms timeout is the only timer, so virtual
+        // time jumps to it and the timeout elapses -> Err.
         let result = tokio::time::timeout(Duration::from_millis(10), sleep_until_some(None)).await;
         assert!(result.is_err());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn sleep_until_some_some_waits_until_deadline() {
         let before = tokio::time::Instant::now();
         let deadline = before + Duration::from_millis(10);
+        // The inner sleep (deadline) fires before the outer 1s timeout, so the
+        // timeout resolves Ok and virtual time has advanced exactly to `deadline`.
         tokio::time::timeout(Duration::from_secs(1), sleep_until_some(Some(deadline)))
             .await
             .expect("deadline should resolve");

@@ -253,6 +253,7 @@ fn wait_for_broker() {
             eprintln!("CAPTURE broker READY");
             return;
         }
+        // intentional: polls the external JVM cp-kafka container via its admin CLI; no in-process crabka metric/image to await.
         std::thread::sleep(Duration::from_secs(2));
     }
     panic!(
@@ -281,6 +282,7 @@ fn wait_for_group_stable() {
             eprintln!("CAPTURE group {GROUP} STABLE:\n{last}");
             return;
         }
+        // intentional: polls the external JVM broker's group state via kafka-consumer-groups; no in-process crabka metric/image to await.
         std::thread::sleep(Duration::from_secs(2));
     }
     panic!(

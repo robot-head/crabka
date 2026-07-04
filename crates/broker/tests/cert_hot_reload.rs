@@ -237,6 +237,8 @@ async fn periodic_watcher_reloads_on_mtime_change() {
     // Sleep > 1s before rewriting so the new mtime is guaranteed to
     // differ from the original (mtime resolution on some filesystems
     // is 1s).
+    // intentional: mtime-resolution deadline is the behavior under test; no broker
+    // image/metric signal reflects on-disk mtime.
     tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
     std::fs::write(&cert_path, DEV_CERT_B).unwrap();
     std::fs::write(&key_path, DEV_KEY_B).unwrap();
@@ -253,6 +255,9 @@ async fn periodic_watcher_reloads_on_mtime_change() {
             std::time::Instant::now() < deadline,
             "watcher never reloaded within 5s",
         );
+        // intentional: the periodic mtime-polling reload is the behavior under test;
+        // "cert B is served" is observable only via a live handshake, not any broker
+        // metadata-image or metric, so keep the bounded handshake-retry poll.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 

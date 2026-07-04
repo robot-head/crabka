@@ -27,7 +27,7 @@ use crate::compression::Compression;
 use crate::error::ProducerError;
 use crate::partitioner::UniformStickyPartitioner;
 use crate::record::{ProducerRecord, RecordMetadata};
-use crate::transactional::TxnState;
+use crate::transactional::{OwnedTransaction, Transaction, TxnState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Acks {
@@ -146,7 +146,8 @@ impl Producer {
 
     // ── Transactional API ────────────────────────────────────────────────────
 
-    /// Begin a new transaction.
+    /// Begin a new transaction, returning a borrowed guard that must be
+    /// finished with [`Transaction::commit`] or [`Transaction::abort`].
     ///
     /// Must be called after [`init_transactions`] has completed and before
     /// any transactional [`send`] calls. Transitions the producer from
@@ -167,7 +168,38 @@ impl Producer {
         fields(transactional_id = self.transactional_id.as_deref()),
         err,
     )]
-    pub async fn begin_transaction(&self) -> Result<(), ProducerError> {
+    pub async fn begin_transaction(&self) -> Result<Transaction<'_>, ProducerError> {
+        self.begin_transaction_state().await?;
+        Ok(Transaction { producer: self })
+    }
+
+    /// Begin a new transaction, returning an owning guard that must be
+    /// finished with [`OwnedTransaction::commit`] or
+    /// [`OwnedTransaction::abort`].
+    ///
+    /// Identical semantics to [`begin_transaction`](Self::begin_transaction),
+    /// but the returned guard owns an `Arc<Producer>` instead of borrowing
+    /// `&self`. Use this when the guard must survive across an owned/`'static`
+    /// boundary a borrow can't — e.g. stored behind a `dyn Trait` object.
+    /// Mirrors `tokio::sync::Mutex::lock_owned`.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`begin_transaction`](Self::begin_transaction).
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(transactional_id = self.transactional_id.as_deref()),
+        err,
+    )]
+    pub async fn begin_transaction_owned(
+        self: Arc<Self>,
+    ) -> Result<OwnedTransaction, ProducerError> {
+        self.begin_transaction_state().await?;
+        Ok(OwnedTransaction { producer: self })
+    }
+
+    async fn begin_transaction_state(&self) -> Result<(), ProducerError> {
         if self.transactional_id.is_none() {
             return Err(ProducerError::NotTransactional);
         }
@@ -183,11 +215,14 @@ impl Producer {
         }
     }
 
-    /// Commit the current transaction.
+    /// Finish the current transaction: flushes all in-flight records, then
+    /// sends `EndTxn(committed)` to the transaction coordinator. Transitions
+    /// the producer from `InTransaction` → `Ready` on success.
     ///
-    /// Flushes all in-flight records, then sends `EndTxn(committed=true)` to
-    /// the transaction coordinator. Transitions the producer from
-    /// `InTransaction` → `Ready` on success.
+    /// Called by [`Transaction::commit`]/[`Transaction::abort`] and
+    /// [`OwnedTransaction::commit`]/[`OwnedTransaction::abort`] — the only
+    /// ways to finish a transaction opened via `begin_transaction`/
+    /// `begin_transaction_owned`.
     ///
     /// # Errors
     ///
@@ -199,39 +234,10 @@ impl Producer {
     #[tracing::instrument(
         level = "info",
         skip_all,
-        fields(transactional_id = self.transactional_id.as_deref()),
-        err,
-    )]
-    pub async fn commit_transaction(&self) -> Result<(), ProducerError> {
-        self.end_transaction(true).await
-    }
-
-    /// Abort the current transaction.
-    ///
-    /// Flushes all in-flight records, then sends `EndTxn(committed=false)` to
-    /// the transaction coordinator. Transitions the producer from
-    /// `InTransaction` → `Ready` on success.
-    ///
-    /// # Errors
-    ///
-    /// Same as [`commit_transaction`](Self::commit_transaction).
-    #[tracing::instrument(
-        level = "info",
-        skip_all,
-        fields(transactional_id = self.transactional_id.as_deref()),
-        err,
-    )]
-    pub async fn abort_transaction(&self) -> Result<(), ProducerError> {
-        self.end_transaction(false).await
-    }
-
-    #[tracing::instrument(
-        level = "info",
-        skip_all,
         fields(committed, error_code = tracing::field::Empty),
         err,
     )]
-    async fn end_transaction(&self, committed: bool) -> Result<(), ProducerError> {
+    pub(crate) async fn end_transaction(&self, committed: bool) -> Result<(), ProducerError> {
         let tid = self
             .transactional_id
             .clone()
@@ -628,12 +634,12 @@ impl Producer {
         tracing::Span::current().record("partition", partition);
 
         let key = (record.topic.clone(), partition);
-        let acc = self
-            .accumulators
-            .entry(key)
-            .or_insert_with(|| Arc::new(Mutex::new(Accumulator::new(self.batch_size))))
-            .value()
-            .clone();
+        let acc = Arc::clone(
+            self.accumulators
+                .entry(key)
+                .or_insert_with(|| Arc::new(Mutex::new(Accumulator::new(self.batch_size))))
+                .value(),
+        );
 
         let timestamp = record.timestamp_ms.unwrap_or_else(current_millis);
         let mut a = acc.lock().await;

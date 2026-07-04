@@ -259,14 +259,23 @@ impl RecordProducer for BrokerProducer {
 /// Unlike [`BrokerProducer`], this wrapper does NOT accumulate per-record ack
 /// receivers: the EOS commit path never calls `flush` — it goes
 /// `send` → `send_offsets_to_transaction` → `commit_transaction`, and the inner
-/// `Producer::commit_transaction` already flushes the batch buffer and blocks on
-/// every in-flight ack before sending the COMMIT marker. The dropped receiver
+/// `Transaction::commit` (via `end_transaction`) already flushes the batch
+/// buffer and blocks on every in-flight ack before sending the COMMIT marker.
+/// The dropped receiver
 /// does NOT cancel the send: the record's ack sender lives in the accumulator
 /// batch (see `Producer::send` / `Accumulator::try_append`), so the record is
 /// produced and durably committed regardless of whether the receiver is awaited.
 /// Accumulating receivers here would leak unboundedly for the app's lifetime.
 pub(crate) struct BrokerTransactionalProducer {
-    inner: Producer,
+    inner: Arc<Producer>,
+    /// The currently-open transaction, if any. Populated by `begin_transaction`
+    /// (via `Producer::begin_transaction_owned`, whose `OwnedTransaction` guard
+    /// must survive across the separate `commit_transaction`/`abort_transaction`
+    /// call that arrives on a later poll cycle — a borrowed `Transaction<'p>`
+    /// can't be stored in a struct field across that gap without either unsafe
+    /// self-reference or a lifetime parameter that would break the `'static`
+    /// `Arc<dyn TransactionalProducer>` storage this type is used behind).
+    txn: Mutex<Option<crabka_client_producer::OwnedTransaction>>,
 }
 
 #[async_trait::async_trait]
@@ -339,10 +348,12 @@ impl TransactionalProducer for BrokerTransactionalProducer {
     }
 
     async fn begin_transaction(&self) -> Result<(), StreamsClientError> {
-        self.inner
-            .begin_transaction()
+        let t = Arc::clone(&self.inner)
+            .begin_transaction_owned()
             .await
-            .map_err(|e| StreamsClientError::Runtime(e.to_string()))
+            .map_err(|e| StreamsClientError::Runtime(e.to_string()))?;
+        *self.txn.lock().await = Some(t);
+        Ok(())
     }
 
     async fn send_offsets_to_transaction(
@@ -364,17 +375,41 @@ impl TransactionalProducer for BrokerTransactionalProducer {
     }
 
     async fn commit_transaction(&self) -> Result<(), StreamsClientError> {
-        self.inner
-            .commit_transaction()
-            .await
-            .map_err(|e| StreamsClientError::Runtime(e.to_string()))
+        let t = self.txn.lock().await.take().ok_or_else(|| {
+            StreamsClientError::Runtime(
+                "commit_transaction called without an open transaction".into(),
+            )
+        })?;
+        // On failure the broker may consider the transaction still open (e.g.
+        // CONCURRENT_TRANSACTIONS), so put the guard back rather than drop
+        // it -- the caller's abort-after-failed-commit recovery path (see
+        // StreamThread::abort_and_rollback) needs a live guard to actually
+        // reach the broker instead of failing locally with "no open
+        // transaction".
+        match t.commit().await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                let source = e.source.to_string();
+                *self.txn.lock().await = Some(e.transaction);
+                Err(StreamsClientError::Runtime(source))
+            }
+        }
     }
 
     async fn abort_transaction(&self) -> Result<(), StreamsClientError> {
-        self.inner
-            .abort_transaction()
-            .await
-            .map_err(|e| StreamsClientError::Runtime(e.to_string()))
+        let t = self.txn.lock().await.take().ok_or_else(|| {
+            StreamsClientError::Runtime(
+                "abort_transaction called without an open transaction".into(),
+            )
+        })?;
+        match t.abort().await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                let source = e.source.to_string();
+                *self.txn.lock().await = Some(e.transaction);
+                Err(StreamsClientError::Runtime(source))
+            }
+        }
     }
 }
 
@@ -809,7 +844,10 @@ pub(crate) async fn build_eos(
         max_wait_ms: 500,
         partition_max_bytes: 1 << 20,
     };
-    let txn_producer = Arc::new(BrokerTransactionalProducer { inner: producer });
+    let txn_producer = Arc::new(BrokerTransactionalProducer {
+        inner: Arc::new(producer),
+        txn: Mutex::new(None),
+    });
     let offset_store = Arc::new(BrokerOffsetStore::new(offset_client, group_id));
 
     Ok((fetcher, txn_producer, offset_store))
@@ -820,12 +858,19 @@ pub(crate) async fn build_eos(
 #[cfg(test)]
 mod tests {
 
+    use std::sync::Arc;
+
+    use bytes::Bytes;
     use crabka_broker::{Broker, BrokerConfig};
     use crabka_client_core::Client;
+    use crabka_client_producer::Producer;
     use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
+    use tokio::sync::Mutex;
 
-    use super::BrokerOffsetStore;
-    use crate::runtime::io::OffsetStore as _;
+    use super::{BrokerOffsetStore, BrokerTransactionalProducer};
+    use crate::error::StreamsClientError;
+    use crate::runtime::eos::TransactionalProducer as _;
+    use crate::runtime::io::{OffsetStore as _, RecordProducer as _};
 
     async fn boot() -> (crabka_broker::BrokerHandle, String, tempfile::TempDir) {
         let dir = tempfile::TempDir::new().unwrap();
@@ -900,5 +945,64 @@ mod tests {
         // 3. Now reads back Some(42).
         let after = store.committed("ostore-topic", 0).await.unwrap();
         assert_eq!(after, Some(42), "expected committed offset 42 after commit");
+    }
+
+    /// `abort_transaction` must consume the open guard: a second call with no
+    /// intervening `begin_transaction` has to report "no open transaction"
+    /// rather than silently succeeding again, which is what a no-op stub
+    /// (never touching `self.txn` or the broker) would do instead.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn abort_transaction_consumes_the_open_guard() {
+        let (_broker, bootstrap, _dir) = boot().await;
+
+        let admin = Client::builder()
+            .bootstrap(&bootstrap)
+            .client_id("abort-admin")
+            .build()
+            .await
+            .unwrap();
+        create_topic(&admin, "abort-topic", 1).await;
+
+        let inner = Producer::builder()
+            .bootstrap(&bootstrap)
+            .client_id("abort-producer")
+            .transactional_id("abort-txn")
+            .build()
+            .await
+            .unwrap();
+        let txn_producer = BrokerTransactionalProducer {
+            inner: Arc::new(inner),
+            txn: Mutex::new(None),
+        };
+
+        txn_producer
+            .init_transactions()
+            .await
+            .expect("init_transactions");
+        txn_producer
+            .begin_transaction()
+            .await
+            .expect("begin_transaction");
+
+        // A transaction with no partitions added is still `Empty` on the
+        // coordinator, which cannot transition straight to `PrepareAbort` —
+        // send one record so the coordinator sees `AddPartitionsToTxn` and
+        // moves to `Ongoing`, matching what any real transactional producer
+        // does between `begin` and `abort`/`commit`.
+        txn_producer
+            .send("abort-topic", None, None, Some(Bytes::from_static(b"v")))
+            .await
+            .expect("send");
+
+        // First abort succeeds and must consume the open guard.
+        txn_producer.abort_transaction().await.expect("first abort");
+
+        // No transaction is open now, so a second abort must fail rather than
+        // silently succeed again.
+        let err = txn_producer.abort_transaction().await.unwrap_err();
+        assert!(matches!(
+            &err,
+            StreamsClientError::Runtime(msg) if msg.contains("without an open transaction")
+        ));
     }
 }

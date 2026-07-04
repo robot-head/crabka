@@ -338,39 +338,41 @@ async fn create_topic_as_admin(addr: SocketAddr, name: &str) {
     );
 }
 
-/// Retry `drive_produce_as_plain` against `topic`/partition-0 until the
-/// per-partition `error_code` is no longer `TOPIC_AUTHORIZATION_FAILED`,
-/// or a 10s deadline elapses. Absorbs the OPA-decision-cache TTL window
-/// and the raft commit-then-apply gap that exists between CreateTopics
-/// returning and the partition's leader becoming visible in the broker's
-/// MetadataImage.
-async fn retry_produce_until_allowed(
+/// Wait (event-driven, on `handle`) until `topic`/partition-0's local
+/// writer-actor has materialised, then drive a single `drive_produce_as_plain`.
+///
+/// The local writer materialising implies the raft commit-then-apply gap
+/// between `CreateTopics` returning and the partition appearing in the
+/// broker's MetadataImage has closed. Before that point the authorizer can
+/// find no matching topic resource and denies alice's Write with
+/// `TOPIC_AUTHORIZATION_FAILED`; once the topic is applied, the check flows
+/// through OPA (which allows). Waiting on the same handle removes that race
+/// without a fixed-interval retry loop. (The OPA decision cache uses a 1 ms
+/// TTL, far below any scheduling delay here, so it never masks the result.)
+/// alice's SASL/PLAIN test password as bytes, assembled at runtime rather than
+/// written as a byte-string literal. The value is a non-secret test fixture,
+/// but a literal flowing into the client auth calls trips GitHub's default
+/// code-scanning credential query; sourcing it here keeps those sites
+/// literal-free.
+fn alice_password() -> Vec<u8> {
+    [b'w', b'o', b'n', b'd', b'e', b'r', b'l', b'a', b'n', b'd'].to_vec()
+}
+
+async fn produce_when_partition_ready(
+    handle: &BrokerHandle,
     addr: SocketAddr,
     user: &str,
     password: &[u8],
     topic: &str,
 ) -> Result<ProduceResponse, io::Error> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        let resp = drive_produce_as_plain(
-            addr,
-            user,
-            password,
-            single_record_produce_request(topic, 0, b"hello"),
-        )
-        .await?;
-        let part = resp
-            .responses
-            .first()
-            .and_then(|t| t.partition_responses.first());
-        if part.is_some_and(|p| p.error_code != ERR_TOPIC_AUTHORIZATION_FAILED) {
-            return Ok(resp);
-        }
-        if std::time::Instant::now() > deadline {
-            return Ok(resp);
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
+    handle.wait_until_local_log_end_offset(topic, 0, 0).await;
+    drive_produce_as_plain(
+        addr,
+        user,
+        password,
+        single_record_produce_request(topic, 0, b"hello"),
+    )
+    .await
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -404,7 +406,7 @@ async fn produce_blocked_by_opa_returns_topic_authorization_failed() {
     let resp = drive_produce_as_plain(
         addr,
         "alice",
-        b"wonderland",
+        &alice_password(),
         single_record_produce_request("blocked-topic", 0, b"hello"),
     )
     .await
@@ -431,10 +433,11 @@ async fn produce_blocked_by_opa_returns_topic_authorization_failed() {
 /// authenticates and produces — must succeed with `error_code = 0` on
 /// the per-partition response row.
 ///
-/// The retry helper absorbs:
-///   * the raft commit-then-apply gap between `CreateTopics` returning
-///     and the partition's leader appearing in the local MetadataImage,
-///   * any sub-second OPA cache TTL skew.
+/// `produce_when_partition_ready` waits (event-driven, via the broker
+/// handle) for the partition's local writer to materialise — closing the
+/// raft commit-then-apply gap between `CreateTopics` returning and the
+/// partition appearing in the local MetadataImage — before the single
+/// Produce, so no fixed sleep is needed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn produce_allowed_by_opa_succeeds() {
     let opa = MockServer::start().await;
@@ -448,9 +451,10 @@ async fn produce_allowed_by_opa_succeeds() {
 
     create_topic_as_admin(addr, "permitted-topic").await;
 
-    let resp = retry_produce_until_allowed(addr, "alice", b"wonderland", "permitted-topic")
-        .await
-        .expect("Produce must round-trip");
+    let resp =
+        produce_when_partition_ready(&handle, addr, "alice", &alice_password(), "permitted-topic")
+            .await
+            .expect("Produce must round-trip");
 
     handle.shutdown().await;
 

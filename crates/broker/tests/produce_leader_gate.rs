@@ -121,6 +121,10 @@ async fn wait_for_local_replica(broker: &BrokerHandle, topic: &str, partition: i
             Instant::now() <= deadline,
             "broker never materialized a local replica for {topic}/{partition}"
         );
+        // intentional: gates on the LOCAL writer-actor (PartitionRegistry)
+        // being materialized by the supervisor reconcile, which lags the
+        // metadata image. No image-based awaiter observes local-registry
+        // materialization, so an event-driven signal isn't available here.
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
@@ -179,28 +183,20 @@ async fn produce_to_non_leader_is_rejected() {
         .unwrap()
         .topic_id;
 
-    // Wait until node 1's image knows every partition's leader.
-    let deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        let rf3_ok = cluster[0]
-            .0
-            .partition_leader_for_test("gate-rf3", 0)
-            .is_some();
-        let rf1_ok = (0..6).all(|p| {
-            cluster[0]
-                .0
-                .partition_leader_for_test("gate-rf1", p)
-                .is_some()
-        });
-        if rf3_ok && rf1_ok {
-            break;
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "partition leaders didn't converge within 30s"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    // Wait until node 1's image knows every partition's leader. Mirrors the
+    // `partition_leader_for_test(..).is_some()` predicate exactly: partition
+    // present in the image AND its leader field elected (non-zero).
+    cluster[0]
+        .0
+        .wait_for_image(|img| {
+            img.partition("gate-rf3", 0)
+                .is_some_and(|pr| pr.leader != 0)
+                && (0..6).all(|p| {
+                    img.partition("gate-rf1", p)
+                        .is_some_and(|pr| pr.leader != 0)
+                })
+        })
+        .await;
 
     // ───────────────────────────────────────────────────────────────────
     // Case A: rf=3 — Produce to a NON-leader that DOES hold a follower replica.

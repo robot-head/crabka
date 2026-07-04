@@ -557,7 +557,7 @@ fn reconcile(state: &mut ShareGroupState, metadata: &dyn MetadataProvider) {
         .collect();
     let topics = TopicMetadata {
         partitions_per_topic: input.partitions_per_topic.clone(),
-        partition_racks: input.partition_racks.clone(),
+        partition_racks: input.partition_racks,
     };
     let assignment = ShareGroupAssignor.assign(&subscriptions, &topics);
     state.bump_epoch();

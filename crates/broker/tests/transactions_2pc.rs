@@ -162,6 +162,9 @@ async fn enable_2pc_persists_no_timeout_sentinel() {
             std::time::Instant::now() < deadline,
             "DescribeTransactions never returned the tid: {row:?}"
         );
+        // intentional: transaction-coordinator state (persisted txn timeout) is
+        // read via a DescribeTransactions RPC and is not in the metadata image
+        // nor exposed as a metric — bounded RPC-response poll, no awaiter exists.
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
     assert!(

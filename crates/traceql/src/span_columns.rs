@@ -170,10 +170,7 @@ pub fn assign_nested_set(spans: &[InputSpan]) -> Vec<NestedSet> {
     // nor self-parented), so the root-seeded DFS never reaches them and leaves
     // them at {left:0,right:0}, which would collide with real roots. Sweep for
     // any still-unassigned span and seed it as an additional root.
-    for start in 0..spans.len() {
-        if out[start].left != 0 {
-            continue;
-        }
+    while let Some(start) = out.iter().position(|bounds| bounds.left == 0) {
         stack.push(Frame::Enter {
             idx: start,
             // Cycle-orphaned spans become additional roots: same -1 sentinel.

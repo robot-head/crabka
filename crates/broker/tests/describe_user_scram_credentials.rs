@@ -280,17 +280,9 @@ async fn describe_all_users_round_trip() {
         .expect("seed alice ScramCredential");
 
     // Wait for the credential to become visible in the controller image.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    loop {
-        let img = handle.controller_image_for_test();
-        if !img.scram_credentials_for_user("alice").is_empty() {
-            break;
-        }
-        if std::time::Instant::now() > deadline {
-            panic!("alice's SCRAM credential not visible in image after 5s");
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
+    handle
+        .wait_for_image(|img| !img.scram_credentials_for_user("alice").is_empty())
+        .await;
 
     let (top_err, per_user) =
         drive_describe_user_scram_credentials_sasl(addr, "admin", "admin-secret", None).await;

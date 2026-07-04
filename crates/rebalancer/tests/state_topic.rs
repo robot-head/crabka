@@ -34,7 +34,7 @@ async fn drive_loader_until_loaded(state: Arc<LoadedState>, timeout: Duration) {
         if start.elapsed() > timeout {
             panic!("loader did not converge within {timeout:?}");
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
 }
 

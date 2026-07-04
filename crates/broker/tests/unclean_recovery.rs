@@ -42,7 +42,7 @@
 use assert2::assert;
 use std::io;
 use std::net::SocketAddr;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use bytes::{Buf, BufMut, BytesMut};
 use crabka_broker::BrokerHandle;
@@ -200,38 +200,27 @@ async fn drive_elect_leaders(
 // Polling helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Poll until every handle in `handles` sees `(topic, partition)` present.
+/// Wait until `handle` sees `(topic, partition)` present in its metadata image.
 async fn wait_partition_hosted(handle: &BrokerHandle, topic: &str, partition: i32) {
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        if handle.has_partition(topic, partition).await {
-            return;
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "partition {topic}-{partition} never hosted within 15s"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    // Event-driven: `has_partition` reads the committed metadata image, which is
+    // exactly the source `wait_until_partition_present` subscribes to.
+    handle.wait_until_partition_present(topic, partition).await;
 }
 
-/// Poll until `handle` reports `leader` as the leader for `(topic, partition)`.
+/// Wait until `handle`'s metadata image reports `leader` as the leader for
+/// `(topic, partition)`.
 async fn wait_partition_leader(handle: &BrokerHandle, topic: &str, partition: i32, leader: u64) {
-    let deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        if handle.partition_leader_for_test(topic, partition) == Some(leader) {
-            return;
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "partition {topic}-{partition} didn't elect leader={leader} within 30s; current={:?}",
-            handle.partition_leader_for_test(topic, partition)
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    // Event-driven: await the metadata image whose leader == expected (the image
+    // is the same source `partition_leader_for_test` reads; `leader` is non-zero).
+    handle
+        .wait_for_image(|img| {
+            img.partition(topic, partition)
+                .is_some_and(|p| p.leader == leader)
+        })
+        .await;
 }
 
-/// Poll until the ISR for `(topic, partition)` is exactly `expected`.
+/// Wait until the ISR for `(topic, partition)` is exactly `expected`.
 async fn wait_partition_isr_only(
     handle: &BrokerHandle,
     topic: &str,
@@ -239,21 +228,19 @@ async fn wait_partition_isr_only(
     expected: &[u64],
 ) {
     let expected_set: std::collections::HashSet<u64> = expected.iter().copied().collect();
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        if let Some(isr) = handle.partition_isr_for_test(topic, partition) {
-            let actual_set: std::collections::HashSet<u64> = isr.iter().copied().collect();
-            if actual_set == expected_set {
-                return;
-            }
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "ISR for {topic}-{partition} didn't converge to {expected:?} within 15s; current={:?}",
-            handle.partition_isr_for_test(topic, partition)
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    // Event-driven: await the metadata image whose ISR set matches `expected`
+    // exactly (length-only `wait_until_isr_len` is too weak for a set assertion).
+    handle
+        .wait_for_image(|img| {
+            img.partition(topic, partition).is_some_and(|p| {
+                p.isr
+                    .iter()
+                    .copied()
+                    .collect::<std::collections::HashSet<u64>>()
+                    == expected_set
+            })
+        })
+        .await;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -286,19 +273,12 @@ async fn unclean_recovery_elects_longest_log_replica() {
     wait_partition_hosted(h2, topic, 0).await;
     wait_partition_hosted(h3, topic, 0).await;
 
-    let pr_before = {
-        let deadline = Instant::now() + Duration::from_secs(15);
-        loop {
-            if let Some(pr) = h1.partition_record_for_test(topic, 0) {
-                break pr;
-            }
-            assert!(
-                Instant::now() <= deadline,
-                "partition record never appeared within 15s"
-            );
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    };
+    // Event-driven: await the partition's presence in the image, then read the
+    // record the loop captured (h1 already saw it via `wait_partition_hosted`).
+    h1.wait_until_partition_present(topic, 0).await;
+    let pr_before = h1
+        .partition_record_for_test(topic, 0)
+        .expect("partition record present after wait_until_partition_present");
     eprintln!("partition before divergence: {pr_before:?}");
     assert!(
         pr_before.replicas == vec![1, 2, 3],
@@ -345,6 +325,9 @@ async fn unclean_recovery_elects_longest_log_replica() {
     wait_partition_isr_only(h1, topic, 0, &[99]).await;
     // Give the supervisors a beat to observe the leader change and tear down
     // any in-flight replication fetchers before we diverge the logs.
+    // intentional: fetcher teardown is a background reconcile action with no
+    // metadata-image or metric signal to await; the barrier keeps the direct
+    // appends deterministic.
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // ── Force the surviving replicas' local logs to DIVERGE deterministically.
@@ -375,21 +358,15 @@ async fn unclean_recovery_elects_longest_log_replica() {
 
     // ── ElectLeaders(UNCLEAN) must reach the raft leader, the only node that
     //    runs the URM and has authoritative liveness state. Discover it. ──
+    // Event-driven: await a non-zero elected controller leader (same watch channel
+    // `controller_leader_id` reads), then resolve its listen address.
     let elect_addr = {
-        let deadline = Instant::now() + Duration::from_secs(15);
-        loop {
-            let lid = h1.controller_leader_id().await;
-            if let Some(l) = lid
-                && let Some(pos) = cluster.iter().position(|(_, cfg, _)| cfg.node_id == l)
-            {
-                break cluster[pos].1.listen_addr;
-            }
-            assert!(
-                Instant::now() <= deadline,
-                "raft leader not stable within 15s"
-            );
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        let leader = h1.wait_until_controller_leader().await;
+        let pos = cluster
+            .iter()
+            .position(|(_, cfg, _)| cfg.node_id == leader)
+            .expect("elected raft leader must be one of the cluster nodes");
+        cluster[pos].1.listen_addr
     };
     eprintln!("sending ElectLeaders UNCLEAN to raft leader at {elect_addr}");
 

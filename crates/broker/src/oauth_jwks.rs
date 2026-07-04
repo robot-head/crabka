@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
 use crabka_security::{Jwks, JwksHandle};
+use qubit_clock::sleep::AsyncSleeper;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -93,11 +94,17 @@ pub(crate) struct JwksRefresher {
     /// Default false (filter out `use=enc`). Threads to
     /// [`Jwks::from_json`].
     pub ignore_key_use: bool,
+    /// Relative sleeper driving the periodic refresh cadence. Production uses
+    /// [`qubit_clock::sleep::SystemSleeper`] (real time); tests inject a
+    /// [`qubit_clock::sleep::MockSleeper`] so the refresh interval fires on a
+    /// controlled mock timeline instead of wall-clock time.
+    pub sleeper: Arc<dyn AsyncSleeper>,
 }
 
 impl JwksRefresher {
     /// Run until cancelled. The first periodic fetch fires immediately (a
-    /// `tokio::interval` ticks at t=0), so keys are available shortly after
+    /// zero-duration first sleep on the injected [`AsyncSleeper`] reproduces
+    /// `tokio::time::interval`'s t=0 tick), so keys are available shortly after
     /// startup; a failed fetch logs a warning and leaves the previous key set
     /// in place — a transient identity-provider outage never crashes the broker.
     /// On-demand refresh signals from validators race with the
@@ -131,13 +138,25 @@ impl JwksRefresher {
                 return;
             }
         };
-        let mut tick = tokio::time::interval(self.interval);
-        // Skip missed ticks rather than firing a burst after a slow fetch.
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // Drive the periodic refresh cadence through the injected `AsyncSleeper`
+        // (production: real time; tests: a controlled mock timeline). A
+        // zero-duration first sleep reproduces `tokio::time::interval`'s t=0
+        // tick, so the first fetch fires immediately and keys are available
+        // shortly after startup. Each subsequent sleep is re-armed to
+        // `self.interval` only after the fetch completes, so a slow fetch never
+        // triggers a catch-up burst — this preserves the never-burst intent of
+        // the original `MissedTickBehavior::Skip` (re-arm-after-work aligns the
+        // next tick to `Delay` rather than `Skip`, but neither ever bursts, and
+        // a JWKS fetch is far shorter than the multi-minute refresh interval).
+        // The sleeper is cloned into a local so the tick future borrows it
+        // rather than `self`, leaving `self` free for the arms below.
+        let sleeper = self.sleeper.clone();
+        let mut tick = sleeper.sleep_for_async(Duration::ZERO);
         loop {
             tokio::select! {
-                _ = tick.tick() => {
+                () = &mut tick => {
                     self.refresh_and_swap(&client).await;
+                    tick = sleeper.sleep_for_async(self.interval);
                 }
                 // On-demand refresh triggered by validator
                 // signal. Subject to `min_on_demand_pause` rate-limit.
@@ -209,7 +228,21 @@ fn current_epoch_ms() -> i64 {
 mod tests {
     use super::*;
     use assert2::{assert, check};
+    use qubit_clock::MockWaiterKind;
+    use qubit_clock::sleep::{MockSleeper, SystemSleeper};
     use std::net::SocketAddr;
+
+    /// Yield-poll until `cond` holds, with a bounded hang-guard so a genuine
+    /// stall fails the test deterministically instead of spinning forever.
+    async fn await_until(what: &str, mut cond: impl FnMut() -> bool) {
+        for _ in 0..200_000 {
+            if cond() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("condition never held: {what}");
+    }
 
     /// Serve a fixed body at `/jwks` on an ephemeral port; returns the bound
     /// address and a shutdown token for the server task.
@@ -242,6 +275,7 @@ mod tests {
         interval: Duration,
         shutdown: CancellationToken,
         tls_trust: Option<PathBuf>,
+        sleeper: Arc<dyn AsyncSleeper>,
     ) -> JwksRefresher {
         let (_tx, rx) = mpsc::channel::<()>(1);
         JwksRefresher {
@@ -255,6 +289,7 @@ mod tests {
             last_successful_fetch_ms: Arc::new(AtomicI64::new(0)),
             last_on_demand_refresh_ms: Arc::new(AtomicI64::new(0)),
             ignore_key_use: false,
+            sleeper,
         }
     }
 
@@ -292,16 +327,15 @@ mod tests {
             Duration::from_millis(50),
             shutdown.clone(),
             None,
+            Arc::new(SystemSleeper::new()),
         );
         let task = tokio::spawn(refresher.run());
 
         // Poll until the immediate first fetch lands.
-        for _ in 0..100 {
-            if !handle.load().is_empty() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        await_until("first JWKS fetch populates handle", || {
+            !handle.load().is_empty()
+        })
+        .await;
         assert!(handle.load().len() == 1);
 
         shutdown.cancel();
@@ -398,14 +432,13 @@ mod tests {
             Duration::from_millis(50),
             shutdown.clone(),
             Some(ca_path),
+            Arc::new(SystemSleeper::new()),
         );
         let task = tokio::spawn(refresher.run());
-        for _ in 0..100 {
-            if !handle.load().is_empty() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        await_until("first HTTPS JWKS fetch populates handle", || {
+            !handle.load().is_empty()
+        })
+        .await;
         assert!(handle.load().len() == 1);
         shutdown.cancel();
         task.await.unwrap();
@@ -414,8 +447,13 @@ mod tests {
 
     #[tokio::test]
     async fn refresher_https_fetch_fails_when_custom_trust_doesnt_match_server_cert() {
-        // Server presents cert A; trust bundle is an unrelated cert B.
-        // Handle stays empty because every refresh fails verification.
+        // Server presents cert A; trust bundle is an unrelated cert B. Every
+        // refresh fails TLS verification, so the handle must never populate.
+        //
+        // Driven on a mock timeline instead of a wall-clock sleep: the first
+        // fetch fires immediately (t=0 tick), then the loop parks on the
+        // refresh-interval sleep. Advancing the timeline fires each subsequent
+        // fetch deterministically — exact and instant, with no flaky timing.
         let (addr, srv_shutdown, _server_cert_path) = serve_jwks_https(JWKS_BODY).await;
 
         let dir = tempfile::tempdir().unwrap();
@@ -427,20 +465,43 @@ mod tests {
 
         let handle = JwksHandle::default();
         let shutdown = CancellationToken::new();
+        let interval = Duration::from_millis(50);
+        let sleeper = MockSleeper::new();
+        let timeline = sleeper.timeline();
         let refresher = test_refresher(
             format!("https://127.0.0.1:{}/jwks", addr.port()),
             handle.clone(),
-            Duration::from_millis(50),
+            interval,
             shutdown.clone(),
             Some(bogus_ca),
+            Arc::new(sleeper),
         );
         let task = tokio::spawn(refresher.run());
-        // Give the refresher time for several ticks; each should fail.
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        assert!(
-            handle.load().is_empty(),
-            "fetch should fail verification and leave handle empty",
-        );
+
+        // Drive several refresh intervals. Before each advance, block (bounded
+        // real time, hang-guard only) until the loop has parked on the interval
+        // sleep — this confirms the prior fetch attempt completed — then assert
+        // the failing fetch left the handle empty. `wait_for_blocked_waiters`
+        // runs on a blocking thread so it never stalls the current-thread
+        // runtime that must drive the refresher's HTTPS attempt.
+        for _ in 0..3 {
+            let tl = timeline.clone();
+            let parked = tokio::task::spawn_blocking(move || {
+                tl.wait_for_blocked_waiters(MockWaiterKind::Sleep, 1, Duration::from_secs(5))
+            })
+            .await
+            .unwrap();
+            assert!(
+                parked,
+                "refresher should park on the interval sleep between fetches",
+            );
+            assert!(
+                handle.load().is_empty(),
+                "fetch should fail verification and leave handle empty",
+            );
+            timeline.advance(interval);
+        }
+
         shutdown.cancel();
         task.await.unwrap();
         srv_shutdown.cancel();
@@ -518,6 +579,7 @@ mod tests {
             last_successful_fetch_ms: last_successful.clone(),
             last_on_demand_refresh_ms: last_on_demand.clone(),
             ignore_key_use: false,
+            sleeper: Arc::new(SystemSleeper::new()),
         };
         (
             refresher,
@@ -539,14 +601,13 @@ mod tests {
 
         // Drive at least one signal refresh.
         signal_tx.send(()).await.unwrap();
-        // Poll until the on-demand timestamp moves or until the handle has been
+        // Poll until the on-demand timestamp moves and the handle has been
         // populated by the on-demand fetch.
-        for _ in 0..100 {
-            if last_on_demand.load(Ordering::Relaxed) > 0 && !handle.load().is_empty() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        await_until(
+            "on-demand fetch advances timestamp and populates handle",
+            || last_on_demand.load(Ordering::Relaxed) > 0 && !handle.load().is_empty(),
+        )
+        .await;
         check!(
             last_on_demand.load(Ordering::Relaxed) > 0,
             "on-demand timestamp should have advanced past sentinel 0",
@@ -621,12 +682,11 @@ mod tests {
 
         assert!(last_successful.load(Ordering::Relaxed) == 0);
         signal_tx.send(()).await.unwrap();
-        for _ in 0..100 {
-            if last_successful.load(Ordering::Relaxed) > 0 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        await_until(
+            "successful fetch advances last_successful timestamp",
+            || last_successful.load(Ordering::Relaxed) > 0,
+        )
+        .await;
         assert!(
             last_successful.load(Ordering::Relaxed) > 0,
             "last_successful_fetch_ms must advance after a successful fetch",
@@ -664,13 +724,13 @@ mod tests {
         let task = tokio::spawn(refresher.run());
 
         signal_tx.send(()).await.unwrap();
-        // Wait long enough for the refresh attempt to complete & log.
-        for _ in 0..50 {
-            if last_on_demand.load(Ordering::Relaxed) > 0 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        // Wait for the failed refresh attempt to complete & log; the on-demand
+        // rate-limit timestamp advances even when the fetch itself fails.
+        await_until(
+            "failed on-demand fetch still advances rate-limit timestamp",
+            || last_on_demand.load(Ordering::Relaxed) > 0,
+        )
+        .await;
         // On-demand timestamp advances regardless (rate-limit accounting);
         // success timestamp must stay at 0.
         assert!(
@@ -702,12 +762,10 @@ mod tests {
         let task = tokio::spawn(refresher.run());
 
         signal_tx.send(()).await.unwrap();
-        for _ in 0..100 {
-            if !handle.load().is_empty() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        await_until("on-demand fetch installs the use=enc key", || {
+            !handle.load().is_empty()
+        })
+        .await;
         assert!(
             handle.load().len() == 1,
             "ignore_key_use=true must keep the use=enc key in the installed set"

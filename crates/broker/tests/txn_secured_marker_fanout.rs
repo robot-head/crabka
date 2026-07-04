@@ -180,19 +180,11 @@ async fn start_two_sasl() -> Result<Vec<(BrokerHandle, BrokerConfig, TempDir)>, 
         .map_err(|e| BrokerError::Startup(format!("broker1 task panicked: {e}")))??;
 
     // Block until the static set converges on a 2-voter quorum.
-    let deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        if broker0.voter_count_for_test() >= 2 || broker1.voter_count_for_test() >= 2 {
-            break;
-        }
-        if Instant::now() > deadline {
-            return Err(BrokerError::Startup(format!(
-                "static cluster did not reach 2 voters within 30s (have {})",
-                broker0.voter_count_for_test()
-            )));
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    // `voter_count_for_test` reads the committed metadata image's voter set, so
+    // `wait_for_image` observes the same convergence event-driven (image watch
+    // channel) rather than polling on a fixed cadence. Both nodes are static
+    // voters, so broker0's image reflects the full set once the quorum forms.
+    broker0.wait_for_image(|img| img.voters().len() >= 2).await;
 
     Ok(vec![(broker0, cfg0, dir0), (broker1, cfg1, dir1)])
 }
@@ -207,6 +199,9 @@ async fn start_two_sasl_with_retry() -> Vec<(BrokerHandle, BrokerConfig, TempDir
             Err(e) => {
                 tracing::warn!(attempt, error = %e, "SASL cluster boot failed; retrying");
                 last = Some(e);
+                // intentional: backoff before re-booting the whole cluster after
+                // a failed boot attempt (lets stray raft timings settle) — not a
+                // wait on any observable crabka broker/image/metric state.
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
         }
@@ -217,61 +212,46 @@ async fn start_two_sasl_with_retry() -> Vec<(BrokerHandle, BrokerConfig, TempDir
 /// Wait until every broker's metadata image lists both peers, so `CreateTopics`
 /// round-robins partition leadership across the two brokers.
 async fn wait_both_registered(cluster: &[(BrokerHandle, BrokerConfig, TempDir)]) {
-    let deadline = Instant::now() + Duration::from_mins(1);
-    loop {
-        let mut all = true;
-        for (h, _, _) in cluster {
-            if h.broker_count().await < 2 {
-                all = false;
-                break;
-            }
-        }
-        if all {
-            return;
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "brokers didn't converge on a 2-broker view within 60s"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+    // Each broker's `broker_count` reads its committed metadata image;
+    // `wait_until_brokers_registered` observes that same `img.brokers().count()`
+    // via the image watch channel, so wait per-broker instead of polling.
+    for (h, _, _) in cluster {
+        h.wait_until_brokers_registered(2).await;
     }
 }
 
-/// Resolve `TOPIC`'s partition → leader-node map via Metadata, retrying until
-/// both partitions report a real leader (`leader_id >= 0`).
-async fn partition_leaders(client: &Client) -> Vec<(i32, i32)> {
-    let deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        let resp = client
-            .send(MetadataRequest {
-                topics: Some(vec![MetadataRequestTopic {
-                    name: Some(TOPIC.to_string()),
-                    ..Default::default()
-                }]),
+/// Resolve `TOPIC`'s partition → leader-node map via Metadata, once both
+/// partitions have an elected leader in `handle`'s metadata image — the same
+/// image the admin client (connected to that broker) is served Metadata from.
+async fn partition_leaders(client: &Client, handle: &BrokerHandle) -> Vec<(i32, i32)> {
+    // A non-zero `leader` in the image is exactly the wire condition the old
+    // loop polled for (`leader_id >= 0`); await both partitions' elections
+    // event-driven via the image watch channel, then take one Metadata snapshot.
+    handle
+        .wait_for_image(|img| {
+            (0..2).all(|p| img.partition(TOPIC, p).is_some_and(|pr| pr.leader != 0))
+        })
+        .await;
+    let resp = client
+        .send(MetadataRequest {
+            topics: Some(vec![MetadataRequestTopic {
+                name: Some(TOPIC.to_string()),
                 ..Default::default()
-            })
-            .await
-            .expect("metadata");
-        if let Some(topic) = resp
-            .topics
-            .iter()
-            .find(|t| t.name.as_deref() == Some(TOPIC))
-        {
-            let leaders: Vec<(i32, i32)> = topic
-                .partitions
-                .iter()
-                .map(|p| (p.partition_index, p.leader_id))
-                .collect();
-            if leaders.len() == 2 && leaders.iter().all(|&(_, l)| l >= 0) {
-                return leaders;
-            }
-        }
-        assert!(
-            Instant::now() < deadline,
-            "topic leaders not assigned within 30s"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+            }]),
+            ..Default::default()
+        })
+        .await
+        .expect("metadata");
+    let topic = resp
+        .topics
+        .iter()
+        .find(|t| t.name.as_deref() == Some(TOPIC))
+        .expect("topic present in metadata after leader election");
+    topic
+        .partitions
+        .iter()
+        .map(|p| (p.partition_index, p.leader_id))
+        .collect()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -304,7 +284,7 @@ async fn end_txn_marker_fanout_to_remote_leader_over_sasl() {
         cr.topics[0].error_code
     );
 
-    let leaders = partition_leaders(&admin).await;
+    let leaders = partition_leaders(&admin, &cluster[0].0).await;
     let distinct: std::collections::BTreeSet<i32> = leaders.iter().map(|&(_, l)| l).collect();
     assert!(
         distinct.len() == 2,
@@ -341,7 +321,7 @@ async fn end_txn_marker_fanout_to_remote_leader_over_sasl() {
             Instant::now() <= fc_deadline,
             "txn coordinator never became available: {fc:?}"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     };
 
     // Pick the partition led by the broker that is NOT the coordinator, so

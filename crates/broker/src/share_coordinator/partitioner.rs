@@ -4,52 +4,7 @@
 //! `__transaction_state` so a share key resolves to the same
 //! `__share_group_state` partition on Crabka as on Apache Kafka.
 
-// `murmur2` is exercised by `partition_for_share_key`; the constants and the
-// helper keep share-state partition routing byte-compatible with Kafka.
-
-const SEED: u32 = 0x9747_b28c;
-const M: u32 = 0x5bd1_e995;
-const R: u32 = 24;
-
-// Intentional truncation: murmur2 operates on the low 32 bits of the
-// length, matching the JVM int-cast semantics.
-#[allow(clippy::cast_possible_truncation)]
-fn murmur2(data: &[u8]) -> u32 {
-    let length = data.len();
-    let mut h: u32 = SEED ^ (length as u32);
-    let chunks = data.chunks_exact(4);
-    let rem = chunks.remainder();
-    for chunk in chunks {
-        let mut k = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-        k = k.wrapping_mul(M);
-        k ^= k >> R;
-        k = k.wrapping_mul(M);
-        h = h.wrapping_mul(M);
-        h ^= k;
-    }
-    match rem.len() {
-        3 => {
-            h ^= u32::from(rem[2]) << 16;
-            h ^= u32::from(rem[1]) << 8;
-            h ^= u32::from(rem[0]);
-            h = h.wrapping_mul(M);
-        }
-        2 => {
-            h ^= u32::from(rem[1]) << 8;
-            h ^= u32::from(rem[0]);
-            h = h.wrapping_mul(M);
-        }
-        1 => {
-            h ^= u32::from(rem[0]);
-            h = h.wrapping_mul(M);
-        }
-        _ => {}
-    }
-    h ^= h >> 13;
-    h = h.wrapping_mul(M);
-    h ^= h >> 15;
-    h
-}
+use crate::kafka_hash::murmur2_partition;
 
 /// Map a share-coordinator key `(group_id, topic_id, partition)` to a
 /// partition index in `__share_group_state`. Builds Kafka's key string
@@ -63,9 +18,7 @@ pub fn partition_for_share_key(
     num: i32,
 ) -> i32 {
     let key = format!("{group_id}:{topic_id}:{partition}");
-    let h = murmur2(key.as_bytes()).cast_signed();
-    let abs = if h == i32::MIN { 0 } else { h.abs() };
-    abs % num
+    murmur2_partition(key.as_bytes(), num)
 }
 
 #[cfg(test)]

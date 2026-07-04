@@ -67,7 +67,7 @@ pub fn load_bootstrap_records(log_dir: &Path) -> Result<Vec<MetadataRecord>, Bro
     while !cur.is_empty() {
         if cur.len() < 4 {
             return Err(BrokerError::BootstrapFile {
-                path: path.clone(),
+                path,
                 source: "truncated length prefix".into(),
             });
         }
@@ -75,7 +75,7 @@ pub fn load_bootstrap_records(log_dir: &Path) -> Result<Vec<MetadataRecord>, Bro
         cur = &cur[4..];
         if cur.len() < len {
             return Err(BrokerError::BootstrapFile {
-                path: path.clone(),
+                path,
                 source: "truncated record body".into(),
             });
         }

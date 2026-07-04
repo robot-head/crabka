@@ -85,6 +85,12 @@ async fn fetch_snapshot_serves_metadata_snapshot() {
             "snapshot not served within 30s; last partition error_code={}",
             part.error_code
         );
+        // intentional: snapshot production/installation completes
+        // asynchronously in raft and has no metadata-image or metric signal
+        // (the image was already non-empty after CreateTopics, so it does not
+        // change when the snapshot is written). The only observable is the
+        // FetchSnapshot RPC response state, so we poll it under a bounded
+        // deadline.
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 

@@ -87,7 +87,7 @@ async fn boot_with_ongoing_txn(
         .await
         .unwrap();
     producer.init_transactions().await.unwrap();
-    producer.begin_transaction().await.unwrap();
+    let _ = producer.begin_transaction().await.unwrap();
     // `send` enqueues into the producer's local batch; without
     // `flush()` the AddPartitionsToTxn round-trip that registers
     // `(topic, partition)` on the coordinator's TxnEntry may not run
@@ -122,6 +122,9 @@ async fn list_transactions_returns_ongoing_txn() {
         if std::time::Instant::now() > deadline {
             panic!("ListTransactions never saw the ongoing txn: {r:?}");
         }
+        // intentional: polls RPC response until the txn is visible as Ongoing
+        // (coordinator TxnEntry state after AddPartitionsToTxn); no
+        // metadata-image signal for this
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
 
@@ -217,6 +220,9 @@ async fn describe_transactions_returns_full_state_for_known_tid() {
         if std::time::Instant::now() > deadline {
             panic!("Ongoing txn never showed its partitions: {row:?}");
         }
+        // intentional: polls RPC response until the txn shows its registered
+        // partitions (coordinator TxnEntry state after AddPartitionsToTxn); no
+        // metadata-image signal for this
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
 

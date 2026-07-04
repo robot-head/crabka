@@ -427,6 +427,22 @@ mod bootstrap_failover_tests {
         }
     }
 
+    /// Bounded poll: wait until `addr` refuses connections, i.e. a stopped
+    /// `MockBroker`'s listener (and its per-connection handlers, which share
+    /// the same cancelled token) have actually torn down. This replaces a
+    /// fixed post-`stop()` settle: the sleep was only waiting for that socket
+    /// teardown, so we poll the teardown directly and then run the unchanged
+    /// failover assertion. The timeout is a hang-guard.
+    async fn wait_for_listener_closed(addr: std::net::SocketAddr) {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while tokio::net::TcpStream::connect(addr).await.is_ok() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("broker listener must close after stop()");
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn refresh_metadata_fails_over_when_bootstrap_broker_dies() {
         // Two bootstrap brokers. The client pins its bootstrap connection to the
@@ -451,9 +467,11 @@ mod bootstrap_failover_tests {
             .await
             .expect("first refresh succeeds via A");
 
-        // Broker A is killed.
+        // Broker A is killed. Poll until its listener is actually gone so the
+        // pinned bootstrap connection is torn down before the failover refresh.
+        let a_addr = a.addr;
         a.stop();
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        wait_for_listener_closed(a_addr).await;
 
         // The next refresh must transparently fail over to the live broker B,
         // not hang/error on the dead A socket.
@@ -481,8 +499,9 @@ mod bootstrap_failover_tests {
             .await
             .expect("first send succeeds via A");
 
+        let a_addr = a.addr;
         a.stop();
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        wait_for_listener_closed(a_addr).await;
         client.reconnect_bootstrap().await;
 
         let md = client
@@ -514,8 +533,9 @@ mod bootstrap_failover_tests {
             .refresh_metadata()
             .await
             .expect("first metadata refresh learns broker 1 at A");
+        let a_addr = a.addr;
         a.stop();
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        wait_for_listener_closed(a_addr).await;
 
         let md = client
             .broker(1)

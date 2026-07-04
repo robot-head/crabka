@@ -1228,6 +1228,18 @@ mod tests {
     use super::*;
     use assert2::{assert, check};
 
+    /// Yield-poll until `cond` holds, with a bounded hang-guard so a genuine
+    /// stall fails the test deterministically instead of spinning forever.
+    async fn await_until(what: &str, mut cond: impl FnMut() -> bool) {
+        for _ in 0..200_000 {
+            if cond() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("condition never held: {what}");
+    }
+
     #[test]
     fn group_type_has_share_variant() {
         // KIP-932: a third locked group type alongside Classic and NextGen.
@@ -1711,13 +1723,11 @@ mod tests {
         coord.shutdown_all().await;
 
         // The ack can arrive a scheduler tick before the actor task exits
-        // and drops its receiver — poll briefly instead of racing it.
-        for _ in 0..200 {
-            if group.tx.is_closed() && share.tx.is_closed() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
+        // and drops its receiver — poll instead of racing it.
+        await_until("group and share actor channels closed", || {
+            group.tx.is_closed() && share.tx.is_closed()
+        })
+        .await;
         assert!(group.tx.is_closed());
         assert!(share.tx.is_closed());
     }

@@ -1993,6 +1993,7 @@ dependencies = [
  "crabka-log",
  "crabka-protocol",
  "mutants",
+ "qubit-clock",
  "ring",
  "serde",
  "serde_json",
@@ -2114,6 +2115,7 @@ dependencies = [
  "prometheus-client",
  "proptest",
  "prost 0.14.4",
+ "qubit-clock",
  "rcgen",
  "regex",
  "reqwest 0.13.4",
@@ -2344,6 +2346,7 @@ dependencies = [
  "bytes",
  "crabka-connect-derive",
  "crabka-schema-serde",
+ "qubit-clock",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -3070,6 +3073,7 @@ dependencies = [
  "crabka-logfmt",
  "crabka-security",
  "mutants",
+ "qubit-clock",
  "regex",
  "rustls",
  "serde",
@@ -3218,6 +3222,7 @@ version = "0.3.8"
 dependencies = [
  "assert2",
  "proptest",
+ "qubit-clock",
  "stateright",
 ]
 
@@ -5047,7 +5052,7 @@ dependencies = [
  "libc",
  "log",
  "rustversion",
- "windows-link 0.1.3",
+ "windows-link 0.2.1",
  "windows-result 0.4.1",
 ]
 
@@ -9032,6 +9037,18 @@ name = "quad-rand"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5a651516ddc9168ebd67b24afd085a718be02f8858fe406591b013d101ce2f40"
+
+[[package]]
+name = "qubit-clock"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "78fd5f61da2a970d1b637134429f107f7a8d119227ad31e5f3c9b8cc5ef7df08"
+dependencies = [
+ "chrono",
+ "chrono-tz",
+ "parking_lot",
+ "tokio",
+]
 
 [[package]]
 name = "quick-error"

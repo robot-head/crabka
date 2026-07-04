@@ -129,12 +129,7 @@ async fn create_topic(broker: &BrokerHandle, client: &Client, topic: &str, parti
         resp.topics[0].error_code == 0,
         "topic create failed: {resp:?}"
     );
-    for _ in 0..200 {
-        if broker.has_partition(topic, 0).await {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    broker.wait_until_partition_present(topic, 0).await;
     assert!(broker.has_partition(topic, 0).await, "partition never led");
 }
 
@@ -241,6 +236,9 @@ async fn join_and_converge(
         if active_partition_count(&resp) >= want_active {
             break;
         }
+        // intentional: streams-group task assignment is coordinator-local state,
+        // not in the metadata image and exposed by no metric — bounded backoff
+        // between heartbeat RPCs is the only way to observe convergence.
         tokio::time::sleep(Duration::from_millis(200)).await;
         let active = resp.active_tasks.clone().map(|v| {
             v.into_iter()

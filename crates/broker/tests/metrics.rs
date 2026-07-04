@@ -19,6 +19,7 @@ use std::time::Duration;
 
 use bytes::{Buf, BufMut, BytesMut};
 use crabka_broker::config::ListenerSpec;
+use crabka_broker::metrics::PartitionLabel;
 use crabka_broker::{Broker, BrokerConfig};
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
 use crabka_protocol::owned::create_topics_response::CreateTopicsResponse;
@@ -222,14 +223,18 @@ async fn metrics_endpoint_serves_openmetrics_and_counters_tick() {
     // Drive a CreateTopics + Produce + Fetch so the topic-labelled
     // counters get at least one entry and start emitting series.
     create_topic(kafka_addr).await;
-    // Wait briefly for the partition writer to be ready.
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Wait for the partition to materialize in the metadata image (the
+    // partition writer is ready on commit) instead of guessing a duration.
+    handle.wait_until_partition_present(TOPIC, 0).await;
     produce_one(kafka_addr).await;
     fetch_one(kafka_addr).await;
 
-    // Allow the gauge updater (1s tick) to set partitions_led at
-    // least once.
-    tokio::time::sleep(Duration::from_millis(1200)).await;
+    // Wait for the background gauge sampler (1s tick) to publish
+    // partitions_led rather than sleeping past one tick. active_controller
+    // is set in the same sampler iteration, so it is live once this holds.
+    handle
+        .wait_for_metrics("partitions_led >= 1", |m| m.partitions_led.get() >= 1)
+        .await;
 
     let body = scrape(metrics_addr).await;
     for needle in [
@@ -316,12 +321,24 @@ async fn partition_level_metrics_and_disk_gauge_render() {
     // Create the topic + produce a record so the per-partition
     // counters fire and the on-disk segment exists for the scanner.
     create_topic(kafka_addr).await;
-    // Wait briefly for the partition writer to be ready.
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Wait for the partition to materialize (writer ready on commit)
+    // instead of guessing a duration.
+    handle.wait_until_partition_present(TOPIC, 0).await;
     produce_one(kafka_addr).await;
 
-    // Wait for the disk scanner to tick at least once (configured 1s).
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    // Wait for the disk scanner to publish a non-zero on-disk size for the
+    // materialized partition rather than sleeping past its 1s tick.
+    handle
+        .wait_for_metrics("partition_disk_bytes > 0", |m| {
+            m.partition_disk_bytes
+                .get_or_create(&PartitionLabel {
+                    topic: TOPIC.to_string(),
+                    partition: 0,
+                })
+                .get()
+                > 0
+        })
+        .await;
 
     let body = scrape(metrics_addr).await;
 

@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use qubit_clock::sleep::AsyncSleeper;
 use tokio::sync::mpsc;
-use tokio::time::{Instant, MissedTickBehavior};
 
 use crate::chain::ChainState;
 use crate::checkpoint::Checkpoint;
@@ -81,6 +81,11 @@ pub struct AuditWriterParams {
     pub stats: Arc<AuditStats>,
     /// How often to attempt draining the spool while in spool mode.
     pub replay_every: Duration,
+    /// Relative sleeper driving the checkpoint/replay cadence. Production uses
+    /// [`qubit_clock::sleep::SystemSleeper`]; tests inject a
+    /// [`qubit_clock::sleep::MockSleeper`] so the two tickers fire on a
+    /// controlled mock timeline instead of real wall-clock time.
+    pub sleeper: Arc<dyn AsyncSleeper>,
 }
 
 /// Background task: chains + writes audit events, spooling on sink failure and
@@ -98,6 +103,7 @@ pub struct AuditWriter {
     spooling: bool,
     stats: Arc<AuditStats>,
     replay_every: Duration,
+    sleeper: Arc<dyn AsyncSleeper>,
 }
 
 impl AuditWriter {
@@ -120,6 +126,7 @@ impl AuditWriter {
             spooling,
             stats: params.stats,
             replay_every: params.replay_every,
+            sleeper: params.sleeper,
         }
     }
 
@@ -131,14 +138,16 @@ impl AuditWriter {
         fields(checkpoint_every_n = self.checkpoint_every_n, spooling = self.spooling)
     )]
     pub async fn run(mut self) {
-        let mut ckpt = tokio::time::interval_at(
-            Instant::now() + self.checkpoint_every,
-            self.checkpoint_every,
-        );
-        ckpt.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        let mut replay =
-            tokio::time::interval_at(Instant::now() + self.replay_every, self.replay_every);
-        replay.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        // Drive the checkpoint and replay cadence through the injected
+        // `AsyncSleeper` (production: real time; tests: a mock timeline). Each
+        // ticker is a single sleep future re-armed only after it fires, which
+        // matches `tokio::time::interval` with `MissedTickBehavior::Delay`: a
+        // steady stream of events never resets or starves either tick. The
+        // sleeper is cloned into a local so the futures borrow it rather than
+        // `self`, leaving `self` free for the `&mut self` handlers below.
+        let sleeper = self.sleeper.clone();
+        let mut ckpt = sleeper.sleep_for_async(self.checkpoint_every);
+        let mut replay = sleeper.sleep_for_async(self.replay_every);
 
         loop {
             tokio::select! {
@@ -155,15 +164,17 @@ impl AuditWriter {
                         None => break,
                     }
                 }
-                _ = ckpt.tick() => {
+                () = &mut ckpt => {
                     if self.since_checkpoint > 0 {
                         self.emit_checkpoint().await;
                     }
+                    ckpt = sleeper.sleep_for_async(self.checkpoint_every);
                 }
-                _ = replay.tick() => {
+                () = &mut replay => {
                     if self.spooling {
                         self.try_replay().await;
                     }
+                    replay = sleeper.sleep_for_async(self.replay_every);
                 }
             }
         }
@@ -313,6 +324,8 @@ mod tests {
     use std::time::Duration;
 
     use assert2::check;
+    use qubit_clock::MockTimeline;
+    use qubit_clock::sleep::MockSleeper;
 
     use super::*;
     use crate::checkpoint::Checkpoint;
@@ -407,6 +420,10 @@ mod tests {
         }
     }
 
+    /// Replay ticker cadence used by the test params. Tests advance the mock
+    /// timeline by this amount to fire the replay ticker exactly once.
+    const REPLAY_EVERY: Duration = Duration::from_millis(20);
+
     fn params(sink: Arc<dyn AuditSink>, spool: Spool, stats: Arc<AuditStats>) -> AuditWriterParams {
         AuditWriterParams {
             sink,
@@ -417,8 +434,42 @@ mod tests {
             chain: crate::chain::ChainState::new(),
             spool: Some(spool),
             stats,
-            replay_every: Duration::from_millis(20),
+            replay_every: REPLAY_EVERY,
+            // A dormant mock sleeper: its checkpoint/replay tickers only fire
+            // when a test advances the shared timeline, so tests that don't
+            // exercise the tickers stay quiet and deterministic.
+            sleeper: Arc::new(MockSleeper::new()),
         }
+    }
+
+    /// Like [`params`], but returns the mock [`MockTimeline`] backing the
+    /// checkpoint/replay tickers so a test can fire them deterministically with
+    /// `timeline.advance(replay_every)` instead of sleeping for real time.
+    fn params_with_timeline(
+        sink: Arc<dyn AuditSink>,
+        spool: Spool,
+        stats: Arc<AuditStats>,
+    ) -> (AuditWriterParams, MockTimeline) {
+        let sleeper = MockSleeper::new();
+        let timeline = sleeper.timeline();
+        let mut p = params(sink, spool, stats);
+        p.sleeper = Arc::new(sleeper);
+        (p, timeline)
+    }
+
+    /// Polls `cond` on every executor turn until it holds, yielding so the
+    /// spawned writer task can make progress. This replaces fixed `sleep`s that
+    /// waited for the writer to drain the channel: it returns the instant the
+    /// observable condition is true (deterministic), with a large iteration cap
+    /// only as a hang guard.
+    async fn await_until(what: &str, mut cond: impl FnMut() -> bool) {
+        for _ in 0..1_000_000 {
+            if cond() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("condition never held: {what}");
     }
 
     #[tokio::test]
@@ -440,6 +491,7 @@ mod tests {
                 spool: Some(spool),
                 stats,
                 replay_every: Duration::from_hours(1),
+                sleeper: Arc::new(MockSleeper::new()),
             },
         );
         let handle = tokio::spawn(writer.run());
@@ -496,6 +548,7 @@ mod tests {
                 spool: Some(spool),
                 stats: Arc::new(AuditStats::new()),
                 replay_every: Duration::from_hours(1),
+                sleeper: Arc::new(MockSleeper::new()),
             },
         );
         let h = tokio::spawn(writer.run());
@@ -542,6 +595,7 @@ mod tests {
                 spool: Some(spool),
                 stats: Arc::new(AuditStats::new()),
                 replay_every: Duration::from_hours(1),
+                sleeper: Arc::new(MockSleeper::new()),
             },
         );
         let h = tokio::spawn(writer.run());
@@ -596,6 +650,7 @@ mod tests {
                 spool: Some(spool),
                 stats: Arc::new(AuditStats::new()),
                 replay_every: Duration::from_hours(1),
+                sleeper: Arc::new(MockSleeper::new()),
             },
         );
         let h = tokio::spawn(writer.run());
@@ -625,21 +680,22 @@ mod tests {
         let stats = Arc::new(AuditStats::new());
         let (log, rx) = AuditLog::new(64);
         let spool = Spool::open(dir.path(), 1 << 20).unwrap();
-        let writer = AuditWriter::new(rx, params(sink.clone(), spool, stats.clone()));
+        let (p, timeline) = params_with_timeline(sink.clone(), spool, stats.clone());
+        let writer = AuditWriter::new(rx, p);
         let h = tokio::spawn(writer.run());
 
         log.emit(life(1));
         log.emit(life(2));
         log.emit(life(3));
-        // give the writer time to process + spool
-        tokio::time::sleep(Duration::from_millis(60)).await;
-        check!(stats.spooled() >= 3);
+        // wait until the writer has drained all three into the spool
+        await_until("3 records spooled", || stats.spooled() >= 3).await;
         check!(stats.depth() >= 3);
         check!(sink.inner.records().is_empty()); // nothing reached the topic yet
 
-        // topic recovers; replay ticker should drain
+        // topic recovers; fire the replay ticker by advancing the mock timeline
         sink.set_fail(false);
-        tokio::time::sleep(Duration::from_millis(120)).await;
+        timeline.advance(REPLAY_EVERY);
+        await_until("spool drained after replay", || stats.depth() == 0).await;
 
         drop(log);
         h.await.unwrap();
@@ -683,17 +739,19 @@ mod tests {
         let stats = Arc::new(AuditStats::new());
         let (log, rx) = AuditLog::new(64);
         let spool = Spool::open(dir.path(), 1 << 20).unwrap();
-        let mut p = params(sink.clone(), spool, stats.clone());
+        let (mut p, timeline) = params_with_timeline(sink.clone(), spool, stats.clone());
         p.signer = Some(signer);
         p.checkpoint_every_n = 2; // emit a checkpoint after every 2 records
         let writer = AuditWriter::new(rx, p);
         let h = tokio::spawn(writer.run());
         log.emit(life(0));
         log.emit(life(1)); // 2 records → triggers a checkpoint, all spooled
-        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        // 2 chained records + 1 count-triggered checkpoint all land in the spool
+        await_until("2 records + checkpoint spooled", || stats.spooled() >= 3).await;
         check!(sink.inner.records().is_empty()); // nothing on topic yet
         sink.set_fail(false); // recover → replay drains spool in order
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        timeline.advance(REPLAY_EVERY);
+        await_until("spool drained after replay", || stats.depth() == 0).await;
         drop(log);
         h.await.unwrap();
         let recs = sink.inner.records();
@@ -738,7 +796,11 @@ mod tests {
         for i in 0..6 {
             log.emit(life(i));
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // wait until all six events are accounted for (each is spooled or dropped)
+        await_until("6 events processed", || {
+            stats.spooled() + stats.dropped() >= 6
+        })
+        .await;
         drop(log);
         h.await.unwrap();
         // Strict bounds chosen to also kill the "return constant 1" mutants.
@@ -754,24 +816,27 @@ mod tests {
         let stats = Arc::new(AuditStats::new());
         let (log, rx) = AuditLog::new(64);
         let spool = Spool::open(dir.path(), 1 << 20).unwrap();
-        let writer = AuditWriter::new(rx, params(sink.clone(), spool, stats.clone()));
+        let (p, timeline) = params_with_timeline(sink.clone(), spool, stats.clone());
+        let writer = AuditWriter::new(rx, p);
         let h = tokio::spawn(writer.run());
         log.emit(life(0));
         log.emit(life(1));
         log.emit(life(2));
-        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
-        check!(stats.depth() == 3);
+        await_until("3 records spooled", || stats.depth() == 3).await;
 
         // allow exactly 2 replay writes, then fail → partial replay
         sink.allow_n(2);
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        check!(stats.replayed() == 2);
+        timeline.advance(REPLAY_EVERY);
+        await_until("2 of 3 replayed", || {
+            stats.replayed() == 2 && stats.depth() == 1
+        })
+        .await;
         check!(stats.depth() == 1); // remainder retained, still spooling
 
-        // allow the rest
+        // allow the rest; fire the replay ticker again to drain the remainder
         sink.allow_unlimited();
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        check!(stats.depth() == 0);
+        timeline.advance(REPLAY_EVERY);
+        await_until("remainder drained", || stats.depth() == 0).await;
 
         drop(log);
         h.await.unwrap();

@@ -519,7 +519,7 @@ async fn execute_proposal_settles_against_real_broker() {
         if final_status != ProposalStatus::Executing && final_status != ProposalStatus::Computed {
             break;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::task::yield_now().await;
     }
     let _ = exec_task.await;
 
@@ -603,7 +603,30 @@ async fn cancel_clears_throttle_and_reverts() {
     let exec = Execution::new(live_client, executor_state, proposal, 50_000_000, cancel);
     let exec_task = tokio::spawn(exec.run());
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Wait until the execution is genuinely under way — it persists an
+    // ApplyThrottle in-flight record before issuing its first broker RPC —
+    // or has already reached a terminal status, then cancel. Polling the
+    // real post-condition instead of sleeping a fixed 100ms means we cancel
+    // a run that has actually started regardless of machine speed, and the
+    // terminal fallback keeps the loop from hanging if the no-op plan wins
+    // the race and tombstones the backend before we observe it. Bounded so a
+    // stuck run surfaces as a failure rather than a hang.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let started = backend.loaded().is_some();
+        let terminal = matches!(
+            store.get("cancel-1").unwrap().status,
+            ProposalStatus::Cancelled | ProposalStatus::Completed | ProposalStatus::Failed
+        );
+        if started || terminal {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "execution never started"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
     cancel_for_caller.cancel();
     let _ = tokio::time::timeout(Duration::from_secs(10), exec_task).await;
 

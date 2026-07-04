@@ -387,12 +387,14 @@ impl AcquisitionState {
     /// `first_offset`. No-op when `offset` already lands on a boundary or is
     /// outside the window.
     fn split_at_offset(&mut self, offset: i64) {
-        for i in 0..self.batches.len() {
-            let b = &self.batches[i];
-            if offset > b.first_offset && offset <= b.last_offset {
-                self.split_at(i, offset);
-                return;
-            }
+        if let Some(i) = self.batches.iter().position(|b| {
+            b.first_offset
+                .checked_add(1)
+                .is_some_and(|first_split_offset| {
+                    (first_split_offset..=b.last_offset).contains(&offset)
+                })
+        }) {
+            self.split_at(i, offset);
         }
     }
 

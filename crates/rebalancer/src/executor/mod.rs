@@ -399,6 +399,19 @@ mod tests {
     use assert2::{assert, check};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+    /// Bounded yield-poll: spin (yielding to the runtime) until `cond` holds,
+    /// so a test waits on observable in-process progress deterministically
+    /// instead of sleeping a fixed settle.
+    async fn await_until(what: &str, mut cond: impl FnMut() -> bool) {
+        for _ in 0..200_000 {
+            if cond() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("condition never held: {what}");
+    }
+
     fn cfg(dir: &std::path::Path) -> ExecutorConfig {
         ExecutorConfig {
             data_dir: dir.to_path_buf(),
@@ -592,7 +605,17 @@ mod tests {
         let handle = tokio::spawn(async move {
             exec.run().await;
         });
-        tokio::time::sleep(Duration::from_millis(30)).await;
+        // Wait until the execution has submitted and entered the in-flight
+        // wait loop (it polls `list_in_flight`, which never drains here), then
+        // cancel — this exercises the cancel-DURING-wait path deterministically
+        // rather than racing a fixed settle.
+        await_until("execution entered in-flight wait loop", || {
+            client
+                .calls()
+                .iter()
+                .any(|c| matches!(c, MockCall::ListInFlight(_)))
+        })
+        .await;
         cancel_for_caller.cancel();
         handle.await.unwrap();
 
