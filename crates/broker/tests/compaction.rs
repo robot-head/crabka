@@ -7,9 +7,10 @@
 //! Log compaction end-to-end broker integration test.
 //!
 //! Produces 30 records across 3 keys (k1, k2, k3) into a compacted topic,
-//! sleeps for 2+ cleaner ticks, force-rolls the active segment, sleeps again,
-//! then fetches and asserts exactly 3 distinct keys survive with only their
-//! latest values (v10-kN). Old values v0..v9 must be gone from sealed segments.
+//! waits for a compaction pass, force-rolls the active segment, waits for
+//! another pass, then fetches and asserts exactly 3 distinct keys survive with
+//! only their latest values (v10-kN). Old values v0..v9 must be gone from
+//! sealed segments.
 //!
 //! Gated to non-Windows to match the multi-broker test convention from
 //! slices 10b/12b/14/15.
@@ -17,9 +18,10 @@
 use assert2::assert;
 use std::io;
 use std::net::SocketAddr;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use crabka_broker::metrics::PartitionLabel;
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_protocol::owned::create_topics_request::{
     CreatableTopic, CreatableTopicConfig, CreateTopicsRequest,
@@ -102,21 +104,6 @@ async fn start_broker_with_fast_cleaner() -> (BrokerHandle, TempDir, SocketAddr)
     let handle = Broker::start(cfg).await.expect("broker must start");
     let addr = handle.listen_addr();
     (handle, log_dir, addr)
-}
-
-/// Poll until the partition is visible in the broker's metadata image.
-async fn wait_partition_exists(handle: &BrokerHandle, topic: &str, partition: i32) {
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        if handle.has_partition(topic, partition).await {
-            return;
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "partition {topic}-{partition} never appeared within 15s"
-        );
-        tokio::task::yield_now().await;
-    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -331,9 +318,9 @@ async fn fetch_all(addr: SocketAddr, topic: &str, topic_id: Uuid) -> Vec<FlatRec
 /// 1. Boot a single broker with cleaner interval = 1s.
 /// 2. Create topic `compacted` with `cleanup.policy=compact` and `segment.bytes=256`.
 /// 3. Produce 30 records (10 × 3 keys), values v0-k1..v9-k3.
-/// 4. Sleep 3s (≥ 2 cleaner ticks) so compaction runs on the sealed segments.
+/// 4. Wait for a compaction pass so the sealed segments are compacted.
 /// 5. Force-roll the active segment by producing v10-k1, v10-k2, v10-k3.
-/// 6. Sleep 3s again so the newly-sealed segments get compacted.
+/// 6. Wait for another compaction pass so the newly-sealed segments get compacted.
 /// 7. Fetch all records from offset 0.
 /// 8. Assert exactly 3 distinct keys survive.
 /// 9. Assert no stale (v0-* to v9-*) values remain.
@@ -353,7 +340,7 @@ async fn compaction_dedupes_via_native_client() {
     .await;
 
     // Wait for the partition to appear in the broker's registry.
-    wait_partition_exists(&handle, "compacted", 0).await;
+    handle.wait_until_partition_present("compacted", 0).await;
 
     // Wait for the topic-config overrides (cleanup.policy=compact +
     // segment.bytes=256) to propagate from the metadata image through the
@@ -361,20 +348,21 @@ async fn compaction_dedupes_via_native_client() {
     // Without this wait, produces can start before the supervisor reconciles,
     // so they land in a default-config Log (1GiB segments, Delete policy) →
     // no segment rolls, no compaction, test sees every record.
-    let cfg_deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if let Some(cfg) = handle.partition_log_config_for_test("compacted", 0)
-            && cfg.cleanup_policy == crabka_log::CleanupPolicy::Compact
-            && cfg.segment_bytes == 256
-        {
-            break;
-        }
-        assert!(
-            Instant::now() <= cfg_deadline,
-            "cleanup.policy/segment.bytes never propagated to partition LogConfig within 10s"
-        );
-        tokio::task::yield_now().await;
-    }
+    // The LogConfig materializes downstream of the image, so poll the
+    // partition's live LogConfig rather than the metadata image itself.
+    handle
+        .wait_for_metrics(
+            "cleanup.policy/segment.bytes propagate to partition LogConfig",
+            |_m| {
+                handle
+                    .partition_log_config_for_test("compacted", 0)
+                    .is_some_and(|cfg| {
+                        cfg.cleanup_policy == crabka_log::CleanupPolicy::Compact
+                            && cfg.segment_bytes == 256
+                    })
+            },
+        )
+        .await;
 
     // Get the topic_id (needed for Fetch).
     let topic_id = get_topic_id(addr, "compacted").await;
@@ -395,11 +383,30 @@ async fn compaction_dedupes_via_native_client() {
         }
     }
 
-    // Wait for 2+ cleaner ticks. The 256-byte segment limit causes many
-    // segment rolls during the produce loop, so the cleaner will find
-    // sealed segments ready for compaction.
-    // real-time wait (not a progress poll): waits for the broker's 1s cleaner-interval ticks
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    // The 256-byte segment limit causes many segment rolls during the produce
+    // loop, so the cleaner finds sealed segments ready for compaction. Wait for
+    // a compaction pass to run on this partition instead of sleeping. Capture
+    // the current pass count right before the wait so the +1 pass is guaranteed
+    // to run after the sealed segments exist.
+    let compactions_before = handle
+        .metrics()
+        .log_compactions_total
+        .get_or_create(&PartitionLabel {
+            topic: "compacted".to_string(),
+            partition: 0,
+        })
+        .get();
+    handle
+        .wait_for_metrics("compaction pass ran on sealed segments", |m| {
+            m.log_compactions_total
+                .get_or_create(&PartitionLabel {
+                    topic: "compacted".to_string(),
+                    partition: 0,
+                })
+                .get()
+                > compactions_before
+        })
+        .await;
 
     // Force-roll the active segment by writing one more record per key.
     // After this the previously-active segment becomes sealed and eligible
@@ -431,9 +438,29 @@ async fn compaction_dedupes_via_native_client() {
         produce_record(addr, "compacted", topic_id, b"__pad__", value.as_bytes()).await;
     }
 
-    // Wait again so the newly-sealed segments get compacted.
-    // real-time wait (not a progress poll): waits for the broker's 1s cleaner-interval ticks
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    // Wait for another compaction pass so the newly-sealed segments (holding
+    // the final v10-* records and the now-sealed prior "latest" entries) get
+    // compacted. Capture the pass count after the force-roll + padding burst
+    // seal the active segment so the awaited +1 pass runs against them.
+    let compactions_before_reroll = handle
+        .metrics()
+        .log_compactions_total
+        .get_or_create(&PartitionLabel {
+            topic: "compacted".to_string(),
+            partition: 0,
+        })
+        .get();
+    handle
+        .wait_for_metrics("compaction pass ran on newly-sealed segments", |m| {
+            m.log_compactions_total
+                .get_or_create(&PartitionLabel {
+                    topic: "compacted".to_string(),
+                    partition: 0,
+                })
+                .get()
+                > compactions_before_reroll
+        })
+        .await;
 
     // Fetch all records from offset 0.
     let records = fetch_all(addr, "compacted", topic_id).await;

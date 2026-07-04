@@ -216,7 +216,10 @@ async fn join_and_converge(
         if active_partition_count(&resp) >= want_active {
             break;
         }
-        // real-time wait (not a progress poll): iteration-bounded heartbeat-convergence retry budget; no wall-clock deadline to guard a yield
+        // intentional: backoff between heartbeats while polling the RPC response
+        // for active-task-assignment convergence. The assignment is coordinator-
+        // local state that is not reflected in the metadata image and exposes no
+        // metric/awaiter, so a bounded re-heartbeat loop is the only observer.
         tokio::time::sleep(Duration::from_millis(200)).await;
         let active = resp.active_tasks.clone().map(|v| {
             v.into_iter()
@@ -319,7 +322,10 @@ async fn stateful_member_triggers_internal_topic_creation() {
             converged = true;
             break;
         }
-        // real-time wait (not a progress poll): iteration-bounded heartbeat-convergence retry budget; no wall-clock deadline to guard a yield
+        // intentional: backoff between heartbeats while polling the RPC response
+        // for active-task assignment plus clearing of the MISSING_INTERNAL_TOPICS
+        // status. This convergence is coordinator-local; it has no metadata-image
+        // signal or metric, so a bounded re-heartbeat loop is the only observer.
         tokio::time::sleep(Duration::from_millis(300)).await;
         let active = resp.active_tasks.clone().map(|v| {
             v.into_iter()

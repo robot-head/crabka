@@ -71,9 +71,8 @@ async fn connect_get_state_over_http_json() {
             Instant::now() < deadline,
             "rebalancer /readyz never returned 200"
         );
-        // real-time wait (not a progress poll): polls a separate `crabka-rebalancer` OS
-        // subprocess over HTTP; yield_now can't advance another process and each iteration
-        // is a full network round-trip.
+        // intentional: poll backoff while waiting on the out-of-process
+        // rebalancer subprocess to flip /readyz green (external process).
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 
@@ -187,9 +186,8 @@ async fn connect_execute_proposal_and_cancel_over_http_json() {
             Instant::now() < deadline,
             "rebalancer /readyz never returned 200"
         );
-        // real-time wait (not a progress poll): polls a separate `crabka-rebalancer` OS
-        // subprocess over HTTP; yield_now can't advance another process and each iteration
-        // is a full network round-trip.
+        // intentional: poll backoff while waiting on the out-of-process
+        // rebalancer subprocess to flip /readyz green (external process).
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 

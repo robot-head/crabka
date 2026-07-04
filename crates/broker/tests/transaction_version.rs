@@ -290,7 +290,9 @@ async fn tv2_verify_only_add_partitions_reports_per_partition_codes() {
             resp.error_code == 15 || resp.error_code == 16,
             "InitProducerId failed: {resp:?}"
         );
-        tokio::task::yield_now().await;
+        // intentional: txn-coordinator load state is not in the metadata image and
+        // has no metric/awaiter; only InitProducerId's 15/16 code signals it.
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
     let init = init.expect("InitProducerId did not become ready within 10s");
     let (pid, epoch) = (init.producer_id, init.producer_epoch);
@@ -433,7 +435,9 @@ async fn init_producer_id(client: &Client, tid: &str) -> (i64, i16) {
             resp.error_code == 15 || resp.error_code == 16,
             "InitProducerId failed: {resp:?}"
         );
-        tokio::task::yield_now().await;
+        // intentional: txn-coordinator load state is not in the metadata image and
+        // has no metric/awaiter; only InitProducerId's 15/16 code signals it.
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
     let init = init.expect("InitProducerId did not become ready within 10s");
     (init.producer_id, init.producer_epoch)
@@ -520,7 +524,10 @@ async fn commit_via_end_txn(client: &Client, tid: &str, pid: i64, epoch: i16) ->
         // 15/16: coordinator still loading — keep retrying until the deadline.
         if (resp.error_code == 15 || resp.error_code == 16) && std::time::Instant::now() < deadline
         {
-            tokio::task::yield_now().await;
+            // intentional: coordinator recover/load state after restart is not in the
+            // metadata image and has no metric/awaiter; only EndTxn's 15/16 code
+            // signals it. Bounded RPC-response poll, not a materialization wait.
+            tokio::time::sleep(Duration::from_millis(100)).await;
             continue;
         }
         return resp.error_code;

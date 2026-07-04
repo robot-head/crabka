@@ -80,22 +80,8 @@ async fn wait_for_partition_on_all(
     topic: &str,
     partition: i32,
 ) {
-    let deadline = Instant::now() + Duration::from_mins(2);
-    loop {
-        let mut all = true;
-        for (h, _, _) in cluster {
-            if !h.has_partition(topic, partition).await {
-                all = false;
-                break;
-            }
-        }
-        if all {
-            return;
-        }
-        if Instant::now() > deadline {
-            panic!("topic '{topic}' didn't propagate to all brokers within 2 min");
-        }
-        tokio::task::yield_now().await;
+    for (h, _, _) in cluster {
+        h.wait_until_partition_present(topic, partition).await;
     }
 }
 
@@ -109,23 +95,13 @@ async fn wait_leader_and_isr(
     expected_isr: &[u64],
 ) {
     let want: BTreeSet<u64> = expected_isr.iter().copied().collect();
-    let deadline = Instant::now() + Duration::from_mins(2);
-    loop {
-        let cur_leader = handle.partition_leader_for_test(topic, partition);
-        let cur_isr = handle
-            .partition_isr_for_test(topic, partition)
-            .map(|v| v.into_iter().collect::<BTreeSet<u64>>());
-        if cur_leader == Some(leader) && cur_isr.as_ref() == Some(&want) {
-            return;
-        }
-        if Instant::now() > deadline {
-            panic!(
-                "{topic}-{partition} didn't reach leader={leader} isr={expected_isr:?} \
-                 within 2 min; leader={cur_leader:?} isr={cur_isr:?}"
-            );
-        }
-        tokio::task::yield_now().await;
-    }
+    handle
+        .wait_for_image(|img| {
+            img.partition(topic, partition).is_some_and(|p| {
+                p.leader == leader && p.isr.iter().copied().collect::<BTreeSet<u64>>() == want
+            })
+        })
+        .await;
 }
 
 fn record_batch(n: i32) -> RecordBatch {
@@ -258,20 +234,9 @@ async fn rack_aware_consumer_is_redirected_to_same_rack_follower() {
     // Step 4: wait for the follower (broker 2) to replicate to N. The
     // follower's local log catching up to N is the prerequisite for it to
     // serve the consumer fetch in step 6.
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        let leo = follower_handle
-            .local_log_end_offset("t", 0)
-            .await
-            .unwrap_or(0);
-        if leo >= i64::from(N_RECORDS) {
-            break;
-        }
-        if Instant::now() > deadline {
-            panic!("follower (broker 2) didn't replicate to {N_RECORDS} within 15s; leo={leo}");
-        }
-        tokio::task::yield_now().await;
-    }
+    follower_handle
+        .wait_until_local_log_end_offset("t", 0, i64::from(N_RECORDS))
+        .await;
 
     // Step 5: consumer Fetch to the LEADER with rack_id=rack-b → the
     // selector should redirect to the same-rack follower (node 2).
@@ -318,7 +283,10 @@ async fn rack_aware_consumer_is_redirected_to_same_rack_follower() {
         if Instant::now() > deadline {
             panic!("follower didn't serve {N_RECORDS} records within 5s; last count={count}");
         }
-        // real-time wait (not a progress poll): retry cadence between follower Fetch RPC attempts while HW propagation catches up (observed via a wire Fetch, not an in-process accessor).
+        // intentional: retry backoff on a real follower Fetch RPC. The gating
+        // state is the follower's high watermark (HW propagation lags the local
+        // log), and no awaiter/metric reflects HW — a LEO awaiter would return
+        // before the follower can actually serve all N records.
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
     assert!(got == N_RECORDS as usize, "follower returned all N records");

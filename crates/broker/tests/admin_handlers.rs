@@ -118,6 +118,10 @@ async fn alter_configs_round_trip() {
     // immediately after `create_topic_helper` returns, carrying the broker's
     // default retention; we poll until the supervisor swaps in the override
     // (or until the deadline).
+    //
+    // intentional poll (not an awaiter): the override lands in the local log
+    // config *after* the image commits, so no image/metric signal reflects it
+    // — same convergence gate the recompression / tiered-storage tests use.
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     let want = Duration::from_millis(60_000);
     let last = loop {
@@ -194,16 +198,9 @@ async fn min_insync_replicas_blocks_acks_all_when_isr_too_small() {
 
     create_topic_helper(&client, "t-min-isr", 1).await;
 
-    // Wait for the supervisor to materialize partition 0 locally;
-    // otherwise the produce path returns UNKNOWN_TOPIC_OR_PARTITION
-    // before the min.insync.replicas pre-flight even runs.
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while !broker.partition_exists_for_test("t-min-isr", 0) {
-        if std::time::Instant::now() > deadline {
-            panic!("partition 0 did not materialize within 10s");
-        }
-        tokio::task::yield_now().await;
-    }
+    // Wait for partition 0 to materialize; otherwise the produce path returns
+    // UNKNOWN_TOPIC_OR_PARTITION before the min.insync.replicas pre-flight runs.
+    broker.wait_until_partition_present("t-min-isr", 0).await;
 
     // Produce v13+ drops `name` from the wire and demands `topic_id`.
     // Fetch it via Metadata so the produce calls below resolve.
@@ -344,20 +341,9 @@ async fn create_partitions_extends_topic() {
         resp.results[0].error_message
     );
 
-    // Wait for the supervisor reconcile to materialise the new partition dirs.
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        let all_present = (0..3).all(|p| broker.partition_exists_for_test("t-cp", p));
-        if all_present {
-            break;
-        }
-        if std::time::Instant::now() > deadline {
-            let present: Vec<i32> = (0..3)
-                .filter(|&p| broker.partition_exists_for_test("t-cp", p))
-                .collect();
-            panic!("only partitions {present:?} present after 10 s; expected [0, 1, 2]");
-        }
-        tokio::task::yield_now().await;
+    // Wait for the supervisor reconcile to materialise all three partitions.
+    for p in 0..3 {
+        broker.wait_until_partition_present("t-cp", p).await;
     }
 }
 
@@ -402,14 +388,8 @@ async fn create_partitions_honors_explicit_assignments() {
         resp.results[0].error_message
     );
 
-    // Wait for the new partition to materialise locally.
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while !broker.partition_exists_for_test("t-cpa", 1) {
-        if std::time::Instant::now() > deadline {
-            panic!("partition 1 did not materialize after 10 s");
-        }
-        tokio::task::yield_now().await;
-    }
+    // Wait for the new partition to materialise.
+    broker.wait_until_partition_present("t-cpa", 1).await;
 
     // Invalid path: ask for 1 more partition (total 3) but supply 2
     // assignments. Must surface INVALID_REPLICA_ASSIGNMENT and NOT add a

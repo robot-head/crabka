@@ -37,22 +37,9 @@ async fn unregister_known_broker_drops_it_from_metadata() {
     assert!(r.error_code == 0, "{r:?}");
     assert!(r.error_message.is_none() || r.error_message.as_deref() == Some(""));
 
-    // The Raft commit may race the Metadata response; poll briefly.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    loop {
-        let resp = p
-            .client
-            .send(MetadataRequest::default())
-            .await
-            .expect("Metadata (after unregister)");
-        if resp.brokers.is_empty() {
-            break;
-        }
-        if std::time::Instant::now() > deadline {
-            panic!("broker 1 still in Metadata: {resp:?}");
-        }
-        tokio::task::yield_now().await;
-    }
+    // The Raft commit may race the Metadata response; await the controller
+    // image dropping broker 1 instead of polling the wire.
+    p.broker.wait_for_image(|img| img.broker(1).is_none()).await;
 
     p.broker.shutdown().await;
 }
@@ -118,22 +105,9 @@ async fn unregister_is_idempotent_on_repeat_call() {
         .expect("UnregisterBroker 1");
     assert!(r1.error_code == 0, "{r1:?}");
 
-    // Wait for the unregister to commit.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    loop {
-        let resp = p
-            .client
-            .send(MetadataRequest::default())
-            .await
-            .expect("Metadata");
-        if resp.brokers.is_empty() {
-            break;
-        }
-        if std::time::Instant::now() > deadline {
-            panic!("first unregister never landed");
-        }
-        tokio::task::yield_now().await;
-    }
+    // Wait for the unregister to commit: await the controller image
+    // dropping broker 1 rather than polling the wire.
+    p.broker.wait_for_image(|img| img.broker(1).is_none()).await;
 
     // Second call against the now-removed broker: surfaces
     // INVALID_REQUEST (existence check fails). The image apply itself

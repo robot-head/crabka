@@ -14,7 +14,6 @@
 use assert2::assert;
 use std::io;
 use std::net::SocketAddr;
-use std::time::{Duration, Instant};
 
 use bytes::{Buf, BufMut, BytesMut};
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
@@ -106,20 +105,13 @@ async fn describe_log_dirs(addr: SocketAddr) -> DescribeLogDirsResponse {
 }
 
 async fn wait_all_partitions(handle: &BrokerHandle, topic: &str, n: i32) {
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        let mut all = true;
-        for p in 0..n {
-            if !handle.has_partition(topic, p).await {
-                all = false;
-                break;
-            }
-        }
-        if all {
-            return;
-        }
-        assert!(Instant::now() <= deadline, "partitions never materialized");
-        tokio::task::yield_now().await;
+    // The on-disk / DescribeLogDirs assertions below read partition directories
+    // straight from the log dirs, so wait for each partition's LOCAL writer-actor
+    // to materialize (which creates its dir) — not just the metadata image, which
+    // can name the partition before the local replica exists. `min = 0` waits only
+    // for the local replica/writer to appear.
+    for p in 0..n {
+        handle.wait_until_local_log_end_offset(topic, p, 0).await;
     }
 }
 

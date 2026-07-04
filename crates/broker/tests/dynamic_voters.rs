@@ -10,30 +10,11 @@
 //! are gated off Windows like the other multi-node suites.
 
 use assert2::assert;
-use std::time::{Duration, Instant};
 
 use crabka_raft::reconfig::{ReconfigOutcome, RemoveVoter};
 
 mod support;
 use support::start_n_node;
-
-/// Poll `predicate` every 100ms until it returns `true` or `timeout` elapses.
-/// Returns `true` on success, `false` if the deadline passed first.
-async fn wait_until<F>(timeout: Duration, mut predicate: F) -> bool
-where
-    F: FnMut() -> bool,
-{
-    let deadline = Instant::now() + timeout;
-    loop {
-        if predicate() {
-            return true;
-        }
-        if Instant::now() > deadline {
-            return false;
-        }
-        tokio::task::yield_now().await;
-    }
-}
 
 /// Auto-join must grow a fresh cluster from one voter to three: broker 0
 /// bootstraps alone, brokers 1 and 2 join over the wire. `start_n_node`
@@ -48,25 +29,12 @@ async fn auto_join_grows_quorum_to_three() {
     // broker 0 is the bootstrap node and the initial (only) leader.
     let leader = &cluster[0].0;
 
-    let grew = wait_until(Duration::from_secs(30), || {
-        leader.voter_count_for_test() == 3
-    })
-    .await;
-    assert!(
-        grew,
-        "auto-join did not converge to 3 voters; leader sees {}",
-        leader.voter_count_for_test()
-    );
+    leader.wait_for_image(|img| img.voters().len() == 3).await;
 
     // Every node should eventually agree on the 3-voter set, not just the
     // leader.
-    for (i, (h, _, _)) in cluster.iter().enumerate() {
-        let converged = wait_until(Duration::from_secs(15), || h.voter_count_for_test() == 3).await;
-        assert!(
-            converged,
-            "broker index {i} did not see 3 voters; sees {}",
-            h.voter_count_for_test()
-        );
+    for (h, _, _) in &cluster {
+        h.wait_for_image(|img| img.voters().len() == 3).await;
     }
 }
 
@@ -80,11 +48,7 @@ async fn remove_voter_shrinks_quorum() {
     let leader = &cluster[0].0;
     let leader_id = leader.node_id();
 
-    let grew = wait_until(Duration::from_secs(30), || {
-        leader.voter_count_for_test() == 3
-    })
-    .await;
-    assert!(grew, "precondition: cluster must reach 3 voters first");
+    leader.wait_for_image(|img| img.voters().len() == 3).await;
 
     // Pick a follower (any voter that isn't the leader) and read its
     // directory id straight from the committed image — `remove_voter` keys on
@@ -110,15 +74,7 @@ async fn remove_voter_shrinks_quorum() {
         "remove_voter should commit on the leader, got {outcome:?}"
     );
 
-    let shrank = wait_until(Duration::from_secs(15), || {
-        leader.voter_count_for_test() == 2
-    })
-    .await;
-    assert!(
-        shrank,
-        "voter set did not shrink to 2 after remove_voter; leader sees {}",
-        leader.voter_count_for_test()
-    );
+    leader.wait_for_image(|img| img.voters().len() == 2).await;
     assert!(
         !leader.voter_ids_for_test().contains(&victim),
         "removed voter {victim} still present in committed voter set"

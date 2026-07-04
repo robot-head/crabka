@@ -350,21 +350,16 @@ async fn ip_quota_alter_then_describe_round_trip() {
     .await;
     assert!(alter_resp[0].1 == 0, "alter should succeed");
 
-    // Poll the image until the quota is visible.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    loop {
-        let img = handle.controller_image_for_test();
-        let key: crabka_metadata::EntityKey = vec![("ip".into(), Some("127.0.0.1".into()))];
-        if let Some(cfgs) = img.client_quotas().get(&key)
-            && cfgs.get("connection_creation_rate") == Some(&2.0)
-        {
-            break;
-        }
-        if std::time::Instant::now() > deadline {
-            panic!("ip quota not visible in image");
-        }
-        tokio::task::yield_now().await;
-    }
+    // Wait until the quota is visible in the image.
+    handle
+        .wait_for_image(|img| {
+            let key: crabka_metadata::EntityKey = vec![("ip".into(), Some("127.0.0.1".into()))];
+            img.client_quotas()
+                .get(&key)
+                .and_then(|cfgs| cfgs.get("connection_creation_rate"))
+                == Some(&2.0)
+        })
+        .await;
 
     let desc = drive_describe_client_quotas_sasl(
         addr,
@@ -416,24 +411,16 @@ async fn connection_creation_rate_throttles_accept() {
         .await
         .expect("seed quota");
 
-    // Poll until the quota is visible in the image.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-    loop {
-        let img = handle.controller_image_for_test();
-        let key: crabka_metadata::EntityKey = vec![("ip".into(), Some("127.0.0.1".into()))];
-        if img
-            .client_quotas()
-            .get(&key)
-            .and_then(|m| m.get("connection_creation_rate"))
-            .is_some()
-        {
-            break;
-        }
-        if std::time::Instant::now() > deadline {
-            panic!("quota not visible after submit");
-        }
-        tokio::task::yield_now().await;
-    }
+    // Wait until the quota is visible in the image.
+    handle
+        .wait_for_image(|img| {
+            let key: crabka_metadata::EntityKey = vec![("ip".into(), Some("127.0.0.1".into()))];
+            img.client_quotas()
+                .get(&key)
+                .and_then(|m| m.get("connection_creation_rate"))
+                .is_some()
+        })
+        .await;
 
     // Open 5 connections in sequence. For each connection, send ApiVersions
     // and wait for the response — this ensures the accept loop has processed
@@ -558,7 +545,9 @@ async fn max_connections_per_ip_refuses_excess_and_frees_on_close() {
             std::time::Instant::now() < deadline,
             "per-IP slot was not freed after c1 closed"
         );
-        // real-time wait (not a progress poll): retry cadence between network connect attempts (slot free), deadline-guarded
+        // intentional: the per-IP ConnectionGuard decrement is coordinator-local
+        // (not in the metadata image and has no metric); each iteration re-drives
+        // the real connect+round-trip under test, so keep the bounded retry poll.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 }

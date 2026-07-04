@@ -129,7 +129,8 @@ protocol = "Plaintext"
             connected = true;
             break;
         }
-        // real-time wait (not a progress poll): polling a spawned child broker process to bind its TCP listener
+        // intentional: waiting on a spawned crabka-broker subprocess to bind its
+        // TCP listener; no in-process BrokerHandle, image, or metric to await here.
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
 

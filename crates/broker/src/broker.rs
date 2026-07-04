@@ -1193,6 +1193,56 @@ impl BrokerHandle {
         assert!(res.is_ok(), "wait_for_image timed out after 30s");
     }
 
+    /// Test-only: borrow this broker's live [`crate::metrics::BrokerMetrics`]
+    /// bundle so integration tests can read counters / gauges in-process.
+    ///
+    /// Pair with [`Self::wait_for_metrics`] to replace fixed-duration `sleep`s
+    /// with a bounded poll on an observable signal (a counter crossing a
+    /// threshold, a gauge reaching an expected value) — the metric moves the
+    /// instant the awaited work lands, so the wait is race-free rather than a
+    /// timing guess.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[must_use]
+    #[allow(clippy::used_underscore_binding)]
+    pub fn metrics(&self) -> &crate::metrics::BrokerMetrics {
+        &self._broker.metrics
+    }
+
+    /// Test-only: poll `predicate` against this broker's live metrics every
+    /// ~25ms until it returns `true` or [`TEST_AWAITER_TIMEOUT`] elapses.
+    ///
+    /// The metrics-driven replacement for a fixed `sleep` in integration
+    /// tests: instead of sleeping "long enough" for a background loop (the
+    /// gauge sampler, disk scanner, cleaner, ISR-maintenance tick, audit
+    /// flush, …) to run and hoping it did, wait until the counter / gauge it
+    /// bumps reflects the awaited state. `what` names the condition for the
+    /// timeout panic message. Unlike [`Self::wait_for_image`] there is no
+    /// change-notification channel behind a Prometheus metric, so this polls;
+    /// the 25ms cadence is an internal implementation detail, not a
+    /// test-visible timing assumption.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[allow(clippy::used_underscore_binding)]
+    pub async fn wait_for_metrics<F>(&self, what: &str, mut predicate: F)
+    where
+        F: FnMut(&crate::metrics::BrokerMetrics) -> bool,
+    {
+        let res = tokio::time::timeout(TEST_AWAITER_TIMEOUT, async {
+            loop {
+                if predicate(&self._broker.metrics) {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await;
+        assert!(
+            res.is_ok(),
+            "wait_for_metrics({what}) timed out after {TEST_AWAITER_TIMEOUT:?}"
+        );
+    }
+
     /// Test-only: await until a non-zero controller leader is elected.
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-helpers"))]
@@ -3005,6 +3055,7 @@ impl Broker {
                 config.node_id,
                 cfg,
                 shutdown,
+                metrics.clone(),
             ));
         }
 

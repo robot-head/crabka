@@ -261,19 +261,9 @@ async fn create_topic_as_admin(
     );
 }
 
-/// Poll until `handle` sees `(topic, partition)` present in its image.
+/// Await until `handle` sees `(topic, partition)` present in its image.
 async fn wait_partition_exists(handle: &BrokerHandle, topic: &str, partition: i32) {
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        if handle.has_partition(topic, partition).await {
-            return;
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "partition {topic}-{partition} never appeared within 15s"
-        );
-        tokio::task::yield_now().await;
-    }
+    handle.wait_until_partition_present(topic, partition).await;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -528,8 +518,9 @@ async fn seed_compat_shim_disable_acl(handle: &BrokerHandle) {
         }))
         .await
         .expect("seed dummy ACL to disable compat shim");
-    // Small pause to absorb raft commit-then-apply gap.
-    // real-time wait (not a progress poll): raft commit-then-apply settle, no local condition to poll
+    // intentional: absorb the raft commit-then-apply gap for the ACL record;
+    // ACL image state has no test awaiter/metric, and callers additionally
+    // retry until the compat shim is provably off.
     tokio::time::sleep(Duration::from_millis(50)).await;
 }
 
@@ -547,7 +538,9 @@ async fn seed_alice_write_acl(handle: &BrokerHandle, topic: &str) {
         }))
         .await
         .expect("seed alice Write ACL");
-    // real-time wait (not a progress poll): raft commit-then-apply settle, no local condition to poll
+    // intentional: absorb the raft commit-then-apply gap for the ACL record;
+    // ACL image state has no test awaiter/metric, and downstream produce/fetch
+    // retry loops guard the actual authorization outcome.
     tokio::time::sleep(Duration::from_millis(50)).await;
 }
 
@@ -565,7 +558,9 @@ async fn seed_alice_read_acl(handle: &BrokerHandle, topic: &str) {
         }))
         .await
         .expect("seed alice Read ACL");
-    // real-time wait (not a progress poll): raft commit-then-apply settle, no local condition to poll
+    // intentional: absorb the raft commit-then-apply gap for the ACL record;
+    // ACL image state has no test awaiter/metric, and downstream produce/fetch
+    // retry loops guard the actual authorization outcome.
     tokio::time::sleep(Duration::from_millis(50)).await;
 }
 
@@ -602,22 +597,16 @@ async fn alter_then_describe_round_trip() {
         alter_resp[0].1
     );
 
-    // Poll the metadata image until the quota is visible (absorb raft commit latency).
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let img = handle.controller_image_for_test();
-        let key: crabka_metadata::EntityKey = vec![("user".into(), Some("alice".into()))];
-        if let Some(cfgs) = img.client_quotas().get(&key)
-            && cfgs.get("producer_byte_rate") == Some(&1024.0)
-        {
-            break;
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "quota not visible in image within 5s"
-        );
-        tokio::task::yield_now().await;
-    }
+    // Await until the quota is visible in the committed metadata image.
+    handle
+        .wait_for_image(|img| {
+            let key: crabka_metadata::EntityKey = vec![("user".into(), Some("alice".into()))];
+            img.client_quotas()
+                .get(&key)
+                .and_then(|cfgs| cfgs.get("producer_byte_rate"))
+                == Some(&1024.0)
+        })
+        .await;
 
     // Describe: fetch back the quota.
     let desc = drive_describe_client_quotas_sasl(
@@ -688,21 +677,15 @@ async fn producer_byte_rate_throttles_produce() {
     assert!(alter_resp[0].1 == 0, "alter quota must succeed");
 
     // Wait for the quota to appear in the image before producing.
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let img = handle.controller_image_for_test();
-        let key: crabka_metadata::EntityKey = vec![("user".into(), Some("alice".into()))];
-        if let Some(cfgs) = img.client_quotas().get(&key)
-            && cfgs.get("producer_byte_rate") == Some(&128.0)
-        {
-            break;
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "quota not visible in image within 5s"
-        );
-        tokio::task::yield_now().await;
-    }
+    handle
+        .wait_for_image(|img| {
+            let key: crabka_metadata::EntityKey = vec![("user".into(), Some("alice".into()))];
+            img.client_quotas()
+                .get(&key)
+                .and_then(|cfgs| cfgs.get("producer_byte_rate"))
+                == Some(&128.0)
+        })
+        .await;
 
     // Alice produces 8 KB (8 records of 1 KB each). Rate = 128 bytes/sec.
     // Retry loop: TOPIC_AUTHORIZATION_FAILED (29) can fire if the alice ACL
@@ -782,21 +765,15 @@ async fn request_percentage_throttles_produce() {
     assert!(alter_resp[0].1 == 0, "alter quota must succeed");
 
     // Wait for the quota to appear in the image before producing.
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let img = handle.controller_image_for_test();
-        let key: crabka_metadata::EntityKey = vec![("user".into(), Some("alice".into()))];
-        if let Some(cfgs) = img.client_quotas().get(&key)
-            && cfgs.get("request_percentage") == Some(&0.001)
-        {
-            break;
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "request_percentage quota not visible in image within 5s"
-        );
-        tokio::task::yield_now().await;
-    }
+    handle
+        .wait_for_image(|img| {
+            let key: crabka_metadata::EntityKey = vec![("user".into(), Some("alice".into()))];
+            img.client_quotas()
+                .get(&key)
+                .and_then(|cfgs| cfgs.get("request_percentage"))
+                == Some(&0.001)
+        })
+        .await;
 
     // Alice produces a single small record. Retry past TOPIC_AUTHORIZATION_FAILED
     // (29) while the alice Write ACL propagates to the handler's image snapshot.
@@ -870,21 +847,15 @@ async fn consumer_byte_rate_throttles_fetch() {
     );
 
     // Wait for the quota to appear in the image.
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let img = handle.controller_image_for_test();
-        let key: crabka_metadata::EntityKey = vec![("user".into(), Some("alice".into()))];
-        if let Some(cfgs) = img.client_quotas().get(&key)
-            && cfgs.get("consumer_byte_rate") == Some(&128.0)
-        {
-            break;
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "consumer_byte_rate quota not visible in image within 5s"
-        );
-        tokio::task::yield_now().await;
-    }
+    handle
+        .wait_for_image(|img| {
+            let key: crabka_metadata::EntityKey = vec![("user".into(), Some("alice".into()))];
+            img.client_quotas()
+                .get(&key)
+                .and_then(|cfgs| cfgs.get("consumer_byte_rate"))
+                == Some(&128.0)
+        })
+        .await;
 
     // Produce 8 KB as admin (not subject to quota yet).
     seed_alice_write_acl(&handle, "throttle-fetch").await; // give admin path a topic
@@ -976,30 +947,23 @@ async fn user_specific_overrides_user_default() {
     assert!(alter_alice[0].1 == 0, "alter alice quota must succeed");
 
     // Wait for both quotas to appear in the image.
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let img = handle.controller_image_for_test();
-        let alice_key: crabka_metadata::EntityKey = vec![("user".into(), Some("alice".into()))];
-        let default_key: crabka_metadata::EntityKey = vec![("user".into(), None)];
-        let alice_rate = img
-            .client_quotas()
-            .get(&alice_key)
-            .and_then(|c| c.get("producer_byte_rate"))
-            .copied();
-        let default_rate = img
-            .client_quotas()
-            .get(&default_key)
-            .and_then(|c| c.get("producer_byte_rate"))
-            .copied();
-        if alice_rate == Some(128.0) && default_rate == Some(8192.0) {
-            break;
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "quotas not visible in image within 5s; alice={alice_rate:?} default={default_rate:?}"
-        );
-        tokio::task::yield_now().await;
-    }
+    handle
+        .wait_for_image(|img| {
+            let alice_key: crabka_metadata::EntityKey = vec![("user".into(), Some("alice".into()))];
+            let default_key: crabka_metadata::EntityKey = vec![("user".into(), None)];
+            let alice_rate = img
+                .client_quotas()
+                .get(&alice_key)
+                .and_then(|c| c.get("producer_byte_rate"))
+                .copied();
+            let default_rate = img
+                .client_quotas()
+                .get(&default_key)
+                .and_then(|c| c.get("producer_byte_rate"))
+                .copied();
+            alice_rate == Some(128.0) && default_rate == Some(8192.0)
+        })
+        .await;
 
     // Alice produces 8 KB. The alice-specific rate (128 bytes/sec) should
     // cause throttling. The default rate (8192) would NOT cause throttling for

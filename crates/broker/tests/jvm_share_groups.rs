@@ -124,12 +124,7 @@ async fn create_topic(broker: &BrokerHandle, client: &Client, topic: &str) -> uu
         resp.topics[0].error_code == 0,
         "topic create failed: {resp:?}"
     );
-    for _ in 0..200 {
-        if broker.has_partition(topic, 0).await {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    broker.wait_until_partition_present(topic, 0).await;
     assert!(broker.has_partition(topic, 0).await, "partition never led");
     let image = broker.controller_image_for_test();
     image
@@ -157,19 +152,11 @@ async fn bootstrap_share_state(broker: &BrokerHandle, client: &Client, key: &str
         "FindCoordinator(SHARE) error: {}",
         resp.coordinators[0].error_code
     );
-    for _ in 0..200 {
-        let mut have = 0;
-        for p in 0..SHARE_STATE_PARTITIONS {
-            if broker.has_partition(SHARE_STATE_TOPIC, p).await {
-                have += 1;
-            }
-        }
-        if have == SHARE_STATE_PARTITIONS {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+    for p in 0..SHARE_STATE_PARTITIONS {
+        broker
+            .wait_until_partition_present(SHARE_STATE_TOPIC, p)
+            .await;
     }
-    panic!("__share_group_state never fully materialized");
 }
 
 /// Produce the supplied `values` as one batch into `(topic, 0)`, retrying while
@@ -217,6 +204,10 @@ async fn produce(client: &Client, topic: &str, tid: uuid::Uuid, values: &[&str])
         }
         // 3 = UNKNOWN_TOPIC_OR_PARTITION, 6 = NOT_LEADER_OR_FOLLOWER.
         if p.error_code == 3 || p.error_code == 6 {
+            // intentional: bounded produce-RPC retry. The failure means the
+            // local writer-actor has not materialized yet even though the image
+            // already names this broker leader; that local readiness is not in
+            // the metadata image and `produce` holds no broker handle to await.
             tokio::time::sleep(Duration::from_millis(100)).await;
             continue;
         }

@@ -18,6 +18,7 @@ use tracing::{debug, warn};
 
 use crabka_metadata::NodeId;
 
+use crate::metrics::BrokerMetrics;
 use crate::partition::Partition;
 use crate::partition_registry::PartitionRegistry;
 
@@ -50,6 +51,7 @@ pub(crate) async fn run(
     node_id: NodeId,
     cfg: CleanerConfig,
     shutdown: CancellationToken,
+    metrics: BrokerMetrics,
 ) {
     // Drive the sweep cadence through the injected `AsyncSleeper` (production:
     // real time; tests: a controlled mock timeline). A zero-duration first sleep
@@ -63,7 +65,7 @@ pub(crate) async fn run(
     loop {
         tokio::select! {
             () = &mut tick => {
-                tick_all(&partitions, node_id).await;
+                tick_all(&partitions, node_id, &metrics).await;
                 tick = sleeper.sleep_for_async(cfg.interval);
             }
             () = shutdown.cancelled() => {
@@ -74,7 +76,11 @@ pub(crate) async fn run(
     }
 }
 
-pub(crate) async fn tick_all(partitions: &PartitionRegistry, node_id: NodeId) {
+pub(crate) async fn tick_all(
+    partitions: &PartitionRegistry,
+    node_id: NodeId,
+    metrics: &BrokerMetrics,
+) {
     // Snapshot first to avoid holding any registry guard across await.
     let snapshot: Vec<Arc<Partition>> = partitions.arcs();
     for partition in snapshot {
@@ -95,15 +101,24 @@ pub(crate) async fn tick_all(partitions: &PartitionRegistry, node_id: NodeId) {
         if policy != crabka_log::CleanupPolicy::Compact {
             continue;
         }
-        if let Err(e) = partition.compact_log().await {
-            warn!(
-                topic = %partition.topic,
-                partition_id = partition.partition_id,
-                error = %e,
-                "compaction failed for partition",
-            );
+        match partition.compact_log().await {
+            Ok(()) => {
+                metrics.record_compaction(&partition.topic, partition.partition_id);
+            }
+            Err(e) => {
+                warn!(
+                    topic = %partition.topic,
+                    partition_id = partition.partition_id,
+                    error = %e,
+                    "compaction failed for partition",
+                );
+            }
         }
     }
+    // One increment per completed sweep, whether or not any partition was
+    // eligible, so a test that seals a segment can poll this counter to
+    // confirm a full pass ran after the seal (see `wait_for_metrics`).
+    metrics.record_cleaner_run();
 }
 
 #[cfg(test)]
@@ -199,7 +214,13 @@ mod tests {
             })
             .collect();
 
-        tick_all(&registry, 7).await;
+        let metrics = BrokerMetrics::new();
+        tick_all(&registry, 7, &metrics).await;
+
+        // A single `tick_all` is exactly one cleaner sweep, so the run counter
+        // must advance by one. This pins `record_cleaner_run` against a no-op
+        // mutation (nothing else asserts on `log_cleaner_runs_total`).
+        assert_eq!(metrics.log_cleaner_runs_total.get(), 1);
 
         for (topic, partition, before, expect_compacted) in cases {
             let after = record_count(&partition);
@@ -245,6 +266,7 @@ mod tests {
                 sleeper: Arc::new(sleeper),
             },
             shutdown.clone(),
+            BrokerMetrics::new(),
         ));
 
         // The immediate t=0 tick runs a compaction sweep, then the loop re-arms
