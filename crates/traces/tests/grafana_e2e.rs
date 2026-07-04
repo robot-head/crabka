@@ -909,7 +909,7 @@ async fn start_crabka_querier(records: &[SpanRecord]) -> TestResult<CrabkaPair> 
 // ---------------------------------------------------------------------------
 
 async fn start_grafana() -> TestResult<ContainerAsync<GenericImage>> {
-    let tag = std::env::var("CRABKA_GRAFANA_IMAGE_TAG").unwrap_or_else(|_| "latest".into());
+    let tag = std::env::var("CRABKA_GRAFANA_IMAGE_TAG").unwrap_or_else(|_| "11.5.2".into());
     Ok(
         GenericImage::new("mirror.gcr.io/grafana/grafana".to_string(), tag)
             .with_exposed_port(GRAFANA_HTTP_PORT.tcp())
@@ -922,7 +922,7 @@ async fn start_grafana() -> TestResult<ContainerAsync<GenericImage>> {
 }
 
 async fn start_prometheus() -> TestResult<ContainerAsync<GenericImage>> {
-    let tag = std::env::var("CRABKA_PROM_IMAGE_TAG").unwrap_or_else(|_| "latest".into());
+    let tag = std::env::var("CRABKA_PROM_IMAGE_TAG").unwrap_or_else(|_| "v3.1.0".into());
     Ok(
         GenericImage::new("mirror.gcr.io/prom/prometheus".to_string(), tag)
             .with_exposed_port(PROM_HTTP_PORT.tcp())

@@ -197,6 +197,46 @@ pub async fn start_with_deny_all_authz() -> InProcess {
 /// Fetch all records from `AUDIT_TOPIC` partition 0 and JSON-decode each
 /// record value, returning the decoded objects. Mirrors the
 /// `broker_started_event_is_written_to_audit_topic` fetch pattern.
+pub async fn wait_for_audit_record<F>(
+    client: &crabka_client_core::Client,
+    what: &str,
+    mut predicate: F,
+) -> Vec<serde_json::Value>
+where
+    F: FnMut(&serde_json::Value) -> bool,
+{
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let records = consume_audit_records(client).await;
+        if records.iter().any(&mut predicate) {
+            return records;
+        }
+        assert!(
+            Instant::now() <= deadline,
+            "audit record '{what}' did not appear within 30s; last={records:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+pub async fn wait_for_audit_seq_count(
+    client: &crabka_client_core::Client,
+    min_count: usize,
+) -> Vec<u64> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let seqs = audit_record_seqs(client).await;
+        if seqs.len() >= min_count {
+            return seqs;
+        }
+        assert!(
+            Instant::now() <= deadline,
+            "audit seq count did not reach {min_count} within 30s; last={seqs:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 pub async fn consume_audit_records(client: &crabka_client_core::Client) -> Vec<serde_json::Value> {
     use crabka_broker::coordinator::AUDIT_TOPIC;
     use crabka_protocol::owned::fetch_request::{FetchPartition, FetchRequest, FetchTopic};

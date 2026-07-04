@@ -10,6 +10,7 @@ use crabka_protocol::owned::{
 #[tokio::test]
 async fn audit_topic_exists_after_startup() {
     let p = support::start().await;
+    p.broker.wait_until_partition_present(AUDIT_TOPIC, 0).await;
 
     // Send a Metadata request for `__crabka_audit` and assert the broker
     // returns it with `error_code == 0` and at least one partition.
@@ -186,7 +187,10 @@ async fn signed_checkpoints_appear_on_audit_topic() {
         })
         .await;
 
-    let recs = support::consume_audit_records(&p.client).await;
+    let recs = support::wait_for_audit_record(&p.client, "signed checkpoint", |j| {
+        j["type"] == "checkpoint" && j["key_id"] == "k-test"
+    })
+    .await;
     let saw_checkpoint = recs
         .iter()
         .any(|j| j["type"] == "checkpoint" && j["key_id"] == "k-test");
@@ -332,7 +336,7 @@ async fn audit_chain_continues_across_restart() {
 
     // Consume the audit topic and assert seqs are a contiguous, duplicate-free
     // chain (recovery worked — no reset to 0 on the second boot).
-    let seqs = support::audit_record_seqs(&client).await;
+    let seqs = support::wait_for_audit_seq_count(&client, 4).await;
     assert2::check!(seqs.len() >= 4); // 2 BrokerStarted + 2 CreateTopics (at least)
     let mut sorted = seqs.clone();
     sorted.sort_unstable();
